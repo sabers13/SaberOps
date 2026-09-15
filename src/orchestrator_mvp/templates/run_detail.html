@@ -1,0 +1,384 @@
+{% extends "base.html" %}
+{% block title %}Run Detail · {{ run_id }}{% endblock %}
+{% block nav_dashboard %} is-active{% endblock %}
+
+{% block content %}
+{% if missing %}
+<header class="page-head">
+  <div>
+    <h1>Run Not Found</h1>
+    <p class="muted">No run with identifier <code class="mono">{{ run_id }}</code> exists in the local database.</p>
+  </div>
+</header>
+<div class="card">
+  <p class="muted">This identifier could not be matched. Return to the
+    <a href="/">dashboard</a> to browse recorded runs.</p>
+</div>
+{% else %}
+<header class="page-head" id="run-header" data-run-id="{{ run_id }}" data-run-status="{{ status }}" data-created-at="{{ created_at }}" data-completed-at="{{ completed_at or '' }}">
+  <div>
+    <h1>Run <span class="mono">{{ run_id }}</span></h1>
+    <p class="muted"><a href="/">← Back to dashboard</a></p>
+  </div>
+  <div class="head-badges" style="display: flex; gap: 0.75rem; align-items: center;">
+    <span class="elapsed-badge mono muted" id="elapsed-timer">Elapsed: --:--</span>
+    <span id="run-status-badge" class="badge badge-{{ status_class }}">{{ status }}</span>
+  </div>
+</header>
+
+{% if notice %}
+<div class="alert alert-info">{{ notice }}</div>
+{% endif %}
+{% if error %}
+<div class="alert alert-error">{{ error }}</div>
+{% endif %}
+
+<aside class="card plan-pane" id="plan-pane" aria-label="Persisted execution plan">
+  <h2>Plan</h2>
+  {% if plan_projection.plan %}
+  <p class="muted mono">v{{ plan_projection.plan.version }} · {{ plan_projection.plan.status }}</p>
+  <dl class="detail-list compact-plan-meta">
+    <dt>Worker</dt><dd>{{ plan_projection.current_provider or "UNKNOWN" }} / {{ plan_projection.current_model or "UNKNOWN" }}</dd>
+    <dt>Attempt</dt><dd>{{ plan_projection.current_attempt_id or "UNKNOWN" }}</dd>
+    <dt>Health</dt><dd>{{ plan_projection.health }}{% if plan_projection.stalled %} <span class="badge badge-stalled">stalled (soft)</span>{% endif %}</dd>
+    <dt>Last activity</dt><dd>{{ plan_projection.last_activity_at or "UNKNOWN" }}{% if plan_projection.elapsed_since_activity_seconds is not none %} · {{ plan_projection.elapsed_since_activity_seconds }}s ago{% endif %}</dd>
+    <dt>Hard deadline</dt><dd>{{ plan_projection.deadline_at or "none (activity-aware)" }}</dd>
+    <dt>Supervisor</dt><dd>{{ plan_projection.supervisor_state }}</dd>
+    <dt>Manager</dt><dd>{{ plan_projection.manager_state }}</dd>
+    <dt>Review</dt><dd>{{ plan_projection.review_state }}</dd>
+  </dl>
+  <ol class="plan-step-list">
+    {% for step in plan_projection.steps %}
+    <li class="plan-step plan-{{ step.status|lower }}"><span class="badge badge-{{ step.status|lower }}">{{ step.status }}</span> {{ step.title }}</li>
+    {% endfor %}
+  </ol>
+  {% else %}
+  <p class="muted">Legacy run: no persisted 3B plan.</p>
+  {% endif %}
+</aside>
+
+<section class="card">
+  <h2>Actions</h2>
+  <div class="action-row" style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center;">
+    {% if can_retry %}
+    <form method="post" action="/runs/{{ run_id }}/retry">
+      <button type="submit" class="btn btn-secondary">Retry Run (New Attempt)</button>
+    </form>
+    {% endif %}
+
+    {% if can_cancel %}
+    <form method="post" action="/runs/{{ run_id }}/cancel">
+      <button type="submit" class="btn btn-secondary">Cancel Run</button>
+    </form>
+    {% endif %}
+
+    {% if can_review %}
+    <form method="post" action="/runs/{{ run_id }}/review">
+      <button type="submit" class="btn btn-primary">Request review</button>
+    </form>
+    {% endif %}
+
+    {% if can_cleanup %}
+      {% if confirming_cleanup %}
+      <div class="confirm-panel" role="alert">
+        <p class="confirm-title">Warning: destructive action</p>
+        <p class="muted">Cleanup permanently deletes the clean attempt worktrees for this run.
+          Candidate branches and database records are preserved, but deleted worktree
+          directories cannot be recovered.</p>
+        <div class="action-row">
+          <form method="post" action="/runs/{{ run_id }}/cleanup">
+            <input type="hidden" name="confirm" value="1">
+            <button type="submit" class="btn btn-danger">Yes, clean up worktrees</button>
+          </form>
+          <a class="btn btn-secondary" href="/runs/{{ run_id }}">Cancel</a>
+        </div>
+      </div>
+      {% else %}
+      <form method="post" action="/runs/{{ run_id }}/cleanup">
+        <input type="hidden" name="confirm" value="0">
+        <button type="submit" class="btn btn-danger">Clean up worktrees</button>
+      </form>
+      {% endif %}
+    {% endif %}
+
+    {% if can_accept %}
+      {% if confirming_accept %}
+      <div class="confirm-panel" role="alert">
+        <p class="confirm-title">Warning: destructive action</p>
+        <p class="muted">Accepting will fast-forward the candidate commit into the target repository and
+          run the post-integration gate. The target repository is modified in place; this
+          cannot be undone. Type the exact run id to confirm.</p>
+        <div class="action-row">
+          <form method="post" action="/runs/{{ run_id }}/accept">
+            <input type="text" name="confirm_run_id" class="mono" required placeholder="{{ run_id }}">
+            <button type="submit" class="btn btn-danger">Yes, accept run</button>
+          </form>
+          <a class="btn btn-secondary" href="/runs/{{ run_id }}">Cancel</a>
+        </div>
+      </div>
+      {% else %}
+      <form method="post" action="/runs/{{ run_id }}/accept">
+        <input type="hidden" name="confirm_run_id" value="">
+        <button type="submit" class="btn btn-danger">Accept run</button>
+      </form>
+      {% endif %}
+    {% endif %}
+
+    {% if not can_review and not can_cleanup and not can_retry %}
+    <p class="muted">Run in progress... Actions will unlock once completed. Push remains CLI-only.</p>
+    {% endif %}
+  </div>
+</section>
+
+{% if accept_result %}
+<section class="card">
+  <h2>Accept Result</h2>
+  <div class="alert alert-info"><strong>Run accepted.</strong></div>
+  <dl class="detail-list">
+    <dt>Final Branch</dt><dd class="mono">{{ accept_result.final_branch }}</dd>
+    <dt>Final Commit</dt><dd class="mono">{{ accept_result.final_sha }}</dd>
+    <dt>Summary</dt><dd>{{ accept_result.summary }}</dd>
+  </dl>
+</section>
+{% endif %}
+
+<!-- Tab navigation: Overview | Terminal | Timeline | Diff | Review -->
+<nav class="run-tabs" role="tablist" style="display: flex; gap: 0.5rem; margin: 1rem 0; border-bottom: 1px solid var(--border); padding-bottom: 0.5rem;">
+  <button class="run-tab btn btn-secondary is-active" role="tab" data-tab="overview" aria-selected="true">Overview</button>
+  <button class="run-tab btn btn-secondary" role="tab" data-tab="terminal" aria-selected="false">Terminal</button>
+  <button class="run-tab btn btn-secondary" role="tab" data-tab="timeline" aria-selected="false">Timeline</button>
+  <button class="run-tab btn btn-secondary" role="tab" data-tab="diff" aria-selected="false">Diff</button>
+  <button class="run-tab btn btn-secondary" role="tab" data-tab="review" aria-selected="false">Review</button>
+</nav>
+
+<!-- Overview panel -->
+<div class="run-tab-panel" data-panel="overview">
+  <section class="card">
+    <h2>Details</h2>
+    <dl class="detail-list">
+      <dt>Run ID</dt><dd class="mono">{{ run_id }}</dd>
+      <dt>Target Repository</dt><dd class="mono">{{ target_repo }}</dd>
+      <dt>Task</dt><dd>{{ task }}</dd>
+      <dt>Base Commit</dt><dd class="mono">{{ base_commit }}</dd>
+      {% if candidate_sha %}
+      <dt>Candidate SHA</dt><dd class="mono">{{ candidate_sha }}</dd>
+      {% endif %}
+      {% if changed_files %}
+      <dt>Changed Files</dt>
+      <dd>
+        <ul style="margin: 0; padding-left: 1.2rem;">
+          {% for cf in changed_files %}
+          <li class="mono">{{ cf }}</li>
+          {% endfor %}
+        </ul>
+      </dd>
+      {% endif %}
+      <dt>Tier</dt><dd>{{ tier }}</dd>
+      {% if current_dispatch %}
+      <dt>Current Dispatch</dt><dd class="mono">{{ current_dispatch.stage }} · {{ current_dispatch.tier }} · {{ current_dispatch.provider }} / {{ current_dispatch.model }}</dd>
+      <dt>Tier Reason</dt><dd class="mono">{{ current_dispatch.tier_reason }}</dd>
+      {% endif %}
+      <dt>Training Policy</dt><dd>{{ training_policy }}</dd>
+      <dt>Status</dt><dd id="detail-status" class="badge badge-{{ status_class }}">{{ status }}</dd>
+      <dt>Gate Command</dt><dd class="mono">{{ gate_command }}</dd>
+      <dt>Review Attempts</dt><dd class="mono">{{ review_attempt_counter }}</dd>
+      <dt>Summary / Reason</dt><dd id="detail-summary">{{ summary or failure_reason or "N/A" }}</dd>
+      <dt>Created</dt><dd class="mono">{{ fmt(created_at) }}</dd>
+      <dt>Completed</dt><dd class="mono" id="detail-completed">{{ fmt(completed_at) }}</dd>
+    </dl>
+  </section>
+  <section class="card">
+    <h2>Exact Token Usage</h2>
+    <dl class="detail-list">
+      <dt>Known Input Tokens</dt><dd class="mono">{{ usage.known_input_tokens if usage.known_input_tokens is not none else "Unknown" }}</dd>
+      <dt>Known Output Tokens</dt><dd class="mono">{{ usage.known_output_tokens if usage.known_output_tokens is not none else "Unknown" }}</dd>
+      <dt>Known Cached Tokens</dt><dd class="mono">{{ usage.known_cached_tokens if usage.known_cached_tokens is not none else "Unknown" }}</dd>
+      <dt>Known Total Tokens</dt><dd class="mono">{{ usage.known_total_tokens if usage.known_total_tokens is not none else "Unknown" }}</dd>
+      <dt>Usage Coverage</dt><dd class="mono">{{ usage.calls_with_known_usage }} known / {{ usage.calls_with_unknown_usage }} unknown call(s)</dd>
+      <dt>Tier Calls</dt><dd class="mono">T1 {{ usage.calls_by_tier.T1 }} · T2 {{ usage.calls_by_tier.T2 }} · T3 {{ usage.calls_by_tier.T3 }}</dd>
+    </dl>
+    {% if not usage.coverage_complete %}
+    <p class="muted">Totals include only provider-reported usage. Unknown calls are never treated as zero.</p>
+    {% endif %}
+  </section>
+</div>
+
+<!-- Terminal panel (new focus) -->
+<div class="run-tab-panel" data-panel="terminal" style="display: none;">
+  <section class="card">
+    <h2>Terminal</h2>
+    <p class="muted" style="margin-top: 0;">Read-only view of the supervised <span class="mono">orch</span> run (launched via a Linux PTY with argv only, no shell). The terminal shows what the CLI prints: worker/provider banner, model commentary, tool output, stdout/stderr, gate output, review/repair output, timeouts/errors, and final summary. No input is sent to the process. Reconnect replays the persisted ANSI transcript, then continues live. If the run is completed, the transcript remains available.</p>
+    <link rel="stylesheet" href="/static/vendor/xterm/xterm.css">
+    <div id="terminal" style="height: 420px; background: #0f1115; border-radius: 4px; padding: 4px; overflow: hidden;"></div>
+    <p class="muted" style="margin-top: 0.5rem; font-size: 0.85rem;">WebSocket: <span class="mono">/runs/{{ run_id }}/terminal/ws</span> · Raw PTY bytes (ANSI) · Transcript persisted under XDG state dir per run.</p>
+  </section>
+</div>
+
+<!-- Timeline panel -->
+<div class="run-tab-panel" data-panel="timeline" style="display: none;">
+  <section class="card">
+    <h2>Attempts &amp; Verification Console</h2>
+    <div id="attempts-container">
+      {% if attempts %}
+        {% for attempt in attempts %}
+        <div class="attempt-card card" style="margin-bottom: 1rem; border-left: 3px solid var(--primary, #3b82f6);">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <h3>Attempt #{{ attempt.attempt_number }}: <span class="mono">{{ attempt.provider }} / {{ attempt.model }}</span></h3>
+            <span class="badge badge-{{ attempt.status_class }}">{{ attempt.status }}</span>
+          </div>
+          <dl class="detail-list" style="margin-top: 0.5rem;">
+            <dt>Worktree</dt><dd class="mono">{{ attempt.worktree_path }}</dd>
+            <dt>Candidate Commit</dt><dd class="mono">{{ attempt.commit_sha or "N/A" }}</dd>
+            <dt>Stage / Tier</dt><dd class="mono">{{ attempt.stage }} / {{ attempt.tier }}</dd>
+            {% if attempt.gate_result %}
+            <dt>Gate Result</dt><dd><span class="badge badge-{{ attempt.gate_result|lower }}">{{ attempt.gate_result }}</span>{% if attempt.gate_exit_code is not none %} (exit {{ attempt.gate_exit_code }}){% endif %}</dd>
+            {% endif %}
+            {% if attempt.worker_error %}
+            <dt>Worker Error</dt><dd class="mono" style="color: var(--danger-color, #e05252);">{{ attempt.worker_error }}</dd>
+            {% endif %}
+          </dl>
+
+          {% if attempt.worker_stdout or attempt.worker_stderr %}
+          <details style="margin-top: 0.5rem;">
+            <summary class="muted" style="cursor: pointer;">Worker Output</summary>
+            {% if attempt.worker_stdout %}
+            <div style="margin-top: 0.25rem;">
+              <span class="muted" style="font-size: 0.8rem;">stdout:</span>
+              <pre class="mono" style="background: rgba(0,0,0,0.3); padding: 0.5rem; border-radius: 4px; max-height: 200px; overflow-y: auto;">{{ attempt.worker_stdout }}</pre>
+            </div>
+            {% endif %}
+            {% if attempt.worker_stderr %}
+            <div style="margin-top: 0.25rem;">
+              <span class="muted" style="font-size: 0.8rem;">stderr:</span>
+              <pre class="mono" style="background: rgba(0,0,0,0.3); padding: 0.5rem; border-radius: 4px; max-height: 200px; overflow-y: auto;">{{ attempt.worker_stderr }}</pre>
+            </div>
+            {% endif %}
+          </details>
+          {% endif %}
+
+          {% if attempt.gate_stdout or attempt.gate_stderr %}
+          <details style="margin-top: 0.5rem;">
+            <summary class="muted" style="cursor: pointer;">Gate Check Output</summary>
+            {% if attempt.gate_stdout %}
+            <div style="margin-top: 0.25rem;">
+              <span class="muted" style="font-size: 0.8rem;">stdout:</span>
+              <pre class="mono" style="background: rgba(0,0,0,0.3); padding: 0.5rem; border-radius: 4px; max-height: 200px; overflow-y: auto;">{{ attempt.gate_stdout }}</pre>
+            </div>
+            {% endif %}
+            {% if attempt.gate_stderr %}
+            <div style="margin-top: 0.25rem;">
+              <span class="muted" style="font-size: 0.8rem;">stderr:</span>
+              <pre class="mono" style="background: rgba(0,0,0,0.3); padding: 0.5rem; border-radius: 4px; max-height: 200px; overflow-y: auto;">{{ attempt.gate_stderr }}</pre>
+            </div>
+            {% endif %}
+          </details>
+          {% endif %}
+        </div>
+        {% endfor %}
+      {% else %}
+        <div class="empty-state">
+          <p class="empty-state-title">No attempts recorded</p>
+          <p class="muted">Attempts appear here once this run dispatches work to a worker provider.</p>
+        </div>
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Live Event Log</h2>
+    <div id="events-log" style="max-height: 250px; overflow-y: auto; display: flex; flex-direction: column; gap: 0.25rem; font-family: monospace; font-size: 0.85rem; padding: 0.5rem; background: rgba(0,0,0,0.25); border-radius: 4px;">
+      {% for ev in events %}
+      <div class="event-row" data-event-id="{{ ev.id }}" style="display: flex; gap: 0.75rem;">
+        <span class="muted">#{{ ev.id }}</span>
+        <span class="muted">{{ fmt(ev.created_at) }}</span>
+        <strong style="color: var(--primary, #3b82f6);">{{ ev.event_type }}</strong>
+        {% if ev.attempt_id %}<span class="muted">[{{ ev.attempt_id }}]</span>{% endif %}
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+</div>
+
+<!-- Diff panel -->
+<div class="run-tab-panel" data-panel="diff" style="display: none;">
+  <section class="card">
+    <h2>Diff</h2>
+    {% if candidate_sha %}
+    <dl class="detail-list">
+      <dt>Candidate SHA</dt><dd class="mono">{{ candidate_sha }}</dd>
+      {% if base_commit %}<dt>Base Commit</dt><dd class="mono">{{ base_commit }}</dd>{% endif %}
+    </dl>
+    {% endif %}
+    {% if changed_files %}
+    <p class="muted">Changed files in the candidate:</p>
+    <ul style="margin: 0; padding-left: 1.2rem;">
+      {% for cf in changed_files %}
+      <li class="mono">{{ cf }}</li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <div class="empty-state">
+      <p class="empty-state-title">No diff available</p>
+      <p class="muted">Changed files appear here after a successful candidate is recorded. For the full diff, inspect the candidate commit in the target repository worktree.</p>
+    </div>
+    {% endif %}
+  </section>
+</div>
+
+<!-- Review panel -->
+<div class="run-tab-panel" data-panel="review" style="display: none;">
+  <section class="card">
+    <h2>Independent Code Review</h2>
+    <div id="reviews-container">
+      {% if reviews %}
+        {% for review in reviews %}
+        <div class="review-card card" style="margin-bottom: 0.75rem; border-left: 3px solid {% if review.verdict in ['PASS', 'PASS_WITH_BACKLOG'] %}#22c55e{% elif review.verdict in ['BLOCK', 'FINAL_BLOCK'] %}#ef4444{% else %}#eab308{% endif %};">
+          <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem;">
+            <div style="display: flex; align-items: center; gap: 0.5rem;">
+              <h3 style="margin: 0; font-size: 1.1rem;">{{ review.progress_label }}</h3>
+              {% if review.is_final %}
+              <span class="badge badge-warning" style="font-weight: 700;">FINAL</span>
+              {% endif %}
+            </div>
+            <div style="display: flex; gap: 0.5rem; align-items: center;">
+              <span class="badge badge-secondary mono">Status: {{ review.execution_status }}</span>
+              <span class="badge badge-{{ review.status_class }}">{{ review.verdict }}</span>
+            </div>
+          </div>
+
+          <dl class="detail-list" style="margin-top: 0.75rem;">
+            <dt>Reviewer</dt>
+            <dd class="mono">{% if review.provider and review.model %}{{ review.provider }} / {{ review.model }}{% else %}N/A{% endif %}</dd>
+            <dt>Candidate SHA</dt>
+            <dd class="mono">{% if review.candidate_sha %}{{ review.candidate_sha }}{% else %}N/A{% endif %}</dd>
+            <dt>Related Repair SHA</dt>
+            <dd class="mono">{% if review.repair_sha %}{{ review.repair_sha }}{% else %}None{% endif %}</dd>
+            <dt>Substantive Verdict</dt>
+            <dd><span class="badge badge-{{ review.status_class }}">{{ review.verdict }}</span></dd>
+            <dt>Created</dt>
+            <dd class="mono">{{ fmt(review.created_at) }}</dd>
+          </dl>
+
+          <p style="margin: 0.5rem 0;"><strong>Summary:</strong> {{ review.summary }}</p>
+          {% if review.details %}
+          <details style="margin-top: 0.5rem;">
+            <summary class="muted" style="cursor: pointer;">Review Details</summary>
+            <pre class="mono" style="background: rgba(0,0,0,0.3); padding: 0.5rem; border-radius: 4px; margin-top: 0.25rem; white-space: pre-wrap;">{{ review.details }}</pre>
+          </details>
+          {% endif %}
+        </div>
+        {% endfor %}
+      {% else %}
+        <div class="empty-state">
+          <p class="empty-state-title">No reviews recorded</p>
+          <p class="muted">{% if can_review %}Request a review above once this run completes.{% else %}Reviews are only available for completed runs.{% endif %}</p>
+        </div>
+      {% endif %}
+    </div>
+  </section>
+</div>
+
+<script src="/static/vendor/xterm/xterm.js"></script>
+<script src="/static/js/terminal.js"></script>
+{% endif %}
+{% endblock %}

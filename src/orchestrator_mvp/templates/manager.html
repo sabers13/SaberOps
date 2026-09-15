@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Ox Alpha Manager{% endblock %}
+{% block nav_manager %} is-active{% endblock %}
+
+{% block content %}
+<header class="page-head">
+  <div>
+    <h1>Ox Alpha Manager</h1>
+    <p class="muted">Conversational engineering manager powered by <code>opencode-go/ox-alpha-free</code>.</p>
+  </div>
+  <span class="badge badge-normal">Active: <span class="mono">{{ active_project }}</span></span>
+</header>
+
+<section class="card">
+  <div class="manager-layout" style="display: flex; flex-direction: column; gap: 1rem;">
+    <div class="manager-meta" style="display: flex; justify-content: space-between; align-items: center;">
+      <div>
+        <span class="muted">Active Project:</span>
+        <strong class="mono">{{ active_project }}</strong>
+      </div>
+      <a href="/" class="btn btn-secondary btn-sm">Switch Project ↗</a>
+    </div>
+
+    <div class="quick-prompts" style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+      <button type="button" class="btn btn-secondary btn-sm prompt-pill" data-prompt="What is the current status of recent runs?">Status of recent runs</button>
+      <button type="button" class="btn btn-secondary btn-sm prompt-pill" data-prompt="Show local provider quota and availability.">Provider &amp; quota status</button>
+      <button type="button" class="btn btn-secondary btn-sm prompt-pill" data-prompt="List configured tiers and routing chains.">List model tiers</button>
+    </div>
+
+    <div id="chat-container" class="chat-container" style="display: flex; flex-direction: column; gap: 0.75rem; min-height: 300px; max-height: 500px; overflow-y: auto; border: 1px solid var(--border-color, #333); border-radius: 6px; padding: 1rem; background: var(--bg-card-alt, rgba(0,0,0,0.2));">
+      <div class="chat-msg chat-msg-system">
+        <p class="muted">Welcome to Ox Alpha Manager. Ask questions about runs, request diagnostics, or instruct the manager to run tasks on the active project. Transcripts are preserved in local storage.</p>
+      </div>
+    </div>
+
+    <form id="manager-form" class="manager-form" style="display: flex; flex-direction: column; gap: 0.5rem;">
+      <div style="display: flex; gap: 0.5rem;">
+        <textarea id="manager-input" name="text" rows="2" placeholder="Ask Ox Alpha (e.g. 'Why did run_xxx fail?', 'Start a standard run to fix typing in models.py', 'Show quota')..." style="flex: 1;" required></textarea>
+        <button type="submit" id="manager-send-btn" class="btn btn-primary" style="align-self: flex-end; padding: 0.6rem 1.2rem;">Send</button>
+      </div>
+      <div style="display: flex; justify-content: space-between;">
+        <button type="button" id="clear-transcript-btn" class="btn btn-secondary btn-sm" style="font-size: 0.8rem;">Clear Transcript</button>
+        <span id="manager-status" class="muted" style="font-size: 0.85rem;"></span>
+      </div>
+    </form>
+  </div>
+</section>
+{% endblock %}

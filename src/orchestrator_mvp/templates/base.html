@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Orchestrator{% endblock %} · Orchestrator Dashboard</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <a class="brand" href="/">Orchestrator</a>
+      <nav class="nav">
+        <a class="nav-link{% block nav_dashboard %}{% endblock %}" href="/">Dashboard</a>
+        <a class="nav-link{% block nav_manager %}{% endblock %}" href="/manager">Ox Manager</a>
+        <a class="nav-link{% block nav_quota %}{% endblock %}" href="/quota">Quota</a>
+        <a class="nav-link{% block nav_routing %}{% endblock %}" href="/routing">Routing</a>
+        <a class="nav-link{% block nav_orchestrator %}{% endblock %}" href="/orchestrator">Orchestrator Model</a>
+        <a class="nav-link{% block nav_access %}{% endblock %}" href="/access">Model Access</a>
+      </nav>
+      <div class="sidebar-foot">
+        <button id="theme-toggle" class="theme-toggle" type="button">Toggle theme</button>
+        <span class="sidebar-tag">Local</span>
+        <p class="muted">Starting runs, review, cleanup, accept, and quota management are available here. Push remains CLI-only.</p>
+      </div>
+    </aside>
+
+    <main class="content">
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block title %}Quota Management{% endblock %}
+{% block nav_quota %} is-active{% endblock %}
+
+{% block content %}
+<header class="page-head">
+  <div>
+    <h1>Quota Management</h1>
+    <p class="muted">Owner-supplied quota state for quota-aware routing.</p>
+  </div>
+</header>
+
+{% if notice %}
+<div class="alert alert-info">{{ notice }}</div>
+{% endif %}
+{% if error %}
+<div class="alert alert-error">{{ error }}</div>
+{% endif %}
+
+<section class="card">
+  <h2>Current Quota State</h2>
+  {% if quota_states %}
+  <div class="table-wrap">
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Provider</th>
+          <th>Pool</th>
+          <th>Remaining</th>
+          <th>Routing State</th>
+          <th>Reset Time</th>
+          <th>Updated</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for q in quota_states %}
+        <tr>
+          <td>{{ q.provider }}</td>
+          <td>{{ q.pool }}</td>
+          <td>{{ "%g"|format(q.remaining_percent) }}%</td>
+          <td><span class="badge badge-{{ q.status_class }}">{{ q.routing_state }}</span></td>
+          <td class="mono">{{ fmt(q.reset_at) }}</td>
+          <td class="mono">{{ fmt(q.updated_at) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty-state">
+    <p class="empty-state-title">No quota rows configured</p>
+    <p class="muted">Providers without quota state are treated as NORMAL. Set a pool below to add quota state.</p>
+  </div>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Update a Pool</h2>
+  <form method="post" action="/quota/set" class="run-form">
+    <div class="field-row">
+      <div class="field">
+        <label for="provider">Provider</label>
+        <input type="text" id="provider" name="provider" value="{{ form.provider }}" required>
+      </div>
+      <div class="field">
+        <label for="pool">Pool</label>
+        <input type="text" id="pool" name="pool" value="{{ form.pool }}" required>
+      </div>
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <label for="remaining_percent">Remaining percent (0-100)</label>
+        <input type="text" id="remaining_percent" name="remaining_percent" value="{{ form.remaining_percent }}" required>
+      </div>
+      <div class="field">
+        <label for="reset_at">Reset at (optional)</label>
+        <input type="text" id="reset_at" name="reset_at" value="{{ form.reset_at }}">
+      </div>
+    </div>
+    <p class="muted">Routing state is derived by the orchestrator core from the remaining percentage.</p>
+    <button type="submit" class="btn btn-primary">Set quota</button>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Enable a Pool</h2>
+  <p class="muted">Explicitly clears a sticky routing block and restores automatic routing for a provider pool.</p>
+  <form method="post" action="/quota/enable" class="run-form">
+    <div class="field-row">
+      <div class="field">
+        <label for="enable_provider">Provider</label>
+        <input type="text" id="enable_provider" name="provider" value="{{ enable_form.provider }}" required>
+      </div>
+      <div class="field">
+        <label for="enable_pool">Pool</label>
+        <input type="text" id="enable_pool" name="pool" value="{{ enable_form.pool }}" required>
+      </div>
+    </div>
+    <button type="submit" class="btn btn-primary">Enable pool</button>
+  </form>
+</section>
+{% endblock %}

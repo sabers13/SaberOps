@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}Orchestrator Model{% endblock %}
+{% block nav_orchestrator %} is-active{% endblock %}
+
+{% block content %}
+<header class="page-head">
+  <div>
+    <h1>Orchestrator Model</h1>
+    <p class="muted">Choose the exact C11-B binding the Orchestrator slot will use. Only canonical eligible bindings are listed; the persisted choice is a binding identity, never a free-floating provider/model setting. This choice is independent of worker routing order and never reorders the routing chains.</p>
+    <p class="muted"><strong>Note.</strong> Selecting a binding here stores the configuration. A distinct production Orchestrator-model execution consumer is not yet wired in the bounded architecture; this selection prepares the slot for that future consumer.</p>
+  </div>
+</header>
+
+{% if notice %}
+<div class="alert alert-info">{{ notice }}</div>
+{% endif %}
+{% if error %}
+<div class="alert alert-error">{{ error }}</div>
+{% endif %}
+
+<section class="card">
+  <h2>Current selection</h2>
+  {% if current %}
+  <p class="mono">mode = {{ current.mode }}{% if current.pinned_binding_id %} · binding = {{ current.pinned_binding_id }}{% endif %}</p>
+  <p class="muted">Resolution: {{ selection_status }}</p>
+  {% else %}
+  <p class="muted">No Orchestrator binding policy configured. The Orchestrator falls back to the canonical AUTO path over eligible bindings.</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Eligible bindings</h2>
+  {% if bindings %}
+  <div class="table-wrap">
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Provider</th>
+          <th>Model</th>
+          <th>Backend</th>
+          <th>Profile</th>
+          <th>Quota pool</th>
+          <th>Binding id</th>
+          <th>Select</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for b in bindings %}
+        <tr>
+          <td>{{ b.provider }}</td>
+          <td class="mono">{{ b.model }}</td>
+          <td class="mono">{{ b.backend }}</td>
+          <td class="mono">{{ b.profile_id }}</td>
+          <td class="mono">{{ b.quota_pool_id }}</td>
+          <td class="mono">{{ b.binding_id }}</td>
+          <td>
+            <form method="post" action="/orchestrator/select">
+              <input type="hidden" name="binding_id" value="{{ b.binding_id }}">
+              <input type="hidden" name="mode" value="PINNED">
+              <button type="submit" class="btn btn-sm">Pin</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty-state">
+    <p class="empty-state-title">No eligible bindings</p>
+    <p class="muted">Connect an account provider and run &ldquo;Refresh models&rdquo; on the <a href="/access">Model Access</a> page. Discovery proves an exact executable binding before a model becomes selectable.</p>
+  </div>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Automatic selection</h2>
+  <p class="muted">AUTO resolves through the existing canonical Orchestrator selection authority over eligible bindings. It does not alter worker routing order.</p>
+  <form method="post" action="/orchestrator/select">
+    <input type="hidden" name="mode" value="AUTO">
+    <button type="submit" class="btn"{% if auto_selected %} disabled{% endif %}>Use AUTO</button>
+  </form>
+</section>
+{% endblock %}

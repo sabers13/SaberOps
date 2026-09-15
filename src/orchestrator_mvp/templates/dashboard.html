@@ -1,0 +1,300 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block nav_dashboard %} is-active{% endblock %}
+
+{% block content %}
+<header class="page-head">
+  <div>
+    <h1>Dashboard</h1>
+    <p class="muted">Live operational control plane and local orchestrator state.</p>
+  </div>
+  <div class="head-badges">
+    <a class="btn btn-secondary" href="/manager">Open Ox Manager ↗</a>
+    <span class="badge badge-{{ schedule_class }}">{{ schedule_state }}</span>
+  </div>
+</header>
+
+{% if notice %}
+<div class="alert alert-info">{{ notice }}</div>
+{% endif %}
+{% if error %}
+<div class="alert alert-error">{{ error }}</div>
+{% endif %}
+
+<section class="card">
+  <h2>Active Target Project</h2>
+  <div class="project-active-bar">
+    <div>
+      <span class="muted">Active Repository:</span>
+      <strong class="mono">{{ repo_path or "None selected" }}</strong>
+    </div>
+    {% if repo_ready %}
+    <span class="badge badge-success">READY</span>
+    {% else %}
+    <span class="badge badge-failed">NOT READY</span>
+    {% endif %}
+  </div>
+  {% if not repo_ready and repo_note %}
+  <p class="muted alert alert-error" style="margin-top: 0.5rem;">{{ repo_note }}</p>
+  {% endif %}
+
+  {% if recent_projects %}
+  <div class="recent-projects" style="margin-top: 1rem;">
+    <span class="muted">Recent Projects:</span>
+    <div class="project-tags" style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.25rem;">
+      {% for p in recent_projects %}
+      <form method="post" action="/projects/select" style="display: inline;">
+        <input type="hidden" name="path" value="{{ p.path }}">
+        <button type="submit" class="btn btn-secondary btn-sm{% if p.path == active_project %} is-active{% endif %} mono">
+          {{ p.path }}
+          {% if not p.validation.ready %}
+          <span style="color: var(--danger-color, #e05252);">(!)</span>
+          {% endif %}
+        </button>
+      </form>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  <form method="post" action="/projects/select" class="project-select-form" style="margin-top: 1rem; display: flex; gap: 0.5rem;">
+    <input type="text" name="path" placeholder="/absolute/path/to/git/repository" class="mono" style="flex: 1;" required>
+    <button type="submit" class="btn btn-secondary">Select / Switch Project</button>
+  </form>
+</section>
+
+{% if repo_ready and project_gate_scratch %}
+<section class="card">
+  <h2>Project Settings</h2>
+  <form method="post" action="/projects/settings/gate-scratch" class="run-form">
+    <div class="field">
+      <label for="gate_scratch_mode">Gate temporary storage / Gate performance</label>
+      <select id="gate_scratch_mode" name="mode">
+        {% for opt in project_gate_scratch.options %}
+        <option value="{{ opt.value }}"{% if opt.value == project_gate_scratch.current_mode %} selected{% endif %}>{{ opt.label }}</option>
+        {% endfor %}
+      </select>
+      <span class="muted">
+        Project files remain on disk. Only temporary gate/test scratch may use RAM.
+        <strong>Prefer RAM</strong> can fall back to disk before execution.
+        <strong>Require RAM</strong> blocks gate execution when RAM is unavailable.
+      </span>
+    </div>
+    <button type="submit" class="btn btn-secondary">Save project setting</button>
+  </form>
+</section>
+{% endif %}
+
+<section class="card">
+  <h2>Start a Run</h2>
+  <form method="post" action="/runs" class="run-form">
+    <div class="field">
+      <label for="task">Task</label>
+      <textarea id="task" name="task" rows="3" required placeholder="Describe task to implement or fix...">{{ form.task }}</textarea>
+    </div>
+
+    <div class="field-row">
+      <div class="field">
+        <label for="routing_mode">Routing</label>
+        <select id="routing_mode" name="routing_mode">
+          <option value="auto"{% if form.routing_mode == "auto" %} selected{% endif %}>Auto (recommended)</option>
+          <option value="manual"{% if form.routing_mode == "manual" %} selected{% endif %}>Manual</option>
+        </select>
+        <span class="muted">Auto classifies the task and may escalate through T3.</span>
+      </div>
+      <div class="field field-check">
+        <label class="check" for="training_allowed">
+          <input type="checkbox" id="training_allowed" name="training_allowed" value="1"{% if form.training_allowed %} checked{% endif %}>
+          Allow training-eligible models (e.g. Muse)
+        </label>
+        <span class="muted">Training policy defaults to <strong>Allowed</strong> in Web UI.</span>
+      </div>
+    </div>
+
+    <details class="field">
+      <summary>Advanced Routing Override</summary>
+      <div class="field-row" style="margin-top: 0.75rem;">
+        <div class="field">
+          <label for="manual_tier">Manual tier</label>
+          <select id="manual_tier" name="manual_tier">
+            <option value="">None</option>
+            {% for t in tier_options %}<option value="{{ t }}"{% if form.manual_tier == t %} selected{% endif %}>{{ t }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="field">
+          <label for="max_auto_tier">Max auto tier</label>
+          <select id="max_auto_tier" name="max_auto_tier">{% for t in tier_options %}<option value="{{ t }}"{% if form.max_auto_tier == t %} selected{% endif %}>{{ t }}</option>{% endfor %}</select>
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field"><label for="provider_override">Provider override</label><input type="text" id="provider_override" name="provider_override" value="{{ form.provider_override }}" placeholder="e.g. opencode, codex"></div>
+        <div class="field"><label for="model_override">Model override</label><input type="text" id="model_override" name="model_override" value="{{ form.model_override }}" placeholder="e.g. opencode-go/ox-alpha-free"></div>
+      </div>
+    </details>
+
+    <div class="field">
+      <label for="gate_command">Gate command</label>
+      <input type="text" id="gate_command" name="gate_command" value="{{ form.gate_command }}">
+    </div>
+    <div class="field-row">
+      <div class="field"><label for="worker_timeout">Worker timeout (seconds)</label><input type="number" id="worker_timeout" name="worker_timeout" value="{{ form.worker_timeout }}" placeholder="Auto: T1 600, T2 1200, T3 1800"></div>
+      <div class="field"><label for="gate_timeout">Gate timeout</label><input type="number" id="gate_timeout" name="gate_timeout" value="{{ form.gate_timeout }}" placeholder="300"></div>
+      <div class="field"><label for="review_timeout">Review timeout</label><input type="number" id="review_timeout" name="review_timeout" value="{{ form.review_timeout }}" placeholder="1200"></div>
+    </div>
+    <div class="field-row">
+      <div class="field field-check">
+        <label class="check" for="review_enabled">
+          <input type="checkbox" id="review_enabled" name="review_enabled" value="1"{% if form.review_enabled %} checked{% endif %}>
+          Independent Review
+        </label>
+        <span class="muted">Force an independent review after gate passes. Off (default): risk-adaptive policy decides.</span>
+      </div>
+    </div>
+    <div class="field-row" id="review-controls-row">
+      <div class="field">
+        <label for="review_mode">Review mode</label>
+        <select id="review_mode" name="review_mode">
+          <option value="bounded"{% if form.review_mode == "bounded" %} selected{% endif %}>Bounded</option>
+          <option value="max"{% if form.review_mode == "max" %} selected{% endif %}>Max</option>
+        </select>
+        <span class="muted">Bounded stops after the review limit; Max loops until convergence (stall-guarded).</span>
+      </div>
+      <div class="field" id="review-limit-field">
+        <label for="review_limit">Review limit</label>
+        <input type="number" id="review_limit" name="review_limit" value="{{ form.review_limit }}" min="1">
+        <span class="muted">Number of reviewers when Bounded.</span>
+      </div>
+    </div>
+    <p class="muted" id="effective-timeouts" data-timeout-defaults="{{ effective_timeouts.defaults_json }}">
+      Effective timeouts before launch — worker: <strong data-eff="worker">{{ effective_timeouts.worker }}</strong>,
+      gate: <strong data-eff="gate">{{ effective_timeouts.gate }}</strong>,
+      review: <strong data-eff="review">{{ effective_timeouts.review }}</strong>.
+    </p>
+
+    <p class="muted mono">Dispatch Target: {{ repo_path }}</p>
+    {% if not repo_ready %}
+    <p class="muted" style="color: var(--danger-color, #e05252);">Target repository is not ready for runs ({{ repo_note }}).</p>
+    {% endif %}
+
+    <button type="submit" class="btn btn-primary" {% if not repo_ready %}disabled{% endif %}>Start run (asynchronous)</button>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Provider Availability</h2>
+  <div class="provider-grid">
+    {% for provider in providers %}
+    <div class="provider-cell">
+      <span class="provider-name">{{ provider.name }}</span>
+      <span class="badge badge-{{ provider.status_class }}">{{ provider.status }}</span>
+      {% if provider.detail %}
+      <span class="muted mono">{{ provider.detail }}</span>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  <p class="muted">Antigravity permission posture: <span class="badge badge-{{ agy_permission_class }}">{{ agy_permission_posture }}</span></p>
+</section>
+
+<section class="card">
+  <h2>Execution Tiers &amp; Models</h2>
+  <p class="muted">Training policy defaults to <strong>Allowed</strong>; explicitly opt out to exclude Muse-capable routing.</p>
+  <div class="tier-grid">
+    {% for tier in tiers %}
+    <div class="tier-panel">
+      <div class="tier-head">
+        <span class="tier-name">{{ tier.name }}</span>
+        <span class="muted">{{ tier.title }}</span>
+      </div>
+      {% for group in tier.groups %}
+      <div class="tier-group">
+        <span class="tier-group-label">{{ group.label }}</span>
+        <ol class="candidate-list">
+          {% for candidate in group.candidates %}
+          <li class="candidate{% if not candidate.available %} unavailable{% endif %}">
+            <span class="candidate-model">{{ candidate.model }}</span>
+            <span class="muted candidate-provider">[{{ candidate.provider }}]</span>
+          </li>
+          {% endfor %}
+        </ol>
+      </div>
+      {% endfor %}
+    </div>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="card">
+  <h2>Quota State</h2>
+  {% if quota_states %}
+  <div class="table-wrap">
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Provider</th>
+          <th>Pool</th>
+          <th>Remaining</th>
+          <th>Routing State</th>
+          <th>Reset Time</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for q in quota_states %}
+        <tr>
+          <td>{{ q.provider }}</td>
+          <td>{{ q.pool }}</td>
+          <td>{{ "%g"|format(q.remaining_percent) }}%</td>
+          <td><span class="badge badge-{{ q.status_class }}">{{ q.routing_state }}</span></td>
+          <td class="mono">{{ fmt(q.reset_at) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty-state">
+    <p class="empty-state-title">No quota rows configured</p>
+    <p class="muted">Providers without quota state are treated as NORMAL. Add quota from the <a href="/quota">Quota</a> page.</p>
+  </div>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Recent Runs</h2>
+  {% if runs %}
+  <div class="table-wrap">
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Run ID</th>
+          <th>Repository</th>
+          <th>Tier</th>
+          <th>Status</th>
+          <th>Created</th>
+          <th>Completed</th>
+          <th>Task Summary</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for run in runs %}
+        <tr>
+          <td><a class="mono" href="/runs/{{ run.id }}">{{ run.id }}</a></td>
+          <td class="mono">{{ run.repository }}</td>
+          <td>{{ run.tier }}</td>
+          <td><span class="badge badge-{{ run.status_class }}">{{ run.status }}</span></td>
+          <td class="mono">{{ fmt(run.created_at) }}</td>
+          <td class="mono">{{ fmt(run.completed_at) }}</td>
+          <td>{{ run.summary }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty-state">
+    <p class="empty-state-title">No runs recorded yet</p>
+    <p class="muted">Start a run with the form above or <code>orch run</code>.</p>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}

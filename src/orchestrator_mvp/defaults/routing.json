@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "T1": {
+    "default": [
+      "antigravity/gemini-3.7-flash",
+      "opencode/opencode/nemotron-3.5-lightning-free",
+      "opencode/opencode/mimo-v2.5-free",
+      "opencode/opencode-go/mimo-v2.5",
+      "opencode/opencode-go/deepseek-v4-flash",
+      "opencode/opencode/minimax-m3",
+      "opencode/opencode/qwen3.7-plus",
+      "codex/gpt-5.6-luna"
+    ]
+  },
+  "T2": {
+    "training_allowed": [
+      "opencode/opencode/muse-spark-1.2-contributor-free",
+      "opencode/opencode/hy3-free",
+      "opencode/opencode-go/muse-spark-1.2-contributor",
+      "opencode/opencode-go/deepseek-v4-pro",
+      "opencode/opencode/nemotron-3-ultra-free",
+      "codex/gpt-5.6-terra",
+      "opencode/opencode-go/deepseek-v4-flash",
+      "opencode/opencode/mimo-v2.5-free",
+      "opencode/opencode/nemotron-3.5-lightning-free",
+      "opencode/opencode/big-pickle",
+      "opencode/opencode/minimax-m3",
+      "opencode/opencode/qwen3.7-plus",
+      "codex/gpt-5.6-luna"
+    ],
+    "training_denied_off_peak": [
+      "opencode/opencode-go/deepseek-v4-pro",
+      "codex/gpt-5.6-terra",
+      "opencode/opencode-go/deepseek-v4-flash",
+      "opencode/opencode/deepseek-v4-flash",
+      "opencode/opencode/minimax-m3",
+      "opencode/opencode/qwen3.7-plus",
+      "opencode/opencode/deepseek-v4-pro",
+      "codex/gpt-5.6-luna"
+    ],
+    "training_denied_peak": [
+      "codex/gpt-5.6-terra",
+      "opencode/opencode-go/deepseek-v4-pro",
+      "opencode/opencode-go/deepseek-v4-flash",
+      "opencode/opencode/minimax-m3",
+      "opencode/opencode/qwen3.7-plus",
+      "codex/gpt-5.6-luna"
+    ]
+  },
+  "T3": {
+    "off_peak": [
+      "opencode/opencode-go/deepseek-v4-pro",
+      "codex/gpt-5.6-terra",
+      "codex/gpt-5.6-sol",
+      "opencode/opencode/deepseek-v4-flash",
+      "opencode/opencode/minimax-m3",
+      "opencode/opencode/qwen3.7-plus",
+      "opencode/opencode/deepseek-v4-pro",
+      "codex/gpt-5.6-luna"
+    ],
+    "peak": [
+      "codex/gpt-5.6-terra",
+      "opencode/opencode-go/deepseek-v4-pro",
+      "codex/gpt-5.6-sol",
+      "opencode/opencode/minimax-m3",
+      "opencode/opencode/qwen3.7-plus",
+      "codex/gpt-5.6-luna"
+    ]
+  }
+}

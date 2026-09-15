@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+{% block title %}Routing{% endblock %}
+{% block nav_routing %} is-active{% endblock %}
+
+{% block content %}
+<header class="page-head">
+  <div>
+    <h1>Routing</h1>
+    <p class="muted">Owner-selected worker routing chains. Discovery populates the chooser below; the user decides what enters routing. Ordering and tier semantics remain owned by the canonical routing configuration.</p>
+  </div>
+</header>
+
+{% if notice %}
+<div class="alert alert-info">{{ notice }}</div>
+{% endif %}
+{% if error %}
+<div class="alert alert-error">{{ error }}</div>
+{% endif %}
+
+<section class="card">
+  <h2>Current chains</h2>
+  <p class="muted">Adding a model appends it to the end of the chosen tier/context chain. Existing order is never rewritten.</p>
+  <div class="table-wrap">
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Tier</th>
+          <th>Context</th>
+          <th>Candidates (ordered)</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for chain in chains %}
+        <tr>
+          <td class="mono">{{ chain.tier }}</td>
+          <td class="mono">{{ chain.context }}</td>
+          <td>
+            {% if chain.candidates %}
+            <ol class="mono model-list">
+              {% for cid in chain.candidates %}
+              <li>
+                {{ cid }}
+                <form method="post" action="/routing/remove" style="display:inline">
+                  <input type="hidden" name="context" value="{{ chain.context_key }}">
+                  <input type="hidden" name="candidate_id" value="{{ cid }}">
+                  <button type="submit" class="btn btn-sm">Remove</button>
+                </form>
+              </li>
+              {% endfor %}
+            </ol>
+            {% else %}
+            <span class="muted">empty</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="card">
+  <h2>Add model</h2>
+  <p class="muted">Only discovery-verified, fresh models with an exact executable C11-B binding can enter routing. A registered adapter alone is not enough: the binding must resolve through the canonical registry. Adding a model outside the static registry records its non-secret discovery evidence and exact binding identity as owner approval; it never enrolls automatically, and C07 still decides eligibility in each context (an unknown training requirement fails closed in training-denied contexts).</p>
+  {% if chooser %}
+  <div class="table-wrap">
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Provider</th>
+          <th>Connection</th>
+          <th>Model</th>
+          <th>Discovery</th>
+          <th>Execution</th>
+          <th>Routing eligible</th>
+          <th>Add to tier</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for m in chooser %}
+        <tr>
+          <td>{{ m.provider }}</td>
+          <td class="mono">{{ m.connection_id }}</td>
+          <td class="mono">{{ m.model_id }}</td>
+          <td><span class="badge">{{ m.discovery_status }}</span>{% if m.stale == 'TRUE' %} <span class="badge badge-demoted">STALE</span>{% endif %}</td>
+          <td><span class="badge badge-{{ 'normal' if m.execution_support == 'SUPPORTED' else 'demoted' }}">{{ m.execution_support }}</span></td>
+          <td>
+            {% if m.routing_eligible == 'TRUE' %}
+            <span class="badge badge-normal">TRUE</span>
+            {% else %}
+            <span class="badge badge-demoted">FALSE</span>
+            <br><span class="muted">{{ m.ineligible_reason }}</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if m.routing_eligible == 'TRUE' %}
+            <form method="post" action="/routing/add" class="field-row">
+              <input type="hidden" name="connection_id" value="{{ m.connection_id }}">
+              <input type="hidden" name="model_id" value="{{ m.model_id }}">
+              <input type="hidden" name="binding_id" value="{{ m.binding_id }}">
+              <select name="context">
+                {% for ctx in contexts %}
+                <option value="{{ ctx }}">{{ ctx }}</option>
+                {% endfor %}
+              </select>
+              <button type="submit" class="btn">Add</button>
+            </form>
+            {% else %}
+            <span class="muted">disabled</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty-state">
+    <p class="empty-state-title">No discovered models</p>
+    <p class="muted">Connect a provider and run &ldquo;Refresh models&rdquo; on the <a href="/access">Model Access</a> page. Discovery never invents models.</p>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}
