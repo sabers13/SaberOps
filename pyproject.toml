@@ -3,8 +3,8 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "orchestrator-mvp"
-version = "0.1.1"
+name = "saberops"
+version = "0.2.0"
 description = "Minimal reliable AI coding orchestrator with Git worktree isolation and deterministic verification"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [project.scripts]
-orch = "orchestrator_mvp.cli:main"
+orch = "saberops.cli:main"
 
 [project.optional-dependencies]
 dev = [
@@ -31,7 +31,7 @@ dev = [
 where = ["src"]
 
 [tool.setuptools.package-data]
-orchestrator_mvp = [
+saberops = [
     "templates/*.html",
     "static/css/*.css",
     "static/js/*.js",

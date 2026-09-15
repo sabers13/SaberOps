@@ -1,83 +1,88 @@
 # SaberOps
 
-**Local AI agent orchestration, validation & observability platform.**
-
-SaberOps is a local, provider-independent control plane for coordinating
-external AI coding agents against a project treated as the source of truth.
-A durable project ledger owns project state; a worker executes a bounded
-work package inside an isolated Git worktree candidate; a deterministic gate
-decides pass/fail; candidates carry immutable provenance; and review/repair
-loops converge or stall safely. SaberOps itself is a control plane, not a
-model: it does not require any single provider, model, harness, or session.
+SaberOps is a local control plane for supervised AI-assisted engineering. It
+coordinates external worker tools against a Git project while retaining durable
+project state, candidate provenance, validation results, and review decisions.
+It is provider-independent: SaberOps does not ship a model or require a
+specific provider session.
 
 ## Install
 
-Requires Python 3.12+.
+Python 3.12 or later is required.
 
 ```sh
 python -m venv .venv
-.venv/bin/pip install .
+.venv/bin/pip install -e ".[dev]"
 .venv/bin/orch --help
 ```
 
-For development (tests, lint, type checks):
+## Quick Start
 
 ```sh
-.venv/bin/pip install -e ".[dev]"
-```
-
-## Quick start
-
-```sh
-# Show CLI help
-orch --help
-
-# Check local orchestration readiness
 orch doctor
-
-# Inspect configured model routing
 orch models
-
-# Review supervised-run options before starting a task
 orch run --help
-
-# Review local dashboard options
 orch ui --help
 ```
 
-## What SaberOps does
+`orch ui` starts the local web UI. Runtime state, databases, worktrees, and
+logs use standard XDG locations or project-local state; they are not written
+into the installed package.
 
-- Durable, per-project state with ledger authority and frozen run identity.
-- Bounded work packages executed in isolated Git worktree candidates.
-- Deterministic verification gates with captured gate receipts.
-- Candidate provenance bound to project, objective, run, and base SHA.
-- Clear PASS / FAIL / BLOCKED / infrastructure outcomes.
-- Durable supervision, orphan reconciliation, and resumable project state.
-- Structured run history and durable events.
-- Optional local web dashboard (`orch ui --help`).
+## Product Model
 
-## Repository layout
+SaberOps supports bounded work in isolated Git worktrees, deterministic gates,
+candidate provenance, durable run history, supervision, review policy, and
+replay/developer tooling. Project identity and stored state are scoped to the
+target project so operations do not silently retarget another checkout.
+
+Connections describe how an already-selected binding may connect. Reachability
+tests send no credentials and do not establish authentication or readiness.
+Saving a connection alone never authorizes worker execution: discovery, exact
+binding, readiness, and routing admission remain separate checks. Credential
+references may be stored, but secret values are not.
+
+Discovery provides evidence about available models. Routing uses eligible,
+exact provider/model bindings and fails closed when required admission evidence
+is unavailable. The routing chain is separate from the Orchestrator-model
+configuration.
+
+The Orchestrator page persists an exact eligible binding configuration. It does
+not reorder worker routing. In this release, selecting that configuration does
+not execute a separate Orchestrator-model process.
+
+## Security And Privacy
+
+SaberOps is designed for local use and keeps provider authentication with the
+provider's normal mechanism. Do not place credentials in source, configuration
+committed to Git, or task text. Review run commands and their project scope
+before execution. Provider and model execution is never required for the test
+suite or CI.
+
+## Development
+
+The public checks are deterministic and do not require provider accounts:
+
+```sh
+ruff check .
+mypy --strict src tests
+pytest -q
+```
+
+CI runs these commands on Python 3.12 without secrets.
+
+## Repository Layout
 
 ```
-src/orchestrator_mvp/   # runtime (Python package `orchestrator_mvp`, CLI `orch`)
-pyproject.toml          # build metadata (setuptools)
-README.md               # this file
-LICENSE                 # Apache License 2.0
-THIRD_PARTY_NOTICES.md  # vendored third-party license notices
+src/saberops/            # runtime package
+tests/                   # public capability tests
+.github/workflows/       # public CI
+pyproject.toml           # package metadata and tool configuration
+LICENSE                  # Apache License 2.0
+THIRD_PARTY_NOTICES.md   # shipped third-party notices
 ```
-
-Runtime state (databases, worktrees, logs) lives under the platform XDG
-directories or the project-local `.orch/` directory — never inside `src/`.
-
-## Configuration
-
-SaberOps keeps runtime state in the standard XDG locations
-(`XDG_STATE_HOME`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`). Provider
-credentials are never stored in this repository; each external provider
-(OpenCode, Codex, Copilot, and others where supported) authenticates
-through its own normal mechanism.
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE).
-Third-party notices — see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Apache License 2.0. See [LICENSE](LICENSE) and
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

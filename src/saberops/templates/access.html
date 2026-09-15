@@ -1,0 +1,223 @@
+{% extends "base.html" %}
+{% block title %}Model Access{% endblock %}
+{% block nav_access %} is-active{% endblock %}
+
+{% block content %}
+<header class="page-head">
+  <div>
+    <h1>Model Access</h1>
+    <p class="muted">User-owned account and API access. This page answers HOW an already-selected binding connects &mdash; it never selects models or routes work.</p>
+  </div>
+</header>
+
+{% if notice %}
+<div class="alert alert-info">{{ notice }}</div>
+{% endif %}
+{% if error %}
+<div class="alert alert-error">{{ error }}</div>
+{% endif %}
+{% if probe %}
+<section class="card">
+  <h2>Probe result: <span class="mono">{{ probe.connection_id }}</span></h2>
+  <p>
+    <span class="badge badge-{{ 'normal' if probe.ok == 'TRUE' else 'demoted' }}">{{ probe.reason }}</span>
+  </p>
+  <p class="muted">{{ probe.detail }}</p>
+</section>
+{% endif %}
+{% for d in discovery %}
+<section class="card">
+  <h2>Model discovery: <span class="mono">{{ d.connection_id }}</span></h2>
+  <p>
+    <span class="badge badge-{{ 'normal' if d.ok else 'demoted' }}">{{ d.reason }}</span>
+    <span class="muted">discovery={{ d.discovery_status }}</span>
+  </p>
+  <p class="muted">{{ d.detail }}</p>
+  <p class="muted">Discovered does <strong>not</strong> mean executable or routing-eligible. Discovery is evidence only; the user decides what enters routing.</p>
+</section>
+{% endfor %}
+
+<section class="card">
+  <h2>Connected accounts</h2>
+  <p class="muted">Authenticated sessions owned by their own backends. Orchestrator detects installation and reachability only &mdash; it never extracts account credentials.</p>
+  <div class="table-wrap">
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Account</th>
+          <th>Provider</th>
+          <th>Backend</th>
+          <th>Auth mode</th>
+          <th>Installed</th>
+          <th>Authenticated</th>
+          <th>Models</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for a in account_rows %}
+        <tr>
+          <td class="mono">{{ a.connection_id }}</td>
+          <td>{{ a.provider }}</td>
+          <td class="mono">{{ a.backend }}</td>
+          <td class="mono">{{ a.auth_mode }}</td>
+          <td><span class="badge badge-{{ a.installed_class }}">{{ a.installed }}</span><br><span class="mono muted">{{ a.installed_detail }}</span></td>
+          <td><span class="badge">{{ a.authenticated }}</span></td>
+          <td>
+            {% if a.models %}
+            <ul class="mono model-list">
+              {% for m in a.models %}
+              <li>
+                {{ m.model_id }}
+                <span class="badge badge-{{ 'normal' if m.execution_support == 'SUPPORTED' else 'demoted' }}">{{ m.execution_support }}</span>
+                <span class="muted">{{ m.source }} / discovered={{ m.discovery_status }}</span>
+                {% if m.evidence == 'STALE' %}<span class="badge badge-demoted">STALE</span>{% endif %}
+              </li>
+              {% endfor %}
+            </ul>
+            {% else %}
+            <span class="muted">UNKNOWN</span>
+            {% endif %}
+          </td>
+          <td>
+            <form method="post" action="/access/test">
+              <input type="hidden" name="connection_id" value="{{ a.connection_id }}">
+              <button type="submit" class="btn">Probe</button>
+            </form>
+            <form method="post" action="/access/discover">
+              <input type="hidden" name="connection_id" value="{{ a.connection_id }}">
+              <button type="submit" class="btn">Refresh models</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="card">
+  <h2>API connections</h2>
+  <p class="muted">User-owned API / BYOK access. Only credential <em>references</em> (e.g. <span class="mono">env:MINIMAX_API_KEY</span>) are stored &mdash; never secret values.</p>
+  {% if api_rows %}
+  <div class="table-wrap">
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Provider</th>
+          <th>Protocol</th>
+          <th>Endpoint</th>
+          <th>Credential</th>
+          <th>Model</th>
+          <th>Enabled</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for c in api_rows %}
+        <tr>
+          <td class="mono">{{ c.connection_id }}</td>
+          <td>{{ c.provider }}</td>
+          <td class="mono">{{ c.protocol }}</td>
+          <td class="mono">{{ c.endpoint }}</td>
+          <td class="mono">{{ c.credential }}</td>
+          <td>
+            {% if c.models %}
+            <ul class="mono model-list">
+              {% for m in c.models %}
+              <li>
+                {{ m.model_id }}
+                <span class="badge badge-{{ 'normal' if m.execution_support == 'SUPPORTED' else 'demoted' }}">{{ m.execution_support }}</span>
+                <span class="muted">{{ m.source }} / discovered={{ m.discovery_status }}</span>
+                {% if m.evidence == 'STALE' %}<span class="badge badge-demoted">STALE</span>{% endif %}
+              </li>
+              {% endfor %}
+            </ul>
+            {% elif c.model %}
+            <span class="mono">{{ c.model }}</span>
+            <span class="muted">(owner-declared; not verified)</span>
+            {% else %}
+            <span class="muted">UNKNOWN</span>
+            {% endif %}
+          </td>
+          <td><span class="badge">{{ c.enabled }}</span></td>
+          <td>
+            <form method="post" action="/access/test">
+              <input type="hidden" name="connection_id" value="{{ c.connection_id }}">
+              <button type="submit" class="btn">Reachability</button>
+            </form>
+            <form method="post" action="/access/discover">
+              <input type="hidden" name="connection_id" value="{{ c.connection_id }}">
+              <button type="submit" class="btn">Refresh models</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty-state">
+    <p class="empty-state-title">No API connections configured</p>
+    <p class="muted">Add one below. Unknown providers that speak OpenAI-compatible HTTPS work through the generic escape hatch.</p>
+  </div>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Add connection</h2>
+  <form method="post" action="/access/connections" class="run-form">
+    <div class="field-row">
+      <div class="field">
+        <label for="connection_id">Name</label>
+        <input type="text" id="connection_id" name="connection_id" value="{{ form.connection_id }}" required>
+      </div>
+      <div class="field">
+        <label for="preset">Preset (prefills protocol/endpoint; never routes)</label>
+        <select id="preset" name="preset">
+          {% for p in presets %}
+          <option value="{{ p }}"{% if form.preset == p %} selected{% endif %}>{{ p }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <label for="protocol">Protocol</label>
+        <select id="protocol" name="protocol">
+          {% for p in protocols %}
+          <option value="{{ p }}"{% if form.protocol == p %} selected{% endif %}>{{ p }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label for="endpoint">Endpoint (https URL, or loopback http)</label>
+        <input type="text" id="endpoint" name="endpoint" value="{{ form.endpoint }}">
+      </div>
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <label for="credential_ref">Credential reference (env:/profile:/store: handle &mdash; never paste a secret)</label>
+        <input type="text" id="credential_ref" name="credential_ref" value="{{ form.credential_ref }}" placeholder="env:MY_API_KEY">
+      </div>
+      <div class="field">
+        <label for="auth_header_name">Credential header name (optional; name only, e.g. X-API-Key)</label>
+        <input type="text" id="auth_header_name" name="auth_header_name" value="{{ form.auth_header_name }}" placeholder="X-API-Key">
+      </div>
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <label for="model">Model identifier</label>
+        <input type="text" id="model" name="model" value="{{ form.model }}">
+      </div>
+    </div>
+    <div class="field">
+      <label for="public_headers">Public headers (optional literal metadata, one <span class="mono">Name: value</span> per line; credential-like names are rejected)</label>
+      <textarea id="public_headers" name="public_headers" rows="3">{{ form.public_headers }}</textarea>
+    </div>
+    <p class="muted">Reachability testing does not transmit credentials and does not verify authentication. Saving a connection does not by itself authorize worker execution; executable use requires the normal discovery, exact-binding, readiness, and routing checks.</p>
+    <button type="submit" class="btn btn-primary">Save connection</button>
+  </form>
+</section>
+{% endblock %}
