@@ -6,6 +6,14 @@ project state, candidate provenance, validation results, and review decisions.
 It is provider-independent: SaberOps does not ship a model or require a
 specific provider session.
 
+## Status
+
+v0.3.0 is the first functional preview. Its core Orchestrator/worker flow is
+covered by hermetic integration tests that use deterministic fake adapters and
+never call a real provider or model. Real-provider and larger mock-project
+dogfooding is the next validation phase. This release is **not** live-provider
+certified, production ready, stable, or complete.
+
 ## Install
 
 Python 3.12 or later is required.
@@ -29,6 +37,45 @@ orch ui --help
 logs use standard XDG locations or project-local state; they are not written
 into the installed package.
 
+## What This Release Can Do
+
+SaberOps v0.3.0 can:
+
+- discover models from supported connections;
+- preserve exact provider / backend / model identity through discovery,
+  the catalog, and binding materialization;
+- select an exact Orchestrator model;
+- select and configure exact worker bindings;
+- use the selected Orchestrator model for bounded initial semantic guidance;
+- keep worker routing separate from Orchestrator selection;
+- execute workers through exact bindings; and
+- enforce deterministic control-plane authority.
+
+## Division Of Responsibility
+
+The Orchestrator LLM provides **bounded semantic guidance** only. It is asked
+once, with a bounded prompt and timeout, to produce a short piece of initial
+guidance that is attached to the first worker dispatch. It does not authorize
+work, choose routes, or decide outcomes.
+
+The SaberOps deterministic control plane owns everything that must not depend
+on a model's judgement:
+
+- authorization
+- exact binding validation
+- routing admission
+- readiness
+- budgets
+- Git / worktrees
+- gates
+- state / ledger
+- acceptance / safety
+
+Worker routing uses eligible, exact provider/model bindings and fails closed
+when required admission evidence is unavailable. The routing chain is separate
+from the Orchestrator-model configuration, and changing one does not silently
+change the other.
+
 ## Product Model
 
 SaberOps supports bounded work in isolated Git worktrees, deterministic gates,
@@ -42,14 +89,17 @@ Saving a connection alone never authorizes worker execution: discovery, exact
 binding, readiness, and routing admission remain separate checks. Credential
 references may be stored, but secret values are not.
 
-Discovery provides evidence about available models. Routing uses eligible,
-exact provider/model bindings and fails closed when required admission evidence
-is unavailable. The routing chain is separate from the Orchestrator-model
-configuration.
+Discovery provides evidence about available models. A discovered identity keeps
+its upstream namespace, so an OpenCode-native model and a same-named sibling
+from another upstream stay distinct. Effort capability is reported truthfully:
+when no controllable effort tier is known, the provider's own default reasoning
+behaviour is used rather than a fabricated tier.
 
-The Orchestrator page persists an exact eligible binding configuration. It does
-not reorder worker routing. In this release, selecting that configuration does
-not execute a separate Orchestrator-model process.
+The Orchestrator page persists an exact eligible Orchestrator binding. During
+the first worker dispatch of a run, the selected Orchestrator binding is
+invoked once for bounded initial guidance, and that guidance is passed into the
+worker context. The Orchestrator selection remains independent of worker
+routing order.
 
 ## Security And Privacy
 

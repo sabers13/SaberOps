@@ -560,6 +560,57 @@ def _role_for_orchestrator_dispatch(
     return role_for_stage(stage)
 
 
+class _InitialOrchestratorGuidanceCache:
+    """Bounded first-dispatch Orchestrator guidance cache.
+
+    C15-XEC: the bounded Orchestrator model participates in ONE
+    semantic role in a normal run -- initial objective interpretation
+    / execution guidance.  The cache is consulted exactly once, on
+    the first dispatch of the run.  Subsequent calls return the
+    cached result without re-invoking the consumer (deterministic
+    bound: ``maximum Orchestrator semantic calls per normal run = 1``).
+    """
+
+    __slots__ = ("_consumed", "_reason", "_text")
+
+    def __init__(self) -> None:
+        self._consumed = False
+        self._text: str | None = None
+        self._reason: str | None = None
+
+    def get_or_fetch(
+        self,
+        *,
+        service: Any,
+        original_task: str,
+        run_id: str,
+        correlation_id: str | None = None,
+    ) -> tuple[str, str | None]:
+        """Return ``(text, reason)`` for the bounded initial guidance.
+
+        On the first call the cache invokes the bounded consumer via
+        :func:`fetch_initial_orchestrator_guidance`.  On subsequent
+        calls it returns the cached result so the consumer is invoked
+        at most once per run.
+        """
+        if self._consumed:
+            return self._text or "", self._reason
+        from saberops.orchestrator_consumer import (
+            fetch_initial_orchestrator_guidance,
+        )
+
+        text, reason = fetch_initial_orchestrator_guidance(
+            service=service,
+            original_task=original_task,
+            run_id=run_id,
+            correlation_id=correlation_id,
+        )
+        self._text = text
+        self._reason = reason
+        self._consumed = True
+        return text, reason
+
+
 def _classify_gate_outcome(
     gate_res: ProcessResult,
     *,
@@ -2516,6 +2567,12 @@ class Orchestrator:
             attempt_number = 0
             stage_attempts = 0
             package_dispatch_ordinal = 0
+            # C15-XEC: the bounded Orchestrator model has exactly ONE
+            # semantic role in a normal run -- initial objective
+            # interpretation / execution guidance.  It is invoked at
+            # most once per run; the cache is consumed by the first
+            # dispatch projection.
+            initial_orchestrator_guidance = _InitialOrchestratorGuidanceCache()
             # Explicit escalation-evidence flag: True only when an actually
             # dispatched attempt produced a genuine capability-bearing
             # outcome (a worker FAILED status, or a gate failure on
@@ -3568,12 +3625,27 @@ class Orchestrator:
                         pkg_role = _role_for_orchestrator_dispatch(
                             local_stage, surgeon_active=surgeon_active
                         )
+                        # C15-XEC: bounded initial-orchestrator-guidance
+                        # is consumed exactly once per run.  It is
+                        # passed here as an advisory ``extra_sections``
+                        # entry on the FIRST package dispatch.  Worker
+                        # routing / binding identity remain unchanged.
+                        _pkg_guidance_text, _pkg_guidance_reason = (
+                            initial_orchestrator_guidance.get_or_fetch(
+                                service=self,
+                                original_task=task,
+                                run_id=run_id,
+                            )
+                        )
                         dispatch_projection = build_package_initial_projection(
                             original_task=task,
                             package=current_package,
                             completed_summaries=tuple(completed_steps),
                             inherited_base_sha=lineage_base_sha,
                             role=pkg_role.value,
+                            orchestrator_guidance=(
+                                _pkg_guidance_text or None
+                            ),
                         )
                 elif next_attempt_num > 1 and attempts:
                     # Unslciced retry (no current package).
@@ -3680,10 +3752,26 @@ class Orchestrator:
                     initial_role = _role_for_orchestrator_dispatch(
                         local_stage, surgeon_active=surgeon_active
                     )
+                    # C15-XEC: bounded initial-orchestrator-guidance
+                    # is consumed exactly once per run.  It is
+                    # passed here as an advisory ``extra_sections``
+                    # entry on the FIRST unsliced initial dispatch.
+                    # Worker routing / binding identity remain
+                    # unchanged.
+                    _init_guidance_text, _init_guidance_reason = (
+                        initial_orchestrator_guidance.get_or_fetch(
+                            service=self,
+                            original_task=task,
+                            run_id=run_id,
+                        )
+                    )
                     dispatch_projection = build_initial_projection(
                         original_task=task,
                         role=initial_role.value,
                         package_id=current_package.id if current_package is not None else None,
+                        orchestrator_guidance=(
+                            _init_guidance_text or None
+                        ),
                     )
 
                 assert dispatch_projection is not None

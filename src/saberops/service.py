@@ -14,6 +14,13 @@ from typing import TYPE_CHECKING, Any
 
 from saberops.accept import AcceptEngine, AcceptResult
 from saberops.config import RunConfig, resolve_run_config
+from saberops.control_plane.binding_store import (
+    load_owner_bindings,
+)
+from saberops.control_plane.orch_binding import (
+    OrchSelectionStatus,
+    select_orch_binding,
+)
 from saberops.db import Database
 from saberops.dispatch import UnavailableReadinessService
 from saberops.gate_runner import (
@@ -25,6 +32,7 @@ from saberops.model_access import ReadinessService
 from saberops.models import (
     OrchEvent,
     QuotaState,
+    ReasoningEffort,
     ReviewResult,
     Run,
     RunResult,
@@ -422,3 +430,114 @@ class OrchestratorService:
     def enable_quota(self, provider: str, pool: str) -> QuotaState:
         """Re-enable normal routing state for a provider pool."""
         return self.db.enable_quota(provider=provider, pool=pool)
+
+    def invoke_orchestrator_model(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        reasoning_effort: ReasoningEffort | str | None = None,
+        timeout_seconds: float = 60.0,
+        correlation_id: str | None = None,
+        run_id: str | None = None,
+    ) -> Any:
+        """Invoke the persisted Orchestrator-model binding through the consumer.
+
+        This is the production seam that connects the persisted owner
+        selection (the :class:`OrchBindingPolicy` saved on
+        ``/orchestrator``) to the actual model call.  No provider,
+        model, binding id, or transport is accepted from the caller:
+        every one of those comes exclusively from the owner document,
+        and a refusal surfaces as
+        :class:`OrchestratorModelInvocationError` with a typed reason
+        -- never a silent launch against a sibling binding.
+        """
+        from saberops.orchestrator_consumer import (
+            OrchestratorModelConsumer,
+            OrchestratorModelInvocationError,
+            OrchestratorModelRequest,
+            OrchestratorModelResult,
+        )
+
+        coerced_effort: ReasoningEffort | None
+        if reasoning_effort is None:
+            coerced_effort = None
+        elif isinstance(reasoning_effort, ReasoningEffort):
+            coerced_effort = reasoning_effort
+        else:
+            try:
+                coerced_effort = ReasoningEffort(
+                    str(reasoning_effort).strip().upper()
+                )
+            except ValueError as exc:
+                raise OrchestratorModelInvocationError(
+                    "ORCH_MODEL_UNKNOWN_EFFORT",
+                    message=f"unknown effort tier {reasoning_effort!r}",
+                ) from exc
+
+        consumer = OrchestratorModelConsumer(
+            db=self.db,
+            registry=self.registry,
+        )
+        request = OrchestratorModelRequest(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            reasoning_effort=coerced_effort,
+            timeout_seconds=timeout_seconds,
+            correlation_id=correlation_id,
+            run_id=run_id,
+        )
+        result: OrchestratorModelResult = consumer.invoke(request)
+        return result
+
+    def get_orchestrator_model_status(self) -> dict[str, Any]:
+        """Read-only introspection of the persisted Orchestrator selection.
+
+        The dashboard and CLI both surface the same shape so the
+        ``/orchestrator`` page can truthfully report whether the
+        selected binding is the one the production consumer would
+        actually invoke.
+        """
+        owner = load_owner_bindings()
+        if owner.policy is None:
+            return {
+                "configured": False,
+                "selection_status": OrchSelectionStatus.UNRESOLVED.value,
+                "reason": "ORCH_MODEL_NO_POLICY",
+            }
+        selection = select_orch_binding(owner.policy, owner.registry)
+        binding = selection.binding
+        profile = None
+        pool = None
+        if binding is not None:
+            try:
+                profile = owner.registry.profile_of(binding)
+                pool = owner.registry.pool_of(binding)
+            except KeyError:
+                profile = None
+                pool = None
+        return {
+            "configured": True,
+            "policy_mode": owner.policy.mode.value,
+            "pinned_binding_id": owner.policy.pinned_binding_id,
+            "selection_status": selection.status.value,
+            "selection_reason": selection.reason,
+            "binding": None
+            if binding is None
+            else {
+                "binding_id": binding.binding_id,
+                "provider": binding.provider,
+                "model": binding.model,
+                "backend": binding.backend.value,
+                "binding_role": binding.binding_role.value,
+                "profile_id": binding.profile_id,
+                "quota_pool_id": binding.quota_pool_id,
+                "profile_enabled": (
+                    bool(profile.enabled) if profile is not None else False
+                ),
+                "reasoning_effort_capabilities": sorted(
+                    e.value for e in binding.reasoning_effort_capabilities
+                ),
+                "pool_id": None if pool is None else pool.pool_id,
+            },
+        }

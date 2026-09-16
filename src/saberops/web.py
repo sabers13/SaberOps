@@ -1135,35 +1135,44 @@ def _run_backend_listing(argv: list[str]) -> str:
     return completed.stdout or ""
 
 
-def _canonical_model_fragment(provider: str, raw: str) -> str:
-    """Strip a leading ``<provider>/`` prefix from a backend-listed id."""
-    cleaned = raw.strip()
-    if "/" in cleaned:
-        head, tail = cleaned.split("/", 1)
-        if head.strip().lower() == provider.strip().lower() and tail.strip():
-            return tail.strip()
-    return cleaned
+def _normalized_backend_model_id(raw: str) -> str:
+    """Return one backend-enumerated model id verbatim (whitespace-trimmed).
+
+    A backend's enumerated model identity is provider-native and may carry
+    an upstream namespace that is part of the identity the adapter must
+    invoke.  ``opencode models`` lists the OpenCode-native upstream as
+    ``opencode/<model>`` and its sibling upstreams as ``<upstream>/<model>``;
+    the SaberOps connection ``provider`` (for example ``opencode``) names the
+    CLI that carries the request, not the upstream namespace.  Stripping a
+    leading ``<provider>/`` would therefore collapse ``opencode/<model>``
+    into a bare name and silently merge it with an unrelated same-named
+    upstream (for example ``google/<model>``).  The raw listing is the
+    authoritative executable identity, so no prefix is ever removed here.
+    """
+    return raw.strip()
 
 
-def _model_ids_from_sequence(provider: str, items: list[Any]) -> list[str]:
+def _model_ids_from_sequence(items: list[Any]) -> list[str]:
     ids: list[str] = []
     for item in items:
         if isinstance(item, str):
-            ids.append(_canonical_model_fragment(provider, item))
+            ids.append(_normalized_backend_model_id(item))
         elif isinstance(item, dict):
             for key in ("id", "model", "slug", "name"):
                 candidate = item.get(key)
                 if isinstance(candidate, str) and candidate.strip():
-                    ids.append(_canonical_model_fragment(provider, candidate.strip()))
+                    ids.append(_normalized_backend_model_id(candidate.strip()))
                     break
     return [model_id for model_id in ids if model_id]
 
 
-def _parse_backend_model_list(provider: str, stdout: str) -> list[str]:
+def _parse_backend_model_list(stdout: str) -> list[str]:
     """Parse a backend's supported model-list output conservatively.
 
     Recognises a JSON catalog (``codex debug models``) and the
-    ``provider/model`` line format (``opencode models``).  Anything that
+    ``provider/model`` line format (``opencode models``).  Model ids are
+    preserved verbatim so provider-native upstream namespaces survive
+    discovery (see :func:`_normalized_backend_model_id`).  Anything that
     cannot be parsed with confidence yields no ids rather than invented ones.
     """
     text = stdout.strip()
@@ -1177,16 +1186,16 @@ def _parse_backend_model_list(provider: str, stdout: str) -> list[str]:
         for key in ("models", "data", "items"):
             value = payload.get(key)
             if isinstance(value, list):
-                return _model_ids_from_sequence(provider, value)
+                return _model_ids_from_sequence(value)
         return []
     if isinstance(payload, list):
-        return _model_ids_from_sequence(provider, payload)
+        return _model_ids_from_sequence(payload)
     ids: list[str] = []
     for line in text.splitlines():
         cleaned = line.strip()
         if not cleaned or " " in cleaned:
             continue
-        ids.append(_canonical_model_fragment(provider, cleaned))
+        ids.append(_normalized_backend_model_id(cleaned))
     return [model_id for model_id in ids if model_id]
 
 
@@ -1212,7 +1221,7 @@ def _list_account_models(connection: ProviderConnection) -> list[str]:
             f"backend executable '{descriptor.executable}' not found",
         )
     stdout = _run_backend_listing([executable, *descriptor.model_list_argv])
-    return _parse_backend_model_list(connection.provider, stdout)
+    return _parse_backend_model_list(stdout)
 
 
 def _materialize_discovered_binding(

@@ -34,16 +34,13 @@ Target flow::
         -> WorkerAdapter / protocol transport
         -> provider / account / backend
 
-Course Compiler donor note: the donor repository carries no production
-LLM-provider integration by design (its only live provider surface is
-a browser-relay prompt contract plus SSRF-safe file ingress).  Nothing
-was copied; the reusable donor *patterns* applied here are fail-closed
+Design conventions applied here are deliberately small and fail-closed:
 typed failures, fixed reason vocabularies, secret-free ``repr``\\ s /
-durable payloads, and lease/observation separation.  Orchestrator
-conventions reused directly: ``env:`` / ``profile:`` / ``store:``
-credential references (validated by
-:func:`saberops.sandbox.grants.validate_credential_ref`),
-non-secret overlay keys, and ``BindingRegistry``-style
+durable payloads, and lease/observation separation.  Credential
+references use the ``env:`` / ``profile:`` / ``store:`` handle forms
+(validated by
+:func:`saberops.sandbox.grants.validate_credential_ref`), non-secret
+overlay keys, and ``BindingRegistry``-style
 ``to_dict`` / ``from_mapping`` durability.
 
 Secrets: this module declares no dedicated raw credential-value
