@@ -392,8 +392,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="orch",
         description=(
-            "Minimal reliable multi-provider AI coding orchestrator with Git worktree isolation "
-            "and deterministic gate verification."
+            "Local control plane for supervised multi-model AI engineering workflows with "
+            "Git worktree isolation and deterministic gate verification."
         ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -749,7 +749,7 @@ def build_parser() -> argparse.ArgumentParser:
     recover_parser = subparsers.add_parser(
         "recover",
         help=(
-            "Dedicated C05 cold-takeover execution owner.  Internal: invoked "
+            "Dedicated cold-takeover execution owner.  Internal: invoked "
             "by the supervisor with a fenced execution-owner reservation.  "
             "Requires ORCH_EXECUTION_OWNER_GENERATION to match the durable "
             "record; otherwise fails closed before any mutation."

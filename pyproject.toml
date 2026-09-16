@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "saberops"
 version = "0.3.0"
-description = "Minimal reliable AI coding orchestrator with Git worktree isolation and deterministic verification"
+description = "Local control plane for supervised multi-model AI engineering workflows"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
