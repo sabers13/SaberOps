@@ -338,7 +338,13 @@ def parse_review_output(output_text: str, is_final: bool = False) -> tuple[Revie
     ``PASS_WITH_BACKLOG`` are only valid on a final review. On a non-final
     review they deterministically map to substantive ``BLOCK`` so a repair
     cycle proceeds and backlog collection is deferred to the final review.
-    Unknown or ambiguous verdict strings safely map to ``BLOCK``.
+
+    Fail-closed protocol (mirrors the structured review machinery in
+    :mod:`saberops.review_policy`, whose disposition is computed, never
+    trusted from prose): only a single unambiguous explicit ``VERDICT:``
+    line can establish ``PASS``.  Bare prose approvals (``LGTM`` /
+    ``APPROVED``) without that line, conflicting explicit verdict lines,
+    and unknown or ambiguous verdict strings all map to ``BLOCK``.
     """
     text = output_text.strip()
     if not text:
@@ -371,14 +377,26 @@ def parse_review_output(output_text: str, is_final: bool = False) -> tuple[Revie
             explicit_verdicts.append((idx, v))
 
     if explicit_verdicts:
-        last_idx, last_verdict = explicit_verdicts[-1]
         # Gate final-only verdicts behind is_final: on non-final reviews they
         # map deterministically to BLOCK (repair proceeds).
-        if (
-            last_verdict in (ReviewVerdict.PASS_WITH_BACKLOG, ReviewVerdict.FINAL_BLOCK)
-            and not is_final
-        ):  # noqa: E501
-            last_verdict = ReviewVerdict.BLOCK
+        gated: list[tuple[int, ReviewVerdict]] = []
+        for idx, raw_verdict in explicit_verdicts:
+            if not is_final and raw_verdict in (
+                ReviewVerdict.PASS_WITH_BACKLOG,
+                ReviewVerdict.FINAL_BLOCK,
+            ):
+                raw_verdict = ReviewVerdict.BLOCK
+            gated.append((idx, raw_verdict))
+        if len({verdict for _, verdict in gated}) > 1:
+            # Conflicting explicit verdict lines are malformed reviewer
+            # output: fail closed as BLOCK, never approve on contradiction.
+            return (
+                ReviewVerdict.BLOCK,
+                "Conflicting explicit verdict lines without a single "
+                "disposition (blocked)",
+                text,
+            )
+        last_idx, last_verdict = gated[-1]
         verdict = last_verdict
         if verdict in (ReviewVerdict.PASS, ReviewVerdict.PASS_WITH_BACKLOG):
             if verdict == ReviewVerdict.PASS_WITH_BACKLOG:
@@ -416,15 +434,21 @@ def parse_review_output(output_text: str, is_final: bool = False) -> tuple[Revie
             text,
         )
 
-    # Only texts containing no verdict token at all continue through unchanged.
+    # Only texts containing no explicit verdict line reach here.  A bare
+    # prose approval (``LGTM`` / ``APPROVED``) without the required
+    # explicit ``VERDICT:`` line is NOT an authoritative PASS: the
+    # fail-closed review protocol only honors the explicit verdict line,
+    # so unstructured approval fails closed as BLOCK with a truthful
+    # summary.  The verdict vocabulary itself is unchanged (no new
+    # protocol); only the approval condition is tightened.
     if "LGTM" in upper_text or "APPROVED" in upper_text:
-        verdict = ReviewVerdict.PASS
-        summary = lines[0][:300]
-    else:
-        verdict = ReviewVerdict.BLOCK
-        summary = lines[0][:300]
-
-    return verdict, summary, text
+        return (
+            ReviewVerdict.BLOCK,
+            "Unstructured approval without explicit VERDICT line "
+            f"(blocked): {lines[0][:200]}",
+            text,
+        )
+    return ReviewVerdict.BLOCK, lines[0][:300], text
 
 
 class ReviewEngine:

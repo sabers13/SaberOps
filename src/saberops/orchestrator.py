@@ -1255,9 +1255,11 @@ class Orchestrator:
         Returns the decision whether or not the persistence write
         succeeds: callers consult the returned value but the persisted
         row is also the authoritative source Accept / supervisor
-        recovery consult on reconstruction.  Conservative on any
-        classification failure: a malformed persisted decision is
-        replaced with a fresh conservative one that requires review.
+        recovery consult on reconstruction.  A malformed persisted
+        decision is never re-derived into a fresh classifier answer:
+        it fails closed as review-required via the conservative legacy
+        seam (mirroring the Accept engine, which treats a malformed
+        persisted decision as review-required).
 
         The decision is computed against the **actual candidate change
         set** (``git diff base..candidate``), not against speculative
@@ -1282,31 +1284,31 @@ class Orchestrator:
             ReviewDecision,
             ReviewPolicyError,
             classify_change,
+            conservative_legacy_decision,
             decide_review,
+            validate_project_review_policy_invariants,
         )
 
         # Reconstruct from persisted decision when present so the
         # decision survives retry / repair / supervisor restart without
         # re-derivation against possibly-evolved classifier state.
-        # A malformed persisted value falls through to a fresh
-        # conservative computation: ``review_required=True``.
+        # A malformed persisted value fails closed as review-required:
+        # it MUST NOT fall through to a fresh classifier computation,
+        # which could reclassify corrupted authoritative state into a
+        # LOW skip.  The corrupt bytes are left untouched on the row
+        # (forensic evidence); the returned conservative decision
+        # requires review, matching the Accept engine's read path.
         persisted = self.db.get_review_risk_decision_json(run_id)
         if persisted is not None:
             try:
                 decision = ReviewDecision.from_json(persisted)
-                validate_invariants = (
-                    __import__(
-                        "saberops.review_adaptive",
-                        fromlist=["validate_project_review_policy_invariants"],
-                    )
-                ).validate_project_review_policy_invariants
-                validate_invariants(decision)
+                validate_project_review_policy_invariants(decision)
                 return decision
             except ReviewPolicyError:
-                # Malformed: fall through to re-derive below.  Do NOT
-                # silently skip; the classifier will normally produce
-                # ``required=True`` for any non-trivial change anyway.
-                pass
+                return conservative_legacy_decision(
+                    owner_explicit_review=bool(config.review_enabled),
+                    review_policy_mode=config.review_policy_mode,
+                )
 
         task_text = (config.task or "").strip()
         changed_paths: tuple[str, ...] = ()

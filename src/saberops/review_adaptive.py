@@ -138,7 +138,16 @@ class ReviewRequirementSource(StrEnum):
 
 # ---------------------------------------------------------------------------
 # Path pattern groups.  Deterministic, no I/O: pure string matching.
+#
+# Production paths are repository-relative with the real normalized
+# ``src/saberops/...`` prefix (``PACKAGE_ROOT`` in
+# :mod:`saberops.devscope.paths`; see ``git diff --name-only`` output).
+# Every ``saberops/``-anchored group therefore accepts an optional
+# leading ``src/`` so both the real normalized paths and the legacy
+# bare ``saberops/...`` form classify identically.
 # ---------------------------------------------------------------------------
+
+_PKG_PREFIX: Final[str] = r"^(?:src/)?saberops/"
 
 _DOCS_PATH_PATTERNS: Final[tuple[str, ...]] = (
     r"\.md$",
@@ -167,42 +176,42 @@ _HARD_GOVERNANCE_PATH_PATTERNS: Final[tuple[str, ...]] = (
 )
 
 _SECURITY_PATH_PATTERNS: Final[tuple[str, ...]] = (
-    r"^saberops/sandbox/",
-    r"^saberops/control_plane/",
-    r"^saberops/authority\.py$",
-    r"^saberops/publishing\.py$",
-    r"^saberops/execution_failover\.py$",
-    r"^saberops/ownership\.py$",
-    r"^saberops/provenance\.py$",
+    _PKG_PREFIX + r"sandbox/",
+    _PKG_PREFIX + r"control_plane/",
+    _PKG_PREFIX + r"authority\.py$",
+    _PKG_PREFIX + r"publishing\.py$",
+    _PKG_PREFIX + r"execution_failover\.py$",
+    _PKG_PREFIX + r"ownership\.py$",
+    _PKG_PREFIX + r"provenance\.py$",
 )
 
 _ACCEPTANCE_OR_GATE_PATH_PATTERNS: Final[tuple[str, ...]] = (
-    r"^saberops/accept\.py$",
-    r"^saberops/gate_runner\.py$",
-    r"^saberops/quota\.py$",
-    r"^saberops/routing\.py$",
-    r"^saberops/routing_decision\.py$",
-    r"^saberops/routing_config\.py$",
-    r"^saberops/process\.py$",
+    _PKG_PREFIX + r"accept\.py$",
+    _PKG_PREFIX + r"gate_runner\.py$",
+    _PKG_PREFIX + r"quota\.py$",
+    _PKG_PREFIX + r"routing\.py$",
+    _PKG_PREFIX + r"routing_decision\.py$",
+    _PKG_PREFIX + r"routing_config\.py$",
+    _PKG_PREFIX + r"process\.py$",
 )
 
 _PUBLICATION_PATH_PATTERNS: Final[tuple[str, ...]] = (
-    r"^saberops/publishing\.py$",
-    r"^saberops/gateway/",
-    r"^saberops/vcs/",
+    _PKG_PREFIX + r"publishing\.py$",
+    _PKG_PREFIX + r"gateway/",
+    _PKG_PREFIX + r"vcs/",
 )
 
 _RECOVERY_PATH_PATTERNS: Final[tuple[str, ...]] = (
-    r"^saberops/replay/",
-    r"^saberops/persistence/",
-    r"^saberops/db\.py$",
-    r"^saberops/execution_failover\.py$",
+    _PKG_PREFIX + r"replay/",
+    _PKG_PREFIX + r"persistence/",
+    _PKG_PREFIX + r"db\.py$",
+    _PKG_PREFIX + r"execution_failover\.py$",
 )
 
 _PLANNING_DOC_PATH_PATTERNS: Final[tuple[str, ...]] = (
-    r"^saberops/planning\.py$",
-    r"^saberops/slicing\.py$",
-    r"^saberops/project_scope/",
+    _PKG_PREFIX + r"planning\.py$",
+    _PKG_PREFIX + r"slicing\.py$",
+    _PKG_PREFIX + r"project_scope/",
 )
 
 # Exact module / production-path patterns that count as "ordinary production"
@@ -211,12 +220,12 @@ _PLANNING_DOC_PATH_PATTERNS: Final[tuple[str, ...]] = (
 # boundary, lives in a hard-governance file, or affects authority / acceptance
 # / publication MUST be classified MEDIUM or higher regardless of pattern.
 _ORDINARY_PRODUCTION_PATH_PATTERNS: Final[tuple[str, ...]] = (
-    r"^saberops/classifier\.py$",
-    r"^saberops/terminal\.py$",
-    r"^saberops/templates/",
-    r"^saberops/static/",
-    r"^saberops/observability/",
-    r"^saberops/telemetry\.py$",
+    _PKG_PREFIX + r"classifier\.py$",
+    _PKG_PREFIX + r"terminal\.py$",
+    _PKG_PREFIX + r"templates/",
+    _PKG_PREFIX + r"static/",
+    _PKG_PREFIX + r"observability/",
+    _PKG_PREFIX + r"telemetry\.py$",
 )
 
 
@@ -458,6 +467,15 @@ def _detect_ownership_boundary(changed_paths: tuple[str, ...]) -> bool:
     production surface, or when the change touches the ``tests/`` root
     in combination with anything else.  A pure single-module change does
     not cross.
+
+    A leading ``src/`` is stripped before domain extraction so the real
+    normalized production paths (``src/saberops/<area>/...``) map to
+    the same ownership domain as their bare ``saberops/<area>/...``
+    form; without this every distinct ``src/...`` file path is its own
+    domain and same-module files falsely cross.  The devscope module
+    manifests are deliberately NOT consulted here: they require
+    repository I/O, while this classifier is a pure function of its
+    inputs (no I/O, no clock, no randomness).
     """
     if not changed_paths:
         return False
@@ -471,11 +489,10 @@ def _detect_ownership_boundary(changed_paths: tuple[str, ...]) -> bool:
             continue
         if path.startswith("tests/"):
             has_tests_root = True
-        if path.startswith("saberops/"):
-            parts = path[len("saberops/") :].split("/", 1)
+        normalized = path[len("src/") :] if path.startswith("src/") else path
+        if normalized.startswith("saberops/"):
+            parts = normalized[len("saberops/") :].split("/", 1)
             module_dirs.add(parts[0])
-        elif path.startswith("src/"):
-            module_dirs.add(path)
         else:
             has_outside_pkg = True
     if len(module_dirs) > 1:
