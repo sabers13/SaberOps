@@ -458,24 +458,46 @@ def _paths_match_group(
     return tuple(matched)
 
 
+def _ownership_domain(path: str) -> str | None:
+    """Return the deterministic ownership domain for one changed path.
+
+    Pure string mapping (no I/O, no clock, no randomness): an optional
+    leading ``src/`` is stripped, then ``saberops/<directory>/...``
+    maps to the package directory while a top-level
+    ``saberops/<stem>.py`` module maps to its logical module family
+    (the stem up to the first underscore), so families such as
+    ``review`` / ``review_policy`` / ``review_adaptive`` share one
+    domain instead of each file becoming its own.  Returns ``None``
+    when no package domain can be established (paths outside the
+    package); a top-level non-Python file keeps its full name as its
+    domain so unrelated files never silently merge.  Conservative by
+    construction: unknown shapes stay distinct domains.
+    """
+    normalized = path[len("src/") :] if path.startswith("src/") else path
+    if not normalized.startswith("saberops/"):
+        return None
+    rest = normalized[len("saberops/") :]
+    head, sep, _ = rest.partition("/")
+    if sep:
+        return head
+    if rest.endswith(".py"):
+        return rest[: -len(".py")].split("_", 1)[0]
+    return rest
+
+
 def _detect_ownership_boundary(changed_paths: tuple[str, ...]) -> bool:
     """Return True iff the delta touches paths owned by more than one module.
 
-    Heuristic: a change that touches both ``saberops/<area>/`` and
-    ``saberops/<other_area>/`` crosses an ownership boundary.  The
+    Heuristic: a change that touches two different ownership domains
+    (see :func:`_ownership_domain`) crosses an ownership boundary.  The
     same is true when the change touches ``architecture/*`` plus any
     production surface, or when the change touches the ``tests/`` root
-    in combination with anything else.  A pure single-module change does
-    not cross.
+    in combination with anything else.  A pure single-domain change
+    does not cross.
 
-    A leading ``src/`` is stripped before domain extraction so the real
-    normalized production paths (``src/saberops/<area>/...``) map to
-    the same ownership domain as their bare ``saberops/<area>/...``
-    form; without this every distinct ``src/...`` file path is its own
-    domain and same-module files falsely cross.  The devscope module
-    manifests are deliberately NOT consulted here: they require
-    repository I/O, while this classifier is a pure function of its
-    inputs (no I/O, no clock, no randomness).
+    The devscope module manifests are deliberately NOT consulted here:
+    they require repository I/O, while this classifier is a pure
+    function of its inputs (no I/O, no clock, no randomness).
     """
     if not changed_paths:
         return False
@@ -489,12 +511,11 @@ def _detect_ownership_boundary(changed_paths: tuple[str, ...]) -> bool:
             continue
         if path.startswith("tests/"):
             has_tests_root = True
-        normalized = path[len("src/") :] if path.startswith("src/") else path
-        if normalized.startswith("saberops/"):
-            parts = normalized[len("saberops/") :].split("/", 1)
-            module_dirs.add(parts[0])
-        else:
+        domain = _ownership_domain(path)
+        if domain is None:
             has_outside_pkg = True
+        else:
+            module_dirs.add(domain)
     if len(module_dirs) > 1:
         return True
     if has_architecture and (module_dirs or has_outside_pkg):

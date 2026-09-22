@@ -324,6 +324,38 @@ def test_bare_package_paths_keep_ownership_semantics() -> None:
     assert crossed.crosses_ownership_boundary is True
 
 
+def test_review_module_family_does_not_cross_ownership() -> None:
+    classification = _classify(("src/saberops/review.py", "src/saberops/review_policy.py"))
+    assert classification.crosses_ownership_boundary is False
+    assert "ownership_boundary_crossed" not in classification.signals
+
+
+def test_review_adaptive_module_family_does_not_cross_ownership() -> None:
+    classification = _classify(("src/saberops/review.py", "src/saberops/review_adaptive.py"))
+    assert classification.crosses_ownership_boundary is False
+    assert "ownership_boundary_crossed" not in classification.signals
+
+
+def test_related_top_level_families_share_one_domain() -> None:
+    for paths in (
+        ("src/saberops/routing.py", "src/saberops/routing_config.py"),
+        ("src/saberops/routing_config.py", "src/saberops/routing_decision.py"),
+        ("src/saberops/authority.py", "src/saberops/authority_sync.py"),
+        ("src/saberops/orchestrator.py", "src/saberops/orchestrator_consumer.py"),
+    ):
+        classification = _classify(paths)
+        assert classification.crosses_ownership_boundary is False, paths
+
+
+def test_unrelated_top_level_modules_still_cross_ownership() -> None:
+    for paths in (
+        ("src/saberops/accept.py", "src/saberops/telemetry.py"),
+        ("src/saberops/review.py", "src/saberops/telemetry.py"),
+    ):
+        classification = _classify(paths)
+        assert classification.crosses_ownership_boundary is True, paths
+
+
 # ---------------------------------------------------------------------------
 # Live review parser: fail-closed protocol
 # ---------------------------------------------------------------------------
