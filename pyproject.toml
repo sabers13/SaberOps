@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "saberops"
-version = "0.3.5"
+version = "0.3.6"
 description = "Local control plane for supervised multi-model AI engineering workflows"
 readme = "README.md"
 requires-python = ">=3.12"
