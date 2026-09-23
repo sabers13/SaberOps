@@ -114,12 +114,21 @@ _WORKER_STAGES: frozenset[str] = frozenset(
 
 
 def saberops_version() -> str:
-    """Return the installed SaberOps version, or ``UNKNOWN``.
+    """Return the product version of the code being executed, or ``UNKNOWN``.
 
-    The installed distribution metadata is authoritative for "which
-    SaberOps produced this report" because it identifies the running
-    code.  It is read-only package metadata, never execution state.
+    The imported ``saberops`` package is authoritative because it
+    identifies the running code.  Installed distribution metadata is
+    consulted only when the imported package carries no version, so a
+    stale unrelated install can never shadow the source checkout.
+    It is read-only package metadata, never execution state.
     """
+    try:
+        from saberops import __version__ as code_version
+
+        if isinstance(code_version, str) and code_version:
+            return code_version
+    except Exception:
+        pass
     try:
         import importlib.metadata as _metadata
 
@@ -128,13 +137,6 @@ def saberops_version() -> str:
         version = ""
     if version:
         return version
-    try:
-        from saberops import __version__ as fallback
-
-        if isinstance(fallback, str) and fallback:
-            return fallback
-    except Exception:
-        pass
     return UNKNOWN
 
 
