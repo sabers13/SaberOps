@@ -12,7 +12,7 @@ SaberOps lets AI models propose software changes while deterministic code contro
 > **Core principle: the LLM advises; deterministic software decides.**
 
 > [!IMPORTANT]
-> **v0.3.3 is a narrowly scoped public-install hygiene release.** It builds on v0.3.2 (review-correctness baseline: ownership-family correction on top of v0.3.1 frozen review-decision handling, real `src/saberops/...` path classification, fail-closed live review parsing, regression tests) with two corrections found during clean-install certification with a real provider: (1) `orch doctor` distinguishes runtime requirements from development-only diagnostics, so a normal non-editable installed package can report READY without developer-checkout tooling; (2) public runtime state/config/cache now defaults to a canonical `saberops` XDG namespace (`$XDG_STATE_HOME/saberops/`, `$XDG_CONFIG_HOME/saberops/`, `$XDG_CACHE_HOME/saberops/`) with deterministic database schema identity, instead of legacy private-development locations. No mock harness, routing, provider, telemetry, or UX changes. The core Orchestrator/worker flow remains covered by hermetic integration tests using deterministic fake adapters, with no real provider or model calls in CI. This release is **not** live-provider certified, production-ready, stable, or complete.
+> **v0.3.4 is a functional owner-workflow / observability release.** It builds on v0.3.3 (public-install hygiene release: installed-package `orch doctor` readiness, canonical `saberops` XDG namespace, deterministic database schema identity; on top of v0.3.2 review-correctness and v0.3.1 frozen review-decision handling) with the certified owner workflow: live run monitoring (`orch monitor`) and canonical run reports (`orch report` with exact executing-code version), provider-native model discovery, owner-configured worker routing (add/remove/reorder), separate Orchestrator-model selection, persisted exact bindings, detached execution retaining the same SaberOps environment, and override-free normal routing after configuration. Connection does not imply authorization; worker routing and Orchestrator selection are separate; requested model identity is not fabricated as provider-reported actual identity; deterministic software remains authoritative for gates and policy. This release is **not** production-ready, stable, or complete.
 
 ---
 
@@ -99,7 +99,7 @@ How much SaberOps may do without asking is an explicit, persisted owner setting.
 | `full_autonomy` | Yes | Yes |
 | `full_autonomy_publish` | Yes | Yes |
 
-Acceptance authority never bypasses verification; a candidate must still satisfy the fail-closed acceptance requirements. `full_autonomy_publish` additionally grants publication of accepted work, but v0.3.3 has no governed publication command, so it stops at the accepted state. Inspect or change the mode with `orch authority show`, `orch authority list`, and `orch authority set`.
+Acceptance authority never bypasses verification; a candidate must still satisfy the fail-closed acceptance requirements. `full_autonomy_publish` additionally grants publication of accepted work, but v0.3.4 has no governed publication command, so it stops at the accepted state. Inspect or change the mode with `orch authority show`, `orch authority list`, and `orch authority set`.
 
 ---
 
@@ -153,7 +153,7 @@ orch ui --repo /path/to/project
 ### Example provider-backed run
 
 > [!WARNING]
-> Real-provider execution is the next validation phase for v0.3.3. The command surface exists, but this release is not yet live-provider certified.
+> v0.3.4 provides owner-configured provider execution through discovery, worker routing, and separate Orchestrator-model selection, with live monitoring and canonical reports. This is still a preview release: not production-ready, stable, or complete.
 
 After installing and authenticating a supported provider CLI:
 
@@ -190,7 +190,7 @@ Run `orch <command> --help` for the full command and option reference. Runtime s
 | OpenCode | Yes |
 | Antigravity | Yes |
 
-"Implemented" means the adapter exists in the codebase. It does **not** mean that every adapter has been live-certified against a real provider account in v0.3.3.
+"Implemented" means the adapter exists in the codebase. It does **not** mean that every adapter has been live-certified against a real provider account in v0.3.4.
 
 ---
 
@@ -232,7 +232,7 @@ THIRD_PARTY_NOTICES.md   shipped third-party notices
 
 ## Current limitations
 
-- v0.3.3 is **not yet live-provider certified**; real-provider and larger mock-project dogfooding is next.
+- v0.3.4 is a functional owner-workflow / observability release: live run monitoring and canonical reports, provider-native model discovery, owner-configured worker routing, separate Orchestrator-model selection, persisted exact bindings, detached execution in the same SaberOps environment, and override-free normal routing after configuration.
 - This is a preview release: interfaces and workflows may change.
 - SaberOps is not production-ready, stable, or feature-complete.
 
