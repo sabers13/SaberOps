@@ -1322,21 +1322,21 @@ class RunSupervisor:
         return successor, True
 
     def _build_recovery_cli_args(self, run_id: str, config: RunConfig) -> list[str]:
-        """Build the dedicated ``orch recover`` invocation.
+        """Build the dedicated ``recover`` invocation.
 
-        Mirrors :meth:`_build_cli_args` shape (same orch binary, same db
-        path, same target repo cwd) but produces a command line that
-        :meth:`handle_recover` accepts -- NOT ``orch run --run-id``.  The
+        Mirrors :meth:`_build_cli_args` shape (same owner argv prefix, same
+        db path, same target repo cwd) but produces a command line that
+        :meth:`handle_recover` accepts -- NOT ``run --run-id``.  The
         fencing token (owner_id/generation) is delivered via the standard
         ``ORCH_EXECUTION_OWNER_*`` environment variables so the child can
         adopt the exact reservation the supervisor pre-claimed.
         """
-        from saberops.web import resolve_orch_executable
+        from saberops.web import resolve_owner_argv_prefix
 
-        orch_bin = resolve_orch_executable()
+        prefix = resolve_owner_argv_prefix()
         db_path = str(self.db.db_path)
         return [
-            orch_bin,
+            *prefix,
             "recover",
             run_id,
             "--db",
@@ -1444,15 +1444,15 @@ class RunSupervisor:
         return True
 
     def _build_cli_args(self, run_id: str, config: RunConfig) -> list[str]:
-        from saberops.web import resolve_orch_executable
+        from saberops.web import resolve_owner_argv_prefix
 
-        orch_bin = resolve_orch_executable()
+        prefix = resolve_owner_argv_prefix()
         db_path = str(self.db.db_path)
         tier_arg = "auto"
         if config.routing_mode == "manual" and config.manual_tier is not None:
             tier_arg = config.manual_tier.value
         args: list[str] = [
-            orch_bin,
+            *prefix,
             "run",
             "--repo",
             config.target_repo,

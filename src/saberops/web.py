@@ -551,31 +551,36 @@ def _effective_timeout_display(form: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def resolve_orch_executable() -> str:
-    """Resolve the real orchestrator executable, never relying on bare ``sys.argv[0]``.
+def resolve_owner_argv_prefix() -> list[str]:
+    """Resolve the argv prefix for a detached/supervised execution owner.
 
-    Resolution order: ``ORCH_EXECUTABLE`` env override, then the ``orch`` entry
-    point installed alongside the running interpreter, then ``shutil.which("orch")``.
-    This keeps supervisor and recovery children in the caller's installed
-    distribution rather than silently crossing into an unrelated PATH entry.
-    The active interpreter directory is used WITHOUT resolving ``sys.executable``:
-    a virtualenv ``bin/python`` is commonly a symlink to the system interpreter,
-    and resolving it would erase the virtualenv identity (``/usr/bin/orch``
-    instead of the venv's own ``orch``).  This matches the existing
-    ``_check_venv_tools`` seam in ``cli.py``.
-    The final fallback is the canonical ``orch`` name, so a test harness name
-    such as ``pytest`` can never leak into the reported identity.
+    Single authority for execution-owner identity.  By default the
+    continuation re-executes the **same** Python environment/code identity
+    that launched it via ``[sys.executable, "-m", "saberops.cli"]`` -- this
+    covers an installed venv, an editable install, and a source/dev
+    execution whose checkout arrives via the inherited ``PYTHONPATH``
+    (see ``RunSupervisor._spawn_owner``).  No ``orch`` entry point is
+    discovered from ``$PATH`` on the default path, so a stale global
+    ``orch`` can never become the continuation authority.
+
+    ``ORCH_EXECUTABLE`` remains an explicit owner/developer override and,
+    when set, yields the single-element prefix ``[override]``.
     """
     override = os.environ.get("ORCH_EXECUTABLE", "").strip()
     if override:
-        return override
-    sibling = Path(sys.executable).parent / "orch"
-    if sibling.exists():
-        return str(sibling)
-    resolved = shutil.which("orch")
-    if resolved:
-        return resolved
-    return "orch"
+        return [override]
+    return [sys.executable, "-m", "saberops.cli"]
+
+
+def resolve_orch_executable() -> str:
+    """Resolve the orchestrator executable identity for display/diagnostics.
+
+    Thin display wrapper over :func:`resolve_owner_argv_prefix` (the single
+    launch authority): the override when set, else the current interpreter
+    identity.  Never falls back to ``shutil.which("orch")`` or any other
+    ``$PATH`` discovery, so diagnostics cannot mask a stale global ``orch``.
+    """
+    return " ".join(resolve_owner_argv_prefix())
 
 
 def _dashboard_context(
