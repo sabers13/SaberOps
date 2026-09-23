@@ -170,6 +170,8 @@ Then inspect and, if appropriate, accept the verified result:
 ```bash
 orch status <run_id>
 orch events <run_id>
+orch report <run_id>   # Canonical read-only run report (text, or --json for the deterministic payload)
+orch monitor <run_id>  # Follow a run live with the canonical projection (read-only)
 orch accept <run_id>
 orch cleanup <run_id>
 ```

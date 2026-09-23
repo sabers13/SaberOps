@@ -55,6 +55,13 @@ from saberops.models import (
     RunStatus,
 )
 from saberops.observability import build_run_observability_snapshot, canonical_snapshot_json
+from saberops.observability.run_report import (
+    build_run_report,
+    canonical_report_json,
+    is_terminal_report,
+    render_monitor_frame,
+    render_report_text,
+)
 from saberops.ownership import (
     OWNER_ENV_ID,
     Liveness,
@@ -920,6 +927,48 @@ def build_parser() -> argparse.ArgumentParser:
     )
     observability_parser.add_argument(
         "--db", type=str, default=None, help="Path to SQLite database."
+    )
+
+    # orch report <run-id> [--json]
+    report_parser = subparsers.add_parser(
+        "report",
+        help="Show the canonical C16-B1 read-only run report (same evidence as observability).",
+    )
+    report_parser.add_argument("run_id", type=str, help="Run identifier (e.g. run_abc123).")
+    report_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit canonical deterministic JSON instead of human-readable text.",
+    )
+    report_parser.add_argument(
+        "--db", type=str, default=None, help="Path to SQLite database."
+    )
+
+    # orch monitor <run-id>
+    monitor_parser = subparsers.add_parser(
+        "monitor",
+        help="Follow a run live with the canonical C16-B1 projection (read-only).",
+    )
+    monitor_parser.add_argument("run_id", type=str, help="Run identifier (e.g. run_abc123).")
+    monitor_parser.add_argument(
+        "--db", type=str, default=None, help="Path to SQLite database."
+    )
+    monitor_parser.add_argument(
+        "--interval",
+        type=float,
+        default=2.0,
+        help="Refresh interval in seconds (default: 2.0).",
+    )
+    monitor_parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Render a single frame and exit instead of following the run.",
+    )
+    monitor_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=0.0,
+        help="Maximum follow time in seconds (default: 0 = no limit).",
     )
 
     # orch list
@@ -2081,6 +2130,86 @@ def handle_observability(args: argparse.Namespace) -> int:
     return 0
 
 
+def _open_read_only_report_db(args: argparse.Namespace) -> Database | None:
+    """Open the run's store read-only for the report/monitor surface.
+
+    Returns ``None`` (after printing a diagnostic) when no store exists.
+    The projection never mutates the run: refreshes re-open the store
+    read-only on every iteration.
+    """
+    explicit = _explicit_db(args)
+    path = Path(explicit) if explicit else (db_path_for_run(args.run_id) or get_default_db_path())
+    resolved = path.resolve()
+    if not resolved.is_file():
+        print(f"Error: Database not found at {resolved}", file=sys.stderr)
+        return None
+    return Database(resolved, read_only=True)
+
+
+def handle_report(args: argparse.Namespace) -> int:
+    """Handle the strictly read-only C16-B1 canonical run report command."""
+    db = _open_read_only_report_db(args)
+    if db is None:
+        return 1
+    try:
+        report = build_run_report(db, args.run_id)
+    except (OSError, sqlite3.Error, ValueError) as exc:
+        print(f"Error: Could not read report for '{args.run_id}': {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        sys.stdout.buffer.write(canonical_report_json(report) + b"\n")
+    else:
+        print(render_report_text(report))
+    return 0
+
+
+def handle_monitor(args: argparse.Namespace) -> int:
+    """Follow a run live with the canonical projection (read-only polling).
+
+    Each refresh re-opens the store read-only and rebuilds the same
+    canonical report that ``orch report`` emits, so the live view and
+    the post-run report can never disagree on semantics.  Terminal
+    states exit 0 after rendering the final frame; ``--timeout``
+    exits 2 while the run is still active; ``--once`` renders one
+    frame and exits 0.
+    """
+    interval = max(0.5, float(getattr(args, "interval", 2.0) or 2.0))
+    timeout = max(0.0, float(getattr(args, "timeout", 0.0) or 0.0))
+    once = bool(getattr(args, "once", False))
+    deadline = time.monotonic() + timeout if timeout > 0 else None
+    try:
+        while True:
+            db = _open_read_only_report_db(args)
+            if db is None:
+                return 1
+            try:
+                report = build_run_report(db, args.run_id)
+            except (OSError, sqlite3.Error, ValueError) as exc:
+                print(
+                    f"Error: Could not read monitor for '{args.run_id}': {exc}",
+                    file=sys.stderr,
+                )
+                return 1
+            print(render_monitor_frame(report))
+            print("", flush=True)
+            if once or is_terminal_report(report):
+                return 0
+            if deadline is not None and time.monotonic() >= deadline:
+                print(
+                    f"Monitor timeout after {timeout:.0f}s; run '{args.run_id}' "
+                    "is still active.",
+                    file=sys.stderr,
+                )
+                return 2
+            sleep_for = interval
+            if deadline is not None:
+                sleep_for = max(0.0, min(interval, deadline - time.monotonic()))
+            time.sleep(sleep_for)
+    except KeyboardInterrupt:
+        print("Monitor interrupted; run is untouched.", file=sys.stderr)
+        return 130
+
+
 def handle_list(args: argparse.Namespace) -> int:
     """Handle `orch list` command.
 
@@ -2736,6 +2865,10 @@ def _dispatch(args: argparse.Namespace) -> int:
         return handle_events(args)
     elif args.command == "observability":
         return handle_observability(args)
+    elif args.command == "report":
+        return handle_report(args)
+    elif args.command == "monitor":
+        return handle_monitor(args)
     elif args.command == "list":
         return handle_list(args)
     elif args.command == "models":

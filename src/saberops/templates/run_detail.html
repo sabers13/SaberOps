@@ -201,6 +201,31 @@
     <p class="muted">Totals include only provider-reported usage. Unknown calls are never treated as zero.</p>
     {% endif %}
   </section>
+  <section class="card">
+    <h2>Live Monitoring (canonical C16-B1 projection)</h2>
+    {% if run_report %}
+    <dl class="detail-list">
+      <dt>Live Stage</dt><dd class="mono">{{ run_report.lifecycle.current_stage }} ({{ run_report.lifecycle.current_stage_source }})</dd>
+      <dt>Worker Requested</dt><dd class="mono">{{ run_report.worker.requested_provider }} / {{ run_report.worker.requested_model }}</dd>
+      <dt>Worker Actual</dt><dd class="mono">{{ run_report.worker.actual_provider }} / {{ run_report.worker.actual_model }} ({{ run_report.worker.actual_identity_status }})</dd>
+      <dt>Dispatches</dt><dd class="mono">worker {{ run_report.execution.worker_dispatch_count }} · retry {{ run_report.execution.retry_dispatch_count }} · repair {{ run_report.execution.repair_dispatch_count }} · reviewer {{ run_report.execution.reviewer_dispatch_count }} · resumes {{ run_report.execution.resume_count }}</dd>
+      <dt>Gate</dt><dd class="mono">{{ run_report.gate.summary.check_passed }} passed / {{ run_report.gate.summary.check_failed }} failed / {{ run_report.gate.summary.check_total }} checks · {{ run_report.gate.summary.receipt_total }} receipt(s)</dd>
+      <dt>Review</dt><dd class="mono">required={{ run_report.review.review_required }} · rounds={{ run_report.review.rounds }} · verdicts={{ run_report.review.verdicts | join(", ") if run_report.review.verdicts else "none" }}</dd>
+      <dt>Usage Events</dt><dd class="mono">{{ run_report.usage.provider_usage_event_count }} events · in={{ run_report.usage.input_tokens }} out={{ run_report.usage.output_tokens }} cache_r={{ run_report.usage.cache_read_tokens }} cache_w={{ run_report.usage.cache_write_tokens }} reason={{ run_report.usage.reasoning_tokens }} total={{ run_report.usage.total_tokens }}</dd>
+      <dt>Acceptance</dt><dd class="mono">{{ run_report.acceptance.acceptance_status }} · {{ run_report.acceptance.accepted_candidate_sha }}</dd>
+      <dt>Elapsed</dt><dd class="mono">created {{ fmt(created_at) }} · wall {{ run_report.lifecycle.total_wall_seconds }}s</dd>
+    </dl>
+    {% if run_report.warnings %}
+    <p class="muted">Warnings: {{ run_report.warnings | join("; ") }}</p>
+    {% endif %}
+    {% if run_report.evidence_gaps %}
+    <p class="muted">Evidence gaps: {{ run_report.evidence_gaps | join("; ") }}</p>
+    {% endif %}
+    <p class="muted">Same projection as <span class="mono">orch report {{ run_id }} --json</span> and <span class="mono">GET /runs/{{ run_id }}/report</span>. UNKNOWN is never zero.</p>
+    {% else %}
+    <p class="muted">Canonical report unavailable for this run.</p>
+    {% endif %}
+  </section>
 </div>
 
 <!-- Terminal panel (new focus) -->

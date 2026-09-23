@@ -92,6 +92,7 @@ from saberops.models import (
     RunStatus,
     WorkerCandidate,
 )
+from saberops.observability.run_report import build_run_report
 from saberops.project import owner_state_dir
 from saberops.projects import ProjectRegistry
 from saberops.provenance import assert_run_repository
@@ -698,6 +699,13 @@ def _run_detail_context(
             }
             break
     usage = db.aggregate_model_call_usage(run.id)
+    try:
+        run_report: dict[str, Any] | None = build_run_report(db, run.id)
+    except Exception:
+        # The monitoring projection must never break the run page: a
+        # report build failure degrades to "unavailable" in the UI
+        # while the canonical CLI/API surfaces still fail closed.
+        run_report = None
 
     return {
         "missing": False,
@@ -736,6 +744,7 @@ def _run_detail_context(
         "plan_projection": _plan_projection(db, run.id),
         "current_dispatch": current_dispatch,
         "usage": usage,
+        "run_report": run_report,
     }
 
 
@@ -2251,6 +2260,21 @@ def create_app(
         if runtime is None or runtime.db.get_run(run_id) is None:
             return JSONResponse({"error": "run not found"}, status_code=404)
         return JSONResponse(_plan_projection(runtime.db, run_id))
+
+    @app.get("/runs/{run_id}/report")
+    def run_report_json(run_id: str) -> JSONResponse:
+        """Read-only canonical C16-B1 run report as JSON.
+
+        Same projection as ``orch report RUN_ID --json``; the payload
+        is deterministic for a given persisted state.
+        """
+        runtime = runtime_for_run(run_id)
+        if runtime is None or runtime.db.get_run(run_id) is None:
+            return JSONResponse({"error": "run not found"}, status_code=404)
+        try:
+            return JSONResponse(build_run_report(runtime.db, run_id))
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=404)
 
     @app.get("/runs/{run_id}/events/stream")
     async def stream_events(request: Request, run_id: str, after: int = 0) -> Response:
