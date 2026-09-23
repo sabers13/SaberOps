@@ -12,7 +12,7 @@ SaberOps lets AI models propose software changes while deterministic code contro
 > **Core principle: the LLM advises; deterministic software decides.**
 
 > [!IMPORTANT]
-> **v0.3.2 is a review-correctness baseline.** It corrects ownership-domain extraction so related top-level module families (for example `review.py` with `review_policy.py` / `review_adaptive.py`) no longer falsely count as cross-owner, while genuinely different ownership areas remain conservative. It builds on v0.3.1 (frozen review-decision handling, real `src/saberops/...` path classification, fail-closed live review parsing, regression tests). The core Orchestrator/worker flow remains covered by hermetic integration tests using deterministic fake adapters, with no real provider or model calls in CI. Real-provider and larger mock-project dogfooding is the next validation phase. This release is **not** live-provider certified, production-ready, stable, or complete.
+> **v0.3.3 is a narrowly scoped public-install hygiene release.** It builds on v0.3.2 (review-correctness baseline: ownership-family correction on top of v0.3.1 frozen review-decision handling, real `src/saberops/...` path classification, fail-closed live review parsing, regression tests) with two corrections found during clean-install certification with a real provider: (1) `orch doctor` distinguishes runtime requirements from development-only diagnostics, so a normal non-editable installed package can report READY without developer-checkout tooling; (2) public runtime state/config/cache now defaults to a canonical `saberops` XDG namespace (`$XDG_STATE_HOME/saberops/`, `$XDG_CONFIG_HOME/saberops/`, `$XDG_CACHE_HOME/saberops/`) with deterministic database schema identity, instead of legacy private-development locations. No mock harness, routing, provider, telemetry, or UX changes. The core Orchestrator/worker flow remains covered by hermetic integration tests using deterministic fake adapters, with no real provider or model calls in CI. This release is **not** live-provider certified, production-ready, stable, or complete.
 
 ---
 
@@ -99,7 +99,7 @@ How much SaberOps may do without asking is an explicit, persisted owner setting.
 | `full_autonomy` | Yes | Yes |
 | `full_autonomy_publish` | Yes | Yes |
 
-Acceptance authority never bypasses verification; a candidate must still satisfy the fail-closed acceptance requirements. `full_autonomy_publish` additionally grants publication of accepted work, but v0.3.2 has no governed publication command, so it stops at the accepted state. Inspect or change the mode with `orch authority show`, `orch authority list`, and `orch authority set`.
+Acceptance authority never bypasses verification; a candidate must still satisfy the fail-closed acceptance requirements. `full_autonomy_publish` additionally grants publication of accepted work, but v0.3.3 has no governed publication command, so it stops at the accepted state. Inspect or change the mode with `orch authority show`, `orch authority list`, and `orch authority set`.
 
 ---
 
@@ -153,7 +153,7 @@ orch ui --repo /path/to/project
 ### Example provider-backed run
 
 > [!WARNING]
-> Real-provider execution is the next validation phase for v0.3.2. The command surface exists, but this release is not yet live-provider certified.
+> Real-provider execution is the next validation phase for v0.3.3. The command surface exists, but this release is not yet live-provider certified.
 
 After installing and authenticating a supported provider CLI:
 
@@ -188,7 +188,7 @@ Run `orch <command> --help` for the full command and option reference. Runtime s
 | OpenCode | Yes |
 | Antigravity | Yes |
 
-"Implemented" means the adapter exists in the codebase. It does **not** mean that every adapter has been live-certified against a real provider account in v0.3.2.
+"Implemented" means the adapter exists in the codebase. It does **not** mean that every adapter has been live-certified against a real provider account in v0.3.3.
 
 ---
 
@@ -230,7 +230,7 @@ THIRD_PARTY_NOTICES.md   shipped third-party notices
 
 ## Current limitations
 
-- v0.3.2 is **not yet live-provider certified**; real-provider and larger mock-project dogfooding is next.
+- v0.3.3 is **not yet live-provider certified**; real-provider and larger mock-project dogfooding is next.
 - This is a preview release: interfaces and workflows may change.
 - SaberOps is not production-ready, stable, or feature-complete.
 

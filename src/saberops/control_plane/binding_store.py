@@ -75,7 +75,7 @@ BINDING_STORE_SCHEMA_VERSION = 1
 #: Test / diagnostics override for the owner binding document path.
 ORCH_BINDING_STORE_ENV = "ORCH_BINDING_STORE"
 
-_BINDING_STORE_DIR = "orchestrator-v2"
+_BINDING_STORE_DIR = "saberops"
 _BINDING_STORE_FILENAME = "bindings.json"
 
 
@@ -88,17 +88,14 @@ def get_binding_store_path() -> Path:
 
     ``ORCH_BINDING_STORE`` pins an explicit file (tests / diagnostics).
     Otherwise the store lives beside the other C11-B owner configuration
-    (``$XDG_CONFIG_HOME/orchestrator-v2/bindings.json``).
+    (``$XDG_CONFIG_HOME/saberops/bindings.json``).
     """
     override = os.environ.get(ORCH_BINDING_STORE_ENV, "").strip()
     if override:
         return Path(override).expanduser()
-    xdg = os.environ.get("XDG_CONFIG_HOME", "")
-    if xdg.strip():
-        base = Path(xdg.strip()).expanduser()
-    else:
-        base = Path.home() / ".config"
-    return base / _BINDING_STORE_DIR / _BINDING_STORE_FILENAME
+    from saberops.paths import get_binding_store_path_no_override as _canonical
+
+    return _canonical()
 
 
 @dataclass(frozen=True)

@@ -49,11 +49,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from saberops.paths import (
+    owner_state_dir as _canonical_owner_state_dir,
+)
+from saberops.paths import (
+    projects_state_root as _canonical_projects_state_root,
+)
+from saberops.paths import (
+    state_home as _canonical_state_home,
+)
 from saberops.process import run_process
 
 PROJECT_ID_LENGTH = 12
 OBJECTIVE_ID_LENGTH = 16
-_STATE_APP_DIR = "orchestrator-mvp"
 _PROJECTS_DIR = "projects"
 _MARKER_NAME = "project.json"
 _HEX = frozenset("0123456789abcdef")
@@ -276,21 +284,18 @@ def validate_project_identity(
 
 
 def state_home() -> Path:
-    """Return the XDG state home used for all orchestrator runtime state."""
-    xdg_state_home = os.environ.get("XDG_STATE_HOME")
-    if xdg_state_home and xdg_state_home.strip():
-        return Path(xdg_state_home).expanduser()
-    return Path.home() / ".local" / "state"
+    """Return the XDG state home used for all SaberOps runtime state."""
+    return _canonical_state_home()
 
 
 def owner_state_dir() -> Path:
-    """Return the global owner-wide state directory (also the legacy root)."""
-    return state_home() / _STATE_APP_DIR
+    """Return the canonical public owner-wide state directory."""
+    return _canonical_owner_state_dir()
 
 
 def projects_state_root() -> Path:
     """Return the parent directory holding every project-local state dir."""
-    return owner_state_dir() / _PROJECTS_DIR
+    return _canonical_projects_state_root()
 
 
 def project_state_dir(identity: ProjectIdentity, root: Path | str | None = None) -> Path:

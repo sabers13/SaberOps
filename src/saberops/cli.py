@@ -100,7 +100,16 @@ _BIN_ATTR: dict[str, str] = {
 
 _DOCTOR_PROVIDERS: tuple[str, ...] = ("opencode", "codex", "antigravity", "cline")
 
-_CORE_MODULES: tuple[str, ...] = ("fastapi", "uvicorn", "jinja2", "httpx", "pytest")
+#: Runtime imports necessary to use SaberOps (from ``pyproject.toml``
+#: ``dependencies``).  Missing entries are a genuine readiness failure.
+_RUNTIME_MODULES: tuple[str, ...] = ("fastapi", "uvicorn", "jinja2", "multipart", "websockets")
+
+#: Development-only imports relevant to a source checkout.  Never a
+#: runtime readiness blocker for an installed package.
+_DEV_MODULES: tuple[str, ...] = ("httpx", "pytest")
+
+#: Development-only executables relevant to a source checkout.
+_DEV_TOOLS: tuple[str, ...] = ("ruff", "mypy", "pytest")
 
 _SPECIFIER_PATTERN = re.compile(r"^(>=|<=|==|!=|>|<|~=)\s*v?(\d+)(?:\.(\d+))?(?:\.(\d+))?$")
 
@@ -134,8 +143,38 @@ def _cli_review_policy_mode(args: object) -> ReviewPolicyMode:
 
 
 def _orch_project_root() -> Path:
-    """Return the SaberOps project root (contains pyproject.toml and .venv)."""
+    """Return the candidate SaberOps project root for a source checkout."""
     return Path(__file__).resolve().parents[2]
+
+
+def _is_source_checkout(project_root: Path) -> bool:
+    """Return True only for a developer source checkout layout.
+
+    An installed (non-editable) package lives under site-packages and has
+    no ``pyproject.toml`` / ``src/saberops`` siblings; development
+    diagnostics apply only to a real checkout.
+    """
+    return (project_root / "pyproject.toml").is_file() and (
+        project_root / "src" / "saberops"
+    ).is_dir()
+
+
+def _installed_package_metadata() -> tuple[str | None, str | None]:
+    """Return ``(version, requires_python)`` from installed metadata, if any."""
+    try:
+        from importlib.metadata import metadata as _metadata
+        from importlib.metadata import version as _version
+    except Exception:
+        return None, None
+    try:
+        dist_version = _version("saberops")
+    except Exception:
+        return None, None
+    try:
+        requires_python = _metadata("saberops").get("Requires-Python")
+    except Exception:
+        requires_python = None
+    return dist_version, str(requires_python) if requires_python else None
 
 
 def _version_clause_satisfied(
@@ -181,6 +220,34 @@ def _requires_python_satisfied(specifier: str, current: tuple[int, int, int]) ->
 
 
 def _check_python_requires(project_root: Path) -> DoctorFinding:
+    """Check the running interpreter against the declared requires-python.
+
+    Uses installed package metadata when available (the installed-package
+    path) and falls back to the checkout ``pyproject.toml`` only for a
+    source checkout without installed metadata.
+    """
+    current_version = (sys.version_info[0], sys.version_info[1], sys.version_info[2])
+    current_str = ".".join(str(part) for part in current_version)
+    dist_version, requires_python = _installed_package_metadata()
+    if requires_python:
+        verdict = _requires_python_satisfied(requires_python.strip(), current_version)
+        if verdict is None:
+            return DoctorFinding(
+                "WARN",
+                f"saberops {dist_version}: could not evaluate "
+                f"requires-python '{requires_python}' against python {current_str}",
+            )
+        if verdict:
+            return DoctorFinding(
+                "OK",
+                f"saberops {dist_version}: python {current_str} satisfies "
+                f"requires-python '{requires_python}'",
+            )
+        return DoctorFinding(
+            "FAIL",
+            f"saberops {dist_version}: python {current_str} does NOT satisfy "
+            f"requires-python '{requires_python}'",
+        )
     pyproject = project_root / "pyproject.toml"
     if not pyproject.is_file():
         return DoctorFinding(
@@ -197,9 +264,7 @@ def _check_python_requires(project_root: Path) -> DoctorFinding:
         return DoctorFinding(
             "WARN", f"pyproject.toml at {project_root} has no requires-python constraint"
         )
-    current_version = (sys.version_info[0], sys.version_info[1], sys.version_info[2])
     verdict = _requires_python_satisfied(raw.strip(), current_version)
-    current_str = ".".join(str(part) for part in current_version)
     if verdict is None:
         return DoctorFinding(
             "WARN",
@@ -211,7 +276,20 @@ def _check_python_requires(project_root: Path) -> DoctorFinding:
 
 
 def _check_venv_tools(project_root: Path) -> DoctorFinding:
-    required = ("ruff", "mypy", "pytest")
+    """Check developer bootstrap tools; informational for installed packages.
+
+    A normal installed package must never fail readiness merely because
+    development-only executables (ruff/mypy/pytest) are absent.  This check
+    fails only inside a source checkout where the developer environment is
+    genuinely expected.
+    """
+    required = _DEV_TOOLS
+    if not _is_source_checkout(project_root):
+        return DoctorFinding(
+            "OK",
+            "installed package: developer-tool check skipped "
+            f"({', '.join(required)} not required at runtime)",
+        )
     # Candidate worktrees intentionally do not contain their own environment.
     # Prefer a colocated environment, but accept the active interpreter's
     # environment when it provides the exact developer tools.  This remains
@@ -248,10 +326,29 @@ def _check_venv_tools(project_root: Path) -> DoctorFinding:
 
 
 def _check_core_imports() -> DoctorFinding:
-    missing = [name for name in _CORE_MODULES if importlib.util.find_spec(name) is None]
+    """Check runtime imports necessary to use SaberOps (genuine blockers)."""
+    missing = [name for name in _RUNTIME_MODULES if importlib.util.find_spec(name) is None]
     if missing:
-        return DoctorFinding("FAIL", f"core modules unresolvable: {', '.join(missing)}")
-    return DoctorFinding("OK", f"core modules resolvable: {', '.join(_CORE_MODULES)}")
+        return DoctorFinding("FAIL", f"runtime modules unresolvable: {', '.join(missing)}")
+    return DoctorFinding("OK", f"runtime modules resolvable: {', '.join(_RUNTIME_MODULES)}")
+
+
+def _check_dev_imports(project_root: Path) -> DoctorFinding:
+    """Report development-only imports without ever blocking readiness."""
+    if not _is_source_checkout(project_root):
+        return DoctorFinding(
+            "OK",
+            "installed package: development-only modules "
+            f"({', '.join(_DEV_MODULES)}) not required at runtime",
+        )
+    missing = [name for name in _DEV_MODULES if importlib.util.find_spec(name) is None]
+    if missing:
+        return DoctorFinding(
+            "WARN",
+            f"development-only modules unresolvable: {', '.join(missing)} "
+            "(source checkout; not a runtime blocker)",
+        )
+    return DoctorFinding("OK", f"development-only modules resolvable: {', '.join(_DEV_MODULES)}")
 
 
 def _check_git_binary() -> DoctorFinding:
@@ -305,6 +402,31 @@ def _check_database(db_path: Path) -> tuple[DoctorFinding, list[QuotaState]]:
             DoctorFinding("FAIL", f"database unreadable/corrupt at {resolved}: {exc}"),
             [],
         )
+    try:
+        version_row_conn = sqlite3.connect(
+            f"{resolved.as_uri()}?mode=ro", uri=True, timeout=5.0
+        )
+        try:
+            version_row = version_row_conn.execute("PRAGMA user_version").fetchone()
+            schema_version = int(version_row[0]) if version_row is not None else 0
+        finally:
+            version_row_conn.close()
+    except sqlite3.Error as exc:
+        return (
+            DoctorFinding("FAIL", f"database schema unreadable at {resolved}: {exc}"),
+            [],
+        )
+    from saberops.db import DB_SCHEMA_VERSION
+
+    if schema_version != DB_SCHEMA_VERSION:
+        return (
+            DoctorFinding(
+                "FAIL",
+                f"database schema unsupported at {resolved}: "
+                f"user_version={schema_version}, expected {DB_SCHEMA_VERSION}",
+            ),
+            [],
+        )
     quota_rows: list[QuotaState]
     try:
         quota_rows = _quota_rows_readonly(resolved)
@@ -314,7 +436,11 @@ def _check_database(db_path: Path) -> tuple[DoctorFinding, list[QuotaState]]:
             [],
         )
     return (
-        DoctorFinding("OK", f"database readable (read-only) at {resolved} ({count} runs)"),
+        DoctorFinding(
+            "OK",
+            f"database readable (read-only) at {resolved} "
+            f"({count} runs, schema v{schema_version})",
+        ),
         quota_rows,
     )
 
@@ -598,8 +724,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Path to SQLite database (default: "
-            "$XDG_STATE_HOME/orchestrator-mvp/orchestrator.db or "
-            "~/.local/state/orchestrator-mvp/orchestrator.db)."
+            "$XDG_STATE_HOME/saberops/orchestrator.db or "
+            "~/.local/state/saberops/orchestrator.db)."
         ),
     )
     run_parser.add_argument(
@@ -846,8 +972,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Path to SQLite database (default: "
-            "$XDG_STATE_HOME/orchestrator-mvp/orchestrator.db or "
-            "~/.local/state/orchestrator-mvp/orchestrator.db)."
+            "$XDG_STATE_HOME/saberops/orchestrator.db or "
+            "~/.local/state/saberops/orchestrator.db)."
         ),
     )
 
@@ -2406,8 +2532,9 @@ def handle_doctor(args: argparse.Namespace) -> int:
     findings: list[DoctorFinding] = []
 
     findings.append(_check_python_requires(project_root))
-    findings.append(_check_venv_tools(project_root))
     findings.append(_check_core_imports())
+    findings.append(_check_dev_imports(project_root))
+    findings.append(_check_venv_tools(project_root))
     findings.append(_check_git_binary())
 
     db_arg = getattr(args, "db", None)

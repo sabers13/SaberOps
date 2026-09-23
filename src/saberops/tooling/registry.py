@@ -21,8 +21,9 @@ def default_registry_path() -> Path:
     configured = os.environ.get("ORCH_TOOL_REGISTRY", "").strip()
     if configured:
         return Path(configured).expanduser()
-    config_home = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")).expanduser()
-    return config_home / "orchestrator-mvp" / "tools.json"
+    from saberops.paths import get_tool_registry_path as _canonical
+
+    return _canonical()
 
 
 class ToolRegistry:

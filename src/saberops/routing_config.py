@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -94,13 +93,10 @@ def _is_muse_id(cid: str) -> bool:
 
 
 def get_user_routing_path() -> Path:
-    """Resolve user routing config path via XDG_CONFIG_HOME or ~/.config."""
-    xdg = os.environ.get("XDG_CONFIG_HOME", "")
-    if xdg and xdg.strip():
-        base = Path(xdg.strip()).expanduser()
-    else:
-        base = Path.home() / ".config"
-    return base / "orchestrator-v2" / "routing.json"
+    """Return the canonical public owner routing-config path."""
+    from saberops.paths import get_user_routing_path as _canonical
+
+    return _canonical()
 
 
 def _packaged_default_path() -> Path:

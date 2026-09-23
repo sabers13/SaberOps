@@ -226,17 +226,14 @@ def list_presets() -> list[dict[str, Any]]:
 
 
 def get_authority_config_path() -> Path:
-    """Resolve the owner authority config path via XDG_CONFIG_HOME or ~/.config.
+    """Return the canonical public owner authority-config path.
 
     This mirrors :func:`saberops.routing_config.get_user_routing_path`
     so both owner settings live in the same directory.
     """
-    xdg = os.environ.get("XDG_CONFIG_HOME", "")
-    if xdg and xdg.strip():
-        base = Path(xdg.strip()).expanduser()
-    else:
-        base = Path.home() / ".config"
-    return base / "orchestrator-v2" / "authority.json"
+    from saberops.paths import get_authority_config_path as _canonical
+
+    return _canonical()
 
 
 def _parse_host_access(value: object) -> HostAccessMode:

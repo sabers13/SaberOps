@@ -8,10 +8,10 @@ from saberops.db import Database
 
 
 def get_transcript_dir(db: Database) -> Path:
-    """Return the XDG orchestrator state dir for transcripts.
+    """Return the canonical SaberOps state dir for transcripts.
 
     Mirrors :func:`saberops.db.get_default_db_path` parent logic:
-    ``<state_home>/orchestrator-mvp/transcripts``.
+    ``<state_home>/saberops/transcripts``.
     """
     return Path(db.db_path).resolve().parent / "transcripts"
 

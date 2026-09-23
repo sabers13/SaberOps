@@ -4,8 +4,8 @@ Every correctness-critical runtime store (run database, transcripts,
 supervision/ownership records, per-run coordination locks) lives inside one
 project-local directory::
 
-    <state_home>/orchestrator-mvp/                 # preserved global/legacy root
-        orchestrator.db                            # legacy runs + owner-wide quota
+    <state_home>/saberops/                        # canonical public root
+        orchestrator.db                            # global store + owner-wide quota
         projects/<slug>-<project_id>/
             project.json                           # marker: which repository this is
             orchestrator.db                        # this project's runs

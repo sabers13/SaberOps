@@ -95,9 +95,10 @@ class FrozenControlPlane:
 
 
 def get_control_plane_config_path() -> Path:
-    xdg = os.environ.get("XDG_CONFIG_HOME", "")
-    base = Path(xdg.strip()).expanduser() if xdg.strip() else Path.home() / ".config"
-    return base / "orchestrator-v2" / "control_plane.json"
+    """Return the canonical public owner control-plane-config path."""
+    from saberops.paths import get_control_plane_config_path as _canonical
+
+    return _canonical()
 
 
 def _default() -> dict[str, object]:

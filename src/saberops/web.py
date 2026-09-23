@@ -861,7 +861,7 @@ def _load_catalog_safely() -> ModelCatalog:
 def _binding_store() -> OwnerBindingStore:
     """Return the owner binding store (overridable for tests).
 
-    Production path is ``$XDG_CONFIG_HOME/orchestrator-v2/bindings.json``;
+    Production path is ``$XDG_CONFIG_HOME/saberops/bindings.json``;
     ``ORCH_BINDING_STORE`` pins an explicit file.  The document is C11-B
     owner identity only -- never a credential value, never a second routing
     configuration.

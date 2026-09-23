@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -12,13 +11,10 @@ from saberops.git import GitManager
 
 
 def get_default_projects_path() -> Path:
-    """Return default path for projects registry JSON."""
-    xdg_state_home = os.environ.get("XDG_STATE_HOME")
-    if xdg_state_home and xdg_state_home.strip():
-        base_dir = Path(xdg_state_home).expanduser()
-    else:
-        base_dir = Path.home() / ".local" / "state"
-    return base_dir / "orchestrator-mvp" / "ui-projects.json"
+    """Return the canonical public projects-registry JSON path."""
+    from saberops.paths import get_projects_registry_path as _canonical
+
+    return _canonical()
 
 
 @dataclass(frozen=True)

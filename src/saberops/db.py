@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 import threading
 import uuid
@@ -13,7 +12,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from saberops.models import (
     TERMINAL_RUN_STATUSES,
@@ -67,19 +66,41 @@ from saberops.ownership import (
 from saberops.quota import derive_routing_state, normalize_quota_observation
 from saberops.wake import notify_run
 
+DB_SCHEMA_VERSION: Final[int] = 1
+
+
+class DatabaseSchemaError(ValueError):
+    """Fail-closed error for an unknown or legacy database schema version."""
+
 
 def get_default_db_path() -> Path:
-    """Return the default SQLite database path according to XDG state specification.
+    """Return the canonical public SQLite database path.
 
-    If $XDG_STATE_HOME is set: $XDG_STATE_HOME/orchestrator-mvp/orchestrator.db
-    Otherwise: ~/.local/state/orchestrator-mvp/orchestrator.db
+    ``$XDG_STATE_HOME/saberops/orchestrator.db`` (fallback
+    ``~/.local/state/saberops/orchestrator.db``).  Legacy
+    ``orchestrator-mvp`` locations are never selected here.
     """
-    xdg_state_home = os.environ.get("XDG_STATE_HOME")
-    if xdg_state_home and xdg_state_home.strip():
-        base_dir = Path(xdg_state_home).expanduser()
-    else:
-        base_dir = Path.home() / ".local" / "state"
-    return base_dir / "orchestrator-mvp" / "orchestrator.db"
+    from saberops.paths import get_default_db_path as _canonical_db_path
+
+    return _canonical_db_path()
+
+
+def get_db_schema_version(path: Path | str) -> int:
+    """Return the SQLite ``user_version`` marker for ``path`` (0 when absent)."""
+    resolved = Path(path).expanduser()
+    if not resolved.exists():
+        return 0
+    conn = sqlite3.connect(f"{resolved.resolve().as_uri()}?mode=ro", uri=True, timeout=5.0)
+    try:
+        row = conn.execute("PRAGMA user_version").fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return 0
+    try:
+        return int(row[0])
+    except (TypeError, ValueError):
+        return 0
 
 
 def current_iso_timestamp() -> str:
@@ -459,6 +480,18 @@ class Database:
     def _init_db(self) -> None:
         if self._read_only:
             return
+        # Fail-closed schema identity: an existing non-empty database with
+        # user_version 0 is legacy/unknown state and is never silently
+        # adopted or mutated.  Fresh databases are stamped deterministically.
+        existed = self.db_path.exists() and self.db_path.stat().st_size > 0
+        if existed:
+            existing_version = get_db_schema_version(self.db_path)
+            if existing_version != DB_SCHEMA_VERSION:
+                raise DatabaseSchemaError(
+                    f"unsupported database schema at {self.db_path}: "
+                    f"user_version={existing_version}, expected {DB_SCHEMA_VERSION}; "
+                    "refusing to open legacy or unknown state"
+                )
         try:
             with self._get_connection() as conn:
                 conn.executescript(
@@ -1191,6 +1224,15 @@ class Database:
                 except Exception:
                     # work_packages may not exist yet in very old databases.
                     pass
+                row = conn.execute("PRAGMA user_version").fetchone()
+                current_version = int(row[0]) if row is not None else 0
+                if current_version == 0:
+                    conn.execute(f"PRAGMA user_version = {DB_SCHEMA_VERSION}")
+                elif current_version != DB_SCHEMA_VERSION:
+                    raise DatabaseSchemaError(
+                        f"unsupported database schema at {self.db_path}: "
+                        f"user_version={current_version}, expected {DB_SCHEMA_VERSION}"
+                    )
                 conn.commit()
         except sqlite3.OperationalError as exc:
             if "readonly" not in str(exc).lower():

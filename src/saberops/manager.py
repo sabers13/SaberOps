@@ -11,7 +11,6 @@ fail-closed safety and require explicit human confirmation in the browser UI.
 from __future__ import annotations
 
 import json
-import os
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -53,12 +52,9 @@ class OpenCodeManagerClient:
         self.runner = runner
 
         if session_dir is None:
-            xdg_state_home = os.environ.get("XDG_STATE_HOME")
-            if xdg_state_home and xdg_state_home.strip():
-                base_dir = Path(xdg_state_home).expanduser()
-            else:
-                base_dir = Path.home() / ".local" / "state"
-            self.session_dir = base_dir / "orchestrator-mvp" / "manager-session"
+            from saberops.paths import get_manager_session_dir as _canonical
+
+            self.session_dir = _canonical()
         else:
             self.session_dir = Path(session_dir).resolve()
         self.session_dir.mkdir(parents=True, exist_ok=True)
