@@ -848,6 +848,72 @@ def _missing_run_context(run_id: str) -> dict[str, Any]:
     return {"missing": True, "run_id": run_id}
 
 
+def _empty_shell() -> dict[str, Any]:
+    """Degraded shell context: the console chrome renders with empty panes."""
+    return {
+        "active_project": "",
+        "active_project_short": "SaberOps",
+        "repo_ready": False,
+        "repo_note": "Shell unavailable",
+        "recent_projects": [],
+        "recent_runs": [],
+        "terminal_runs": [],
+        "run_count": 0,
+        "active_workers": 0,
+        "status_verdict": "SaberOps",
+    }
+
+
+def _shell_context(
+    service: OrchestratorService,
+    projects: ProjectRegistry,
+) -> dict[str, Any]:
+    """Build the console-shell context rendered on every page.
+
+    The approved OpenDesign shell (activity rail panes, status bar)
+    needs live project/run data independently of the page body, so a
+    small read-only projection is attached per request by middleware.
+    It never mutates state and degrades to :func:`_empty_shell` when
+    the backing store is unreachable.
+    """
+    try:
+        active_repo = projects.active()
+        active_path_str = str(active_repo) if active_repo else ""
+        val = projects.validate_project(active_repo) if active_repo else None
+        runs = _run_rows(service.list_runs(limit=50))
+        terminal_runs = [row for row in runs if row["status"] in TERMINAL_RUN_STATUSES]
+        live_runs = [row for row in runs if row["status"] not in TERMINAL_RUN_STATUSES]
+        active_short = (
+            Path(active_path_str).name if active_path_str else "SaberOps"
+        )
+        if live_runs:
+            verdict = f"{len(live_runs)} active · {len(runs)} recent"
+        elif runs:
+            verdict = f"{len(runs)} runs · all terminal"
+        else:
+            verdict = "No runs yet"
+        return {
+            "active_project": active_path_str,
+            "active_project_short": active_short,
+            "repo_ready": val.ready if val else False,
+            "repo_note": val.note if val else "No project selected",
+            "recent_projects": [
+                {
+                    "path": p,
+                    "ready": projects.validate_project(p).ready,
+                }
+                for p in projects.list_projects()
+            ],
+            "recent_runs": runs,
+            "terminal_runs": terminal_runs,
+            "run_count": len(runs),
+            "active_workers": len(live_runs),
+            "status_verdict": verdict,
+        }
+    except Exception:
+        return _empty_shell()
+
+
 def _access_store() -> AccessStore:
     """Return the user-connection store (overridable for tests).
 
@@ -2000,9 +2066,26 @@ def create_app(
         runtimes=runtimes,
     )
 
-    app = FastAPI(title="Orchestrator Dashboard")
+    app = FastAPI(title="SaberOps Dashboard")
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
     templates.env.globals["fmt"] = format_timestamp
+
+    @app.middleware("http")
+    async def _attach_shell_context(request: Request, call_next: Callable[..., Any]) -> Response:
+        """Attach the read-only console-shell projection to every request.
+
+        The approved shell renders run/project panes on all pages, so the
+        data is resolved once per request here instead of in each handler.
+        A failure degrades to an empty shell rather than failing the page.
+        """
+        try:
+            request.state.shell = _shell_context(
+                active_runtime().service, project_registry
+            )
+        except Exception:
+            request.state.shell = _empty_shell()
+        response: Response = await call_next(request)
+        return response
     app.state.db = db
     app.state.service = service
     app.state.supervisor = supervisor

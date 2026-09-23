@@ -1,310 +1,240 @@
 {% extends "base.html" %}
+{% set active_pane = "chats" %}
 {% block title %}Dashboard{% endblock %}
-{% block nav_dashboard %} is-active{% endblock %}
+{% block conversation_title %}SaberOps{% endblock %}
+{% block run_meta %}{{ repo_path or "No project selected" }} · {{ schedule_state }}{% endblock %}
 
-{% block content %}
-<header class="page-head">
-  <div>
-    <h1>Dashboard</h1>
-    <p class="muted">Live operational control plane and local orchestrator state.</p>
-  </div>
-  <div class="head-badges">
-    <a class="btn btn-secondary" href="/manager">Open Ox Manager ↗</a>
-    <span class="badge badge-{{ schedule_class }}">{{ schedule_state }}</span>
-  </div>
-</header>
+{% block workspace %}
+<div class="date-rule">Workspace</div>
 
 {% if notice %}
-<div class="alert alert-info">{{ notice }}</div>
+<p class="so-notice">{{ notice }}</p>
 {% endif %}
 {% if error %}
-<div class="alert alert-error">{{ error }}</div>
+<p class="so-error">{{ error }}</p>
 {% endif %}
 
-<section class="card">
-  <h2>Active Target Project</h2>
-  <div class="project-active-bar">
-    <div>
-      <span class="muted">Active Repository:</span>
-      <strong class="mono">{{ repo_path or "None selected" }}</strong>
-    </div>
-    {% if repo_ready %}
-    <span class="badge badge-success">READY</span>
-    {% else %}
-    <span class="badge badge-failed">NOT READY</span>
-    {% endif %}
+<article class="message" data-od-id="message-user-task">
+  <div class="avatar">Y</div>
+  <div>
+    <div class="message-head"><strong>You</strong></div>
+    <div class="message-body"><div class="user-prompt">Active repository: {{ repo_path or "none selected" }}.</div></div>
   </div>
-  {% if not repo_ready and repo_note %}
-  <p class="muted alert alert-error" style="margin-top: 0.5rem;">{{ repo_note }}</p>
-  {% endif %}
+</article>
 
-  {% if recent_projects %}
-  <div class="recent-projects" style="margin-top: 1rem;">
-    <span class="muted">Recent Projects:</span>
-    <div class="project-tags" style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.25rem;">
-      {% for p in recent_projects %}
-      <form method="post" action="/projects/select" style="display: inline;">
-        <input type="hidden" name="path" value="{{ p.path }}">
-        <button type="submit" class="btn btn-secondary btn-sm{% if p.path == active_project %} is-active{% endif %} mono">
-          {{ p.path }}
-          {% if not p.validation.ready %}
-          <span style="color: var(--danger-color, #e05252);">(!)</span>
-          {% endif %}
-        </button>
-      </form>
-      {% endfor %}
-    </div>
-  </div>
-  {% endif %}
-
-  <form method="post" action="/projects/select" class="project-select-form" style="margin-top: 1rem; display: flex; gap: 0.5rem;">
-    <input type="text" name="path" placeholder="/absolute/path/to/git/repository" class="mono" style="flex: 1;" required>
-    <button type="submit" class="btn btn-secondary">Select / Switch Project</button>
-  </form>
-</section>
-
-{% if repo_ready and project_gate_scratch %}
-<section class="card">
-  <h2>Project Settings</h2>
-  <form method="post" action="/projects/settings/gate-scratch" class="run-form">
-    <div class="field">
-      <label for="gate_scratch_mode">Gate temporary storage / Gate performance</label>
-      <select id="gate_scratch_mode" name="mode">
-        {% for opt in project_gate_scratch.options %}
-        <option value="{{ opt.value }}"{% if opt.value == project_gate_scratch.current_mode %} selected{% endif %}>{{ opt.label }}</option>
-        {% endfor %}
-      </select>
-      <span class="muted">
-        Project files remain on disk. Only temporary gate/test scratch may use RAM.
-        <strong>Prefer RAM</strong> can fall back to disk before execution.
-        <strong>Require RAM</strong> blocks gate execution when RAM is unavailable.
-      </span>
-    </div>
-    <button type="submit" class="btn btn-secondary">Save project setting</button>
-  </form>
-</section>
-{% endif %}
-
-<section class="card">
-  <h2>Start a Run</h2>
-  <form method="post" action="/runs" class="run-form">
-    <div class="field">
-      <label for="task">Task</label>
-      <textarea id="task" name="task" rows="3" required placeholder="Describe task to implement or fix...">{{ form.task }}</textarea>
-    </div>
-
-    <div class="field-row">
-      <div class="field">
-        <label for="routing_mode">Routing</label>
-        <select id="routing_mode" name="routing_mode">
-          <option value="auto"{% if form.routing_mode == "auto" %} selected{% endif %}>Auto (recommended)</option>
-          <option value="manual"{% if form.routing_mode == "manual" %} selected{% endif %}>Manual</option>
-        </select>
-        <span class="muted">Auto classifies the task and may escalate through T3.</span>
+<article class="message">
+  <div class="avatar assistant" aria-hidden="true"><svg class="saber-symbol assistant-logo" viewBox="0 0 32 20"><path class="saber-bracket" d="m9 3-6.5 7L9 17"/><path class="saber-bracket" d="m23 3 6.5 7-6.5 7"/><path class="saber-razor-s" d="M20.7 2.4h-5.2c-2.4 0-4.1 1.1-4.6 3-.4 1.8.5 3.2 2.9 4.1l2.4.9c1 .4 1.4.8 1.2 1.4-.2.7-.9 1.1-2 1.1h-4.2l-1.6 4.5h5.6c3.2 0 5.2-1.5 5.8-4.1.5-2.2-.7-3.9-3.5-5l-2-.7c-.7-.3-1-.6-.9-1 .1-.4.6-.6 1.4-.6h3.6Z"/><path class="saber-razor-edge" d="m12.1 14.9 4.1-.1m-.9-9.9 4.1-.1"/></svg></div>
+  <div>
+    <div class="message-head"><strong>SaberOps</strong></div>
+    <div class="message-body">
+      <p>
+        {% if repo_ready %}
+        Repository is ready. Describe a task below and choose Run to dispatch it.
+        {% else %}
+        No ready repository{{ " (" ~ repo_note ~ ")" if repo_note else "" }}. Select a project from the Projects pane or Settings → Repositories first.
+        {% endif %}
+      </p>
+      {% if repo_ready and project_gate_scratch %}
+      <div class="settings-section" id="execution">
+        <div class="settings-section-head"><h4>Project settings</h4><p>Gate scratch policy affects future runs only.</p></div>
+        <div class="settings-card"><div class="settings-control-row" style="display: block;">
+          <form method="post" action="/projects/settings/gate-scratch" class="so-form">
+            <div class="advanced-field">
+              <label for="gate_scratch_mode">Gate temporary storage / Gate performance ({{ project_gate_scratch.current_label }})</label>
+              <select id="gate_scratch_mode" name="mode">
+                {% for opt in project_gate_scratch.options %}
+                <option value="{{ opt.value }}"{% if opt.value == project_gate_scratch.current_mode %} selected{% endif %}>{{ opt.label }}</option>
+                {% endfor %}
+              </select>
+            </div>
+            <div><button type="submit" class="text-button">Save project setting</button></div>
+          </form>
+        </div></div>
       </div>
-      <div class="field field-check">
-        <label class="check" for="training_allowed">
-          <input type="checkbox" id="training_allowed" name="training_allowed" value="1"{% if form.training_allowed %} checked{% endif %}>
-          Allow training-eligible models (e.g. Muse)
-        </label>
-        <span class="muted">Training policy defaults to <strong>Allowed</strong> in Web UI.</span>
-      </div>
-    </div>
-
-    <details class="field">
-      <summary>Advanced Routing Override</summary>
-      <div class="field-row" style="margin-top: 0.75rem;">
-        <div class="field">
-          <label for="manual_tier">Manual tier</label>
-          <select id="manual_tier" name="manual_tier">
-            <option value="">None</option>
-            {% for t in tier_options %}<option value="{{ t }}"{% if form.manual_tier == t %} selected{% endif %}>{{ t }}</option>{% endfor %}
-          </select>
-        </div>
-        <div class="field">
-          <label for="max_auto_tier">Max auto tier</label>
-          <select id="max_auto_tier" name="max_auto_tier">{% for t in tier_options %}<option value="{{ t }}"{% if form.max_auto_tier == t %} selected{% endif %}>{{ t }}</option>{% endfor %}</select>
-        </div>
-      </div>
-      <div class="field-row">
-        <div class="field"><label for="provider_override">Provider override</label><input type="text" id="provider_override" name="provider_override" value="{{ form.provider_override }}" placeholder="e.g. opencode, codex"></div>
-        <div class="field"><label for="model_override">Model override</label><input type="text" id="model_override" name="model_override" value="{{ form.model_override }}" placeholder="e.g. opencode-go/ox-alpha-free"></div>
-      </div>
-    </details>
-
-    <div class="field">
-      <label for="gate_command">Gate command</label>
-      <input type="text" id="gate_command" name="gate_command" value="{{ form.gate_command }}">
-    </div>
-    <div class="field-row">
-      <div class="field"><label for="worker_timeout">Worker timeout (seconds)</label><input type="number" id="worker_timeout" name="worker_timeout" value="{{ form.worker_timeout }}" placeholder="Auto: T1 600, T2 1200, T3 1800"></div>
-      <div class="field"><label for="gate_timeout">Gate timeout</label><input type="number" id="gate_timeout" name="gate_timeout" value="{{ form.gate_timeout }}" placeholder="300"></div>
-      <div class="field"><label for="review_timeout">Review timeout</label><input type="number" id="review_timeout" name="review_timeout" value="{{ form.review_timeout }}" placeholder="1200"></div>
-    </div>
-    <div class="field-row">
-      <div class="field field-check">
-        <label class="check" for="review_enabled">
-          <input type="checkbox" id="review_enabled" name="review_enabled" value="1"{% if form.review_enabled %} checked{% endif %}>
-          Independent Review
-        </label>
-        <span class="muted">Force an independent review after gate passes. Off (default): risk-adaptive policy decides.</span>
-      </div>
-    </div>
-    <div class="field-row" id="review-controls-row">
-      <div class="field">
-        <label for="review_mode">Review mode</label>
-        <select id="review_mode" name="review_mode">
-          <option value="bounded"{% if form.review_mode == "bounded" %} selected{% endif %}>Bounded</option>
-          <option value="max"{% if form.review_mode == "max" %} selected{% endif %}>Max</option>
-        </select>
-        <span class="muted">Bounded stops after the review limit; Max loops until convergence (stall-guarded).</span>
-      </div>
-      <div class="field" id="review-limit-field">
-        <label for="review_limit">Review limit</label>
-        <input type="number" id="review_limit" name="review_limit" value="{{ form.review_limit }}" min="1">
-        <span class="muted">Number of reviewers when Bounded.</span>
-      </div>
-    </div>
-    <p class="muted" id="effective-timeouts" data-timeout-defaults="{{ effective_timeouts.defaults_json }}">
-      Effective timeouts before launch — worker: <strong data-eff="worker">{{ effective_timeouts.worker }}</strong>,
-      gate: <strong data-eff="gate">{{ effective_timeouts.gate }}</strong>,
-      review: <strong data-eff="review">{{ effective_timeouts.review }}</strong>.
-    </p>
-
-    <p class="muted mono">Dispatch Target: {{ repo_path }}</p>
-    {% if not repo_ready %}
-    <p class="muted" style="color: var(--danger-color, #e05252);">Target repository is not ready for runs ({{ repo_note }}).</p>
-    {% endif %}
-
-    <button type="submit" class="btn btn-primary" {% if not repo_ready %}disabled{% endif %}>Start run (asynchronous)</button>
-  </form>
-</section>
-
-<section class="card">
-  <h2>Provider &amp; Model Ownership</h2>
-  <p class="muted">Providers: add / connect / refresh &middot; Models: what each provider exposes &middot; Routing: which models workers may use, in what order &middot; Orchestrator Model: which model runs SaberOps' own decision role.</p>
-  <div class="field-row">
-    <a class="btn btn-secondary" href="/access">Providers / Models</a>
-    <a class="btn btn-secondary" href="/routing">Routing</a>
-    <a class="btn btn-secondary" href="/orchestrator">Orchestrator Model</a>
-  </div>
-</section>
-
-<section class="card">
-  <h2>Provider Availability</h2>
-  <div class="provider-grid">
-    {% for provider in providers %}
-    <div class="provider-cell">
-      <span class="provider-name">{{ provider.name }}</span>
-      <span class="badge badge-{{ provider.status_class }}">{{ provider.status }}</span>
-      {% if provider.detail %}
-      <span class="muted mono">{{ provider.detail }}</span>
       {% endif %}
-    </div>
-    {% endfor %}
-  </div>
-  <p class="muted">Antigravity permission posture: <span class="badge badge-{{ agy_permission_class }}">{{ agy_permission_posture }}</span></p>
-</section>
-
-<section class="card">
-  <h2>Execution Tiers &amp; Models</h2>
-  <p class="muted">Training policy defaults to <strong>Allowed</strong>; explicitly opt out to exclude Muse-capable routing.</p>
-  <div class="tier-grid">
-    {% for tier in tiers %}
-    <div class="tier-panel">
-      <div class="tier-head">
-        <span class="tier-name">{{ tier.name }}</span>
-        <span class="muted">{{ tier.title }}</span>
+      <div class="quick-actions" data-od-id="quick-actions">
+        <button type="button" data-fill-composer="Show provider and quota status">Show provider status</button>
+        <button type="button" data-fill-composer="List the configured worker routing chains">List routing chains</button>
+        <button type="button" data-fill-composer="Summarize recent runs">Summarize recent runs</button>
       </div>
-      {% for group in tier.groups %}
-      <div class="tier-group">
-        <span class="tier-group-label">{{ group.label }}</span>
-        <ol class="candidate-list">
-          {% for candidate in group.candidates %}
-          <li class="candidate{% if not candidate.available %} unavailable{% endif %}">
-            <span class="candidate-model">{{ candidate.model }}</span>
-            <span class="muted candidate-provider">[{{ candidate.provider }}]</span>
-          </li>
-          {% endfor %}
-        </ol>
-      </div>
-      {% endfor %}
     </div>
-    {% endfor %}
   </div>
-</section>
+</article>
 
-<section class="card">
-  <h2>Quota State</h2>
-  {% if quota_states %}
-  <div class="table-wrap">
-    <table class="table">
-      <thead>
+<div class="inspector-shell">
+  <div class="inspector-section">
+    <div class="inspector-head"><strong>Providers</strong><span class="muted">availability on this host</span></div>
+    <div class="so-table-wrap"><table class="so-table">
+      <thead><tr><th>Provider</th><th>Status</th><th>Detail</th></tr></thead>
+      <tbody>
+        {% for provider in providers %}
         <tr>
-          <th>Provider</th>
-          <th>Pool</th>
-          <th>Remaining</th>
-          <th>Routing State</th>
-          <th>Reset Time</th>
+          <td>{{ provider.name }}</td>
+          <td><span class="badge badge-{{ provider.status_class }}">{{ provider.status }}</span></td>
+          <td class="mono muted">{{ provider.detail or "—" }}</td>
         </tr>
-      </thead>
+        {% endfor %}
+      </tbody>
+    </table></div>
+    <p class="muted">Antigravity permission posture: <span class="badge badge-{{ agy_permission_class }}">{{ agy_permission_posture }}</span></p>
+    <p><a class="text-button" href="/access">Providers / Models</a> <a class="text-button" href="/routing">Routing</a> <a class="text-button" href="/orchestrator">Orchestrator Model</a> <a class="text-button" href="/manager">Ox Manager</a></p>
+  </div>
+
+  <div class="inspector-section">
+    <div class="inspector-head"><strong>Execution tiers</strong><span class="muted">worker routing order</span></div>
+    <div class="so-table-wrap"><table class="so-table">
+      <thead><tr><th>Tier</th><th>Group</th><th>Candidates (ordered)</th></tr></thead>
+      <tbody>
+        {% for tier in tiers %}
+        {% for group in tier.groups %}
+        <tr>
+          <td class="mono">{{ tier.name }}</td>
+          <td>{{ group.label }}</td>
+          <td>
+            <ol class="mono" style="margin: 0; padding-left: 18px;">
+              {% for candidate in group.candidates %}
+              <li>{{ candidate.model }} <span class="muted">[{{ candidate.provider }}]{% if not candidate.available %} · unavailable{% endif %}</span></li>
+              {% endfor %}
+            </ol>
+          </td>
+        </tr>
+        {% endfor %}
+        {% endfor %}
+      </tbody>
+    </table></div>
+  </div>
+
+  <div class="inspector-section">
+    <div class="inspector-head"><strong>Quota</strong><span class="muted">owner-supplied state</span></div>
+    {% if quota_states %}
+    <div class="so-table-wrap"><table class="so-table">
+      <thead><tr><th>Provider</th><th>Pool</th><th>Remaining</th><th>Routing state</th><th>Reset</th></tr></thead>
       <tbody>
         {% for q in quota_states %}
         <tr>
           <td>{{ q.provider }}</td>
           <td>{{ q.pool }}</td>
-          <td>{{ "%g"|format(q.remaining_percent) }}%</td>
+          <td class="mono">{{ "%g"|format(q.remaining_percent) }}%</td>
           <td><span class="badge badge-{{ q.status_class }}">{{ q.routing_state }}</span></td>
           <td class="mono">{{ fmt(q.reset_at) }}</td>
         </tr>
         {% endfor %}
       </tbody>
-    </table>
+    </table></div>
+    {% else %}
+    <div class="so-empty"><strong>No quota rows configured</strong>Providers without quota state are treated as NORMAL. Add quota from the <a href="/quota">Quota</a> page.</div>
+    {% endif %}
   </div>
-  {% else %}
-  <div class="empty-state">
-    <p class="empty-state-title">No quota rows configured</p>
-    <p class="muted">Providers without quota state are treated as NORMAL. Add quota from the <a href="/quota">Quota</a> page.</p>
-  </div>
-  {% endif %}
-</section>
 
-<section class="card">
-  <h2>Recent Runs</h2>
-  {% if runs %}
-  <div class="table-wrap">
-    <table class="table">
-      <thead>
-        <tr>
-          <th>Run ID</th>
-          <th>Repository</th>
-          <th>Tier</th>
-          <th>Status</th>
-          <th>Created</th>
-          <th>Completed</th>
-          <th>Task Summary</th>
-        </tr>
-      </thead>
+  <div class="inspector-section">
+    <div class="inspector-head"><strong>Recent runs</strong><span class="muted">latest first</span></div>
+    {% if runs %}
+    <div class="so-table-wrap"><table class="so-table">
+      <thead><tr><th>Run</th><th>Tier</th><th>Status</th><th>Created</th><th>Task</th></tr></thead>
       <tbody>
         {% for run in runs %}
         <tr>
           <td><a class="mono" href="/runs/{{ run.id }}">{{ run.id }}</a></td>
-          <td class="mono">{{ run.repository }}</td>
           <td>{{ run.tier }}</td>
           <td><span class="badge badge-{{ run.status_class }}">{{ run.status }}</span></td>
           <td class="mono">{{ fmt(run.created_at) }}</td>
-          <td class="mono">{{ fmt(run.completed_at) }}</td>
           <td>{{ run.summary }}</td>
         </tr>
         {% endfor %}
       </tbody>
-    </table>
+    </table></div>
+    {% else %}
+    <div class="so-empty"><strong>No runs recorded yet</strong>Describe a task in the composer below, or run <span class="mono">orch run</span>.</div>
+    {% endif %}
   </div>
-  {% else %}
-  <div class="empty-state">
-    <p class="empty-state-title">No runs recorded yet</p>
-    <p class="muted">Start a run with the form above or <code>orch run</code>.</p>
-  </div>
-  {% endif %}
-</section>
+</div>
+{% endblock %}
+
+{% block composer %}
+<div class="composer-wrap">
+  <form class="composer" data-od-id="chat-composer" method="post" action="/runs">
+    <label class="sr-only" for="prompt">Describe the task to run</label>
+    <textarea id="prompt" name="task" placeholder="Describe the task to implement or fix…" rows="2" required>{{ form.task }}</textarea>
+    <div class="composer-bar">
+      <div class="composer-context">
+        <span class="composer-control repository-control">Repository<span class="mono muted" style="font-size: 10px;">{{ repo_path or "none" }}</span></span>
+        <label class="composer-control routing-control">Run routing
+          <select class="model-select" id="routing_mode" name="routing_mode" aria-label="Run routing" data-od-id="routing-select">
+            <option value="auto"{% if form.routing_mode == "auto" %} selected{% endif %}>Auto</option>
+            <option value="manual"{% if form.routing_mode == "manual" %} selected{% endif %}>Manual tier</option>
+          </select>
+        </label>
+        <button class="advanced-toggle" type="button" data-od-id="advanced-run-toggle" aria-expanded="false">Advanced ▾</button>
+      </div>
+      <button class="send-button" type="submit" data-od-id="send-message" aria-label="Run task"{% if not repo_ready %} disabled{% endif %}>Run</button>
+    </div>
+    <div class="advanced-run" id="advancedRun" data-od-id="advanced-run-settings">
+      <div class="advanced-field"><label for="manual_tier">Manual tier</label>
+        <select id="manual_tier" name="manual_tier">
+          <option value="">None</option>
+          {% for t in tier_options %}<option value="{{ t }}"{% if form.manual_tier == t %} selected{% endif %}>{{ t }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="advanced-field"><label for="max_auto_tier">Maximum automatic tier</label>
+        <select id="max_auto_tier" name="max_auto_tier">{% for t in tier_options %}<option value="{{ t }}"{% if form.max_auto_tier == t %} selected{% endif %}>{{ t }}</option>{% endfor %}</select>
+      </div>
+      <div class="advanced-field"><label for="training_allowed">Training</label>
+        <select id="training_allowed" name="training_allowed">
+          <option value="1"{% if form.training_allowed %} selected{% endif %}>Allowed</option>
+          <option value=""{% if not form.training_allowed %} selected{% endif %}>Denied</option>
+        </select>
+      </div>
+      <div class="advanced-field"><label for="review_enabled">Review</label>
+        <select id="review_enabled" name="review_enabled">
+          <option value=""{% if not form.review_enabled %} selected{% endif %}>Risk-adaptive (default)</option>
+          <option value="1"{% if form.review_enabled %} selected{% endif %}>Force independent review</option>
+        </select>
+      </div>
+      <div class="advanced-field"><label for="review_mode">Review mode</label>
+        <select id="review_mode" name="review_mode">
+          <option value="bounded"{% if form.review_mode == "bounded" %} selected{% endif %}>Bounded</option>
+          <option value="max"{% if form.review_mode == "max" %} selected{% endif %}>Max</option>
+        </select>
+      </div>
+      <div class="advanced-field" id="review-limit-field"><label for="review_limit">Review limit</label>
+        <input type="number" id="review_limit" name="review_limit" value="{{ form.review_limit }}" min="1">
+      </div>
+      <div class="advanced-field"><label for="gate_command">Gate</label>
+        <input type="text" id="gate_command" name="gate_command" value="{{ form.gate_command }}">
+      </div>
+      <div class="advanced-field"><label for="worker_timeout">Worker timeout (s)</label>
+        <input type="number" id="worker_timeout" name="worker_timeout" value="{{ form.worker_timeout }}" placeholder="Auto: T1 600, T2 1200, T3 1800">
+      </div>
+      <div class="advanced-field"><label for="gate_timeout">Gate timeout (s)</label>
+        <input type="number" id="gate_timeout" name="gate_timeout" value="{{ form.gate_timeout }}" placeholder="300">
+      </div>
+      <div class="advanced-field"><label for="review_timeout">Review timeout (s)</label>
+        <input type="number" id="review_timeout" name="review_timeout" value="{{ form.review_timeout }}" placeholder="1200">
+      </div>
+      <div class="advanced-field"><label for="provider_override">Provider override</label>
+        <input type="text" id="provider_override" name="provider_override" value="{{ form.provider_override }}" placeholder="e.g. opencode, codex">
+      </div>
+      <div class="advanced-field"><label for="model_override">Model override</label>
+        <input type="text" id="model_override" name="model_override" value="{{ form.model_override }}" placeholder="e.g. opencode-go/ox-alpha-free">
+      </div>
+    </div>
+  </form>
+  <p class="composer-hint" id="effective-timeouts" data-timeout-defaults="{{ effective_timeouts.defaults_json }}">
+    Effective timeouts before launch — worker: <strong data-eff="worker">{{ effective_timeouts.worker }}</strong>,
+    gate: <strong data-eff="gate">{{ effective_timeouts.gate }}</strong>,
+    review: <strong data-eff="review">{{ effective_timeouts.review }}</strong>.
+    SaberOps dispatches workers and modifies code. Review proposed changes before accepting.
+  </p>
+  <div class="composer-hint" id="review-controls-row" hidden></div>
+</div>
+{% endblock %}
+
+{% block workers_dock %}
+<div class="worker-mode-tabs" data-od-id="worker-mode-tabs" aria-label="Worker views">
+  <button class="worker-mode-tab active" data-worker-filter="all">All workers</button>
+</div>
+<div class="worker-list" id="workerDockBody" data-od-id="worker-dock-body">
+  <p class="side-copy muted" style="padding: 10px 12px;">Open a run to inspect its worker attempts.</p>
+</div>
+<footer class="worker-footer"><a class="text-button" href="/routing">Worker routing</a></footer>
 {% endblock %}

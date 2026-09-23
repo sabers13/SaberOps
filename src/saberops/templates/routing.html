@@ -1,136 +1,118 @@
 {% extends "base.html" %}
+{% set active_pane = "chats" %}
 {% block title %}Routing{% endblock %}
-{% block nav_routing %} is-active{% endblock %}
+{% block conversation_title %}Worker Routing{% endblock %}
+{% block run_meta %}Owner-selected candidate order per tier and context{% endblock %}
 
-{% block content %}
-<header class="page-head">
-  <div>
-    <h1>Routing</h1>
-    <p class="muted">Owner-selected worker routing chains. Discovery populates the chooser below; the user decides what enters routing. Ordering and tier semantics remain owned by the canonical routing configuration.</p>
-  </div>
-</header>
+{% block workspace %}
+<div class="date-rule">Routing</div>
 
 {% if notice %}
-<div class="alert alert-info">{{ notice }}</div>
+<p class="so-notice">{{ notice }}</p>
 {% endif %}
 {% if error %}
-<div class="alert alert-error">{{ error }}</div>
+<p class="so-error">{{ error }}</p>
 {% endif %}
 
-<section class="card">
-  <h2>Current chains</h2>
-  <p class="muted">Adding a model appends it to the end of the chosen tier/context chain. Existing order is never rewritten except through the Move up / Move down controls below. Every mutation re-renders the resulting canonical chain here.</p>
-  <div class="table-wrap">
-    <table class="table">
-      <thead>
-        <tr>
-          <th>Tier</th>
-          <th>Context</th>
-          <th>Candidates (ordered)</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for chain in chains %}
-        <tr>
-          <td class="mono">{{ chain.tier }}</td>
-          <td class="mono">{{ chain.context }}</td>
-          <td>
-            {% if chain.candidates %}
-            <ol class="mono model-list">
-              {% for cid in chain.candidates %}
-              <li>
-                {{ cid }}
-                <form method="post" action="/routing/remove" style="display:inline">
-                  <input type="hidden" name="context" value="{{ chain.context_key }}">
-                  <input type="hidden" name="candidate_id" value="{{ cid }}">
-                  <button type="submit" class="btn btn-sm">Remove</button>
-                </form>
-                <form method="post" action="/routing/move" style="display:inline">
-                  <input type="hidden" name="context" value="{{ chain.context_key }}">
-                  <input type="hidden" name="candidate_id" value="{{ cid }}">
-                  <input type="hidden" name="direction" value="up">
-                  <button type="submit" class="btn btn-sm">Move up</button>
-                </form>
-                <form method="post" action="/routing/move" style="display:inline">
-                  <input type="hidden" name="context" value="{{ chain.context_key }}">
-                  <input type="hidden" name="candidate_id" value="{{ cid }}">
-                  <input type="hidden" name="direction" value="down">
-                  <button type="submit" class="btn btn-sm">Move down</button>
-                </form>
-              </li>
-              {% endfor %}
-            </ol>
-            {% else %}
-            <span class="muted">empty</span>
-            {% endif %}
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+<article class="message">
+  <div class="avatar assistant" aria-hidden="true">S</div>
+  <div>
+    <div class="message-head"><strong>SaberOps</strong></div>
+    <div class="message-body"><p>Adding a model appends it to the end of the chosen tier/context chain. Existing order is never rewritten except through the Move up / Move down controls. Discovery populates the chooser; you decide what enters routing.</p></div>
   </div>
-</section>
+</article>
 
-<section class="card">
-  <h2>Add model</h2>
-  <p class="muted">Only discovery-verified, fresh models with an exact executable binding can enter routing. A registered adapter alone is not enough: the binding must resolve through the canonical registry. Adding a model outside the static registry records its non-secret discovery evidence and exact binding identity as owner approval; it never enrolls automatically, and eligibility is evaluated in each context (an unknown training requirement fails closed in training-denied contexts).</p>
+<div class="settings-section">
+  <div class="settings-section-head"><h4>Current chains</h4><p>Canonical routing configuration, rendered per tier and context.</p></div>
+  <div class="so-table-wrap"><table class="so-table">
+    <thead><tr><th>Tier</th><th>Context</th><th>Candidates (ordered)</th></tr></thead>
+    <tbody>
+      {% for chain in chains %}
+      <tr>
+        <td class="mono">{{ chain.tier }}</td>
+        <td class="mono">{{ chain.context }}</td>
+        <td>
+          {% if chain.candidates %}
+          <ol class="mono">
+            {% for cid in chain.candidates %}
+            <li>
+              {{ cid }}
+              <form method="post" action="/routing/remove" class="so-inline-form">
+                <input type="hidden" name="context" value="{{ chain.context_key }}">
+                <input type="hidden" name="candidate_id" value="{{ cid }}">
+                <button type="submit" class="text-button">Remove</button>
+              </form>
+              <form method="post" action="/routing/move" class="so-inline-form">
+                <input type="hidden" name="context" value="{{ chain.context_key }}">
+                <input type="hidden" name="candidate_id" value="{{ cid }}">
+                <input type="hidden" name="direction" value="up">
+                <button type="submit" class="text-button">Move up</button>
+              </form>
+              <form method="post" action="/routing/move" class="so-inline-form">
+                <input type="hidden" name="context" value="{{ chain.context_key }}">
+                <input type="hidden" name="candidate_id" value="{{ cid }}">
+                <input type="hidden" name="direction" value="down">
+                <button type="submit" class="text-button">Move down</button>
+              </form>
+            </li>
+            {% endfor %}
+          </ol>
+          {% else %}
+          <span class="muted">empty</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table></div>
+</div>
+
+<div class="settings-section">
+  <div class="settings-section-head"><h4>Add model</h4><p>Only discovery-verified, fresh models with an exact executable binding can enter routing.</p></div>
   {% if chooser %}
-  <div class="table-wrap">
-    <table class="table">
-      <thead>
-        <tr>
-          <th>Provider</th>
-          <th>Connection</th>
-          <th>Model</th>
-          <th>Discovery</th>
-          <th>Execution</th>
-          <th>Routing eligible</th>
-          <th>Add to tier</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for m in chooser %}
-        <tr>
-          <td>{{ m.provider }}</td>
-          <td class="mono">{{ m.connection_id }}</td>
-          <td class="mono">{{ m.model_id }}</td>
-          <td><span class="badge">{{ m.discovery_status }}</span>{% if m.stale == 'TRUE' %} <span class="badge badge-demoted">STALE</span>{% endif %}</td>
-          <td><span class="badge badge-{{ 'normal' if m.execution_support == 'SUPPORTED' else 'demoted' }}">{{ m.execution_support }}</span></td>
-          <td>
-            {% if m.routing_eligible == 'TRUE' %}
-            <span class="badge badge-normal">TRUE</span>
-            {% else %}
-            <span class="badge badge-demoted">FALSE</span>
-            <br><span class="muted">{{ m.ineligible_reason }}</span>
-            {% endif %}
-          </td>
-          <td>
-            {% if m.routing_eligible == 'TRUE' %}
-            <form method="post" action="/routing/add" class="field-row">
-              <input type="hidden" name="connection_id" value="{{ m.connection_id }}">
-              <input type="hidden" name="model_id" value="{{ m.model_id }}">
-              <input type="hidden" name="binding_id" value="{{ m.binding_id }}">
+  <div class="so-table-wrap"><table class="so-table">
+    <thead><tr><th>Provider</th><th>Connection</th><th>Model</th><th>Discovery</th><th>Execution</th><th>Routing eligible</th><th>Add to tier</th></tr></thead>
+    <tbody>
+      {% for m in chooser %}
+      <tr>
+        <td>{{ m.provider }}</td>
+        <td class="mono">{{ m.connection_id }}</td>
+        <td class="mono">{{ m.model_id }}</td>
+        <td><span class="badge">{{ m.discovery_status }}</span>{% if m.stale == 'TRUE' %} <span class="badge badge-demoted">STALE</span>{% endif %}</td>
+        <td><span class="badge badge-{{ 'normal' if m.execution_support == 'SUPPORTED' else 'demoted' }}">{{ m.execution_support }}</span></td>
+        <td>
+          {% if m.routing_eligible == 'TRUE' %}
+          <span class="badge badge-normal">TRUE</span>
+          {% else %}
+          <span class="badge badge-demoted">FALSE</span>
+          <br><span class="muted">{{ m.ineligible_reason }}</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if m.routing_eligible == 'TRUE' %}
+          <form method="post" action="/routing/add" class="so-form">
+            <input type="hidden" name="connection_id" value="{{ m.connection_id }}">
+            <input type="hidden" name="model_id" value="{{ m.model_id }}">
+            <input type="hidden" name="binding_id" value="{{ m.binding_id }}">
+            <div class="advanced-field"><label>Context</label>
               <select name="context">
                 {% for ctx in contexts %}
                 <option value="{{ ctx }}">{{ ctx }}</option>
                 {% endfor %}
               </select>
-              <button type="submit" class="btn">Add</button>
-            </form>
-            {% else %}
-            <span class="muted">disabled</span>
-            {% endif %}
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
+            </div>
+            <div><button type="submit" class="text-button primary-button">Add</button></div>
+          </form>
+          {% else %}
+          <span class="muted">disabled</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table></div>
   {% else %}
-  <div class="empty-state">
-    <p class="empty-state-title">No discovered models</p>
-    <p class="muted">Connect a provider and run &ldquo;Refresh models&rdquo; on the <a href="/access">Model Access</a> page. Discovery never invents models.</p>
-  </div>
+  <div class="so-empty"><strong>No discovered models</strong>Connect a provider and run “Refresh models” on the <a href="/access">Model Access</a> page. Discovery never invents models.</div>
   {% endif %}
-</section>
+</div>
 {% endblock %}

@@ -1,88 +1,81 @@
 {% extends "base.html" %}
+{% set active_pane = "chats" %}
 {% block title %}Orchestrator Model{% endblock %}
-{% block nav_orchestrator %} is-active{% endblock %}
+{% block conversation_title %}Orchestrator Model{% endblock %}
+{% block run_meta %}Exact execution binding for the SaberOps decision role{% endblock %}
 
-{% block content %}
-<header class="page-head">
-  <div>
-    <h1>Orchestrator Model</h1>
-    <p class="muted">Choose the exact execution binding for the Orchestrator slot. Only canonical eligible bindings are listed. The persisted choice is a binding identity, not a free-floating provider/model setting, and it does not change worker routing order.</p>
-    <p class="muted"><strong>Live guidance.</strong> The selected binding is the one the bounded Orchestrator model consumer drives for initial objective interpretation / execution guidance, delivered to the first implementation-worker of a run as a bounded advisory section. The consumer never alters worker routing, exact worker bindings, repository identity, scope authority, or the validation gate.</p>
-  </div>
-</header>
+{% block workspace %}
+<div class="date-rule">Orchestrator model</div>
 
 {% if notice %}
-<div class="alert alert-info">{{ notice }}</div>
+<p class="so-notice">{{ notice }}</p>
 {% endif %}
 {% if error %}
-<div class="alert alert-error">{{ error }}</div>
+<p class="so-error">{{ error }}</p>
 {% endif %}
 
-<section class="card">
-  <h2>Current selection</h2>
-  {% if current %}
-  <p class="mono">mode = {{ current.mode }}{% if current.pinned_binding_id %} · binding = {{ current.pinned_binding_id }}{% endif %}</p>
-  <p class="muted">Resolution: {{ selection_status }}</p>
-  {% else %}
-  <p class="muted">No Orchestrator binding policy configured. The Orchestrator falls back to the canonical AUTO path over eligible bindings.</p>
-  {% endif %}
-</section>
+<article class="message">
+  <div class="avatar assistant" aria-hidden="true">S</div>
+  <div>
+    <div class="message-head"><strong>SaberOps</strong></div>
+    <div class="message-body"><p>Only canonical eligible bindings are listed. The persisted choice is a binding identity, not a free-floating provider/model setting, and it does not change worker routing order.</p></div>
+  </div>
+</article>
 
-<section class="card">
-  <h2>Eligible bindings</h2>
+<div class="settings-section">
+  <div class="settings-section-head"><h4>Current selection</h4><p>Binding identity driving initial objective interpretation.</p></div>
+  <div class="settings-card"><div class="settings-control-row" style="display: block;">
+    {% if current %}
+    <p class="mono">mode = {{ current.mode }}{% if current.pinned_binding_id %} · binding = {{ current.pinned_binding_id }}{% endif %}</p>
+    <p class="muted">Resolution: {{ selection_status }}</p>
+    {% else %}
+    <p class="muted">No Orchestrator binding policy configured. The Orchestrator falls back to the canonical AUTO path over eligible bindings.</p>
+    {% endif %}
+  </div></div>
+</div>
+
+<div class="settings-section">
+  <div class="settings-section-head"><h4>Eligible bindings</h4><p>Discovery proves an exact executable binding before a model becomes selectable.</p></div>
   {% if bindings %}
-  <div class="table-wrap">
-    <table class="table">
-      <thead>
-        <tr>
-          <th>Provider</th>
-          <th>Model</th>
-          <th>Backend</th>
-          <th>Profile</th>
-          <th>Quota pool</th>
-          <th>Binding id</th>
-          <th>Select</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for b in bindings %}
-        <tr>
-          <td>{{ b.provider }}</td>
-          <td class="mono">{{ b.model }}</td>
-          <td class="mono">{{ b.backend }}</td>
-          <td class="mono">{{ b.profile_id }}</td>
-          <td class="mono">{{ b.quota_pool_id }}</td>
-          <td class="mono">{{ b.binding_id }}</td>
-          <td>
-            {% if pinned_value == b.binding_id %}
-            <span class="badge badge-normal">currently selected</span>
-            {% else %}
-            <form method="post" action="/orchestrator/select">
-              <input type="hidden" name="binding_id" value="{{ b.binding_id }}">
-              <input type="hidden" name="mode" value="PINNED">
-              <button type="submit" class="btn btn-sm">Pin</button>
-            </form>
-            {% endif %}
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
+  <div class="so-table-wrap"><table class="so-table">
+    <thead><tr><th>Provider</th><th>Model</th><th>Backend</th><th>Profile</th><th>Quota pool</th><th>Binding id</th><th>Select</th></tr></thead>
+    <tbody>
+      {% for b in bindings %}
+      <tr>
+        <td>{{ b.provider }}</td>
+        <td class="mono">{{ b.model }}</td>
+        <td class="mono">{{ b.backend }}</td>
+        <td class="mono">{{ b.profile_id }}</td>
+        <td class="mono">{{ b.quota_pool_id }}</td>
+        <td class="mono">{{ b.binding_id }}</td>
+        <td>
+          {% if pinned_value == b.binding_id %}
+          <span class="badge badge-normal">currently selected</span>
+          {% else %}
+          <form method="post" action="/orchestrator/select" class="so-inline-form">
+            <input type="hidden" name="binding_id" value="{{ b.binding_id }}">
+            <input type="hidden" name="mode" value="PINNED">
+            <button type="submit" class="text-button">Pin</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table></div>
   {% else %}
-  <div class="empty-state">
-    <p class="empty-state-title">No eligible bindings</p>
-    <p class="muted">Connect an account provider and run &ldquo;Refresh models&rdquo; on the <a href="/access">Model Access</a> page. Discovery proves an exact executable binding before a model becomes selectable.</p>
-  </div>
+  <div class="so-empty"><strong>No eligible bindings</strong>Connect an account provider and run “Refresh models” on the <a href="/access">Model Access</a> page.</div>
   {% endif %}
-</section>
+</div>
 
-<section class="card">
-  <h2>Automatic selection</h2>
-  <p class="muted">AUTO resolves through the existing canonical Orchestrator selection authority over eligible bindings. It does not alter worker routing order.</p>
-  <form method="post" action="/orchestrator/select">
-    <input type="hidden" name="mode" value="AUTO">
-    <button type="submit" class="btn"{% if auto_selected %} disabled{% endif %}>Use AUTO</button>
-  </form>
-</section>
+<div class="settings-section">
+  <div class="settings-section-head"><h4>Automatic selection</h4><p>AUTO resolves through the canonical Orchestrator selection authority. It does not alter worker routing order.</p></div>
+  <div class="settings-card"><div class="settings-control-row">
+    <div class="settings-control-copy"><strong>Use AUTO</strong><p>Resolve over eligible bindings at dispatch time.</p></div>
+    <form method="post" action="/orchestrator/select" class="so-inline-form">
+      <input type="hidden" name="mode" value="AUTO">
+      <button type="submit" class="text-button primary-button"{% if auto_selected %} disabled{% endif %}>Use AUTO</button>
+    </form>
+  </div></div>
+</div>
 {% endblock %}
