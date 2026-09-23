@@ -891,6 +891,50 @@ def remove_candidate_from_chain(
     return data
 
 
+def move_candidate_in_chain(
+    payload: Mapping[str, Any],
+    *,
+    top: str,
+    sub: str,
+    candidate_id: str,
+    direction: str,
+) -> dict[str, Any]:
+    """Return a validated copy of ``payload`` with ``candidate_id`` reordered.
+
+    ``direction`` is ``"up"`` (one position earlier) or ``"down"`` (one
+    position later) within the named tier/context chain.  Moving the first
+    entry up or the last entry down is a no-op; moving an absent candidate
+    is also a no-op.  No other entry is added, removed or substituted --
+    this helper only reorders.  The result is re-validated by the canonical
+    structure validator, so unknown contexts fail closed.
+    """
+    context = _canonical_chain_key(top, sub)
+    if context not in {_canonical_chain_key(t, s) for t, s in CONTEXT_KEYS}:
+        raise RoutingConfigError(f"unknown routing context {context!r}")
+    cleaned = candidate_id.strip()
+    if not cleaned:
+        raise RoutingConfigError("candidate id must not be empty")
+    cleaned_direction = direction.strip().lower()
+    if cleaned_direction not in ("up", "down"):
+        raise RoutingConfigError(
+            f"invalid move direction {direction!r}: expected 'up' or 'down'"
+        )
+    data: dict[str, Any] = json.loads(json.dumps(payload))
+    section = data.get(top)
+    if not isinstance(section, dict):
+        raise RoutingConfigError(f"routing section {top!r} is missing or invalid")
+    chain = section.get(sub)
+    if not isinstance(chain, list):
+        raise RoutingConfigError(f"routing context {context!r} is missing or invalid")
+    if cleaned in chain:
+        index = chain.index(cleaned)
+        target = index - 1 if cleaned_direction == "up" else index + 1
+        if 0 <= target < len(chain):
+            chain[index], chain[target] = chain[target], chain[index]
+    _validate_structure(data, None)
+    return data
+
+
 def save_user_routing(payload: Mapping[str, Any]) -> Path:
     """Persist the canonical user routing document (validated, atomic).
 

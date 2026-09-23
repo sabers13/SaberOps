@@ -112,6 +112,7 @@ from saberops.routing_config import (
     format_candidate_id,
     load_effective_routing,
     load_effective_routing_payload,
+    move_candidate_in_chain,
     remove_candidate_from_chain,
     save_user_routing,
 )
@@ -1408,12 +1409,16 @@ def _discover_connection(
     return _apply_exact_execution_bindings(connection, result, registry)
 
 
-def _model_display_row(model: Any) -> dict[str, str]:
+def _model_display_row(
+    model: Any,
+    *,
+    eligibility: dict[str, str] | None = None,
+) -> dict[str, str]:
     """Render one catalog entry for the access page (evidence only)."""
     capabilities = ", ".join(
         f"{name}={state.value}" for name, state in model.capabilities
     )
-    return {
+    row = {
         "model_id": model.model_id,
         "display_name": model.display_name or model.model_id,
         "source": model.source.value,
@@ -1424,6 +1429,12 @@ def _model_display_row(model: Any) -> dict[str, str]:
         "evidence": "STALE" if model.is_stale else "FRESH",
         "routing_eligible": "TRUE" if model.is_execution_supported else "FALSE",
     }
+    if eligibility is not None:
+        row["routing_eligible"] = eligibility.get("routing_eligible", "FALSE")
+        row["ineligible_reason"] = eligibility.get("ineligible_reason", "")
+    else:
+        row["ineligible_reason"] = ""
+    return row
 
 
 def _access_context(
@@ -1433,20 +1444,30 @@ def _access_context(
     form: dict[str, Any] | None = None,
     probe: dict[str, Any] | None = None,
     discovery: list[dict[str, Any]] | None = None,
+    owner: OwnerBindings | None = None,
+    registry: AdapterRegistry | None = None,
 ) -> dict[str, Any]:
     """Build the model-access template context (evidence only, no secrets)."""
     try:
-        registry = _access_store().load()
+        access_registry = _access_store().load()
     except AccessStoreError:
-        registry = build_access_registry(default_account_connections())
+        access_registry = build_access_registry(default_account_connections())
     catalog = _load_catalog_safely()
+    resolved_owner = owner if owner is not None else _load_owner_bindings_safely()
+    resolved_registry = registry if registry is not None else AdapterRegistry.default()
 
     def rows_for(connection_id: str) -> list[dict[str, str]]:
-        return [_model_display_row(model) for model in catalog.for_connection(connection_id)]
+        rows: list[dict[str, str]] = []
+        for model in catalog.for_connection(connection_id):
+            eligibility = _routing_chooser_row(
+                model, owner=resolved_owner, registry=resolved_registry
+            )
+            rows.append(_model_display_row(model, eligibility=eligibility))
+        return rows
 
     account_rows: list[dict[str, Any]] = []
     for descriptor in ACCOUNT_BACKENDS:
-        connection = registry.try_get(descriptor.connection_id)
+        connection = access_registry.try_get(descriptor.connection_id)
         resolved = shutil.which(descriptor.executable)
         account_rows.append(
             {
@@ -1486,7 +1507,7 @@ def _access_context(
             "enabled": "TRUE" if connection.enabled else "FALSE",
             "models": rows_for(connection.connection_id),
         }
-        for connection in registry.list_connections()
+        for connection in access_registry.list_connections()
         if connection.connection_id not in account_ids
     ]
     empty = {
@@ -1870,6 +1891,25 @@ def _notice_from_query(request: Request) -> str | None:
     if request.query_params.get("enabled") == "1":
         return "Quota enabled."
     if request.query_params.get("connection_saved") == "1":
+        auto = request.query_params.get("auto_discovered")
+        if auto is not None:
+            try:
+                count = int(auto)
+            except ValueError:
+                count = -1
+            if count >= 0:
+                return (
+                    "Connection saved (credential reference only; no secret stored). "
+                    f"Bounded discovery ran automatically and found {count} model(s) "
+                    "below; adding a provider only makes models available, it does "
+                    "not place them into routing."
+                )
+        if request.query_params.get("auto_discover_failed") == "1":
+            return (
+                "Connection saved (credential reference only; no secret stored). "
+                "Automatic discovery could not enumerate models; use "
+                "'Refresh models' to retry. Nothing was invented."
+            )
         return "Connection saved (credential reference only; no secret stored)."
     if request.query_params.get("connection_tested") == "1":
         return "Connection probed (see result below)."
@@ -1877,6 +1917,8 @@ def _notice_from_query(request: Request) -> str | None:
         return "Model added to the routing chain (owner decision)."
     if request.query_params.get("routing_model_removed") == "1":
         return "Model removed from the routing chain."
+    if request.query_params.get("routing_model_moved") == "1":
+        return "Routing chain reordered (canonical order saved)."
     if request.query_params.get("selected") == "1":
         return "Orchestrator model selection saved (exact binding identity)."
     if request.query_params.get("project_selected") == "1":
@@ -3026,7 +3068,42 @@ def create_app(
                 ),
                 status_code=400,
             )
-        return RedirectResponse(url="/access?connection_saved=1", status_code=303)
+        saved_connection_id = connection.connection_id
+        # C16-B2: adding a provider makes its models available for
+        # selection, so run one bounded discovery immediately after a
+        # successful save.  This never fails the save itself and never
+        # erases durable state: a failed/UNKNOWN refresh keeps the last
+        # valid catalog evidence (marked stale by the canonical helper).
+        discovery_suffix = ""
+        try:
+            saved_registry = _access_store().load()
+            saved_connection = saved_registry.try_get(saved_connection_id)
+            if saved_connection is not None:
+                auto_result = _discover_connection(
+                    saved_connection, resolved_registry
+                )
+                auto_store = _model_catalog_store()
+                try:
+                    auto_catalog = auto_store.load()
+                except ModelCatalogStoreError:
+                    auto_catalog = ModelCatalog()
+                auto_catalog = apply_discovery_result(auto_catalog, auto_result)
+                try:
+                    auto_store.save(auto_catalog)
+                except ModelCatalogStoreError:
+                    auto_result = replace(auto_result, ok=False)
+                if auto_result.ok:
+                    discovery_suffix = (
+                        f"&auto_discovered={len(auto_result.models)}"
+                    )
+                else:
+                    discovery_suffix = "&auto_discover_failed=1"
+        except (AccessStoreError, ValueError):
+            discovery_suffix = "&auto_discover_failed=1"
+        return RedirectResponse(
+            url=f"/access?connection_saved=1{discovery_suffix}",
+            status_code=303,
+        )
 
     @app.get("/routing", response_class=HTMLResponse, name="routing_selection")
     def routing_selection(request: Request) -> HTMLResponse:
@@ -3281,6 +3358,54 @@ def create_app(
                 status_code=400,
             )
         return RedirectResponse(url="/routing?routing_model_removed=1", status_code=303)
+
+    @app.post("/routing/move", name="move_routing_model")
+    def routing_move(
+        request: Request,
+        context: Annotated[str, Form()] = "",
+        candidate_id: Annotated[str, Form()] = "",
+        direction: Annotated[str, Form()] = "",
+    ) -> Response:
+        """Reorder one candidate within a routing chain (canonical writer).
+
+        Only the relative order changes; membership is untouched.  The
+        resulting canonical chain is rendered via the redirect notice on
+        the routing page.
+        """
+        top, _, sub = context.strip().partition(".")
+        if not top or not sub or (top, sub) not in CONTEXT_KEYS:
+            return templates.TemplateResponse(
+                request,
+                "routing.html",
+                _routing_context(
+                    error=f"Unknown routing context: {context!r}",
+                    owner=_load_owner_bindings_safely(),
+                    registry=resolved_registry,
+                ),
+                status_code=400,
+            )
+        try:
+            payload = load_effective_routing_payload()
+            updated = move_candidate_in_chain(
+                payload,
+                top=top,
+                sub=sub,
+                candidate_id=candidate_id.strip(),
+                direction=direction.strip(),
+            )
+            save_user_routing(updated)
+        except RoutingConfigError as exc:
+            return templates.TemplateResponse(
+                request,
+                "routing.html",
+                _routing_context(
+                    error=f"Routing not saved: {exc}",
+                    owner=_load_owner_bindings_safely(),
+                    registry=resolved_registry,
+                ),
+                status_code=400,
+            )
+        return RedirectResponse(url="/routing?routing_model_moved=1", status_code=303)
 
     @app.get("/orchestrator", response_class=HTMLResponse, name="orchestrator_selection")
     def orchestrator_selection(request: Request) -> HTMLResponse:

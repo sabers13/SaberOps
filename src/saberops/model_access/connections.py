@@ -1087,6 +1087,32 @@ def access_registry_from_mapping(payload: Mapping[str, Any]) -> AccessRegistry:
     return AccessRegistry.from_mapping(payload)
 
 
+#: Namespace prefix for execution profiles materialized from discovery.
+#: :func:`saberops.control_plane.binding_store.materialize_discovered_binding`
+#: names the shared account/profile resource of a discovered binding
+#: ``discovered-profile:<connection_id>``.  The lookup rule below treats
+#: that namespaced value as addressing the real connection it was
+#: materialized from; the literal is repeated here (not imported) so this
+#: module keeps its existing dependency direction.
+_DISCOVERED_PROFILE_PREFIX = "discovered-profile:"
+
+
+def discovered_profile_connection_id(profile_id: str) -> str | None:
+    """Return the connection id a discovered execution profile addresses.
+
+    A ``discovered-profile:<connection_id>`` value names the real
+    account connection the binding was materialized from.  Anything
+    else (including a bare ``discovered-profile:`` with an empty
+    suffix) returns ``None``: the caller keeps its fail-closed
+    behavior and never invents a connection.
+    """
+    cleaned = profile_id.strip()
+    if not cleaned.startswith(_DISCOVERED_PROFILE_PREFIX):
+        return None
+    suffix = cleaned[len(_DISCOVERED_PROFILE_PREFIX) :].strip()
+    return suffix or None
+
+
 def resolve_access(
     *,
     registry: AccessRegistry | None,
@@ -1100,7 +1126,15 @@ def resolve_access(
 
     1. ``backend_ref`` names a ``connection_id`` directly;
     2. ``profile_id`` names a ``connection_id`` directly;
-    3. ``(provider, backend_ref)`` names a ``(provider, backend)`` pair.
+    3. ``profile_id`` is a discovered execution profile
+       (``discovered-profile:<connection_id>``) addressing the real
+       account connection it was materialized from (C16-B2: without
+       this, an exact discovered binding's profile can never resolve
+       to its own connection, so readiness admission for a
+       discovered WORKER/ORCHESTRATOR binding stays UNKNOWN forever
+       and automatic dispatch can never select an owner-routed
+       discovered model);
+    4. ``(provider, backend_ref)`` names a ``(provider, backend)`` pair.
 
     ``provider`` here is the *already-selected* binding provider: this
     function performs a lookup, never a selection.  It raises
@@ -1123,6 +1157,12 @@ def resolve_access(
         direct = registry.try_get(profile)
         if direct is not None and direct not in candidates:
             candidates.append(direct)
+        if direct is None:
+            discovered = discovered_profile_connection_id(profile)
+            if discovered:
+                via = registry.try_get(discovered)
+                if via is not None and via not in candidates:
+                    candidates.append(via)
     if backend:
         for connection in registry.for_provider(wanted_provider):
             if connection.backend == backend and connection not in candidates:

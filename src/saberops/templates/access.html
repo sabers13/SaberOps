@@ -6,7 +6,8 @@
 <header class="page-head">
   <div>
     <h1>Model Access</h1>
-    <p class="muted">User-owned account and API access. This page answers HOW an already-selected binding connects &mdash; it never selects models or routes work.</p>
+    <p class="muted">User-owned account and API access. This page answers HOW an already-selected binding connects &mdash; it never selects models or routes work. Adding a provider makes its models available for selection; it does not place them into routing. Saving a connection runs one bounded discovery automatically; otherwise use &ldquo;Refresh models&rdquo;. A backend that cannot enumerate models reports that truthfully instead of inventing a list.</p>
+    <p class="muted">Next steps: <a href="/routing">Routing</a> (choose which discovered models workers may use) &middot; <a href="/orchestrator">Orchestrator Model</a> (choose the model for SaberOps' own decision role).</p>
   </div>
 </header>
 
@@ -72,11 +73,17 @@
                 <span class="badge badge-{{ 'normal' if m.execution_support == 'SUPPORTED' else 'demoted' }}">{{ m.execution_support }}</span>
                 <span class="muted">{{ m.source }} / discovered={{ m.discovery_status }}</span>
                 {% if m.evidence == 'STALE' %}<span class="badge badge-demoted">STALE</span>{% endif %}
+                {% if m.routing_eligible == 'TRUE' %}
+                <span class="badge badge-normal">routing-eligible</span>
+                {% else %}
+                <span class="badge badge-demoted">not routing-eligible</span>
+                {% if m.ineligible_reason %}<br><span class="muted">{{ m.ineligible_reason }}</span>{% endif %}
+                {% endif %}
               </li>
               {% endfor %}
             </ul>
             {% else %}
-            <span class="muted">UNKNOWN</span>
+            <span class="muted">UNKNOWN (backend exposes no supported enumeration, or no refresh has run)</span>
             {% endif %}
           </td>
           <td>
@@ -131,6 +138,12 @@
                 <span class="badge badge-{{ 'normal' if m.execution_support == 'SUPPORTED' else 'demoted' }}">{{ m.execution_support }}</span>
                 <span class="muted">{{ m.source }} / discovered={{ m.discovery_status }}</span>
                 {% if m.evidence == 'STALE' %}<span class="badge badge-demoted">STALE</span>{% endif %}
+                {% if m.routing_eligible == 'TRUE' %}
+                <span class="badge badge-normal">routing-eligible</span>
+                {% else %}
+                <span class="badge badge-demoted">not routing-eligible</span>
+                {% if m.ineligible_reason %}<br><span class="muted">{{ m.ineligible_reason }}</span>{% endif %}
+                {% endif %}
               </li>
               {% endfor %}
             </ul>

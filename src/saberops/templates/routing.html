@@ -19,7 +19,7 @@
 
 <section class="card">
   <h2>Current chains</h2>
-  <p class="muted">Adding a model appends it to the end of the chosen tier/context chain. Existing order is never rewritten.</p>
+  <p class="muted">Adding a model appends it to the end of the chosen tier/context chain. Existing order is never rewritten except through the Move up / Move down controls below. Every mutation re-renders the resulting canonical chain here.</p>
   <div class="table-wrap">
     <table class="table">
       <thead>
@@ -44,6 +44,18 @@
                   <input type="hidden" name="context" value="{{ chain.context_key }}">
                   <input type="hidden" name="candidate_id" value="{{ cid }}">
                   <button type="submit" class="btn btn-sm">Remove</button>
+                </form>
+                <form method="post" action="/routing/move" style="display:inline">
+                  <input type="hidden" name="context" value="{{ chain.context_key }}">
+                  <input type="hidden" name="candidate_id" value="{{ cid }}">
+                  <input type="hidden" name="direction" value="up">
+                  <button type="submit" class="btn btn-sm">Move up</button>
+                </form>
+                <form method="post" action="/routing/move" style="display:inline">
+                  <input type="hidden" name="context" value="{{ chain.context_key }}">
+                  <input type="hidden" name="candidate_id" value="{{ cid }}">
+                  <input type="hidden" name="direction" value="down">
+                  <button type="submit" class="btn btn-sm">Move down</button>
                 </form>
               </li>
               {% endfor %}

@@ -54,11 +54,15 @@
           <td class="mono">{{ b.quota_pool_id }}</td>
           <td class="mono">{{ b.binding_id }}</td>
           <td>
+            {% if pinned_value == b.binding_id %}
+            <span class="badge badge-normal">currently selected</span>
+            {% else %}
             <form method="post" action="/orchestrator/select">
               <input type="hidden" name="binding_id" value="{{ b.binding_id }}">
               <input type="hidden" name="mode" value="PINNED">
               <button type="submit" class="btn btn-sm">Pin</button>
             </form>
+            {% endif %}
           </td>
         </tr>
         {% endfor %}
