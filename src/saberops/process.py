@@ -1723,8 +1723,10 @@ def run_process(
                                 break
                         elif mon_state is _MS.STALLED and _monitor.should_terminate():
                             # Confirmed deterministic stall — authorise graceful
-                            # tree termination.  This is the ONLY path that
-                            # auto-terminates a worker (no tier-derived deadline).
+                            # tree termination.  This monitor path complements
+                            # (never replaces) the hard absolute deadline
+                            # (C16-C0 tier default or explicit owner timeout),
+                            # which terminates regardless of activity.
                             monitor_stall_terminated = True
                             if _monitor is not None:
                                 _monitor.mark_terminating()

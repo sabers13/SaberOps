@@ -4220,12 +4220,14 @@ class Orchestrator:
                 # Dispatch task to worker with live-output/activity hooks
                 adapter = adapter_pre
                 assert adapter is not None
+                # C16-C0: every worker dispatch is bounded.  The effective
+                # timeout is the explicit owner value when supplied, else
+                # the tier default -- a single source of truth
+                # (RunConfig.worker_timeout_for), never an unbounded sentinel.
                 worker_timeout_seconds = config.worker_timeout_for(current_tier)
-                deadline_iso = None
-                if worker_timeout_seconds is not None and worker_timeout_seconds > 0:
-                    deadline_iso = (
-                        datetime.now(UTC) + timedelta(seconds=worker_timeout_seconds)
-                    ).isoformat()
+                deadline_iso = (
+                    datetime.now(UTC) + timedelta(seconds=worker_timeout_seconds)
+                ).isoformat()
                 self._ensure_supervision(
                     run_id,
                     attempt_id,
@@ -4292,11 +4294,7 @@ class Orchestrator:
                     task=task_for_worker,
                     worktree_path=wt_path,
                     model=candidate.model,
-                    timeout_seconds=(
-                        worker_timeout_seconds
-                        if worker_timeout_seconds is not None
-                        else float("inf")
-                    ),
+                    timeout_seconds=worker_timeout_seconds,
                     inactivity_timeout=config.worker_inactivity_timeout,
                     on_stdout=on_stdout,
                     on_stderr=on_stderr,
@@ -5879,12 +5877,14 @@ class Orchestrator:
                                             "inherited_base_sha": cur_from_sha,
                                         },
                                     )
+                                    # C16-C0: repair dispatches share the same
+                                    # bounded effective timeout as primary
+                                    # dispatches (explicit owner value, else
+                                    # the tier default).
                                     rep_timeout_sec = config.worker_timeout_for(cur_tier)
-                                    rep_deadline = None
-                                    if rep_timeout_sec is not None and rep_timeout_sec > 0:
-                                        rep_deadline = (
-                                            datetime.now(UTC) + timedelta(seconds=rep_timeout_sec)
-                                        ).isoformat()
+                                    rep_deadline = (
+                                        datetime.now(UTC) + timedelta(seconds=rep_timeout_sec)
+                                    ).isoformat()
                                     self._ensure_supervision(
                                         run_id,
                                         local_attempt_id,
@@ -5940,11 +5940,7 @@ class Orchestrator:
                                         task=prompt_task,
                                         worktree_path=local_wt_path,
                                         model=cand_model,
-                                        timeout_seconds=(
-                                            rep_timeout_sec
-                                            if rep_timeout_sec is not None
-                                            else float("inf")
-                                        ),
+                                        timeout_seconds=rep_timeout_sec,
                                         inactivity_timeout=config.worker_inactivity_timeout,
                                         on_stdout=r_on_stdout,
                                         on_stderr=r_on_stderr,

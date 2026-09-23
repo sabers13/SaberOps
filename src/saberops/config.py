@@ -20,10 +20,16 @@ RoutingMode = Literal["auto", "manual"]
 ReviewMode = Literal["bounded", "max"]
 
 _TIER_ORDER: tuple[Tier, ...] = (Tier.T1, Tier.T2, Tier.T3)
+# C16-C0: bounded default worker execution.  These tier defaults are the
+# hard absolute deadline applied to every worker dispatch unless the owner
+# explicitly supplies ``--worker-timeout`` (which remains authoritative).
+# They match the CLI ``--worker-timeout`` help contract (T1=600, T2=1200,
+# T3=1800) so runtime behavior and documented behavior share this one
+# table as their single source of truth.
 TIER_WORKER_TIMEOUTS: dict[Tier, float] = {
-    Tier.T1: 1200.0,
-    Tier.T2: 2700.0,
-    Tier.T3: 3600.0,
+    Tier.T1: 600.0,
+    Tier.T2: 1200.0,
+    Tier.T3: 1800.0,
 }
 
 # Soft inactivity expectation (seconds of quiet provider output before the
@@ -41,11 +47,14 @@ _REVIEW_MODES: tuple[str, ...] = ("bounded", "max")
 
 
 def tier_worker_timeout(tier: Tier) -> float:
-    """Return the expected duration (expected / monitoring guidance) for a concrete routing tier.
+    """Return the default hard deadline for a concrete routing tier.
 
-    This is NOT a termination boundary.  It is a monitoring/expected-duration hint
-    for UI display and stall heuristics.  Only an explicit `--worker-timeout` or
-    the monitor-driven stall policy terminates a worker.
+    This IS a termination boundary (C16-C0): unless the owner supplied an
+    explicit ``--worker-timeout``, a worker dispatched at ``tier`` is
+    terminated through the fenced process-group mechanism once it exceeds
+    this duration, and the attempt is classified TIMEOUT.  The soft
+    inactivity expectation (``WORKER_INACTIVITY_TIMEOUT``) remains a
+    monitoring/reporting signal only and never terminates a worker.
     """
     return TIER_WORKER_TIMEOUTS[tier]
 
@@ -163,7 +172,9 @@ class RunConfig:
     def has_worker_deadline(self) -> bool:
         """True when the owner explicitly supplied an absolute runtime budget.
 
-        No tier-derived default constitutes an explicit deadline.
+        A tier-derived default is still a deadline (see
+        :meth:`worker_timeout_for`); this flag only reports whether the
+        owner overrode it explicitly.
         """
         return (
             self.worker_timeout_explicit
@@ -171,18 +182,20 @@ class RunConfig:
             and self.worker_timeout > 0
         )
 
-    def worker_timeout_for(self, tier: Tier) -> float | None:
-        """Return the explicit runtime budget, or ``None`` when no automatic deadline applies.
+    def worker_timeout_for(self, tier: Tier) -> float:
+        """Return the effective hard deadline for a worker dispatched at ``tier``.
 
-        When the owner supplied an explicit ``--worker-timeout``, that value is
-        authoritative regardless of tier.  Without an explicit timeout, return
-        ``None`` to signal that no tier-derived automatic kill deadline exists;
-        the monitor-driven lifecycle alone governs runtime.
+        When the owner supplied an explicit ``--worker-timeout``, that value
+        is authoritative regardless of tier.  Otherwise the tier default
+        from :data:`TIER_WORKER_TIMEOUTS` applies (C16-C0): normal runs are
+        always bounded and never depend on the monitor lifecycle alone.
+        A degenerate non-positive explicit value falls back to the tier
+        default rather than leaving the run unbounded.
         """
         if self.has_worker_deadline:
             assert self.worker_timeout is not None
             return self.worker_timeout
-        return None
+        return tier_worker_timeout(tier)
 
     def as_dict(self) -> dict[str, object]:
         """Serialize enums into JSON-compatible values for durable run events."""

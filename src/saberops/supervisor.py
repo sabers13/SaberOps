@@ -1501,6 +1501,13 @@ class RunSupervisor:
             args.append("--training-denied")
         if config.review_enabled:
             args.append("--review")
+        # C16-C0: only an explicit owner timeout is forwarded as a flag.
+        # The effective timeout always survives detached execution because
+        # the detached owner adopts the persisted RunConfig
+        # (reconstruct_run_config) and recomputes the same effective value
+        # via RunConfig.worker_timeout_for (explicit value, else the
+        # deterministic tier default).  Forwarding a computed tier default
+        # here would corrupt the explicit flag and mislabel the deadline.
         if config.worker_timeout_explicit:
             args.extend(["--worker-timeout", str(config.worker_timeout)])
         return args

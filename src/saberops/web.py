@@ -509,10 +509,12 @@ def _effective_timeout_display(form: dict[str, Any]) -> dict[str, str]:
     table used by ``resolve_run_config``), so the display can never drift from
     the resolver.
 
-    Tier values (T1/T2/T3) are EXPECTED DURATION GUIDANCE for monitoring —
-    they are NOT hard deadlines and do NOT automatically kill the worker.
-    Only an explicit ``--worker-timeout`` constitutes a hard runtime budget;
-    without it, termination is monitor-driven (confirmed stall only).
+    Tier values (T1/T2/T3) are the DEFAULT HARD DEADLINES (C16-C0): every
+    worker dispatch is bounded, and exceeding the effective timeout
+    terminates the worker through the fenced process-group mechanism with
+    a TIMEOUT classification.  An explicit ``--worker-timeout`` overrides
+    the tier default; without it, the tier default still bounds the run
+    alongside monitor-driven (confirmed stall) termination.
 
     The raw defaults are also embedded as JSON so the browser can recompute
     the panel live without a form submission.
@@ -528,7 +530,7 @@ def _effective_timeout_display(form: dict[str, Any]) -> dict[str, str]:
         worker_text = hard_budget
         has_hard_budget = True
     else:
-        # No explicit budget: tier values are expected-duration guidance only.
+        # No explicit budget: the tier default is the effective hard deadline.
         routing_mode = str(form.get("routing_mode", "auto"))
         manual_tier = str(form.get("manual_tier", "")).strip()
         if routing_mode == "manual" and manual_tier in _TIERS:
@@ -546,9 +548,15 @@ def _effective_timeout_display(form: dict[str, Any]) -> dict[str, str]:
         "gate": gate_text,
         "review": review_text,
         "defaults_json": json.dumps(defaults, sort_keys=True),
-        # Semantic markers for the template: distinguish budget from guidance.
+        # Semantic markers for the template: distinguish an explicit owner
+        # budget from the tier-default deadline.  Every run is bounded
+        # (C16-C0); the monitor complements both modes.
         "has_hard_budget": "true" if has_hard_budget else "false",
-        "termination_mode": "explicit_budget_plus_monitor" if has_hard_budget else "monitor_driven",
+        "termination_mode": (
+            "explicit_budget_plus_monitor"
+            if has_hard_budget
+            else "tier_default_plus_monitor"
+        ),
     }
 
 
@@ -804,6 +812,9 @@ def _plan_projection(db: Database, run_id: str) -> dict[str, Any]:
         "worker_pid": supervisor.worker_pid if supervisor else None,
         "started_at": started_at,
         "deadline_at": supervisor.deadline_at if supervisor else None,
+        # C16-C0: every supervised dispatch carries a hard deadline
+        # (explicit owner value, else the tier default), so a present
+        # deadline means the run is bounded -- never unbounded.
         "has_explicit_budget": bool(supervisor and supervisor.deadline_at is not None),
         "elapsed_since_activity_seconds": (
             round(elapsed_seconds, 1) if elapsed_seconds is not None else None

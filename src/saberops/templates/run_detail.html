@@ -42,7 +42,7 @@
     <dt>Attempt</dt><dd>{{ plan_projection.current_attempt_id or "UNKNOWN" }}</dd>
     <dt>Health</dt><dd>{{ plan_projection.health }}{% if plan_projection.stalled %} <span class="badge badge-stalled">stalled (soft)</span>{% endif %}</dd>
     <dt>Last activity</dt><dd>{{ plan_projection.last_activity_at or "UNKNOWN" }}{% if plan_projection.elapsed_since_activity_seconds is not none %} · {{ plan_projection.elapsed_since_activity_seconds }}s ago{% endif %}</dd>
-    <dt>Hard deadline</dt><dd>{{ plan_projection.deadline_at or "none (activity-aware)" }}</dd>
+    <dt>Hard deadline</dt><dd>{{ plan_projection.deadline_at or "pending (no worker dispatched yet)" }}</dd>
     <dt>Supervisor</dt><dd>{{ plan_projection.supervisor_state }}</dd>
     <dt>Manager</dt><dd>{{ plan_projection.manager_state }}</dd>
     <dt>Review</dt><dd>{{ plan_projection.review_state }}</dd>
