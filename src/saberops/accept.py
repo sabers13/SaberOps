@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
 
+from saberops.candidate_lifecycle import find_matching_rejection_event
 from saberops.db import Database
 from saberops.gate_runner import (
     GateReceipt,
@@ -17,13 +18,80 @@ from saberops.gate_runner import (
     GateScratchPreflightError,
 )
 from saberops.git import GitManager, GitRefRaceError
-from saberops.models import AttemptStatus, GateScratchMode, ReviewVerdict, Run, RunStatus
+from saberops.models import (
+    Attempt,
+    AttemptStatus,
+    GateScratchMode,
+    ReviewVerdict,
+    Run,
+    RunStatus,
+)
 from saberops.provenance import (
     ProvenanceError,
     assert_candidate_provenance,
     assert_run_repository,
     failover_authorized_bases,
 )
+
+
+@dataclass(frozen=True)
+class AcceptPrecondition:
+    """One read-only acceptance precondition for UI rendering.
+
+    ``status`` is ``"pass"`` or ``"fail"``; ``reason`` carries the
+    human-readable evidence (or the exact failure).  The Web renders
+    these as a checklist and gates the Accept button on the derived
+    eligibility -- it never recreates acceptance policy itself.
+    """
+
+    key: str
+    label: str
+    status: str
+    reason: str
+
+    def passed(self) -> bool:
+        """Return True only for an explicit pass."""
+        return self.status == "pass"
+
+
+@dataclass(frozen=True)
+class AcceptEligibility:
+    """Read-only projection of acceptance preconditions for a candidate.
+
+    ``eligible`` is True when the acceptance preconditions are
+    currently satisfied.  It is a static pre-CAS promise only:
+    acceptance revalidates state and still runs the post-integration
+    gate, so an eligible projection never guarantees successful
+    acceptance.
+    """
+
+    run_id: str
+    eligible: bool
+    checks: tuple[AcceptPrecondition, ...]
+
+    def as_dict(self) -> dict[str, object]:
+        """Serialize for JSON endpoints and template contexts."""
+        return {
+            "run_id": self.run_id,
+            "eligible": self.eligible,
+            "checks": [
+                {
+                    "key": check.key,
+                    "label": check.label,
+                    "status": check.status,
+                    "reason": check.reason,
+                }
+                for check in self.checks
+            ],
+        }
+
+
+def _pass(key: str, label: str, reason: str) -> AcceptPrecondition:
+    return AcceptPrecondition(key=key, label=label, status="pass", reason=reason)
+
+
+def _fail(key: str, label: str, reason: str) -> AcceptPrecondition:
+    return AcceptPrecondition(key=key, label=label, status="fail", reason=reason)
 
 
 @dataclass
@@ -89,6 +157,37 @@ class _GatePhaseFailure:
     # recorded before this failure surfaced; the boundary never
     # duplicates it.
     receipt_event_recorded: bool = False
+
+
+def _select_final_candidate(attempts: list[Attempt]) -> Attempt | None:
+    """Return the final successful candidate attempt, or None.
+
+    Shared deterministic precondition logic: both the read-only
+    projection (:meth:`AcceptEngine.check_accept_eligibility`) and the
+    engine (:meth:`AcceptEngine.accept_run`) consume this helper, so
+    the "which candidate" decision lives in exactly one place.  The
+    latest successful attempt with a commit SHA wins.
+    """
+    successful = [a for a in attempts if a.status == AttemptStatus.SUCCESS and a.commit_sha]
+    if not successful:
+        return None
+    return successful[-1]
+
+
+def _lineage_base_sha(attempts: list[Attempt], final_attempt: Attempt) -> str | None:
+    """Return the lineage base SHA for provenance of ``final_attempt``.
+
+    Shared with the same consumers as :func:`_select_final_candidate`:
+    the most recent commit SHA from an earlier attempt number, if any.
+    """
+    return next(
+        (
+            prior.commit_sha
+            for prior in reversed(attempts)
+            if prior.attempt_number < final_attempt.attempt_number and prior.commit_sha
+        ),
+        None,
+    )
 
 
 class AcceptEngine:
@@ -692,8 +791,344 @@ class AcceptEngine:
             event_error_message=str(event_error) if event_error is not None else None,
         )
 
+    def check_accept_eligibility(self, run_id: str) -> AcceptEligibility:
+        """Project whether acceptance preconditions are currently satisfied, read-only.
+
+        Every blocking check mirrors a precondition enforced by
+        :meth:`accept_run` before (or atomically at) the candidate
+        compare-and-swap -- the Web renders the returned checks as a
+        checklist and gates the Accept button on :attr:`eligible`,
+        so acceptance policy lives in exactly one place.  There are
+        no projection-only blockers.
+
+        No repository mutation, no gate execution, and no event writes
+        happen here.  Anything unreadable fails closed: the check
+        reports ``fail`` and the candidate is ineligible.
+
+        Inherently dynamic execution outcomes are NOT static
+        eligibility promises and are therefore not modeled here: a
+        later CAS race, a post-integration gate failure,
+        evidence-directory I/O failure, or infrastructure failure
+        occurring after the owner clicks Accept.  Acceptance
+        revalidates state and still runs the post-integration gate.
+        """
+        checks: list[AcceptPrecondition] = []
+
+        run = self.db.get_run(run_id)
+        if run is None:
+            checks.append(_fail("run_completed", "Run completed", f"Run '{run_id}' not found"))
+            return AcceptEligibility(run_id=run_id, eligible=False, checks=tuple(checks))
+        if run.status != RunStatus.COMPLETED:
+            checks.append(
+                _fail(
+                    "run_completed",
+                    "Run completed",
+                    f"Status is {run.status.value}, expected COMPLETED",
+                )
+            )
+            return AcceptEligibility(run_id=run_id, eligible=False, checks=tuple(checks))
+        checks.append(_pass("run_completed", "Run completed", "Status is COMPLETED"))
+
+        attempts = self.db.get_attempts_for_run(run_id)
+        final_attempt = _select_final_candidate(attempts)
+        if final_attempt is None:
+            checks.append(
+                _fail(
+                    "candidate_available",
+                    "Candidate available",
+                    "Run has no successful candidate commit",
+                )
+            )
+            return AcceptEligibility(run_id=run_id, eligible=False, checks=tuple(checks))
+        candidate_sha = final_attempt.commit_sha or ""
+        checks.append(
+            _pass(
+                "candidate_available",
+                "Candidate available",
+                f"Candidate commit {candidate_sha[:8]} from attempt "
+                f"#{final_attempt.attempt_number}",
+            )
+        )
+
+        # Provenance: same assertion the engine executes, read-only, with
+        # the same shared lineage-base helper.
+        try:
+            provenance = assert_candidate_provenance(
+                run,
+                final_attempt,
+                lineage_base_sha=_lineage_base_sha(attempts, final_attempt),
+                extra_authorized_bases=failover_authorized_bases(self.db, run_id),
+            )
+            candidate_sha = provenance.candidate_sha
+            candidate_branch = final_attempt.branch_name
+            checks.append(
+                _pass(
+                    "candidate_provenance",
+                    "Candidate belongs to this run",
+                    f"Candidate {candidate_sha[:8]} is provably a product of this run",
+                )
+            )
+        except ProvenanceError as exc:
+            checks.append(
+                _fail("candidate_provenance", "Candidate belongs to this run", str(exc))
+            )
+            return AcceptEligibility(run_id=run_id, eligible=False, checks=tuple(checks))
+
+        # Owner rejection: a canonical candidate_rejected event for the
+        # exact current candidate blocks acceptance.  Uses the SAME
+        # shared helper as the lifecycle projection and the Reject
+        # action, so "rejected" has exactly one definition.  The Web
+        # never invents this blocker; it renders this checklist.
+        if find_matching_rejection_event(self.db, run_id, candidate_sha) is not None:
+            checks.append(
+                _fail(
+                    "candidate_not_rejected",
+                    "Candidate not rejected",
+                    f"Candidate {candidate_sha[:8]} was rejected by the owner "
+                    "(candidate_rejected event); re-run to produce a new candidate.",
+                )
+            )
+            return AcceptEligibility(run_id=run_id, eligible=False, checks=tuple(checks))
+        checks.append(
+            _pass(
+                "candidate_not_rejected",
+                "Candidate not rejected",
+                "No owner rejection recorded for this candidate",
+            )
+        )
+
+        # Target repository: derived from the run row, never the UI selection.
+        try:
+            target_repo = assert_run_repository(run).resolve()
+            checks.append(
+                _pass(
+                    "target_repository",
+                    "Target repository resolved",
+                    f"Target repository is {target_repo}",
+                )
+            )
+        except ProvenanceError as exc:
+            checks.append(
+                _fail("target_repository", "Target repository resolved", str(exc))
+            )
+            return AcceptEligibility(run_id=run_id, eligible=False, checks=tuple(checks))
+
+        # Target must be clean.
+        try:
+            clean = GitManager.is_clean(target_repo)
+        except Exception as exc:
+            checks.append(
+                _fail("target_clean", "Target repository clean", f"Unreadable: {exc}")
+            )
+            return AcceptEligibility(run_id=run_id, eligible=False, checks=tuple(checks))
+        if not clean:
+            checks.append(
+                _fail(
+                    "target_clean",
+                    "Target repository clean",
+                    f"Target repository '{target_repo}' has uncommitted or "
+                    "untracked changes. Working tree must be clean before accept.",
+                )
+            )
+            return AcceptEligibility(run_id=run_id, eligible=False, checks=tuple(checks))
+        checks.append(
+            _pass("target_clean", "Target repository clean", "Working tree is clean")
+        )
+
+        # Target HEAD must still equal the candidate base (no rebasing here; R4).
+        try:
+            current_head = GitManager.get_head_commit(target_repo)
+        except Exception as exc:
+            checks.append(
+                _fail(
+                    "target_head",
+                    "Candidate based on current HEAD",
+                    f"Target HEAD unreadable: {exc}",
+                )
+            )
+            return AcceptEligibility(run_id=run_id, eligible=False, checks=tuple(checks))
+        if current_head != run.base_commit:
+            checks.append(
+                _fail(
+                    "target_head",
+                    "Candidate based on current HEAD",
+                    f"Target HEAD moved since this candidate was created "
+                    f"(HEAD {current_head[:8]}, base {run.base_commit[:8]}). "
+                    "Refusing accept.",
+                )
+            )
+            return AcceptEligibility(run_id=run_id, eligible=False, checks=tuple(checks))
+        checks.append(
+            _pass(
+                "target_head",
+                "Candidate based on current HEAD",
+                f"Target HEAD equals candidate base {run.base_commit[:8]}",
+            )
+        )
+
+        # Candidate ref, when present, must name the candidate SHA.
+        try:
+            branch_commit = GitManager.get_ref_commit(target_repo, candidate_branch)
+        except Exception as exc:
+            checks.append(
+                _fail(
+                    "candidate_ref",
+                    "Candidate ref consistent",
+                    f"Candidate ref unreadable: {exc}",
+                )
+            )
+            return AcceptEligibility(run_id=run_id, eligible=False, checks=tuple(checks))
+        if branch_commit is not None and branch_commit != candidate_sha:
+            checks.append(
+                _fail(
+                    "candidate_ref",
+                    "Candidate ref consistent",
+                    f"Candidate branch '{candidate_branch}' points to "
+                    f"{branch_commit[:8]}, expected candidate commit "
+                    f"{candidate_sha[:8]}.",
+                )
+            )
+            return AcceptEligibility(run_id=run_id, eligible=False, checks=tuple(checks))
+        checks.append(
+            _pass(
+                "candidate_ref",
+                "Candidate ref consistent",
+                "Candidate ref names the candidate commit"
+                if branch_commit is not None
+                else "No candidate ref to reconcile",
+            )
+        )
+
+        # Deterministic gate evidence: the candidate attempt succeeded, which
+        # is only recorded after its run-time gate passed.  The
+        # post-integration gate itself still runs inside accept_run.
+        checks.append(
+            _pass(
+                "deterministic_gate",
+                "Deterministic gate passed",
+                f"Attempt #{final_attempt.attempt_number} succeeded after its gate",
+            )
+        )
+
+        # Review rule, exactly as the engine enforces it: required review
+        # must exist; any present non-substantive verdict blocks; no review
+        # when none is required is valid; PASS and PASS_WITH_BACKLOG approve.
+        try:
+            review_required = self._resolve_review_required_from_persisted_run(run_id)
+        except RuntimeError as exc:
+            checks.append(
+                _fail("review", "Review requirement satisfied", str(exc))
+            )
+            return AcceptEligibility(run_id=run_id, eligible=False, checks=tuple(checks))
+        latest_review = self.db.get_latest_review(run_id)
+        if latest_review is None and review_required:
+            checks.append(
+                _fail(
+                    "review",
+                    "Review requirement satisfied",
+                    "Independent review is required by the persisted run "
+                    "configuration but no review exists",
+                )
+            )
+            return AcceptEligibility(run_id=run_id, eligible=False, checks=tuple(checks))
+        if latest_review is not None and latest_review.verdict not in (
+            ReviewVerdict.PASS,
+            ReviewVerdict.PASS_WITH_BACKLOG,
+        ):
+            checks.append(
+                _fail(
+                    "review",
+                    "Review requirement satisfied",
+                    f"Independent review verdict is "
+                    f"{latest_review.verdict.value}, not a substantive approval: "
+                    f"{latest_review.summary}",
+                )
+            )
+            return AcceptEligibility(run_id=run_id, eligible=False, checks=tuple(checks))
+        if latest_review is None:
+            checks.append(
+                _pass(
+                    "review",
+                    "Review requirement satisfied",
+                    "Review not required by policy and none exists",
+                )
+            )
+        else:
+            checks.append(
+                _pass(
+                    "review",
+                    "Review requirement satisfied",
+                    f"Review verdict {latest_review.verdict.value} is a "
+                    "substantive approval",
+                )
+            )
+
+        # Candidate must fast-forward from the target HEAD.
+        try:
+            descendant = GitManager.is_ancestor(target_repo, current_head, candidate_sha)
+        except Exception as exc:
+            checks.append(
+                _fail(
+                    "fast_forward",
+                    "Candidate fast-forwards target",
+                    f"Ancestry unreadable: {exc}",
+                )
+            )
+            return AcceptEligibility(run_id=run_id, eligible=False, checks=tuple(checks))
+        if not descendant:
+            checks.append(
+                _fail(
+                    "fast_forward",
+                    "Candidate fast-forwards target",
+                    f"Candidate {candidate_sha[:8]} is not a fast-forward "
+                    f"descendant of target {current_head[:8]}",
+                )
+            )
+            return AcceptEligibility(run_id=run_id, eligible=False, checks=tuple(checks))
+        checks.append(
+            _pass(
+                "fast_forward",
+                "Candidate fast-forwards target",
+                f"Candidate {candidate_sha[:8]} descends from target "
+                f"{current_head[:8]}",
+            )
+        )
+
+        # Frozen gate-scratch authority must be absent (legacy DISK default)
+        # or syntactically valid; present-but-invalid fails closed.
+        try:
+            frozen_mode = self._frozen_gate_scratch_mode(run)
+        except RuntimeError as exc:
+            checks.append(
+                _fail("gate_scratch", "Gate scratch policy valid", str(exc))
+            )
+            return AcceptEligibility(run_id=run_id, eligible=False, checks=tuple(checks))
+        checks.append(
+            _pass(
+                "gate_scratch",
+                "Gate scratch policy valid",
+                f"Frozen gate scratch mode is {frozen_mode.value}",
+            )
+        )
+
+        # R0-B.1 parity: there is deliberately NO "accepted only once"
+        # projection blocker here.  accept_run() enforces no such
+        # pre-CAS policy, so a prior run_accepted event must not make
+        # the projection ineligible -- the preserved pre-R0 acceptance
+        # policy is authoritative and candidate lifecycle /
+        # accepted-state policy belongs to R3.  Prior acceptance
+        # remains visible in the run event stream; it is informational,
+        # never a static eligibility blocker.
+
+        return AcceptEligibility(run_id=run_id, eligible=True, checks=tuple(checks))
+
     def accept_run(self, run_id: str, gate_timeout: float = 300.0) -> AcceptResult:
-        """Safely fast-forward integrate a completed candidate run and verify canonical gate."""
+        """Safely fast-forward integrate a completed candidate run and verify canonical gate.
+
+        Pre-R0 acceptance policy is preserved: there is no
+        "accepted only once" engine precondition here.  Candidate
+        lifecycle / accepted-state policy belongs to R3.
+        """
         run = self.db.get_run(run_id)
         if not run:
             raise ValueError(f"Run '{run_id}' not found")
@@ -704,13 +1139,9 @@ class AcceptEngine:
             )
 
         attempts = self.db.get_attempts_for_run(run_id)
-        successful_attempts = [
-            a for a in attempts if a.status == AttemptStatus.SUCCESS and a.commit_sha
-        ]
-        if not successful_attempts:
+        final_attempt = _select_final_candidate(attempts)
+        if final_attempt is None:
             raise RuntimeError(f"Run '{run_id}' has no successful candidate commit")
-
-        final_attempt = successful_attempts[-1]
 
         # Fail closed unless this candidate is provably a product of *this*
         # run and *this* objective.  Without it, a candidate from an unrelated
@@ -719,14 +1150,7 @@ class AcceptEngine:
             provenance = assert_candidate_provenance(
                 run,
                 final_attempt,
-                lineage_base_sha=next(
-                    (
-                        prior.commit_sha
-                        for prior in reversed(attempts)
-                        if prior.attempt_number < final_attempt.attempt_number and prior.commit_sha
-                    ),
-                    None,
-                ),
+                lineage_base_sha=_lineage_base_sha(attempts, final_attempt),
                 # C11-D: a failover-legitimate final attempt based at
                 # its validated required-base anchor (re-verified live
                 # against durable decision evidence) remains provably
@@ -738,6 +1162,17 @@ class AcceptEngine:
 
         candidate_sha = provenance.candidate_sha
         candidate_branch = final_attempt.branch_name
+
+        # A rejected current candidate must not remain acceptable.  Same
+        # shared helper as the eligibility projection above: enforced
+        # here before any Git mutation, so direct service/engine
+        # acceptance after rejection fails with the target HEAD
+        # untouched and no run_accepted event added.
+        if find_matching_rejection_event(self.db, run_id, candidate_sha) is not None:
+            raise RuntimeError(
+                f"Cannot accept run '{run_id}': candidate {candidate_sha[:8]} "
+                "was rejected by the owner (candidate_rejected event)."
+            )
 
         # The repository is derived from the run's own persisted identity, never
         # from the UI's currently selected project.

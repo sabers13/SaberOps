@@ -1,4 +1,4 @@
-"""One normalized run configuration shared by CLI, Web, and Ox Manager."""
+"""One normalized run configuration shared by CLI and Web."""
 
 from __future__ import annotations
 
@@ -128,7 +128,7 @@ class RunConfig:
     publish_candidate: bool = False
     tool_refs: tuple[str, ...] = ()
     # C10: optional non-secret frozen gateway contract, built by the caller
-    # (CLI/Web/manager) before :func:`resolve_run_config` and stored
+    # (CLI/Web) before :func:`resolve_run_config` and stored
     # verbatim. ``None`` means the run uses the first-class no-gateway
     # ``DIRECT`` path.  The value is opaque to RunConfig so this module
     # never imports from :mod:`saberops.gateway`.
@@ -159,6 +159,13 @@ class RunConfig:
     # preference at the lowest precedence band; it MUST NOT escalate
     # into governance, security, or acceptance semantics.
     gate_scratch_mode: GateScratchMode = GateScratchMode.DISK
+    # R2-A: owner-selectable accept target branch, FROZEN at run creation.
+    # An explicit project setting wins; otherwise the current symbolic
+    # branch is resolved once at creation and frozen verbatim.  Legacy or
+    # partial payloads carry "" (unknown); acceptance behavior for such
+    # runs is unchanged (the AcceptEngine still reads live repo state).
+    # R4 owns moved-HEAD acceptance; R2-A establishes and freezes policy.
+    accept_target_branch: str = ""
 
     @property
     def initial_tier(self) -> Tier:
@@ -313,6 +320,10 @@ def resolve_run_config(
     # ``tier`` keeps legacy callers source-compatible while normalizing them.
     tier: Tier | str | None = None,
     gate_scratch_mode: GateScratchMode | str | None = None,
+    # R2-A: frozen accept target branch.  The shared run-creation
+    # authority always supplies an explicit value; direct low-level
+    # callers may omit it (legacy "" = unknown, acceptance unchanged).
+    accept_target_branch: str | None = None,
 ) -> RunConfig:
     """Normalize all public launch inputs into the one canonical policy object."""
     target = target_repo if target_repo is not None else repo_path
@@ -404,6 +415,9 @@ def resolve_run_config(
             str(gateway_frozen_digest) if gateway_frozen_digest else None
         ),
         gate_scratch_mode=resolved_gate_scratch_mode,
+        accept_target_branch=(
+            str(accept_target_branch).strip() if accept_target_branch else ""
+        ),
     )
 
 
@@ -502,4 +516,7 @@ def reconstruct_run_config(data: dict[str, Any]) -> RunConfig:
         # never recorded before this tranche -- replaying such a run with
         # the current RAM setting would silently change its semantics.
         gate_scratch_mode=_reconstruct_gate_scratch_mode(data),
+        # R2-A: legacy payloads predate the frozen target branch; ""
+        # preserves their acceptance behavior (live repo state).
+        accept_target_branch=str(data.get("accept_target_branch", "") or ""),
     )

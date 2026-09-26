@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% set active_pane = "chats" %}
+{% block title %}Reviewer role{% endblock %}
+{% block conversation_title %}Reviewer role{% endblock %}
+{% block run_meta %}Model used for independent SaberOps code review{% endblock %}
+
+{% block workspace %}
+<div class="date-rule">Reviewer role</div>
+
+{% if notice %}
+<p class="so-notice">{{ notice }}</p>
+{% endif %}
+{% if error %}
+<p class="so-error">{{ error }}</p>
+{% endif %}
+
+<article class="message">
+  <div class="avatar assistant" aria-hidden="true">S</div>
+  <div>
+    <div class="message-head"><strong>SaberOps</strong></div>
+    <div class="message-body"><p>Only verified available models are listed. The saved choice names one specific reviewer model setup, not a free-floating provider/model setting, and it does not change worker routing order. Until a reviewer is selected, the existing reviewer policy is used.</p></div>
+  </div>
+</article>
+
+<div class="settings-section">
+  <div class="settings-section-head"><h4>Current selection</h4><p>The saved exact reviewer model setup used for independent review.</p></div>
+  <div class="settings-card"><div class="settings-control-row" style="display: block;">
+    {% if current %}
+    <p class="mono">binding = {{ current }}</p>
+    <p class="muted">Resolution: {{ selection_status }}</p>
+    {% else %}
+    <p class="muted">No Reviewer choice saved. The existing reviewer policy is used until one is selected.</p>
+    {% endif %}
+  </div></div>
+</div>
+
+<div class="settings-section">
+  <div class="settings-section-head"><h4>Available models</h4><p>A model becomes selectable once SaberOps has verified it can actually run.</p></div>
+  {% if bindings %}
+  <div class="so-table-wrap"><table class="so-table">
+    <thead><tr><th>Provider</th><th>Model</th><th>Backend</th><th>Profile</th><th>Quota pool</th><th>Binding id</th><th>Select</th></tr></thead>
+    <tbody>
+      {% for b in bindings %}
+      <tr>
+        <td>{{ b.provider }}</td>
+        <td class="mono">{{ b.model }}</td>
+        <td class="mono">{{ b.backend }}</td>
+        <td class="mono">{{ b.profile_id }}</td>
+        <td class="mono">{{ b.quota_pool_id }}</td>
+        <td class="mono">{{ b.binding_id }}</td>
+        <td>
+          {% if selected_value == b.binding_id %}
+          <span class="badge badge-normal">currently selected</span>
+          {% else %}
+          <form method="post" action="/reviewer/select" class="so-inline-form">
+            <input type="hidden" name="binding_id" value="{{ b.binding_id }}">
+            <button type="submit" class="text-button">Select</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table></div>
+  {% else %}
+  <div class="so-empty"><strong>No available models</strong>Connect an account provider and run “Refresh models” on the <a href="/access">Model Access</a> page.</div>
+  {% endif %}
+</div>
+{% endblock %}

@@ -126,7 +126,10 @@ def test_c16c2_dashboard_renders_approved_shell(
     assert "/routing" in text
     assert "/orchestrator" in text
     assert "/quota" in text
-    assert "/manager" in text
+    # R0-A: the legacy Manager capability is gone from owner navigation.
+    assert "/manager" not in text
+    assert "Ox Manager" not in text
+    assert "Ox Alpha" not in text
     # Pages without inspector tabs use the collapsed three-row grid.
     assert 'class="workspace"' in text
     assert 'class="workspace has-tabs"' not in text
@@ -272,17 +275,13 @@ def test_c16c2_owner_pages_keep_forms(
     orch = client.get("/orchestrator")
     assert orch.status_code == 200
     assert 'action="/orchestrator/select"' in orch.text
-    assert "Eligible bindings" in orch.text
-
-    manager = client.get("/manager")
-    assert manager.status_code == 200
-    assert 'id="manager-form"' in manager.text
+    assert "Available models" in orch.text
 
 
 def test_c16c2_settings_modal_marks_unavailable_sections(
     isolated_xdg: None, tmp_path: Path
 ) -> None:
-    """Sections with no backend capability are honest, not fake."""
+    """Sections with no backend capability are removed, not fake."""
     client = _client(tmp_path)
     text = client.get("/").text
     for section in (
@@ -292,11 +291,12 @@ def test_c16c2_settings_modal_marks_unavailable_sections(
         "models",
         "routing",
         "repositories",
-        "notifications",
-        "retention",
     ):
         assert f'data-settings-section="{section}"' in text, section
-    assert "Not available in this version" in text
+    # R0-A: placeholder Notifications/Retention surfaces are gone.
+    assert 'data-settings-section="notifications"' not in text
+    assert 'data-settings-section="retention"' not in text
+    assert "Not available in this version" not in text
 
 
 def test_c16c2_console_assets_are_served(

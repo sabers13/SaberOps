@@ -1,4 +1,4 @@
-"""Safe, marker-scoped synchronization of the OpenCode ORX agent file.
+"""Safe, marker-scoped synchronization of the SaberOps OpenCode agent file.
 
 The agent Markdown is an adapter surface generated from
 :mod:`saberops.authority`.  Synchronization rewrites only the two
@@ -55,18 +55,18 @@ def default_orch_executable() -> Path:
 
     ``sys.prefix`` is used rather than a resolved ``sys.executable`` so a
     virtualenv whose ``bin/python`` is a symlink to the system interpreter
-    still yields the venv's own ``orch``, which is the exact path ORX is
-    granted.
+    still yields the venv's own ``orch``, which is the exact path the
+    SaberOps agent is granted.
     """
     return Path(sys.prefix) / "bin" / "orch"
 
 
 def default_allowed_directories(orch_executable: Path) -> tuple[str, ...]:
-    """Derive the external-directory allowlist from the Orch installation.
+    """Derive the external-directory allowlist from the ``orch`` installation.
 
     ``<workspace>/<repo>/.venv/bin/orch`` yields the workspace root that holds
-    the Orch repository, which is the tree ORX legitimately inspects, plus
-    ``/tmp`` for scratch evidence.  Callers may override this entirely.
+    the SaberOps checkout, which is the tree the agent legitimately inspects,
+    plus ``/tmp`` for scratch evidence.  Callers may override this entirely.
     """
     parents = orch_executable.parents
     if len(parents) < 4:
@@ -80,7 +80,7 @@ def _bool_yaml(value: bool) -> str:
 
 
 def _shell_decision(policy: AuthorityPolicy) -> str:
-    """Whether ORX may run Orch itself without a per-invocation prompt."""
+    """Whether the SaberOps agent may run ``orch`` itself without a per-invocation prompt."""
     return "allow" if policy.auto_start else "ask"
 
 
@@ -89,7 +89,7 @@ def _question_decision(policy: AuthorityPolicy) -> str:
 
 
 def _doom_loop_decision(policy: AuthorityPolicy) -> str:
-    """Repeating the same governed Orch command is not itself a new decision."""
+    """Repeating the same governed ``orch`` command is not itself a new decision."""
     return "ask" if policy.routine_questions else "allow"
 
 
@@ -141,11 +141,11 @@ def render_permissions_region(
         ]
     else:
         lines += [
-            "  # ORX is the controller, never the implementer: project mutation",
-            "  # belongs to workers launched through Orch.",
+        "  # The SaberOps agent is the controller, never the implementer:",
+        "  # project mutation belongs to workers launched through `orch`.",
             "  edit: deny",
             "",
-            "  # Do not let ORX bypass Orch by spawning OpenCode subagents directly.",
+            "  # Do not let the agent bypass `orch` by spawning OpenCode subagents directly.",
             "  task: deny",
             "",
         ]
@@ -171,8 +171,8 @@ def render_permissions_region(
         lines.append(f'    "{directory}": allow')
     lines += [
         "",
-        "  # Orch is the only executable ORX may run.  Full authority over Orch",
-        "  # is never arbitrary host-shell authority.",
+        "  # `orch` is the only executable the SaberOps agent may run.",
+        "  # Full authority over `orch` is never arbitrary host-shell authority.",
         "  bash:",
         f'    "*": {"allow" if host_access == HostAccessMode.UNRESTRICTED else "deny"}',
         "",
@@ -189,14 +189,14 @@ def render_permissions_region(
     if publish_governed:
         assert governed_publish_command is not None
         lines += [
-            "    # Publication is authorized only through this governed Orch",
-            "    # command; raw git push/merge/tag is never the mechanism.",
+        "    # Publication is authorized only through this governed `orch`",
+        "    # command; raw git push/merge/tag is never the mechanism.",
             f'    "{orch} {governed_publish_command}": allow',
             f'    "{orch} {governed_publish_command} *": allow',
         ]
     else:
         reason = (
-            "auto_publish is granted but Orch exposes no governed publication"
+            "auto_publish is granted but `orch` exposes no governed publication"
             if policy.auto_publish
             else "this mode does not grant publication authority"
         )
@@ -217,18 +217,18 @@ def render_permissions_region(
 
 def _authorized_actions(policy: AuthorityPolicy) -> list[tuple[str, bool]]:
     return [
-        ("start Orch runs", policy.auto_start),
+        ("start SaberOps runs", policy.auto_start),
         ("retry a recoverable attempt", policy.auto_retry),
         ("repair a failed attempt", policy.auto_repair),
         (
-            "escalate capability tier when Orch policy justifies it",
+            "escalate capability tier when SaberOps policy justifies it",
             policy.auto_escalate_when_policy_justifies,
         ),
         ("run the authoritative deterministic gate", policy.auto_gate),
         ("obtain independent review", policy.auto_review),
         ("accept a candidate once every fail-closed requirement passes", policy.auto_accept),
-        ("perform ordinary safe Orch-managed cleanup", policy.auto_safe_cleanup),
-        ("publish through a governed Orch capability", policy.auto_publish),
+        ("perform ordinary safe SaberOps-managed cleanup", policy.auto_safe_cleanup),
+        ("publish through a governed SaberOps capability", policy.auto_publish),
     ]
 
 
@@ -291,7 +291,7 @@ def render_prompt_region(
         ]
     if policy.auto_publish and not governed_publish_command:
         lines += [
-            "Publication authority is granted by policy, but Orch exposes no",
+            "Publication authority is granted by policy, but SaberOps exposes no",
             "governed publication capability yet.  Stop at the strongest",
             "supported accepted state.  Never substitute raw `git push`,",
             "`git merge`, `git tag`, or a deployment command.",
@@ -299,7 +299,7 @@ def render_prompt_region(
         ]
     elif policy.auto_publish:
         lines += [
-            f"Publish only through the governed Orch command `{governed_publish_command}`,",
+            f"Publish only through the governed SaberOps command `{governed_publish_command}`,",
             "and only after acceptance succeeds.  Never substitute raw",
             "`git push`, `git merge`, `git tag`, or a deployment command.",
             "",
@@ -307,7 +307,7 @@ def render_prompt_region(
     else:
         lines += [
             "Automatic publication is NOT authorized.  Never run `git push`,",
-            "`git merge`, `git tag`, a release/deployment command, or an Orch",
+            "`git merge`, `git tag`, a release/deployment command, or a SaberOps",
             "publication operation on your own initiative.",
             "",
         ]

@@ -6,13 +6,22 @@ import json
 import re
 import uuid
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from saberops.authority import load_authority_settings
 from saberops.config import DEFAULT_REVIEW_LIMIT, RunConfig, reconstruct_run_config
 from saberops.control_plane import (
     legacy_frozen_control_plane,
     reconstruct_frozen_control_plane,
+)
+from saberops.control_plane.binding_store import (
+    BindingStoreError,
+    load_owner_bindings,
+)
+from saberops.control_plane.bindings import (
+    BindingResolutionError,
+    ResolvedExecutionBinding,
+    resolve_reviewer_candidate_binding,
 )
 from saberops.db import Database, current_iso_timestamp
 from saberops.dispatch import control_plane_decision
@@ -48,8 +57,8 @@ from saberops.routing import (
     CANDIDATE_OPENCODE_GO_DEEPSEEK_V4_PRO,
     CANDIDATE_OPENCODE_MUSE_SPARK,
     CANDIDATE_OPENCODE_OX_ALPHA,
-    is_muse_model,
 )
+from saberops.routing_config import RoutingConfigError, payload_to_snapshot
 from saberops.routing_decision import TierDecision, choose_tier
 from saberops.telemetry import persist_worker_usage
 from saberops.workers.base import WorkerAdapter
@@ -158,13 +167,22 @@ def _pre_dispatch_skip_reason(
     policy: object | None = None,
     required_capabilities: tuple[str, ...] = (),
     control_plane_digest: str | None = None,
+    binding_pool_id: str | None = None,
     readiness_state: ProviderReadiness | None = None,
     readiness_reason: str | None = None,
     readiness_executable_available: bool = True,
+    training_required: str | None = None,
+    routing_snapshot: Any | None = None,
 ) -> str | None:
     """Determine a deterministic pre-dispatch skip reason, or None to launch.
 
     Delegates to the shared dispatch evaluator to ensure single-source policy.
+    ``training_required`` / ``routing_snapshot`` carry the Run's frozen R2-B
+    data-policy evidence so reviewer dispatch reaches the same
+    decision/reason as worker dispatch and C07 preflight.
+    ``binding_pool_id`` scopes C07 quota evaluation to the exact resolved
+    reviewer's quota pool (R3-E1.2); ``None`` keeps the legacy
+    provider-wide behavior for unbound ladder candidates.
     """
     from saberops.dispatch import evaluate_eligibility
 
@@ -172,12 +190,15 @@ def _pre_dispatch_skip_reason(
         candidate=candidate,
         adapter=adapter,
         training_allowed=training_allowed,
+        training_required=training_required,
+        routing_snapshot=routing_snapshot,
         quota_states=quota_states,
         prompt_bytes=prompt_bytes,
         explicit_override=False,
         policy=policy,  # type: ignore[arg-type]
         required_capabilities=required_capabilities,
         control_plane_digest=control_plane_digest,
+        binding_pool_id=binding_pool_id,
         readiness_state=readiness_state,
         readiness_reason=readiness_reason,
         readiness_executable_available=readiness_executable_available,
@@ -293,12 +314,15 @@ def select_reviewer_ladder(
 
     The ladder is keyed by the normalized implementer model basename (prefix- and
     case-insensitive) and the run tier. It never includes the implementer itself,
-    drops Muse entries when training is not allowed, and only keeps candidates
-    whose provider adapter is currently available.
+    drops data-policy-denied entries under the canonical R2-B decision (the
+    same decision worker dispatch and C07 preflight reach), and only keeps
+    candidates whose provider adapter is currently available.
     """
+    from saberops.training_policy import is_training_permitted
+
     ladder: list[WorkerCandidate] = []
     for candidate in _ordered_reviewer_candidates(candidate_provider, candidate_model, tier):
-        if not training_allowed and is_muse_model(candidate.model):
+        if not is_training_permitted(candidate, training_allowed):
             continue
         if not registry.is_available(candidate.provider):
             continue
@@ -591,6 +615,24 @@ class ReviewEngine:
         # training-policy, availability, quota, and transport exclusions are
         # surfaced as recorded skip events instead of being silently dropped.
         if reviewer_override is not None:
+            # R3-E1: an explicitly selected reviewer keeps the ladder's
+            # anti-self-review invariant (the legacy ladder excludes the
+            # implementer by normalized model).  A configured reviewer
+            # that IS the final implementer fails closed here -- it is
+            # never silently replaced by another reviewer.
+            # R3-E1.1: the override's exact ``binding_id`` (when present)
+            # is re-resolved at the launch boundary below through the
+            # canonical reviewer resolver; provider/model text alone
+            # never authorizes the dispatch.
+            if _normalized_model(reviewer_override.model) == _normalized_model(
+                final_attempt.model
+            ):
+                raise ValueError(
+                    "Configured reviewer "
+                    f"{reviewer_override.provider}/{reviewer_override.model} "
+                    "is the same model as the final implementer; refusing "
+                    "self-review rather than substituting another reviewer"
+                )
             ladder = [reviewer_override]
         else:
             ladder = select_reviewer_ladder_unfiltered(
@@ -715,6 +757,26 @@ class ReviewEngine:
             )
         control_plane_policy = frozen_control_plane.policy
 
+        # R2-B: reviewer dispatch governs data policy from the Run's frozen
+        # routing snapshot (reconstructed from the persisted payload, never
+        # mutable live state) so it reaches the same decision/reason as
+        # worker dispatch and C07 preflight.  A missing/unreadable snapshot
+        # (legacy runs) falls back to the candidate's frozen classification
+        # plus the static v1 knowledge -- the historical behavior.
+        routing_snapshot = None
+        if run.routing_snapshot_json:
+            try:
+                snapshot_payload = json.loads(run.routing_snapshot_json)
+            except json.JSONDecodeError:
+                snapshot_payload = None
+            if isinstance(snapshot_payload, dict):
+                try:
+                    routing_snapshot = payload_to_snapshot(
+                        snapshot_payload, run_id=run_id
+                    )
+                except RoutingConfigError:
+                    routing_snapshot = None
+
         # Bounded budget accounting: only ACTUALLY LAUNCHED reviewer model calls
         # consume a slot. Deterministic pre-dispatch skips do not.
         skipped_count = 0
@@ -722,25 +784,105 @@ class ReviewEngine:
         unusable_count = 0
         unusable_notes: list[dict[str, str | None]] = []
         review_dispatches: list[DispatchEvidence] = []
+        skipped_candidate_details: list[dict[str, object]] = []
+        # R3-E1.1: the authoritative owner binding registry the launch
+        # boundary re-resolves exact reviewer bindings against.  A
+        # corrupt/unreadable store refuses bound candidates (fail closed)
+        # while leaving the legacy ladder's provider/model path untouched.
+        try:
+            _owner_binding_registry = load_owner_bindings().registry
+        except BindingStoreError:
+            _owner_binding_registry = None
         for candidate in ladder:
             if tried_count >= limit:
                 break
             cand_adapter = self.registry.get(candidate.provider)
-            if self.readiness_service is not None:
-                readiness = self.readiness_service.admission_for(
-                    provider=candidate.provider
+            # R3-E1.1: exact REVIEWER binding authority at the launch
+            # boundary.  A candidate carrying a non-empty ``binding_id``
+            # must re-resolve to exactly that REVIEWER-role binding with
+            # matching provider/model through the canonical C11-B seam
+            # with the real adapter.  Any failure refuses with zero
+            # model launch and never substitutes a provider/model
+            # sibling: no fallback, no budget consumed.
+            reviewer_resolved: ResolvedExecutionBinding | None = None
+            candidate_binding_id = getattr(candidate, "binding_id", None)
+            if candidate_binding_id is not None and str(candidate_binding_id).strip():
+                from saberops.dispatch import (
+                    build_candidate_skip as _build_binding_refusal_detail,
                 )
+
+                try:
+                    reviewer_resolved = resolve_reviewer_candidate_binding(
+                        registry=_owner_binding_registry,
+                        candidate_binding_id=candidate_binding_id,
+                        provider=candidate.provider,
+                        model=candidate.model,
+                        adapter=cand_adapter,
+                    )
+                except BindingResolutionError as exc:
+                    self.db.record_event(
+                        run_id,
+                        "reviewer_binding_unresolvable",
+                        payload={
+                            "provider": candidate.provider,
+                            "model": candidate.model,
+                            "binding_id": str(candidate_binding_id).strip(),
+                            "reason": exc.reason,
+                        },
+                    )
+                    skipped_candidate_details.append(
+                        dict(
+                            _build_binding_refusal_detail(
+                                provider=candidate.provider,
+                                model=candidate.model,
+                                reason=exc.reason,
+                                binding_id=str(candidate_binding_id).strip(),
+                            )
+                        )
+                    )
+                    skipped_count += 1
+                    continue
+            if self.readiness_service is not None:
+                if reviewer_resolved is not None:
+                    # R3-E1.2: a bound reviewer admits through its exact
+                    # resolved profile, never provider-wide.  The
+                    # canonical readiness contract resolves
+                    # ``discovered-profile:<connection>`` to that exact
+                    # connection; ``backend_ref`` stays default because
+                    # the contract does not require it and discovered
+                    # profiles carry none.  Unbound ladder candidates
+                    # keep the historical provider-level call below.
+                    readiness = self.readiness_service.admission_for(
+                        provider=candidate.provider,
+                        profile_id=reviewer_resolved.profile_id,
+                    )
+                else:
+                    readiness = self.readiness_service.admission_for(
+                        provider=candidate.provider
+                    )
             else:
                 readiness = None
+            # R3-E1.2: the selected exact binding's quota pool is the
+            # C07 quota authority; unbound ladder candidates keep the
+            # legacy provider-wide (``None``) scope.  No new quota
+            # semantics: the existing ``binding_pool_id`` seam filters
+            # to observations for this pool only.
+            reviewer_pool_id = (
+                reviewer_resolved.quota_pool_id
+                if reviewer_resolved is not None
+                else None
+            )
             skip_reason = _pre_dispatch_skip_reason(
                 candidate=candidate,
                 adapter=cand_adapter,
                 training_allowed=run.training_allowed,
+                routing_snapshot=routing_snapshot,
                 quota_states=quota_states,
                 prompt_bytes=prompt_bytes,
                 policy=control_plane_policy,
                 required_capabilities=frozen_control_plane.required_capabilities,
                 control_plane_digest=frozen_control_plane.digest,
+                binding_pool_id=reviewer_pool_id,
                 readiness_state=readiness.state if readiness is not None else None,
                 readiness_reason=readiness.reason if readiness is not None else None,
                 readiness_executable_available=(
@@ -751,11 +893,13 @@ class ReviewEngine:
                 candidate=candidate,
                 adapter=cand_adapter,
                 training_allowed=run.training_allowed,
+                routing_snapshot=routing_snapshot,
                 quota_states=quota_states,
                 prompt_bytes=prompt_bytes,
                 policy=control_plane_policy,
                 required_capabilities=frozen_control_plane.required_capabilities,
                 control_plane_digest=frozen_control_plane.digest,
+                binding_pool_id=reviewer_pool_id,
                 readiness_state=readiness.state if readiness is not None else None,
                 readiness_reason=readiness.reason if readiness is not None else None,
                 readiness_executable_available=(
@@ -769,6 +913,9 @@ class ReviewEngine:
             )
             if skip_reason is not None:
                 # Build shared payload and merge for backward compatibility
+                from saberops.dispatch import (
+                    build_candidate_skip as _build_review_skip_detail,
+                )
                 from saberops.dispatch import build_skip_payload as _build_review_skip
 
                 try:
@@ -787,18 +934,54 @@ class ReviewEngine:
                     transport=transport_v,
                     explicit_override=False,
                 )
+                # Structured skip record: sanitized typed reason plus
+                # readiness state/reason/connection/observed_at when
+                # readiness participated and the exact binding id when
+                # the candidate carries one.
+                skip_detail = _build_review_skip_detail(
+                    provider=candidate.provider,
+                    model=candidate.model,
+                    reason=skip_reason,
+                    binding_id=getattr(candidate, "binding_id", None),
+                    readiness_state=(
+                        readiness.state.value if readiness is not None else None
+                    ),
+                    readiness_reason=(
+                        readiness.reason if readiness is not None else None
+                    ),
+                    connection_id=(
+                        readiness.connection_id if readiness is not None else None
+                    ),
+                    observed_at=(
+                        getattr(readiness, "observed_at", None)
+                        if readiness is not None
+                        else None
+                    ),
+                )
                 # Preserve legacy keys at top level for compatibility
                 payload_merged = {
                     "provider": candidate.provider,
                     "model": candidate.model,
                     "reason": skip_reason,
                     **shared,
+                    **{
+                        key: skip_detail[key]
+                        for key in (
+                            "readiness_state",
+                            "readiness_reason",
+                            "connection_id",
+                            "observed_at",
+                            "binding_id",
+                        )
+                        if skip_detail.get(key) is not None
+                    },
                 }
                 self.db.record_event(
                     run_id,
                     "review_candidate_skipped",
                     payload=payload_merged,
                 )
+                skipped_candidate_details.append(dict(skip_detail))
                 skipped_count += 1
                 continue
 
@@ -806,20 +989,35 @@ class ReviewEngine:
             tried_count += 1
             reviewer = candidate
             adapter = cand_adapter
+            # R3-E1.1: the resolved exact resource identity authorizing
+            # this dispatch.  ``None`` for legacy ladder candidates
+            # (historical provider/model behavior, unchanged).
+            review_binding_id = (
+                reviewer_resolved.binding_id if reviewer_resolved is not None else None
+            )
+            review_profile_id = (
+                reviewer_resolved.profile_id if reviewer_resolved is not None else None
+            )
+            review_pool_id = (
+                reviewer_resolved.quota_pool_id if reviewer_resolved is not None else None
+            )
             review_association_id = f"rev_{uuid.uuid4().hex[:10]}"
+            review_dispatch_started_payload: dict[str, object] = {
+                "review_id": review_association_id,
+                "provider": reviewer.provider,
+                "model": reviewer.model,
+                "stage": DispatchStage.REVIEW.value,
+                "tier": review_tier.value,
+                "tier_reason": review_tier_decision.source,
+                "prompt_bytes": prompt_bytes,
+                "transport": adapter.prompt_transport_for(prompt_bytes),
+            }
+            if review_binding_id is not None:
+                review_dispatch_started_payload["binding_id"] = review_binding_id
             self.db.record_event(
                 run_id,
                 "review_dispatch_started",
-                payload={
-                    "review_id": review_association_id,
-                    "provider": reviewer.provider,
-                    "model": reviewer.model,
-                    "stage": DispatchStage.REVIEW.value,
-                    "tier": review_tier.value,
-                    "tier_reason": review_tier_decision.source,
-                    "prompt_bytes": prompt_bytes,
-                    "transport": adapter.prompt_transport_for(prompt_bytes),
-                },
+                payload=review_dispatch_started_payload,
             )
 
             # Snapshot before review to ensure read-only invariant
@@ -837,6 +1035,15 @@ class ReviewEngine:
                         model=reviewer.model,
                         timeout_seconds=timeout,
                         read_only=True,
+                        # R3-E1.1: the exactly resolved execution overlay
+                        # (binding / profile / pool / backend identity)
+                        # rides the actual adapter invocation so the
+                        # invocation observes what the evidence records.
+                        env=(
+                            dict(reviewer_resolved.overlay)
+                            if reviewer_resolved is not None
+                            else None
+                        ),
                     )
                     routing_digest = None
                     if run.routing_snapshot_json:
@@ -864,6 +1071,14 @@ class ReviewEngine:
                         authority_mode=load_authority_settings().mode.value,
                         routing_snapshot_digest=routing_digest,
                         control_plane_digest=frozen_control_plane.digest,
+                        # R3-E1.1: the exact reviewer binding identity
+                        # authorizing this dispatch (binding / profile /
+                        # quota-pool), sourced from the resolved value the
+                        # runtime is about to invoke.  Legacy ladder
+                        # dispatches record no binding (unchanged).
+                        binding_id=review_binding_id,
+                        profile_id=review_profile_id,
+                        quota_pool_id=review_pool_id,
                     )
                     self.db.create_dispatch_evidence(review_dispatch_evidence)
                     review_dispatches.append(review_dispatch_evidence)
@@ -895,7 +1110,9 @@ class ReviewEngine:
                 and readiness.connection_id is not None
             ):
                 # Successful reviewer execution is direct evidence
-                # for the exact connection used; failures record
+                # for the exact connection used (R3-E1.2: bound reviewers
+                # admit through their exact profile, so this connection
+                # is the resolved reviewer's own); failures record
                 # nothing and never fabricate NOT_READY.
                 self.readiness_service.record_success(readiness.connection_id)
 
@@ -1095,6 +1312,7 @@ class ReviewEngine:
                     "candidates": [
                         {"provider": c.provider, "model": c.model} for c in ladder
                     ],
+                    "skipped_candidates": list(skipped_candidate_details),
                 },
             )
             verdict = ReviewVerdict.REVIEW_UNAVAILABLE

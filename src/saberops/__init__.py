@@ -1,3 +1,3 @@
 """Orchestrator MVP: Minimal reliable AI coding orchestrator."""
 
-__version__ = "0.3.6"
+__version__ = "0.3.7"

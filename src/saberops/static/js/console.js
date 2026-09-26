@@ -6,11 +6,12 @@
  * 25e96df8-02ca-468a-9335-0ea38e57308f, artifact
  * orchestrator-console-v2.html (canonical product UI).
  *
- * This controller only drives shell chrome (panes, theme, palette,
- * settings modal, dialogs) and progressive enhancement. Every control
- * either performs a real SaberOps route/action (plain HTML forms and
- * links) or is an honest local view toggle. Run live data comes from
- * the existing SSE stream (app.js) and PTY terminal (terminal.js).
+ * Ownership: this file drives shell chrome (panes, theme, palette,
+ * settings modal, dialogs, composer progressive enhancement). It owns
+ * the ONE theme implementation (read, toggle, persist, control state;
+ * base.html carries only the pre-paint snippet). Run live data comes
+ * from the run page's single SSE stream (app.js) and PTY terminal
+ * (terminal.js) -- this file never opens its own EventSource.
  */
 (function () {
   var THEME_KEY = "saberops-theme";
@@ -158,9 +159,7 @@
     providers: ["Providers", "Account and API access"],
     models: ["Models", "Discovered model catalog"],
     routing: ["Routing", "Worker routing chains"],
-    repositories: ["Repositories", "Active target project for new runs"],
-    notifications: ["Notifications", "Notification channels"],
-    retention: ["Retention", "Evidence retention policy"]
+    repositories: ["Repositories", "Active target project for new runs"]
   };
 
   function renderSettingsPage(name) {
@@ -251,7 +250,7 @@
     }
   }
 
-  /* --- Connection banner state (driven by the real SSE stream) --- */
+  /* --- Connection banner state (driven by the run page's single SSE owner) --- */
   function setConnectionState(state, message) {
     var root = app();
     var bannerText = document.getElementById("ambientBannerText");
@@ -266,24 +265,107 @@
     }
   }
 
-  function watchEventStream() {
-    var header = document.getElementById("run-header");
-    if (!header || !window.EventSource) return;
-    var runId = header.getAttribute("data-run-id");
-    if (!runId) return;
-    var source = new EventSource("/runs/" + encodeURIComponent(runId) + "/events/stream");
-    source.onopen = function () {
-      setConnectionState("live");
-    };
-    source.onerror = function () {
-      var status = header.getAttribute("data-run-status");
-      if (status === "COMPLETED" || status === "FAILED") {
-        source.close();
-        setConnectionState("live");
-        return;
+  /* --- Composer progressive enhancement (dashboard; moved from app.js) ---
+   *
+   * app.js loads only on the run-detail page, so dashboard-only
+   * enhancement must live here in the shell controller that loads
+   * everywhere. */
+
+  function initEffectiveTimeouts() {
+    var panel = document.getElementById("effective-timeouts");
+    if (!panel) return;
+    var defaultsRaw = panel.getAttribute("data-timeout-defaults");
+    if (!defaultsRaw) return;
+    var defaults;
+    try {
+      defaults = JSON.parse(defaultsRaw);
+    } catch (_err) {
+      return;
+    }
+
+    var routingSel = document.getElementById("routing_mode");
+    var manualSel = document.getElementById("manual_tier");
+    var maxTierSel = document.getElementById("max_auto_tier");
+    var workerInput = document.getElementById("worker_timeout");
+    var gateInput = document.getElementById("gate_timeout");
+    var reviewInput = document.getElementById("review_timeout");
+
+    function fmt(num) {
+      return String(num);
+    }
+
+    function workerText() {
+      var override = workerInput ? workerInput.value.trim() : "";
+      if (override !== "" && !isNaN(parseFloat(override))) {
+        return fmt(parseFloat(override)) + "s";
       }
-      setConnectionState("disconnected", "Connection lost — retrying the live event stream…");
-    };
+      var manual = manualSel ? manualSel.value : "";
+      if (routingSel && routingSel.value === "manual" && manual && defaults[manual] !== undefined) {
+        return fmt(defaults[manual]) + "s";
+      }
+      var ceiling = maxTierSel ? maxTierSel.value : "";
+      var order = ["T1", "T2", "T3"];
+      var parts = [];
+      for (var i = 0; i < order.length; i++) {
+        var t = order[i];
+        if (defaults[t] === undefined) continue;
+        parts.push(t + " " + fmt(defaults[t]) + "s");
+        if (t === ceiling) break;
+      }
+      return parts.join(" / ");
+    }
+
+    function valueText(input, key) {
+      var v = input ? input.value.trim() : "";
+      if (v !== "" && !isNaN(parseFloat(v))) {
+        return fmt(parseFloat(v)) + "s";
+      }
+      return fmt(defaults[key]) + "s";
+    }
+
+    function update() {
+      var values = {
+        worker: workerText(),
+        gate: valueText(gateInput, "gate"),
+        review: valueText(reviewInput, "review")
+      };
+      ["worker", "gate", "review"].forEach(function (key) {
+        var el = panel.querySelector('[data-eff="' + key + '"]');
+        if (el) el.textContent = values[key];
+      });
+    }
+
+    [routingSel, manualSel, maxTierSel, workerInput, gateInput, reviewInput].forEach(function (el) {
+      if (el) {
+        el.addEventListener("input", update);
+        el.addEventListener("change", update);
+      }
+    });
+
+    update();
+  }
+
+  function initReviewMode() {
+    var modeSel = document.getElementById("review_mode");
+    var limitField = document.getElementById("review-limit-field");
+    var reviewCheck = document.getElementById("review_enabled");
+    var reviewControls = document.getElementById("review-controls-row");
+
+    function update() {
+      if (modeSel && limitField) {
+        var bounded = modeSel.value !== "max";
+        limitField.style.display = bounded ? "" : "none";
+        var limitInput = document.getElementById("review_limit");
+        if (limitInput) limitInput.disabled = !bounded;
+      }
+      if (reviewCheck && reviewControls) {
+        reviewControls.style.opacity = reviewCheck.checked ? "1" : "0.5";
+      }
+    }
+
+    if (modeSel) modeSel.addEventListener("change", update);
+    if (reviewCheck) reviewCheck.addEventListener("change", update);
+    update();
   }
 
   function init() {
@@ -446,12 +528,6 @@
         copyOutput(btn);
       });
     });
-    document.querySelectorAll("[data-fill-composer]").forEach(function (btn) {
-      btn.addEventListener("click", function () {
-        fillComposer(btn.getAttribute("data-fill-composer") || "");
-      });
-    });
-
     document.querySelectorAll(".worker-card > .worker-card-head").forEach(function (head) {
       head.addEventListener("click", function () {
         var card = head.closest(".worker-card");
@@ -508,7 +584,11 @@
       }
     });
 
-    watchEventStream();
+    // No EventSource here by design: the run page's app.js owns the
+    // single SSE stream and reports connection state via
+    // SaberOpsConsole.setConnectionState.
+    initEffectiveTimeouts();
+    initReviewMode();
   }
 
   if (document.readyState === "loading") {
@@ -532,6 +612,7 @@
     fillComposer: fillComposer,
     copyOutput: copyOutput,
     showToast: showToast,
-    toggleTheme: toggleTheme
+    toggleTheme: toggleTheme,
+    setConnectionState: setConnectionState
   };
 })();

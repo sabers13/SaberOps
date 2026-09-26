@@ -1,4 +1,4 @@
-"""Command-line interface for the multi-provider AI coding orchestrator."""
+"""Command-line interface for SaberOps (`orch`)."""
 # ruff: noqa: E501
 
 from __future__ import annotations
@@ -35,13 +35,10 @@ from saberops.authority_sync import (
     default_orch_executable,
     sync_agent_file,
 )
-from saberops.config import reconstruct_run_config, resolve_run_config
+from saberops.config import RunConfig, reconstruct_run_config
 from saberops.db import Database, get_default_db_path
 from saberops.dispatch import READINESS_AUTHORITY_UNAVAILABLE
-from saberops.gate_runner import (
-    GateScratchPolicyError,
-    load_project_gate_scratch_policy,
-)
+from saberops.gate_runner import GateScratchPolicyError
 from saberops.git import GitManager
 from saberops.model_access import ReadinessService
 from saberops.models import (
@@ -74,11 +71,7 @@ from saberops.project import (
     ProjectStateConflictError,
     owner_state_dir,
 )
-from saberops.review_adaptive import (
-    ReviewPolicyError,
-    load_project_review_policy,
-    resolve_effective_review_policy_mode,
-)
+from saberops.review_adaptive import ReviewPolicyError
 from saberops.routing import (
     is_peak_hours,
 )
@@ -87,6 +80,12 @@ from saberops.routing_config import (
     get_user_routing_path,
     init_user_config,
     load_effective_routing,
+)
+from saberops.run_creation import (
+    RunCreationError,
+    RunRequest,
+    effective_policy_summary,
+    resolve_effective_run_config,
 )
 from saberops.runtime import db_path_for_run, project_db_path_for_repo
 from saberops.service import OrchestratorService
@@ -147,6 +146,57 @@ def _cli_review_policy_mode(args: object) -> ReviewPolicyMode:
     raise ValueError(
         f"unknown --review-policy value {raw!r}; expected 'risk-adaptive' or 'always-required'"
     )
+
+
+def _cli_explicit_review_policy(args: argparse.Namespace) -> ReviewPolicyMode | None:
+    """Return the per-run review-policy override, or None to follow project.
+
+    The CLI default (``risk-adaptive``) is intentionally mapped to None:
+    the tightening-only merge treats an unset per-run value and an
+    explicit RISK_ADAPTIVE identically, so the project setting drives.
+    Only an explicit ``always-required`` tightens this run.
+    """
+    raw = str(getattr(args, "review_policy", "") or "").strip().lower()
+    if raw in ("", "risk-adaptive"):
+        return None
+    return _cli_review_policy_mode(args)
+
+
+def _resolve_cli_run_config(args: argparse.Namespace, repo: Path | str) -> RunConfig:
+    """Resolve one frozen RunConfig through the shared R2-A authority.
+
+    This is the CLI's only run-creation path: Web's ``POST /runs``
+    calls the same :func:`resolve_effective_run_config` with the same
+    precedence, so identical project settings plus equivalent run
+    requests freeze identical policy.  Raises :class:`RunCreationError`
+    (fail-closed, before any worker/model execution) when the project
+    has no usable gate or the policy is invalid.
+    """
+    full = RunRequest(
+        task=str(args.task),
+        repo_path=repo,
+        gate_command=getattr(args, "gate", None),
+        training_allowed=getattr(args, "training_allowed", None),
+        review_policy=_cli_explicit_review_policy(args),
+        routing_mode="auto" if args.tier == "auto" else "manual",
+        manual_tier=None if args.tier == "auto" else args.tier,
+        max_auto_tier=args.max_tier,
+        provider_override=args.provider,
+        model_override=args.model,
+        reserve_override=args.reserve_override,
+        required_capabilities=tuple(args.required_capabilities),
+        max_attempts=args.max_attempts,
+        worker_timeout=args.worker_timeout,
+        gate_timeout=args.gate_timeout,
+        review=args.review,
+        review_timeout=args.review_timeout,
+        review_mode=args.review_mode,
+        review_limit=args.review_limit,
+        publish_candidate=getattr(args, "publish_candidate", None),
+        tool_refs=tuple(args.tool_refs),
+    )
+    config: RunConfig = resolve_effective_run_config(full)
+    return config
 
 
 def _orch_project_root() -> Path:
@@ -520,6 +570,26 @@ def _check_target_repo(repo_path: Path) -> DoctorFinding:
     return DoctorFinding("OK", f"target repo '{repo}' is a clean git repository")
 
 
+def _check_legacy_manager_state() -> DoctorFinding | None:
+    """Report a leftover manager-session dir as legacy/unused state, if present.
+
+    Strictly read-only: never creates, mutates, or deletes owner files.
+    """
+    from saberops.paths import saberops_state_dir
+
+    legacy_dir = saberops_state_dir() / "manager-session"
+    try:
+        if legacy_dir.is_dir():
+            return DoctorFinding(
+                "WARN",
+                f"legacy unused state at {legacy_dir} "
+                "(removed Manager capability; left untouched)",
+            )
+    except OSError:
+        return None
+    return None
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build CLI argument parser."""
     parser = argparse.ArgumentParser(
@@ -626,8 +696,12 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument(
         "--gate",
         type=str,
-        default="make gate",
-        help="Deterministic gate command to verify changes (default: 'make gate').",
+        default=None,
+        help=(
+            "Explicit gate command for this run (default: follow the project "
+            "gate setting; run creation fails before dispatch when the "
+            "project has no gate configured or detected)."
+        ),
     )
     run_parser.add_argument(
         "--tier",
@@ -681,15 +755,20 @@ def build_parser() -> argparse.ArgumentParser:
     training_group.add_argument(
         "--training-allowed",
         action="store_true",
-        default=True,
-        help="Permit models that may use task data for training (e.g. Muse); the default.",
+        default=None,
+        dest="training_allowed",
+        help="Permit models that may use task data for training (explicit per-run opt-in).",
     )
     training_group.add_argument(
         "--training-denied",
         action="store_false",
         dest="training_allowed",
-        help="Deny training-eligible models (explicit opt-out).",
+        help="Deny training-eligible models (explicit per-run opt-out).",
     )
+    # R2-A: no implicit default.  ``None`` means "follow the persisted
+    # project data policy" (unset project policy resolves conservatively
+    # to Denied); the shared run-creation authority owns the default.
+    run_parser.set_defaults(training_allowed=None)
     run_parser.add_argument(
         "--max-attempts",
         type=int,
@@ -802,6 +881,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=300.0,
         help="Reviewer timeout in seconds (default: 300).",
     )
+    review_parser.add_argument(
+        "--action-id",
+        type=str,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    review_parser.add_argument(
+        "--expected-candidate",
+        type=str,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
 
     # orch accept <run-id>
     accept_parser = subparsers.add_parser(
@@ -820,6 +911,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=300.0,
         help="Post-integration gate timeout in seconds (default: 300).",
+    )
+    accept_parser.add_argument(
+        "--action-id",
+        type=str,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    accept_parser.add_argument(
+        "--expected-candidate",
+        type=str,
+        default=None,
+        help=argparse.SUPPRESS,
     )
 
     # orch cleanup <run-id>
@@ -972,7 +1075,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     # orch list
-    list_parser = subparsers.add_parser("list", help="List recent orchestrator runs.")
+    list_parser = subparsers.add_parser("list", help="List recent SaberOps runs.")
     list_parser.add_argument(
         "--limit",
         type=int,
@@ -1007,7 +1110,7 @@ def build_parser() -> argparse.ArgumentParser:
     # orch doctor
     doctor_parser = subparsers.add_parser(
         "doctor",
-        help="Strictly read-only preflight diagnostics for local orchestration readiness.",
+        help="Strictly read-only preflight diagnostics for SaberOps readiness.",
     )
     doctor_parser.add_argument(
         "--repo",
@@ -1046,8 +1149,17 @@ def build_parser() -> argparse.ArgumentParser:
     ui_parser.add_argument(
         "--repo",
         type=str,
-        default=".",
-        help="Target repository the dashboard dispatches runs against (default: '.').",
+        default=None,
+        help="Optional initial target repository. Omit for an empty first-run UI.",
+    )
+    ui_parser.add_argument(
+        "--profile",
+        type=str,
+        default=None,
+        help=(
+            "Optional isolated SaberOps owner profile. The profile gets its own "
+            "state/config/cache namespace; project and model setup then happens in the UI."
+        ),
     )
     ui_parser.add_argument(
         "--db",
@@ -1151,7 +1263,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     authority_sync = authority_sub.add_parser(
         "sync-opencode",
-        help="Synchronize the managed authority regions of the OpenCode ORX agent.",
+        help="Synchronize the managed authority regions of the SaberOps OpenCode agent.",
     )
     authority_sync.add_argument(
         "--agent",
@@ -1163,7 +1275,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--orch-executable",
         type=str,
         default=None,
-        help="Exact Orch executable ORX may run (default: alongside this interpreter).",
+        help="Exact `orch` executable the SaberOps agent may run (default: alongside this interpreter).",
     )
     authority_sync.add_argument(
         "--allow-directory",
@@ -1185,12 +1297,89 @@ def build_parser() -> argparse.ArgumentParser:
     # form.  The accepted CLI syntax is documented accordingly.
     project_parser = subparsers.add_parser(
         "project",
-        help="Project-scoped settings (currently: gate-scratch).",
+        help="Project-scoped settings (gate, data policy, review policy, target branch, gate-scratch).",
     )
     project_sub = project_parser.add_subparsers(dest="project_command", required=True)
+
+    def _add_repo_arg(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument(
+            "--repo",
+            dest="project_repo",
+            type=str,
+            default=None,
+            help="Absolute path to the target Git repository.",
+        )
+
+    def _add_json_arg(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("--json", action="store_true", help="JSON output")
+
+    project_show = project_sub.add_parser(
+        "show",
+        help="Show the effective project settings (gate, data policy, review policy, target branch, gate storage).",
+    )
+    _add_repo_arg(project_show)
+    _add_json_arg(project_show)
+
+    project_set_gate = project_sub.add_parser(
+        "set-gate",
+        help="Persist the project's gate command (explicit owner decision).",
+    )
+    _add_repo_arg(project_set_gate)
+    project_set_gate.add_argument(
+        "command",
+        type=str,
+        help="Exact gate command to freeze into future runs (e.g. 'make gate').",
+    )
+
+    project_clear_gate = project_sub.add_parser(
+        "clear-gate",
+        help="Remove the project's explicit gate command (returns to unset).",
+    )
+    _add_repo_arg(project_clear_gate)
+
+    project_set_data = project_sub.add_parser(
+        "set-data-policy",
+        help="Persist the project's training/data-use policy (allowed|denied).",
+    )
+    _add_repo_arg(project_set_data)
+    project_set_data.add_argument(
+        "policy",
+        type=str,
+        choices=["allowed", "denied"],
+        help="Owner decision for training/data use in future runs.",
+    )
+
+    project_set_review = project_sub.add_parser(
+        "set-review-policy",
+        help="Persist the project's review policy (risk-adaptive|always-required).",
+    )
+    _add_repo_arg(project_set_review)
+    project_set_review.add_argument(
+        "policy",
+        type=str,
+        choices=["risk-adaptive", "always-required"],
+        help="Tightening-only review policy for future runs.",
+    )
+
+    project_set_branch = project_sub.add_parser(
+        "set-target-branch",
+        help="Persist the owner-selectable accept target branch.",
+    )
+    _add_repo_arg(project_set_branch)
+    project_set_branch.add_argument(
+        "branch",
+        type=str,
+        help="Branch name frozen as the accept target of future runs.",
+    )
+
+    project_clear_branch = project_sub.add_parser(
+        "clear-target-branch",
+        help="Remove the explicit accept target branch (returns to unset).",
+    )
+    _add_repo_arg(project_clear_branch)
     project_gate_scratch = project_sub.add_parser(
         "gate-scratch",
-        help="Project gate-scratch mode (DISK / RAM_PREFERRED / RAM_REQUIRED).",
+        help="Project gate temporary storage (DISK / RAM_PREFERRED / RAM_REQUIRED).",
     )
     project_gate_scratch_sub = project_gate_scratch.add_subparsers(
         dest="project_gate_scratch_command", required=True
@@ -1298,49 +1487,13 @@ def handle_run(args: argparse.Namespace) -> int:
                         print("[!] Task is required", file=sys.stderr)
                         return 1
                     try:
-                        resolved_mode = load_project_gate_scratch_policy(args.repo)
-                    except GateScratchPolicyError as exc:
-                        print(
-                            f"[!] Project gate-scratch policy is invalid: {exc}",
-                            file=sys.stderr,
-                        )
+                        config = _resolve_cli_run_config(args, args.repo)
+                    except RunCreationError as exc:
+                        print(f"[!] {exc}", file=sys.stderr)
                         return 1
-                    try:
-                        project_review_mode = load_project_review_policy(args.repo)
-                    except ReviewPolicyError as exc:
-                        print(
-                            f"[!] Project review policy is invalid: {exc}",
-                            file=sys.stderr,
-                        )
-                        return 1
-                    effective_review_mode = resolve_effective_review_policy_mode(
-                        project_mode=project_review_mode,
-                        explicit_run_mode=_cli_review_policy_mode(args),
-                    )
-                    config = resolve_run_config(
-                        task=args.task,
-                        repo_path=args.repo,
-                        routing_mode="auto" if args.tier == "auto" else "manual",
-                        manual_tier=None if args.tier == "auto" else args.tier,
-                        max_auto_tier=args.max_tier,
-                        training_allowed=args.training_allowed,
-                        provider_override=args.provider,
-                        model_override=args.model,
-                        reserve_override=args.reserve_override,
-                        required_capabilities=tuple(args.required_capabilities),
-                        gate_command=args.gate,
-                        max_attempts=args.max_attempts,
-                        worker_timeout=args.worker_timeout,
-                        gate_timeout=args.gate_timeout,
-                        review=args.review,
-                        review_timeout=args.review_timeout,
-                        review_mode=args.review_mode,
-                        review_limit=args.review_limit,
-                        review_policy_mode=effective_review_mode,
-                        publish_candidate=getattr(args, "publish_candidate", None),
-                        tool_refs=tuple(args.tool_refs),
-                        gate_scratch_mode=resolved_mode,
-                    )
+            except RunCreationError as exc:
+                print(f"[!] {exc}", file=sys.stderr)
+                return 1
             except Exception as exc:
                 print(f"[!] Error during run execution: {exc}", file=sys.stderr)
                 return 1
@@ -1350,6 +1503,11 @@ def handle_run(args: argparse.Namespace) -> int:
             print(f"[*] Gate command      : {config.gate_command}")
             print(f"[*] Routing           : {config.routing_mode} ({config.initial_tier.value})")
             print(f"[*] Training allowed  : {config.training_allowed}")
+            print(f"[*] Review policy     : {config.review_policy_mode.value}")
+            print(f"[*] Gate storage      : {config.gate_scratch_mode.value}")
+            print(
+                f"[*] Target branch     : {config.accept_target_branch or '(unknown legacy)'}"
+            )
             print(
                 f"[*] Candidate publish : {'enabled' if config.publish_candidate else 'disabled'}"
             )
@@ -1436,49 +1594,21 @@ def handle_run(args: argparse.Namespace) -> int:
     except ProjectIdentityError as exc:
         print(f"[!] {exc}", file=sys.stderr)
         return 1
+    # R2-A: the CLI resolves run policy exclusively through the shared
+    # run-creation authority (same precedence as Web's POST /runs).
     try:
-        resolved_gate_scratch_mode = load_project_gate_scratch_policy(args.repo)
-    except GateScratchPolicyError as exc:
-        print(f"[!] Project gate-scratch policy is invalid: {exc}", file=sys.stderr)
+        config = _resolve_cli_run_config(args, args.repo)
+    except RunCreationError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
         return 1
-    try:
-        project_review_mode = load_project_review_policy(args.repo)
-    except ReviewPolicyError as exc:
-        print(f"[!] Project review policy is invalid: {exc}", file=sys.stderr)
-        return 1
-    effective_review_mode = resolve_effective_review_policy_mode(
-        project_mode=project_review_mode,
-        explicit_run_mode=_cli_review_policy_mode(args),
-    )
-    config = resolve_run_config(
-        task=args.task,
-        repo_path=args.repo,
-        routing_mode="auto" if args.tier == "auto" else "manual",
-        manual_tier=None if args.tier == "auto" else args.tier,
-        max_auto_tier=args.max_tier,
-        training_allowed=args.training_allowed,
-        provider_override=args.provider,
-        model_override=args.model,
-        reserve_override=args.reserve_override,
-        required_capabilities=tuple(args.required_capabilities),
-        gate_command=args.gate,
-        max_attempts=args.max_attempts,
-        worker_timeout=args.worker_timeout,
-        gate_timeout=args.gate_timeout,
-        review=args.review,
-        review_timeout=args.review_timeout,
-        review_mode=args.review_mode,
-        review_limit=args.review_limit,
-        review_policy_mode=effective_review_mode,
-        publish_candidate=getattr(args, "publish_candidate", None),
-        tool_refs=tuple(args.tool_refs),
-        gate_scratch_mode=resolved_gate_scratch_mode,
-    )
     print(f"[*] Target repository : {config.target_repo}")
     print(f"[*] Task              : {config.task}")
     print(f"[*] Gate command      : {config.gate_command}")
     print(f"[*] Routing           : {config.routing_mode} ({config.initial_tier.value})")
     print(f"[*] Training allowed  : {config.training_allowed}")
+    print(f"[*] Review policy     : {config.review_policy_mode.value}")
+    print(f"[*] Gate storage      : {config.gate_scratch_mode.value}")
+    print(f"[*] Target branch     : {config.accept_target_branch or '(unknown legacy)' }")
     print(f"[*] Candidate publish : {'enabled' if config.publish_candidate else 'disabled'}")
     if args.provider:
         print(f"[*] Provider override : {args.provider}")
@@ -1618,6 +1748,22 @@ def handle_cancel(args: argparse.Namespace) -> int:
 
 def handle_review(args: argparse.Namespace) -> int:
     """Handle `orch review <run-id>` command."""
+    action_id = getattr(args, "action_id", None)
+    expected_candidate = getattr(args, "expected_candidate", None)
+    if action_id:
+        # Detached R3-E2 owner-action child: fence on the exact requested
+        # candidate, then delegate to the existing service authority.
+        # The explicit --db (handed by the launcher) always wins so the
+        # child can never be retargeted to another project store.
+        from saberops.owner_actions import run_review_action_child
+
+        return run_review_action_child(
+            db=db_for_run(args, args.run_id),
+            action_id=str(action_id),
+            expected_candidate_sha=str(expected_candidate or ""),
+            run_id=str(args.run_id),
+            timeout=args.timeout,
+        )
     service = OrchestratorService(db=db_for_run(args, args.run_id))
 
     print(f"[*] Initiating independent review for run '{args.run_id}'...")
@@ -1641,6 +1787,22 @@ def handle_review(args: argparse.Namespace) -> int:
 
 def handle_accept(args: argparse.Namespace) -> int:
     """Handle `orch accept <run-id>` command."""
+    action_id = getattr(args, "action_id", None)
+    expected_candidate = getattr(args, "expected_candidate", None)
+    if action_id:
+        # Detached R3-E2 owner-action child: fence on the exact requested
+        # candidate, then delegate to the existing service authority.
+        # The AcceptEngine re-checks every canonical condition immediately
+        # before mutation; the Web pre-check stays advisory only.
+        from saberops.owner_actions import run_accept_action_child
+
+        return run_accept_action_child(
+            db=db_for_run(args, args.run_id),
+            action_id=str(action_id),
+            expected_candidate_sha=str(expected_candidate or ""),
+            run_id=str(args.run_id),
+            gate_timeout=args.gate_timeout,
+        )
     service = OrchestratorService(db=db_for_run(args, args.run_id))
 
     print(f"[*] Integrating candidate from run '{args.run_id}'...")
@@ -1942,7 +2104,8 @@ def handle_status(args: argparse.Namespace) -> int:
         print(
             f"Worker Health    : {supervision.health_state.value} ({supervision.health_reason or 'UNKNOWN'})"
         )
-        print(f"Manager State    : {supervision.manager_state.value}")
+        if supervision.manager_state.value == "ATTENTION_REQUIRED":
+            print("Needs attention : yes — this run needs owner review")
 
     attempts = service.db.get_attempts_for_run(run.id)
     # Candidate-publication evidence comes from the durable event log so the
@@ -2469,6 +2632,148 @@ def handle_project_gate_scratch_set(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_project_show(args: argparse.Namespace) -> int:
+    """Handle ``orch project show`` (effective owner-facing settings)."""
+    try:
+        repo = _resolve_repo_for_project_settings(args)
+    except SystemExit:
+        return 2
+    summary = effective_policy_summary(repo)
+    if "error" in summary:
+        print(f"[!] {summary['error']}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return 0
+    print(f"Gate            : {summary['gate_effective'] or '(not configured)'}")
+    print(f"  configured    : {'yes' if summary['gate_configured'] else 'no'}")
+    print(f"Data policy     : {summary['data_policy_label']}")
+    print(f"  explicit      : {'yes' if summary['data_policy_explicit'] else 'no (Denied default)'}")
+    print(f"Review policy   : {summary['review_policy_mode']}")
+    print(f"  explicit      : {'yes' if summary['review_policy_explicit'] else 'no'}")
+    print(f"Gate storage    : {summary['gate_scratch_mode']}")
+    print(f"Target branch   : {summary['accept_target_branch_effective'] or '(unknown)'}")
+    print(
+        "  explicit      : "
+        f"{'yes' if summary['accept_target_branch_explicit'] else 'no (live branch)'}"
+    )
+    return 0
+
+
+def handle_project_set_gate(args: argparse.Namespace) -> int:
+    """Handle ``orch project set-gate <command>``."""
+    from saberops.project_settings import ProjectSettingsError, set_project_gate_command
+
+    try:
+        repo = _resolve_repo_for_project_settings(args)
+    except SystemExit:
+        return 2
+    try:
+        path = set_project_gate_command(repo, str(args.command))
+    except ProjectSettingsError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    print(f"Project gate set to '{str(args.command).strip()}' at {path}")
+    return 0
+
+
+def handle_project_clear_gate(args: argparse.Namespace) -> int:
+    """Handle ``orch project clear-gate``."""
+    from saberops.project_settings import ProjectSettingsError, clear_project_gate_command
+
+    try:
+        repo = _resolve_repo_for_project_settings(args)
+    except SystemExit:
+        return 2
+    try:
+        path = clear_project_gate_command(repo)
+    except ProjectSettingsError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    print(f"Project gate cleared (unset) at {path}")
+    return 0
+
+
+def handle_project_set_data_policy(args: argparse.Namespace) -> int:
+    """Handle ``orch project set-data-policy <allowed|denied>``."""
+    from saberops.project_settings import ProjectSettingsError, set_project_data_policy
+
+    try:
+        repo = _resolve_repo_for_project_settings(args)
+    except SystemExit:
+        return 2
+    try:
+        path = set_project_data_policy(repo, str(args.policy))
+    except ProjectSettingsError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    print(f"Project data policy set to '{str(args.policy).strip().upper()}' at {path}")
+    return 0
+
+
+def handle_project_set_review_policy(args: argparse.Namespace) -> int:
+    """Handle ``orch project set-review-policy`` via the canonical store."""
+    from saberops.project_settings import ProjectSettingsError, set_project_review_policy
+
+    try:
+        repo = _resolve_repo_for_project_settings(args)
+    except SystemExit:
+        return 2
+    raw = str(args.policy).strip().lower()
+    mode = (
+        ReviewPolicyMode.ALWAYS_REQUIRED
+        if raw == "always-required"
+        else ReviewPolicyMode.RISK_ADAPTIVE
+    )
+    try:
+        path = set_project_review_policy(repo, mode)
+    except (ProjectSettingsError, ReviewPolicyError) as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    print(f"Project review policy set to '{mode.value}' at {path}")
+    return 0
+
+
+def handle_project_set_target_branch(args: argparse.Namespace) -> int:
+    """Handle ``orch project set-target-branch <branch>``."""
+    from saberops.project_settings import (
+        ProjectSettingsError,
+        set_project_accept_target_branch,
+    )
+
+    try:
+        repo = _resolve_repo_for_project_settings(args)
+    except SystemExit:
+        return 2
+    try:
+        path = set_project_accept_target_branch(repo, str(args.branch))
+    except ProjectSettingsError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    print(f"Project target branch set to '{str(args.branch).strip()}' at {path}")
+    return 0
+
+
+def handle_project_clear_target_branch(args: argparse.Namespace) -> int:
+    """Handle ``orch project clear-target-branch``."""
+    from saberops.project_settings import (
+        ProjectSettingsError,
+        clear_project_accept_target_branch,
+    )
+
+    try:
+        repo = _resolve_repo_for_project_settings(args)
+    except SystemExit:
+        return 2
+    try:
+        path = clear_project_accept_target_branch(repo)
+    except ProjectSettingsError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    print(f"Project target branch cleared (unset) at {path}")
+    return 0
+
+
 def handle_authority_show(args: argparse.Namespace) -> int:
     """Handle `orch authority show`."""
     try:
@@ -2628,17 +2933,30 @@ def handle_ui(args: argparse.Namespace) -> int:
     """Handle `orch ui` command."""
     import uvicorn
 
+    # Profile selection must happen before any SaberOps path/store is resolved.
+    # It is a launch-time namespace choice only; every substantive owner choice
+    # (providers, models, routing, Orchestrator, project and policy) stays in UI.
+    profile = (getattr(args, "profile", None) or "").strip()
+    if profile:
+        os.environ["SABEROPS_PROFILE"] = profile
+        from saberops.paths import active_profile
+
+        active_profile()  # fail closed before constructing any state path
+
     from saberops.db import Database
     from saberops.web import create_app
 
-    app = create_app(db_path=args.db, repo_path=args.repo)
-    startup_db = Database(args.db) if args.db else db_for_repo(args, args.repo)
+    app = create_app(db_path=args.db, repo_path=args.repo, seed_cwd_if_empty=False)
+    startup_db = Database(args.db) if args.db else Database(get_default_db_path())
     url = f"http://{args.host}:{args.port}"
+    from saberops.observability.run_report import saberops_version
+
     print("─" * 60)
-    print("Orchestrator Dashboard")
+    print(f"SaberOps {saberops_version()}")
     print(f"  URL      : {url}")
     print(f"  Database : {startup_db.db_path}")
-    print(f"  Target   : {Path(args.repo).resolve()}")
+    print(f"  Profile  : {profile or 'default'}")
+    print(f"  Target   : {Path(args.repo).resolve() if args.repo else 'none (select in UI)'}")
     print("─" * 60)
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
     return 0
@@ -2673,6 +2991,9 @@ def handle_doctor(args: argparse.Namespace) -> int:
 
     findings.extend(_check_providers(quota_rows))
     findings.append(_check_target_repo(Path(getattr(args, "repo", "."))))
+    legacy_manager = _check_legacy_manager_state()
+    if legacy_manager is not None:
+        findings.append(legacy_manager)
 
     ok_count = sum(1 for f in findings if f.severity == "OK")
     warn_count = sum(1 for f in findings if f.severity == "WARN")
@@ -2908,6 +3229,20 @@ def _dispatch(args: argparse.Namespace) -> int:
                 return handle_project_gate_scratch_show(args)
             elif args.project_gate_scratch_command == "set":
                 return handle_project_gate_scratch_set(args)
+        elif args.project_command == "show":
+            return handle_project_show(args)
+        elif args.project_command == "set-gate":
+            return handle_project_set_gate(args)
+        elif args.project_command == "clear-gate":
+            return handle_project_clear_gate(args)
+        elif args.project_command == "set-data-policy":
+            return handle_project_set_data_policy(args)
+        elif args.project_command == "set-review-policy":
+            return handle_project_set_review_policy(args)
+        elif args.project_command == "set-target-branch":
+            return handle_project_set_target_branch(args)
+        elif args.project_command == "clear-target-branch":
+            return handle_project_clear_target_branch(args)
 
     return 0
 

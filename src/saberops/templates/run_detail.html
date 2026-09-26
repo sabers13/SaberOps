@@ -102,7 +102,7 @@
         <dt>Worker</dt><dd>{{ plan_projection.current_provider or "UNKNOWN" }} / {{ plan_projection.current_model or "UNKNOWN" }}</dd>
         <dt>Health</dt><dd>{{ plan_projection.health }}{% if plan_projection.stalled %} (stalled, soft){% endif %}</dd>
         <dt>Supervisor</dt><dd>{{ plan_projection.supervisor_state }}</dd>
-        <dt>Manager</dt><dd>{{ plan_projection.manager_state }}</dd>
+        {% if plan_projection.manager_state == "ATTENTION_REQUIRED" %}<dt>Needs attention</dt><dd>Yes — this run needs owner review</dd>{% endif %}
         <dt>Review</dt><dd>{{ plan_projection.review_state }}</dd>
       </dl>
       <ol class="plan-step-list" style="margin: 8px 0 0; padding-left: 18px; font-size: 12px;">
@@ -111,7 +111,7 @@
         {% endfor %}
       </ol>
       {% else %}
-      <p class="muted">Legacy run: no persisted 3B plan.</p>
+      <p class="muted">Legacy run: no persisted execution plan.</p>
       {% endif %}
     </div>
 
@@ -124,6 +124,9 @@
         <dt>Base Commit</dt><dd class="mono">{{ base_commit }}</dd>
         {% if candidate_sha %}
         <dt>Candidate SHA</dt><dd class="mono">{{ candidate_sha }}</dd>
+        {% endif %}
+        {% if candidate_state %}
+        <dt>Candidate State</dt><dd class="mono" id="candidate-state">{{ candidate_state }}</dd>
         {% endif %}
         <dt>Tier</dt><dd>{{ tier }}</dd>
         {% if current_dispatch %}
@@ -142,46 +145,85 @@
 
     <div class="inspector-section">
       <div class="inspector-head"><strong>Actions</strong></div>
-      <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
-        {% if can_retry %}
-        <form method="post" action="/runs/{{ run_id }}/retry" class="so-inline-form"><button type="submit" class="text-button">Retry Run (New Attempt)</button></form>
-        {% endif %}
-        {% if can_cancel %}
-        <button type="button" class="text-button" id="overviewCancelButton">Cancel Run</button>
-        {% endif %}
-        {% if can_review %}
-        <form method="post" action="/runs/{{ run_id }}/review" class="so-inline-form"><button type="submit" class="text-button primary-button">Request review</button></form>
-        {% endif %}
+      <div id="run-actions" data-run-id="{{ run_id }}" data-run-status="{{ status }}" style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+        <form method="post" action="/runs/{{ run_id }}/retry" class="so-inline-form" data-action="retry"><button type="submit" class="text-button"{% if not can_retry %} disabled title="Retry unlocks once the run completes or fails"{% endif %}>Retry Run (New Attempt)</button></form>
+        <button type="button" class="text-button" id="overviewCancelButton" data-action="cancel"{% if not can_cancel %} disabled title="Nothing to cancel on a terminal run"{% endif %}>Cancel Run</button>
+        <form method="post" action="/runs/{{ run_id }}/review" class="so-inline-form" data-action="review"><button type="submit" class="text-button primary-button"{% if not can_review or owner_review_active %} disabled title="{% if owner_review_active %}A Review owner action is already running{% else %}Review unlocks once the run completes{% endif %}"{% endif %}>Request review</button></form>
         {% if can_cleanup %}
           {% if confirming_cleanup %}
           <div class="so-error" role="alert"><strong>Warning: destructive action.</strong> Cleanup permanently deletes the clean attempt worktrees for this run. Candidate branches and database records are preserved.
             <div style="margin-top: 8px; display: flex; gap: 8px;">
-              <form method="post" action="/runs/{{ run_id }}/cleanup" class="so-inline-form"><input type="hidden" name="confirm" value="1"><button type="submit" class="text-button danger-button">Yes, clean up worktrees</button></form>
+              <form method="post" action="/runs/{{ run_id }}/cleanup" class="so-inline-form" data-action="cleanup"><input type="hidden" name="confirm" value="1"><button type="submit" class="text-button danger-button">Yes, clean up worktrees</button></form>
               <a class="text-button" href="/runs/{{ run_id }}">Cancel</a>
             </div>
           </div>
           {% else %}
-          <form method="post" action="/runs/{{ run_id }}/cleanup" class="so-inline-form"><input type="hidden" name="confirm" value="0"><button type="submit" class="text-button danger-button">Clean up worktrees</button></form>
+          <form method="post" action="/runs/{{ run_id }}/cleanup" class="so-inline-form" data-action="cleanup"><input type="hidden" name="confirm" value="0"><button type="submit" class="text-button danger-button">Clean up worktrees</button></form>
           {% endif %}
+        {% else %}
+        <form method="post" action="/runs/{{ run_id }}/cleanup" class="so-inline-form" data-action="cleanup"><input type="hidden" name="confirm" value="0"><button type="submit" class="text-button danger-button" disabled title="Cleanup unlocks once the run completes or fails">Clean up worktrees</button></form>
         {% endif %}
-        {% if can_accept %}
-          {% if confirming_accept %}
-          <div class="so-error" role="alert"><strong>Warning: destructive action.</strong> Accepting fast-forwards the candidate commit into the target repository and runs the post-integration gate. Type the exact run id to confirm.
-            <div style="margin-top: 8px;">
-              <form method="post" action="/runs/{{ run_id }}/accept" class="so-form">
-                <div class="advanced-field"><label for="confirm_run_id">Confirm run id</label><input type="text" id="confirm_run_id" name="confirm_run_id" class="mono" required placeholder="{{ run_id }}"></div>
-                <div style="display: flex; gap: 8px;"><button type="submit" class="text-button danger-button">Yes, accept run</button><a class="text-button" href="/runs/{{ run_id }}">Cancel</a></div>
-              </form>
-            </div>
+        {% if confirming_accept and can_accept %}
+        <div class="so-error" role="alert"><strong>Warning: destructive action.</strong> Accepting fast-forwards the candidate commit into the target repository and runs the post-integration gate. Type the exact run id to confirm.
+          <div style="margin-top: 8px;">
+            <form method="post" action="/runs/{{ run_id }}/accept" class="so-form" data-action="accept">
+              <div class="advanced-field"><label for="confirm_run_id">Confirm run id</label><input type="text" id="confirm_run_id" name="confirm_run_id" class="mono" required placeholder="{{ run_id }}"></div>
+              <div style="display: flex; gap: 8px;"><button type="submit" class="text-button danger-button">Yes, accept run</button><a class="text-button" href="/runs/{{ run_id }}">Cancel</a></div>
+            </form>
           </div>
-          {% else %}
-          <form method="post" action="/runs/{{ run_id }}/accept" class="so-inline-form"><input type="hidden" name="confirm_run_id" value=""><button type="submit" class="text-button danger-button">Accept run</button></form>
-          {% endif %}
+        </div>
+        {% else %}
+        <form method="post" action="/runs/{{ run_id }}/accept" class="so-inline-form" data-action="accept"><input type="hidden" name="confirm_run_id" value=""><button id="acceptRunButton" type="submit" class="text-button danger-button"{% if not can_accept or owner_accept_active %} disabled title="{% if owner_accept_active %}An Accept owner action is already running{% else %}Accept is blocked by the checklist below{% endif %}"{% endif %}>Accept run</button></form>
         {% endif %}
-        {% if not can_review and not can_cleanup and not can_retry and not can_cancel %}
-        <p class="muted">Run in progress… Actions unlock once completed. Push remains CLI-only.</p>
+        {% if confirming_reject and can_reject %}
+        <div class="so-notice" role="alert"><strong>Reject this candidate?</strong> This records a durable owner decision. It does not delete the commit or worktree.
+          <div style="margin-top: 8px; display: flex; gap: 8px;">
+            <form method="post" action="/runs/{{ run_id }}/reject" class="so-inline-form" data-action="reject"><input type="hidden" name="confirm" value="1"><button type="submit" class="text-button danger-button">Reject candidate</button></form>
+            <a class="text-button" href="/runs/{{ run_id }}">Cancel</a>
+          </div>
+        </div>
+        {% elif can_reject %}
+        <form method="post" action="/runs/{{ run_id }}/reject" class="so-inline-form" data-action="reject"><input type="hidden" name="confirm" value="0"><button type="submit" class="text-button danger-button">Reject candidate</button></form>
+        {% endif %}
+        {% if not can_review and not can_cleanup and not can_retry and not can_cancel and not can_accept and not can_reject %}
+        <p class="muted" id="actions-empty-note">Run in progress… Actions unlock once completed.</p>
+        {% endif %}
+        {% if owner_review_active or owner_accept_active or owner_review_last_error or owner_accept_last_error %}
+        <div class="inspector-section" id="owner-action-status" style="flex-basis: 100%;">
+          <div class="inspector-head"><strong>Owner actions</strong><span class="muted">detached · survives browser close</span></div>
+          <dl class="so-kv">
+            {% if owner_review_active %}
+            <dt>Review</dt><dd class="mono">{{ owner_review_state }} · {{ owner_review_action }}</dd>
+            {% elif owner_review_last_error %}
+            <dt>Review</dt><dd class="mono">settled · {{ owner_review_last_error }}</dd>
+            {% endif %}
+            {% if owner_accept_active %}
+            <dt>Accept</dt><dd class="mono">{{ owner_accept_state }} · {{ owner_accept_action }}</dd>
+            {% elif owner_accept_last_error %}
+            <dt>Accept</dt><dd class="mono">settled · {{ owner_accept_last_error }}</dd>
+            {% endif %}
+          </dl>
+        </div>
         {% endif %}
       </div>
+    </div>
+
+    <div class="inspector-section" id="accept-checklist-section">
+      <div class="inspector-head"><strong>Acceptance checklist</strong><span class="muted">engine-derived · same rules as the Accept button</span></div>
+      {% if accept_checklist %}
+      <ul class="so-kv" id="accept-checklist" data-accept-eligible="{{ 'true' if can_accept else 'false' }}" style="list-style: none; padding-left: 0;">
+        {% for c in accept_checklist %}
+        <li data-check-key="{{ c.key }}" data-check-status="{{ c.status }}"><span class="mono">{% if c.status == 'pass' %}✓{% else %}✗{% endif %}</span> <strong>{{ c.label }}</strong> <span class="muted">{{ c.reason }}</span></li>
+        {% endfor %}
+      </ul>
+      {% if can_accept %}
+      <p class="muted">Acceptance preconditions currently satisfied. Acceptance revalidates state and still runs the post-integration gate; an enabled Accept button does not guarantee successful acceptance.</p>
+      {% else %}
+      <p class="muted">Acceptance revalidates state and still runs the post-integration gate.</p>
+      {% endif %}
+      {% else %}
+      <p class="muted">No acceptance projection for this run.</p>
+      {% endif %}
     </div>
 
     {% if accept_result %}
@@ -275,17 +317,27 @@
     {% if base_commit %}<dt>Base Commit</dt><dd class="mono">{{ base_commit }}</dd>{% endif %}
   </dl>
   {% endif %}
+  {% if diff_available %}
   {% if changed_files %}
   <div class="so-table-wrap"><table class="so-table">
-    <thead><tr><th>Changed files</th><th>Count</th></tr></thead>
+    <thead><tr><th>Changed files</th></tr></thead>
     <tbody>
       {% for cf in changed_files %}
-      <tr><td class="mono">{{ cf }}</td><td class="mono">{{ loop.index }}</td></tr>
+      <tr><td class="mono">{{ cf }}</td></tr>
       {% endfor %}
     </tbody>
   </table></div>
   {% else %}
-  <div class="so-empty"><strong>No diff available</strong>Changed files appear here after a successful candidate is recorded. For the full diff, inspect the candidate commit in the target repository worktree.</div>
+  <p class="muted">No file changes between base and candidate.</p>
+  {% endif %}
+  {% if diff_text %}
+  <pre class="so-pre mono">{{ diff_text }}</pre>
+  {% endif %}
+  {% if diff_truncated %}
+  <p class="so-notice">Diff truncated at the display bound; showing a prefix only.</p>
+  {% endif %}
+  {% else %}
+  <div class="so-empty"><strong>No diff available</strong>{{ (" " + diff_unavailable_reason) if diff_unavailable_reason else "" }}Changed files appear here after a successful gate-passed candidate is recorded.</div>
   {% endif %}
 </div>
 
@@ -330,8 +382,10 @@
   {% else %}
   <div class="so-empty"><strong>No reviews recorded</strong>{% if can_review %}Request a review below once this run completes.{% else %}Reviews are only available for completed runs.{% endif %}</div>
   {% endif %}
-  {% if can_review %}
+  {% if can_review and not owner_review_active %}
   <form method="post" action="/runs/{{ run_id }}/review" class="so-inline-form"><button type="submit" class="text-button primary-button">Request review</button></form>
+  {% elif owner_review_active %}
+  <p class="muted">Review {{ owner_review_state|lower }} in a detached owner action (<span class="mono">{{ owner_review_action }}</span>). Closing this page does not stop it.</p>
   {% endif %}
 </div>
 
@@ -365,7 +419,7 @@
   {% else %}
   <div class="so-empty"><strong>No dispatch recorded</strong>Dispatch details appear here once a worker is assigned.</div>
   {% endif %}
-  <p><a class="text-button" href="/routing">Open worker routing</a> <a class="text-button" href="/orchestrator">Orchestrator model</a></p>
+  <p><a class="text-button" href="/routing">Open worker routing</a> <a class="text-button" href="/orchestrator">Orchestrator role</a></p>
 </div>
 
 {# --- Usage panel --- #}
@@ -418,7 +472,7 @@
   <p class="side-copy muted" style="padding: 10px 12px;">No attempts recorded yet.</p>
   {% endif %}
 </div>
-<footer class="worker-footer"><span class="side-meta" style="padding: 0 12px;">{% if attempts %}Attempts {{ attempts|length }} · {% endif %}Hard budget: tier default + monitor</span></footer>
+<footer class="worker-footer"><span class="side-meta" style="padding: 0 12px;">{% if attempts %}Attempts {{ attempts|length }} · {% endif %}Each attempt runs with a bounded time limit</span></footer>
 {% endblock %}
 
 {% block extra_scripts %}

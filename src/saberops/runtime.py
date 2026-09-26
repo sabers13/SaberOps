@@ -44,6 +44,22 @@ from saberops.workers.registry import AdapterRegistry
 
 
 @dataclass(frozen=True)
+class InboxStore:
+    """One genuinely read-only Inbox enumeration source.
+
+    A narrow ``identity`` + ``db`` pair only: deliberately *not* a full
+    :class:`ProjectRuntime`, so merely inspecting stored runs can never
+    construct (and thereby create/migrate) project databases, owner
+    databases, supervisors, or services.  The database is always opened
+    with ``read_only=True`` and only when its file already exists.
+    ``identity`` is ``None`` only for the preserved global store.
+    """
+
+    identity: ProjectIdentity | None
+    db: Database
+
+
+@dataclass(frozen=True)
 class ProjectRuntime:
     """The isolated runtime state of exactly one repository.
 
@@ -196,6 +212,148 @@ class ProjectRuntimeManager:
             return self.for_repo(repo_path)
         except ProjectIdentityError:
             return self.legacy()
+
+    def _owner_db_resolved_path(self) -> Path:
+        """Return the global-store path without creating anything."""
+        if self.pinned_db_path is not None:
+            return self.pinned_db_path
+        if self._owner_db_path is not None:
+            return Path(self._owner_db_path)
+        return get_default_db_path()
+
+    def list_inbox_stores(self) -> tuple[list[InboxStore], int]:
+        """Enumerate read-only Inbox sources without any write side effect.
+
+        Genuinely read-only cross-project discovery for the owner Inbox:
+        every subdirectory of :attr:`state_root` holding a readable
+        ``project.json`` marker *and* an already-existing usable
+        ``orchestrator.db`` contributes one :class:`InboxStore` opened
+        with ``read_only=True``.  The preserved global store is appended
+        last, but only when its file already exists.
+
+        A persisted marker with no existing usable database is skipped
+        and counted as unreadable -- it never causes an empty database,
+        schema, migration, directory, marker, supervisor, or service to
+        be created.  Likewise an absent legacy/global database is simply
+        skipped, never created.  A corrupt/unreadable store fails
+        locally (counted in ``unreadable``) rather than breaking the
+        whole Inbox; the failure surfaces when the store is read, so
+        ``collect_project_inbox`` must let read failures propagate.
+
+        In explicit ``pinned_db_path`` mode the answer is at most the
+        one pinned store, read once when its file already exists (never
+        created, never duplicated).
+        """
+        pinned = self.pinned_db_path
+        if pinned is not None:
+            if not pinned.is_file():
+                return ([], 0)
+            try:
+                store = InboxStore(
+                    identity=None,
+                    db=Database(pinned, read_only=True),
+                )
+            except Exception:
+                return ([], 1)
+            return ([store], 0)
+        stores: list[InboxStore] = []
+        unreadable = 0
+        try:
+            entries = sorted(self.state_root.iterdir())
+        except OSError:
+            entries = []
+        for entry in entries:
+            if not entry.is_dir():
+                continue
+            try:
+                identity = read_project_marker(entry)
+            except Exception:
+                identity = None
+            if identity is None:
+                unreadable += 1
+                continue
+            db_path = entry / "orchestrator.db"
+            if not db_path.is_file():
+                # Persisted marker, no usable database: skip without
+                # creating an empty store merely to inspect it.
+                unreadable += 1
+                continue
+            try:
+                stores.append(
+                    InboxStore(
+                        identity=identity,
+                        db=Database(db_path, read_only=True),
+                    )
+                )
+            except Exception:
+                unreadable += 1
+        legacy_path = self._owner_db_resolved_path()
+        if legacy_path.is_file():
+            try:
+                stores.append(
+                    InboxStore(
+                        identity=None, db=Database(legacy_path, read_only=True)
+                    )
+                )
+            except Exception:
+                unreadable += 1
+        # An absent legacy/global database is normal (never created by a
+        # read); it contributes no source and no unreadable count.
+        return (stores, unreadable)
+
+    def list_known_runtimes(self) -> tuple[list[ProjectRuntime], int]:
+        """Enumerate one runtime per persisted project state, plus legacy last.
+
+        Read-only cross-project discovery for the owner Inbox: every
+        subdirectory of :attr:`state_root` holding a readable
+        ``project.json`` marker contributes its project runtime, resolved
+        from the marker's own identity (never from the directory name).
+        The preserved global store is appended last so genuine legacy runs
+        are still visible.
+
+        Returns ``(runtimes, unreadable)`` where ``unreadable`` counts
+        state directories that could not be read (missing/corrupt marker
+        or unusable database).  Unreadable directories are skipped
+        locally; they never break -- and their rows are never attributed
+        to -- other projects.
+
+        Never creates or binds state directories, never changes the
+        active project, and never mutates the project registry.  In
+        explicit ``pinned_db_path`` mode the answer is exactly the one
+        pinned store with zero unreadable directories (no duplicate
+        scanning).
+        """
+        if self.pinned_db_path is not None:
+            return ([self.legacy()], 0)
+        runtimes: list[ProjectRuntime] = []
+        unreadable = 0
+        try:
+            entries = sorted(self.state_root.iterdir())
+        except OSError:
+            entries = []
+        for entry in entries:
+            if not entry.is_dir():
+                continue
+            try:
+                identity = read_project_marker(entry)
+            except Exception:
+                identity = None
+            if identity is None:
+                unreadable += 1
+                continue
+            try:
+                runtimes.append(
+                    self._cached(
+                        identity.project_id, identity, entry / "orchestrator.db"
+                    )
+                )
+            except Exception:
+                unreadable += 1
+        try:
+            runtimes.append(self.legacy())
+        except Exception:
+            unreadable += 1
+        return (runtimes, unreadable)
 
     def shutdown(self) -> None:
         """Detach every cached supervisor without cancelling durable workers."""

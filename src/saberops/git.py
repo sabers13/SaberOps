@@ -85,7 +85,7 @@ class CandidatePublication:
         }
 
 
-# Orch-generated candidate branches only: ``orch/<run_id>/a<n>``.  Anything
+# SaberOps-generated candidate branches only: ``orch/<run_id>/a<n>``.  Anything
 # else is rejected before a refspec is ever constructed, so a user-controlled
 # string can never become an arbitrary remote ref update.
 _CANDIDATE_BRANCH_RE: Final = re.compile(r"^orch/[A-Za-z0-9._-]+/a[0-9]+$")
@@ -119,8 +119,8 @@ def validate_candidate_branch(branch: object) -> str:
     value = branch
     if not value or not _CANDIDATE_BRANCH_RE.match(value):
         raise CandidatePublicationError(
-            f"Refusing to publish: '{value[:64]}' is not an Orch-generated "
-            "candidate branch of the form 'orch/<run_id>/a<n>'"
+            f"Refusing to publish: '{value[:64]}' is not a SaberOps candidate "
+            "branch of the form 'orch/<run_id>/a<n>'"
         )
     if value.startswith("-") or value.endswith((".", ".lock", "/")) or "//" in value:
         raise CandidatePublicationError(

@@ -400,8 +400,18 @@ def test_c16b2_discovered_profile_resolves_to_real_connection(
 
 def test_c16b2_admission_for_discovered_profile_reaches_store_evidence(
     isolated_xdg: None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Readiness admission for a discovered profile uses stored evidence."""
+    """Readiness admission for a discovered profile uses stored evidence.
+
+    Hermetic by construction: executable availability is provided through
+    the service's ``which`` seam (``/fake/opencode``), so the assertion
+    proves the discovered profile resolves to its real stored
+    connection/readiness evidence on any machine, whether or not the
+    ``opencode`` executable happens to be installed.  Production
+    semantics are unchanged: a genuinely missing executable is still
+    NOT_READY (covered by the readiness-truth suite).
+    """
     from saberops.model_access import ReadinessService
     from saberops.models import ProviderReadiness
     from saberops.project import owner_state_dir
@@ -410,12 +420,19 @@ def test_c16b2_admission_for_discovered_profile_reaches_store_evidence(
         build_access_registry(default_account_connections())
     )
     service = ReadinessService.for_owner_state(owner_state_dir())
-    connection = next(
-        c
-        for c in default_account_connections()
-        if c.connection_id == "opencode-account"
+    # Deterministic executable-availability evidence: the discovered
+    # opencode profile must resolve against installed=TRUE regardless
+    # of the machine running pytest (GitHub runners have no opencode).
+    # Bound on the instance because ``which`` defaults are captured at
+    # import time; patching ``shutil.which`` would not reach them.
+    monkeypatch.setattr(service, "which", lambda _exe: "/fake/opencode")
+    service.refresh(
+        next(
+            c
+            for c in default_account_connections()
+            if c.connection_id == "opencode-account"
+        )
     )
-    service.refresh(connection)
     # A successful execution marks the real connection READY ...
     service.record_success("opencode-account")
 
@@ -423,6 +440,7 @@ def test_c16b2_admission_for_discovered_profile_reaches_store_evidence(
         provider="opencode", profile_id="discovered-profile:opencode-account"
     )
     assert admission.connection_id == "opencode-account"
+    assert admission.executable_available is True
     assert admission.state is ProviderReadiness.READY
 
 
@@ -515,5 +533,5 @@ def test_c16b2_owner_pages_are_reachable_from_dashboard(
 
     orch = client.get("/orchestrator")
     assert orch.status_code == 200
-    assert "Eligible bindings" in orch.text
+    assert "Available models" in orch.text
 

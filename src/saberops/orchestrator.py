@@ -55,7 +55,7 @@ from saberops.control_plane import (
     load_control_plane_policy,
     reconstruct_frozen_control_plane,
 )
-from saberops.control_plane.binding_store import load_owner_bindings
+from saberops.control_plane.binding_store import BindingStoreError, load_owner_bindings
 from saberops.control_plane.bindings import (
     BindingKind,
     BindingResolutionError,
@@ -69,8 +69,18 @@ from saberops.control_plane.effort import (
     EffortPolicy,
 )
 from saberops.control_plane.orch_binding import OrchBindingPolicy
+from saberops.control_plane.reviewer_binding import (
+    ReviewerSelectionError,
+    reviewer_candidate_for_dispatch,
+)
 from saberops.db import Database, current_iso_timestamp
-from saberops.dispatch import build_skip_payload, evaluate_eligibility
+from saberops.dispatch import (
+    build_candidate_skip,
+    build_skip_payload,
+    evaluate_eligibility,
+    format_no_eligible_summary,
+    routing_context_for,
+)
 from saberops.dispatch import control_plane_decision as control_plane_decision
 from saberops.execution_failover import FailoverEngine
 from saberops.gateway import (
@@ -106,12 +116,14 @@ from saberops.models import (
     ManagerState,
     PhaseKind,
     PlanStatus,
+    PlanStep,
     PlanStepStatus,
     ProviderReadiness,
     ReasoningEffort,
     ReviewResult,
     ReviewVerdict,
     Run,
+    RunPlan,
     RunResult,
     RunStatus,
     SideEffectOperation,
@@ -125,6 +137,7 @@ from saberops.models import (
     WorkerInterruptionReason,
     WorkerRequest,
     WorkerResult,
+    WorkPackage,
     role_for_stage,
 )
 from saberops.observability import new_dispatch_evidence, update_dispatch_from_result
@@ -534,10 +547,301 @@ def _is_genuine_capability_escalation(outcome: DispatchOutcome | None) -> bool:
     validation failure on actual candidate changes (``GATE_FAILURE`` with
     real diff).  Provider / quota / infrastructure / timeout / termination /
     mutation / no_changes / already_satisfied / unknown / unknown_no_changes
-    / eligibility_skip / worker_failure_or_refusal escalations never select
-    SURGEON context semantics, regardless of how cleanly the worker ran.
+    / eligibility_skip / worker_failure_or_refusal / explicit
+    capability-failure escalations never select SURGEON context semantics,
+    regardless of how cleanly the worker ran.
+
+    H3.1: gate failure alone no longer authorizes tier escalation, so the
+    ``GATE_FAILURE`` branch is currently unreachable and SURGEON stays
+    dormant.  An explicit worker ``CAPABILITY_FAILURE`` is NOT mapped to
+    SURGEON: it carries no failed-candidate diff for a corrective
+    descendant.
     """
     return outcome is DispatchOutcome.GATE_FAILURE
+
+
+# Durable event types that install a genuinely fresh routing candidate
+# chain.  Each is emitted exactly where the in-memory
+# ``chain_attempt_start`` marker advances during uninterrupted execution
+# (the tier-escalation block emits ``tier_escalated``; the next-package
+# transition emits ``next_package_started``).  Neither is re-emitted by the
+# recovery/adoption entry path, so the last such event in the durable log
+# is the authoritative pre-crash chain boundary.  ``tier_candidates_resolved``
+# is deliberately NOT a boundary here: the entry path re-emits it for the
+# resumed chain, so it cannot distinguish pre-crash history.
+_FRESH_CHAIN_BOUNDARY_EVENTS = ("next_package_started", "tier_escalated")
+
+# Actionable bounded error raised when the chain boundary cannot be proven.
+# It follows the existing "Recovery blocked:" convention: the run is left
+# RUNNING (never terminalized) and durable history is preserved so a later
+# recovery can succeed once the evidence is consistent.
+_AMBIGUOUS_CHAIN_BOUNDARY_REASON = (
+    "Recovery blocked: current routing-chain attempt boundary cannot be "
+    "reconstructed from durable evidence"
+)
+
+
+def _reconstruct_chain_attempt_start(
+    db: Database, run_id: str, existing_attempts: list[Attempt]
+) -> int | None:
+    """Reconstruct the current-chain attempt boundary from durable evidence.
+
+    ``existing_attempts`` is the run-global attempt history ordered by
+    attempt number (as :meth:`Database.get_attempts_for_run` returns it).
+    The result is the index at which the currently active package/tier
+    candidate chain begins, so ``existing_attempts[result:]`` holds exactly
+    the launches belonging to the current chain.  Run-global history stays
+    complete; only the chain-local slice is bounded.
+
+    The boundary is derived from the ordered durable event log, never from
+    process-local state:
+
+    * no ``next_package_started`` / ``tier_escalated`` event: no fresh chain
+      was ever installed, so recovered history belongs to the still-active
+      chain (retries, timeouts, checkpoint continuations and cold-takeover
+      replacements never move the boundary) -- return ``0``;
+    * otherwise the complete durable attempt history must first be reconciled
+      with the ``attempt_started`` launch markers: each durable attempt must
+      carry exactly one marker of its own, markers must not be duplicated,
+      and the marker attempt-id sequence must account for the attempt
+      sequence in the same order.  Only a fully reconciled history may be
+      divided at the last boundary event -- markers at or before the
+      boundary are the old-chain prefix, markers after it are the
+      current-chain suffix (including an empty suffix).  A durable attempt
+      with no marker, duplicated markers, or an ordering inconsistent with
+      the attempt history means the split is NOT proven;
+    * when marker evidence is incomplete, a package transition's
+      ``package_completed`` linkage may still independently prove the split,
+      but only when every launch marker names a durable attempt exactly once
+      (a marker with no durable attempt row, or a duplicated marker for one
+      attempt, is contradictory evidence and fails closed), the linkage names
+      the last old-chain attempt, every current-chain attempt is positively
+      evidenced by a post-boundary marker, and no known marker contradicts
+      the split.
+
+    Ambiguous evidence returns ``None`` -- never a fabricated precise
+    boundary.  This covers an unreadable event log, missing launch markers,
+    an ordering inconsistent with the attempt history, and any package
+    linkage that does not actually prove the split.  Callers must fail
+    closed; the absence of proof is never treated as proof of zero.
+    """
+    if not existing_attempts:
+        return 0
+    try:
+        events = db.get_complete_events_for_run(run_id)
+    except Exception:
+        # The evidence cannot even be read: the split cannot be proven.
+        return None
+    boundary_id: int | None = None
+    boundary_type: str | None = None
+    for event in events:
+        if event.event_type in _FRESH_CHAIN_BOUNDARY_EVENTS:
+            boundary_id = event.id
+            boundary_type = event.event_type
+    if boundary_id is None:
+        return 0
+    existing_ids = [attempt.id for attempt in existing_attempts]
+    started_events = [
+        event
+        for event in events
+        if event.event_type == "attempt_started" and event.attempt_id is not None
+    ]
+    marker_sequence: list[str] = []
+    for event in started_events:
+        attempt_id = event.attempt_id
+        if attempt_id is not None:
+            marker_sequence.append(attempt_id)
+
+    # Complete reconciliation: the launch markers must account for the whole
+    # durable attempt history in attempt order.  Event ids are monotonic with
+    # event order, so a reconciled marker sequence divides cleanly into an
+    # old-chain prefix (markers at or before the boundary) and a current-chain
+    # suffix (markers after it).
+    if marker_sequence == existing_ids:
+        return sum(1 for event in started_events if event.id <= boundary_id)
+
+    # Marker evidence is incomplete or contradictory.  For a package
+    # transition the ``package_completed`` linkage can still independently
+    # prove where the old chain ended -- but never against the known markers.
+    if boundary_type == "next_package_started":
+        marker_ids_by_attempt: dict[str, list[int]] = {}
+        for event in started_events:
+            attempt_id = event.attempt_id
+            if attempt_id is not None:
+                marker_ids_by_attempt.setdefault(attempt_id, []).append(event.id)
+        # Contradictory durable evidence never authorizes a precise boundary:
+        # an authoritative ``attempt_started`` marker naming no durable attempt
+        # row, or more than one marker for a single durable attempt, is
+        # ambiguous and must fail closed before any package linkage is trusted.
+        existing_id_set = set(existing_ids)
+        for attempt_id, marker_event_ids in marker_ids_by_attempt.items():
+            if attempt_id not in existing_id_set or len(marker_event_ids) > 1:
+                return None
+        completed_attempt_id: str | None = None
+        for event in events:
+            if event.event_type == "package_completed" and event.id < boundary_id:
+                if event.attempt_id is not None:
+                    completed_attempt_id = event.attempt_id
+        if completed_attempt_id is not None and completed_attempt_id in existing_ids:
+            split = existing_ids.index(completed_attempt_id) + 1
+            proven = True
+            for index, attempt_id in enumerate(existing_ids):
+                marker_event_ids = marker_ids_by_attempt.get(attempt_id, [])
+                if index >= split:
+                    # Current-chain membership needs positive proof: the
+                    # attempt must carry a post-boundary launch marker.
+                    if not marker_event_ids or any(
+                        event_id <= boundary_id for event_id in marker_event_ids
+                    ):
+                        proven = False
+                        break
+                elif any(
+                    event_id > boundary_id for event_id in marker_event_ids
+                ):
+                    # A known old-chain marker after the boundary contradicts
+                    # the split.
+                    proven = False
+                    break
+            if proven:
+                return split
+    return None
+
+
+def _durable_plan_expected_package_count(
+    db: Database, run_id: str, plan: RunPlan
+) -> int | None:
+    """Return the durable expected package count for ``plan``, or ``None``.
+
+    ``persist_plan`` records ``plan_created`` with the intended
+    ``package_count`` *before* it persists the step/package pairs, so that
+    event -- and only that event -- is the durable completeness authority.
+    Recovery must prove the complete normalized footprint from durable
+    evidence alone; it never consults the planner to infer what is missing.
+
+    Exactly one unambiguous matching event carrying a valid positive integer
+    is required.  Missing, duplicated or malformed completeness evidence
+    returns ``None`` so the caller fails closed instead of adopting a
+    truncated plan.
+    """
+    try:
+        events = db.get_complete_events_for_run(run_id)
+    except Exception:
+        # The evidence cannot even be read: completeness cannot be proven.
+        return None
+    matching_counts: list[Any] = []
+    for event in events:
+        if event.event_type != "plan_created":
+            continue
+        payload = event.payload
+        if isinstance(payload, dict) and payload.get("plan_id") == plan.id:
+            matching_counts.append(payload.get("package_count"))
+    if len(matching_counts) != 1:
+        return None
+    count = matching_counts[0]
+    if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+        return None
+    return count
+
+
+def _durable_plan_linkage_is_adoptable(
+    plan: RunPlan,
+    steps: list[PlanStep],
+    packages: list[WorkPackage],
+    expected_package_count: int,
+) -> bool:
+    """Return True when a durable plan's complete normalized footprint is proven.
+
+    Recovery adopts an existing plan as-is rather than repairing it: a plan
+    whose linkage is incomplete or contradictory must fail closed instead of
+    hiding the inconsistency behind a freshly regenerated plan or silently
+    adopting a truncated one.  ``expected_package_count`` is the durable
+    ``plan_created.package_count`` authority: the step/package rows, the
+    ordering and every dependency reference must all prove that complete
+    normalized footprint.
+    """
+    if not steps or len(steps) != len(packages):
+        return False
+    if len(steps) != expected_package_count:
+        return False
+    if len({step.id for step in steps}) != len(steps):
+        return False
+    if len({package.id for package in packages}) != len(packages):
+        return False
+    if sorted(step.ordering for step in steps) != list(
+        range(1, expected_package_count + 1)
+    ):
+        return False
+    package_by_step = {package.plan_step_id: package for package in packages}
+    if len(package_by_step) != len(packages):
+        return False
+    step_ids = {step.id for step in steps}
+    package_ids = {package.id for package in packages}
+    for step in steps:
+        if step.plan_id != plan.id or step.run_id != plan.run_id:
+            return False
+        if step.work_package_id is None:
+            return False
+        if any(dependency not in step_ids for dependency in step.dependency_ids):
+            return False
+        package = package_by_step.get(step.id)
+        if package is None:
+            return False
+        if package.id != step.work_package_id or package.run_id != plan.run_id:
+            return False
+        if any(
+            dependency not in package_ids
+            for dependency in package.dependency_package_ids
+        ):
+            return False
+    return True
+
+
+def _adopt_durable_plan_for_recovery(
+    db: Database, run_id: str
+) -> tuple[PlanStep, ...] | None:
+    """Return the run's durable plan steps for recovery adoption, or ``None``.
+
+    ``None`` means the run has no durable plan and must be planned normally.
+    Exactly one durable plan whose durable evidence proves its complete
+    normalized footprint is adopted as-is -- its plan id, step ids, package
+    ids and persisted lifecycle state are preserved and no second plan is
+    created.  The ``plan_created.package_count`` event is the durable
+    cardinality authority: the durable step/package rows, ordering and every
+    dependency reference must all account for that complete footprint.  Any
+    other shape records bounded evidence and raises so the RUNNING run fails
+    closed: multiple durable plans are never silently disambiguated, and an
+    incomplete or inconsistent linkage is never repaired by re-planning or by
+    guessing the missing packages.
+    """
+    plans = db.list_run_plans(run_id)
+    if not plans:
+        return None
+    if len(plans) > 1:
+        reason = f"Recovery blocked: multiple durable plans exist for run '{run_id}'"
+        db.record_event(
+            run_id,
+            "recovery_blocked_multiple_durable_plans",
+            payload={"reason": reason, "plan_ids": [plan.id for plan in plans]},
+        )
+        raise RuntimeError(reason)
+    plan = plans[0]
+    steps = db.get_plan_steps(run_id)
+    packages = db.get_work_packages(run_id)
+    expected_package_count = _durable_plan_expected_package_count(db, run_id, plan)
+    if expected_package_count is None or not _durable_plan_linkage_is_adoptable(
+        plan, steps, packages, expected_package_count
+    ):
+        reason = (
+            "Recovery blocked: durable plan linkage cannot be safely adopted "
+            f"for run '{run_id}'"
+        )
+        db.record_event(
+            run_id,
+            "recovery_blocked_incomplete_durable_plan",
+            payload={"reason": reason, "plan_id": plan.id},
+        )
+        raise RuntimeError(reason)
+    return tuple(steps)
 
 
 def _role_for_orchestrator_dispatch(
@@ -623,8 +927,11 @@ def _classify_gate_outcome(
     The classification is driven by structured fields on ``ProcessResult`` only:
     ``launch_failed``, ``timed_out``, ``termination_incomplete``,
     ``exit_code``.  Stderr text is NEVER used for classification; this keeps
-    infrastructure / runtime / timeout / termination-unsafe outcomes
-    distinguishable from real validation failures without fuzzy parsing.
+    typed infrastructure / timeout / termination-unsafe / mutation outcomes
+    distinguishable from the ``VALIDATION_FAILURE`` bucket without fuzzy
+    parsing.  The ``VALIDATION_FAILURE`` bucket itself does NOT prove cause:
+    current structured evidence does not distinguish a genuine candidate
+    validation failure from a launchable gate-configuration error (H3/H3.1).
 
     Precedence:
       1. launch_failed            -> INFRASTRUCTURE_FAILURE
@@ -1239,6 +1546,44 @@ class Orchestrator:
             },
         )
         return publication
+
+    def _configured_reviewer_override(self, run_id: str) -> WorkerCandidate | None:
+        """Return the owner-configured exact reviewer for in-run review.
+
+        R3-E1.1: every production semantic-review dispatch must receive
+        the same exact configured Reviewer candidate the service seam
+        supplies.  This delegates to the canonical R3-E1 authority
+        (:func:`reviewer_candidate_for_dispatch` over
+        ``OwnerBindings.reviewer_binding_id``) with this run's real
+        adapter registry -- no reviewer-selection policy lives here.
+
+        Unconfigured (``None``) keeps the legacy reviewer ladder.
+        Configured-but-invalid raises :class:`ReviewerSelectionError`
+        after recording a durable refusal: the run fails closed with
+        zero legacy-reviewer substitution, exactly as the manual /
+        service review path does.
+        """
+        try:
+            owner = load_owner_bindings()
+        except BindingStoreError as exc:
+            raise ReviewerSelectionError(
+                "REVIEWER_UNRESOLVABLE",
+                f"owner reviewer state unreadable; refusing review: {exc}",
+            ) from exc
+        try:
+            return reviewer_candidate_for_dispatch(
+                owner, adapter_registry=self.registry
+            )
+        except ReviewerSelectionError as exc:
+            self.db.record_event(
+                run_id,
+                "reviewer_binding_unresolvable",
+                payload={
+                    "requested_binding_id": owner.reviewer_binding_id,
+                    "reason": exc.reason,
+                },
+            )
+            raise
 
     def _resolve_c13_f_review_decision(
         self,
@@ -2505,28 +2850,42 @@ class Orchestrator:
         # retain the standard lifecycle/events and do not incur planning model
         # calls; the deterministic sizing assessment never reads adapters.
         plan_steps: list[Any] = []
-        sizing, package_proposals = resolve_work_packages(task)
-        if sizing.should_slice:
-            persisted = persist_plan(
-                self.db,
-                run_id,
-                task,
-                sizing,
-                package_proposals,
-                base_commit,
-            )
-            plan_steps = list(persisted.steps)
-            # C09: attach the deterministic module scope to each work package
-            # so package workers receive their own bounded [PROJECT SCOPE].
-            assert scope_bundle is not None
-            for package in persisted.packages:
-                package_scope = resolve_package_scope(
-                    scope_bundle.graph, package.goal, package.relevant_paths
+        # R1-B.5: an adopting/recovering run must never re-plan an already
+        # durable decomposition.  A durable plan is the authority on
+        # recovery: adopt its exact plan id, step ids, package ids and
+        # persisted lifecycle state.  Multiple or inconsistent durable plans
+        # fail closed (bounded evidence, run stays RUNNING) rather than
+        # silently planning the same objective again.
+        adopted_plan_steps: tuple[PlanStep, ...] | None = None
+        if is_adoption:
+            adopted_plan_steps = _adopt_durable_plan_for_recovery(self.db, run_id)
+        if adopted_plan_steps is not None:
+            plan_steps = list(adopted_plan_steps)
+        else:
+            sizing, package_proposals = resolve_work_packages(task)
+            if sizing.should_slice:
+                persisted = persist_plan(
+                    self.db,
+                    run_id,
+                    task,
+                    sizing,
+                    package_proposals,
+                    base_commit,
                 )
-                self.db.set_work_package_scope(
-                    package.id,
-                    json.dumps(package_scope.to_dict(), sort_keys=True, separators=(",", ":")),
-                )
+                plan_steps = list(persisted.steps)
+                # C09: attach the deterministic module scope to each work package
+                # so package workers receive their own bounded [PROJECT SCOPE].
+                assert scope_bundle is not None
+                for package in persisted.packages:
+                    package_scope = resolve_package_scope(
+                        scope_bundle.graph, package.goal, package.relevant_paths
+                    )
+                    self.db.set_work_package_scope(
+                        package.id,
+                        json.dumps(
+                            package_scope.to_dict(), sort_keys=True, separators=(",", ":")
+                        ),
+                    )
         # Each successful package becomes the only permitted start point for
         # its dependent.  The ordinary, no-plan path retains the base commit.
         lineage_base_sha = base_commit
@@ -2576,22 +2935,25 @@ class Orchestrator:
             # dispatch projection.
             initial_orchestrator_guidance = _InitialOrchestratorGuidanceCache()
             # Explicit escalation-evidence flag: True only when an actually
-            # dispatched attempt produced a genuine capability-bearing
-            # outcome (a worker FAILED status, or a gate failure on
-            # real candidate changes) at the CURRENT tier. no_changes,
-            # TIMEOUT, and deterministic pre-dispatch skips (availability /
-            # quota / training policy / prompt_exceeds_transport_capability)
-            # never set this -- exhausting the candidate ladder on those
-            # alone is not evidence the task exceeds this tier's capability,
-            # and must never by itself justify escalating to a costlier
-            # tier. Reset alongside stage_attempts wherever a fresh
-            # attempt-budget cycle begins (tier escalation, next package).
+            # dispatched attempt produced an explicit typed capability
+            # failure (DispatchOutcome.CAPABILITY_FAILURE) at the CURRENT
+            # tier.  Gate failures (even VALIDATION_FAILURE on real
+            # candidate changes), no_changes, TIMEOUT, and deterministic
+            # pre-dispatch skips (availability / quota / training policy /
+            # prompt_exceeds_transport_capability) never set this --
+            # exhausting the candidate ladder on those alone is not evidence
+            # the task exceeds this tier's capability, and must never by
+            # itself justify escalating to a costlier tier. Reset alongside
+            # stage_attempts wherever a fresh attempt-budget cycle begins
+            # (tier escalation, next package).
             tier_has_escalation_evidence = False
             escalation_outcome: DispatchOutcome | None = None
             escalation_stage: DispatchStage | None = None
             # C04: True only when the just-completed tier escalation is a
             # GENUINE capability-bearing escalation (a real validation
-            # failure on actual candidate changes).  Reset alongside
+            # failure on actual candidate changes).  H3.1 removed gate
+            # failure from escalation authority, so no reachable escalation
+            # sets this today; SURGEON stays dormant.  Reset alongside
             # tier_has_escalation_evidence wherever a fresh attempt-budget
             # cycle begins.  Used to select SURGEON context semantics for
             # the next dispatch only.
@@ -2610,11 +2972,47 @@ class Orchestrator:
             # produce typed decision evidence and cannot be resurrected by
             # ranking or overrides.
             candidates = list(base_candidates)
+            # Structured per-candidate skip evidence for this run: every
+            # automatic candidate that cannot dispatch appends one
+            # sanitized record (provider/model/binding, canonical skip
+            # reason, readiness state/reason/connection/observed_at when
+            # readiness participated).  The terminal no_eligible_candidate
+            # evidence and the owner-facing summary are both derived from
+            # this same list -- never re-derived or contradicted.
+            skipped_candidate_details: list[dict[str, Any]] = []
+            # R1-B.1: skip details are scoped to the selected routing
+            # chain.  The flag tracks whether terminal exhaustion
+            # evidence was already recorded for the current context so
+            # the mixed attempted+skipped case persists exactly one
+            # terminal record without duplicating the zero-launch path.
+            chain_exhaustion_recorded = False
+            # R1-B.3: chain-local attempt authority.  The terminal
+            # summary must describe the CURRENT selected routing chain,
+            # not the run-global ``attempts`` history.  This index marks
+            # where the active chain's launches begin inside ``attempts``;
+            # ``attempts[chain_attempt_start:]`` is the single source of
+            # truth for launched attempts in the current chain.  A plain
+            # ``stage_attempts`` counter cannot serve this role: it is an
+            # attempt-budget counter that is decremented on interruption /
+            # no_changes / timeout exemptions and reset on escalation, so
+            # it can read zero after real launches.  The slice marker only
+            # moves forward when a genuinely fresh candidate chain is
+            # installed (tier escalation, next-package transition) and
+            # never moves on retries/timeouts/recovery, so historical
+            # attempts stay durable in ``attempts`` while the terminal
+            # facts stay chain-local.
+            chain_attempt_start: int = 0
+            selected_routing_context = routing_context_for(
+                current_tier.value,
+                training_allowed=config.training_allowed,
+                is_peak=bool(is_peak),
+            )
             self.db.record_event(
                 run_id,
                 "tier_candidates_resolved",
                 payload={
                     "tier": current_tier.value,
+                    "routing_context": selected_routing_context,
                     "candidates": [
                         {"provider": c.provider, "model": c.model} for c in base_candidates
                     ],
@@ -2670,6 +3068,31 @@ class Orchestrator:
             if existing_attempts:
                 attempts.extend(existing_attempts)
                 attempt_number = len(attempts)
+            # R1-B.4: the process-local marker cannot survive process death,
+            # so the current-chain boundary is reconstructed from durable
+            # evidence whenever history is adopted.  The durable authority
+            # is the last fresh-chain install (next_package_started /
+            # tier_escalated) ordered against attempt_started launch
+            # markers; retries, timeouts, checkpoint continuations and
+            # cold-takeover replacements never install a fresh chain and
+            # therefore never move the reconstructed boundary.
+            if existing_attempts:
+                reconstructed_chain_start = _reconstruct_chain_attempt_start(
+                    self.db, run_id, existing_attempts
+                )
+                if reconstructed_chain_start is None:
+                    # Unknown must stay unknown: the chain-local boundary is
+                    # unprovable, so fail closed via the existing recovery
+                    # safety convention rather than fabricate a count or a
+                    # terminal summary.  The run stays RUNNING and durable
+                    # history is left intact.
+                    self.db.record_event(
+                        run_id,
+                        "recovery_blocked_ambiguous_chain_boundary",
+                        payload={"reason": _AMBIGUOUS_CHAIN_BOUNDARY_REASON},
+                    )
+                    raise RuntimeError(_AMBIGUOUS_CHAIN_BOUNDARY_REASON)
+                chain_attempt_start = reconstructed_chain_start
 
             active_continuation_checkpoint: WorkerCheckpoint | None = None
             active_continuation_reason: str | None = None
@@ -2941,10 +3364,19 @@ class Orchestrator:
                                 },
                             )
                     if not may_escalate:
+                        # R1-B.3: chain-local exhaustion guard.  The ladder
+                        # is exhausted for the CURRENT chain; record
+                        # evidence when that chain launched nothing or
+                        # skipped something.  Uses the chain-local attempt
+                        # scope (never stage_attempts: budget exemptions
+                        # decrement it after real launches).
                         if (
                             config.model_override is None
                             and candidate_idx >= len(candidates)
-                            and stage_attempts == 0
+                            and (
+                                len(attempts) <= chain_attempt_start
+                                or skipped_candidate_details
+                            )
                         ):
                             self.db.record_event(
                                 run_id,
@@ -2952,12 +3384,17 @@ class Orchestrator:
                                 payload={
                                     "outcome": NO_ELIGIBLE_CANDIDATE,
                                     "tier": current_tier.value,
+                                    "routing_context": selected_routing_context,
                                     "candidates": [
                                         {"provider": c.provider, "model": c.model}
                                         for c in candidates
                                     ],
+                                    "skipped_candidates": list(
+                                        skipped_candidate_details
+                                    ),
                                 },
                             )
+                            chain_exhaustion_recorded = True
                         if ceiling_allows_escalation and not tier_has_escalation_evidence:
                             # The ceiling and routing mode would otherwise
                             # have allowed escalation; it is withheld here
@@ -2991,10 +3428,13 @@ class Orchestrator:
                     )
                     # C04: a genuine capability-bearing tier escalation may
                     # activate SURGEON context semantics for the next
-                    # dispatch.  Provider / quota / infrastructure / timeout
-                    # / mutation / no_changes / already_satisfied escalations
-                    # never set this flag -- those continue to use the
-                    # canonical role_for_stage() mapping.  See
+                    # dispatch.  Explicit CAPABILITY_FAILURE escalations and
+                    # provider / quota / infrastructure / timeout / mutation
+                    # / no_changes / already_satisfied outcomes never set
+                    # this flag -- those continue to use the canonical
+                    # role_for_stage() mapping (an explicit worker
+                    # CAPABILITY_FAILURE carries no failed-candidate diff
+                    # for a corrective descendant).  See
                     # ``_is_genuine_capability_escalation``.
                     surgeon_active = _is_genuine_capability_escalation(escalation_outcome)
                     self.db.record_event(
@@ -3020,11 +3460,17 @@ class Orchestrator:
                         snapshot=routing_snapshot,
                     )
                     candidates = list(base_candidates)
+                    selected_routing_context = routing_context_for(
+                        current_tier.value,
+                        training_allowed=config.training_allowed,
+                        is_peak=bool(is_peak),
+                    )
                     self.db.record_event(
                         run_id,
                         "tier_candidates_resolved",
                         payload={
                             "tier": current_tier.value,
+                            "routing_context": selected_routing_context,
                             "candidates": [
                                 {"provider": c.provider, "model": c.model} for c in base_candidates
                             ],
@@ -3035,6 +3481,17 @@ class Orchestrator:
                     )
                     candidate_idx = 0
                     stage_attempts = 0
+                    # R1-B.1: skip details are scoped to the selected
+                    # routing chain -- a real tier escalation changes
+                    # selected_routing_context, so prior-tier skips must
+                    # never render as though they belonged to the new
+                    # tier.  Reset alongside the attempt-budget cycle.
+                    # R1-B.3: a genuinely fresh chain also restarts the
+                    # terminal attempt scope; historical attempts stay
+                    # durable in ``attempts``.
+                    skipped_candidate_details.clear()
+                    chain_exhaustion_recorded = False
+                    chain_attempt_start = len(attempts)
                     tier_has_escalation_evidence = False
                     escalation_outcome = None
                     escalation_stage = None
@@ -3165,30 +3622,45 @@ class Orchestrator:
                     ):
                         blocked_cand = candidates[candidate_idx]
                         candidate_idx += 1
+                        blocked_skip = build_candidate_skip(
+                            provider=blocked_cand.provider,
+                            model=blocked_cand.model,
+                            reason="quota_blocked",
+                            binding_id=getattr(blocked_cand, "binding_id", None),
+                        )
+                        skipped_candidate_details.append(blocked_skip)
+                        blocked_payload = {
+                            "provider": blocked_cand.provider,
+                            "model": blocked_cand.model,
+                            "reason": "quota_blocked",
+                            "outcome": DispatchOutcome.ELIGIBILITY_SKIP.value,
+                        }
+                        blocked_payload.update(blocked_skip)
                         self.db.record_event(
                             run_id,
                             "worker_candidate_skipped",
-                            payload={
-                                "provider": blocked_cand.provider,
-                                "model": blocked_cand.model,
-                                "reason": "quota_blocked",
-                                "outcome": DispatchOutcome.ELIGIBILITY_SKIP.value,
-                            },
+                            payload=blocked_payload,
                         )
                     if candidate_idx >= len(candidates):
-                        if stage_attempts == 0:
+                        # R1-B.3: same chain-local guard as above.
+                        if len(attempts) <= chain_attempt_start or skipped_candidate_details:
                             self.db.record_event(
                                 run_id,
                                 "no_eligible_candidate",
                                 payload={
                                     "outcome": NO_ELIGIBLE_CANDIDATE,
                                     "tier": current_tier.value,
+                                    "routing_context": selected_routing_context,
                                     "candidates": [
                                         {"provider": c.provider, "model": c.model}
                                         for c in candidates
                                     ],
+                                    "skipped_candidates": list(
+                                        skipped_candidate_details
+                                    ),
                                 },
                             )
+                            chain_exhaustion_recorded = True
                         stage_attempts = config.max_attempts
                         continue
                     candidate = candidates[candidate_idx]
@@ -3224,8 +3696,18 @@ class Orchestrator:
                                 "reason": exc.reason,
                                 "outcome": DispatchOutcome.ELIGIBILITY_SKIP.value,
                                 "tier": current_tier.value,
+                                "routing_context": selected_routing_context,
                                 "routing_snapshot_digest": (routing_snapshot.content_hash),
                             }
+                            if config.model_override is None:
+                                skipped_candidate_details.append(
+                                    build_candidate_skip(
+                                        provider=candidate.provider,
+                                        model=candidate.model,
+                                        reason=exc.reason,
+                                        binding_id=ordinary_binding_id,
+                                    )
+                                )
                             self.db.record_event(
                                 run_id,
                                 "exact_binding_unresolvable",
@@ -3836,6 +4318,7 @@ class Orchestrator:
                     candidate=candidate,
                     adapter=adapter_pre,
                     training_allowed=config.training_allowed,
+                    routing_snapshot=routing_snapshot,
                     quota_states=quota_states,
                     prompt_bytes=prompt_bytes_pre,
                     reserve_override=frozen_control_plane.reserve_override,
@@ -3882,6 +4365,7 @@ class Orchestrator:
                         candidate=candidate,
                         adapter=adapter_pre,
                         training_allowed=config.training_allowed,
+                        routing_snapshot=routing_snapshot,
                         quota_states=quota_states,
                         prompt_bytes=prompt_bytes_pre,
                         reserve_override=frozen_control_plane.reserve_override,
@@ -3938,6 +4422,40 @@ class Orchestrator:
                         transport=transport_pre,
                         explicit_override=is_explicit,
                     )
+                    # Structured skip record: sanitized typed reason plus
+                    # readiness state/reason/connection/observed_at when
+                    # readiness participated and the exact binding id when
+                    # the candidate carries one.  The same record feeds
+                    # the terminal no_eligible_candidate evidence below.
+                    skip_detail = build_candidate_skip(
+                        provider=candidate.provider,
+                        model=candidate.model,
+                        reason=reason_pre,
+                        binding_id=getattr(candidate, "binding_id", None),
+                        readiness_state=(
+                            readiness_pre.state.value
+                            if readiness_pre is not None
+                            and readiness_pre.state is not None
+                            else None
+                        ),
+                        readiness_reason=(
+                            readiness_pre.reason
+                            if readiness_pre is not None
+                            else None
+                        ),
+                        connection_id=(
+                            readiness_pre.connection_id
+                            if readiness_pre is not None
+                            else None
+                        ),
+                        observed_at=(
+                            getattr(readiness_pre, "observed_at", None)
+                            if readiness_pre is not None
+                            else None
+                        ),
+                    )
+                    if not is_explicit:
+                        skipped_candidate_details.append(skip_detail)
                     payload_pre.update(
                         {
                             "outcome": DispatchOutcome.ELIGIBILITY_SKIP.value,
@@ -3947,8 +4465,20 @@ class Orchestrator:
                                 else DispatchStage.RETRY.value
                             ),
                             "tier": current_tier.value,
+                            "routing_context": selected_routing_context,
                             "package_id": tier_decision.package_id,
                             "control_plane": decision_pre.as_payload(),
+                            **{
+                                key: skip_detail[key]
+                                for key in (
+                                    "readiness_state",
+                                    "readiness_reason",
+                                    "connection_id",
+                                    "observed_at",
+                                    "binding_id",
+                                )
+                                if skip_detail.get(key) is not None
+                            },
                         }
                     )
                     if supervisor is not None:
@@ -5261,11 +5791,17 @@ class Orchestrator:
                                     snapshot=routing_snapshot,
                                 )
                                 candidates = list(base_candidates)
+                                selected_routing_context = routing_context_for(
+                                    current_tier.value,
+                                    training_allowed=config.training_allowed,
+                                    is_peak=bool(is_peak),
+                                )
                                 self.db.record_event(
                                     run_id,
                                     "tier_candidates_resolved",
                                     payload={
                                         "tier": current_tier.value,
+                                        "routing_context": selected_routing_context,
                                         "package_id": tier_decision.package_id,
                                         "candidates": [
                                             {"provider": c.provider, "model": c.model}
@@ -5280,8 +5816,24 @@ class Orchestrator:
                                 candidate_idx = 0
                                 stage_attempts = 0
                                 package_dispatch_ordinal = 0
+                                # R1-B.2: skip evidence belongs only to the
+                                # currently selected package/tier routing
+                                # chain.  A next-package transition installs
+                                # a fresh chain (possibly a new tier and
+                                # routing context), so prior-package skips
+                                # must never leak into the next package's
+                                # terminal exhaustion.  Reset alongside the
+                                # fresh attempt-budget/escalation cycle.
+                                # R1-B.3: the same fresh chain restarts the
+                                # terminal attempt scope; prior-package
+                                # attempts stay durable in ``attempts``.
+                                skipped_candidate_details.clear()
+                                chain_exhaustion_recorded = False
+                                chain_attempt_start = len(attempts)
                                 tier_has_escalation_evidence = False
+                                escalation_outcome = None
                                 escalation_stage = None
+                                surgeon_active = False
                                 continue
 
                         lineage_base_sha = commit_sha
@@ -5493,6 +6045,14 @@ class Orchestrator:
                                 registry=self.registry,
                                 readiness_service=self.readiness_service,
                             )
+                            # R3-E1.1: the owner-selected exact REVIEWER
+                            # binding (when configured) authorizes every
+                            # in-run review dispatch below -- bounded/final
+                            # and MAX alike.  A configured-but-invalid
+                            # reviewer raises here: zero legacy fallback.
+                            reviewer_override = self._configured_reviewer_override(
+                                run_id
+                            )
                             current_commit_sha = commit_sha
                             current_branch = branch_name
                             current_wt_path = wt_path
@@ -5665,6 +6225,7 @@ class Orchestrator:
                                             candidate=repair_candidate,
                                             adapter=repair_adapter,
                                             training_allowed=config.training_allowed,
+                                            routing_snapshot=routing_snapshot,
                                             quota_states=quota_states_rep,
                                             prompt_bytes=prompt_bytes_rep,
                                             explicit_override=is_explicit_rep,
@@ -5682,6 +6243,7 @@ class Orchestrator:
                                             candidate=repair_candidate,
                                             adapter=repair_adapter,
                                             training_allowed=config.training_allowed,
+                                            routing_snapshot=routing_snapshot,
                                             quota_states=quota_states_rep,
                                             prompt_bytes=prompt_bytes_rep,
                                             reserve_override=frozen_control_plane.reserve_override,
@@ -6951,6 +7513,7 @@ class Orchestrator:
                                     # Launch review (final or not)
                                     rev_res = review_engine.review_run(
                                         run_id,
+                                        reviewer_override=reviewer_override,
                                         timeout=config.review_timeout,
                                         review_limit=remaining_budget,
                                         is_final=is_final,
@@ -7069,6 +7632,7 @@ class Orchestrator:
                                     # Unlimited budget for max
                                     rev_res = review_engine.review_run(
                                         run_id,
+                                        reviewer_override=reviewer_override,
                                         timeout=config.review_timeout,
                                         review_limit=9999,
                                     )
@@ -7837,15 +8401,19 @@ class Orchestrator:
                         attempt.worker_stdout = worker_res.stdout
                         attempt.worker_stderr = worker_res.stderr
                         attempt.completed_at = now
-                        # Capability-bearing evidence is ONLY a real validation
-                        # failure on actual candidate changes.  INFRASTRUCTURE_FAILURE,
-                        # TIMEOUT, TERMINATION_UNSAFE, and MUTATION are
-                        # deterministic-gate outcomes that must NEVER trigger a
-                        # stronger model dispatch.
-                        capability_bearing_gate_failure = (
+                        # Gate truth is recorded for a VALIDATION_FAILURE outcome
+                        # on actual candidate changes (deterministic verification
+                        # did not pass; cause not proven), but gate failure alone
+                        # carries NO cross-tier spend authority (H3.1):
+                        # process evidence cannot distinguish a misconfigured
+                        # gate from a genuine candidate validation failure.
+                        # INFRASTRUCTURE_FAILURE, TIMEOUT,
+                        # TERMINATION_UNSAFE, and MUTATION likewise must
+                        # NEVER trigger a stronger model dispatch.
+                        real_changes_validation_failure = (
                             disposition.outcome is GateOutcome.VALIDATION_FAILURE and has_changes
                         )
-                        if capability_bearing_gate_failure:
+                        if real_changes_validation_failure:
                             attempt.worker_error = (
                                 f"Gate check failed (exit code {gate_res.exit_code})"
                             )
@@ -7890,29 +8458,30 @@ class Orchestrator:
                                     "reason": "gate_failed_committed_candidate",
                                 },
                             )
-                            # A real gate failure on actual candidate changes is
-                            # genuine capability-bearing evidence: the worker
-                            # produced a substantive attempt and it did not pass
-                            # verification. This (unlike no_changes/TIMEOUT) may
-                            # justify escalating to a costlier tier once the
-                            # attempt budget/candidate ladder is exhausted.
-                            tier_has_escalation_evidence = True
-                            escalation_outcome = DispatchOutcome.GATE_FAILURE
-                            escalation_stage = DispatchStage(stage_label)
+                            # H3.1: a VALIDATION_FAILURE outcome on actual candidate
+                            # changes preserves gate truth and repair lineage
+                            # but is NOT cross-tier escalation evidence.  The
+                            # durable outcome stays GATE_FAILURE with
+                            # escalation_evidence False; the same-tier
+                            # candidate chain may still repair from this
+                            # candidate, but its failure alone must never buy
+                            # a stronger-tier dispatch.
                             self.db.record_event(
                                 run_id,
                                 "dispatch_outcome_classified",
                                 attempt_id=attempt_id,
                                 payload={
                                     "outcome": DispatchOutcome.GATE_FAILURE.value,
-                                    "escalation_evidence": True,
+                                    "escalation_evidence": False,
                                     "candidate_sha": commit_sha,
                                     "role": role_for_stage(DispatchStage(stage_label)).value,
                                 },
                             )
                         else:
-                            # Non-capability-bearing gate failure or no-diff
-                            # VALIDATION_FAILURE.  Candidate SHA is preserved.
+                            # Every other gate outcome, or VALIDATION_FAILURE
+                            # with no candidate changes.  No gate outcome
+                            # carries cross-tier escalation authority (H3.1).
+                            # Candidate SHA is preserved.
                             # INFRASTRUCTURE_FAILURE / TIMEOUT /
                             # TERMINATION_UNSAFE / MUTATION must never produce
                             # escalation evidence regardless of how cleanly the
@@ -8247,7 +8816,76 @@ class Orchestrator:
 
             # All attempts exhausted
             now = current_iso_timestamp()
-            summary = f"All {len(attempts)} attempt(s) failed to pass gate '{gate_command}'."
+            # R1-B.1 mixed exhaustion: the final selected chain is
+            # exhausted with both launched attempts and skipped
+            # candidates.  Attempted candidates stay distinct from
+            # skipped/ineligible ones; the launched model is never
+            # described as ineligible.
+            # R1-B.3: all terminal attempt facts are scoped to the
+            # CURRENT selected routing chain via ``chain_attempt_start``.
+            # ``chain_attempt_count`` counts genuinely launched attempts
+            # in ``attempts[chain_attempt_start:]``; the run-global
+            # ``attempts`` history (prior packages/tiers) stays durable
+            # but never enters the owner-facing summary.
+            chain_attempt_count = max(0, len(attempts) - chain_attempt_start)
+            chain_has_launches = chain_attempt_count > 0
+            mixed_exhaustion = (
+                config.model_override is None
+                and chain_has_launches
+                and bool(skipped_candidate_details)
+                and candidate_idx >= len(candidates)
+            )
+            chain_exhausted_no_launches = (
+                not chain_has_launches and config.model_override is None
+            )
+            if chain_exhausted_no_launches:
+                # Zero launches: no worker ran, so the generic gate
+                # summary would mislead.  Report the actionable
+                # terminal explanation from the same skip authority
+                # that produced the no_eligible_candidate evidence:
+                # an empty selected chain names its context, otherwise
+                # every skipped candidate is named with its reason.
+                summary = format_no_eligible_summary(
+                    skipped_candidate_details,
+                    routing_context=selected_routing_context,
+                )
+            elif mixed_exhaustion:
+                # Persist terminal structured exhaustion evidence even
+                # though prior attempts exist (the loop break above
+                # already records it in the normal path; this is the
+                # defensive terminal guarantee from the same single
+                # skip authority -- never a second authority).
+                if not chain_exhaustion_recorded:
+                    self.db.record_event(
+                        run_id,
+                        "no_eligible_candidate",
+                        payload={
+                            "outcome": NO_ELIGIBLE_CANDIDATE,
+                            "tier": current_tier.value,
+                            "routing_context": selected_routing_context,
+                            "candidates": [
+                                {"provider": c.provider, "model": c.model}
+                                for c in candidates
+                            ],
+                            "skipped_candidates": list(
+                                skipped_candidate_details
+                            ),
+                        },
+                    )
+                    chain_exhaustion_recorded = True
+                exhaustion_summary = format_no_eligible_summary(
+                    skipped_candidate_details,
+                    routing_context=selected_routing_context,
+                )
+                summary = (
+                    f"All {chain_attempt_count} attempt(s) failed to pass gate "
+                    f"'{gate_command}'. {exhaustion_summary}"
+                )
+            else:
+                summary = (
+                    f"All {chain_attempt_count} attempt(s) failed to pass gate "
+                    f"'{gate_command}'."
+                )
             failed_step = next(
                 (
                     step
@@ -8275,10 +8913,25 @@ class Orchestrator:
                 completed_at=now,
                 result_summary=summary,
             )
+            run_failed_payload: dict[str, Any] = {
+                "summary": summary,
+                # R1-B.3: ``attempts_count`` intentionally remains the total
+                # run attempt count (durable history across packages/tiers).
+                # ``chain_attempts_count`` is the chain-local launched-attempt
+                # count described by the owner-facing summary.
+                "attempts_count": len(attempts),
+                "chain_attempts_count": chain_attempt_count,
+            }
+            if chain_exhausted_no_launches or mixed_exhaustion:
+                run_failed_payload["outcome"] = NO_ELIGIBLE_CANDIDATE
+                run_failed_payload["routing_context"] = selected_routing_context
+                run_failed_payload["skipped_candidates"] = list(
+                    skipped_candidate_details
+                )
             self.db.record_event(
                 run_id,
                 "run_failed",
-                payload={"summary": summary, "attempts_count": len(attempts)},
+                payload=run_failed_payload,
             )
 
             return RunResult(

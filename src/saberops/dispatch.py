@@ -42,6 +42,121 @@ SKIP_TRAINING_POLICY = "training_policy_excludes_model"
 SKIP_QUOTA_BLOCKED = "quota_blocked"
 SKIP_PROMPT_TOO_LARGE = "prompt_exceeds_transport_capability"
 
+#: Skip reasons where readiness evidence participated in the decision.
+#: Callers use this to decide whether readiness state/reason/connection
+#: fields belong on the durable skip record.
+READINESS_SKIP_REASONS: frozenset[str] = frozenset(
+    {SKIP_PROVIDER_READINESS_NOT_READY, SKIP_PROVIDER_READINESS_UNKNOWN}
+)
+
+
+def routing_context_for(
+    tier: str,
+    *,
+    training_allowed: bool = True,
+    is_peak: bool = False,
+) -> str:
+    """Return the canonical selected routing context key for a dispatch tier.
+
+    Mirrors the chain selection in
+    :func:`saberops.routing.resolve_candidate_chain` (snapshot path):
+    T1 always resolves ``T1.default``; T2 splits on training permission
+    then peak; T3 splits on peak only.  The value names the actual
+    selected context so empty-chain and exhaustion evidence can quote it.
+    """
+    cleaned = tier.strip().upper()
+    if cleaned == "T2" and training_allowed:
+        return "T2.training_allowed"
+    if cleaned == "T2":
+        return "T2.training_denied_peak" if is_peak else "T2.training_denied_off_peak"
+    if cleaned == "T3":
+        return "T3.peak" if is_peak else "T3.off_peak"
+    return "T1.default"
+
+
+def build_candidate_skip(
+    *,
+    provider: str,
+    model: str,
+    reason: str,
+    binding_id: str | None = None,
+    readiness_state: str | None = None,
+    readiness_reason: str | None = None,
+    connection_id: str | None = None,
+    observed_at: str | None = None,
+) -> dict[str, Any]:
+    """Build the structured, non-secret record for one skipped candidate.
+
+    Only sanitized typed reasons owned by the control plane are stored:
+    provider/model identity, the canonical skip reason, readiness
+    state/reason when readiness participated, the resolved connection id
+    when known, the exact owner-selected binding id when known, and the
+    existing readiness observation timestamp when it can be carried
+    through.  No credential material, command output, exception repr, or
+    provider stderr ever enters this record.
+    """
+    record: dict[str, Any] = {
+        "provider": provider.strip().lower(),
+        "model": model.strip(),
+        "reason": reason.strip(),
+    }
+    cleaned_binding = (binding_id or "").strip()
+    if cleaned_binding:
+        record["binding_id"] = cleaned_binding
+    if reason.strip() in READINESS_SKIP_REASONS:
+        if readiness_state:
+            record["readiness_state"] = readiness_state.strip()
+        if readiness_reason:
+            record["readiness_reason"] = readiness_reason.strip()
+        cleaned_connection = (connection_id or "").strip()
+        if cleaned_connection:
+            record["connection_id"] = cleaned_connection
+        cleaned_observed = (observed_at or "").strip()
+        if cleaned_observed:
+            record["observed_at"] = cleaned_observed
+    else:
+        cleaned_connection = (connection_id or "").strip()
+        if cleaned_connection:
+            record["connection_id"] = cleaned_connection
+    return record
+
+
+def format_skipped_candidate_line(skip: dict[str, Any] | Any) -> str:
+    """Render one skipped candidate as an owner-actionable evidence line."""
+    if isinstance(skip, dict):
+        provider = str(skip.get("provider", ""))
+        model = str(skip.get("model", ""))
+        reason = str(skip.get("reason", ""))
+        readiness_state = skip.get("readiness_state")
+        readiness_reason = skip.get("readiness_reason")
+    else:
+        provider = str(getattr(skip, "provider", ""))
+        model = str(getattr(skip, "model", ""))
+        reason = str(getattr(skip, "reason", ""))
+        readiness_state = getattr(skip, "readiness_state", None)
+        readiness_reason = getattr(skip, "readiness_reason", None)
+    identity = f"{provider}/{model}"
+    if reason in READINESS_SKIP_REASONS and readiness_state and readiness_reason:
+        return f"{identity}:\n    readiness {readiness_state} ({readiness_reason})"
+    if reason == SKIP_PROVIDER_EXECUTABLE_UNAVAILABLE:
+        return f"{identity}:\n    executable unavailable"
+    return f"{identity}:\n    {reason}"
+
+
+def format_no_eligible_summary(
+    skips: list[dict[str, Any]],
+    *,
+    routing_context: str = "",
+) -> str:
+    """Render the owner-facing summary for an exhausted candidate chain."""
+    context_suffix = f" for {routing_context}" if routing_context else ""
+    if not skips:
+        return f"No routing candidates are configured{context_suffix}."
+    lines = "\n".join(format_skipped_candidate_line(skip) for skip in skips)
+    if routing_context:
+        return f"No eligible candidate{context_suffix}:\n{lines}"
+    return f"No eligible candidate:\n{lines}"
+
 #: Fixed sanitized reason used when the readiness authority itself cannot
 #: be constructed or read.  Never an exception repr, path, or secret:
 #: the single vocabulary token is the whole diagnostic.
@@ -63,6 +178,7 @@ class UnavailableReadinessAdmission:
     reason: str = READINESS_AUTHORITY_UNAVAILABLE
     executable_available: bool = True
     connection_id: str | None = None
+    observed_at: str | None = None
 
 
 class UnavailableReadinessService:
@@ -105,6 +221,8 @@ def evaluate_eligibility(
     candidate: WorkerCandidate,
     adapter: WorkerAdapter | None,
     training_allowed: bool,
+    training_required: str | None = None,
+    routing_snapshot: Any | None = None,
     quota_states: list[QuotaState],
     prompt_bytes: int,
     explicit_override: bool = False,
@@ -118,12 +236,19 @@ def evaluate_eligibility(
     readiness_reason: str | None = None,
     readiness_executable_available: bool = True,
 ) -> str | None:
-    """Return the compatibility skip reason for the canonical C07 decision."""
+    """Return the compatibility skip reason for the canonical C07 decision.
+
+    ``training_required`` / ``routing_snapshot`` carry frozen R2-B
+    data-policy evidence through to the single canonical decision; when
+    omitted the candidate's own frozen classification decides.
+    """
     decision = control_plane_decision(
         candidate=candidate,
         adapter=adapter,
         quota_states=quota_states,
         training_allowed=training_allowed,
+        training_required=training_required,
+        routing_snapshot=routing_snapshot,
         reserve_override=reserve_override,
         prompt_bytes=prompt_bytes,
         policy=policy,
@@ -172,6 +297,8 @@ def control_plane_decision(
     candidate: WorkerCandidate,
     adapter: WorkerAdapter | None,
     training_allowed: bool,
+    training_required: str | None = None,
+    routing_snapshot: Any | None = None,
     quota_states: list[QuotaState],
     prompt_bytes: int,
     reserve_override: bool = False,
@@ -191,6 +318,8 @@ def control_plane_decision(
         adapter=adapter,
         quota_states=quota_states,
         training_allowed=training_allowed,
+        training_required=training_required,
+        routing_snapshot=routing_snapshot,
         reserve_override=reserve_override,
         prompt_bytes=prompt_bytes,
         policy=policy,

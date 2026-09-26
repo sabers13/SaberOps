@@ -8,7 +8,7 @@ candidates and never alters tier semantics.
 
 The chain is::
 
-    AuthorityMode -> AuthorityPolicy -> persisted owner setting -> ORX agent
+    AuthorityMode -> AuthorityPolicy -> persisted owner setting -> SaberOps agent
 
 The generated OpenCode agent Markdown is an *adapter* surface, never the
 source of truth. Every permission decision is derived from the typed policy

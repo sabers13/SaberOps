@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% set active_pane = "projects" %}
+{% block title %}First-run setup{% endblock %}
+{% block conversation_title %}First-run setup{% endblock %}
+{% block run_meta %}Profile {{ profile }} · UI-only owner configuration{% endblock %}
+
+{% block workspace %}
+<div class="date-rule">Dogfood setup</div>
+
+<article class="message">
+  <div class="avatar assistant" aria-hidden="true">S</div>
+  <div>
+    <div class="message-head"><strong>SaberOps</strong></div>
+    <div class="message-body">
+      <p>This page is the first-user path. Complete each owner decision here or through the linked UI pages. No JSON, database, or config-file edits are part of this flow.</p>
+      {% if ready_for_dogfood %}
+      <p><span class="badge badge-normal">READY FOR DOGFOOD</span> The project, worker routing, Reviewer model, Orchestrator model, and required project policy are configured.</p>
+      {% else %}
+      <p><span class="badge badge-demoted">SETUP INCOMPLETE</span> Finish the incomplete steps below before the first real SaberOps task.</p>
+      {% endif %}
+    </div>
+  </div>
+</article>
+
+<section class="settings-section">
+  <div class="settings-section-head"><h4>1. Providers and models</h4><p>Use installed account backends, verify readiness, and discover the models each backend can enumerate.</p></div>
+  <div class="settings-card"><div class="settings-control-row" style="display:block;">
+    <p>Discovered models: <strong>{{ discovered_model_count }}</strong> · routing-eligible: <strong>{{ routing_eligible_count }}</strong></p>
+    <div class="so-table-wrap"><table class="so-table">
+      <thead><tr><th>Provider</th><th>Backend</th><th>Installed</th><th>Readiness</th><th>Models</th></tr></thead>
+      <tbody>
+        {% for a in account_rows %}
+        <tr>
+          <td>{{ a.provider }}</td>
+          <td class="mono">{{ a.backend }}</td>
+          <td>{{ a.installed }}</td>
+          <td>{{ a.readiness.display }}</td>
+          <td>{{ a.models|length }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table></div>
+    <p><a class="text-button primary-button" href="/access">Open Providers / Models</a></p>
+  </div></div>
+</section>
+
+<section class="settings-section">
+  <div class="settings-section-head"><h4>2. Worker categories</h4><p>Assign discovered executable models to the current worker routing categories and order them.</p></div>
+  <div class="settings-card"><div class="settings-control-row" style="display:block;">
+    <p>Configured worker placements: <strong>{{ routed_model_count }}</strong></p>
+    <div class="so-table-wrap"><table class="so-table">
+      <thead><tr><th>Tier</th><th>Context</th><th>Models</th></tr></thead>
+      <tbody>
+        {% for chain in routing_chains %}
+        <tr><td class="mono">{{ chain.tier }}</td><td class="mono">{{ chain.context }}</td><td>{{ chain.candidates|length }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table></div>
+    <p class="muted">These are the current deterministic T1/T2/T3 worker categories. Choose the exact reviewer model in step 3; worker routing order is unchanged by that choice.</p>
+    <p><a class="text-button primary-button" href="/routing">Choose Worker models</a></p>
+  </div></div>
+</section>
+
+<section class="settings-section">
+  <div class="settings-section-head"><h4>3. Reviewer model</h4><p>Choose the separate exact model binding used for independent code review.</p></div>
+  <div class="settings-card"><div class="settings-control-row" style="display:block;">
+    <p>Status: <span class="badge badge-{{ 'normal' if reviewer_ready else 'demoted' }}">{{ reviewer_status }}</span></p>
+    {% if reviewer_current %}
+    <p class="mono">binding = {{ reviewer_current }}</p>
+    {% endif %}
+    <p><a class="text-button primary-button" href="/reviewer">Choose Reviewer model</a></p>
+  </div></div>
+</section>
+
+<section class="settings-section">
+  <div class="settings-section-head"><h4>4. Orchestrator model</h4><p>Choose the separate exact model binding used for bounded Orchestrator guidance.</p></div>
+  <div class="settings-card"><div class="settings-control-row" style="display:block;">
+    <p>Status: <span class="badge badge-{{ 'normal' if orch_ready else 'demoted' }}">{{ orch_status }}</span></p>
+    {% if orch_current %}
+    <p class="mono">mode={{ orch_current.mode }}{% if orch_current.pinned_binding_id %} · {{ orch_current.pinned_binding_id }}{% endif %}</p>
+    {% endif %}
+    <p><a class="text-button primary-button" href="/orchestrator">Choose Orchestrator model</a></p>
+  </div></div>
+</section>
+
+<section class="settings-section">
+  <div class="settings-section-head"><h4>5. Project</h4><p>Select the repository SaberOps will modify. For self-dogfood, choose the clean SaberOps checkout.</p></div>
+  <div class="settings-card"><div class="settings-control-row" style="display:block;">
+    <form method="post" action="/projects/select" class="so-form">
+      <div class="advanced-field">
+        <label for="setup-project-path">Repository path</label>
+        <input type="text" id="setup-project-path" name="path" class="mono" value="{{ active_project }}" placeholder="/absolute/path/to/git/repository" required>
+      </div>
+      <button type="submit" class="text-button primary-button">Select project</button>
+    </form>
+    <p>Status: <span class="badge badge-{{ 'normal' if project_ready else 'demoted' }}">{{ 'READY' if project_ready else 'NOT READY' }}</span> {{ project_note }}</p>
+  </div></div>
+</section>
+
+<section class="settings-section">
+  <div class="settings-section-head"><h4>6. Project policy</h4><p>Gate, data use, review policy, accept target branch, and gate storage remain canonical project settings.</p></div>
+  <div class="settings-card"><div class="settings-control-row" style="display:block;">
+    {% if project_settings %}
+    <p>Gate: <span class="mono">{{ project_settings.gate_effective or 'not configured' }}</span></p>
+    <p>Data policy: <span class="mono">{{ project_settings.data_policy_label }}</span></p>
+    <p>Review policy: <span class="mono">{{ project_settings.review_policy_mode }}</span></p>
+    <p>Accept branch: <span class="mono">{{ project_settings.accept_target_branch_effective or 'not configured' }}</span></p>
+    {% else %}
+    <p class="muted">Select a valid project first.</p>
+    {% endif %}
+    <p><a class="text-button primary-button" href="/#execution">Configure project policy</a></p>
+  </div></div>
+</section>
+
+<section class="settings-section">
+  <div class="settings-section-head"><h4>7. Start dogfooding</h4><p>When every required step is ready, submit a real SaberOps task from the normal dashboard.</p></div>
+  <div class="settings-card"><div class="settings-control-row" style="display:block;">
+    {% if ready_for_dogfood %}
+    <p><span class="badge badge-normal">READY</span> The UI-only setup checkpoint is satisfied.</p>
+    <p><a class="text-button primary-button" href="/">Open run composer</a> <a class="text-button" href="/inbox">Open Inbox</a></p>
+    {% else %}
+    <p class="muted">The run composer stays available, but this setup page will not call the first-user checkpoint ready until the required owner choices resolve.</p>
+    {% endif %}
+  </div></div>
+</section>
+{% endblock %}

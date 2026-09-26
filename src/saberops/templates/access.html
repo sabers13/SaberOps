@@ -19,6 +19,9 @@
   <div class="settings-card"><div class="settings-control-row" style="display: block;">
     <p><span class="badge badge-{{ 'normal' if probe.ok == 'TRUE' else 'demoted' }}">{{ probe.reason }}</span></p>
     <p class="muted">{{ probe.detail }}</p>
+    {% if probe.readiness_state %}
+    <p class="muted">Readiness: <span class="mono">{{ probe.readiness_state }} ({{ probe.readiness_reason }})</span>{% if probe.observed_at %} observed <span class="mono">{{ probe.observed_at }}</span>{% endif %}</p>
+    {% endif %}
   </div></div>
 </div>
 {% endif %}
@@ -37,14 +40,14 @@
   <div class="avatar assistant" aria-hidden="true">S</div>
   <div>
     <div class="message-head"><strong>SaberOps</strong></div>
-    <div class="message-body"><p>Next steps: <a href="/routing">Routing</a> (choose which discovered models workers may use) · <a href="/orchestrator">Orchestrator Model</a> (choose the model for the decision role).</p></div>
+    <div class="message-body"><p>Next steps: <a href="/routing">Routing</a> (choose which discovered models workers may use) · <a href="/orchestrator">Orchestrator role</a> (choose the model for initial task guidance).</p></div>
   </div>
 </article>
 
 <div class="settings-section">
-  <div class="settings-section-head"><h4>Connected accounts</h4><p>Authenticated sessions owned by their own backends. SaberOps detects installation and reachability only — it never extracts account credentials.</p></div>
+  <div class="settings-section-head"><h4>Connected accounts</h4><p>Authenticated sessions owned by their own backends. SaberOps detects installation and reachability only — it never extracts account credentials. A CLI being installed is availability, not proven model execution readiness: readiness below is persisted evidence only.</p></div>
   <div class="so-table-wrap"><table class="so-table">
-    <thead><tr><th>Account</th><th>Provider</th><th>Backend</th><th>Auth mode</th><th>Installed</th><th>Authenticated</th><th>Models</th><th></th></tr></thead>
+    <thead><tr><th>Account</th><th>Provider</th><th>Backend</th><th>Auth mode</th><th>Installed</th><th>Authenticated</th><th>Model readiness</th><th>Models</th><th></th></tr></thead>
     <tbody>
       {% for a in account_rows %}
       <tr>
@@ -54,6 +57,7 @@
         <td class="mono">{{ a.auth_mode }}</td>
         <td><span class="badge badge-{{ a.installed_class }}">{{ a.installed }}</span><br><span class="mono muted">{{ a.installed_detail }}</span></td>
         <td><span class="badge">{{ a.authenticated }}</span></td>
+        <td><span class="badge badge-{{ 'normal' if a.readiness.state == 'READY' else 'demoted' }}">{{ a.readiness.display }}</span><br><span class="mono muted">{{ a.readiness.reason }}</span>{% if a.readiness.observed_at %}<br><span class="mono muted">observed {{ a.readiness.observed_at }} ({{ a.readiness.age }}){% if not a.readiness.fresh %} · STALE{% endif %}</span>{% elif a.readiness.age %}<br><span class="mono muted">{{ a.readiness.age }}</span>{% endif %}</td>
         <td>
           {% if a.models %}
           <ul class="mono">
@@ -92,8 +96,10 @@
   </table></div>
 </div>
 
+<details class="settings-section" aria-label="Experimental API connections">
+  <summary class="settings-section-head" style="cursor: pointer;"><h4 style="display: inline;">Experimental: API connections</h4><p>API / BYOK connections cannot execute models yet. Saved connections and data are preserved.</p></summary>
 <div class="settings-section">
-  <div class="settings-section-head"><h4>API connections</h4><p>User-owned API / BYOK access. Only credential <em>references</em> (e.g. <span class="mono">env:MINIMAX_API_KEY</span>) are stored — never secret values.</p></div>
+  <div class="settings-section-head"><h4>API connections</h4><p>User-owned API / BYOK access. Only credential <em>references</em> (e.g. <span class="mono">env:MINIMAX_API_KEY</span>) are stored — never secret values. Execution through these connections is not supported.</p></div>
   {% if api_rows %}
   <div class="so-table-wrap"><table class="so-table">
     <thead><tr><th>Name</th><th>Provider</th><th>Protocol</th><th>Endpoint</th><th>Credential</th><th>Model</th><th>Enabled</th><th></th></tr></thead>
@@ -151,7 +157,7 @@
 </div>
 
 <div class="settings-section">
-  <div class="settings-section-head"><h4>Add connection</h4><p>Saving a connection does not by itself authorize worker execution.</p></div>
+  <div class="settings-section-head"><h4>Add connection</h4><p>Saving a connection does not by itself authorize worker execution. API connections cannot execute models yet.</p></div>
   <div class="settings-card"><div class="settings-control-row" style="display: block;">
     <form method="post" action="/access/connections" class="so-form">
       <div class="so-form-row">
@@ -185,4 +191,6 @@
     </form>
   </div></div>
 </div>
+</div>
+</details>
 {% endblock %}

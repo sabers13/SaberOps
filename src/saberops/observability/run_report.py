@@ -310,6 +310,62 @@ def _current_stage(run: Run, db: Database, run_id: str, gaps: list[str]) -> dict
     return {"current_stage": UNKNOWN, "current_stage_source": "none"}
 
 
+def _termination_section(
+    run: Run, db: Database, run_id: str, gaps: list[str]
+) -> dict[str, Any]:
+    """Project the terminal explanation from the persisted terminal event.
+
+    Read-only projection over the same authority the engine wrote: the
+    latest ``run_failed`` (or ``run_completed``) event payload is
+    reported verbatim -- summary, outcome, routing context and skipped
+    candidates -- never re-derived, so the report cannot contradict the
+    run result.  A run with no terminal event reports ``UNKNOWN``.
+    """
+    try:
+        events = db.get_events(run_id, limit=10000)
+    except Exception:
+        gaps.append("event log unreadable; termination UNKNOWN")
+        return {
+            "terminal_event": UNKNOWN,
+            "summary": UNKNOWN,
+            "outcome": UNKNOWN,
+            "routing_context": UNKNOWN,
+            "skipped_candidates": [],
+        }
+    terminal = next(
+        (
+            event
+            for event in reversed(events)
+            if event.event_type in ("run_failed", "run_completed", "run_exception")
+        ),
+        None,
+    )
+    if terminal is None:
+        return {
+            "terminal_event": UNKNOWN,
+            "summary": run.result_summary if run.result_summary else UNKNOWN,
+            "outcome": UNKNOWN,
+            "routing_context": UNKNOWN,
+            "skipped_candidates": [],
+        }
+    payload = terminal.payload if isinstance(terminal.payload, dict) else {}
+    summary = payload.get("summary")
+    if not isinstance(summary, str) or not summary:
+        summary = run.result_summary if run.result_summary else UNKNOWN
+    outcome = payload.get("outcome")
+    routing_context = payload.get("routing_context")
+    skipped = payload.get("skipped_candidates")
+    return {
+        "terminal_event": f"{terminal.event_type}#{terminal.id}",
+        "summary": summary,
+        "outcome": outcome if isinstance(outcome, str) and outcome else UNKNOWN,
+        "routing_context": (
+            routing_context if isinstance(routing_context, str) and routing_context else UNKNOWN
+        ),
+        "skipped_candidates": skipped if isinstance(skipped, list) else [],
+    }
+
+
 def _review_section(
     run: Run, db: Database, run_id: str, gaps: list[str]
 ) -> dict[str, Any]:
@@ -687,6 +743,7 @@ def build_run_report(db: Database, run_id: str) -> dict[str, Any]:
     actual = _actual_identity(dispatches, gaps)
     candidate = _candidate_sha(run, attempts, gaps)
     stage = _current_stage(run, db, run_id, gaps)
+    termination = _termination_section(run, db, run_id, gaps)
     review = _review_section(run, db, run_id, gaps)
     gate = _gate_section(run, db, run_id, gaps)
     usage = _usage_section(db, run_id, gaps)
@@ -741,6 +798,7 @@ def build_run_report(db: Database, run_id: str) -> dict[str, Any]:
             "dispatch_identities": actual["dispatch_identities"],
         },
         "review": review,
+        "termination": termination,
         "gate": gate,
         "usage": usage,
         "acceptance": acceptance,
@@ -787,11 +845,36 @@ def render_report_text(report: dict[str, Any]) -> str:
     lifecycle = report["lifecycle"]
     execution = report["execution"]
     worker = report["worker"]
+    termination = report.get("termination", {})
     review = report["review"]
     gate = report["gate"]
     usage = report["usage"]
     acceptance = report["acceptance"]
     workspace = report["workspace"]
+    termination_lines = [
+        "",
+        "termination",
+        f"  event            {_fmt_scalar(termination.get('terminal_event'))}",
+        f"  outcome          {_fmt_scalar(termination.get('outcome'))}",
+        f"  context          {_fmt_scalar(termination.get('routing_context'))}",
+        f"  summary          {_fmt_scalar(termination.get('summary'))}",
+    ]
+    for skipped in termination.get("skipped_candidates", []) or []:
+        if isinstance(skipped, dict):
+            skipped_provider = skipped.get("provider", "?")
+            skipped_model = skipped.get("model", "?")
+            skipped_reason = skipped.get("reason", "?")
+            skipped_readiness = skipped.get("readiness_state")
+            skipped_readiness_reason = skipped.get("readiness_reason")
+            if skipped_readiness and skipped_readiness_reason:
+                termination_lines.append(
+                    f"    - {skipped_provider}/{skipped_model}: "
+                    f"readiness {skipped_readiness} ({skipped_readiness_reason})"
+                )
+            else:
+                termination_lines.append(
+                    f"    - {skipped_provider}/{skipped_model}: {skipped_reason}"
+                )
     lines = [
         f"Run report  {identity['run_id']}  ({report['schema']})",
         "",
@@ -811,6 +894,7 @@ def render_report_text(report: dict[str, Any]) -> str:
         f"  created_at        {_fmt_scalar(lifecycle['created_at'])}",
         f"  completed_at      {_fmt_scalar(lifecycle['completed_at'])}",
         f"  total_wall_time   {_fmt_scalar(lifecycle['total_wall_seconds'])}s",
+        *termination_lines,
         "",
         "execution",
         f"  attempt_count            {execution['attempt_count']}",

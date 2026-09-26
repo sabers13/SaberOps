@@ -25,6 +25,7 @@ from saberops.control_plane.bindings import (
     binding_from_mapping,
     binding_registry_from_mapping,
     build_binding_registry,
+    resolve_reviewer_candidate_binding,
 )
 from saberops.control_plane.capabilities import (
     Capability,
@@ -103,6 +104,17 @@ from saberops.control_plane.quota_policy import (
     QuotaPoolPolicy,
     quota_decision,
 )
+from saberops.control_plane.reviewer_binding import (
+    REVIEWER_BINDING_NOT_FOUND,
+    REVIEWER_NOT_CONFIGURED,
+    REVIEWER_UNRESOLVABLE,
+    REVIEWER_WRONG_ROLE,
+    ReviewerSelection,
+    ReviewerSelectionError,
+    ReviewerSelectionStatus,
+    reviewer_candidate_for_dispatch,
+    select_reviewer_binding,
+)
 
 __all__ = [
     "BINDING_STORE_SCHEMA_VERSION",
@@ -166,6 +178,13 @@ __all__ = [
     "QuotaPoolMode",
     "QuotaPoolPolicy",
     "REQUIRED_CAPABILITY_UNSUPPORTED",
+    "REVIEWER_BINDING_NOT_FOUND",
+    "REVIEWER_NOT_CONFIGURED",
+    "REVIEWER_UNRESOLVABLE",
+    "REVIEWER_WRONG_ROLE",
+    "ReviewerSelection",
+    "ReviewerSelectionError",
+    "ReviewerSelectionStatus",
     "TRAINING_PERMISSION_DENIED",
     "binding_from_mapping",
     "binding_registry_from_mapping",
@@ -185,9 +204,12 @@ __all__ = [
     "packaged_control_plane_policy",
     "quota_decision",
     "reconstruct_frozen_control_plane",
+    "reviewer_candidate_for_dispatch",
     "resolve_effort",
+    "resolve_reviewer_candidate_binding",
     "save_owner_bindings",
     "select_orch_binding",
+    "select_reviewer_binding",
     "set_provider_policy",
     "set_quota_pool_policy",
     "supported_tiers",

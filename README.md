@@ -12,7 +12,7 @@ SaberOps lets AI models propose software changes while deterministic code contro
 > **Core principle: the LLM advises; deterministic software decides.**
 
 > [!IMPORTANT]
-> **v0.3.6 is the approved OpenDesign production UI integration.** It preserves the v0.3.5 execution/routing/monitoring backend while replacing the legacy dashboard presentation with the approved OpenDesign console shell. No execution, routing-policy, monitoring, or provider-handling change. This release is **not** production-ready, stable, or complete.
+> **v0.3.7 adds the UI-first owner workflow for real product testing.** It adds isolated first-run profiles, guided setup, exact Worker/Reviewer/Orchestrator selection, project policy configuration, candidate Inbox/diff/Reject flows, and durable detached Review/Accept owner actions. This release is still **preview software**: not production-ready, stable, or complete.
 
 ---
 
@@ -24,7 +24,7 @@ SaberOps separates **semantic work** from **execution authority**:
 
 | AI models | Deterministic SaberOps control plane |
 | --- | --- |
-| Orchestrator LLM provides one bounded piece of initial task guidance | Validates exact provider/backend/model bindings |
+| Orchestrator role provides one bounded piece of initial task guidance | Validates exact provider/backend/model bindings |
 | Worker model proposes implementation changes | Enforces routing admission, readiness, quota, and policy |
 | Optional reviewer provides an independent read-only assessment | Owns Git worktrees, gates, provenance, durable state, and acceptance |
 | Models never decide whether their own result is accepted | Fails closed when required evidence is missing |
@@ -36,7 +36,7 @@ SaberOps separates **semantic work** from **execution authority**:
 ```mermaid
 flowchart LR
     T[Task] --> C[SaberOps control plane]
-    C --> O[Orchestrator LLM<br/>bounded initial guidance]
+    C --> O[Orchestrator role<br/>bounded initial guidance]
     O --> C
     C --> R[Exact worker binding<br/>readiness / quota / policy]
     R --> W[Isolated Git worktree]
@@ -71,7 +71,7 @@ SaberOps preserves provider, backend, and model identity from discovery through 
 
 ### Separate Orchestrator and worker roles
 
-The Orchestrator model and worker models use separate role-bound execution bindings. Changing the Orchestrator selection does not reorder worker routing, and a worker-role binding cannot be used as the Orchestrator binding.
+The Orchestrator role and worker models use separate role-bound execution bindings. Changing the Orchestrator selection does not reorder worker routing, and a worker-role binding cannot be used as the Orchestrator binding.
 
 ### Provenance before acceptance
 
@@ -99,7 +99,7 @@ How much SaberOps may do without asking is an explicit, persisted owner setting.
 | `full_autonomy` | Yes | Yes |
 | `full_autonomy_publish` | Yes | Yes |
 
-Acceptance authority never bypasses verification; a candidate must still satisfy the fail-closed acceptance requirements. `full_autonomy_publish` additionally grants publication of accepted work, but v0.3.6 has no governed publication command, so it stops at the accepted state. Inspect or change the mode with `orch authority show`, `orch authority list`, and `orch authority set`.
+Acceptance authority never bypasses verification; a candidate must still satisfy the fail-closed acceptance requirements. `full_autonomy_publish` additionally grants publication of accepted work, but v0.3.7 has no governed publication command, so it stops at the accepted state. Inspect or change the mode with `orch authority show`, `orch authority list`, and `orch authority set`.
 
 ---
 
@@ -144,16 +144,18 @@ orch models
 orch authority show
 ```
 
-Start the local dashboard (binds to `127.0.0.1:8765` by default):
+Start the local dashboard with an isolated first-run profile (binds to `127.0.0.1:8765` by default):
 
 ```bash
-orch ui --repo /path/to/project
+orch ui --profile first-run
 ```
+
+Then use **First-run setup** in the UI to discover providers/models, choose Worker/Reviewer/Orchestrator roles, select the target repository, and configure project policy.
 
 ### Example provider-backed run
 
 > [!WARNING]
-> v0.3.6 provides the approved OpenDesign console over the v0.3.5 owner-configured provider execution backend (discovery, worker routing, separate Orchestrator-model selection, live monitoring, canonical reports, always-bounded worker execution with explicit `--worker-timeout` else tier default T1=600s/T2=1200s/T3=1800s). This is still a preview release: not production-ready, stable, or complete.
+> v0.3.7 adds the guided first-user UI, exact Reviewer and Orchestrator role selection, project policy setup, candidate Inbox/diff/Reject flows, and durable non-blocking Review/Accept actions on top of the existing bounded execution backend. This is still a preview release: not production-ready, stable, or complete.
 
 After installing and authenticating a supported provider CLI:
 
@@ -190,7 +192,7 @@ Run `orch <command> --help` for the full command and option reference. Runtime s
 | OpenCode | Yes |
 | Antigravity | Yes |
 
-"Implemented" means the adapter exists in the codebase. It does **not** mean that every adapter has been live-certified against a real provider account in v0.3.6.
+"Implemented" means the adapter exists in the codebase. It does **not** mean that every adapter has been live-certified against a real provider account in v0.3.7.
 
 ---
 
@@ -232,7 +234,7 @@ THIRD_PARTY_NOTICES.md   shipped third-party notices
 
 ## Current limitations
 
-- v0.3.6 is the approved OpenDesign production UI integration: it preserves the v0.3.5 execution/routing/monitoring backend (always-bounded worker execution with explicit `--worker-timeout` else tier default T1=600s/T2=1200s/T3=1800s, live monitoring, canonical reports, discovery, routing, bindings, detached execution) while replacing the legacy dashboard presentation.
+- v0.3.7 is the first UI-first owner workflow release: isolated profiles and setup, explicit Worker/Reviewer/Orchestrator selection, project policy configuration, candidate Inbox/diff/Reject workflows, and durable detached Review/Accept owner actions.
 - This is a preview release: interfaces and workflows may change.
 - SaberOps is not production-ready, stable, or feature-complete.
 

@@ -104,11 +104,15 @@ class OwnerBindings:
 
     ``registry`` is the exact binding/profile/pool identity set; ``policy``
     is the owner's Orchestrator binding choice expressed over those exact
-    binding ids.  Neither carries secret material or routing order.
+    binding ids; ``reviewer_binding_id`` is the owner's optional exact
+    Reviewer binding choice (R3-E1: one binding id, never a pool or an
+    ordered fallback list).  None of these carry secret material or
+    routing order.
     """
 
     registry: BindingRegistry = field(default_factory=BindingRegistry)
     policy: OrchBindingPolicy | None = None
+    reviewer_binding_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Canonical non-secret rendering (sorted by the registry renderer)."""
@@ -118,6 +122,7 @@ class OwnerBindings:
             "orch_binding_policy": (
                 None if self.policy is None else self.policy.to_dict()
             ),
+            "reviewer_binding_id": self.reviewer_binding_id,
         }
 
     @classmethod
@@ -149,7 +154,17 @@ class OwnerBindings:
                 ) from exc
         else:
             raise BindingStoreError("owner orch binding policy must be a mapping or null")
-        return cls(registry=registry, policy=policy)
+        reviewer_raw = payload.get("reviewer_binding_id")
+        if reviewer_raw is None:
+            reviewer_binding_id: str | None = None
+        elif isinstance(reviewer_raw, str):
+            cleaned = reviewer_raw.strip()
+            reviewer_binding_id = cleaned or None
+        else:
+            raise BindingStoreError("owner reviewer binding id must be a string or null")
+        return cls(
+            registry=registry, policy=policy, reviewer_binding_id=reviewer_binding_id
+        )
 
 
 def _upsert_by_id(

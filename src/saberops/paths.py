@@ -24,17 +24,44 @@ change the *base* directory, while the ``saberops`` segment stays fixed.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Final
 
 STATE_APP_DIR: Final[str] = "saberops"
 CONFIG_APP_DIR: Final[str] = "saberops"
 CACHE_APP_DIR: Final[str] = "saberops"
+PROFILE_ENV: Final[str] = "SABEROPS_PROFILE"
 
 LEGACY_STATE_APP_DIRS: Final[tuple[str, ...]] = ("orchestrator-mvp",)
 LEGACY_CONFIG_APP_DIRS: Final[tuple[str, ...]] = ("orchestrator-v2", "orchestrator-mvp")
 
 _PROJECTS_DIR: Final[str] = "projects"
+_PROFILE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+
+
+def active_profile() -> str:
+    """Return the optional isolated owner profile selected for this process.
+
+    Profiles are a narrow first-user/dogfood isolation seam: they change only
+    the SaberOps state/config/cache namespace and never change repository
+    identity, routing semantics, or execution authority.  An invalid profile
+    fails closed instead of becoming an arbitrary filesystem path.
+    """
+    raw = os.environ.get(PROFILE_ENV, "").strip()
+    if not raw:
+        return ""
+    if _PROFILE_RE.fullmatch(raw) is None:
+        raise ValueError(
+            f"{PROFILE_ENV} must match [A-Za-z0-9][A-Za-z0-9._-]{{0,63}}"
+        )
+    return raw
+
+
+def _profiled_app_dir(base: Path, app_dir: str) -> Path:
+    root = base / app_dir
+    profile = active_profile()
+    return root if not profile else root / "profiles" / profile
 
 
 def state_home() -> Path:
@@ -62,18 +89,18 @@ def cache_home() -> Path:
 
 
 def saberops_state_dir() -> Path:
-    """Return the canonical public state directory (``.../saberops``)."""
-    return state_home() / STATE_APP_DIR
+    """Return the canonical public state directory for the active profile."""
+    return _profiled_app_dir(state_home(), STATE_APP_DIR)
 
 
 def saberops_config_dir() -> Path:
-    """Return the canonical public config directory (``.../saberops``)."""
-    return config_home() / CONFIG_APP_DIR
+    """Return the canonical public config directory for the active profile."""
+    return _profiled_app_dir(config_home(), CONFIG_APP_DIR)
 
 
 def saberops_cache_dir() -> Path:
-    """Return the canonical public cache directory (``.../saberops``)."""
-    return cache_home() / CACHE_APP_DIR
+    """Return the canonical public cache directory for the active profile."""
+    return _profiled_app_dir(cache_home(), CACHE_APP_DIR)
 
 
 def owner_state_dir() -> Path:
@@ -119,11 +146,6 @@ def get_tool_registry_path() -> Path:
 def get_projects_registry_path() -> Path:
     """Return the canonical UI project-registry path."""
     return saberops_state_dir() / "ui-projects.json"
-
-
-def get_manager_session_dir() -> Path:
-    """Return the canonical manager session directory."""
-    return saberops_state_dir() / "manager-session"
 
 
 def legacy_state_dirs() -> tuple[Path, ...]:

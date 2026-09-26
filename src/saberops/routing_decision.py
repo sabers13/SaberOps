@@ -123,5 +123,12 @@ def classify_worker_outcome(result: WorkerResult) -> DispatchOutcome:
 
 
 def is_escalation_evidence(outcome: DispatchOutcome) -> bool:
-    """Only explicit capability and substantive gate failures justify spend."""
-    return outcome in (DispatchOutcome.CAPABILITY_FAILURE, DispatchOutcome.GATE_FAILURE)
+    """Only an explicit typed capability failure justifies cross-tier spend.
+
+    H3.1: a gate failure alone is insufficient evidence to buy a stronger
+    tier -- process evidence cannot distinguish a misconfigured gate from a
+    genuine candidate validation failure -- so ``GATE_FAILURE`` never
+    authorizes escalation.  Gate truth is still recorded durably; only its
+    spend authority is removed.
+    """
+    return outcome is DispatchOutcome.CAPABILITY_FAILURE

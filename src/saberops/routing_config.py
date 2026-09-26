@@ -122,10 +122,15 @@ def _validate_context_chain(
     source_label: str,
     approved: Mapping[str, DynamicCandidate] | None = None,
 ) -> list[str]:
-    if not isinstance(chain, list) or len(chain) == 0:
+    if not isinstance(chain, list):
         raise RoutingConfigError(
-            f"Routing config at {source_label}: context {ctx_key} must be non-empty list"
+            f"Routing config at {source_label}: context {ctx_key} must be a list"
         )
+    if len(chain) == 0:
+        # An empty chain is a valid owner decision: no candidate may
+        # dispatch in this context.  It terminates with structured
+        # no-eligible-candidate evidence, never a substituted default.
+        return []
     seen: set[str] = set()
     cids: list[str] = []
     for entry in chain:
@@ -867,8 +872,11 @@ def remove_candidate_from_chain(
 ) -> dict[str, Any]:
     """Return a validated copy of ``payload`` with ``candidate_id`` removed.
 
-    Removing a candidate not present is a no-op.  The failure modes are
-    covered by the same canonical validator as :func:`add_candidate_to_chain`.
+    Removing a candidate not present is a no-op.  Removing the final
+    candidate leaves a valid empty chain: no default is substituted and
+    dispatch in that context terminates with structured
+    no-eligible-candidate evidence.  The failure modes are covered by
+    the same canonical validator as :func:`add_candidate_to_chain`.
     The owner approval record (if any) is left in place: removing a candidate
     from a chain is an ordering decision, not a revocation of discovery
     evidence, and an approval that is no longer referenced is inert.

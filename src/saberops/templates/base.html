@@ -26,6 +26,7 @@
   {% block extra_head %}{% endblock %}
 </head>
 <body>
+  {% set shell = request.state.shell %}
   <div class="app" id="app" data-od-id="orchestrator-chat-workspace">
     <aside class="left-sidebar" data-od-id="left-sidebar" aria-label="Navigation and settings">
       <nav class="activity-rail" aria-label="Workspace panes">
@@ -33,6 +34,7 @@
         <button class="rail-button{% if active_pane == 'projects' %} active{% endif %}" data-pane="projects" data-od-id="pane-projects" aria-label="Open projects" title="Projects"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 5h6l2 2h8v12H4z"/></svg></button>
         <button class="rail-button{% if active_pane|default('chats') == 'chats' %} active{% endif %}" data-pane="chats" data-od-id="pane-chats" aria-label="Open chats" title="Chats"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 5h16v11H8l-4 4z"/></svg></button>
         <button class="rail-button{% if active_pane == 'runs' %} active{% endif %}" data-pane="runs" data-od-id="pane-runs" aria-label="Open runs" title="Runs"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 5h14v4H5zm0 7h14v7H5z"/></svg></button>
+        <a class="rail-button" href="/inbox" data-od-id="pane-inbox" aria-label="Open inbox" title="Inbox"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 5h16v6l-3 3H7l-3-3z"/><path d="M4 5l3 3h10l3-3"/></svg></a>
         <button class="rail-button{% if active_pane == 'archive' %} active{% endif %}" data-pane="archive" data-od-id="pane-archive" aria-label="Open archive" title="Archive"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 7h16v13H4zM3 4h18v3H3zM9 11h6"/></svg></button>
         <div class="rail-spacer"></div>
         <button class="rail-button" data-od-id="pane-settings" aria-label="Open settings" title="Settings" id="railSettingsButton"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="3"/><path d="M12 3v3m0 12v3M3 12h3m12 0h3M5.6 5.6l2.1 2.1m8.6 8.6 2.1 2.1m0-12.8-2.1 2.1m-8.6 8.6-2.1 2.1"/></svg></button>
@@ -176,6 +178,7 @@
     </aside>
 
     <footer class="statusbar" data-od-id="status-bar">
+      <span class="status-project">SaberOps {{ shell.saberops_version or "" }}</span>
       <span class="status-project">{{ shell.active_project_short or "SaberOps" }}</span>
       <span class="status-workers" id="statusWorkers">Runs {{ shell.run_count }}</span>
       <span class="verdict attention-copy" id="statusVerdict">{{ shell.status_verdict }}</span>
@@ -190,13 +193,15 @@
       <input class="command-input" id="commandInput" placeholder="Type a command…">
       <div class="command-list" id="commandList">
         <a class="command-item" href="/"><span>New run</span><span class="command-shortcut">⌘N</span></a>
+        <a class="command-item" href="/setup"><span>First-run setup</span><span class="command-shortcut">Go</span></a>
         <button class="command-item" id="commandSettingsItem"><span>Open settings</span><span class="command-shortcut">⌘,</span></button>
         <button class="command-item" id="commandThemeItem"><span>Switch light / dark theme</span><span class="command-shortcut">⌘⇧T</span></button>
+        <a class="command-item" href="/inbox"><span>Inbox</span><span class="command-shortcut">Go</span></a>
         <a class="command-item" href="/routing"><span>Worker routing</span><span class="command-shortcut">Go</span></a>
-        <a class="command-item" href="/orchestrator"><span>Orchestrator model</span><span class="command-shortcut">Go</span></a>
+        <a class="command-item" href="/orchestrator"><span>Orchestrator role</span><span class="command-shortcut">Go</span></a>
+        <a class="command-item" href="/reviewer"><span>Reviewer role</span><span class="command-shortcut">Go</span></a>
         <a class="command-item" href="/access"><span>Model access</span><span class="command-shortcut">Go</span></a>
         <a class="command-item" href="/quota"><span>Quota</span><span class="command-shortcut">Go</span></a>
-        <a class="command-item" href="/manager"><span>Ox Manager</span><span class="command-shortcut">Go</span></a>
         <button class="command-item" id="commandNavToggle"><span>Toggle navigation sidebar</span><span class="command-shortcut">⌘B</span></button>
         <button class="command-item" id="commandWorkersToggle"><span>Toggle workers sidebar</span><span class="command-shortcut">⌘⇧B</span></button>
         {% if run_id is defined and run_id and can_cancel %}
@@ -218,8 +223,6 @@
         <button class="settings-nav-button" data-settings-page="models"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 6h16v5H4zm0 8h16v4H4z"/></svg><span>Models</span></button>
         <button class="settings-nav-button" data-settings-page="routing"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 6h6v5H5zm8 7h6v5h-6zm-2-5h4v7h-4"/></svg><span>Routing</span></button>
         <button class="settings-nav-button" data-settings-page="repositories"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 5h6l2 2h8v12H4z"/></svg><span>Repositories</span></button>
-        <button class="settings-nav-button" data-settings-page="notifications"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 7h18s-3 0-3-7M10 20h4"/></svg><span>Notifications</span></button>
-        <button class="settings-nav-button" data-settings-page="retention"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 5h14v14H5zM8 9h8m-8 4h8"/></svg><span>Retention</span></button>
       </aside>
       <section class="settings-main">
         <header class="settings-main-head">
@@ -229,6 +232,10 @@
         <div class="settings-content" id="settingsContent">
           <div class="settings-section" data-settings-section="general" data-od-id="settings-general">
             <div class="settings-section-head"><h4>General</h4><p>Interface and workspace defaults</p></div>
+            <div class="settings-card"><div class="settings-control-row">
+              <div class="settings-control-copy"><strong>First-run setup</strong><p>Configure providers, worker routing, Orchestrator, project and policy through one guided path.</p></div>
+              <a class="text-button" href="/setup">Open setup</a>
+            </div></div>
             <div class="settings-card"><div class="settings-control-row">
               <div class="settings-control-copy"><strong>Theme</strong><p>Light / dark treatment follows the approved design tokens.</p></div>
               <div class="segmented" role="group" aria-label="Theme">
@@ -277,14 +284,6 @@
                 <div><button type="submit" class="text-button primary-button">Select project</button></div>
               </form>
             </div></div>
-          </div>
-          <div class="settings-section" data-settings-section="notifications" data-od-id="settings-notifications" hidden>
-            <div class="settings-section-head"><h4>Notifications</h4><p>Notification channels</p></div>
-            <div class="so-empty"><strong>Not available in this version</strong>Notification channels have no backend capability in SaberOps v0.3.5, so there is nothing to configure here.</div>
-          </div>
-          <div class="settings-section" data-settings-section="retention" data-od-id="settings-retention" hidden>
-            <div class="settings-section-head"><h4>Retention</h4><p>Evidence retention policy</p></div>
-            <div class="so-empty"><strong>Not available in this version</strong>Retention policy has no backend capability in SaberOps v0.3.5; run evidence is preserved in the local database.</div>
           </div>
         </div>
       </section>

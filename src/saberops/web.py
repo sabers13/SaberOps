@@ -11,9 +11,12 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
+import subprocess
 import sys
 import threading
+import time
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -25,6 +28,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Stre
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from saberops.accept import AcceptEngine
 from saberops.config import (
     reconstruct_run_config,
     resolve_run_config,
@@ -37,11 +41,13 @@ from saberops.control_plane import (
     OrchSelectionStatus,
     OwnerBindings,
     OwnerBindingStore,
+    ReviewerSelectionStatus,
     capability_profile_for,
     get_binding_store_path,
     materialize_discovered_binding,
     save_owner_bindings,
     select_orch_binding,
+    select_reviewer_binding,
     upsert_owner_binding,
 )
 from saberops.control_plane.bindings import (
@@ -52,11 +58,10 @@ from saberops.db import Database
 from saberops.gate_runner import (
     GATE_SCRATCH_LABELS,
     GateScratchPolicyError,
-    load_project_gate_scratch_policy,
 )
-from saberops.manager import ManagerClient, ManagerService, OpenCodeManagerClient
 from saberops.model_access import (
     ACCOUNT_BACKENDS,
+    DEFAULT_READINESS_MAX_AGE,
     AccessProtocol,
     AccessStore,
     AccessStoreError,
@@ -70,6 +75,10 @@ from saberops.model_access import (
     ModelListingError,
     ModelSource,
     ProviderConnection,
+    ReadinessCatalog,
+    ReadinessService,
+    ReadinessStore,
+    ReadinessStoreError,
     TriState,
     apply_discovery_result,
     build_access_registry,
@@ -77,44 +86,49 @@ from saberops.model_access import (
     discover_connection_models,
     list_presets,
     preset_connection,
-    probe_account_backend,
 )
 from saberops.models import (
     TERMINAL_RUN_STATUSES,
     CheckResult,
     HealthState,
     OrchBindingMode,
+    ProviderReadiness,
     QuotaState,
-    ReviewPolicyMode,
     ReviewVerdict,
     RoutingState,
     Run,
     RunStatus,
     WorkerCandidate,
 )
-from saberops.observability.run_report import build_run_report
-from saberops.project import owner_state_dir
-from saberops.projects import ProjectRegistry
-from saberops.provenance import assert_run_repository
-from saberops.review_adaptive import (
-    ReviewPolicyError,
-    load_project_review_policy,
-    resolve_effective_review_policy_mode,
+from saberops.observability.run_report import build_run_report, saberops_version
+from saberops.owner_actions import (
+    LAUNCH_FAILED_REASON,
+    OwnerActionSupervisor,
+    summarize_owner_actions,
 )
+from saberops.project import owner_state_dir
+from saberops.projects import ProjectRegistry, ProjectValidation
+from saberops.provenance import assert_run_repository
 from saberops.routing import is_peak_hours
 from saberops.routing_config import (
     ALLOWED_CANDIDATES,
     CONTEXT_KEYS,
     DynamicCandidate,
     RoutingConfigError,
-    add_candidate_to_chain,
     add_dynamic_candidate_to_chain,
     format_candidate_id,
     load_effective_routing,
     load_effective_routing_payload,
     move_candidate_in_chain,
     remove_candidate_from_chain,
+    requires_training_permission,
     save_user_routing,
+)
+from saberops.run_creation import (
+    RunCreationError,
+    RunRequest,
+    effective_policy_summary,
+    resolve_effective_run_config,
 )
 from saberops.runtime import ProjectRuntime, ProjectRuntimeManager
 from saberops.service import OrchestratorService
@@ -124,6 +138,58 @@ from saberops.workers.registry import AdapterRegistry
 _PACKAGE_DIR = Path(__file__).resolve().parent
 _TEMPLATES_DIR = _PACKAGE_DIR / "templates"
 _STATIC_DIR = _PACKAGE_DIR / "static"
+
+_SOURCE_SHA_UNKNOWN = "UNKNOWN"
+_SOURCE_TREE_CLEAN = "CLEAN"
+_SOURCE_TREE_DIRTY = "DIRTY"
+_SOURCE_TREE_NOT_GIT = "NOT_GIT"
+_SOURCE_TREE_UNKNOWN = "UNKNOWN"
+
+
+def _resolve_source_identity(package_dir: Path) -> tuple[str, str]:
+    """Resolve fail-closed source identity for the executing package.
+
+    Rules:
+      - Installed package outside a Git checkout -> ("UNKNOWN", "NOT_GIT").
+      - Inside a checkout and the executing ``src/saberops`` tree is clean
+        relative to HEAD -> (exact HEAD SHA, "CLEAN").
+      - Inside a checkout but the executing package tree differs from HEAD
+        (modified, staged, deleted, or relevant untracked files) ->
+        ("UNKNOWN", "DIRTY").
+
+    Only the executing package tree (``src/saberops``) is considered, so a
+    dirty unrelated README or planning document does not invalidate the SHA.
+    Any git failure degrades to ("UNKNOWN", "UNKNOWN").
+    """
+    try:
+        source_root = package_dir.parents[1]
+    except IndexError:
+        return (_SOURCE_SHA_UNKNOWN, _SOURCE_TREE_NOT_GIT)
+    if package_dir != source_root / "src" / "saberops":
+        return (_SOURCE_SHA_UNKNOWN, _SOURCE_TREE_NOT_GIT)
+    if not (source_root / ".git").exists():
+        return (_SOURCE_SHA_UNKNOWN, _SOURCE_TREE_NOT_GIT)
+    try:
+        from saberops.process import run_process
+
+        head = run_process(["git", "rev-parse", "HEAD"], cwd=source_root, timeout=5)
+        if not head.passed:
+            return (_SOURCE_SHA_UNKNOWN, _SOURCE_TREE_UNKNOWN)
+        sha = head.stdout.strip()
+        if re.fullmatch(r"[0-9a-f]{40}", sha) is None:
+            return (_SOURCE_SHA_UNKNOWN, _SOURCE_TREE_UNKNOWN)
+        status = run_process(
+            ["git", "status", "--porcelain=v1", "--", "src/saberops"],
+            cwd=source_root,
+            timeout=5,
+        )
+        if not status.passed:
+            return (_SOURCE_SHA_UNKNOWN, _SOURCE_TREE_UNKNOWN)
+        if status.stdout.strip():
+            return (_SOURCE_SHA_UNKNOWN, _SOURCE_TREE_DIRTY)
+        return (sha, _SOURCE_TREE_CLEAN)
+    except Exception:
+        return (_SOURCE_SHA_UNKNOWN, _SOURCE_TREE_UNKNOWN)
 
 _BIN_ATTR: dict[str, str] = {
     "opencode": "opencode_bin",
@@ -137,26 +203,35 @@ _TIERS = ("T1", "T2", "T3")
 
 _DEFAULT_GATE_COMMAND = "make gate"
 
-_AGY_SKIP_PERMISSIONS_OPT_OUT: frozenset[str] = frozenset({"0", "false", "no", "off"})
-
 TERMINAL_EVENT_TYPES: frozenset[str] = frozenset({"run_completed", "run_failed", "run_exception"})
+
+#: Owner-action event types that must reach the run-page EventSource even
+#: after the run itself is terminal (manual Review / Accept happens on an
+#: already COMPLETED run).  Kept as a literal tuple so the client bundle
+#: and the stream liveness check share one visible contract.
+OWNER_ACTION_SSE_EVENT_TYPES: tuple[str, ...] = (
+    "owner_action_queued",
+    "owner_action_started",
+    "owner_action_completed",
+    "owner_action_failed",
+    "owner_action_uncertain",
+)
 
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
 
-def _antigravity_permission_posture() -> str:
-    """Compute the effective Antigravity permission-grant posture from the environment."""
-    raw = os.environ.get("ORCH_AGY_SKIP_PERMISSIONS", "").strip().lower()
-    if raw in _AGY_SKIP_PERMISSIONS_OPT_OUT:
-        return "permission grant OFF (opt-out)"
-    return "permission grant ON (default)"
+def _owner_actions_stream_active(db: Any, run_id: str) -> bool:
+    """True while a Review or Accept owner action is effectively active.
 
-
-def _antigravity_permission_class(posture: str) -> str:
-    """Return the badge class for the Antigravity permission posture."""
-    if "ON" in posture:
-        return "normal"
-    return "demoted"
+    Read-only liveness projection: never mutates storage.  Used by the
+    SSE stream so a terminal run with live post-run owner work keeps a
+    usable event stream until the work settles.
+    """
+    try:
+        summary = summarize_owner_actions(db, run_id)
+    except Exception:
+        return False
+    return summary.active_review is not None or summary.active_accept is not None
 
 
 def format_timestamp(value: str | None) -> str:
@@ -465,8 +540,13 @@ def _quota_rows(quota_states: list[QuotaState]) -> list[dict[str, Any]]:
 
 
 def _default_start_form() -> dict[str, Any]:
-    """Return the start-run form defaults (training defaults to ALLOWED in UI checkbox).
+    """Return the start-run form defaults.
 
+    The gate box defaults to EMPTY (follow the project gate setting);
+    the shared run-creation authority fails creation with an actionable
+    message when the project has no usable gate.  The training default
+    is overlaid from the active project's effective data policy in
+    :func:`_dashboard_context` so a fresh private project offers Denied.
     The ``Independent Review`` checkbox defaults to UNCHECKED: an
     ordinary Web run lets the C13-F risk-adaptive policy decide.  The
     user can opt in to ``review_enabled=True`` per-run via the existing
@@ -481,7 +561,7 @@ def _default_start_form() -> dict[str, Any]:
         "training_allowed": True,
         "provider_override": "",
         "model_override": "",
-        "gate_command": _DEFAULT_GATE_COMMAND,
+        "gate_command": "",
         "worker_timeout": "",
         "gate_timeout": "",
         "review_timeout": "",
@@ -599,21 +679,33 @@ def _dashboard_context(
     error: str | None = None,
     notice: str | None = None,
     form: dict[str, Any] | None = None,
+    validation_cache: ProjectValidationCache | None = None,
 ) -> dict[str, Any]:
     """Build the dashboard template context."""
     peak = is_peak_hours()
     quota_states = service.list_quota()
     active_repo = projects.active()
     active_path_str = str(active_repo) if active_repo else ""
-    val = projects.validate_project(active_repo) if active_repo else None
+    if active_repo is None:
+        val = None
+    elif validation_cache is not None:
+        val = validation_cache.get(active_repo)
+    else:
+        val = projects.validate_project(active_repo)
     repo_ready = val.ready if val else False
     repo_note = val.note if val else "No project selected"
+
+    def _recent_validation(path: str) -> ProjectValidation:
+        if validation_cache is not None:
+            return validation_cache.get(path)
+        return projects.validate_project(path)
+
     recent_projects = [
-        {"path": p, "validation": projects.validate_project(p)} for p in projects.list_projects()
+        {"path": p, "validation": _recent_validation(p)} for p in projects.list_projects()
     ]
-    agy_posture = _antigravity_permission_posture()
     resolved_form = form if form is not None else _default_start_form()
     project_gate_scratch: dict[str, Any] | None = None
+    project_settings: dict[str, Any] | None = None
     if active_repo is not None:
         try:
             payload = OrchestratorService.get_project_gate_scratch_policy(active_repo)
@@ -629,12 +721,41 @@ def _dashboard_context(
             }
         except GateScratchPolicyError:
             project_gate_scratch = None
+        # R2-A: owner-facing effective project settings (gate, data
+        # policy, review policy, target branch, gate storage).  When
+        # rendering a fresh form, overlay the training default and the
+        # configured gate from effective policy so the default
+        # submission freezes the safe project values.
+        summary = effective_policy_summary(active_repo)
+        if "error" not in summary:
+            project_settings = {
+                "gate_command": summary["gate_command"],
+                "gate_configured": summary["gate_configured"],
+                "gate_detected": summary["gate_detected"],
+                "gate_effective": summary["gate_effective"],
+                "data_policy": summary["data_policy"],
+                "data_policy_label": summary["data_policy_label"],
+                "data_policy_explicit": summary["data_policy_explicit"],
+                "training_allowed": summary["training_allowed"],
+                "review_policy_mode": summary["review_policy_mode"],
+                "review_policy_explicit": summary["review_policy_explicit"],
+                "gate_scratch_mode": summary["gate_scratch_mode"],
+                "accept_target_branch": summary["accept_target_branch"],
+                "accept_target_branch_explicit": summary[
+                    "accept_target_branch_explicit"
+                ],
+                "accept_target_branch_effective": summary[
+                    "accept_target_branch_effective"
+                ],
+            }
+            if form is None:
+                resolved_form["training_allowed"] = bool(summary["training_allowed"])
+                if summary["gate_configured"]:
+                    resolved_form["gate_command"] = str(summary["gate_command"] or "")
     return {
         "schedule_state": "PEAK" if peak else "OFF-PEAK",
         "schedule_class": _status_class("PEAK" if peak else "OFF-PEAK"),
         "providers": _provider_availability(service.registry, quota_states),
-        "agy_permission_posture": agy_posture,
-        "agy_permission_class": _antigravity_permission_class(agy_posture),
         "tiers": _build_tiers(service.registry),
         "quota_states": _quota_rows(quota_states),
         "runs": _run_rows(service.list_runs(limit=50)),
@@ -647,6 +768,7 @@ def _dashboard_context(
         "form": resolved_form,
         "effective_timeouts": _effective_timeout_display(resolved_form),
         "project_gate_scratch": project_gate_scratch,
+        "project_settings": project_settings,
         "error": error,
         "notice": notice,
     }
@@ -658,17 +780,35 @@ def _run_detail_context(
     *,
     confirming_cleanup: bool = False,
     confirming_accept: bool = False,
+    confirming_reject: bool = False,
     accept_result: dict[str, str] | None = None,
     error: str | None = None,
     notice: str | None = None,
 ) -> dict[str, Any]:
     """Build the run-detail template context."""
-    latest_review = db.get_latest_review(run.id)
-    can_accept = (
-        run.status == RunStatus.COMPLETED
-        and latest_review is not None
-        and latest_review.verdict == ReviewVerdict.PASS
-    )
+    # Acceptance authority lives in AcceptEngine.  The Web renders the
+    # engine-derived read-only projection as a checklist and gates the
+    # Accept button on it; it never recreates acceptance policy.
+    eligibility = AcceptEngine(db=db).check_accept_eligibility(run.id)
+    can_accept = eligibility.eligible
+    accept_checklist = eligibility.as_dict()["checks"]
+    # R3-C: rejectability derives from the same service/projection
+    # authority as the Reject action (never from RunStatus alone), and
+    # the Candidate State shown is the R3-A projection including
+    # REJECTED.  Reads here never record rejection events.
+    from saberops.candidate_lifecycle import can_reject_candidate, project_candidate_state
+
+    try:
+        _projection = project_candidate_state(db, run.id)
+        candidate_state: str | None = (
+            _projection.state.value if _projection.state is not None else None
+        )
+    except Exception:
+        candidate_state = None
+    try:
+        can_reject = can_reject_candidate(db, run.id)
+    except Exception:
+        can_reject = False
     attempts = db.get_attempts_for_run(run.id)
     events = db.get_events(run.id, limit=1000)
     review_rows = db.get_reviews_for_run(run.id)
@@ -686,18 +826,37 @@ def _run_detail_context(
 
     candidate_sha: str | None = None
     changed_files: list[str] = []
+    diff_text = ""
+    diff_truncated = False
+    diff_available = False
+    diff_unavailable_reason: str | None = None
     failure_reason: str | None = run.result_summary
 
     for att in attempts:
-        if att.commit_sha:
-            candidate_sha = att.commit_sha
         if att.worker_error:
             failure_reason = att.worker_error
 
-    for ev in events:
-        if ev.payload and isinstance(ev.payload, dict):
-            if "changed_paths" in ev.payload and isinstance(ev.payload["changed_paths"], list):
-                changed_files = ev.payload["changed_paths"]
+    # R3-B: the Changes view is the same read-only candidate-diff
+    # projection as GET /runs/{run_id}/diff -- frozen base_commit ..
+    # R3-A current candidate SHA from the run's persisted repository.
+    # Event changed_paths and latest-attempt SHAs are never consulted.
+    try:
+        from saberops.candidate_diff import project_candidate_diff
+
+        diff = project_candidate_diff(db, run.id)
+        candidate_sha = diff.candidate_sha
+        changed_files = list(diff.changed_paths)
+        diff_text = diff.diff_text
+        diff_truncated = diff.truncated
+        diff_available = diff.available
+        diff_unavailable_reason = diff.unavailable_reason
+    except Exception:
+        candidate_sha = None
+        changed_files = []
+        diff_text = ""
+        diff_truncated = False
+        diff_available = False
+        diff_unavailable_reason = "diff_failed"
 
     current_dispatch: dict[str, Any] | None = None
     for ev in reversed(events):
@@ -720,6 +879,47 @@ def _run_detail_context(
         # report build failure degrades to "unavailable" in the UI
         # while the canonical CLI/API surfaces still fail closed.
         run_report = None
+    # R3-E2: durable owner-action projection.  This says whether the
+    # detached process executing Review/Accept authority is active or how
+    # the last one settled -- it is never a second review verdict or
+    # acceptance-policy authority (those stay in the reviews table and
+    # the AcceptEngine evidence).
+    try:
+        owner_summary = summarize_owner_actions(db, run.id)
+    except Exception:
+        owner_summary = None
+    if owner_summary is not None and owner_summary.active_review is not None:
+        owner_review_active = True
+        owner_review_state: str | None = owner_summary.active_review.state.value
+        owner_review_action: str | None = owner_summary.active_review.action_id
+    else:
+        owner_review_active = False
+        owner_review_state = None
+        owner_review_action = None
+    if owner_summary is not None and owner_summary.active_accept is not None:
+        owner_accept_active = True
+        owner_accept_state: str | None = owner_summary.active_accept.state.value
+        owner_accept_action: str | None = owner_summary.active_accept.action_id
+    else:
+        owner_accept_active = False
+        owner_accept_state = None
+        owner_accept_action = None
+    if owner_summary is not None and owner_summary.last_review is not None:
+        owner_review_last_error: str | None = (
+            owner_summary.last_review.reason
+            or owner_summary.last_review.error
+            or owner_summary.last_review.state.value
+        )
+    else:
+        owner_review_last_error = None
+    if owner_summary is not None and owner_summary.last_accept is not None:
+        owner_accept_last_error: str | None = (
+            owner_summary.last_accept.reason
+            or owner_summary.last_accept.error
+            or owner_summary.last_accept.state.value
+        )
+    else:
+        owner_accept_last_error = None
 
     return {
         "missing": False,
@@ -744,14 +944,30 @@ def _run_detail_context(
         "events": events,
         "candidate_sha": candidate_sha,
         "changed_files": changed_files,
+        "diff_text": diff_text,
+        "diff_truncated": diff_truncated,
+        "diff_available": diff_available,
+        "diff_unavailable_reason": diff_unavailable_reason,
         "failure_reason": failure_reason,
-        "can_review": run.status == RunStatus.COMPLETED,
+        "can_review": run.status == RunStatus.COMPLETED and candidate_state != "REJECTED",
         "can_cleanup": run.status in (RunStatus.COMPLETED, RunStatus.FAILED),
         "can_accept": can_accept,
+        "accept_checklist": accept_checklist,
+        "candidate_state": candidate_state,
+        "can_reject": can_reject,
         "can_retry": run.status in (RunStatus.COMPLETED, RunStatus.FAILED),
         "can_cancel": run.status not in TERMINAL_RUN_STATUSES,
+        "owner_review_active": owner_review_active,
+        "owner_review_state": owner_review_state,
+        "owner_review_action": owner_review_action,
+        "owner_accept_active": owner_accept_active,
+        "owner_accept_state": owner_accept_state,
+        "owner_accept_action": owner_accept_action,
+        "owner_review_last_error": owner_review_last_error,
+        "owner_accept_last_error": owner_accept_last_error,
         "confirming_cleanup": confirming_cleanup,
         "confirming_accept": confirming_accept,
+        "confirming_reject": confirming_reject,
         "accept_result": accept_result,
         "error": error,
         "notice": notice,
@@ -848,6 +1064,86 @@ def _missing_run_context(run_id: str) -> dict[str, Any]:
     return {"missing": True, "run_id": run_id}
 
 
+def _inbox_context(snapshot: Any) -> dict[str, Any]:
+    """Build the Inbox template context from one read-only snapshot."""
+    rows: list[dict[str, Any]] = []
+    for item in snapshot.items:
+        payload = item.as_dict()
+        project_path = payload["project_path"] or ""
+        rows.append(
+            {
+                **payload,
+                "project_short": (
+                    Path(project_path).name if project_path else ""
+                ),
+                "task_summary": _short_summary(payload["task"]),
+                "attention_class": _status_class(payload["attention_label"]),
+                "short_sha": item.short_sha,
+                "updated_at": item.updated_at,
+            }
+        )
+    return {
+        "items": rows,
+        "count": len(rows),
+        "unreadable_projects": snapshot.unreadable_projects,
+    }
+
+
+class ProjectValidationCache:
+    """Small bounded cache over expensive project Git validation.
+
+    Shell and dashboard rendering validate the active project plus every
+    known recent project (each a ``git status``-class inspection).  This
+    cache bounds that cost per request burst without becoming a general
+    caching framework:
+
+    * entries expire after ``ttl_seconds`` so active project state never
+      becomes dangerously stale;
+    * :meth:`invalidate` clears one path (or everything) and is called
+      by every route that mutates or selects projects;
+    * size is bounded (oldest entry evicted first);
+    * ``now`` is injectable so behavior is deterministic and testable.
+
+    Correctness beats micro-optimization: on any doubt the caller
+    invalidates and the next read revalidates live.
+    """
+
+    def __init__(
+        self,
+        registry: ProjectRegistry,
+        *,
+        ttl_seconds: float = 2.0,
+        now: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._registry = registry
+        self._ttl = ttl_seconds
+        self._now = now
+        self._entries: dict[str, tuple[float, ProjectValidation]] = {}
+
+    def get(self, path: Path | str) -> ProjectValidation:
+        """Return the cached validation for ``path``, revalidating when stale."""
+        key = str(Path(path).resolve())
+        moment = self._now()
+        entry = self._entries.get(key)
+        if entry is not None:
+            stored_at, validation = entry
+            if moment - stored_at <= self._ttl:
+                return validation
+        validation = self._registry.validate_project(key)
+        if len(self._entries) >= 16:
+            oldest = min(self._entries, key=lambda k: self._entries[k][0])
+            del self._entries[oldest]
+        self._entries[key] = (moment, validation)
+        return validation
+
+    def invalidate(self, path: Path | str | None = None) -> None:
+        """Drop the cached entry for ``path``, or everything when None."""
+        if path is None:
+            self._entries.clear()
+            return
+        self._entries.pop(str(Path(path).resolve()), None)
+
+
 def _empty_shell() -> dict[str, Any]:
     """Degraded shell context: the console chrome renders with empty panes."""
     return {
@@ -861,12 +1157,16 @@ def _empty_shell() -> dict[str, Any]:
         "run_count": 0,
         "active_workers": 0,
         "status_verdict": "SaberOps",
+        "saberops_version": saberops_version(),
+        "inbox_count": None,
     }
 
 
 def _shell_context(
     service: OrchestratorService,
     projects: ProjectRegistry,
+    validation_cache: ProjectValidationCache | None = None,
+    runtimes: ProjectRuntimeManager | None = None,
 ) -> dict[str, Any]:
     """Build the console-shell context rendered on every page.
 
@@ -875,11 +1175,28 @@ def _shell_context(
     small read-only projection is attached per request by middleware.
     It never mutates state and degrades to :func:`_empty_shell` when
     the backing store is unreachable.
+
+    Project Git validation flows through ``validation_cache`` when one
+    is supplied so repeated requests do not re-run ``git status`` for
+    every known project on every page view.
+
+    The Inbox badge is deliberately NOT computed here: the Inbox
+    projection is a cross-project, per-run lifecycle scan and must
+    never run as a universal page-request cost.  The shell carries a
+    plain Inbox navigation link (``inbox_count`` stays ``None``); only
+    ``GET /inbox`` and ``GET /inbox.json`` build their own single
+    snapshot.
     """
     try:
         active_repo = projects.active()
         active_path_str = str(active_repo) if active_repo else ""
-        val = projects.validate_project(active_repo) if active_repo else None
+
+        def _cached_validation(path: Path | str) -> ProjectValidation:
+            if validation_cache is not None:
+                return validation_cache.get(path)
+            return projects.validate_project(path)
+
+        val = _cached_validation(active_repo) if active_repo else None
         runs = _run_rows(service.list_runs(limit=50))
         terminal_runs = [row for row in runs if row["status"] in TERMINAL_RUN_STATUSES]
         live_runs = [row for row in runs if row["status"] not in TERMINAL_RUN_STATUSES]
@@ -892,6 +1209,12 @@ def _shell_context(
             verdict = f"{len(runs)} runs · all terminal"
         else:
             verdict = "No runs yet"
+        inbox_count: int | None = None
+        # R3-D.1: no universal Inbox scan.  ``runtimes`` is accepted for
+        # signature compatibility only and is never scanned here; the
+        # Inbox count badge stays unset so ordinary pages never pay for
+        # a cross-project lifecycle projection.
+        _ = runtimes
         return {
             "active_project": active_path_str,
             "active_project_short": active_short,
@@ -900,7 +1223,7 @@ def _shell_context(
             "recent_projects": [
                 {
                     "path": p,
-                    "ready": projects.validate_project(p).ready,
+                    "ready": _cached_validation(p).ready,
                 }
                 for p in projects.list_projects()
             ],
@@ -909,6 +1232,8 @@ def _shell_context(
             "run_count": len(runs),
             "active_workers": len(live_runs),
             "status_verdict": verdict,
+            "saberops_version": saberops_version(),
+            "inbox_count": inbox_count,
         }
     except Exception:
         return _empty_shell()
@@ -1328,22 +1653,24 @@ def _materialize_discovered_binding(
     resource:
 
     * WORKER-role binding: eligible for the worker-routing ladder.
+    * REVIEWER-role binding: eligible for the owner-selected reviewer slot.
     * ORCHESTRATOR-role binding: eligible for the Orchestrator slot.
 
-    Both share the same ``profile_id`` (the real connection / account)
-    and ``quota_pool_id`` (the real connection-scoped scarcity
-    resource); only their ``binding_id`` carries the semantic role so
-    /routing/add and /orchestrator/select each see their own exact
-    binding and C07 remains authoritative over the real quota pool.
-    Two distinct account connections to the same provider register
-    distinct ``profile_id`` and distinct ``quota_pool_id`` -- provider
-    identity is not quota-resource identity.
+    All three share the same ``profile_id`` (the real connection /
+    account) and ``quota_pool_id`` (the real connection-scoped
+    scarcity resource); only their ``binding_id`` carries the semantic
+    role so /routing/add, /reviewer/select, and /orchestrator/select
+    each see their own exact binding and C07 remains authoritative
+    over the real quota pool.  Two distinct account connections to the
+    same provider register distinct ``profile_id`` and distinct
+    ``quota_pool_id`` -- provider identity is not quota-resource
+    identity, and semantic role never duplicates either resource.
 
-    The exact bindings are persisted only when the WORKER binding
-    proves through the real C11-B resolver with the real adapter, so a
-    provider/model name can never become executable without an exact
-    binding that actually resolves.  Returns ``(owner, worker_binding)``
-    or ``None``.
+    The exact bindings are persisted only when the WORKER and REVIEWER
+    bindings prove through the real C11-B resolver with the real
+    adapter, so a provider/model name can never become executable
+    without an exact binding that actually resolves.  Returns
+    ``(owner, worker_binding)`` or ``None``.
     """
     adapter = registry.get(connection.provider)
     if adapter is None:
@@ -1356,6 +1683,14 @@ def _materialize_discovered_binding(
         provider_transport=profile.transport,
         harness_capabilities=profile.capabilities,
         binding_role=BindingRole.WORKER,
+    )
+    reviewer_binding, _reviewer_profile, _reviewer_pool = materialize_discovered_binding(
+        connection_id=connection.connection_id,
+        provider=connection.provider,
+        model=model_id,
+        provider_transport=profile.transport,
+        harness_capabilities=profile.capabilities,
+        binding_role=BindingRole.REVIEWER,
     )
     orch_binding, _orch_profile, _orch_pool = materialize_discovered_binding(
         connection_id=connection.connection_id,
@@ -1370,12 +1705,20 @@ def _materialize_discovered_binding(
         owner, binding=worker_binding, profile=execution_profile, pool=pool
     )
     candidate = upsert_owner_binding(
+        candidate, binding=reviewer_binding, profile=execution_profile, pool=pool
+    )
+    candidate = upsert_owner_binding(
         candidate, binding=orch_binding, profile=execution_profile, pool=pool
     )
     try:
         resolve_execution_binding(
             registry=candidate.registry,
             binding_id=worker_binding.binding_id,
+            adapter=adapter,
+        )
+        resolve_execution_binding(
+            registry=candidate.registry,
+            binding_id=reviewer_binding.binding_id,
             adapter=adapter,
         )
     except BindingResolutionError:
@@ -1514,6 +1857,90 @@ def _model_display_row(
     return row
 
 
+def _readiness_store() -> ReadinessStore:
+    """Return the readiness-evidence store (overridable for tests).
+
+    Production path is ``<owner_state_dir>/access-readiness.json``;
+    ``ORCH_READINESS_STORE`` pins an explicit file.  The store carries
+    only non-secret observations; the Verify action writes through this
+    same seam while every other read path shows existing evidence only.
+    """
+    override = os.environ.get("ORCH_READINESS_STORE", "").strip()
+    if override:
+        return ReadinessStore(Path(override).expanduser())
+    return ReadinessStore(owner_state_dir() / ReadinessStore.FILENAME)
+
+
+def _readiness_age_display(observed_at: str) -> str:
+    """Render the age of a readiness observation from its timestamp.
+
+    The timestamp is the evidence; the age is derived from it, never
+    fabricated.  An unreadable timestamp degrades to ``unknown age``.
+    """
+    try:
+        observed = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+        if observed.tzinfo is None:
+            raise ValueError("naive timestamp")
+        seconds = max(
+            0.0, (datetime.now(UTC) - observed.astimezone(UTC)).total_seconds()
+        )
+    except (ValueError, TypeError, OverflowError):
+        return "unknown age"
+    if seconds < 60:
+        return f"{int(seconds)}s ago"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m ago"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)}h ago"
+    return f"{int(seconds // 86400)}d ago"
+
+
+def _readiness_presentation(
+    connection_id: str,
+    catalog: ReadinessCatalog | None,
+) -> dict[str, Any]:
+    """Project the persisted readiness evidence for one connection.
+
+    Display only: shows the actual stored state/reason/observation time
+    and whether the existing freshness policy still considers it fresh.
+    No probing, no refresh, no invented readiness.  When no evidence
+    exists the row says ``Not verified yet`` instead of looking like an
+    execution failure.  A binary/CLI being installed is reported
+    separately by the caller and is never presented as proven model
+    execution readiness.
+    """
+    if catalog is None:
+        return {
+            "display": "Readiness store unreadable",
+            "state": ProviderReadiness.UNKNOWN.value,
+            "reason": "READINESS_AUTHORITY_UNAVAILABLE",
+            "observed_at": "",
+            "age": "unknown age",
+            "fresh": False,
+        }
+    evidence = catalog.try_get(connection_id)
+    if evidence is None:
+        return {
+            "display": "Not verified yet",
+            "state": ProviderReadiness.UNKNOWN.value,
+            "reason": "INSUFFICIENT_EVIDENCE",
+            "observed_at": "",
+            "age": "not observed",
+            "fresh": False,
+        }
+    projected = evidence.freshness(
+        as_of=datetime.now(UTC), max_age=DEFAULT_READINESS_MAX_AGE
+    )
+    return {
+        "display": projected.state.value,
+        "state": projected.state.value,
+        "reason": projected.reason,
+        "observed_at": evidence.observed_at,
+        "age": _readiness_age_display(evidence.observed_at),
+        "fresh": projected.state == evidence.state,
+    }
+
+
 def _access_context(
     *,
     error: str | None = None,
@@ -1543,6 +1970,10 @@ def _access_context(
         return rows
 
     account_rows: list[dict[str, Any]] = []
+    try:
+        readiness_catalog = _readiness_store().load()
+    except ReadinessStoreError:
+        readiness_catalog = None
     for descriptor in ACCOUNT_BACKENDS:
         connection = access_registry.try_get(descriptor.connection_id)
         resolved = shutil.which(descriptor.executable)
@@ -1562,6 +1993,12 @@ def _access_context(
                 # so live auth state stays UNKNOWN until a supported
                 # backend status probe is wired per backend.
                 "authenticated": TriState.UNKNOWN.value,
+                # Persisted model-execution readiness evidence (display
+                # only; never refreshed or probed here).  A CLI being
+                # installed is availability, not proven readiness.
+                "readiness": _readiness_presentation(
+                    descriptor.connection_id, readiness_catalog
+                ),
                 "present": "TRUE" if connection is not None else "FALSE",
                 "models": rows_for(descriptor.connection_id),
             }
@@ -1690,6 +2127,77 @@ def _orchestrator_context(
         "auto_selected": (
             current is not None and current["mode"] == OrchBindingMode.AUTO.value
         ),
+    }
+
+
+def _reviewer_context(
+    *,
+    error: str | None = None,
+    notice: str | None = None,
+    registry: AdapterRegistry | None = None,
+) -> dict[str, Any]:
+    """Build the Reviewer-model selection context.
+
+    The page lists only canonical ``REVIEWER`` bindings whose profile is
+    enabled and whose exact identity resolves through the real adapter.
+    The persisted choice is one exact binding id (never a free-floating
+    provider/model setting, never a pool, never an ordered list).
+
+    C15-XC-03: each candidate is validated against ITS OWN exact binding
+    identity (the row's own binding_id) instead of "any other binding
+    with the same provider/model" so the visible roster can never drift
+    away from the bindings the registry actually names.
+    """
+    owner = _load_owner_bindings_safely()
+    resolved_registry = registry if registry is not None else AdapterRegistry.default()
+    rows: list[dict[str, str]] = []
+    for binding in owner.registry.list_bindings():
+        if binding.binding_role is not BindingRole.REVIEWER:
+            continue
+        profile = owner.registry.profile_of(binding)
+        # Validate using THIS binding's own identity, not a provider/model
+        # match: a REVIEWER-role binding with no live adapter (or a
+        # stale profile / pool) is correctly refused.
+        adapter = resolved_registry.get(binding.provider)
+        resolvable = False
+        if adapter is not None and profile.enabled:
+            try:
+                resolve_execution_binding(
+                    registry=owner.registry,
+                    binding_id=binding.binding_id,
+                    adapter=adapter,
+                )
+                resolvable = True
+            except BindingResolutionError:
+                resolvable = False
+        if not resolvable:
+            continue
+        rows.append(
+            {
+                "binding_id": binding.binding_id,
+                "provider": binding.provider,
+                "model": binding.model,
+                "backend": binding.backend.value,
+                "profile_id": binding.profile_id,
+                "quota_pool_id": binding.quota_pool_id,
+                "profile_enabled": "TRUE" if profile.enabled else "FALSE",
+            }
+        )
+    current = owner.reviewer_binding_id
+    selection = select_reviewer_binding(owner, adapter_registry=resolved_registry)
+    if selection.status is ReviewerSelectionStatus.NOT_CONFIGURED:
+        selection_status = "NOT CONFIGURED"
+    elif selection.status is ReviewerSelectionStatus.RESOLVED:
+        selection_status = "RESOLVED"
+    else:
+        selection_status = f"UNRESOLVED ({selection.reason})"
+    return {
+        "error": error,
+        "notice": notice,
+        "bindings": rows,
+        "current": current,
+        "selection_status": selection_status,
+        "selected_value": "" if current is None else str(current),
     }
 
 
@@ -1827,6 +2335,73 @@ def _routing_context(
     }
 
 
+def _setup_context(
+    projects: ProjectRegistry,
+    *,
+    validation_cache: ProjectValidationCache,
+    registry: AdapterRegistry,
+) -> dict[str, Any]:
+    """Build one UI-only first-user setup checklist from canonical stores."""
+    from saberops.paths import active_profile
+
+    access = _access_context(registry=registry)
+    routing = _routing_context(registry=registry)
+    orch = _orchestrator_context(registry=registry)
+    reviewer = _reviewer_context(registry=registry)
+    active_repo = projects.active()
+    validation = validation_cache.get(active_repo) if active_repo is not None else None
+    settings: dict[str, object] | None = None
+    if active_repo is not None:
+        summary = effective_policy_summary(active_repo)
+        if "error" not in summary:
+            settings = summary
+
+    discovered = sum(
+        len(row.get("models", ()))
+        for row in (*access["account_rows"], *access["api_rows"])
+    )
+    eligible = sum(
+        1 for row in routing["chooser"] if row.get("routing_eligible") == "TRUE"
+    )
+    routed = sum(len(chain["candidates"]) for chain in routing["chains"])
+    orch_ready = bool(
+        orch["current"] is not None
+        and str(orch["selection_status"]).startswith("RESOLVED")
+    )
+    reviewer_ready = bool(str(reviewer["selection_status"]).startswith("RESOLVED"))
+    project_ready = bool(validation and validation.ready)
+    project_policy_ready = bool(
+        settings
+        and settings.get("gate_effective")
+        and settings.get("accept_target_branch_effective")
+    )
+    return {
+        "profile": active_profile() or "default",
+        "account_rows": access["account_rows"],
+        "discovered_model_count": discovered,
+        "routing_eligible_count": eligible,
+        "routed_model_count": routed,
+        "routing_chains": routing["chains"],
+        "orch_current": orch["current"],
+        "orch_status": orch["selection_status"],
+        "orch_ready": orch_ready,
+        "reviewer_current": reviewer["current"],
+        "reviewer_status": reviewer["selection_status"],
+        "reviewer_ready": reviewer_ready,
+        "active_project": str(active_repo) if active_repo is not None else "",
+        "project_ready": project_ready,
+        "project_note": validation.note if validation is not None else "No project selected",
+        "project_settings": settings,
+        "project_policy_ready": project_policy_ready,
+        "ready_for_dogfood": bool(
+            project_ready
+            and project_policy_ready
+            and routed > 0
+            and orch_ready
+            and reviewer_ready
+        ),
+    }
+
 
 #: Raw text fields the ``/access`` connection form re-renders verbatim.
 #: A rejected submission is untrusted as a whole, so these are blanked
@@ -1963,6 +2538,16 @@ def _notice_from_query(request: Request) -> str | None:
         return "Review failed."
     if request.query_params.get("cleaned") == "1":
         return "Cleanup completed."
+    if request.query_params.get("rejected") == "1":
+        return "Candidate rejected (durable owner decision)."
+    if request.query_params.get("review_queued") == "1":
+        return "Review queued: a detached owner action is running; this page updates via live events."
+    if request.query_params.get("accept_queued") == "1":
+        return "Accept queued: a detached owner action is running; this page updates via live events."
+    if request.query_params.get("action_active") == "review":
+        return "A Review owner action is already running for this candidate."
+    if request.query_params.get("action_active") == "accept":
+        return "An Accept owner action is already running for this candidate."
     if request.query_params.get("updated") == "1":
         return "Quota updated."
     if request.query_params.get("enabled") == "1":
@@ -2009,8 +2594,8 @@ def create_app(
     registry: AdapterRegistry | None = None,
     worktree_base: Path | None = None,
     projects: ProjectRegistry | None = None,
-    manager_client: ManagerClient | None = None,
     state_root: Path | str | None = None,
+    seed_cwd_if_empty: bool = True,
 ) -> FastAPI:
     """Build the FastAPI dashboard application.
 
@@ -2035,14 +2620,16 @@ def create_app(
         state_root=state_root,
     )
 
-    # Seed registry with repo_path or cwd on first use
+    # An explicit --repo seeds/selects a project.  Existing direct callers
+    # retain the historical CWD seed by default; the real first-user CLI passes
+    # seed_cwd_if_empty=False so a fresh profile stays genuinely empty until
+    # the owner selects a repository in UI.
     if repo_path is not None:
         resolved_repo = Path(repo_path).resolve()
         project_registry.add_project(resolved_repo)
         project_registry.select(resolved_repo)
-    elif not project_registry.list_projects():
-        default_target = Path.cwd().resolve()
-        project_registry.add_project(default_target)
+    elif seed_cwd_if_empty and not project_registry.list_projects():
+        project_registry.add_project(Path.cwd().resolve())
 
     def active_runtime() -> ProjectRuntime:
         """Runtime backing what the dashboard currently displays."""
@@ -2057,34 +2644,41 @@ def create_app(
     service = startup_runtime.service
     supervisor = startup_runtime.supervisor
 
-    resolved_manager_client = (
-        manager_client if manager_client is not None else OpenCodeManagerClient()
-    )
-    manager_service = ManagerService(
-        client=resolved_manager_client,
-        projects=project_registry,
-        runtimes=runtimes,
-    )
-
     app = FastAPI(title="SaberOps Dashboard")
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
     templates.env.globals["fmt"] = format_timestamp
 
+    # Bounded projection over expensive project Git validation (R0-B §6).
+    # Shared by the shell middleware and the dashboard so repeated
+    # requests do not re-run `git status` for every known project.
+    validation_cache = ProjectValidationCache(project_registry)
+    app.state.validation_cache = validation_cache
+
     @app.middleware("http")
     async def _attach_shell_context(request: Request, call_next: Callable[..., Any]) -> Response:
-        """Attach the read-only console-shell projection to every request.
+        """Attach the read-only console-shell projection to every page request.
 
         The approved shell renders run/project panes on all pages, so the
         data is resolved once per request here instead of in each handler.
+        ``/static/*`` and ``/health`` never trigger project Git
+        validation: they render no shell and carry no project state.
         A failure degrades to an empty shell rather than failing the page.
         """
+        path = request.url.path
+        if path == "/health" or path.startswith("/static"):
+            request.state.shell = _empty_shell()
+            response: Response = await call_next(request)
+            return response
         try:
             request.state.shell = _shell_context(
-                active_runtime().service, project_registry
+                active_runtime().service,
+                project_registry,
+                validation_cache,
+                runtimes,
             )
         except Exception:
             request.state.shell = _empty_shell()
-        response: Response = await call_next(request)
+        response = await call_next(request)
         return response
     app.state.db = db
     app.state.service = service
@@ -2100,7 +2694,21 @@ def create_app(
             _dashboard_context(
                 active_runtime().service,
                 project_registry,
+                validation_cache=validation_cache,
                 notice=_notice_from_query(request),
+            ),
+        )
+
+    @app.get("/setup", response_class=HTMLResponse, name="first_user_setup")
+    def first_user_setup(request: Request) -> HTMLResponse:
+        """Render the canonical UI-only path from empty profile to first run."""
+        return templates.TemplateResponse(
+            request,
+            "setup.html",
+            _setup_context(
+                project_registry,
+                validation_cache=validation_cache,
+                registry=resolved_registry,
             ),
         )
 
@@ -2117,6 +2725,7 @@ def create_app(
                 _dashboard_context(
                     active_runtime().service,
                     project_registry,
+                    validation_cache=validation_cache,
                     error="Project path is required.",
                 ),
                 status_code=400,
@@ -2129,10 +2738,14 @@ def create_app(
                 _dashboard_context(
                     active_runtime().service,
                     project_registry,
+                    validation_cache=validation_cache,
                     error=f"Cannot select project: {note}",
                 ),
                 status_code=400,
             )
+        # Selecting a project changes which cached validation is active and
+        # reorders recents: drop the cached entry so the next render is live.
+        validation_cache.invalidate(target_path)
         return RedirectResponse(url="/?project_selected=1", status_code=303)
 
     @app.get(
@@ -2183,6 +2796,142 @@ def create_app(
             )
         return RedirectResponse(url="/?gate_scratch_updated=1", status_code=303)
 
+    @app.get(
+        "/projects/settings",
+        name="get_project_settings",
+    )
+    def get_project_settings_endpoint(
+        request: Request,
+    ) -> Response:
+        """Return the active project's effective owner-facing settings."""
+        active_repo = project_registry.active()
+        if not active_repo:
+            return JSONResponse({"error": "no active project"}, status_code=400)
+        summary = effective_policy_summary(active_repo)
+        if "error" in summary:
+            return JSONResponse({"error": str(summary["error"])}, status_code=400)
+        return JSONResponse(summary)
+
+    @app.post(
+        "/projects/settings/gate",
+        name="set_project_gate",
+    )
+    async def set_project_gate_endpoint(
+        request: Request,
+        command: Annotated[str, Form()] = "",
+    ) -> Response:
+        """Persist (or, when empty, clear) the active project's gate command.
+
+        Changing the gate affects FUTURE runs only; already-created
+        runs keep the gate command frozen at their creation time.
+        """
+        from saberops.project_settings import (
+            ProjectSettingsError,
+            clear_project_gate_command,
+            set_project_gate_command,
+        )
+
+        active_repo = project_registry.active()
+        if not active_repo:
+            return JSONResponse({"error": "no active project"}, status_code=400)
+        try:
+            if command.strip():
+                set_project_gate_command(active_repo, command.strip())
+            else:
+                clear_project_gate_command(active_repo)
+        except ProjectSettingsError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return RedirectResponse(url="/?project_settings_updated=1", status_code=303)
+
+    @app.post(
+        "/projects/settings/data-policy",
+        name="set_project_data_policy",
+    )
+    async def set_project_data_policy_endpoint(
+        request: Request,
+        policy: Annotated[str, Form()] = "",
+    ) -> Response:
+        """Persist the active project's training/data-use policy."""
+        from saberops.project_settings import ProjectSettingsError, set_project_data_policy
+
+        active_repo = project_registry.active()
+        if not active_repo:
+            return JSONResponse({"error": "no active project"}, status_code=400)
+        cleaned = policy.strip().lower()
+        if cleaned not in ("allowed", "denied"):
+            return JSONResponse(
+                {"error": "policy must be 'allowed' or 'denied'"},
+                status_code=400,
+            )
+        try:
+            set_project_data_policy(active_repo, cleaned)
+        except ProjectSettingsError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return RedirectResponse(url="/?project_settings_updated=1", status_code=303)
+
+    @app.post(
+        "/projects/settings/review-policy",
+        name="set_project_review_policy",
+    )
+    async def set_project_review_policy_endpoint(
+        request: Request,
+        policy: Annotated[str, Form()] = "",
+    ) -> Response:
+        """Persist the active project's review policy via the canonical store."""
+        from saberops.models import ReviewPolicyMode as _ReviewPolicyMode
+        from saberops.project_settings import (
+            ProjectSettingsError,
+            set_project_review_policy,
+        )
+        from saberops.review_adaptive import ReviewPolicyError as _ReviewPolicyError
+
+        active_repo = project_registry.active()
+        if not active_repo:
+            return JSONResponse({"error": "no active project"}, status_code=400)
+        cleaned = policy.strip().lower()
+        if cleaned not in ("risk-adaptive", "always-required"):
+            return JSONResponse(
+                {"error": "policy must be 'risk-adaptive' or 'always-required'"},
+                status_code=400,
+            )
+        mode = (
+            _ReviewPolicyMode.ALWAYS_REQUIRED
+            if cleaned == "always-required"
+            else _ReviewPolicyMode.RISK_ADAPTIVE
+        )
+        try:
+            set_project_review_policy(active_repo, mode)
+        except (ProjectSettingsError, _ReviewPolicyError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return RedirectResponse(url="/?project_settings_updated=1", status_code=303)
+
+    @app.post(
+        "/projects/settings/target-branch",
+        name="set_project_target_branch",
+    )
+    async def set_project_target_branch_endpoint(
+        request: Request,
+        branch: Annotated[str, Form()] = "",
+    ) -> Response:
+        """Persist (or, when empty, clear) the accept target branch."""
+        from saberops.project_settings import (
+            ProjectSettingsError,
+            clear_project_accept_target_branch,
+            set_project_accept_target_branch,
+        )
+
+        active_repo = project_registry.active()
+        if not active_repo:
+            return JSONResponse({"error": "no active project"}, status_code=400)
+        try:
+            if branch.strip():
+                set_project_accept_target_branch(active_repo, branch.strip())
+            else:
+                clear_project_accept_target_branch(active_repo)
+        except ProjectSettingsError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return RedirectResponse(url="/?project_settings_updated=1", status_code=303)
+
     @app.post("/runs", name="start_run")
     async def start_run(
         request: Request,
@@ -2210,7 +2959,12 @@ def create_app(
         form["training_allowed"] = training_allowed == "1"
         form["provider_override"] = provider_override
         form["model_override"] = model_override
-        form["gate_command"] = gate_command.strip() or _DEFAULT_GATE_COMMAND
+        # R2-A: an empty gate box means "follow the project gate setting"
+        # (None).  The shared run-creation authority fails creation with
+        # an actionable message when the project has neither an explicit
+        # gate nor a positively detected one -- Web never silently falls
+        # back to a default gate command.
+        form["gate_command"] = gate_command.strip()
         form["worker_timeout"] = worker_timeout
         form["gate_timeout"] = gate_timeout
         form["review_timeout"] = review_timeout
@@ -2219,9 +2973,18 @@ def create_app(
         form["review_limit"] = review_limit.strip() or "3"
 
         active_repo = project_registry.active()
-        if not active_repo:
-            active_repo = (
-                Path(repo_path).resolve() if repo_path is not None else Path.cwd().resolve()
+        if active_repo is None:
+            return templates.TemplateResponse(
+                request,
+                "dashboard.html",
+                _dashboard_context(
+                    active_runtime().service,
+                    project_registry,
+                    validation_cache=validation_cache,
+                    error="Select a project in the UI before starting a run.",
+                    form=form,
+                ),
+                status_code=400,
             )
 
         if not task.strip():
@@ -2231,6 +2994,7 @@ def create_app(
                 _dashboard_context(
                     active_runtime().service,
                     project_registry,
+                    validation_cache=validation_cache,
                     error="Task is required.",
                     form=form,
                 ),
@@ -2248,6 +3012,7 @@ def create_app(
                 _dashboard_context(
                     active_runtime().service,
                     project_registry,
+                    validation_cache=validation_cache,
                     error="Select a valid tier (T1, T2, or T3).",
                     form=form,
                 ),
@@ -2261,6 +3026,7 @@ def create_app(
                 _dashboard_context(
                     active_runtime().service,
                     project_registry,
+                    validation_cache=validation_cache,
                     error="Select a valid review mode (bounded or max).",
                     form=form,
                 ),
@@ -2284,6 +3050,7 @@ def create_app(
                 _dashboard_context(
                     active_runtime().service,
                     project_registry,
+                    validation_cache=validation_cache,
                     error="Review limit must be a whole number of at least 1.",
                     form=form,
                 ),
@@ -2295,76 +3062,47 @@ def create_app(
             def optional_float(raw: str) -> float | None:
                 return float(raw) if raw.strip() else None
 
-            # Freeze the project's gate-scratch policy at run creation.
-            # An already-created run never re-reads mutable project
-            # authority; this is the one read that establishes the
-            # RunConfig's gate_scratch_mode value.
-            try:
-                resolved_gate_scratch_mode = load_project_gate_scratch_policy(active_repo)
-            except GateScratchPolicyError as exc:
-                return templates.TemplateResponse(
-                    request,
-                    "dashboard.html",
-                    _dashboard_context(
-                        active_runtime().service,
-                        project_registry,
-                        error=f"Project gate-scratch policy is invalid: {exc}",
-                        form=form,
-                    ),
-                    status_code=400,
+            # R2-A: Web resolves run policy exclusively through the shared
+            # run-creation authority -- the same precedence the CLI uses.
+            # The effective gate, gate storage, review policy,
+            # data/training policy, and accept target branch freeze onto
+            # the RunConfig here; later project-settings changes affect
+            # future runs only.
+            config = resolve_effective_run_config(
+                RunRequest(
+                    task=task,
+                    repo_path=active_repo,
+                    gate_command=form["gate_command"] or None,
+                    training_allowed=form["training_allowed"],
+                    review_policy=None,
+                    routing_mode="manual" if tier else routing_mode,
+                    manual_tier=manual_tier or tier or None,
+                    max_auto_tier=max_auto_tier,
+                    provider_override=provider_override,
+                    model_override=model_override,
+                    worker_timeout=optional_float(worker_timeout),
+                    gate_timeout=optional_float(gate_timeout),
+                    review_enabled=form["review_enabled"],
+                    review_mode=form["review_mode"],
+                    review_limit=parsed_review_limit,
+                    review_timeout=optional_float(review_timeout),
                 )
-
-            # Freeze the project's review-policy at run creation.  Same
-            # one-read pattern as gate-scratch above: the Web form does
-            # not yet expose the policy knob (doctrine: no UI churn
-            # merely to expose C13-F), but the canonical RISK_ADAPTIVE
-            # default is merged with the persisted project policy via
-            # the tightening-only resolver so a project persisted as
-            # ALWAYS_REQUIRED can never be silently ignored.
-            try:
-                project_review_mode = load_project_review_policy(active_repo)
-            except ReviewPolicyError as exc:
-                return templates.TemplateResponse(
-                    request,
-                    "dashboard.html",
-                    _dashboard_context(
-                        active_runtime().service,
-                        project_registry,
-                        error=f"Project review policy is invalid: {exc}",
-                        form=form,
-                    ),
-                    status_code=400,
-                )
-            effective_review_mode = resolve_effective_review_policy_mode(
-                project_mode=project_review_mode,
-                explicit_run_mode=ReviewPolicyMode.RISK_ADAPTIVE,
-            )
-
-            config = resolve_run_config(
-                task=task,
-                target_repo=active_repo,
-                routing_mode="manual" if tier else routing_mode,
-                manual_tier=manual_tier or tier or None,
-                max_auto_tier=max_auto_tier,
-                training_allowed=form["training_allowed"],
-                provider_override=provider_override,
-                model_override=model_override,
-                gate_command=form["gate_command"],
-                worker_timeout=optional_float(worker_timeout),
-                gate_timeout=optional_float(gate_timeout),
-                review_timeout=optional_float(review_timeout),
-                review_enabled=form["review_enabled"],
-                review_mode=form["review_mode"],
-                review_limit=parsed_review_limit,
-                # C13-F: the effective mode is the frozen result of the
-                # canonical project-policy merge.  A later project-policy
-                # change affects future Runs only; this Run keeps its
-                # frozen mode for the lifetime of its review decision.
-                review_policy_mode=effective_review_mode,
-                gate_scratch_mode=resolved_gate_scratch_mode,
             )
             result = runtimes.for_repo(config.target_repo).supervisor.start_supervised_run(
                 config=config
+            )
+        except RunCreationError as exc:
+            return templates.TemplateResponse(
+                request,
+                "dashboard.html",
+                _dashboard_context(
+                    active_runtime().service,
+                    project_registry,
+                    validation_cache=validation_cache,
+                    error=str(exc),
+                    form=form,
+                ),
+                status_code=400,
             )
         except Exception as exc:
             return templates.TemplateResponse(
@@ -2373,6 +3111,7 @@ def create_app(
                 _dashboard_context(
                     active_runtime().service,
                     project_registry,
+                    validation_cache=validation_cache,
                     error=f"Run failed to start: {exc}",
                     form=form,
                 ),
@@ -2402,6 +3141,23 @@ def create_app(
             return JSONResponse({"error": "run not found"}, status_code=404)
         return JSONResponse(_plan_projection(runtime.db, run_id))
 
+    @app.get("/runs/{run_id}/diff")
+    def run_diff(run_id: str) -> JSONResponse:
+        """Read-only bounded candidate diff as JSON.
+
+        Same projection the Changes tab renders: frozen
+        ``base_commit .. R3-A current candidate SHA`` from the run's
+        persisted repository.  Unknown run is a real not-found
+        result; a known run with no trustworthy current candidate
+        returns a truthful unavailable projection.
+        """
+        from saberops.candidate_diff import project_candidate_diff
+
+        runtime = runtime_for_run(run_id)
+        if runtime is None or runtime.db.get_run(run_id) is None:
+            return JSONResponse({"error": "run not found"}, status_code=404)
+        return JSONResponse(project_candidate_diff(runtime.db, run_id).as_dict())
+
     @app.get("/runs/{run_id}/report")
     def run_report_json(run_id: str) -> JSONResponse:
         """Read-only canonical C16-B1 run report as JSON.
@@ -2416,6 +3172,103 @@ def create_app(
             return JSONResponse(build_run_report(runtime.db, run_id))
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=404)
+
+    @app.get("/runs/{run_id}/actions")
+    def run_actions(run_id: str) -> JSONResponse:
+        """Authoritative run-action state for live button refresh.
+
+        The run page fetches this after lifecycle SSE events so Accept /
+        Review / Cancel / Cleanup controls refresh from server state
+        instead of remaining stale from the initial page load.  The
+        acceptance portion is the same engine-derived projection the
+        page renders and the POST gates on.
+        """
+        runtime = runtime_for_run(run_id)
+        run = runtime.db.get_run(run_id) if runtime is not None else None
+        if runtime is None or run is None:
+            return JSONResponse({"error": "run not found"}, status_code=404)
+        eligibility = AcceptEngine(db=runtime.db).check_accept_eligibility(run_id)
+        from saberops.candidate_lifecycle import can_reject_candidate, project_candidate_state
+
+        try:
+            _projection = project_candidate_state(runtime.db, run_id)
+            _candidate_state: str | None = (
+                _projection.state.value if _projection.state is not None else None
+            )
+        except Exception:
+            _candidate_state = None
+        try:
+            _can_reject = can_reject_candidate(runtime.db, run_id)
+        except Exception:
+            _can_reject = False
+        try:
+            _owner_summary = summarize_owner_actions(runtime.db, run_id)
+            _owner_review_active = _owner_summary.active_review is not None
+            _owner_accept_active = _owner_summary.active_accept is not None
+            _owner_review_state = (
+                _owner_summary.active_review.state.value
+                if _owner_summary.active_review is not None
+                else None
+            )
+            _owner_accept_state = (
+                _owner_summary.active_accept.state.value
+                if _owner_summary.active_accept is not None
+                else None
+            )
+            # Projected terminal history (including a provably dead active
+            # action read-only-projected as UNCERTAIN / OWNER_PROCESS_DEAD).
+            _owner_review_last_state = (
+                _owner_summary.last_review.state.value
+                if _owner_summary.last_review is not None
+                else None
+            )
+            _owner_review_last_reason = (
+                _owner_summary.last_review.reason
+                if _owner_summary.last_review is not None
+                else None
+            )
+            _owner_accept_last_state = (
+                _owner_summary.last_accept.state.value
+                if _owner_summary.last_accept is not None
+                else None
+            )
+            _owner_accept_last_reason = (
+                _owner_summary.last_accept.reason
+                if _owner_summary.last_accept is not None
+                else None
+            )
+        except Exception:
+            _owner_review_active = False
+            _owner_accept_active = False
+            _owner_review_state = None
+            _owner_accept_state = None
+            _owner_review_last_state = None
+            _owner_review_last_reason = None
+            _owner_accept_last_state = None
+            _owner_accept_last_reason = None
+        return JSONResponse(
+            {
+                "run_id": run_id,
+                "status": run.status.value,
+                "can_accept": eligibility.eligible,
+                "can_review": run.status == RunStatus.COMPLETED
+                and _candidate_state != "REJECTED",
+                "can_cleanup": run.status in (RunStatus.COMPLETED, RunStatus.FAILED),
+                "can_retry": run.status in (RunStatus.COMPLETED, RunStatus.FAILED),
+                "can_cancel": run.status not in TERMINAL_RUN_STATUSES,
+                "candidate_state": _candidate_state,
+                "can_reject": _can_reject,
+                "accept_checklist": eligibility.as_dict()["checks"],
+                "owner_review_active": _owner_review_active,
+                "owner_review_state": _owner_review_state,
+                "owner_accept_active": _owner_accept_active,
+                "owner_accept_state": _owner_accept_state,
+                "owner_review_last_state": _owner_review_last_state,
+                "owner_review_last_reason": _owner_review_last_reason,
+                "owner_accept_last_state": _owner_accept_last_state,
+                "owner_accept_last_reason": _owner_accept_last_reason,
+            }
+        )
 
     @app.get("/runs/{run_id}/events/stream")
     async def stream_events(request: Request, run_id: str, after: int = 0) -> Response:
@@ -2435,7 +3288,12 @@ def create_app(
             persisted_run is not None
             and persisted_run.status in (RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.ORPHANED)
         ) or any(event.event_type in TERMINAL_EVENT_TYPES for event in persisted)
-        if terminal_persisted:
+        # R3-E2.1: a terminal run with an active post-run owner action
+        # (Review / Accept) keeps a usable live stream so queued/started/
+        # completed/failed/uncertain events reach the run page.  The
+        # stream may close once the run is terminal AND no owner action
+        # remains active.
+        if terminal_persisted and not _owner_actions_stream_active(db, run_id):
             payload = "".join(
                 f"id: {event.id}\nevent: {event.event_type}\ndata: {
                     json.dumps(
@@ -2468,7 +3326,7 @@ def create_app(
                 and initial_run.status
                 in (RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.ORPHANED)
             ) or any(event.event_type in TERMINAL_EVENT_TYPES for event in initial_events)
-            if terminal_initial:
+            if terminal_initial and not _owner_actions_stream_active(db, run_id):
                 for ev in initial_events:
                     after_id = max(after_id, ev.id)
                     data = {
@@ -2527,7 +3385,7 @@ def create_app(
                         and run.status
                         in (RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.ORPHANED)
                     ) or any(ev.event_type in TERMINAL_EVENT_TYPES for ev in db.get_events(run_id))
-                    if is_terminal:
+                    if is_terminal and not _owner_actions_stream_active(db, run_id):
                         # Terminal events are durable before this check.  End immediately
                         # after a final fetch so TestClient and browsers do not retain a
                         # completed connection solely for a grace-period timer.
@@ -2707,17 +3565,55 @@ def create_app(
             return templates.TemplateResponse(
                 request, "run_detail.html", _missing_run_context(run_id), status_code=404
             )
+        # R3-E2: Request Review claims a durable owner action and detaches
+        # the Review child immediately.  Nothing long-running executes in
+        # this request: closing the browser can never stop the child, and
+        # a duplicate click collapses onto the same active action.
+        from saberops.candidate_lifecycle import project_candidate_state
+
         try:
-            result = runtime.service.review_run(run_id)
+            candidate_sha = project_candidate_state(runtime.db, run.id).candidate_sha
+        except Exception:
+            candidate_sha = None
+        if not candidate_sha:
+            return templates.TemplateResponse(
+                request,
+                "run_detail.html",
+                _run_detail_context(
+                    runtime.db, run, error="Review is unavailable: no reviewable candidate."
+                ),
+                status_code=400,
+            )
+        try:
+            launch = OwnerActionSupervisor(runtime.db).request_review(
+                run_id=run.id,
+                candidate_sha=candidate_sha,
+                target_repo=run.target_repo,
+            )
         except Exception as exc:
             return templates.TemplateResponse(
                 request,
                 "run_detail.html",
-                _run_detail_context(runtime.db, run, error=f"Review failed: {exc}"),
+                _run_detail_context(runtime.db, run, error=f"Review launch failed: {exc}"),
+                status_code=400,
+            )
+        if launch.duplicate:
+            return RedirectResponse(
+                url=f"/runs/{run_id}?action_active=review",
+                status_code=303,
+            )
+        if not launch.launched:
+            reason = launch.action.reason or LAUNCH_FAILED_REASON
+            return templates.TemplateResponse(
+                request,
+                "run_detail.html",
+                _run_detail_context(
+                    runtime.db, run, error=f"Review launch failed: {reason}"
+                ),
                 status_code=400,
             )
         return RedirectResponse(
-            url=f"/runs/{run_id}?reviewed={_reviewed_query_value(result.verdict)}",
+            url=f"/runs/{run_id}?review_queued=1",
             status_code=303,
         )
 
@@ -2764,21 +3660,25 @@ def create_app(
                 request, "run_detail.html", _missing_run_context(run_id), status_code=404
             )
         db = runtime.db
-        service = runtime.service
-        latest_review = db.get_latest_review(run.id)
-        can_accept = (
-            run.status == RunStatus.COMPLETED
-            and latest_review is not None
-            and latest_review.verdict == ReviewVerdict.PASS
-        )
-        if not can_accept:
+        # Gate on the same engine-derived eligibility the page renders.
+        # The POST never recreates acceptance policy; the engine remains
+        # the authority when accept_run executes.
+        eligibility = AcceptEngine(db=db).check_accept_eligibility(run.id)
+        if not eligibility.eligible:
+            blocker = next(
+                (check for check in eligibility.checks if not check.passed()),
+                None,
+            )
+            detail = (
+                f" {blocker.label}: {blocker.reason}" if blocker is not None else ""
+            )
             return templates.TemplateResponse(
                 request,
                 "run_detail.html",
                 _run_detail_context(
                     db,
                     run,
-                    error="Accept is only available for completed runs with a PASS review.",
+                    error=f"Accept is blocked by the acceptance checklist.{detail}",
                 ),
                 status_code=400,
             )
@@ -2801,29 +3701,131 @@ def create_app(
                 ),
                 status_code=400,
             )
+        # R3-E2: confirmed Accept claims a durable owner action and detaches
+        # the Accept child immediately.  The checklist above stays advisory:
+        # the detached child (AcceptEngine) re-checks every canonical
+        # condition immediately before mutation.  The redirect returns at
+        # once; browser close can never stop the child, and duplicate
+        # confirms collapse onto the same active action.
+        from saberops.candidate_lifecycle import project_candidate_state as _accept_candidate_state
+
         try:
-            result = service.accept_run(run_id)
+            accept_candidate = _accept_candidate_state(db, run.id).candidate_sha
+        except Exception:
+            accept_candidate = None
+        if not accept_candidate:
+            return templates.TemplateResponse(
+                request,
+                "run_detail.html",
+                _run_detail_context(
+                    db, run, error="Accept is unavailable: no trustworthy candidate."
+                ),
+                status_code=400,
+            )
+        try:
+            accept_launch = OwnerActionSupervisor(db).request_accept(
+                run_id=run.id,
+                candidate_sha=accept_candidate,
+                target_repo=run.target_repo,
+            )
         except Exception as exc:
             return templates.TemplateResponse(
                 request,
                 "run_detail.html",
-                _run_detail_context(db, run, error=f"Accept failed: {exc}"),
+                _run_detail_context(db, run, error=f"Accept launch failed: {exc}"),
                 status_code=400,
             )
-        return templates.TemplateResponse(
-            request,
-            "run_detail.html",
-            _run_detail_context(
-                db,
-                run,
-                accept_result={
-                    "final_branch": result.final_branch,
-                    "final_sha": result.final_sha,
-                    "summary": result.summary,
-                },
-            ),
-            status_code=200,
+        if accept_launch.duplicate:
+            return RedirectResponse(
+                url=f"/runs/{run_id}?action_active=accept",
+                status_code=303,
+            )
+        if not accept_launch.launched:
+            reason = accept_launch.action.reason or LAUNCH_FAILED_REASON
+            return templates.TemplateResponse(
+                request,
+                "run_detail.html",
+                _run_detail_context(db, run, error=f"Accept launch failed: {reason}"),
+                status_code=400,
+            )
+        return RedirectResponse(
+            url=f"/runs/{run_id}?accept_queued=1",
+            status_code=303,
         )
+
+    @app.post("/runs/{run_id}/reject", name="request_reject")
+    def request_reject(
+        request: Request,
+        run_id: str,
+        confirm: Annotated[str, Form()] = "",
+    ) -> Response:
+        """Two-step owner Reject: confirmation render, then durable decision.
+
+        Reject records a durable owner decision for the exact current
+        candidate; it never mutates the target repository, deletes the
+        candidate, or cleans worktrees.  The POST delegates to the
+        service seam -- the Web never writes ``candidate_rejected``
+        events directly -- and gates the confirmation step on the same
+        ``can_reject`` projection the page renders.
+        """
+        runtime = runtime_for_run(run_id)
+        run = runtime.db.get_run(run_id) if runtime is not None else None
+        if runtime is None or run is None:
+            return templates.TemplateResponse(
+                request, "run_detail.html", _missing_run_context(run_id), status_code=404
+            )
+        db = runtime.db
+        service = runtime.service
+        if confirm != "1":
+            if not service.can_reject_candidate(run.id):
+                return templates.TemplateResponse(
+                    request,
+                    "run_detail.html",
+                    _run_detail_context(
+                        db, run, error="Reject is not available for this candidate."
+                    ),
+                    status_code=400,
+                )
+            return templates.TemplateResponse(
+                request,
+                "run_detail.html",
+                _run_detail_context(db, run, confirming_reject=True),
+                status_code=200,
+            )
+        try:
+            service.reject_candidate(run_id)
+        except Exception as exc:
+            return templates.TemplateResponse(
+                request,
+                "run_detail.html",
+                _run_detail_context(db, run, error=f"Reject failed: {exc}"),
+                status_code=400,
+            )
+        return RedirectResponse(url=f"/runs/{run_id}?rejected=1", status_code=303)
+
+    @app.get("/inbox", response_class=HTMLResponse, name="inbox")
+    def inbox_page(request: Request) -> HTMLResponse:
+        """Render the cross-project owner Inbox (read-only projection)."""
+        from saberops.inbox import InboxSnapshot, build_inbox
+
+        try:
+            snapshot = build_inbox(runtimes)
+        except Exception:
+            snapshot = InboxSnapshot(items=())
+        return templates.TemplateResponse(
+            request, "inbox.html", _inbox_context(snapshot)
+        )
+
+    @app.get("/inbox.json", name="inbox_json")
+    def inbox_json() -> JSONResponse:
+        """Return the same Inbox projection as JSON (read-only)."""
+        from saberops.inbox import InboxSnapshot, build_inbox
+
+        try:
+            snapshot = build_inbox(runtimes)
+        except Exception:
+            snapshot = InboxSnapshot(items=())
+        return JSONResponse(snapshot.as_dict())
 
     @app.get("/quota", response_class=HTMLResponse, name="quota")
     def quota(request: Request) -> HTMLResponse:
@@ -2927,13 +3929,21 @@ def create_app(
         request: Request,
         connection_id: Annotated[str, Form()] = "",
     ) -> Response:
-        """Probe one connection and render the classified result.
+        """Verify one connection and render the classified result.
 
-        Account backends are probed through their supported boundary
-        (executable presence; auth state stays UNKNOWN -- live session
-        material is never inspected).  API connections get a safe
-        unauthenticated reachability probe; the stored credential value
-        is never read or transmitted.
+        Account-backed connections perform the canonical readiness
+        refresh through :class:`ReadinessService` over the exact
+        already-loaded :class:`ProviderConnection`, persisted through
+        the canonical :class:`ReadinessStore`: the rendered
+        state/reason/observation timestamp is the persisted truth that
+        subsequent automatic routing consumes.  Only the declared
+        non-inference status command runs; no model call occurs and
+        ``UNKNOWN`` stays ``UNKNOWN`` (a present CLI is availability,
+        never proven readiness).  API connections keep the safe
+        unauthenticated reachability probe -- there is no
+        truth-preserving readiness authority for them, so they are
+        never classified as ``BACKEND_NOT_INSTALLED``: the stored
+        credential value is never read or transmitted.
         """
         wanted = connection_id.strip()
         if not wanted:
@@ -2961,27 +3971,45 @@ def create_app(
                 status_code=404,
             )
         if connection.is_account_backed:
-            _, result = probe_account_backend(
-                connection,
-                is_installed=lambda: (
-                    shutil.which(
-                        next(
-                            (
-                                descriptor.executable
-                                for descriptor in ACCOUNT_BACKENDS
-                                if descriptor.connection_id == connection.connection_id
-                            ),
-                            connection.backend,
-                        )
-                    )
-                    is not None
-                ),
-            )
+            # One authoritative verification path: the canonical
+            # readiness refresh (non-inference status command only)
+            # over the exact registry-loaded connection, composed with
+            # the existing store seam so XDG/test overrides and
+            # connection identity cannot diverge.  The executable
+            # lookup and status runner are resolved at call time so
+            # the same production functions are used without
+            # early-bound defaults.
+            try:
+                service = ReadinessService(
+                    registry,
+                    _readiness_store(),
+                    which=shutil.which,
+                    run=subprocess.run,
+                )
+                evidence = service.refresh(connection)
+            except ReadinessStoreError as exc:
+                return templates.TemplateResponse(
+                    request,
+                    "access.html",
+                    _access_context(error=f"Readiness store unwritable: {exc}"),
+                    status_code=500,
+                )
             probe = {
                 "connection_id": connection.connection_id,
-                "ok": "TRUE" if result.ok else "FALSE",
-                "reason": result.reason.value,
-                "detail": result.detail or "live authentication NOT VERIFIED",
+                "ok": (
+                    "TRUE"
+                    if evidence.state is ProviderReadiness.READY
+                    else "FALSE"
+                ),
+                "reason": evidence.reason,
+                "detail": (
+                    "verified readiness persisted; "
+                    f"state={evidence.state.value} "
+                    f"observed_at={evidence.observed_at}"
+                ),
+                "readiness_state": evidence.state.value,
+                "readiness_reason": evidence.reason,
+                "observed_at": evidence.observed_at,
             }
         else:
             outcome = _probe_api_connection(
@@ -3225,12 +4253,12 @@ def create_app(
         canonical routing writer.  It never auto-enrolls a model: the model
         must be discovery-verified, fresh, and have an **exact C11-B
         binding** that resolves through the real adapter.  A registered
-        adapter alone is never sufficient.  A newly discovered model outside
-        the static registry is admitted through the canonical dynamic
-        candidate contract, recording both its non-secret discovery evidence
-        and the exact ``binding_id`` in the *same* routing document.  C07
-        still decides context eligibility (unknown training requirement
-        fails closed in training-denied contexts).
+        adapter alone is never sufficient.  The exact ``binding_id`` is
+        recorded through the canonical dynamic candidate contract in the
+        *same* routing document -- for static-registry models too, with
+        the authoritative static training semantics preserved exactly.
+        C07 still decides context eligibility (unknown training
+        requirement fails closed in training-denied contexts).
         """
         owner = _load_owner_bindings_safely()
         try:
@@ -3377,8 +4405,34 @@ def create_app(
         try:
             payload = load_effective_routing_payload()
             if candidate_id in ALLOWED_CANDIDATES:
-                updated = add_candidate_to_chain(
-                    payload, top=top, sub=sub, candidate_id=candidate_id
+                # A static candidate still needs its exact owner-selected
+                # WORKER binding to survive restart/freeze: record the
+                # binding-bearing approval in the same routing document.
+                # The static training semantics are authoritative, so the
+                # approval preserves them exactly (TRUE/FALSE from the
+                # closed static registry -- never UNKNOWN, which would
+                # fail closed and change training-denied behavior).
+                static_training_required = (
+                    "TRUE"
+                    if requires_training_permission(candidate_id)
+                    else "FALSE"
+                )
+                static_approval = DynamicCandidate(
+                    candidate_id=candidate_id,
+                    provider=entry.provider,
+                    model=entry.model_id,
+                    connection_id=connection.connection_id,
+                    backend=connection.backend,
+                    binding_id=exact_binding.binding_id,
+                    discovery_status=entry.discovery_status.value,
+                    execution_support=entry.execution_support.value,
+                    training_required=static_training_required,
+                    capabilities=tuple(
+                        (name, state.value) for name, state in entry.capabilities
+                    ),
+                )
+                updated = add_dynamic_candidate_to_chain(
+                    payload, top=top, sub=sub, candidate=static_approval
                 )
             else:
                 approval = DynamicCandidate(
@@ -3605,63 +4659,119 @@ def create_app(
             )
         return RedirectResponse(url="/orchestrator?selected=1", status_code=303)
 
-    @app.get("/manager", response_class=HTMLResponse, name="manager")
-    def manager_view(request: Request) -> HTMLResponse:
-        active_repo = project_registry.active()
+    @app.get("/reviewer", response_class=HTMLResponse, name="reviewer_selection")
+    def reviewer_selection(request: Request) -> HTMLResponse:
+        """Show the canonical eligible REVIEWER bindings and the selection."""
         return templates.TemplateResponse(
             request,
-            "manager.html",
-            {
-                "active_project": str(active_repo) if active_repo else "None",
-                "recent_projects": project_registry.list_projects(),
-            },
+            "reviewer.html",
+            _reviewer_context(
+                notice=_notice_from_query(request),
+                registry=resolved_registry,
+            ),
         )
+
+    @app.post("/reviewer/select", name="select_reviewer_model")
+    def reviewer_select(
+        request: Request,
+        binding_id: Annotated[str, Form()] = "",
+    ) -> Response:
+        """Persist the owner's exact Reviewer binding choice.
+
+        Only a ``REVIEWER``-role binding that exists in the canonical
+        registry and resolves through the real C11-B resolver with the
+        real adapter may be selected.  A ``WORKER``/``ORCHESTRATOR``
+        binding, an unknown id, or an unresolvable binding is refused;
+        nothing is persisted on refusal.
+        """
+        owner = _load_owner_bindings_safely()
+        wanted = binding_id.strip()
+        binding = owner.registry.try_get(wanted)
+        if binding is None:
+            return templates.TemplateResponse(
+                request,
+                "reviewer.html",
+                _reviewer_context(
+                    error=(
+                        "No such canonical binding: "
+                        f"{wanted or '(empty)'}"
+                    ),
+                    registry=resolved_registry,
+                ),
+                status_code=400,
+            )
+        # C11-B BindingRole: only REVIEWER-role bindings may be selected
+        # for the reviewer slot.  A WORKER/ORCHESTRATOR-role binding is
+        # not qualified for review -- selecting it would be a role
+        # violation even when provider/model text matches.
+        if binding.binding_role is not BindingRole.REVIEWER:
+            return templates.TemplateResponse(
+                request,
+                "reviewer.html",
+                _reviewer_context(
+                    error=(
+                        "Binding is not qualified for the Reviewer slot: "
+                        f"role is {binding.binding_role.value!r}"
+                    ),
+                    registry=resolved_registry,
+                ),
+                status_code=400,
+            )
+        adapter = resolved_registry.get(binding.provider)
+        try:
+            if adapter is None:
+                raise BindingResolutionError("NO_ADAPTER")
+            resolve_execution_binding(
+                registry=owner.registry,
+                binding_id=binding.binding_id,
+                adapter=adapter,
+            )
+        except BindingResolutionError:
+            return templates.TemplateResponse(
+                request,
+                "reviewer.html",
+                _reviewer_context(
+                    error=(
+                        "Reviewer selection refused: exact binding does not "
+                        "resolve for this adapter"
+                    ),
+                    registry=resolved_registry,
+                ),
+                status_code=400,
+            )
+        new_owner = replace(owner, reviewer_binding_id=wanted)
+        try:
+            save_owner_bindings(new_owner)
+        except BindingStoreError as exc:
+            return templates.TemplateResponse(
+                request,
+                "reviewer.html",
+                _reviewer_context(
+                    error=f"Reviewer selection not saved: {exc}",
+                    registry=resolved_registry,
+                ),
+                status_code=500,
+            )
+        return RedirectResponse(url="/reviewer?selected=1", status_code=303)
 
     @app.get("/health")
     def health() -> JSONResponse:
         """Expose non-secret runtime identity for stale-install diagnostics."""
         source_root = _PACKAGE_DIR.parents[1]
-        sha: str | None = None
-        try:
-            from saberops.process import run_process
-
-            result = run_process(["git", "rev-parse", "HEAD"], cwd=source_root, timeout=5)
-            sha = result.stdout.strip() if result.passed else None
-        except Exception:
-            sha = None
+        sha, tree_state = _resolve_source_identity(_PACKAGE_DIR)
         return JSONResponse(
             {
+                "product": "SaberOps",
+                "version": saberops_version(),
                 "package_path": str(_PACKAGE_DIR),
                 "source_path": str(source_root),
                 "source_git_sha": sha,
+                "source_tree_state": tree_state,
                 "database_path": str(active_runtime().db.db_path),
                 "server_pid": os.getpid(),
                 "orch_executable": resolve_orch_executable(),
             }
         )
-
-    @app.post("/manager/message")
-    async def manager_message(request: Request) -> JSONResponse:
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
-        text = str(body.get("text", "")).strip()
-        if not text:
-            return JSONResponse(
-                {"reply": "Please provide a non-empty message.", "tool_calls": []},
-                status_code=400,
-            )
-        try:
-            reply = manager_service.handle_message(text)
-            return JSONResponse(
-                {"reply": reply.reply_text, "tool_calls": reply.tool_calls_executed}
-            )
-        except Exception as exc:
-            return JSONResponse(
-                {"reply": f"Manager encountered an error: {exc}", "tool_calls": []},
-                status_code=500,
-            )
 
     @app.on_event("shutdown")
     def _shutdown_pty() -> None:

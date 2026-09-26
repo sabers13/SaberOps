@@ -19,8 +19,7 @@ from saberops.control_plane.policy import (
 )
 from saberops.control_plane.quota_policy import QuotaDecision, quota_decision
 from saberops.models import ProviderReadiness, QuotaState, WorkerCandidate
-from saberops.routing import is_muse_model
-from saberops.routing_config import requires_training_permission
+from saberops.training_policy import is_training_permitted
 
 PROVIDER_DISABLED = "PROVIDER_DISABLED"
 PROVIDER_ALLOWED_WITH_WARNING = "PROVIDER_ALLOWED_WITH_WARNING"
@@ -125,6 +124,8 @@ def evaluate_control_plane(
     adapter: _Adapter | None = None,
     quota_states: Iterable[QuotaState] = (),
     training_allowed: bool = True,
+    training_required: str | None = None,
+    routing_snapshot: Any | None = None,
     reserve_override: bool = False,
     prompt_bytes: int | None = None,
     control_plane_digest: str | None = None,
@@ -142,6 +143,15 @@ def evaluate_control_plane(
     the seam through which a binding's ``quota_pool_id`` actually
     gates C07 evaluation.  When ``None``, the legacy behaviour applies
     (every supplied state is considered).
+
+    ``training_required`` carries an already-resolved frozen requirement
+    (``TRUE``/``FALSE``/``UNKNOWN``) and ``routing_snapshot`` the Run's
+    frozen routing snapshot for owner-approved evidence lookup; both feed
+    the single canonical R2-B data-policy decision in
+    :mod:`saberops.training_policy` (never mutable live state).  When
+    neither is supplied the candidate's own frozen classification, then
+    the static v1 knowledge, decides; unknown ids fail closed under
+    Denied.
 
     When ``requires_governed_instructions`` is true, the dispatch must
     faithfully deliver the canonical project instruction contract (e.g.
@@ -173,10 +183,16 @@ def evaluate_control_plane(
         if max_bytes is not None and prompt_bytes > max_bytes:
             required.add(Capability.LARGE_PROMPT_STDIN.value)
     missing = tuple(sorted(required - {cap.value for cap in profile.capabilities}))
-    training_permitted = training_allowed or not (
-        is_muse_model(candidate.model)
-        or requires_training_permission(f"{candidate.provider}/{candidate.model}")
-        or requires_training_permission(candidate.model)
+    # Canonical R2-B data-policy decision shared with worker routing and
+    # reviewer dispatch: Allowed excludes nothing; Denied permits only
+    # FALSE while TRUE and UNKNOWN (fail closed) map to
+    # TRAINING_PERMISSION_DENIED below -- never a provider/worker failure
+    # or capability-escalation evidence.
+    training_permitted = is_training_permitted(
+        candidate,
+        training_allowed,
+        snapshot=routing_snapshot,
+        training_required=training_required,
     )
     warnings: tuple[str, ...] = ()
     warning_reasons: tuple[str, ...] = ()

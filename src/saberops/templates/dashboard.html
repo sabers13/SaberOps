@@ -14,52 +14,80 @@
 <p class="so-error">{{ error }}</p>
 {% endif %}
 
-<article class="message" data-od-id="message-user-task">
-  <div class="avatar">Y</div>
-  <div>
-    <div class="message-head"><strong>You</strong></div>
-    <div class="message-body"><div class="user-prompt">Active repository: {{ repo_path or "none selected" }}.</div></div>
-  </div>
-</article>
-
-<article class="message">
-  <div class="avatar assistant" aria-hidden="true"><svg class="saber-symbol assistant-logo" viewBox="0 0 32 20"><path class="saber-bracket" d="m9 3-6.5 7L9 17"/><path class="saber-bracket" d="m23 3 6.5 7-6.5 7"/><path class="saber-razor-s" d="M20.7 2.4h-5.2c-2.4 0-4.1 1.1-4.6 3-.4 1.8.5 3.2 2.9 4.1l2.4.9c1 .4 1.4.8 1.2 1.4-.2.7-.9 1.1-2 1.1h-4.2l-1.6 4.5h5.6c3.2 0 5.2-1.5 5.8-4.1.5-2.2-.7-3.9-3.5-5l-2-.7c-.7-.3-1-.6-.9-1 .1-.4.6-.6 1.4-.6h3.6Z"/><path class="saber-razor-edge" d="m12.1 14.9 4.1-.1m-.9-9.9 4.1-.1"/></svg></div>
-  <div>
-    <div class="message-head"><strong>SaberOps</strong></div>
-    <div class="message-body">
-      <p>
-        {% if repo_ready %}
-        Repository is ready. Describe a task below and choose Run to dispatch it.
-        {% else %}
-        No ready repository{{ " (" ~ repo_note ~ ")" if repo_note else "" }}. Select a project from the Projects pane or Settings → Repositories first.
-        {% endif %}
-      </p>
-      {% if repo_ready and project_gate_scratch %}
-      <div class="settings-section" id="execution">
-        <div class="settings-section-head"><h4>Project settings</h4><p>Gate scratch policy affects future runs only.</p></div>
-        <div class="settings-card"><div class="settings-control-row" style="display: block;">
-          <form method="post" action="/projects/settings/gate-scratch" class="so-form">
-            <div class="advanced-field">
-              <label for="gate_scratch_mode">Gate temporary storage / Gate performance ({{ project_gate_scratch.current_label }})</label>
-              <select id="gate_scratch_mode" name="mode">
-                {% for opt in project_gate_scratch.options %}
-                <option value="{{ opt.value }}"{% if opt.value == project_gate_scratch.current_mode %} selected{% endif %}>{{ opt.label }}</option>
-                {% endfor %}
-              </select>
-            </div>
-            <div><button type="submit" class="text-button">Save project setting</button></div>
-          </form>
-        </div></div>
-      </div>
+<section class="settings-section" aria-label="Workspace status">
+  <div class="settings-section-head"><h4>Workspace status</h4><p>Active repository: {{ repo_path or "none selected" }}</p></div>
+  <div class="settings-card"><div class="settings-control-row" style="display: block;">
+    <p>
+      {% if repo_ready %}
+      Repository is ready. Describe a task below and choose Run to dispatch it.
+      {% else %}
+      No ready repository{{ " (" ~ repo_note ~ ")" if repo_note else "" }}. Use First-run setup to configure providers, worker routing, Orchestrator model, project, and policy entirely in the UI.
       {% endif %}
-      <div class="quick-actions" data-od-id="quick-actions">
-        <button type="button" data-fill-composer="Show provider and quota status">Show provider status</button>
-        <button type="button" data-fill-composer="List the configured worker routing chains">List routing chains</button>
-        <button type="button" data-fill-composer="Summarize recent runs">Summarize recent runs</button>
+    </p>
+    <p><a class="text-button{% if not repo_ready %} primary-button{% endif %}" href="/setup">Open First-run setup</a></p>
+  </div></div>
+</section>
+
+{% if repo_ready and project_settings %}
+<section class="settings-section" id="execution">
+  <div class="settings-section-head"><h4>Project settings</h4><p>Owner policy for future runs. Already-created runs keep their frozen values.</p></div>
+  <div class="settings-card"><div class="settings-control-row" style="display: block;">
+    <form method="post" action="/projects/settings/gate" class="so-form">
+      <div class="advanced-field">
+        <label for="project_gate">Gate command{% if project_settings.gate_effective %} (effective: {{ project_settings.gate_effective }}){% else %} (not configured){% endif %}</label>
+        <input type="text" id="project_gate" name="command" value="{{ project_settings.gate_command or '' }}" placeholder="e.g. make gate (empty clears)">
       </div>
-    </div>
-  </div>
-</article>
+      <div><button type="submit" class="text-button">Save gate</button></div>
+    </form>
+    <form method="post" action="/projects/settings/data-policy" class="so-form">
+      <div class="advanced-field">
+        <label for="project_data_policy">Training / data use ({{ project_settings.data_policy_label }})</label>
+        <select id="project_data_policy" name="policy">
+          <option value="allowed"{% if project_settings.data_policy == "ALLOWED" %} selected{% endif %}>Allowed</option>
+          <option value="denied"{% if project_settings.data_policy == "DENIED" %} selected{% endif %}>Denied</option>
+        </select>
+      </div>
+      <div><button type="submit" class="text-button">Save data policy</button></div>
+    </form>
+    <form method="post" action="/projects/settings/review-policy" class="so-form">
+      <div class="advanced-field">
+        <label for="project_review_policy">Review policy</label>
+        <select id="project_review_policy" name="policy">
+          <option value="risk-adaptive"{% if project_settings.review_policy_mode == "RISK_ADAPTIVE" %} selected{% endif %}>Risk-adaptive</option>
+          <option value="always-required"{% if project_settings.review_policy_mode == "ALWAYS_REQUIRED" %} selected{% endif %}>Always required</option>
+        </select>
+      </div>
+      <div><button type="submit" class="text-button">Save review policy</button></div>
+    </form>
+    <form method="post" action="/projects/settings/target-branch" class="so-form">
+      <div class="advanced-field">
+        <label for="project_target_branch">Accept target branch{% if project_settings.accept_target_branch_effective %} (effective: {{ project_settings.accept_target_branch_effective }}){% endif %}</label>
+        <input type="text" id="project_target_branch" name="branch" value="{{ project_settings.accept_target_branch or '' }}" placeholder="empty clears (uses current branch)">
+      </div>
+      <div><button type="submit" class="text-button">Save target branch</button></div>
+    </form>
+  </div></div>
+</section>
+{% endif %}
+
+{% if repo_ready and project_gate_scratch %}
+<section class="settings-section" id="gate-storage">
+  <div class="settings-section-head"><h4>Gate storage</h4><p>Gate scratch policy affects future runs only.</p></div>
+  <div class="settings-card"><div class="settings-control-row" style="display: block;">
+    <form method="post" action="/projects/settings/gate-scratch" class="so-form">
+      <div class="advanced-field">
+        <label for="gate_scratch_mode">Gate temporary storage / Gate performance ({{ project_gate_scratch.current_label }})</label>
+        <select id="gate_scratch_mode" name="mode">
+          {% for opt in project_gate_scratch.options %}
+          <option value="{{ opt.value }}"{% if opt.value == project_gate_scratch.current_mode %} selected{% endif %}>{{ opt.label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div><button type="submit" class="text-button">Save project setting</button></div>
+    </form>
+  </div></div>
+</section>
+{% endif %}
 
 <div class="inspector-shell">
   <div class="inspector-section">
@@ -76,76 +104,7 @@
         {% endfor %}
       </tbody>
     </table></div>
-    <p class="muted">Antigravity permission posture: <span class="badge badge-{{ agy_permission_class }}">{{ agy_permission_posture }}</span></p>
-    <p><a class="text-button" href="/access">Providers / Models</a> <a class="text-button" href="/routing">Routing</a> <a class="text-button" href="/orchestrator">Orchestrator Model</a> <a class="text-button" href="/manager">Ox Manager</a></p>
-  </div>
-
-  <div class="inspector-section">
-    <div class="inspector-head"><strong>Execution tiers</strong><span class="muted">worker routing order</span></div>
-    <div class="so-table-wrap"><table class="so-table">
-      <thead><tr><th>Tier</th><th>Group</th><th>Candidates (ordered)</th></tr></thead>
-      <tbody>
-        {% for tier in tiers %}
-        {% for group in tier.groups %}
-        <tr>
-          <td class="mono">{{ tier.name }}</td>
-          <td>{{ group.label }}</td>
-          <td>
-            <ol class="mono" style="margin: 0; padding-left: 18px;">
-              {% for candidate in group.candidates %}
-              <li>{{ candidate.model }} <span class="muted">[{{ candidate.provider }}]{% if not candidate.available %} · unavailable{% endif %}</span></li>
-              {% endfor %}
-            </ol>
-          </td>
-        </tr>
-        {% endfor %}
-        {% endfor %}
-      </tbody>
-    </table></div>
-  </div>
-
-  <div class="inspector-section">
-    <div class="inspector-head"><strong>Quota</strong><span class="muted">owner-supplied state</span></div>
-    {% if quota_states %}
-    <div class="so-table-wrap"><table class="so-table">
-      <thead><tr><th>Provider</th><th>Pool</th><th>Remaining</th><th>Routing state</th><th>Reset</th></tr></thead>
-      <tbody>
-        {% for q in quota_states %}
-        <tr>
-          <td>{{ q.provider }}</td>
-          <td>{{ q.pool }}</td>
-          <td class="mono">{{ "%g"|format(q.remaining_percent) }}%</td>
-          <td><span class="badge badge-{{ q.status_class }}">{{ q.routing_state }}</span></td>
-          <td class="mono">{{ fmt(q.reset_at) }}</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table></div>
-    {% else %}
-    <div class="so-empty"><strong>No quota rows configured</strong>Providers without quota state are treated as NORMAL. Add quota from the <a href="/quota">Quota</a> page.</div>
-    {% endif %}
-  </div>
-
-  <div class="inspector-section">
-    <div class="inspector-head"><strong>Recent runs</strong><span class="muted">latest first</span></div>
-    {% if runs %}
-    <div class="so-table-wrap"><table class="so-table">
-      <thead><tr><th>Run</th><th>Tier</th><th>Status</th><th>Created</th><th>Task</th></tr></thead>
-      <tbody>
-        {% for run in runs %}
-        <tr>
-          <td><a class="mono" href="/runs/{{ run.id }}">{{ run.id }}</a></td>
-          <td>{{ run.tier }}</td>
-          <td><span class="badge badge-{{ run.status_class }}">{{ run.status }}</span></td>
-          <td class="mono">{{ fmt(run.created_at) }}</td>
-          <td>{{ run.summary }}</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table></div>
-    {% else %}
-    <div class="so-empty"><strong>No runs recorded yet</strong>Describe a task in the composer below, or run <span class="mono">orch run</span>.</div>
-    {% endif %}
+    <p><a class="text-button" href="/inbox">Inbox</a> <a class="text-button" href="/access">Providers / Models</a> <a class="text-button" href="/routing">Routing</a> <a class="text-button" href="/orchestrator">Orchestrator role</a></p>
   </div>
 </div>
 {% endblock %}
@@ -199,8 +158,8 @@
       <div class="advanced-field" id="review-limit-field"><label for="review_limit">Review limit</label>
         <input type="number" id="review_limit" name="review_limit" value="{{ form.review_limit }}" min="1">
       </div>
-      <div class="advanced-field"><label for="gate_command">Gate</label>
-        <input type="text" id="gate_command" name="gate_command" value="{{ form.gate_command }}">
+      <div class="advanced-field"><label for="gate_command">Gate (empty uses the project gate)</label>
+        <input type="text" id="gate_command" name="gate_command" value="{{ form.gate_command }}" placeholder="e.g. make gate">
       </div>
       <div class="advanced-field"><label for="worker_timeout">Worker timeout (s)</label>
         <input type="number" id="worker_timeout" name="worker_timeout" value="{{ form.worker_timeout }}" placeholder="Auto: T1 600, T2 1200, T3 1800">
@@ -215,7 +174,7 @@
         <input type="text" id="provider_override" name="provider_override" value="{{ form.provider_override }}" placeholder="e.g. opencode, codex">
       </div>
       <div class="advanced-field"><label for="model_override">Model override</label>
-        <input type="text" id="model_override" name="model_override" value="{{ form.model_override }}" placeholder="e.g. opencode-go/ox-alpha-free">
+        <input type="text" id="model_override" name="model_override" value="{{ form.model_override }}" placeholder="e.g. provider/model-id">
       </div>
     </div>
   </form>

@@ -1,41 +1,12 @@
 "use strict";
 
+// Run-page live controller. Loaded ONLY on the run-detail page.
+// Ownership: this file owns the single run-event EventSource per page
+// plus the elapsed timer and accept/action refresh. Shell chrome, theme,
+// and composer enhancement live in console.js; the PTY terminal lives in
+// terminal.js.
+
 (function () {
-  var THEME_KEY = "orch-theme";
-  var MANAGER_TRANSCRIPT_KEY = "orch-manager-transcript";
-
-  // --- Theme Management ---
-  function applyTheme(theme) {
-    document.documentElement.setAttribute("data-theme", theme);
-  }
-
-  function storedTheme() {
-    var stored = null;
-    try {
-      stored = window.localStorage.getItem(THEME_KEY);
-    } catch (_err) {
-      stored = null;
-    }
-    return stored === "light" || stored === "dark" ? stored : null;
-  }
-
-  function systemTheme() {
-    if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) {
-      return "dark";
-    }
-    return "light";
-  }
-
-  function toggleTheme() {
-    var next = (storedTheme() || systemTheme()) === "dark" ? "light" : "dark";
-    try {
-      window.localStorage.setItem(THEME_KEY, next);
-    } catch (_err) {
-      /* ignore */
-    }
-    applyTheme(next);
-  }
-
   // --- Elapsed Timer ---
   function initElapsedTimer() {
     var header = document.getElementById("run-header");
@@ -111,13 +82,15 @@
           var meta = pane.querySelector(".compact-plan-meta");
           if (meta) {
             meta.innerHTML = "<dt>Worker</dt><dd></dd><dt>Health</dt><dd></dd>" +
-              "<dt>Supervisor</dt><dd></dd><dt>Manager</dt><dd></dd><dt>Review</dt><dd></dd>";
-            var values = [projection.current_provider || "UNKNOWN", projection.current_model || "UNKNOWN",
-              projection.health || "UNKNOWN", projection.supervisor_state || "UNKNOWN",
-              projection.manager_state || "UNKNOWN", projection.review_state || "UNKNOWN"];
+              "<dt>Supervisor</dt><dd></dd><dt>Review</dt><dd></dd>";
             var cells = meta.querySelectorAll("dd");
-            cells[0].textContent = values[0] + " / " + values[1];
-            for (var index = 1; index < cells.length; index += 1) cells[index].textContent = values[index + 1];
+            cells[0].textContent =
+              (projection.current_provider || "UNKNOWN") +
+              " / " +
+              (projection.current_model || "UNKNOWN");
+            if (cells[1]) cells[1].textContent = projection.health || "UNKNOWN";
+            if (cells[2]) cells[2].textContent = projection.supervisor_state || "UNKNOWN";
+            if (cells[3]) cells[3].textContent = projection.review_state || "UNKNOWN";
           }
           var list = pane.querySelector(".plan-step-list");
           if (list) {
@@ -171,7 +144,16 @@
       eventsLog.scrollTop = eventsLog.scrollHeight;
       refreshPlanProjection();
 
-      // React to status changes
+      // React to status changes: patch badges immediately, then refresh
+      // every action control from authoritative server state so Accept /
+      // Review / Cancel / Cleanup never stay stale from page load.
+      // Owner-action events (queued/started/completed/failed/uncertain)
+      // arrive on an already-terminal run and must also trigger an
+      // authoritative /actions refresh so Review/Accept buttons and
+      // status update from durable server state without a reload.
+      if (evData.event_type === "owner_action_queued" || evData.event_type === "owner_action_started" || evData.event_type === "owner_action_completed" || evData.event_type === "owner_action_failed" || evData.event_type === "owner_action_uncertain") {
+        refreshActionState();
+      }
       if (evData.event_type === "run_completed" || evData.event_type === "run_failed" || evData.event_type === "run_exception" || evData.event_type === "run_started") {
         var badge = document.getElementById("run-status-badge");
         var detailStatus = document.getElementById("detail-status");
@@ -190,6 +172,64 @@
         if (newStatus === "COMPLETED" || newStatus === "FAILED") {
           header.setAttribute("data-completed-at", evData.created_at || new Date().toISOString());
         }
+        refreshActionState();
+      }
+    }
+
+    // --- Authoritative action-state refresh (single SSE owner) ---
+    function refreshActionState() {
+      if (!window.fetch) return;
+      window.fetch("/runs/" + encodeURIComponent(runId) + "/actions", { credentials: "same-origin" })
+        .then(function (response) { return response.ok ? response.json() : null; })
+        .then(function (actions) {
+          if (!actions) return;
+          var host = document.getElementById("run-actions");
+          if (host && actions.status) {
+            host.setAttribute("data-run-status", actions.status);
+          }
+          var flags = {
+            retry: !!actions.can_retry,
+            cancel: !!actions.can_cancel,
+            review: !!actions.can_review,
+            cleanup: !!actions.can_cleanup,
+            accept: !!actions.can_accept
+          };
+          Object.keys(flags).forEach(function (name) {
+            var scope = document.querySelector('[data-action="' + name + '"]');
+            if (!scope) return;
+            var button = scope.tagName === "BUTTON" ? scope : scope.querySelector("button");
+            if (!button) return;
+            if (flags[name]) {
+              button.removeAttribute("disabled");
+            } else {
+              button.setAttribute("disabled", "disabled");
+            }
+          });
+          var checklist = document.getElementById("accept-checklist");
+          if (checklist && Array.isArray(actions.accept_checklist)) {
+            checklist.setAttribute("data-accept-eligible", actions.can_accept ? "true" : "false");
+            actions.accept_checklist.forEach(function (check) {
+              var row = checklist.querySelector('[data-check-key="' + check.key + '"]');
+              if (!row) return;
+              row.setAttribute("data-check-status", check.status);
+              var mark = row.querySelector(".mono");
+              if (mark) mark.textContent = check.status === "pass" ? "✓" : "✗";
+              var reason = row.querySelector(".muted");
+              if (reason && check.reason) reason.textContent = check.reason;
+            });
+          }
+          var emptyNote = document.getElementById("actions-empty-note");
+          if (emptyNote) {
+            var anyEnabled = Object.keys(flags).some(function (name) { return flags[name]; });
+            emptyNote.style.display = anyEnabled ? "none" : "";
+          }
+        })
+        .catch(function () { /* transient SSE/API reconnect failure */ });
+    }
+
+    function reportConnection(state, message) {
+      if (window.SaberOpsConsole && typeof window.SaberOpsConsole.setConnectionState === "function") {
+        window.SaberOpsConsole.setConnectionState(state, message);
       }
     }
 
@@ -202,12 +242,16 @@
       }
     };
 
-    // Also listen to named events
+    // Also listen to named events. Owner-action events are subscribed
+    // explicitly so post-run Review/Accept work on an already-terminal
+    // run reaches this same EventSource (no second polling loop).
     var eventTypes = [
       "run_created", "run_started", "attempt_started", "worker_completed",
       "gate_started", "gate_completed", "attempt_succeeded", "attempt_failed_no_changes",
       "gate_failed", "run_completed", "run_failed", "run_exception",
-      "review_started", "review_completed", "review_failed", "run_accepted"
+      "review_started", "review_completed", "review_failed", "run_accepted",
+      "owner_action_queued", "owner_action_started", "owner_action_completed",
+      "owner_action_failed", "owner_action_uncertain"
     ];
 
     eventTypes.forEach(function (type) {
@@ -221,275 +265,49 @@
       });
     });
 
+    eventSource.onopen = function () {
+      reportConnection("live");
+    };
+
     eventSource.onerror = function () {
       var currentStatus = header.getAttribute("data-run-status");
       if (currentStatus === "COMPLETED" || currentStatus === "FAILED") {
+        // R3-E2.1: a terminal run may still have an active post-run
+        // owner action (Review/Accept). Keep the stream usable in that
+        // case; close only once no owner action remains active. The
+        // single authoritative /actions read below is not a poll loop.
+        if (window.fetch) {
+          window.fetch("/runs/" + encodeURIComponent(runId) + "/actions", { credentials: "same-origin" })
+            .then(function (response) { return response.ok ? response.json() : null; })
+            .then(function (actions) {
+              var ownerActive = !!(actions && (actions.owner_review_active || actions.owner_accept_active));
+              if (!ownerActive) {
+                eventSource.close();
+                reportConnection("live");
+              } else {
+                reportConnection("live");
+              }
+            })
+            .catch(function () {
+              eventSource.close();
+              reportConnection("live");
+            });
+          return;
+        }
         eventSource.close();
+        reportConnection("live");
+        return;
       }
+      reportConnection("disconnected", "Connection lost — retrying the live event stream…");
     };
   }
 
-  // --- Ox Alpha Manager Chat ---
-  function initManagerChat() {
-    var form = document.getElementById("manager-form");
-    var input = document.getElementById("manager-input");
-    var container = document.getElementById("chat-container");
-    var statusEl = document.getElementById("manager-status");
-    var clearBtn = document.getElementById("clear-transcript-btn");
-    var sendBtn = document.getElementById("manager-send-btn");
-    if (!form || !input || !container) return;
-
-    function renderMessage(role, text, toolCalls) {
-      var msgDiv = document.createElement("div");
-      msgDiv.className = "chat-msg chat-msg-" + role;
-      msgDiv.style.display = "flex";
-      msgDiv.style.flexDirection = "column";
-      msgDiv.style.gap = "0.25rem";
-      msgDiv.style.padding = "0.5rem 0.75rem";
-      msgDiv.style.borderRadius = "6px";
-      msgDiv.style.maxWidth = "85%";
-
-      if (role === "user") {
-        msgDiv.style.alignSelf = "flex-end";
-        msgDiv.style.background = "var(--primary, #3b82f6)";
-        msgDiv.style.color = "#fff";
-      } else {
-        msgDiv.style.alignSelf = "flex-start";
-        msgDiv.style.background = "var(--bg-card, #1e293b)";
-        msgDiv.style.border = "1px solid var(--border-color, #334155)";
-      }
-
-      var roleSpan = document.createElement("span");
-      roleSpan.style.fontSize = "0.75rem";
-      roleSpan.style.fontWeight = "bold";
-      roleSpan.style.opacity = "0.7";
-      roleSpan.textContent = role === "user" ? "You" : "Ox Alpha Manager";
-      msgDiv.appendChild(roleSpan);
-
-      if (toolCalls && toolCalls.length > 0) {
-        var toolsDiv = document.createElement("div");
-        toolsDiv.style.display = "flex";
-        toolsDiv.style.gap = "0.25rem";
-        toolsDiv.style.flexWrap = "wrap";
-        toolCalls.forEach(function (tc) {
-          var pill = document.createElement("span");
-          pill.className = "badge badge-normal mono";
-          pill.style.fontSize = "0.75rem";
-          pill.textContent = "⚡ " + tc.tool;
-          toolsDiv.appendChild(pill);
-        });
-        msgDiv.appendChild(toolsDiv);
-      }
-
-      var textP = document.createElement("div");
-      textP.style.whiteSpace = "pre-wrap";
-      textP.textContent = text;
-      msgDiv.appendChild(textP);
-
-      container.appendChild(msgDiv);
-      container.scrollTop = container.scrollHeight;
-    }
-
-    function loadTranscript() {
-      try {
-        var saved = window.localStorage.getItem(MANAGER_TRANSCRIPT_KEY);
-        if (saved) {
-          var items = JSON.parse(saved);
-          if (Array.isArray(items)) {
-            items.forEach(function (item) {
-              renderMessage(item.role, item.text, item.tool_calls);
-            });
-          }
-        }
-      } catch (_err) {
-        /* ignore */
-      }
-    }
-
-    function saveTranscriptItem(role, text, toolCalls) {
-      try {
-        var saved = window.localStorage.getItem(MANAGER_TRANSCRIPT_KEY);
-        var items = saved ? JSON.parse(saved) : [];
-        if (!Array.isArray(items)) items = [];
-        items.push({ role: role, text: text, tool_calls: toolCalls || [] });
-        window.localStorage.setItem(MANAGER_TRANSCRIPT_KEY, JSON.stringify(items));
-      } catch (_err) {
-        /* ignore */
-      }
-    }
-
-    loadTranscript();
-
-    form.addEventListener("submit", function (e) {
-      e.preventDefault();
-      var text = input.value.trim();
-      if (!text) return;
-
-      input.value = "";
-      renderMessage("user", text);
-      saveTranscriptItem("user", text);
-
-      if (statusEl) statusEl.textContent = "Ox Alpha is thinking & verifying...";
-      if (sendBtn) sendBtn.disabled = true;
-
-      fetch("/manager/message", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: text })
-      })
-        .then(function (res) {
-          return res.json();
-        })
-        .then(function (data) {
-          if (statusEl) statusEl.textContent = "";
-          if (sendBtn) sendBtn.disabled = false;
-          var reply = data.reply || "No reply returned.";
-          var toolCalls = data.tool_calls || [];
-          renderMessage("assistant", reply, toolCalls);
-          saveTranscriptItem("assistant", reply, toolCalls);
-        })
-        .catch(function (err) {
-          if (statusEl) statusEl.textContent = "";
-          if (sendBtn) sendBtn.disabled = false;
-          var errMsg = "Error communicating with Ox Alpha manager: " + err;
-          renderMessage("assistant", errMsg);
-          saveTranscriptItem("assistant", errMsg);
-        });
-    });
-
-    if (clearBtn) {
-      clearBtn.addEventListener("click", function () {
-        try {
-          window.localStorage.removeItem(MANAGER_TRANSCRIPT_KEY);
-        } catch (_err) {
-          /* ignore */
-        }
-        container.innerHTML = '<div class="chat-msg chat-msg-system"><p class="muted">Transcript cleared.</p></div>';
-      });
-    }
-
-    document.querySelectorAll(".prompt-pill").forEach(function (pill) {
-      pill.addEventListener("click", function () {
-        var p = pill.getAttribute("data-prompt");
-        if (p) {
-          input.value = p;
-          input.focus();
-        }
-      });
-    });
-  }
-
-  // --- Effective Timeouts (progressive enhancement) ---
-  function initEffectiveTimeouts() {
-    var panel = document.getElementById("effective-timeouts");
-    if (!panel) return;
-    var defaultsRaw = panel.getAttribute("data-timeout-defaults");
-    if (!defaultsRaw) return;
-    var defaults;
-    try {
-      defaults = JSON.parse(defaultsRaw);
-    } catch (_err) {
-      return;
-    }
-
-    var routingSel = document.getElementById("routing_mode");
-    var manualSel = document.getElementById("manual_tier");
-    var maxTierSel = document.getElementById("max_auto_tier");
-    var workerInput = document.getElementById("worker_timeout");
-    var gateInput = document.getElementById("gate_timeout");
-    var reviewInput = document.getElementById("review_timeout");
-
-    function fmt(num) {
-      return String(num);
-    }
-
-    function workerText() {
-      var override = workerInput ? workerInput.value.trim() : "";
-      if (override !== "" && !isNaN(parseFloat(override))) {
-        return fmt(parseFloat(override)) + "s";
-      }
-      var manual = manualSel ? manualSel.value : "";
-      if (routingSel && routingSel.value === "manual" && manual && defaults[manual] !== undefined) {
-        return fmt(defaults[manual]) + "s";
-      }
-      var ceiling = maxTierSel ? maxTierSel.value : "";
-      var order = ["T1", "T2", "T3"];
-      var parts = [];
-      for (var i = 0; i < order.length; i++) {
-        var t = order[i];
-        if (defaults[t] === undefined) continue;
-        parts.push(t + " " + fmt(defaults[t]) + "s");
-        if (t === ceiling) break;
-      }
-      return parts.join(" / ");
-    }
-
-    function valueText(input, key) {
-      var v = input ? input.value.trim() : "";
-      if (v !== "" && !isNaN(parseFloat(v))) {
-        return fmt(parseFloat(v)) + "s";
-      }
-      return fmt(defaults[key]) + "s";
-    }
-
-    function update() {
-      var values = {
-        worker: workerText(),
-        gate: valueText(gateInput, "gate"),
-        review: valueText(reviewInput, "review")
-      };
-      ["worker", "gate", "review"].forEach(function (key) {
-        var el = panel.querySelector('[data-eff="' + key + '"]');
-        if (el) el.textContent = values[key];
-      });
-    }
-
-    [routingSel, manualSel, maxTierSel, workerInput, gateInput, reviewInput].forEach(function (el) {
-      if (el) {
-        el.addEventListener("input", update);
-        el.addEventListener("change", update);
-      }
-    });
-
-    update();
-  }
-
-  // --- Review Mode / Limit visibility ---
-  function initReviewMode() {
-    var modeSel = document.getElementById("review_mode");
-    var limitField = document.getElementById("review-limit-field");
-    var reviewCheck = document.getElementById("review_enabled");
-    var reviewControls = document.getElementById("review-controls-row");
-
-    function update() {
-      if (modeSel && limitField) {
-        var bounded = modeSel.value !== "max";
-        limitField.style.display = bounded ? "" : "none";
-        var limitInput = document.getElementById("review_limit");
-        if (limitInput) limitInput.disabled = !bounded;
-      }
-      if (reviewCheck && reviewControls) {
-        reviewControls.style.opacity = reviewCheck.checked ? "1" : "0.5";
-      }
-    }
-
-    if (modeSel) modeSel.addEventListener("change", update);
-    if (reviewCheck) reviewCheck.addEventListener("change", update);
-    update();
-  }
-
   // --- DOM Ready ---
+  // Theme is owned by console.js (plus the pre-paint snippet in
+  // base.html); composer enhancement also lives in console.js so it
+  // runs on pages where this file is not loaded.
   document.addEventListener("DOMContentLoaded", function () {
-    applyTheme(storedTheme() || systemTheme());
-    var button = document.getElementById("theme-toggle");
-    if (button) {
-      button.addEventListener("click", toggleTheme);
-    }
-
     initElapsedTimer();
     initEventStream();
-    initManagerChat();
-    initEffectiveTimeouts();
-    initReviewMode();
   });
 })();

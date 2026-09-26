@@ -41,6 +41,7 @@ class ReadinessAdmission:
     reason: str
     executable_available: bool
     connection_id: str | None = None
+    observed_at: str | None = None
 
 
 def _now() -> str:
@@ -277,7 +278,9 @@ class ReadinessService:
                 ProviderReadiness.UNKNOWN, "INSUFFICIENT_EVIDENCE", True, connection.connection_id
             )
         fresh = evidence.freshness(as_of=datetime.now(UTC), max_age=self.max_age)
-        return ReadinessAdmission(fresh.state, fresh.reason, True, fresh.connection_id)
+        return ReadinessAdmission(
+            fresh.state, fresh.reason, True, fresh.connection_id, evidence.observed_at
+        )
 
     def record_success(self, connection_id: str) -> None:
         """Persist direct evidence only for the exact connection that executed."""

@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% set active_pane = "runs" %}
+{% block title %}Inbox{% endblock %}
+{% block conversation_title %}Inbox{% endblock %}
+{% block run_meta %}{{ count }} item{{ "" if count == 1 else "s" }} need attention{% endblock %}
+
+{% block workspace %}
+<div class="date-rule">Needs your attention</div>
+
+{% if unreadable_projects %}
+<p class="so-notice">{{ unreadable_projects }} project state{{ "" if unreadable_projects == 1 else "s" }} could not be read.</p>
+{% endif %}
+
+{% if items %}
+<div class="so-table-wrap"><table class="so-table">
+  <thead><tr><th>Project</th><th>Task</th><th>Attention</th><th>State</th><th>Updated</th><th>Open</th></tr></thead>
+  <tbody>
+    {% for item in items %}
+    <tr>
+      <td class="mono muted" title="{{ item.project_path }}">{{ item.project_short or item.project_id or "legacy" }}</td>
+      <td>{{ item.task_summary or item.run_id }}</td>
+      <td><span class="badge badge-{{ item.attention_class }}">{{ item.attention_label }}</span></td>
+      <td class="mono muted">{% if item.candidate_sha %}{{ item.candidate_state }} · {{ item.short_sha }}{% else %}{{ item.run_status }}{% endif %}</td>
+      <td class="mono muted">{{ fmt(item.updated_at) }}</td>
+      <td><a class="text-button" href="/runs/{{ item.run_id }}">Open run</a></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table></div>
+{% else %}
+<p class="so-notice">Nothing needs your attention.</p>
+{% endif %}
+{% endblock %}

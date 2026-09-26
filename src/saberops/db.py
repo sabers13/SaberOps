@@ -54,6 +54,12 @@ from saberops.models import (
     WorkerCheckpoint,
     WorkPackage,
 )
+from saberops.owner_actions import (
+    OWNER_PROCESS_DEAD_REASON,
+    OwnerActionKind,
+    OwnerActionState,
+    RunOwnerAction,
+)
 from saberops.ownership import (
     ExecutionOwner,
     Liveness,
@@ -592,6 +598,35 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_checks_attempt_id ON checks(attempt_id);
                 CREATE INDEX IF NOT EXISTS idx_reviews_run_id ON reviews(run_id);
                 CREATE INDEX IF NOT EXISTS idx_events_run_id ON events(run_id);
+
+                -- R3-E2: durable non-blocking owner actions (detached Review /
+                -- Accept).  One row per requested action, fenced to the exact
+                -- candidate SHA the owner acted on.  The partial unique index
+                -- enforces at most one ACTIVE (QUEUED / RUNNING) action per
+                -- run and kind across all processes, so concurrent owner
+                -- requests collapse onto a single detached child.  History
+                -- (SUCCEEDED / FAILED / UNCERTAIN) is never unique-bound.
+                CREATE TABLE IF NOT EXISTS owner_actions (
+                    action_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+                    kind TEXT NOT NULL,
+                    candidate_sha TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    pid INTEGER,
+                    identity_json TEXT,
+                    target_repo TEXT,
+                    transcript_path TEXT,
+                    reason TEXT,
+                    error TEXT,
+                    result_summary TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_owner_actions_run
+                    ON owner_actions(run_id, kind, state);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_owner_actions_active
+                    ON owner_actions(run_id, kind)
+                    WHERE state IN ('QUEUED', 'RUNNING');
 
                 CREATE TABLE IF NOT EXISTS run_plans (
                     id TEXT PRIMARY KEY,
@@ -1917,6 +1952,320 @@ class Database:
             conn.commit()
             return cursor.rowcount > 0
 
+    @staticmethod
+    def _row_to_owner_action(row: sqlite3.Row) -> RunOwnerAction:
+        """Rebuild a durable owner action from its storage row."""
+        pid_raw = row["pid"]
+        return RunOwnerAction(
+            action_id=str(row["action_id"]),
+            run_id=str(row["run_id"]),
+            kind=OwnerActionKind(str(row["kind"])),
+            candidate_sha=str(row["candidate_sha"]),
+            state=OwnerActionState(str(row["state"])),
+            pid=int(pid_raw) if pid_raw is not None else None,
+            identity_json=str(row["identity_json"]) if row["identity_json"] else None,
+            target_repo=str(row["target_repo"]) if row["target_repo"] else None,
+            transcript_path=str(row["transcript_path"]) if row["transcript_path"] else None,
+            reason=str(row["reason"]) if row["reason"] else None,
+            error=str(row["error"]) if row["error"] else None,
+            result_summary=str(row["result_summary"]) if row["result_summary"] else None,
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+        )
+
+    def claim_owner_action(
+        self,
+        *,
+        action_id: str,
+        run_id: str,
+        kind: str,
+        candidate_sha: str,
+        target_repo: str | None = None,
+    ) -> tuple[RunOwnerAction, bool]:
+        """Atomically claim the single active owner action for ``run_id``/``kind``.
+
+        The whole decision happens inside one ``BEGIN IMMEDIATE``
+        transaction backed by a partial unique index on active
+        (QUEUED / RUNNING) work, so two independent OS processes racing
+        to Review (or Accept) the same run cannot both win: exactly one
+        inserts, every loser observes the durable winner.
+
+        An incumbent whose exact process is provably DEAD without a
+        recorded terminal result is settled to UNCERTAIN inside the same
+        transaction (releasing the uniqueness bound so a later explicit
+        owner request may proceed) and reported through the normal
+        uncertain event path by the caller.  LIVE or UNKNOWN liveness --
+        including an active row with no recorded identity -- fails closed:
+        the incumbent is returned with ``created=False`` and nothing is
+        launched.  History (SUCCEEDED / FAILED / UNCERTAIN) never blocks
+        a new claim.
+        """
+        now = current_iso_timestamp()
+        reconciled: RunOwnerAction | None = None
+        with self._get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing_row = conn.execute(
+                """
+                SELECT * FROM owner_actions
+                WHERE run_id = ? AND kind = ? AND state IN ('QUEUED', 'RUNNING')
+                ORDER BY created_at DESC, action_id DESC LIMIT 1
+                """,
+                (run_id, kind),
+            ).fetchone()
+            if existing_row is not None:
+                incumbent = self._row_to_owner_action(existing_row)
+                if probe_liveness(_decode_process_identity(incumbent.identity_json)) is Liveness.DEAD:
+                    conn.execute(
+                        """
+                        UPDATE owner_actions
+                        SET state = ?, reason = ?, updated_at = ?
+                        WHERE action_id = ? AND state IN ('QUEUED', 'RUNNING')
+                        """,
+                        (
+                            OwnerActionState.UNCERTAIN.value,
+                            OWNER_PROCESS_DEAD_REASON,
+                            now,
+                            incumbent.action_id,
+                        ),
+                    )
+                    reconciled = RunOwnerAction(
+                        action_id=incumbent.action_id,
+                        run_id=incumbent.run_id,
+                        kind=incumbent.kind,
+                        candidate_sha=incumbent.candidate_sha,
+                        state=OwnerActionState.UNCERTAIN,
+                        pid=incumbent.pid,
+                        identity_json=incumbent.identity_json,
+                        target_repo=incumbent.target_repo,
+                        transcript_path=incumbent.transcript_path,
+                        reason=OWNER_PROCESS_DEAD_REASON,
+                        error=incumbent.error,
+                        result_summary=incumbent.result_summary,
+                        created_at=incumbent.created_at,
+                        updated_at=now,
+                    )
+                else:
+                    conn.commit()
+                    return (incumbent, False)
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO owner_actions (
+                        action_id, run_id, kind, candidate_sha, state,
+                        pid, identity_json, target_repo, transcript_path,
+                        reason, error, result_summary, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, NULL, NULL, NULL, NULL, ?, ?)
+                    """,
+                    (
+                        action_id,
+                        run_id,
+                        kind,
+                        candidate_sha,
+                        OwnerActionState.QUEUED.value,
+                        target_repo,
+                        now,
+                        now,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                winner = conn.execute(
+                    """
+                    SELECT * FROM owner_actions
+                    WHERE run_id = ? AND kind = ? AND state IN ('QUEUED', 'RUNNING')
+                    ORDER BY created_at DESC, action_id DESC LIMIT 1
+                    """,
+                    (run_id, kind),
+                ).fetchone()
+                conn.commit()
+                if winner is None:  # pragma: no cover - index guarantees a winner
+                    raise
+                return (self._row_to_owner_action(winner), False)
+            conn.commit()
+        if reconciled is not None:
+            from saberops.owner_actions import OWNER_ACTION_UNCERTAIN_EVENT
+
+            self.record_event(
+                reconciled.run_id,
+                OWNER_ACTION_UNCERTAIN_EVENT,
+                payload={
+                    "action_id": reconciled.action_id,
+                    "kind": reconciled.kind.value,
+                    "candidate_sha": reconciled.candidate_sha,
+                    "reason": OWNER_PROCESS_DEAD_REASON,
+                },
+            )
+        claimed = self.get_owner_action(action_id)
+        if claimed is None:  # pragma: no cover - the row was just committed
+            raise OwnershipError(f"Owner action '{action_id}' vanished after claim")
+        return (claimed, True)
+
+    def get_owner_action(self, action_id: str) -> RunOwnerAction | None:
+        """Fetch one durable owner action by id, or ``None``."""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM owner_actions WHERE action_id = ?", (action_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            return self._row_to_owner_action(row)
+
+    def get_active_owner_action(self, run_id: str, kind: str) -> RunOwnerAction | None:
+        """Fetch the active (QUEUED / RUNNING) action for ``run_id``/``kind``."""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM owner_actions
+                WHERE run_id = ? AND kind = ? AND state IN ('QUEUED', 'RUNNING')
+                ORDER BY created_at DESC, action_id DESC LIMIT 1
+                """,
+                (run_id, kind),
+            ).fetchone()
+            if row is None:
+                return None
+            return self._row_to_owner_action(row)
+
+    def list_owner_actions(self, run_id: str) -> list[RunOwnerAction]:
+        """List every owner action for ``run_id``, newest first."""
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM owner_actions WHERE run_id = ?
+                ORDER BY created_at DESC, action_id DESC
+                """,
+                (run_id,),
+            ).fetchall()
+            return [self._row_to_owner_action(row) for row in rows]
+
+    def set_owner_action_transcript(
+        self, action_id: str, *, transcript_path: str
+    ) -> RunOwnerAction | None:
+        """Persist the deterministic transcript destination for an action.
+
+        Called during spawn preparation, before the detached child exists,
+        so the durable destination can never be lost merely because the
+        child transitions out of QUEUED before post-Popen bookkeeping
+        runs.  Only touches QUEUED rows; never regresses RUNNING or
+        terminal state.
+        """
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                UPDATE owner_actions
+                SET transcript_path = ?, updated_at = ?
+                WHERE action_id = ? AND state = ?
+                """,
+                (
+                    transcript_path,
+                    current_iso_timestamp(),
+                    action_id,
+                    OwnerActionState.QUEUED.value,
+                ),
+            )
+            conn.commit()
+        return self.get_owner_action(action_id)
+
+    def attach_owner_action_process(
+        self,
+        action_id: str,
+        *,
+        pid: int,
+        identity: ProcessIdentity,
+        transcript_path: str | None = None,
+    ) -> RunOwnerAction | None:
+        """Point a QUEUED action at the detached process now executing it.
+
+        Post-spawn bookkeeping only: the ``WHERE state = 'QUEUED'`` fence
+        means a child that already transitioned to RUNNING or terminal
+        is left untouched (no regression of a terminal row), and the
+        ``COALESCE`` keeps a transcript path persisted during spawn
+        preparation when one is already stored.
+        """
+        payload = json.dumps(identity.to_dict())
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                UPDATE owner_actions
+                SET pid = ?, identity_json = ?,
+                    transcript_path = COALESCE(transcript_path, ?),
+                    updated_at = ?
+                WHERE action_id = ? AND state = ?
+                """,
+                (
+                    pid,
+                    payload,
+                    transcript_path,
+                    current_iso_timestamp(),
+                    action_id,
+                    OwnerActionState.QUEUED.value,
+                ),
+            )
+            conn.commit()
+        return self.get_owner_action(action_id)
+
+    def mark_owner_action_running(
+        self, action_id: str, *, identity: ProcessIdentity
+    ) -> RunOwnerAction | None:
+        """Transition a QUEUED action to RUNNING from its detached child."""
+        payload = json.dumps(identity.to_dict())
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                UPDATE owner_actions
+                SET state = ?, pid = ?, identity_json = ?, updated_at = ?
+                WHERE action_id = ? AND state = ?
+                """,
+                (
+                    OwnerActionState.RUNNING.value,
+                    identity.pid,
+                    payload,
+                    current_iso_timestamp(),
+                    action_id,
+                    OwnerActionState.QUEUED.value,
+                ),
+            )
+            conn.commit()
+        return self.get_owner_action(action_id)
+
+    def mark_owner_action_terminal(
+        self,
+        action_id: str,
+        *,
+        state: str,
+        reason: str | None = None,
+        error: str | None = None,
+        result_summary: str | None = None,
+    ) -> RunOwnerAction | None:
+        """Record a terminal action outcome from QUEUED / RUNNING only.
+
+        Terminal states never overwrite each other: the first recorded
+        receipt wins, so a late duplicate delivery cannot rewrite history.
+        """
+        terminal = OwnerActionState(str(state))
+        if terminal not in (
+            OwnerActionState.SUCCEEDED,
+            OwnerActionState.FAILED,
+            OwnerActionState.UNCERTAIN,
+        ):
+            raise ValueError(f"refusing non-terminal owner-action state {state!r}")
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                UPDATE owner_actions
+                SET state = ?, reason = ?, error = ?, result_summary = ?, updated_at = ?
+                WHERE action_id = ? AND state IN ('QUEUED', 'RUNNING')
+                """,
+                (
+                    terminal.value,
+                    reason,
+                    error,
+                    result_summary,
+                    current_iso_timestamp(),
+                    action_id,
+                ),
+            )
+            conn.commit()
+        return self.get_owner_action(action_id)
+
     def release_execution_owner(
         self,
         run_id: str,
@@ -3080,6 +3429,80 @@ class Database:
 
         return event_id
 
+    def record_candidate_rejection_once(
+        self, run_id: str, candidate_sha: str
+    ) -> tuple[int, bool]:
+        """Atomically record one canonical ``candidate_rejected`` event.
+
+        Check-and-insert under a single ``BEGIN IMMEDIATE`` transaction so
+        independent ``Database`` instances (separate OS request handlers)
+        racing to reject the same exact candidate cannot each append the
+        decision: the first writer inserts, every later writer observes the
+        durable row inside the same serialized transaction and returns it
+        without inserting.
+
+        Persistence only: the caller (``candidate_lifecycle``) decides that
+        ``candidate_sha`` is the canonical current candidate being
+        rejected.  Matching mirrors
+        ``find_matching_rejection_event`` -- any durable
+        ``candidate_rejected`` row on this run whose dict payload carries
+        ``candidate_sha`` equal to the requested SHA counts, regardless of
+        extra keys or ``attempt_id``; rows with a missing/different SHA
+        (foreign or malformed evidence) never match, so they never block a
+        new decision.  No CandidateState is computed here.
+
+        Returns ``(event_id, inserted)``: the existing event id with
+        ``inserted=False`` when the decision was already durable, otherwise
+        the new event id with ``inserted=True``.  Listeners and the wake
+        notifier fire only when a new event was actually inserted.
+        """
+        if not isinstance(run_id, str) or not run_id:
+            raise ValueError("run_id must be a non-empty string")
+        if not isinstance(candidate_sha, str) or not candidate_sha:
+            raise ValueError("candidate_sha must be a non-empty string")
+        payload_str = json.dumps({"candidate_sha": candidate_sha})
+        with self._get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                """
+                SELECT id, payload_json FROM events
+                WHERE run_id = ? AND event_type = ?
+                """,
+                (run_id, "candidate_rejected"),
+            ).fetchall()
+            for row in rows:
+                raw = row["payload_json"]
+                try:
+                    payload = json.loads(raw) if raw else None
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(payload, dict) and payload.get("candidate_sha") == candidate_sha:
+                    existing_id = int(row["id"])
+                    conn.commit()
+                    return (existing_id, False)
+            cursor = conn.execute(
+                """
+                INSERT INTO events (run_id, attempt_id, event_type, payload_json, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (run_id, None, "candidate_rejected", payload_str, current_iso_timestamp()),
+            )
+            event_id = int(cursor.lastrowid) if cursor.lastrowid is not None else 0
+            conn.commit()
+
+        with self._listeners_lock:
+            listeners = list(self._listeners)
+
+        for listener in listeners:
+            try:
+                listener(run_id, event_id)
+            except Exception:
+                pass  # Listener exceptions are swallowed and must never affect orchestration
+
+        notify_run(self.db_path, run_id)
+
+        return (event_id, True)
+
     def get_events(self, run_id: str, after_id: int = 0, limit: int = 1000) -> list[OrchEvent]:
         """Fetch events for a run with ID greater than after_id, ordered by ID ascending."""
         with self._get_connection() as conn:
@@ -3186,6 +3609,22 @@ class Database:
                 "SELECT * FROM run_plans WHERE run_id = ? ORDER BY version DESC LIMIT 1", (run_id,)
             ).fetchone()
             return self._row_to_plan(row) if row is not None else None
+
+    def list_run_plans(self, run_id: str) -> list[RunPlan]:
+        """Return every persisted plan for the run in deterministic order.
+
+        ``get_run_plan`` returns only the newest row and cannot prove that it
+        is the only one; recovery needs that authority, so this is the
+        deterministic ``(created_at, id)``-ordered list it consults instead.
+        """
+        if not self._plan_schema_available:
+            return []
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM run_plans WHERE run_id = ? ORDER BY created_at ASC, id ASC",
+                (run_id,),
+            ).fetchall()
+            return [self._row_to_plan(row) for row in rows]
 
     def update_run_plan(self, plan_id: str, status: PlanStatus, version: int | None = None) -> None:
         """Update plan lifecycle/version without replacing its steps."""

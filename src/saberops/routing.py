@@ -6,7 +6,10 @@ from datetime import UTC, datetime
 from typing import Any
 
 from saberops.models import Tier, WorkerCandidate
-from saberops.routing_config import requires_training_permission
+from saberops.training_policy import (
+    is_training_permitted,
+    training_requirement_for,
+)
 
 # Canonical worker candidates
 CANDIDATE_ANTIGRAVITY_FLASH = WorkerCandidate(provider="antigravity", model="gemini-3.7-flash")
@@ -205,28 +208,33 @@ def resolve_candidate_chain(
     """
     if model_override:
         candidate = parse_candidate_override(model_override, provider_override=provider_override)
-        cid = f"{candidate.provider}/{candidate.model}"
-        if not training_allowed and (
-            is_muse_model(candidate.model)
-            or requires_training_permission(cid)
-            or requires_training_permission(candidate.model)
-        ):
+        # Canonical R2-B data-policy decision: the frozen snapshot record
+        # (when the override names an owner-approved candidate), else the
+        # static v1 knowledge; UNKNOWN fails closed under Denied so an
+        # explicit override can never bypass it.
+        requirement = training_requirement_for(candidate, snapshot=snapshot)
+        if not is_training_permitted(candidate, training_allowed, snapshot=snapshot):
             if is_muse_model(candidate.model):
                 raise ValueError(
                     f"Prohibited model '{candidate.model}': Muse models require training "
                     "permission. Specify --training-allowed if permitted."
                 )
+            if requirement == "UNKNOWN":
+                raise ValueError(
+                    f"Prohibited model '{candidate.model}': model training requirement "
+                    "is unknown (fail closed). Specify --training-allowed if permitted."
+                )
             raise ValueError(
                 f"Prohibited model '{candidate.model}': model requires training permission. "
                 "Specify --training-allowed if permitted."
             )
-        return [_with_binding_id(candidate, snapshot)]
+        return [_with_frozen_evidence(candidate, snapshot)]
 
     peak = is_peak if is_peak is not None else is_peak_hours()
 
     if snapshot is not None:
         raw_chain = snapshot.chain_for(tier.value, training_allowed, peak)
-        chain = [_with_binding_id(c, snapshot) for c in raw_chain]
+        chain = [_with_frozen_evidence(c, snapshot) for c in raw_chain]
     elif tier == Tier.T1:
         chain = list(TIER_1_CHAIN)
     elif tier == Tier.T2:
@@ -245,12 +253,14 @@ def resolve_candidate_chain(
         chain = list(TIER_1_CHAIN)
 
     if not training_allowed:
+        # Canonical R2-B data-policy decision shared with C07 preflight
+        # and reviewer dispatch: only FALSE survives Denied; TRUE and
+        # UNKNOWN (fail closed) are excluded.  Allowed runs keep every
+        # candidate; other policies still apply downstream.
         chain = [
             c
             for c in chain
-            if not is_muse_model(c.model)
-            and not requires_training_permission(f"{c.provider}/{c.model}")
-            and not requires_training_permission(c.model)
+            if is_training_permitted(c, training_allowed, snapshot=snapshot)
         ]
 
     if provider_override:
@@ -265,19 +275,22 @@ def resolve_candidate_chain(
     return chain
 
 
-def _with_binding_id(
+def _with_frozen_evidence(
     candidate: WorkerCandidate, snapshot: Any | None
 ) -> WorkerCandidate:
-    """Return ``candidate`` enriched with its owner-approved binding_id.
+    """Return ``candidate`` enriched with its frozen owner-approved evidence.
 
-    The lookup consults the snapshot's ``approved_candidates`` mapping:
-    when a :class:`~saberops.routing_config.DynamicCandidate`
-    entry exists for this ``provider/model`` identity, its exact
-    ``binding_id`` is propagated onto the returned :class:`WorkerCandidate`
-    so the autonomous supervisor and dispatch lifecycle execute through
-    that binding (C15-XB-01).  Static candidates carry no approval record
-    and return the original candidate unchanged -- the historical
-    declaration-order behavior is preserved.
+    The lookup consults only the frozen snapshot's ``approved_candidates``
+    mapping (never mutable live state): when a
+    :class:`~saberops.routing_config.DynamicCandidate` entry exists for
+    this ``provider/model`` identity, its exact ``binding_id`` is
+    propagated onto the returned :class:`WorkerCandidate` so the
+    autonomous supervisor and dispatch lifecycle execute through that
+    binding (C15-XB-01), and its frozen ``training_required``
+    classification is carried so the canonical R2-B data-policy decision
+    sees the same evidence at every dispatch path.  Static candidates
+    carry no approval record and return the original candidate unchanged
+    -- the historical declaration-order behavior is preserved.
     """
     if snapshot is None:
         return candidate
@@ -289,11 +302,26 @@ def _with_binding_id(
         if getattr(entry, "candidate_id", None) != cid:
             continue
         binding_id = getattr(entry, "binding_id", None)
-        if not binding_id:
+        training_required = getattr(entry, "training_required", None)
+        if isinstance(training_required, str):
+            training_required = training_required.strip().upper() or None
+        else:
+            training_required = None
+        if training_required not in ("TRUE", "FALSE", "UNKNOWN"):
+            training_required = None
+        if not binding_id and training_required is None:
             return candidate
         return WorkerCandidate(
             provider=candidate.provider,
             model=candidate.model,
-            binding_id=str(binding_id),
+            binding_id=str(binding_id) if binding_id else candidate.binding_id,
+            training_required=training_required,
         )
     return candidate
+
+
+def _with_binding_id(
+    candidate: WorkerCandidate, snapshot: Any | None
+) -> WorkerCandidate:
+    """Backward-compatible alias for :func:`_with_frozen_evidence`."""
+    return _with_frozen_evidence(candidate, snapshot)

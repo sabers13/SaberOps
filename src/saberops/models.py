@@ -338,15 +338,26 @@ class BindingRole(StrEnum):
 class GateOutcome(StrEnum):
     """Structured taxonomy for an authoritative Orch-owned full gate.
 
-    The taxonomy is deliberately small and is the single source of truth for
-    distinguishing capability-bearing outcomes (real validation failures) from
-    non-capability infrastructure / runtime / safety outcomes.
+    The taxonomy is deliberately small and records the operational outcome
+    of one gate execution.  It does NOT prove why a gate returned nonzero:
+    current structured evidence does not distinguish a genuine candidate
+    validation failure from a launchable gate-configuration error (H3/H3.1;
+    e.g. ``make definitely_missing_target`` classifies as
+    ``VALIDATION_FAILURE`` exactly like a genuinely failing assertion).
+
+    Gate truth is distinct from routing authority: ``VALIDATION_FAILURE``
+    means deterministic verification did not pass, but it carries no
+    cross-tier escalation authority under H3.1; only an explicit typed
+    capability failure does.
 
     * ``PASS``                 — gate launched normally, completed normally,
       exit code 0, clean candidate.
-    * ``VALIDATION_FAILURE``   — gate launched normally, completed normally,
-      nonzero exit caused by candidate validation failure.  This IS
-      capability-bearing evidence.
+    * ``VALIDATION_FAILURE``   — gate launched and completed normally with a
+      nonzero exit, and no typed infrastructure / timeout / termination /
+      mutation condition applied.  This records that deterministic
+      verification did not pass; it does NOT prove the nonzero exit was
+      caused by candidate validation failure.  This records gate truth but
+      is NOT cross-tier escalation evidence.
     * ``INFRASTRUCTURE_FAILURE`` — gate executable could not be launched (e.g.
       missing executable, missing tool, OSError at spawn).  This is NOT
       capability evidence and must never trigger another model dispatch.
@@ -372,8 +383,11 @@ class GateDisposition:
     """Structured Orch-owned gate outcome.
 
     Carries the typed :class:`GateOutcome` plus the minimum structured evidence
-    necessary to distinguish capability-bearing failures from infrastructure /
-    runtime / safety outcomes.  Designed to be durable-evidence friendly: every
+    necessary to record which operational gate condition applied
+    (launch / timeout / termination / mutation / exit code) without fuzzy
+    parsing.  It does NOT distinguish a genuine candidate validation failure
+    from a launchable gate-configuration error: both present as
+    ``VALIDATION_FAILURE``.  Designed to be durable-evidence friendly: every
     field is a primitive or tuple of primitives, never a free-form string
     subject to fuzzy parsing.
     """
@@ -955,11 +969,19 @@ class WorkerCandidate:
     ``binding_id`` and resolve through registry declaration order; an
     owner-approved dynamic candidate carries the binding id its
     :class:`~saberops.routing_config.DynamicCandidate` records.
+
+    ``training_required`` is the frozen R2-B data-policy classification
+    (``"TRUE"``/``"FALSE"``/``"UNKNOWN"``) attached at chain resolution
+    from the Run's frozen routing snapshot.  ``None`` means unresolved:
+    the canonical :mod:`saberops.training_policy` decision falls back to
+    the frozen snapshot record, then the static v1 knowledge.  It is
+    never populated from mutable live discovery/catalog/routing state.
     """
 
     provider: str
     model: str
     binding_id: str | None = None
+    training_required: str | None = None
 
 
 @dataclass
@@ -1046,6 +1068,50 @@ class ReviewFinding:
     repair_scope: str
     blocking: bool
     created_at: str
+
+
+class CandidateState(StrEnum):
+    """Read-only lifecycle projection vocabulary for one run candidate (R3-A).
+
+    This is a PROJECTION, not a second state machine and not new authority:
+    every value is derived on each read from existing durable evidence (see
+    :mod:`saberops.candidate_lifecycle`).  No DB column, table, migration,
+    or write-on-read event backs it.
+
+    * ``READY`` -- a current gate-passed candidate exists; no substantive
+      review bound to it yet.  A risk-adaptive "review not required"
+      decision stays READY ("review skipped" is never REVIEWED).
+    * ``IN_REVIEW`` -- review started for the CURRENT candidate with no
+      later substantive completion for that same candidate.
+    * ``REVIEWED`` -- a substantive completed review is bound to the
+      CURRENT candidate (actual ReviewVerdict preserved separately).
+    * ``ACCEPTED`` -- a durable AcceptEngine-owned ``run_accepted`` event
+      matches the current candidate.  Terminal for the projection.
+    * ``REJECTED`` -- an explicit durable owner Reject decision: a
+      canonical ``candidate_rejected`` event whose ``candidate_sha``
+      names the exact current candidate (see
+      :mod:`saberops.candidate_lifecycle`).  Terminal for the
+      candidate unless authoritative acceptance already integrated it
+      (ACCEPTED outranks REJECTED); otherwise REJECTED outranks STALE,
+      REVIEWED, IN_REVIEW, and READY, and survives later target-HEAD
+      movement.  Never synthesized from run status, failed review,
+      BLOCK verdict, missing worktree, failed gate, or absent
+      acceptance.
+    * ``STALE`` -- a current non-accepted candidate based on an obsolete
+      target state under the existing acceptance contract.
+    * ``CLEANED`` -- reserved: cleanup removes worktrees without writing
+      durable candidate-cleaned evidence, so nothing can prove it.
+      Unreachable until a later R3 slice adds real cleanup authority.
+      Never synthesized from missing worktrees or filesystem state.
+    """
+
+    READY = "READY"
+    IN_REVIEW = "IN_REVIEW"
+    REVIEWED = "REVIEWED"
+    ACCEPTED = "ACCEPTED"
+    REJECTED = "REJECTED"
+    STALE = "STALE"
+    CLEANED = "CLEANED"
 
 
 @dataclass

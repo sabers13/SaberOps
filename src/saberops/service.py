@@ -12,14 +12,19 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from saberops.accept import AcceptEngine, AcceptResult
+from saberops.accept import AcceptEligibility, AcceptEngine, AcceptResult
 from saberops.config import RunConfig, resolve_run_config
 from saberops.control_plane.binding_store import (
+    BindingStoreError,
     load_owner_bindings,
 )
 from saberops.control_plane.orch_binding import (
     OrchSelectionStatus,
     select_orch_binding,
+)
+from saberops.control_plane.reviewer_binding import (
+    ReviewerSelectionError,
+    reviewer_candidate_for_dispatch,
 )
 from saberops.db import Database
 from saberops.dispatch import UnavailableReadinessService
@@ -50,6 +55,7 @@ from saberops.tooling import ToolRegistry
 from saberops.workers.registry import AdapterRegistry
 
 if TYPE_CHECKING:
+    from saberops.candidate_lifecycle import CandidateProjection
     from saberops.supervisor import RunSupervisor
 
 
@@ -365,7 +371,20 @@ class OrchestratorService:
         timeout: float = 1200.0,
         review_limit: int | None = None,
     ) -> ReviewResult:
-        """Execute independent code review for a completed run."""
+        """Execute independent code review for a completed run.
+
+        R3-E1: when the caller supplies no explicit override, the
+        owner's configured exact Reviewer binding (if any) is resolved
+        to a single :class:`WorkerCandidate` carrying the exact
+        provider, exact model, and exact ``binding_id``.  An
+        unconfigured owner keeps the legacy review ladder
+        (``None``).  A configured-but-invalid reviewer fails closed
+        here -- it is never silently replaced by another reviewer.
+        The existing :class:`ReviewEngine` remains authoritative for
+        whether the candidate can actually launch.
+        """
+        if reviewer_override is None:
+            reviewer_override = self._configured_reviewer_candidate()
         engine = ReviewEngine(
             db=self.db,
             registry=self.registry,
@@ -378,10 +397,62 @@ class OrchestratorService:
             review_limit=review_limit,
         )
 
+    def _configured_reviewer_candidate(self) -> WorkerCandidate | None:
+        """Resolve the owner's exact Reviewer selection, if one is set.
+
+        Returns ``None`` when no reviewer is configured (legacy ladder
+        stays available).  Raises :class:`ReviewerSelectionError` when
+        a configured reviewer is missing, wrong-role, unresolvable, or
+        when the owner document itself is unreadable (a corrupt store
+        must never be mistaken for "no reviewer configured").
+        """
+        try:
+            owner = load_owner_bindings()
+        except BindingStoreError as exc:
+            raise ReviewerSelectionError(
+                "REVIEWER_UNRESOLVABLE",
+                f"owner reviewer state unreadable; refusing review: {exc}",
+            ) from exc
+        return reviewer_candidate_for_dispatch(owner, adapter_registry=self.registry)
+
+    def accept_eligibility(self, run_id: str) -> AcceptEligibility:
+        """Return the engine-derived read-only acceptance projection.
+
+        The Web renders this as a checklist and gates the Accept button
+        on it; the projection never mutates state and never recreates
+        acceptance policy.
+        """
+        engine = AcceptEngine(db=self.db)
+        return engine.check_accept_eligibility(run_id=run_id)
+
     def accept_run(self, run_id: str, gate_timeout: float = 300.0) -> AcceptResult:
         """Safely integrate a verified candidate run into the target repository."""
         engine = AcceptEngine(db=self.db)
         return engine.accept_run(run_id=run_id, gate_timeout=gate_timeout)
+
+    def reject_candidate(self, run_id: str) -> CandidateProjection:
+        """Record a durable owner Reject decision for the current candidate.
+
+        The single service-level Reject authority: delegates to
+        :func:`saberops.candidate_lifecycle.reject_current_candidate`,
+        the only seam that may write a ``candidate_rejected`` event.
+        The Web calls this method; it never writes rejection events
+        directly.  Repeats for the same exact candidate resolve
+        idempotently without a duplicate event.
+        """
+        from saberops.candidate_lifecycle import reject_current_candidate
+
+        return reject_current_candidate(self.db, run_id)
+
+    def can_reject_candidate(self, run_id: str) -> bool:
+        """Return whether the current candidate may receive a new decision.
+
+        Derived from the same projection authority as
+        :meth:`reject_candidate` (never from run status alone).
+        """
+        from saberops.candidate_lifecycle import can_reject_candidate
+
+        return can_reject_candidate(self.db, run_id)
 
     def cleanup_run(self, run_id: str) -> dict[str, list[str]]:
         """Safely clean up clean attempt worktrees for a run."""
