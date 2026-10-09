@@ -1,4 +1,4 @@
-"""Execution engine for C12-A real-project replay.
+"""Execution engine for real-project replay.
 
 Executes the replay semantic shape:
 authoritative Project
@@ -406,7 +406,7 @@ class ReplayEngine:
         - Re-verifies live repository identity before workspace creation (no bypass).
         - Re-verifies supplied FrozenStartingState and claims against live repository and ledger.
         - Validates evidence_dir is outside authoritative repository and worktrees before execution.
-        - Confines production mutating execution via existing C11 sandbox containment.
+        - Confines production mutating execution via existing sandbox containment.
         - Prohibits production callback bypass (only explicit private _test_fixture_strategy_fn).
         - Captures strategy execution result as durable evidence;
           failed command prevents verified_success.
@@ -473,7 +473,7 @@ class ReplayEngine:
                     "passed": True,
                 }
             elif "command" in bound_definition.strategy_params:
-                # Production mutating strategy: executes via existing C11 sandbox containment
+                # Production mutating strategy: executes via existing sandbox containment
                 from saberops.process import run_sandboxed_process
                 from saberops.sandbox import (
                     NetworkPolicy,

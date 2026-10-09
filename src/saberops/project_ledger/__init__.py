@@ -1,4 +1,4 @@
-"""C11 Project Ledger: durable Project authority and cross-session continuity.
+"""Project Ledger: durable Project authority and cross-session continuity.
 
     Project Ledger -> Orch N -> deterministic checkpoint -> verified durable
     delta -> Orch N+1 reconstructs a bounded bootstrap

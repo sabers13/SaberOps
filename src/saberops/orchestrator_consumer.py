@@ -1,6 +1,6 @@
 """Production consumer for the selected Orchestrator-model binding.
 
-C15-XEC (Orchestrator Execution Consumer): the bounded seam that lets the
+Orchestrator Execution Consumer: the bounded seam that lets the
 selected Orchestrator binding drive a real model invocation, instead of
 remaining a stored configuration only.
 
@@ -14,7 +14,7 @@ the Orchestrator-model slot; actually use it."  It is intentionally narrow:
   provider/model string is ever honored; a raw override never
   synthesizes an Orchestrator identity.
 * It then resolves the executable runtime value via
-  :func:`resolve_execution_binding`, the canonical C11-D resolver the
+  :func:`resolve_execution_binding`, the canonical runtime resolver the
   autonomous lifecycle already uses for worker dispatch.  The same
   ``ORCH_EXECUTION_*`` env overlay (carrying the exact
   ``ORCH_EXECUTION_BINDING_ID`` / ``ORCH_EXECUTION_PROFILE_ID`` /
@@ -40,20 +40,20 @@ the Orchestrator-model slot; actually use it."  It is intentionally narrow:
   exact binding identity observed by the adapter is the same identity
   recorded as durable evidence.
 
-C15 invariants preserved:
+The model-access layer invariants preserved:
 
-* **WORKER / ORCHESTRATOR separation (C15-XB-03):** the consumer only
+* **WORKER / ORCHESTRATOR separation:** the consumer only
   resolves bindings whose :class:`BindingRole` is
   :class:`~saberops.control_plane.bindings.BindingRole.ORCHESTRATOR`.
   A WORKER-role binding selected on the Web /orchestrator page is a UI
   bug; the consumer refuses such a binding closed, never silently
   swaps it for a sibling.
-* **Exact identity (C15-XB-01):** two bindings with the same
+* **Exact identity:** two bindings with the same
   provider/model on distinct connections remain distinct; resolution
   is always through the exact :attr:`ExecutionBinding.binding_id`
   resolved by the persisted owner policy, never through
   provider/model first match.
-* **Capability truthfulness (C15-XC-01):** effort / capability /
+* **Capability truthfulness:** effort / capability /
   profile decisions never fabricate a tier.  A binding whose
   :attr:`~ExecutionBinding.reasoning_effort_capabilities` does not
   list a tier returns typed ``UNSUPPORTED`` *only when the caller
@@ -66,7 +66,7 @@ C15 invariants preserved:
   ``PROFILE_DISABLED``; a binding whose backend has no verified
   runtime seam returns typed ``UNSUPPORTED_BACKEND``. DIRECT_API resolves
   only through its exact configured API connection and direct executor.
-* **OpenCode compatibility evidence (C15-GC-03):** when the persisted
+* **OpenCode compatibility evidence:** when the persisted
   binding routes through OpenCode, the consumer consults the same
   :mod:`~saberops.workers.instruction_compat` evidence the governed
   worker dispatch already enforces.  Compatibility is reported but
@@ -202,7 +202,7 @@ _ORCH_SELECTION_REASON_MAP: Mapping[str, str] = {
 }
 
 
-# Mapping from canonical C11-D binding-resolution refusal vocabulary
+# Mapping from canonical runtime binding-resolution refusal vocabulary
 # to the typed Orchestrator-model invocation refusal vocabulary.
 _RESOLUTION_REASON_MAP: Mapping[str, str] = {
     "NO_REGISTRY": "ORCH_MODEL_NO_REGISTRY",
@@ -505,13 +505,13 @@ class OrchestratorModelConsumer:
         self._binding_store_path = binding_store_path
         self._effort_policy_override = effort_policy
         self._now_iso = now_iso or current_iso_timestamp
-        # C15 evidence correction: when True, the consumer refuses to
+        # Evidence correction: when True, the consumer refuses to
         # auto-create a synthetic run row in ``_emit_event``.  The
         # bounded initial-guidance lifecycle helper sets this so the
         # Orchestrator evidence is durably attributed to the existing
         # parent run -- never to a synthetic ``orch_initial_guidance_*``
         # / ``orchestrator_model_consumer`` Run row.  Default False
-        # preserves the existing C15-XEC evidence stream for direct
+        # preserves the existing model-access evidence stream for direct
         # callers (services, tests) that already operate on a parent run.
         self._require_existing_run = require_existing_run
 
@@ -555,7 +555,7 @@ class OrchestratorModelConsumer:
         refusal.  A ``None`` request delegates to AUTO selection
         within the canonical Orchestrator effort bounds.
 
-        C15 provider-default correction: an empty
+        Provider-default correction: an empty
         ``binding.reasoning_effort_capabilities`` does NOT prove the
         model cannot execute -- it means SaberOps has no authoritative
         evidence of a controllable tier for this binding.  When
@@ -573,7 +573,7 @@ class OrchestratorModelConsumer:
         policy = self._effort_policy_override or DEFAULT_ORCH_EFFORT_POLICY
 
         # Provider-default / uncontrolled reasoning effort path.
-        # The early-return below is the bounded C15 correction: the
+        # The early-return below is the bounded model-access correction: the
         # discovered binding declares no authoritative controllable
         # tiers, and no caller / policy has asserted a specific
         # tier -- so the consumer MUST NOT return
@@ -730,7 +730,7 @@ class OrchestratorModelConsumer:
         effort: ReasoningEffort | None,
         registry: Any = None,
     ) -> ResolvedExecutionBinding:
-        """Run the canonical C11-D binding resolver over the selected binding.
+        """Run the canonical runtime binding resolver over the selected binding.
 
         ``registry`` is the optional override used by tests; in
         production the resolver reads from the same owner registry
@@ -951,7 +951,7 @@ class OrchestratorModelConsumer:
             )
 
         binding = selection.binding
-        # C15-XB-03 invariant: the Orchestrator consumer never honors
+        # Invariant: the Orchestrator consumer never honors
         # a WORKER-role binding; the persisted owner policy must
         # already be ORCHESTRATOR-only by construction, but the
         # consumer re-checks at the execution seam.
@@ -978,11 +978,11 @@ class OrchestratorModelConsumer:
                 },
             )
 
-        # C15-XB-01 invariant: identity is the binding's exact id;
+        # Invariant: identity is the binding's exact id;
         # we never reach for a provider/model first-match.
         # Validate that the binding's profile and pool references
         # exist in the owner registry before resolution -- the
-        # canonical C11-D resolver below re-reads them from the
+        # canonical runtime resolver below re-reads them from the
         # owner registry, but a pre-check here keeps the consumer's
         # evidence consistent with what the resolver will see.
         try:
@@ -1042,7 +1042,7 @@ class OrchestratorModelConsumer:
         adapter = self._registry.get(binding.provider)
 
         # 5. Resolve the executable binding (exact identity + env
-        # overlay).  This is the canonical C11-D resolver the
+        # overlay).  This is the canonical runtime resolver the
         # autonomous lifecycle already uses; we deliberately reuse
         # it so the binding identity the consumer records equals the
         # binding identity the adapter invocation observes.
@@ -1319,7 +1319,7 @@ def fetch_initial_orchestrator_guidance(
     lifecycle.  Successful invocations return
     ``(truncated_text, None)``.
 
-    C15 evidence correction: this helper now attributes the durable
+    Evidence correction: this helper now attributes the durable
     Orchestrator evidence to the existing parent run (``run_id``)
     rather than to a synthetic ``orch_initial_guidance_<run_id>`` /
     ``orchestrator_model_consumer`` run row.  The consumer is
@@ -1507,7 +1507,7 @@ def fetch_initial_orchestrator_guidance(
             outcome_output_digest = hashlib.sha256(result.output_text.encode("utf-8")).hexdigest()
 
     # Record ONE canonical, sanitized result event against the parent run.
-    # This is the bounded durable evidence the C15-XEC correction
+    # This is the bounded durable evidence the model-access correction
     # requires: request-attempted + outcome, attributed to the
     # existing parent run only (no synthetic rows).  A ``db=None``
     # service is treated as a test seam and emits no DB event.

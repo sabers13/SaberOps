@@ -349,7 +349,7 @@ class ReadinessService:
         try:
             evidence = self.store.load().try_get(connection.connection_id)
         except (OSError, ValueError):
-            # C15-RDY-02A: a malformed/unreadable readiness store is an
+            # A malformed/unreadable readiness store is an
             # authority failure, never a pass.  Fail closed to UNKNOWN
             # with the fixed sanitized reason (no exception text, path,
             # or secret leaves this seam): automatic dispatch skips,
@@ -390,7 +390,7 @@ class ReadinessService:
                 )
             )
         except (OSError, ValueError):
-            # C15-RDY-02A: success-evidence persistence is best-effort.
+            # Success-evidence persistence is best-effort.
             # A malformed/unreadable store must neither crash run
             # accounting nor leak store content into persisted
             # diagnostics; the successful execution result itself is

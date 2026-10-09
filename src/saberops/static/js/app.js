@@ -343,7 +343,7 @@
     eventSource.onerror = function () {
       var currentStatus = header.getAttribute("data-run-status");
       if (currentStatus === "COMPLETED" || currentStatus === "FAILED" || currentStatus === "ORPHANED") {
-        // R3-E2.1: a terminal run may still have an active post-run
+        // A terminal run may still have an active post-run
         // owner action (Review/Accept). Keep the stream usable in that
         // case; close only once no owner action remains active. The
         // single authoritative /actions read below is not a poll loop.

@@ -149,12 +149,12 @@ def _optional_text(row: sqlite3.Row, name: str) -> str | None:
 
 
 def _drop_gateway_evidence(evidence: DispatchEvidence) -> None:
-    """Clear the C10 gateway field on legacy rows that lack the column."""
+    """Clear the gateway field on legacy rows that lack the column."""
     evidence.gateway_evidence_json = None
 
 
 def _drop_c11d_identity(evidence: DispatchEvidence) -> None:
-    """Clear the C11-D binding identity / effort fields on legacy rows."""
+    """Clear the runtime binding identity / effort fields on legacy rows."""
     evidence.binding_id = None
     evidence.profile_id = None
     evidence.quota_pool_id = None
@@ -162,17 +162,17 @@ def _drop_c11d_identity(evidence: DispatchEvidence) -> None:
 
 
 def _dispatch_values_c10(evidence: DispatchEvidence) -> tuple[object, ...]:
-    """Return dispatch values without the C11-D identity/effort columns."""
+    """Return dispatch values without the runtime identity/effort columns."""
     full = _dispatch_values(evidence)
     c11d_trailing = 4
     if all(v is None for v in full[-c11d_trailing:]):
         return full[:-c11d_trailing]
-    # Never serialize real C11-D data into a legacy row.
+    # Never serialize real runtime data into a legacy row.
     return full[:-c11d_trailing]
 
 
 def _dispatch_values_legacy(evidence: DispatchEvidence) -> tuple[object, ...]:
-    """Return dispatch values without the C10 gateway column."""
+    """Return dispatch values without the gateway column."""
     full = _dispatch_values(evidence)
     c11d_trailing = 4
     gateway_idx = len(full) - c11d_trailing - 1
@@ -182,7 +182,7 @@ def _dispatch_values_legacy(evidence: DispatchEvidence) -> tuple[object, ...]:
         and all(v is None for v in full[-c11d_trailing:])
     ):
         return full[:gateway_idx]
-    # The C10 field is at gateway_idx; never serialize real data into
+    # The field is at gateway_idx; never serialize real data into
     # a legacy row.
     return full[:gateway_idx]
 
@@ -358,7 +358,7 @@ PROJECT_LEDGER_COLUMNS: dict[str, frozenset[str]] = {
 
 
 def _is_missing_project_ledger_table(exc: sqlite3.OperationalError) -> bool:
-    """True only when a C11 ledger table is absent from a legacy database.
+    """True only when a ledger table is absent from a legacy database.
 
     A read-only legacy store cannot be migrated on open, so ledger *reads*
     report "nothing recorded" instead of raising.  Writes deliberately keep
@@ -1188,7 +1188,7 @@ class Database:
                     conn.execute("ALTER TABLE runs ADD COLUMN config_json TEXT")
                 if "review_state_json" not in columns:
                     conn.execute("ALTER TABLE runs ADD COLUMN review_state_json TEXT")
-                # C13-F additive migration: frozen review-necessity decision.
+                # Additive migration: frozen review-necessity decision.
                 # Existing rows keep NULL and remain readable; reconstruction
                 # falls back to the conservative decision.
                 if "review_risk_decision_json" not in columns:
@@ -1203,7 +1203,7 @@ class Database:
                     conn.execute("ALTER TABLE runs ADD COLUMN tool_contract_json TEXT")
                 if "tool_contract_digest" not in columns:
                     conn.execute("ALTER TABLE runs ADD COLUMN tool_contract_digest TEXT")
-                # C10 additive migration: gateway snapshot columns. Existing
+                # Additive migration: gateway snapshot columns. Existing
                 # databases keep NULL and remain readable; legacy runs are
                 # never re-classified by gateway semantics.
                 if "gateway_snapshot_json" not in columns:
@@ -1217,12 +1217,12 @@ class Database:
                     conn.execute(
                         "ALTER TABLE dispatch_evidence ADD COLUMN control_plane_digest TEXT"
                     )
-                # C10 additive migration: per-dispatch gateway evidence.
+                # Additive migration: per-dispatch gateway evidence.
                 if dispatch_columns and "gateway_evidence_json" not in dispatch_columns:
                     conn.execute(
                         "ALTER TABLE dispatch_evidence ADD COLUMN gateway_evidence_json TEXT"
                     )
-                # C11-D additive migration: exact binding identity and
+                # Additive migration: exact binding identity and
                 # resolved reasoning effort on the durable dispatch row.
                 for _c11d_col in (
                     "binding_id",
@@ -1258,7 +1258,7 @@ class Database:
                 except Exception:
                     # supervision table may not exist yet in very old databases.
                     pass
-                # C09 additive migration: work_packages.scope_json. Existing
+                # Additive migration: work_packages.scope_json. Existing
                 # rows keep NULL and stay readable; no data is destroyed.
                 try:
                     wp_columns = {
@@ -1795,7 +1795,7 @@ class Database:
             raise
 
     def update_review_risk_decision(self, run_id: str, json_str: str | None) -> None:
-        """Persist the frozen C13-F review-necessity decision for ``run_id``.
+        """Persist the frozen review-necessity decision for ``run_id``.
 
         Idempotent overwrite; an empty / ``None`` payload deletes the
         decision (which forces conservative reconstruction on the next
@@ -1827,9 +1827,9 @@ class Database:
                 raise
 
     def get_review_risk_decision_json(self, run_id: str) -> str | None:
-        """Return the persisted C13-F review-necessity decision JSON, or ``None``.
+        """Return the persisted review-necessity decision JSON, or ``None``.
 
-        ``None`` for legacy rows predating C13-F and for any row whose
+        ``None`` for legacy rows predating adaptive review and for any row whose
         decision was deleted by a subsequent ``update_review_risk_decision``.
         """
         try:
@@ -3162,7 +3162,7 @@ class Database:
         return aggregate_usage(self.get_model_call_usage(run_id))
 
     # -----------------------------------------------------------------------
-    # C06: durable dispatch evidence and observation-only quota telemetry
+    # Durable dispatch evidence and observation-only quota telemetry
     # -----------------------------------------------------------------------
 
     def create_dispatch_evidence(self, evidence: DispatchEvidence) -> None:
@@ -3197,8 +3197,8 @@ class Database:
             except sqlite3.OperationalError as exc:
                 msg = str(exc)
                 if "reasoning_effort" in msg or "binding_id" in msg:
-                    # Legacy database missing the C11-D binding/effort
-                    # columns.  Drop them and retry through the C10 path.
+                    # Legacy database missing the runtime binding/effort
+                    # columns.  Drop them and retry through the gateway path.
                     _drop_c11d_identity(evidence)
                     try:
                         conn.execute(
@@ -3249,7 +3249,7 @@ class Database:
                             _dispatch_values_legacy(evidence),
                         )
                 elif "gateway_evidence_json" in msg:
-                    # Legacy database missing the C10 column. Insert without it.
+                    # Legacy database missing the gateway column. Insert without it.
                     _drop_gateway_evidence(evidence)
                     conn.execute(
                         """
@@ -3916,7 +3916,7 @@ class Database:
             conn.commit()
 
     # ------------------------------------------------------------------
-    # C09: run-scoped project scope evidence (frozen graph + expansions).
+    # Run-scoped project scope evidence (frozen graph + expansions).
     # The persistence layer stores and returns plain JSON strings/dicts;
     # project-scope semantics live in the project_scope module.
     # ------------------------------------------------------------------
@@ -4065,7 +4065,7 @@ class Database:
             conn.commit()
 
     def set_work_package_scope(self, package_id: str, scope_json: str) -> None:
-        """Attach the deterministic C09 project scope to a work package."""
+        """Attach the deterministic project scope to a work package."""
         with self._get_connection() as conn:
             cursor = conn.execute(
                 "UPDATE work_packages SET scope_json = ?, updated_at = ? WHERE id = ?",
@@ -4683,7 +4683,7 @@ class Database:
         )
 
     def _row_to_dispatch_evidence(self, row: sqlite3.Row) -> DispatchEvidence:
-        """Decode a C06 dispatch row, retaining NULL as unknown."""
+        """Decode an observability dispatch row, retaining NULL as unknown."""
         return DispatchEvidence(
             id=str(row["id"]),
             run_id=str(row["run_id"]),
@@ -4860,7 +4860,7 @@ class Database:
         )
 
     # -----------------------------------------------------------------------
-    # C05: Worker Checkpoints
+    # Worker Checkpoints
     # -----------------------------------------------------------------------
 
     def create_worker_checkpoint(self, checkpoint: WorkerCheckpoint) -> None:
@@ -4937,7 +4937,7 @@ class Database:
             return self._row_to_worker_checkpoint(row)
 
     # -----------------------------------------------------------------------
-    # C05: Worker Activations (Fencing & Lease)
+    # Worker Activations (Fencing & Lease)
     # -----------------------------------------------------------------------
 
     def create_worker_activation(self, activation: WorkerActivation) -> None:
@@ -5015,7 +5015,7 @@ class Database:
             return [self._row_to_worker_activation(row) for row in cursor.fetchall()]
 
     # -----------------------------------------------------------------------
-    # C05: Side-Effect Journal (Crash Window Idempotency)
+    # Side-Effect Journal (Crash Window Idempotency)
     # -----------------------------------------------------------------------
 
     def journal_record_intent(
@@ -5153,7 +5153,7 @@ class Database:
             return [self._row_to_side_effect(row) for row in cursor.fetchall()]
 
     # ------------------------------------------------------------------
-    # C11-C structured trace + tool-effect evidence.
+    # Structured trace + tool-effect evidence.
     #
     # Additive tables; the canonical event log (``events``) is unchanged
     # and remains the authoritative append-only journal for run state.
@@ -5382,11 +5382,11 @@ class Database:
             return [self._row_to_attempt_trace(row) for row in cursor.fetchall()]
 
     # ------------------------------------------------------------------
-    # C14-C production phase telemetry (purely observational)
+    # Production phase telemetry (purely observational)
     # ------------------------------------------------------------------
 
     def create_phase_observation(self, observation: PhaseObservation) -> None:
-        """Persist one C14-C phase observation row.
+        """Persist one telemetry phase observation row.
 
         The ``PhaseObservation`` dataclass validates itself on construction
         (canonical phase/status, finite monotonic anchors, non-negative
@@ -5487,7 +5487,7 @@ class Database:
         )
 
     # ------------------------------------------------------------------
-    # C11 Project Ledger
+    # Project Ledger
     #
     # The store holds durable Project truth and applies each authoritative
     # mutation atomically: the affected rows, the project's new version, and

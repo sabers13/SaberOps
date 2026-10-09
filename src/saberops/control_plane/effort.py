@@ -1,4 +1,4 @@
-"""C11-B: provider-neutral reasoning effort controls.
+"""Provider-neutral reasoning effort controls.
 
 Reasoning effort is a typed, provider-neutral declaration of HOW MUCH
 reasoning budget is requested.  It is independent of:
@@ -317,7 +317,7 @@ def resolve_effort(
 
 
 # Default owner-side effort policy per slot.  The defaults express the
-# recommended C11-B bounds; they are policy/configuration, not hidden
+# recommended binding bounds; they are policy/configuration, not hidden
 # model behaviour, and may be overridden by the owner.
 DEFAULT_ORCH_EFFORT_POLICY = EffortPolicy(
     min_effort=ReasoningEffort.LOW,

@@ -1,14 +1,14 @@
-"""C10 — OmniRoute Gateway & Governed Free Capacity.
+"""OmniRoute Gateway & Governed Free Capacity.
 
-C10 introduces an *optional* provider/account gateway that sits beneath
+The gateway introduces an *optional* provider/account gateway that sits beneath
 Orch's semantic dispatch. The architecture invariant is:
 
-    Orch selects provider/model -> C07 hard policy -> optional gateway
+    Orch selects provider/model -> quota hard policy -> optional gateway
     -> equivalent account/connection only
 
 A gateway module never chooses another provider/model/tier/role. It
 only chooses an equivalent account/connection for the *already selected*
-semantic candidate. C08 remains owner of tool transport; OmniRoute
+semantic candidate. The tool-contract layer remains owner of tool transport; OmniRoute
 Auto/Combo/Fusion/Pipeline/Context-Relay/MCP facilities are *not*
 adopted by this module.
 

@@ -23,10 +23,10 @@ def apply_c07_quota_to_chain(
     *,
     reserve_override: bool = False,
 ) -> list[WorkerCandidate]:
-    """Apply the C07 shared-pool red-line policy without ranking survivors.
+    """Apply the quota shared-pool red-line policy without ranking survivors.
 
-    The older helpers below remain source-compatible for C01-C06 callers;
-    actual C07 dispatch paths use this function and the preflight evaluator.
+    The older helpers below remain source-compatible for callers;
+    actual quota dispatch paths use this function and the preflight evaluator.
     """
     from saberops.control_plane import quota_decision
 

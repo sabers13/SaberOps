@@ -43,13 +43,13 @@ class CodexAdapter(WorkerAdapter):
     """Worker adapter dispatching tasks via Codex CLI.
 
     The adapter is gateway-capable: when ``WorkerRequest.env`` carries
-    the standard C10 gateway env vars (set by
+    the standard gateway env vars (set by
     :func:`saberops.gateway.prepare_dispatch_decision`), the
     adapter emits the per-process ``-c model_providers.<id>={...}`` and
     ``-c model_provider="<id>"`` overrides that the Codex CLI
     ``rust-v0.147.0`` accepts to dynamically select a custom provider.
 
-    When the loopback URL of the bounded C10 bridge is also present,
+    When the loopback URL of the bounded gateway bridge is also present,
     the adapter uses the bridge as the ``base_url`` so the bridge can
     observe ``X-OmniRoute-Selected-Connection-Id`` from the upstream
     response on the worker's behalf.
@@ -67,8 +67,8 @@ class CodexAdapter(WorkerAdapter):
         }
     )
     gateway_capabilities = frozenset()
-    # C10-R3: Codex 0.147.0 has been proven to consume the
-    # ORCH_GATEWAY_* env vars emitted by the C10 dispatch seam and
+    # Codex 0.147.0 has been proven to consume the
+    # ORCH_GATEWAY_* env vars emitted by the dispatch seam and
     # route its real HTTP request through the configured OmniRoute
     # transport via ``-c model_providers.<id>={...}`` and
     # ``-c model_provider="<id>"``.  Advertise this ONLY because the
@@ -229,7 +229,7 @@ class CodexAdapter(WorkerAdapter):
         )
 
     def _build_gateway_overrides(self, env: dict[str, str]) -> list[str] | None:
-        """Return the ``-c`` flags that select a C10 gateway provider.
+        """Return the ``-c`` flags that select a gateway provider.
 
         The Codex CLI accepts repeated ``-c key=value`` flags to layer
         configuration on top of ``~/.codex/config.toml`` *for that
@@ -248,7 +248,7 @@ class CodexAdapter(WorkerAdapter):
 
         Secret hygiene: the bearer-token env-var *name* is passed to
         Codex; Codex resolves the actual token value at request time.
-        When the bounded C10 bridge is the transport owner, the
+        When the bounded gateway bridge is the transport owner, the
         adapter hands Codex a sentinel env-var name so the Codex CLI
         never sees the real OmniRoute token.
         """

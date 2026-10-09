@@ -1,4 +1,4 @@
-"""Comparability contract enforcement for C12-B experiments (Section 13).
+"""Comparability contract enforcement for replay experiments (Section 13).
 
 Two replay execution records may be directly compared ONLY when all required
 controls match.  Mismatched controls produce NOT_DIRECTLY_COMPARABLE rather
@@ -28,7 +28,7 @@ the comparison NOT_DIRECTLY_COMPARABLE EVEN IF BOTH SIDES SHARE THE SAME
 SENTINEL: two runs of unknown toolchain are not proven equivalent, they are
 both unproven.
 
-Context strategy arm IS allowed to differ — that is the point of C12-B.
+Context strategy arm IS allowed to differ — that is the point of the replay harness.
 """
 
 from __future__ import annotations
@@ -251,7 +251,7 @@ def _record_definition_inconsistencies(
 ) -> list[str]:
     """Find contradictions between record-level identity and its definition.
 
-    Canonical owner (C12-E consolidation): this check was previously
+    Canonical owner (replay consolidation): this check was previously
     duplicated in ``efficiency.py`` and reused from there by
     ``parallelism.py``.  Records whose record-level identity contradicts
     their embedded effective_definition are rejected outright before any
@@ -293,11 +293,11 @@ def _record_definition_inconsistencies(
 def _positive_security_identity(rec: ReplayExecutionRecord) -> str | None:
     """Return positively bound policy identity, or None when unestablished.
 
-    Canonical owner (C12-E consolidation): previously duplicated in
+    Canonical owner (replay consolidation): previously duplicated in
     ``efficiency.py`` and reused from there by ``parallelism.py``.  The
     current canonical ReplayEngine seam exposes no trustworthy actual
     policy identity bound to the SandboxPolicy it used, so security
-    identity is UNESTABLISHED for every current C12 execution record.
+    identity is UNESTABLISHED for every current replay execution record.
     This function always returns None: ordinary caller-written strategy
     evidence — including hand-written 64-hex digests, even ones claiming
     ``bound_to == "canonical_execution_seam"`` — is never positive proof

@@ -1,4 +1,4 @@
-"""R2-A single run-creation authority shared by Web and CLI.
+"""Single run-creation authority shared by Web and CLI.
 
 Both owner surfaces (``POST /runs`` in :mod:`saberops.web` and
 ``orch run`` in :mod:`saberops.cli`) resolve the effective run policy
@@ -288,7 +288,7 @@ def resolve_effective_target_branch(
     An explicit per-run branch wins; otherwise an explicit persisted
     project setting wins; otherwise the current symbolic branch is
     resolved once at creation and frozen verbatim (compatibility: the
-    AcceptEngine keeps reading live repo state, R4 owns moved-HEAD).
+    AcceptEngine keeps reading live repo state, future rebase/recovery work owns moved-HEAD).
     A detached HEAD with no explicit setting fails with an actionable
     message rather than freezing a guess.
 

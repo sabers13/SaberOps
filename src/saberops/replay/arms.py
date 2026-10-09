@@ -1,4 +1,4 @@
-"""C12-B context strategy arms (Section 9).
+"""Context strategy arms (Section 9).
 
 Implements four experimentable context-construction arms:
 

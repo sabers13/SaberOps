@@ -1,4 +1,4 @@
-"""C09 project scope: generic, deterministic, module-aware project understanding.
+"""Project scope: generic, deterministic, module-aware project understanding.
 
 This package turns F01's repository-specific scoping foundation into a normal
 Orch runtime capability that works on any managed repository:

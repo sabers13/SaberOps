@@ -1,4 +1,4 @@
-"""C11-B: owner-level, non-secret persistence for exact user model bindings.
+"""Owner-level, non-secret persistence for exact user model bindings.
 
 The correction this module exists for is the gap between *discovery* and
 *execution*:
@@ -15,7 +15,7 @@ those bindings plus the owner's :class:`OrchBindingPolicy`.
 
 Authority boundaries preserved here:
 
-* This is a **control-plane** (C11-B) document.  It is not Project truth and
+* This is a **control-plane** document.  It is not Project truth and
   worker chains remain owned by :mod:`saberops.routing_config`; exact role
   selections and their order live here.
 * Only non-secret identity is persisted.  :class:`ExecutionProfile` carries
@@ -87,7 +87,7 @@ def get_binding_store_path() -> Path:
     """Resolve the canonical owner binding document path.
 
     ``ORCH_BINDING_STORE`` pins an explicit file (tests / diagnostics).
-    Otherwise the store lives beside the other C11-B owner configuration
+    Otherwise the store lives beside the other binding owner configuration
     (``$XDG_CONFIG_HOME/saberops/bindings.json``).
     """
     override = os.environ.get(ORCH_BINDING_STORE_ENV, "").strip()
@@ -100,7 +100,7 @@ def get_binding_store_path() -> Path:
 
 @dataclass(frozen=True)
 class OwnerBindings:
-    """The canonical owner-level C11-B document.
+    """The canonical owner-level binding document.
 
     ``registry`` is the exact binding/profile/pool identity set; ``policy``
     is the owner's Orchestrator binding choice expressed over those exact
@@ -272,22 +272,22 @@ def materialize_discovered_binding(
     binding_role: BindingRole = BindingRole.WORKER,
     reasoning_effort_capabilities: frozenset[ReasoningEffort] = frozenset(),
 ) -> tuple[ExecutionBinding, ExecutionProfile, QuotaPool]:
-    """Build the exact C11-B identity for one discovered account model.
+    """Build the exact binding identity for one discovered account model.
 
     This is a *request* to register an identity, not execution authority:
-    the caller must still prove the result through the real C11-B resolver
+    the caller must still prove the result through the real binding resolver
     with the real adapter before it may be marked executable.
 
     The profile and pool carry no credential value and no quota policy --
-    only provider-neutral identity.  Quota scarcity stays UNKNOWN to C07
+    only provider-neutral identity.  Quota scarcity stays UNKNOWN to quota policy
     until a real ``QuotaPoolPolicy`` exists for the pool id.
 
     ``binding_role`` defaults to :class:`BindingRole.WORKER`: discovery is
     a worker-routing pathway.  Callers needing a role-compatible binding
-    for the ORCHESTRATOR slot must request it explicitly (C15-XB-03:
-    reusing an ORCHESTRATOR binding as proof of worker execution would
-    be a role violation; reusing a WORKER binding as Orchestrator
-    selection would likewise be a role violation).
+    for the ORCHESTRATOR slot must request it explicitly (reusing an
+    ORCHESTRATOR binding as proof of worker execution would be a role
+    violation; reusing a WORKER binding as Orchestrator selection would
+    likewise be a role violation).
 
     The identity scope is ``role``-qualified only at the binding layer so
     the same ``(connection, provider, model)`` triple may register
@@ -311,7 +311,7 @@ def materialize_discovered_binding(
     * ``binding_id`` carries the role so different role-qualified
       bindings on the same ``(connection, model)`` remain distinct.
 
-    C15-XC-01 effort truthfulness: ``reasoning_effort_capabilities`` is
+    Effort truthfulness: ``reasoning_effort_capabilities`` is
     NEVER fabricated by this materialization seam.  ``LOW`` /
     ``MEDIUM`` / ``HIGH`` / ``ULTRA`` are not added merely because
     discovery succeeded or because an adapter is registered.  The

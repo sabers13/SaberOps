@@ -1,6 +1,6 @@
 """GitHub Copilot CLI adapter with profile-distinguished quota ownership.
 
-C11-C introduces the Copilot backend as a *backend*, not as a single
+Execution tracing introduces the Copilot backend as a *backend*, not as a single
 provider.  Two profiles share the ``copilot_cli`` executable but differ
 in every dimension the binding registry cares about:
 
@@ -218,8 +218,8 @@ def profile_for_id(profile_id: str) -> CopilotProfile:
 
 #: Non-secret request-env key selecting the active Copilot profile for
 #: one dispatch.  Already honoured by :func:`_resolve_profile_from_request`
-#: and already allowlisted for autonomous children; the C11-D exact
-#: binding resolver writes it (never a secret) so the selected C11-B
+#: and already allowlisted for autonomous children; the runtime exact
+#: binding resolver writes it (never a secret) so the selected binding
 #: profile controls the actual invocation.
 COPILOT_PROFILE_ENV_VAR = "ORCH_COPILOT_PROFILE_ID"
 
@@ -231,7 +231,7 @@ def copilot_overlay_for_binding(
     account_ref: str = "",
     backend_ref: str = "",
 ) -> dict[str, str]:
-    """Return the non-secret request-env overlay for one C11-B profile.
+    """Return the non-secret request-env overlay for one binding profile.
 
     A ``profile_id`` naming a known Copilot profile reuses the
     adapter's existing ``ORCH_COPILOT_PROFILE_ID`` seam, so the exact
@@ -383,7 +383,7 @@ class CopilotAdapter(WorkerAdapter):
     # Factual capabilities the harness has been observed to expose.  The
     # adapter deliberately does NOT claim ``structured_usage`` /
     # ``large_prompt_stdin`` until those have been proven -- this is the
-    # exact distinction C11-C draws between "the executable is on disk"
+    # exact distinction execution tracing draws between "the executable is on disk"
     # and "the capability has actually been observed for autonomous use".
     # It likewise does NOT claim ``sandbox_intercepted``: interception
     # is per-Attempt enforcement evidence derived from the actual

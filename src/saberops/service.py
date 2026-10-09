@@ -73,7 +73,7 @@ class OrchestratorService:
         self.registry = registry or AdapterRegistry.default()
         self.worktree_base = worktree_base
         self.tool_registry = tool_registry or ToolRegistry.from_environment()
-        # C15-RDY-02A: the composition layer owns readiness acquisition.
+        # The composition layer owns readiness acquisition.
         # ``None``/``True`` builds the owner-state service; when that
         # authority cannot be constructed/read the seam resolves to the
         # fail-closed unavailable fallback (automatic dispatch sees
@@ -340,7 +340,7 @@ class OrchestratorService:
         return self.db.get_events(run_id=run_id, after_id=after_id, limit=limit)
 
     def get_observability_snapshot(self, run_id: str) -> dict[str, Any]:
-        """Return a deterministic, read-only C06 run snapshot."""
+        """Return a deterministic, read-only observability run snapshot."""
         return build_run_observability_snapshot(self.db, run_id)
 
     def get_plan(self, run_id: str) -> dict[str, Any]:
@@ -372,7 +372,7 @@ class OrchestratorService:
     ) -> ReviewResult:
         """Execute independent code review for a completed run.
 
-        R3-E1: when the caller supplies no explicit override, the
+        When the caller supplies no explicit override, the
         owner's configured exact Reviewer binding (if any) is resolved
         to a single :class:`WorkerCandidate` carrying the exact
         provider, exact model, and exact ``binding_id``.  An

@@ -1,9 +1,9 @@
-"""C12-D bounded parallelism experiments over the canonical replay seam.
+"""Bounded parallelism experiments over the canonical replay seam.
 
-C12-D is an EXPERIMENT / OBSERVATION layer.  It is NOT a scheduler, NOT a
+The replay harness is an EXPERIMENT / OBSERVATION layer.  It is NOT a scheduler, NOT a
 second dependency authority, NOT a second worktree/sandbox/tool authority,
 and NOT a production parallelism policy.  Every piece of real execution used
-by C12-D goes through the existing canonical ReplayEngine execution seam
+by the replay harness goes through the existing canonical ReplayEngine execution seam
 (``ReplayEngine.execute_replay``): DisposableWorkspace lifecycle,
 SandboxPolicy construction, sandbox grant/interceptor/trace setup,
 ``run_sandboxed_process`` invocation, deterministic verifier, workspace
@@ -26,21 +26,21 @@ Three declared parallelism families, measured only where honestly available:
    complete valid canonical scope evidence on every item; NO declared
    dependency edges on any item (any non-empty dependency_item_ids —
    self, co-scheduled, undeclared, or otherwise — refuses the parallel
-   arm; C12-D does not interpret dependency graphs); empty/ambiguous
+   arm; the replay harness does not interpret dependency graphs); empty/ambiguous
    scope evidence, or exact or ancestor-descendant overlapping declared
    scope) refuses the parallel arm and execution falls back to the
    sequential baseline.
-- DEPENDENCY-SAFE SEMANTIC PARALLELISM: NOT_AVAILABLE.  C11-D owns the
+- DEPENDENCY-SAFE SEMANTIC PARALLELISM: NOT_AVAILABLE.  The autonomous runtime owns the
   dependency-aware scheduling representation (``WorkPackage.
   dependency_package_ids`` / plan-step ``dependency_ids``) and the bounded
   Attempt loops; the accepted runtime executes those loops sequentially and
   no semantic model/Orch Attempt executor participates in this bounded
-  replay environment.  C12-D builds no replacement scheduler and no
+  replay environment.  The replay harness builds no replacement scheduler and no
   substitute semantic executor.
 - SPECULATIVE SAME-TASK PARALLELISM: NOT_AVAILABLE.  A real speculative arm
-  would require valid semantic execution bindings (C11-B), authorized model
-  execution (C07/C08), and a multi-candidate synthesis/integration path.
-  None of these exist in the current bounded replay environment and C12-D
+  would require valid semantic execution bindings, authorized model
+  execution, and a multi-candidate synthesis/integration path.
+  None of these exist in the current bounded replay environment and the replay harness
   creates none of them.
 
 Honesty invariants for this campaign:
@@ -52,20 +52,20 @@ Honesty invariants for this campaign:
   reasoning, and quota metrics stay UNKNOWN.
 - A deterministic work-item check PASS (strategy/verifier outcome of the
   canonical seam) is deterministic process evidence only.  No arm claims
-  semantic task success: every derived C12-D observation record carries
+  semantic task success: every derived replay observation record carries
   ``verified_success=False`` on both the record and its measurement, and the
   underlying canonical outcomes are preserved separately under explicit
   ``baseline_execution`` evidence.
 - Wall-clock and per-item durations are directly observed quantities.
   Unobserved quantities are UNKNOWN, never zero, never inferred from bytes
   or wall clock.
-- Security identity: as in C12-C, the canonical seam does not expose a
+- Security identity: as in the replay harness, the canonical seam does not expose a
   positive, non-secret security-policy identity bound to the SandboxPolicy
-  it actually used.  C12-D fabricates none and admits none from
+  it actually used.  The replay harness fabricates none and admits none from
   caller-written strategy evidence, so direct cross-arm comparability
   retains the explicit fail-closed security reason.
 - Comparability normalizes ONLY the declared parallelism variable
-  (``c12d_execution_mode``); the accepted C12-B fail-closed comparator is
+  (``c12d_execution_mode``); the accepted replay fail-closed comparator is
   applied UNCHANGED beneath it.
 - No production winner is adopted from any result.
 """
@@ -112,10 +112,10 @@ from saberops.replay.toolchain import (
 # Dimension / vocabulary constants
 # ---------------------------------------------------------------------------
 
-#: Experimental dimension for C12-D.
+#: Experimental dimension for the replay harness.
 DIMENSION_PARALLELISM: Final[str] = "parallelism"
 
-#: Declared execution modes.  This is the ONLY variable C12-D normalizes away
+#: Declared execution modes.  This is the ONLY variable the replay harness normalizes away
 #: when comparing arms; everything else is a mandatory control.
 EXECUTION_MODE_SEQUENTIAL: Final[str] = "sequential"
 EXECUTION_MODE_DETERMINISTIC_PARALLEL: Final[str] = "deterministic_parallel"
@@ -153,7 +153,7 @@ EVIDENCE_KIND_DETERMINISTIC_PARALLELISM: Final[str] = "deterministic_process_par
 #: Evidence-kind marker: one-at-a-time sequential baseline execution.
 EVIDENCE_KIND_SEQUENTIAL_BASELINE: Final[str] = "sequential_baseline"
 
-#: Record-kind marker for derived C12-D observation records.
+#: Record-kind marker for derived replay observation records.
 RECORD_KIND_PARALLELISM_OBSERVATION: Final[str] = "c12d_parallelism_observation"
 
 #: Declared independence statuses of a work item.  UNKNOWN is the honest
@@ -183,7 +183,7 @@ _ITEM_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 @dataclass(frozen=True)
 class ParallelWorkItem:
-    """One declared deterministic work item of a C12-D experiment arm.
+    """One declared deterministic work item of a replay experiment arm.
 
     A work item is a DECLARED EXPERIMENT INPUT, not a scheduler decision:
     it carries its own process step, its declared scope paths (ownership),
@@ -237,7 +237,7 @@ class ParallelWorkItem:
 
 @dataclass(frozen=True)
 class ParallelismExperimentDefinition:
-    """Deterministic identity of one C12-D arm definition.
+    """Deterministic identity of one replay arm definition.
 
     Contains NO execution IDs, timestamps, or random values.  Changing the
     declared execution mode, any work item, the verifier, or any control
@@ -365,7 +365,7 @@ def evaluate_independence(items: tuple[ParallelWorkItem, ...]) -> tuple[bool, tu
 
     This is a FAIL-CLOSED gate over the declared experiment inputs.  It is
     NOT a dependency-analysis engine and owns no production dependency
-    authority: production dependency representation remains owned by C11-D
+    authority: production dependency representation remains owned by the autonomous runtime
     (``WorkPackage.dependency_package_ids``).  Any uncertainty refuses the
     parallel arm and execution falls back to the sequential baseline.
 
@@ -374,7 +374,7 @@ def evaluate_independence(items: tuple[ParallelWorkItem, ...]) -> tuple[bool, tu
     on every item (omitted/UNKNOWN evidence fails closed); complete
     valid canonical scope evidence on every item; EMPTY dependency_item_ids
     on every item (any declared dependency edge — self, co-scheduled,
-    undeclared, or otherwise — refuses the parallel arm; C12-D does not
+    undeclared, or otherwise — refuses the parallel arm; the replay harness does not
     interpret dependency graphs); no duplicate item ids; and no
     overlapping or ancestor-descendant scopes.
     """
@@ -537,7 +537,7 @@ def _build_arm_observation_record(
     """Build the derived arm-level observation record with real frozen controls.
 
     Evidence integrity: no semantic executor performed the corpus task
-    objective, so the derived C12-D observation record carries
+    objective, so the derived replay observation record carries
     ``verified_success=False`` on the record AND its measurement.  The
     underlying canonical outcomes are preserved separately as explicit
     deterministic process evidence and never masquerade as arm success.
@@ -658,7 +658,7 @@ def _build_arm_observation_record(
 
 @dataclass(frozen=True)
 class ParallelismArmResult:
-    """One arm's result inside the bounded C12-D campaign."""
+    """One arm's result inside the bounded replay campaign."""
 
     dimension: str
     arm_id: str
@@ -831,11 +831,11 @@ def run_deterministic_parallel_arm(
 def dependency_safe_semantic_parallel_status() -> tuple[bool, str]:
     """Report dependency-safe semantic parallel arm availability honestly.
 
-    C11-D owns the dependency-aware scheduling representation and the
+    The autonomous runtime owns the dependency-aware scheduling representation and the
     bounded Attempt loops; the accepted runtime executes those loops
     sequentially and no semantic model/Orch Attempt executor participates
     in this bounded replay environment.  Concurrent Attempts are
-    representable, not executable here.  C12-D builds no replacement
+    representable, not executable here.  The replay harness builds no replacement
     scheduler and no substitute semantic executor.
     """
     return (
@@ -858,10 +858,10 @@ def speculative_same_task_parallel_status() -> tuple[bool, str]:
     """Report speculative same-task arm availability honestly.
 
     A real speculative arm (one strong worker vs candidates + selection vs
-    verifier) requires valid semantic execution bindings (C11-B),
-    authorized model execution (C07/C08), and a synthesis/integration path
+    verifier) requires valid semantic execution bindings,
+    authorized model execution, and a synthesis/integration path
     with its own resource accounting.  None of these exist in the current
-    bounded replay environment and C12-D creates no new provider executor,
+    bounded replay environment and the replay harness creates no new provider executor,
     multi-model selection authority, or synthesis authority.
     """
     return (
@@ -880,7 +880,7 @@ def speculative_same_task_parallel_status() -> tuple[bool, str]:
 
 
 # ---------------------------------------------------------------------------
-# Dimension-aware comparability (C12-B layer NOT weakened)
+# Dimension-aware comparability (replay layer NOT weakened)
 # ---------------------------------------------------------------------------
 
 
@@ -888,15 +888,15 @@ def assert_parallelism_comparable(
     record_a: ReplayExecutionRecord,
     record_b: ReplayExecutionRecord,
 ) -> ComparisonResult:
-    """Compare two C12-D records varying ONLY the declared execution mode.
+    """Compare two replay records varying ONLY the declared execution mode.
 
-    The accepted C12-B fail-closed comparability layer is applied UNCHANGED
+    The accepted replay fail-closed comparability layer is applied UNCHANGED
     to mode-normalized records.  Normalization removes ONLY
     ``c12d_execution_mode``; the dimension marker is retained so
     cross-dimension comparisons fail closed.  Security comparability
     requires POSITIVE policy identity bound to the actual canonical
     execution contract on BOTH records; the canonical seam exposes no such
-    identity, so every current C12-D cross-arm comparison retains the
+    identity, so every current replay cross-arm comparison retains the
     explicit fail-closed security reason (NOT_DIRECTLY_COMPARABLE).
     """
     for label, rec in (("record_a", record_a), ("record_b", record_b)):
@@ -961,11 +961,11 @@ def assert_parallelism_comparable(
 
 
 # ---------------------------------------------------------------------------
-# Declared C12-D work items per corpus task
+# Declared replay work items per corpus task
 # ---------------------------------------------------------------------------
 
 
-#: Declared deterministic work items for the C12-D campaign.  Items declare
+#: Declared deterministic work items for the replay campaign.  Items declare
 #: their own process step, scope ownership, dependency edges, and
 #: independence status.  These are deterministic diagnostic checks (NOT
 #: Orch/model turns), disjoint by declared scope.  The engine executes
@@ -1010,7 +1010,7 @@ _DECLARED_WORK_ITEMS: Final[dict[str, tuple[ParallelWorkItem, ...]]] = {
 
 
 def declared_work_items(task_id: str) -> tuple[ParallelWorkItem, ...]:
-    """Return the declared C12-D work items for one corpus task."""
+    """Return the declared replay work items for one corpus task."""
     items = _DECLARED_WORK_ITEMS.get(task_id)
     if items is None:
         raise ReplayError(f"No C12-D work items declared for task {task_id!r}")
@@ -1024,7 +1024,7 @@ def declared_work_items(task_id: str) -> tuple[ParallelWorkItem, ...]:
 
 @dataclass(frozen=True)
 class TaskParallelismEvidence:
-    """All C12-D arm evidence for one corpus task."""
+    """All replay arm evidence for one corpus task."""
 
     task_id: str
     task_definition_digest: str
@@ -1047,7 +1047,7 @@ class TaskParallelismEvidence:
 
 @dataclass(frozen=True)
 class ParallelismExperimentResult:
-    """Aggregate result of the bounded C12-D campaign."""
+    """Aggregate result of the bounded replay campaign."""
 
     task_evidence: tuple[TaskParallelismEvidence, ...]
     toolchain_fingerprint: str
@@ -1112,7 +1112,7 @@ def run_c12d_experiments(
     evidence_dir: Path | str | None = None,
     task_ids: tuple[str, ...] | None = None,
 ) -> ParallelismExperimentResult:
-    """Run the bounded C12-D parallelism campaign on real frozen tasks.
+    """Run the bounded replay parallelism campaign on real frozen tasks.
 
     Campaign shape (bounded; observation only):
     - Sequential baseline: declared deterministic work items executed
@@ -1124,7 +1124,7 @@ def run_c12d_experiments(
       arm is NOT_AVAILABLE and the sequential baseline is the executed
       fallback.
     - Dependency-safe semantic parallel arm: NOT_AVAILABLE (no semantic
-      executor participates; C11-D owns scheduling).
+      executor participates; the autonomous runtime owns scheduling).
     - Speculative same-task arm: NOT_AVAILABLE (no valid semantic
       binding/executor; no substitute authority created).
 

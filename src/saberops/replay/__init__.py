@@ -1,4 +1,4 @@
-"""C12-A / C12-B Real-project replay, measurement, and context-experiment package."""
+"""Real-project replay, measurement, and context-experiment package."""
 
 from __future__ import annotations
 

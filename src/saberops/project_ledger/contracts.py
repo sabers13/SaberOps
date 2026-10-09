@@ -728,7 +728,7 @@ class BootstrapBudget:
 
     Continuity is not solved by dumping the Project database into a prompt.
     The budget caps each typed category; anything not selected stays in the
-    ledger, which remains the authority.  A later C11 tranche can make this
+    ledger, which remains the authority.  A later tranche can make this
     token-aware without changing any durable schema.
     """
 
@@ -755,10 +755,11 @@ class BootstrapBudget:
 
 @dataclass(frozen=True)
 class RuntimeComposition:
-    """Read-only C05 runtime facts about one referenced run.
+    """Read-only supervisor runtime facts about one referenced run.
 
-    C11 owns Project-level continuity; C05 continues to own run and runtime
-    lifecycle semantics.  This view *reads* C05 state so a bootstrap can say
+    The project ledger owns Project-level continuity; the run supervisor
+    continues to own run and runtime lifecycle semantics.  This view *reads*
+    supervisor state so a bootstrap can say
     "this project work is attached to a run that was interrupted" without
     copying, re-deciding or duplicating runtime recovery.
     """

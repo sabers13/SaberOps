@@ -34,7 +34,7 @@ class ExposureMechanism(StrEnum):
     * ``ORCH_CLI``              -- the canonical Orch CLI subprocess
       drives the capability end-to-end.
     * ``MCP_TO_CLI``            -- an MCP source is rendered to an Orch
-      CLI artifact by CLIHub (optional bridge; see C12 measurement).
+      CLI artifact by CLIHub (optional bridge; see replay measurement).
     * ``NATIVE_BACKEND_TOOL``   -- the backend itself owns the capability
       as a built-in tool (e.g. a backend-native ``Bash`` or ``Edit``).
     """

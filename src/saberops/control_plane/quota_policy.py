@@ -1,4 +1,4 @@
-"""Canonical C07 quota-pool red-line policy."""
+"""Canonical quota-pool red-line policy."""
 
 from __future__ import annotations
 
@@ -91,7 +91,7 @@ def quota_decision(
 
     The returned :attr:`QuotaDecision.pool_id` is always the
     **matched** state's canonical ``pool_id`` (or ``None`` only when
-    no state matched), so legacy C07 evidence is preserved verbatim
+    no state matched), so legacy quota evidence is preserved verbatim
     for both legacy and binding-scoped callers.
     """
     policies = pool_policies or {}
@@ -101,7 +101,7 @@ def quota_decision(
             continue
         if pool_id is not None:
             # Binding-scoped: hard policy MUST come from the canonical
-            # C07 ``ControlPlanePolicy``.  Synthesising a default
+            # ``ControlPlanePolicy``.  Synthesising a default
             # STRICT / 15% policy when no canonical policy is declared
             # would silently invent red-line enforcement that the
             # owner never authorised for this binding's pool.

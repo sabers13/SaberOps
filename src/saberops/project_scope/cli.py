@@ -4,7 +4,7 @@
                            external repository; read-only, JSON mode).
 ``orch scope show``        resolve and render a bounded scope for a query.
 ``orch scope expand``      run-scoped deterministic expansion (resolves
-                           ORCH_RUN_ID / ORCH_DB_PATH like C08 tooling).
+                           ORCH_RUN_ID / ORCH_DB_PATH like tooling).
 ``orch scope affected``    shadow affected-verification planning.
 
 All inspection commands are read-only: zero DB mutation, zero model calls,

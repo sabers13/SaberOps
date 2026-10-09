@@ -230,9 +230,9 @@ def evaluate_eligibility(
     readiness_reason: str | None = None,
     readiness_executable_available: bool = True,
 ) -> str | None:
-    """Return the compatibility skip reason for the canonical C07 decision.
+    """Return the compatibility skip reason for the canonical quota decision.
 
-    ``training_required`` / ``routing_snapshot`` carry frozen R2-B
+    ``training_required`` / ``routing_snapshot`` carry frozen
     data-policy evidence through to the single canonical decision; when
     omitted the candidate's own frozen classification decides.
     """
@@ -280,7 +280,7 @@ def evaluate_eligibility(
     if decision.reason == GOVERNED_INSTRUCTIONS_UNSUPPORTED:
         return GOVERNED_INSTRUCTIONS_UNSUPPORTED
     # Explicit ordinary overrides are intentionally not a bypass.  Retain a
-    # stable reason for callers that do not yet understand C07 enums.
+    # stable reason for callers that do not yet understand quota enums.
     if decision.reason == PROVIDER_ALLOWED_WITH_WARNING:
         return None
     return decision.reason
@@ -306,7 +306,7 @@ def control_plane_decision(
     readiness_executable_available: bool = True,
     explicit_unknown_readiness: bool = False,
 ) -> ControlPlaneDecision:
-    """Return the typed C07 decision used by compatibility callers."""
+    """Return the typed quota decision used by compatibility callers."""
     return evaluate_control_plane(
         candidate,
         adapter=adapter,

@@ -1,4 +1,4 @@
-"""C13-F risk-adaptive review policy.
+"""Risk-adaptive review policy.
 
 Pure policy module for the decision surface (``classify_change``,
 ``decide_review``, ``ReviewDecision`` JSON shape, invariants):
@@ -11,7 +11,7 @@ to decide whether an independent semantic review is required for a Run.
 The project-policy persistence seam (``load_project_review_policy`` /
 ``set_project_review_policy`` / ``remove_project_review_policy``) does
 perform atomic file I/O against the canonical per-project state
-directory (mirroring the C13-B gate-scratch policy pattern).  Those
+directory (mirroring the gate-scratch policy pattern).  Those
 helpers are the only I/O surface in this module and they are the
 single seam CLI / Web / supervisor use to resolve the project policy
 that becomes frozen on the run row at Run creation.
@@ -58,7 +58,7 @@ REVIEW_ADAPTIVE_VERSION: Final[str] = "review-adaptive/1"
 
 # Stable on-disk filename inside the project state directory.  Deliberately
 # distinct from the immutable identity marker ``project.json``: this file
-# holds mutable per-project review-policy preference, mirroring the C13-B
+# holds mutable per-project review-policy preference, mirroring the
 # gate-scratch policy file pattern.
 _REVIEW_POLICY_FILENAME: Final[str] = "review-policy.json"
 _REVIEW_POLICY_TMP_PREFIX: Final[str] = ".review-policy-"
@@ -93,7 +93,7 @@ class ChangeClass(StrEnum):
 
     Distinct from review-effort levels in :mod:`saberops.review_policy`:
     this taxonomy classifies the **change**, not the required reviewer
-    effort, and is consumed only by the C13-F decision pipeline.
+    effort, and is consumed only by the review-necessity decision pipeline.
     """
 
     DOCS_ONLY = "DOCS_ONLY"
@@ -113,7 +113,7 @@ class ReviewRequirementSource(StrEnum):
     exactly once at Run-candidate-ready time.
 
     ``CLASSIFIER_AUTO_TIER_UNRESOLVABLE`` is the single truthful
-    label for the fail-closed seam added at C13-F correction: when an
+    label for the fail-closed seam added at review-necessity correction: when an
     auto-routed candidate's durable tier cannot be read (database
     raised, the run row is missing, or ``run.tier`` is null), the
     classifier may still emit a LOW-skip answer on diff patterns
@@ -545,7 +545,7 @@ def classify_change(
     tier: Tier | None,
     autonomous: bool,
 ) -> ChangeClassification:
-    """Classify the change into the C13-F taxonomy using deterministic facts.
+    """Classify the change into the review-necessity taxonomy using deterministic facts.
 
     Inputs are all structured: task text, normalized repo-relative changed
     paths, the resolved routing tier, and whether the run is autonomous.
@@ -820,10 +820,10 @@ def decide_review(
 def conservative_legacy_decision(
     *, owner_explicit_review: bool, review_policy_mode: ReviewPolicyMode
 ) -> ReviewDecision:
-    """Return a conservative decision for a Run with no C13-F fields.
+    """Return a conservative decision for a Run with no review-necessity fields.
 
     Used by Accept and supervisor reconstruction paths when the Run row
-    has no persisted C13-F decision.  Never invents a skip: when
+    has no persisted review-necessity decision.  Never invents a skip: when
     ``review_enabled`` was effectively true for the legacy run, this
     preserves the legacy semantic of "review required".  Never downgrades
     HIGH/T3, autonomous, or owner-explicit review.
@@ -930,7 +930,7 @@ def load_project_review_policy_for_state_dir(
     A missing file is the canonical ``RISK_ADAPTIVE`` default.  A
     present-but-corrupt file fails closed with :class:`ReviewPolicyError`
     because corrupt project authority is a fail-closed condition (mirrors
-    the C13-B gate-scratch policy loader).
+    the gate-scratch policy loader).
     """
     path = project_review_policy_path(state_dir)
     loaded = _read_review_policy_file(path)
@@ -1006,7 +1006,7 @@ def resolve_effective_review_policy_mode(
 def _atomic_write_json(path: Path, payload: dict[str, object]) -> None:
     """Write ``payload`` deterministically and atomically.
 
-    Mirrors the C13-B gate-scratch policy atomic-write discipline.
+    Mirrors the gate-scratch policy atomic-write discipline.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
@@ -1134,7 +1134,7 @@ def validate_project_review_policy_invariants(
     """Fail closed if a decision attempts to weaken a hard minimum.
 
     Public seam for tests and external callers that want to assert a
-    freshly-built decision does not contradict C13-F hard minimums.
+    freshly-built decision does not contradict review-necessity hard minimums.
     OWNER_DISABLED is an explicit owner exception; consumers additionally
     require matching frozen run authorization before honoring that decision.
     Raises :class:`ReviewPolicyError` on violation.

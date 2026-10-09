@@ -1,4 +1,4 @@
-"""Account selection under the C10 invariant.
+"""Account selection under the gateway invariant.
 
 The selection pipeline is intentionally narrow:
 
@@ -7,7 +7,7 @@ The selection pipeline is intentionally narrow:
    substitute a different provider/model/tier/role.
 2. Drop terminal/unusable accounts (no auth, disabled, unavailable).
 3. Filter by current health/cooldown.
-4. Apply C07 quota eligibility at the account or shared-pool level.
+4. Apply quota eligibility at the account or shared-pool level.
 5. Optionally retain a healthy affinity hint.
 6. Otherwise rank by infrastructure preference (free capacity is a tie
    breaker, never a substitute for semantic eligibility).
@@ -108,8 +108,8 @@ def _quota_blocks(
 ) -> bool:
     """Decide whether a quota observation excludes ``account``.
 
-    Unknown and stale observations never block (mirrors C07 quota
-    semantics: the C10 gateway must not pretend to know more than its
+    Unknown and stale observations never block (mirrors quota
+    semantics: the gateway must not pretend to know more than its
     sources reported). The boundary is exact: a value strictly below
     ``red_line_pct`` blocks; the red line itself is eligible.
     """

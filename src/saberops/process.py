@@ -309,14 +309,14 @@ AUTONOMOUS_RUNTIME_ENV_ALLOWLIST: tuple[str, ...] = (
 
 #: Bounded non-secret Orch execution identity/control variables the
 #: existing runtime requires inside the child: run/attempt association,
-#: the run database path, verified tool-contract metadata, the C10
+#: the run database path, verified tool-contract metadata, the
 #: gateway pinning the gateway boundary injects for gateway dispatches
 #: (non-secret names/values only -- the real OmniRoute token is
 #: resolved at forwarding time, never from this mapping), the exact
-#: C11-D execution binding identity the canonical lifecycle resolved
+#: Execution binding identity the canonical lifecycle resolved
 #: (binding/profile/pool/backend references only, never secrets), and
 #: the Copilot profile selector honoured by the Copilot adapter's
-#: request-env overlay, and the C11-D executable-profile selectors
+#: request-env overlay, and the runtime executable-profile selectors
 #: (``ORCH_EXECUTION_PROFILE_ACCOUNT`` / ``ORCH_EXECUTION_PROFILE_BACKEND``):
 #: non-secret account/backend references the canonical lifecycle
 #: populated ONLY from a verified adapter ``execution_profile_overlay``
@@ -1752,7 +1752,7 @@ def run_process(
                             # Confirmed deterministic stall — authorise graceful
                             # tree termination.  This monitor path complements
                             # (never replaces) the hard absolute deadline
-                            # (C16-C0 tier default or explicit owner timeout),
+                            # (tier default or explicit owner timeout),
                             # which terminates regardless of activity.
                             monitor_stall_terminated = True
                             if _monitor is not None:

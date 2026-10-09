@@ -1,4 +1,4 @@
-"""C15: user-owned model access foundation.
+"""User-owned model access foundation.
 
 This module answers exactly one question:
 
@@ -7,11 +7,11 @@ This module answers exactly one question:
 
 It never answers WHICH model Orchestrator should select.  Routing,
 provider/model selection, quota eligibility and dispatch eligibility
-remain owned by C07 (:mod:`saberops.control_plane.preflight`);
-Attempt lifecycle/retries/failover remain owned by C11-D; tool
-authorization/sandboxing/receipts remain owned by C08/C11-C; telemetry
+remain owned by quota policy (:mod:`saberops.control_plane.preflight`);
+Attempt lifecycle/retries/failover remain owned by the autonomous runtime; tool
+authorization/sandboxing/receipts remain owned by the tool-contract layer; telemetry
 remains observational only.  The credential-reference *contract* is
-consumed from :mod:`saberops.sandbox.grants` (C08/C11-C remains
+consumed from :mod:`saberops.sandbox.grants` (the tool-contract layer remains
 the credential/security authority); nothing here re-implements it.
 
 Concept separation (do not collapse these):
@@ -823,7 +823,7 @@ ACCOUNT_BACKENDS: tuple[AccountBackend, ...] = (
     AccountBackend(
         connection_id="codex-chatgpt-account",
         # ``codex`` is the canonical provider identity already used by
-        # the authoritative C07/C11-B vocabulary (``ExecutionBinding.
+        # the authoritative quota vocabulary (``ExecutionBinding.
         # provider`` / ``ExecutionProfile.provider`` / capability
         # profiles / control-plane provider policy) and by the existing
         # Codex WorkerAdapter.  It must match exactly: ``resolve_access``
@@ -1151,7 +1151,7 @@ def resolve_access(
     2. ``profile_id`` names a ``connection_id`` directly;
     3. ``profile_id`` is a discovered execution profile
        (``discovered-profile:<connection_id>``) addressing the real
-       account connection it was materialized from (C16-B2: without
+       account connection it was materialized from (without
        this, an exact discovered binding's profile can never resolve
        to its own connection, so readiness admission for a
        discovered WORKER/ORCHESTRATOR binding stays UNKNOWN forever

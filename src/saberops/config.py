@@ -20,7 +20,7 @@ RoutingMode = Literal["auto", "manual"]
 ReviewMode = Literal["bounded", "max"]
 
 _TIER_ORDER: tuple[Tier, ...] = (Tier.T1, Tier.T2, Tier.T3)
-# C16-C0: bounded default worker execution.  These tier defaults are the
+# Bounded default worker execution.  These tier defaults are the
 # hard absolute deadline applied to every worker dispatch unless the owner
 # explicitly supplies ``--worker-timeout`` (which remains authoritative).
 # They match the CLI ``--worker-timeout`` help contract (T1=600, T2=1200,
@@ -49,7 +49,7 @@ _REVIEW_MODES: tuple[str, ...] = ("bounded", "max")
 def tier_worker_timeout(tier: Tier) -> float:
     """Return the default hard deadline for a concrete routing tier.
 
-    This IS a termination boundary (C16-C0): unless the owner supplied an
+    This IS a termination boundary: unless the owner supplied an
     explicit ``--worker-timeout``, a worker dispatched at ``tier`` is
     terminated through the fenced process-group mechanism once it exceeds
     this duration, and the attempt is classified TIMEOUT.  The soft
@@ -112,7 +112,7 @@ class RunConfig:
     review_timeout: float = DEFAULT_REVIEW_TIMEOUT
     review_mode: ReviewMode = DEFAULT_REVIEW_MODE
     review_limit: int = DEFAULT_REVIEW_LIMIT
-    # C13-F: project-scoped risk-adaptive review policy mode, FROZEN at
+    # Project-scoped risk-adaptive review policy mode, FROZEN at
     # run creation.  ``RISK_ADAPTIVE`` is the canonical default; project
     # configuration may tighten to ``ALWAYS_REQUIRED`` (which forces an
     # independent semantic review even when the classifier would mark
@@ -130,17 +130,17 @@ class RunConfig:
     # never accepted-target/main publication.
     publish_candidate: bool = False
     tool_refs: tuple[str, ...] = ()
-    # C10: optional non-secret frozen gateway contract, built by the caller
+    # Optional non-secret frozen gateway contract, built by the caller
     # (CLI/Web) before :func:`resolve_run_config` and stored
     # verbatim. ``None`` means the run uses the first-class no-gateway
     # ``DIRECT`` path.  The value is opaque to RunConfig so this module
     # never imports from :mod:`saberops.gateway`.
     gateway_frozen_config: dict[str, Any] | None = None
     gateway_frozen_digest: str | None = None
-    # C11-D: autonomous execution is a run-scoped contract.  It contains
+    # Autonomous execution is a run-scoped contract.  It contains
     # references and policy, never resolved secret material.
     autonomous_runtime: dict[str, Any] | None = None
-    # C15-XB-FREEZE-01: non-secret serialization of the effective owner
+    # Non-secret serialization of the effective owner
     # BindingRegistry frozen with the Run at admission.  Ordinary
     # exact-binding dispatch, retry, continuation, review repair, adoption
     # and cold recovery all resolve worker bindings from this frozen
@@ -153,7 +153,7 @@ class RunConfig:
     # (``NO_REGISTRY``) instead of loading ambient owner state.  Only
     # non-secret identity references are stored -- never credential values.
     worker_binding_registry: dict[str, Any] | None = None
-    # C13-B: project-scoped authoritative gate scratch backend preference,
+    # Project-scoped authoritative gate scratch backend preference,
     # FROZEN at run creation time.  Resolved once from the project's
     # persisted policy (or the global default when the project has none)
     # before the run is launched; retry/repair/review/acceptance always
@@ -162,12 +162,13 @@ class RunConfig:
     # preference at the lowest precedence band; it MUST NOT escalate
     # into governance, security, or acceptance semantics.
     gate_scratch_mode: GateScratchMode = GateScratchMode.DISK
-    # R2-A: owner-selectable accept target branch, FROZEN at run creation.
+    # Owner-selectable accept target branch, FROZEN at run creation.
     # An explicit project setting wins; otherwise the current symbolic
     # branch is resolved once at creation and frozen verbatim.  Legacy or
     # partial payloads carry "" (unknown); acceptance behavior for such
     # runs is unchanged (the AcceptEngine still reads live repo state).
-    # R4 owns moved-HEAD acceptance; R2-A establishes and freezes policy.
+    # Moved-HEAD acceptance is future work; the project-settings layer
+    # establishes and freezes policy.
     accept_target_branch: str = ""
     # A linked repair run inherits a committed candidate, never a live provider session.
     continuation: dict[str, str] | None = None
@@ -199,7 +200,7 @@ class RunConfig:
 
         When the owner supplied an explicit ``--worker-timeout``, that value
         is authoritative regardless of tier.  Otherwise the tier default
-        from :data:`TIER_WORKER_TIMEOUTS` applies (C16-C0): normal runs are
+        from :data:`TIER_WORKER_TIMEOUTS` applies: normal runs are
         always bounded and never depend on the monitor lifecycle alone.
         A degenerate non-positive explicit value falls back to the tier
         default rather than leaving the run unbounded.
@@ -244,7 +245,7 @@ def _reconstruct_gate_scratch_mode(data: dict[str, Any]) -> GateScratchMode:
 
 
 def _reconstruct_review_policy_mode(data: dict[str, Any]) -> ReviewPolicyMode:
-    """Resolve a persisted C13-F review-policy mode, defaulting conservatively.
+    """Resolve a persisted review-policy mode, defaulting conservatively.
 
     Mirrors :func:`_reconstruct_gate_scratch_mode`.  Missing / empty /
     non-string values fall back to the canonical ``RISK_ADAPTIVE``
@@ -271,7 +272,7 @@ def freeze_owner_binding_registry_payload() -> dict[str, Any] | None:
     Ordinary exact-binding execution must interpret a candidate's frozen
     ``binding_id`` against the binding registry that was effective at Run
     admission, not against whatever the owner binding store happens to
-    contain later (C15-XB-FREEZE-01).  This loads the canonical owner binding
+    contain later.  This loads the canonical owner binding
     document once and renders it through the existing
     :meth:`BindingRegistry.to_dict`; no second binding-store format and no
     secret material are introduced.
@@ -317,7 +318,7 @@ def resolve_run_config(
     review_timeout: float | None = None,
     review_mode: str = "bounded",
     review_limit: int = DEFAULT_REVIEW_LIMIT,
-    # C13-F: project-scoped risk-adaptive review policy mode, FROZEN at
+    # Project-scoped risk-adaptive review policy mode, FROZEN at
     # run creation.  ``None`` falls back to the canonical default; a
     # malformed value raises.
     review_policy_mode: ReviewPolicyMode | str | None = None,
@@ -328,7 +329,7 @@ def resolve_run_config(
     # ``tier`` keeps legacy callers source-compatible while normalizing them.
     tier: Tier | str | None = None,
     gate_scratch_mode: GateScratchMode | str | None = None,
-    # R2-A: frozen accept target branch.  The shared run-creation
+    # Frozen accept target branch.  The shared run-creation
     # authority always supplies an explicit value; direct low-level
     # callers may omit it (legacy "" = unknown, acceptance unchanged).
     accept_target_branch: str | None = None,
@@ -477,7 +478,7 @@ def reconstruct_run_config(data: dict[str, Any]) -> RunConfig:
         review_timeout=float(data.get("review_timeout", DEFAULT_REVIEW_TIMEOUT)),
         review_mode=raw_review_mode,  # type: ignore[arg-type]
         review_limit=raw_review_limit,
-        # C13-F: a missing / malformed ``review_policy_mode`` falls back
+        # A missing / malformed ``review_policy_mode`` falls back
         # to the canonical RISK_ADAPTIVE default -- a legacy persisted
         # Run must never be re-classified as ``ALWAYS_REQUIRED`` by
         # reconstruction.  Reconstruction is also never downgraded to a
@@ -501,7 +502,7 @@ def reconstruct_run_config(data: dict[str, Any]) -> RunConfig:
             if isinstance(data.get("autonomous_runtime"), Mapping)
             else None
         ),
-        # C15-XB-FREEZE-01: reconstruct the run-frozen worker binding registry
+        # Reconstruct the run-frozen worker binding registry
         # verbatim from durable state.  A legacy/partial payload has no frozen
         # registry and stays ``None`` -- an already-admitted binding-bearing
         # Run must then fail closed rather than fabricate authority from the
@@ -511,12 +512,12 @@ def reconstruct_run_config(data: dict[str, Any]) -> RunConfig:
             if isinstance(data.get("worker_binding_registry"), Mapping)
             else None
         ),
-        # C13-B: legacy/partial payloads have no frozen gate-scratch mode;
+        # Legacy/partial payloads have no frozen gate-scratch mode;
         # stay on the conservative DISK default.  The exact mode was
         # never recorded before this tranche -- replaying such a run with
         # the current RAM setting would silently change its semantics.
         gate_scratch_mode=_reconstruct_gate_scratch_mode(data),
-        # R2-A: legacy payloads predate the frozen target branch; ""
+        # Legacy payloads predate the frozen target branch; ""
         # preserves their acceptance behavior (live repo state).
         accept_target_branch=str(data.get("accept_target_branch", "") or ""),
         continuation=_reconstruct_continuation(data.get("continuation")),

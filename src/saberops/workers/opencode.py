@@ -86,7 +86,7 @@ class OpenCodeAdapter(WorkerAdapter):
         :mod:`saberops.workers.instruction_compat` for the
         reproduced General Compute constraint).  The adapter never
         chooses a replacement model or alters the routing chain; Orch
-        policy / C07 preflight consumes this evidence and owns
+        policy / quota preflight consumes this evidence and owns
         eligibility.
         """
         return instruction_compatibility_for_opencode_model(model)

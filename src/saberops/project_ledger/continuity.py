@@ -1,15 +1,15 @@
-"""Composition with C05 runtime lifecycle state.
+"""Composition with supervisor runtime lifecycle state.
 
-C11 owns *Project* continuity: what the Project is for, what it decided, what
-it is doing, and what remains true after every session ends.  C05 already owns
+The project ledger owns *Project* continuity: what the Project is for, what it decided, what
+it is doing, and what remains true after every session ends.  The run supervisor already owns
 *run* continuity: activations, interruptions, worker checkpoints and the
 side-effect journal that makes recovery exactly-once.
 
-Those are different questions, so this module reads C05's durable records
+Those are different questions, so this module reads the run supervisor's durable records
 rather than re-deriving them.  Nothing here writes runtime state, re-classifies
 a run, decides a recovery action, or keeps a second copy of a lifecycle field:
 a roadmap item stores only the run reference, and the runtime answer is looked
-up from C05 every time it is needed.
+up from the run supervisor every time it is needed.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ _INTERRUPTED_STATES = frozenset(
 
 
 def runtime_composition(db: Database, run_ref: str) -> RuntimeComposition:
-    """Read C05 runtime facts about ``run_ref`` without changing anything.
+    """Read supervisor runtime facts about ``run_ref`` without changing anything.
 
     A run this store has never heard of yields ``run_known=False`` rather than
     an invented status: an unknown run is unknown, never assumed finished.

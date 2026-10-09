@@ -220,7 +220,7 @@ class RunSupervisor:
             training_allowed=config.training_allowed,
             snapshot=snapshot,
         )
-        # C15-XB-FREEZE-01: when the frozen routing snapshot can produce an
+        # When the frozen routing snapshot can produce an
         # exact-binding candidate, freeze the effective owner BindingRegistry
         # with the PENDING Run so every later adoption/recovery dispatch
         # resolves the same execution identity -- a post-admission owner
@@ -265,7 +265,7 @@ class RunSupervisor:
                 host_access=load_authority_settings().host_access.value,
             )
             frozen_tools = freeze_tool_contract(config.tool_refs, self.tool_registry)
-        # C10: freeze the optional gateway contract.  When ``RunConfig`` does
+        # Freeze the optional gateway contract.  When ``RunConfig`` does
         # not carry a frozen config, the run uses the first-class DIRECT
         # path and no gateway evidence is recorded.
         gateway_snapshot_json: str | None = None
@@ -336,14 +336,14 @@ class RunSupervisor:
         )
         self.db.record_event(run_id, "routing_snapshot", payload=routing_payload)
 
-        # C09: the project graph and initial task scope must be frozen against
+        # The project graph and initial task scope must be frozen against
         # this exact ``base_commit`` -- and the execution owner must never be
         # launched without that frozen contract in place.  Building the graph
         # here, before ``_launch``, closes the race where the repository could
         # otherwise change between PENDING creation and the detached child
         # adopting the run.  If this fails, the run never launches.
         #
-        # C09-R2: ``build_project_graph`` reads the working tree while
+        # ``build_project_graph`` reads the working tree while
         # ``base_commit`` is metadata captured a moment earlier -- close that
         # TOCTOU window with a repository re-check both immediately before and
         # immediately after analysis, so a mid-analysis repository move can
@@ -383,7 +383,7 @@ class RunSupervisor:
                 },
             )
         except Exception as exc:  # noqa: BLE001 - never launch without frozen scope
-            # C09-R3: fatal pre-dispatch scope failure is infrastructure
+            # Fatal pre-dispatch scope failure is infrastructure
             # failure -- never a worker/provider/model failure -- and must
             # never leave the run RUNNING with no execution owner.  Bounded
             # durable evidence is recorded before terminalizing so the same
@@ -569,7 +569,7 @@ class RunSupervisor:
     ) -> bool:
         """Return True only when positive durable recovery evidence exists.
 
-        A DEAD execution owner alone is NOT sufficient: C05 cold-recovery must
+        A DEAD execution owner alone is NOT sufficient: supervisor cold-recovery must
         only be selected when the persisted state is provably reconstructable
         (an existing checkpoint, dirty partial work, or a reconcilable crash
         window).  Legacy orphan / abort semantics remain the default for every
@@ -604,7 +604,7 @@ class RunSupervisor:
         9. the old execution owner is provably DEAD (no newer generation);
         10. the worker is provably DEAD (no live worker process);
         11. there is meaningful recoverable execution state: an existing
-            C05 checkpoint, dirty partial work, or a deterministically
+            Checkpoint, dirty partial work, or a deterministically
             reconcilable checkpoint-creation crash window;
         12. no contradictory terminal/cancellation/ownership evidence exists;
         13. no newer execution-owner generation has taken authority.
@@ -741,7 +741,7 @@ class RunSupervisor:
 
         * **Uncommitted partial work on authorized HEAD** -- HEAD equals
           the attempt base_sha, and ``git diff`` finds dirty edits
-          against base.  This preserves the C05-R1 dirty-cold-takeover
+          against base.  This preserves the supervisor dirty-cold-takeover
           path on a clean HEAD.
         * **Already-created checkpoint commit** -- HEAD is **not** equal
           to base_sha AND ``base_sha`` is an **ancestor** of HEAD.  This
@@ -848,8 +848,8 @@ class RunSupervisor:
 
         # Probe worker liveness before deciding on dead owner.  The default
         # is ``UNKNOWN``: a missing durable worker identity for a modern
-        # C05 worker must never be classified as DEAD, because it is the
-        # exact situation C05-INV-3 prescribes must fail closed.  Only an
+        # Worker must never be classified as DEAD, because it is the
+        # exact situation a supervisor invariant prescribes must fail closed.  Only an
         # exact persisted ProcessIdentity that probes ``DEAD`` allows a
         # recovery decision; anything else fails closed.
         worker_liveness = Liveness.UNKNOWN
@@ -875,17 +875,17 @@ class RunSupervisor:
         elif sup is not None and sup.worker_pid is not None:
             worker_liveness = Liveness.UNKNOWN
         else:
-            # No persisted worker identity at all: a modern C05 worker in
+            # No persisted worker identity at all: a modern supervisor worker in
             # a mutating active state (STARTING / RUNNING / QUIESCING) is
-            # exactly the situation where C05-INV-3 forbids classifying as
+            # exactly the situation where a supervisor invariant forbids classifying as
             # DEAD.  Probe the worker activation rows to apply the
-            # backward-compatible rule: only an UNKNOWN modern C05
+            # backward-compatible rule: only an UNKNOWN modern supervisor
             # activation (RUNNING with no identity) raises this branch to
-            # DEAD-friendly behavior; legacy pre-C05 runs without any
+            # DEAD-friendly behavior; legacy older runs without any
             # WorkerActivation row keep the older interpretation that
             # allows DEAD.
             if active_activation is None:
-                # Genuinely pre-C05 legacy: no modern activation row at
+                # Genuinely older legacy: no modern activation row at
                 # all.  The legacy dead-owner orphan semantics still apply.
                 worker_liveness = Liveness.DEAD
             elif (
@@ -897,8 +897,8 @@ class RunSupervisor:
                 )
                 and active_activation.worker_identity_json is None
             ):
-                # Modern C05 worker in a mutating active state but no
-                # identity persisted yet.  Per C05-INV-3 this is UNKNOWN,
+                # Modern supervisor worker in a mutating active state but no
+                # identity persisted yet.  Per a supervisor invariant this is UNKNOWN,
                 # never DEAD -- refuse takeover.
                 worker_liveness = Liveness.UNKNOWN
                 if not dry_run:
@@ -1137,7 +1137,7 @@ class RunSupervisor:
         run_id: str,
         config: RunConfig | None = None,
     ) -> tuple[ExecutionOwner | None, bool]:
-        """C05 cold-takeover: launch a fenced dedicated recovery owner.
+        """Cold-takeover: launch a fenced dedicated recovery owner.
 
         Distinct from :meth:`ensure_running`: ordinary PENDING adoption stays
         PENDING-only and uses ``orch run --run-id``.  A recoverable RUNNING
@@ -1223,7 +1223,7 @@ class RunSupervisor:
             predecessor_owner = self.db.get_execution_owner(run_id)
             if predecessor_owner is None:
                 # No predecessor: launching is fine, but cannot enforce
-                # the C05-R2 fenced-generation contract because there is
+                # the supervisor fenced-generation contract because there is
                 # no proven death.  Refuse (the run must be classified
                 # by ``reconcile`` first to establish positive evidence).
                 self.db.record_event(
@@ -1270,7 +1270,7 @@ class RunSupervisor:
             elif sup is not None and sup.worker_pid is not None:
                 worker_liveness = Liveness.UNKNOWN
             else:
-                # No persisted worker identity at all: a modern C05
+                # No persisted worker identity at all: a modern supervisor
                 # worker in a mutating active state would be flagged
                 # UNKNOWN by ``reconcile``.  Mirror that gate here so
                 # ``ensure_recovery_running`` cannot bypass it.
@@ -1519,7 +1519,7 @@ class RunSupervisor:
             "--review-limit",
             str(config.review_limit),
             "--review-policy",
-            # C13-F: project-scoped risk-adaptive review policy mode is
+            # Project-scoped risk-adaptive review policy mode is
             # frozen at Run creation; the supervisor-launched owner must
             # forward the same value so a fresh CLI process does not
             # silently re-derive it from (possibly changed) live policy.
@@ -1545,7 +1545,7 @@ class RunSupervisor:
             args.append("--training-denied")
         if config.review_enabled:
             args.append("--review")
-        # C16-C0: only an explicit owner timeout is forwarded as a flag.
+        # Only an explicit owner timeout is forwarded as a flag.
         # The effective timeout always survives detached execution because
         # the detached owner adopts the persisted RunConfig
         # (reconstruct_run_config) and recomputes the same effective value

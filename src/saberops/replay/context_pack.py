@@ -1,4 +1,4 @@
-"""Content-addressed context-pack abstraction for C12-B experiments.
+"""Content-addressed context-pack abstraction for replay experiments.
 
 Implements Sections 7–8: deterministic context construction around three
 classes (STABLE / SEMI_STABLE / VOLATILE) with content-addressed identity.

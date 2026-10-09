@@ -1,4 +1,4 @@
-"""C15: discovered-model catalog and bounded discovery seam.
+"""Discovered-model catalog and bounded discovery seam.
 
 This module answers exactly one question:
 
@@ -22,7 +22,7 @@ mean ``CONFIGURED``, does not mean ``EXECUTABLE`` and does not mean
 * ``execution_support`` records whether an executable transport exists
   for this connection/backend/model.  It defaults to ``UNKNOWN`` and is
   only ever ``SUPPORTED`` when a caller supplies real evidence.
-* routing eligibility is *derived by the existing C07 authority* from
+* routing eligibility is *derived by the existing quota authority* from
   routing configuration, adapter availability, capability/quota/training
   policy -- this module never computes or stores it.
 

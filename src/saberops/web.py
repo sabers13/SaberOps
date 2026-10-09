@@ -535,7 +535,7 @@ def _default_start_form() -> dict[str, Any]:
     is overlaid from the active project's effective data policy in
     :func:`_dashboard_context` so a fresh private project offers Denied.
     The ``Independent Review`` checkbox defaults to UNCHECKED: an
-    ordinary Web run lets the C13-F risk-adaptive policy decide.  The
+    ordinary Web run lets the review-necessity risk-adaptive policy decide.  The
     user can opt in to ``review_enabled=True`` per-run via the existing
     checkbox; that signals an explicit owner force and forces review
     regardless of LOW classification.
@@ -576,7 +576,7 @@ def _effective_timeout_display(form: dict[str, Any]) -> dict[str, str]:
     table used by ``resolve_run_config``), so the display can never drift from
     the resolver.
 
-    Tier values (T1/T2/T3) are the DEFAULT HARD DEADLINES (C16-C0): every
+    Tier values (T1/T2/T3) are the DEFAULT HARD DEADLINES: every
     worker dispatch is bounded, and exceeding the effective timeout
     terminates the worker through the fenced process-group mechanism with
     a TIMEOUT classification.  An explicit ``--worker-timeout`` overrides
@@ -617,7 +617,7 @@ def _effective_timeout_display(form: dict[str, Any]) -> dict[str, str]:
         "defaults_json": json.dumps(defaults, sort_keys=True),
         # Semantic markers for the template: distinguish an explicit owner
         # budget from the tier-default deadline.  Every run is bounded
-        # (C16-C0); the monitor complements both modes.
+        # the monitor complements both modes.
         "has_hard_budget": "true" if has_hard_budget else "false",
         "termination_mode": (
             "explicit_budget_plus_monitor"
@@ -708,7 +708,7 @@ def _dashboard_context(
             }
         except GateScratchPolicyError:
             project_gate_scratch = None
-        # R2-A: owner-facing effective project settings (gate, data
+        # Owner-facing effective project settings (gate, data
         # policy, review policy, target branch, gate storage).  When
         # rendering a fresh form, overlay the training default and the
         # configured gate from effective policy so the default
@@ -760,9 +760,9 @@ def _run_detail_context(
     eligibility = AcceptEngine(db=db).check_accept_eligibility(run.id)
     can_accept = eligibility.eligible
     accept_checklist = eligibility.as_dict()["checks"]
-    # R3-C: rejectability derives from the same service/projection
+    # Rejectability derives from the same service/projection
     # authority as the Reject action (never from RunStatus alone), and
-    # the Candidate State shown is the R3-A projection including
+    # the Candidate State shown is the projection including
     # REJECTED.  Reads here never record rejection events.
     from saberops.candidate_lifecycle import can_reject_candidate, project_candidate_state
 
@@ -806,9 +806,9 @@ def _run_detail_context(
         if att.worker_error:
             failure_reason = att.worker_error
 
-    # R3-B: the Changes view is the same read-only candidate-diff
+    # The Changes view is the same read-only candidate-diff
     # projection as GET /runs/{run_id}/diff -- frozen base_commit ..
-    # R3-A current candidate SHA from the run's persisted repository.
+    # Current candidate SHA from the run's persisted repository.
     # Event changed_paths and latest-attempt SHAs are never consulted.
     try:
         from saberops.candidate_diff import project_candidate_diff
@@ -851,7 +851,7 @@ def _run_detail_context(
         # report build failure degrades to "unavailable" in the UI
         # while the canonical CLI/API surfaces still fail closed.
         run_report = None
-    # R3-E2: durable owner-action projection.  This says whether the
+    # Durable owner-action projection.  This says whether the
     # detached process executing Review/Accept authority is active or how
     # the last one settled -- it is never a second review verdict or
     # acceptance-policy authority (those stay in the reviews table and
@@ -1016,7 +1016,7 @@ def _plan_projection(db: Database, run_id: str) -> dict[str, Any]:
         "worker_pid": supervisor.worker_pid if supervisor else None,
         "started_at": started_at,
         "deadline_at": supervisor.deadline_at if supervisor else None,
-        # C16-C0: every supervised dispatch carries a hard deadline
+        # Every supervised dispatch carries a hard deadline
         # (explicit owner value, else the tier default), so a present
         # deadline means the run is bounded -- never unbounded.
         "has_explicit_budget": bool(supervisor and supervisor.deadline_at is not None),
@@ -1204,7 +1204,7 @@ def _shell_context(
         else:
             verdict = "No runs yet"
         inbox_count: int | None = None
-        # R3-D.1: no universal Inbox scan.  ``runtimes`` is accepted for
+        # No universal Inbox scan.  ``runtimes`` is accepted for
         # signature compatibility only and is never scanned here; the
         # Inbox count badge stays unset so ordinary pages never pay for
         # a cross-project lifecycle projection.
@@ -1273,7 +1273,7 @@ def _binding_store() -> OwnerBindingStore:
     """Return the owner binding store (overridable for tests).
 
     Production path is ``$XDG_CONFIG_HOME/saberops/bindings.json``;
-    ``ORCH_BINDING_STORE`` pins an explicit file.  The document is C11-B
+    ``ORCH_BINDING_STORE`` pins an explicit file.  The document is binding
     owner identity only -- never a credential value, never a second routing
     configuration.
     """
@@ -1301,7 +1301,7 @@ def _exact_binding_for(
     A raw provider/model string never synthesizes a binding: the lookup only
     returns an entry that already exists in the canonical registry.
 
-    C15-XC-03: identity must include the connection (the real account the
+    Identity must include the connection (the real account the
     model is reachable through).  Two connections that expose the same
     provider/model pair register distinct bindings; the Web / catalog seam
     must not silently collapse them by returning the first registry
@@ -1346,13 +1346,13 @@ def _resolve_exact_binding(
     connection_id: str | None = None,
     role: BindingRole | None = None,
 ) -> Any | None:
-    """Resolve the exact binding for a model through the real C11-B resolver.
+    """Resolve the exact binding for a model through the real resolver.
 
     Returns the binding only when an exact registry entry exists AND
     :func:`resolve_execution_binding` succeeds against the real adapter;
     otherwise ``None`` (no provider/model fallback, no synthesized identity).
 
-    C15-XC-03: the lookup accepts an explicit ``connection_id`` and
+    The lookup accepts an explicit ``connection_id`` and
     ``role`` so the same provider/model pair reached through two
     different connections (or a WORKER-role / ORCHESTRATOR-role split)
     resolves to its own exact binding rather than the first registry
@@ -1394,7 +1394,7 @@ def _exact_execution_support(
     result stays ``UNKNOWN``.  OpenAI-compatible API connections use their own exact
     DIRECT_API bindings. Unsupported protocols remain unavailable.
 
-    C15-XC-03: the binding is resolved against the catalog row's own
+    The binding is resolved against the catalog row's own
     ``connection_id`` so a model reached through two different
     connections still resolves to *its* binding rather than the first
     registry declaration.
@@ -1683,7 +1683,7 @@ def _materialize_discovered_binding(
     owner: OwnerBindings | None = None,
     persist: bool = True,
 ) -> tuple[OwnerBindings, Any] | None:
-    """Translate validated discovery evidence into exact C11-B bindings.
+    """Translate validated discovery evidence into exact bindings.
 
     Discovery creates the *role-qualified* binding identities that share
     the same account / profile and connection-scoped quota-pool
@@ -1697,14 +1697,14 @@ def _materialize_discovered_binding(
     account) and ``quota_pool_id`` (the real connection-scoped
     scarcity resource); only their ``binding_id`` carries the semantic
     role so /routing/add, /reviewer/select, and /orchestrator/select
-    each see their own exact binding and C07 remains authoritative
+    each see their own exact binding and quota policy remains authoritative
     over the real quota pool.  Two distinct account connections to the
     same provider register distinct ``profile_id`` and distinct
     ``quota_pool_id`` -- provider identity is not quota-resource
     identity, and semantic role never duplicates either resource.
 
     The exact bindings are persisted only when the WORKER and REVIEWER
-    bindings prove through the real C11-B resolver with the real
+    bindings prove through the real resolver with the real
     adapter, so a provider/model name can never become executable
     without an exact binding that actually resolves.  Returns
     ``(owner, worker_binding)`` or ``None``.
@@ -1854,7 +1854,7 @@ def _discover_connection(
     enter durable discovery evidence. Missing credentials permit only public listing.
 
     Execution support is proven *after* enumeration by materializing an exact
-    C11-B binding and resolving it with the real adapter -- never inferred
+    Binding and resolving it with the real adapter -- never inferred
     from the mere presence of a registered adapter.
     """
     discovered_at = datetime.now(UTC).isoformat()
@@ -2199,7 +2199,7 @@ def _orchestrator_context(
     persisted choice is an :class:`OrchBindingPolicy` over binding ids --
     never a free-floating provider/model setting.
 
-    C15-XC-03: each candidate is validated against ITS OWN exact binding
+    Each candidate is validated against ITS OWN exact binding
     identity (the row's own binding_id) instead of "any other binding
     with the same provider/model" so the visible roster can never drift
     away from the bindings the registry actually names.
@@ -2277,7 +2277,7 @@ def _reviewer_context(
     The persisted choice is one exact binding id (never a free-floating
     provider/model setting, never a pool, never an ordered list).
 
-    C15-XC-03: each candidate is validated against ITS OWN exact binding
+    Each candidate is validated against ITS OWN exact binding
     identity (the row's own binding_id) instead of "any other binding
     with the same provider/model" so the visible roster can never drift
     away from the bindings the registry actually names.
@@ -2345,12 +2345,12 @@ def _routing_chooser_row(
 
     Eligibility means *admissible to the owner's add action*, not automatic
     enrollment.  A model must be discovery-verified (not merely owner-typed),
-    fresh, have a valid canonical identity, and have an **exact C11-B
+    fresh, have a valid canonical identity, and have an **exact
     binding** that actually resolves through the real adapter.  A registered
     adapter alone is never enough: without a resolvable exact binding the
     entry is disabled with a truthful reason.
 
-    C15-XC-03: the exact binding is resolved against the catalog row's
+    The exact binding is resolved against the catalog row's
     own ``connection_id`` (the real account) so two connections that
     expose the same provider/model pair never collapse: registry
     declaration order cannot select a sibling binding the owner did not
@@ -2392,7 +2392,7 @@ def _routing_chooser_row(
         eligible = False
         reason = "exact binding does not resolve for this adapter"
     elif binding.binding_role is not BindingRole.WORKER:
-        # C15-XB-03: worker routing requires a WORKER-role binding.
+        # Worker routing requires a WORKER-role binding.
         # An ORCHESTRATOR-only binding cannot authorize WORKER execution.
         eligible = False
         reason = (
@@ -2435,7 +2435,7 @@ def _routing_context(
 
     Routing configuration stays canonical: the page renders the *loaded*
     chains and offers discovered candidates that have an exact resolvable
-    C11-B binding.  The user decides what enters routing; nothing is enrolled
+    Binding.  The user decides what enters routing; nothing is enrolled
     automatically.  Ineligible entries are shown disabled with a truthful
     reason.
     """
@@ -2877,7 +2877,7 @@ def create_app(
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
     templates.env.globals["fmt"] = format_timestamp
 
-    # Bounded projection over expensive project Git validation (R0-B §6).
+    # Bounded projection over expensive project Git validation.
     # Shared by the shell middleware and the dashboard so repeated
     # requests do not re-run `git status` for every known project.
     validation_cache = ProjectValidationCache(project_registry)
@@ -3545,7 +3545,7 @@ def create_app(
         form["training_allowed"] = training_allowed == "1"
         form["provider_override"] = provider_override
         form["model_override"] = model_override
-        # R2-A: an empty gate box means "follow the project gate setting"
+        # An empty gate box means "follow the project gate setting"
         # (None).  The shared run-creation authority fails creation with
         # an actionable message when the project has neither an explicit
         # gate nor a positively detected one -- Web never silently falls
@@ -3648,7 +3648,7 @@ def create_app(
             def optional_float(raw: str) -> float | None:
                 return float(raw) if raw.strip() else None
 
-            # R2-A: Web resolves run policy exclusively through the shared
+            # Web resolves run policy exclusively through the shared
             # run-creation authority -- the same precedence the CLI uses.
             # The effective gate, gate storage, review policy,
             # data/training policy, and accept target branch freeze onto
@@ -4258,7 +4258,7 @@ def create_app(
         """Read-only bounded candidate diff as JSON.
 
         Same projection the Changes tab renders: frozen
-        ``base_commit .. R3-A current candidate SHA`` from the run's
+        ``base_commit .. Current candidate SHA`` from the run's
         persisted repository.  Unknown run is a real not-found
         result; a known run with no trustworthy current candidate
         returns a truthful unavailable projection.
@@ -4272,7 +4272,7 @@ def create_app(
 
     @app.get("/runs/{run_id}/report")
     def run_report_json(run_id: str) -> JSONResponse:
-        """Read-only canonical C16-B1 run report as JSON.
+        """Read-only canonical run report as JSON.
 
         Same projection as ``orch report RUN_ID --json``; the payload
         is deterministic for a given persisted state.
@@ -4400,7 +4400,7 @@ def create_app(
             persisted_run is not None
             and persisted_run.status in (RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.ORPHANED)
         ) or any(event.event_type in TERMINAL_EVENT_TYPES for event in persisted)
-        # R3-E2.1: a terminal run with an active post-run owner action
+        # A terminal run with an active post-run owner action
         # (Review / Accept) keeps a usable live stream so queued/started/
         # completed/failed/uncertain events reach the run page.  The
         # stream may close once the run is terminal AND no owner action
@@ -4761,7 +4761,7 @@ def create_app(
             return templates.TemplateResponse(
                 request, "run_detail.html", _missing_run_context(run_id), status_code=404
             )
-        # R3-E2: Request Review claims a durable owner action and detaches
+        # Request Review claims a durable owner action and detaches
         # the Review child immediately.  Nothing long-running executes in
         # this request: closing the browser can never stop the child, and
         # a duplicate click collapses onto the same active action.
@@ -4897,7 +4897,7 @@ def create_app(
                 ),
                 status_code=400,
             )
-        # R3-E2: confirmed Accept claims a durable owner action and detaches
+        # Confirmed Accept claims a durable owner action and detaches
         # the Accept child immediately.  The checklist above stays advisory:
         # the detached child (AcceptEngine) re-checks every canonical
         # condition immediately before mutation.  The redirect returns at
@@ -5500,7 +5500,7 @@ def create_app(
                 status_code=400,
             )
         saved_connection_id = connection.connection_id
-        # C16-B2: adding a provider makes its models available for
+        # Adding a provider makes its models available for
         # selection, so run one bounded discovery immediately after a
         # successful save.  This never fails the save itself and never
         # erases durable state: a failed/UNKNOWN refresh keeps the last
@@ -5596,17 +5596,17 @@ def create_app(
         context: Annotated[str, Form()] = "",
         binding_id: Annotated[str, Form()] = "",
     ) -> Response:
-        """Add one owner-chosen model with an exact resolvable C11-B binding.
+        """Add one owner-chosen model with an exact resolvable binding.
 
         This is the user's explicit decision, persisted through the
         canonical routing writer.  It never auto-enrolls a model: the model
-        must be discovery-verified, fresh, and have an **exact C11-B
+        must be discovery-verified, fresh, and have an **exact
         binding** that resolves through the real adapter.  A registered
         adapter alone is never sufficient.  The exact ``binding_id`` is
         recorded through the canonical dynamic candidate contract in the
         *same* routing document -- for static-registry models too, with
         the authoritative static training semantics preserved exactly.
-        C07 still decides context eligibility (unknown training
+        Quota policy still decides context eligibility (unknown training
         requirement fails closed in training-denied contexts).
         """
         owner = _load_owner_bindings_safely()
@@ -5697,7 +5697,7 @@ def create_app(
                 ),
                 status_code=400,
             )
-        # C15-XB-03: worker routing requires an exact binding whose
+        # Worker routing requires an exact binding whose
         # role is BindingRole.WORKER.  An ORCHESTRATOR-only binding
         # cannot authorize WORKER execution; reusing it would be a
         # role violation.
@@ -6050,10 +6050,10 @@ def create_app(
                     ),
                     status_code=400,
                 )
-            # C15-XB-03: only ORCHESTRATOR-role bindings may be selected
+            # Only ORCHESTRATOR-role bindings may be selected
             # for the Orchestrator-model slot.  A WORKER-role binding
             # is not qualified for the Orchestrator role -- selecting
-            # it would be a role violation (C11-B BindingRole).
+            # it would be a role violation (BindingRole).
             if binding.binding_role is not BindingRole.ORCHESTRATOR:
                 return templates.TemplateResponse(
                     request,
@@ -6160,7 +6160,7 @@ def create_app(
         """Persist the owner's exact Reviewer binding choice.
 
         Only a ``REVIEWER``-role binding that exists in the canonical
-        registry and resolves through the real C11-B resolver with the
+        registry and resolves through the real binding resolver with the
         real adapter may be selected.  A ``WORKER``/``ORCHESTRATOR``
         binding, an unknown id, or an unresolvable binding is refused;
         nothing is persisted on refusal.
@@ -6193,7 +6193,7 @@ def create_app(
                 ),
                 status_code=400,
             )
-        # C11-B BindingRole: only REVIEWER-role bindings may be selected
+        # BindingRole: only REVIEWER-role bindings may be selected
         # for the reviewer slot.  A WORKER/ORCHESTRATOR-role binding is
         # not qualified for review -- selecting it would be a role
         # violation even when provider/model text matches.

@@ -160,7 +160,7 @@ def _cli_explicit_review_policy(args: argparse.Namespace) -> ReviewPolicyMode | 
 
 
 def _resolve_cli_run_config(args: argparse.Namespace, repo: Path | str) -> RunConfig:
-    """Resolve one frozen RunConfig through the shared R2-A authority.
+    """Resolve one frozen RunConfig through the shared project-settings authority.
 
     This is the CLI's only run-creation path: Web's ``POST /runs``
     calls the same :func:`resolve_effective_run_config` with the same
@@ -513,11 +513,11 @@ def _provider_status_line(
     for row in quota_rows:
         if row.provider == provider and row.routing_state == RoutingState.BLOCKED:
             return "BLOCKED BY QUOTA"
-    # C15-RDY-02: append the durable readiness projection.  The leading
+    # Append the durable readiness projection.  The leading
     # "AVAILABLE (<path>)" wording is preserved for existing operator
     # tooling; the suffix distinguishes READY / NOT READY /
     # READINESS UNKNOWN.  Strictly read-only: never mutates state.
-    # C15-RDY-02A: a lookup failure is itself UNKNOWN -- never plain
+    # A lookup failure is itself UNKNOWN -- never plain
     # AVAILABLE -- with the fixed sanitized reason.  No exception text
     # (paths, secrets) is rendered.
     try:
@@ -623,7 +623,7 @@ def build_parser() -> argparse.ArgumentParser:
     tools_exec.add_argument("--operation-id", type=str, default=None)
     tools_exec.add_argument("tool_args", nargs=argparse.REMAINDER)
 
-    # orch scope: deterministic project-scope inspection and expansion (C09).
+    # orch scope: deterministic project-scope inspection and expansion.
     scope_parser = subparsers.add_parser(
         "scope", help="Inspect or expand deterministic project scope."
     )
@@ -762,7 +762,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="training_allowed",
         help=argparse.SUPPRESS,
     )
-    # R2-A: no implicit default.  ``None`` means "follow the persisted
+    # No implicit default.  ``None`` means "follow the persisted
     # project data policy" (unset project policy resolves conservatively
     # to Denied); the shared run-creation authority owns the default.
     run_parser.set_defaults(training_allowed=None)
@@ -975,7 +975,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     reconcile_parser.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
 
-    # orch recover <run-id>: dedicated C05 cold-takeover child invocation.
+    # orch recover <run-id>: dedicated supervisor cold-takeover child invocation.
     # Reached only from the supervisor's fenced-recovery launch path (see
     # ``RunSupervisor.ensure_recovery_running``); ``--db`` is the only knob
     # a human could conceivably pass, and even that is primarily for tests.
@@ -1032,7 +1032,7 @@ def build_parser() -> argparse.ArgumentParser:
     # orch report <run-id> [--json]
     report_parser = subparsers.add_parser(
         "report",
-        help="Show the canonical C16-B1 read-only run report (same evidence as observability).",
+        help="Show the read-only run report (same evidence as observability).",
     )
     report_parser.add_argument("run_id", type=str, help="Run identifier (e.g. run_abc123).")
     report_parser.add_argument(
@@ -1047,7 +1047,7 @@ def build_parser() -> argparse.ArgumentParser:
     # orch monitor <run-id>
     monitor_parser = subparsers.add_parser(
         "monitor",
-        help="Follow a run live with the canonical C16-B1 projection (read-only).",
+        help="Follow a run live using the run-report projection (read-only).",
     )
     monitor_parser.add_argument("run_id", type=str, help="Run identifier (e.g. run_abc123).")
     monitor_parser.add_argument(
@@ -1590,7 +1590,7 @@ def handle_run(args: argparse.Namespace) -> int:
     except ProjectIdentityError as exc:
         print(f"[!] {exc}", file=sys.stderr)
         return 1
-    # R2-A: the CLI resolves run policy exclusively through the shared
+    # The CLI resolves run policy exclusively through the shared
     # run-creation authority (same precedence as Web's POST /runs).
     try:
         config = _resolve_cli_run_config(args, args.repo)
@@ -1746,7 +1746,7 @@ def handle_review(args: argparse.Namespace) -> int:
     action_id = getattr(args, "action_id", None)
     expected_candidate = getattr(args, "expected_candidate", None)
     if action_id:
-        # Detached R3-E2 owner-action child: fence on the exact requested
+        # Detached owner-action child: fence on the exact requested
         # candidate, then delegate to the existing service authority.
         # The explicit --db (handed by the launcher) always wins so the
         # child can never be retargeted to another project store.
@@ -1785,7 +1785,7 @@ def handle_accept(args: argparse.Namespace) -> int:
     action_id = getattr(args, "action_id", None)
     expected_candidate = getattr(args, "expected_candidate", None)
     if action_id:
-        # Detached R3-E2 owner-action child: fence on the exact requested
+        # Detached owner-action child: fence on the exact requested
         # candidate, then delegate to the existing service authority.
         # The AcceptEngine re-checks every canonical condition immediately
         # before mutation; the Web pre-check stays advisory only.
@@ -1970,7 +1970,7 @@ def handle_reconcile(args: argparse.Namespace) -> int:
 
 
 def handle_recover(args: argparse.Namespace) -> int:
-    """Handle ``orch recover`` -- the dedicated C05 cold-takeover owner.
+    """Handle ``orch recover`` -- the dedicated supervisor cold-takeover owner.
 
     This CLI is intentionally distinct from ``orch run --run-id``: ordinary
     PENDING adoption stays PENDING-only.  Cold takeover of a RUNNING run
@@ -2270,7 +2270,7 @@ def handle_events(args: argparse.Namespace) -> int:
 
 
 def handle_observability(args: argparse.Namespace) -> int:
-    """Handle the strictly read-only C06 observability snapshot command."""
+    """Handle the strictly read-only observability snapshot command."""
     explicit = _explicit_db(args)
     path = Path(explicit) if explicit else (db_path_for_run(args.run_id) or get_default_db_path())
     resolved = path.resolve()
@@ -2305,7 +2305,7 @@ def _open_read_only_report_db(args: argparse.Namespace) -> Database | None:
 
 
 def handle_report(args: argparse.Namespace) -> int:
-    """Handle the strictly read-only C16-B1 canonical run report command."""
+    """Handle the strictly read-only canonical run report command."""
     db = _open_read_only_report_db(args)
     if db is None:
         return 1

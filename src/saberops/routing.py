@@ -155,10 +155,10 @@ def resolve_candidate_chain(
 ) -> list[WorkerCandidate]:
     """Resolve ordered list of worker candidates to attempt based on tier only.
 
-    Each :class:`WorkerCandidate` carries the exact C11-B ``binding_id`` the
+    Each :class:`WorkerCandidate` carries the exact ``binding_id`` the
     owner-approved :class:`~saberops.routing_config.DynamicCandidate`
     records, when present.  Static (closed-registry) candidates leave
-    ``binding_id`` empty so they resolve through the existing C11-B
+    ``binding_id`` empty so they resolve through the existing
     binding-registry declaration order -- the historical backward-compatible
     behavior.
 
@@ -173,9 +173,9 @@ def resolve_candidate_chain(
     Returns:
         List of WorkerCandidate instances to try in priority order.  Each
         candidate's ``binding_id`` is the durable, restart-deterministic
-        C11-B execution identity the autonomous supervisor and dispatch
+        Execution identity the autonomous supervisor and dispatch
         lifecycle must consume; provider/model alone never silently
-        substitutes for it (C15-XB-01).
+        substitutes for it.
 
     Raises:
         ValueError: If a provider override has no candidates in the selected tier.
@@ -216,8 +216,8 @@ def _with_frozen_evidence(candidate: WorkerCandidate, snapshot: Any | None) -> W
     this ``provider/model`` identity, its exact ``binding_id`` is
     propagated onto the returned :class:`WorkerCandidate` so the
     autonomous supervisor and dispatch lifecycle execute through that
-    binding (C15-XB-01), and its frozen ``training_required``
-    classification is carried so the canonical R2-B data-policy decision
+    binding, and its frozen ``training_required``
+    classification is carried so the canonical data-policy decision
     sees the same evidence at every dispatch path.  Static candidates
     carry no approval record and return the original candidate unchanged
     -- the historical declaration-order behavior is preserved.

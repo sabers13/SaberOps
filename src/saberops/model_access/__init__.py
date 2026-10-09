@@ -4,8 +4,8 @@ This package answers exactly one question: given an
 already-selected ``ExecutionBinding`` (WHAT), which ``ProviderConnection``
 (HOW) authenticates and reaches the provider/account/backend.  It never
 selects, ranks or filters bindings: routing, eligibility, quota policy
-and tier decisions remain owned by ``control_plane`` (C07); Attempt
-lifecycle by C11-D; tool/security authority by ``sandbox`` (C08/C11-C),
+and tier decisions remain owned by ``control_plane``; Attempt
+lifecycle by the autonomous runtime; tool/security authority by ``sandbox``,
 whose credential-reference contract this package consumes without
 re-implementing.
 

@@ -185,7 +185,7 @@ from saberops.provenance import (
 )
 
 # Kept as a compatibility module attribute for integrations that patch the
-# pre-C07 chain helper; C07 dispatch itself evaluates quota at preflight.
+# older chain helper; dispatch itself evaluates quota at preflight.
 from saberops.quota import apply_quota_to_chain  # noqa: F401
 from saberops.routing import resolve_candidate_chain
 from saberops.routing_config import (
@@ -231,7 +231,7 @@ _WORKER_ENV_SECRET_KEYS = {"OMNIROUTE_API_KEY"}
 
 # Reserved gateway-control variables that must be stripped from the parent
 # environment before building every WorkerRequest. The DIRECT path must be
-# immune to stale/malicious values; only the C10 boundary may explicitly
+# immune to stale/malicious values; only the gateway boundary may explicitly
 # add approved values for a genuine gateway dispatch.
 _RESERVED_GATEWAY_ENV_VARS = frozenset(
     {
@@ -335,7 +335,7 @@ def build_retry_task_prompt(
 ) -> str:
     """Build a concise, evidence-rich retry prompt for a subsequent attempt.
 
-    C04 projection: the raw full ``original_task`` is intentionally NOT
+    Projection: the raw full ``original_task`` is intentionally NOT
     prepended.  The retry worker receives the bounded objective digest, the
     inherited candidate SHA, and the exact failure evidence; the original
     epic task remains durably persisted on the run/package for audit.
@@ -373,11 +373,11 @@ def _render_repair_task(
 ) -> RenderResult:
     """Build a concise, evidence-rich repair prompt for an implementation worker.
 
-    C04 projection: the raw full ``original_task`` is intentionally NOT
+    Projection: the raw full ``original_task`` is intentionally NOT
     prepended.  The repair worker receives the bounded objective digest,
     the inherited candidate SHA, and bounded review evidence.
 
-    C04-R1: when ``package`` is provided the prompt is emitted as a single
+    When ``package`` is provided the prompt is emitted as a single
     PACKAGE-mode projection; when ``package`` is None it is emitted as the
     ordinary REPAIR projection.  No concatenation of an INITIAL/REPAIR
     contract with a PACKAGE contract.
@@ -458,11 +458,11 @@ def _render_final_repair_task(
 ) -> RenderResult:
     """Build a repair prompt that aggregates ALL outstanding findings for final convergence.
 
-    C04 projection: the raw full ``original_task`` is intentionally NOT
+    Projection: the raw full ``original_task`` is intentionally NOT
     prepended.  Outstanding review findings are deterministically bounded and
     deduplicated; already-resolved findings are NOT re-emitted.
 
-    C04-R1: when ``package`` is provided the prompt is emitted as a single
+    When ``package`` is provided the prompt is emitted as a single
     PACKAGE-mode projection; when ``package`` is None it is emitted as the
     ordinary REPAIR projection.
     """
@@ -549,7 +549,7 @@ def _bounded_output(raw: str, limit: int = 4000) -> str:
 def _is_genuine_capability_escalation(outcome: DispatchOutcome | None) -> bool:
     """Return True only for genuine capability-bearing tier escalation evidence.
 
-    C04 invariant: SURGEON context semantics may activate ONLY on a real
+    Invariant: SURGEON context semantics may activate ONLY on a real
     validation failure on actual candidate changes (``GATE_FAILURE`` with
     real diff).  Provider / quota / infrastructure / timeout / termination /
     mutation / no_changes / already_satisfied / unknown / unknown_no_changes
@@ -557,7 +557,7 @@ def _is_genuine_capability_escalation(outcome: DispatchOutcome | None) -> bool:
     capability-failure escalations never select SURGEON context semantics,
     regardless of how cleanly the worker ran.
 
-    H3.1: gate failure alone no longer authorizes tier escalation, so the
+    Gate failure alone no longer authorizes tier escalation, so the
     ``GATE_FAILURE`` branch is currently unreachable and SURGEON stays
     dormant.  An explicit worker ``CAPABILITY_FAILURE`` is NOT mapped to
     SURGEON: it carries no failed-candidate diff for a corrective
@@ -858,7 +858,7 @@ def _role_for_orchestrator_dispatch(
 ) -> DispatchRole:
     """Return the canonical role for one Orchestrator-level dispatch.
 
-    C04 override: when ``surgeon_active`` is True (genuine capability-bearing
+    Override: when ``surgeon_active`` is True (genuine capability-bearing
     tier escalation), the next dispatch is labelled SURGEON.  Otherwise the
     canonical :func:`role_for_stage` mapping is preserved unchanged for the
     legacy IMPLEMENTATION / RETRY / REPAIR / REVIEW stages.
@@ -873,7 +873,7 @@ def _role_for_orchestrator_dispatch(
 class _InitialOrchestratorGuidanceCache:
     """Bounded first-dispatch Orchestrator guidance cache.
 
-    C15-XEC: the bounded Orchestrator model participates in ONE
+    The bounded Orchestrator model participates in ONE
     semantic role in a normal run -- initial objective interpretation
     / execution guidance.  The cache is consulted exactly once, on
     the first dispatch of the run.  Subsequent calls return the
@@ -937,7 +937,7 @@ def _classify_gate_outcome(
     distinguishable from the ``VALIDATION_FAILURE`` bucket without fuzzy
     parsing.  The ``VALIDATION_FAILURE`` bucket itself does NOT prove cause:
     current structured evidence does not distinguish a genuine candidate
-    validation failure from a launchable gate-configuration error (H3/H3.1).
+    validation failure from a launchable gate-configuration error.
 
     Precedence:
       1. launch_failed            -> INFRASTRUCTURE_FAILURE
@@ -983,7 +983,7 @@ def _gate_disposition_payload(disposition: GateDisposition) -> dict[str, object]
     callers may merge this payload alongside other ``outcome`` fields (notably
     :class:`DispatchOutcome`) without colliding.  The worktree-mutation flag
     keeps its legacy ``gate_mutated_worktree`` key so existing evidence
-    consumers (including C02-R1-A) keep working unchanged.
+    consumers (including the core runtime) keep working unchanged.
     """
     return {
         "gate_outcome": disposition.outcome.value,
@@ -1012,7 +1012,7 @@ def load_owner_runtime_bindings(
     owner policy is adopted only alongside its own owner registry so a policy
     can never reference bindings the effective registry lacks.
 
-    C15 separation note: this helper still couples ``binding_policy`` to the
+    Separation note: this helper still couples ``binding_policy`` to the
     same call, but the policy it returns is the **Orchestrator-model**
     policy -- not a worker-binding selection policy.  Worker-binding
     selection lives in :class:`AutonomousSupervisor` and consults the
@@ -1037,10 +1037,10 @@ def load_owner_runtime_bindings(
 def _adopt_owner_binding_registry(binding_registry: Any | None) -> Any | None:
     """Fill an absent autonomous binding registry from owner state.
 
-    This is the C15-XB-02-aware counterpart to
+    This is the binding-aware counterpart to
     :func:`load_owner_runtime_bindings`: it adopts only the registry,
     never an :class:`OrchBindingPolicy`.  The orchestrator lifecycle
-    consumes the registry for worker dispatch (C15-XB-01/03) and the
+    consumes the registry for worker dispatch and the
     ``binding_policy`` is separately persisted in the frozen runtime
     contract purely so a fresh restart can recover the owner's
     Orchestrator-model choice.  Worker dispatch is **not** governed
@@ -1066,7 +1066,7 @@ def _reconstruct_frozen_worker_binding_registry(payload: Any | None) -> Any | No
     """Reconstruct the Run-frozen BindingRegistry from its durable payload.
 
     The payload is the canonical :meth:`BindingRegistry.to_dict` rendering
-    persisted in the Run's ``config_json`` at admission (C15-XB-FREEZE-01).
+    persisted in the Run's ``config_json`` at admission.
     Ordinary exact-binding dispatch, repair, retry, adoption and cold
     recovery resolve exclusively from this value; the live owner binding
     store is never consulted for an already-admitted Run.
@@ -1110,7 +1110,7 @@ class Orchestrator:
         self.tool_registry = tool_registry or ToolRegistry.from_environment()
         self.gateway_transport = gateway_transport
         self.gateway_live_state_provider = gateway_live_state_provider
-        # C15-RDY-02A: ``None`` here is an explicit test/compatibility-only
+        # ``None`` here is an explicit test/compatibility-only
         # disable of readiness admission (legacy hermetic unit scope).
         # Production construction never passes ``None``: the
         # ``OrchestratorService`` composition seam always injects a
@@ -1496,7 +1496,7 @@ class Orchestrator:
                     ),
                     None,
                 ),
-                # C11-D: a failover-legitimate Attempt based at its
+                # A failover-legitimate Attempt based at its
                 # validated required-base anchor (re-verified live
                 # against durable decision evidence) remains provably
                 # a candidate of this run.
@@ -1575,9 +1575,9 @@ class Orchestrator:
     def _configured_reviewer_override(self, run_id: str) -> WorkerCandidate | None:
         """Return the owner-configured exact reviewer for in-run review.
 
-        R3-E1.1: every production semantic-review dispatch must receive
+        Every production semantic-review dispatch must receive
         the same exact configured Reviewer candidate the service seam
-        supplies.  This delegates to the canonical R3-E1 authority
+        supplies.  This delegates to the canonical reviewer authority
         (:func:`reviewer_candidate_for_dispatch` over
         ``OwnerBindings.reviewer_binding_id``) with this run's real
         adapter registry -- no reviewer-selection policy lives here.
@@ -1620,7 +1620,7 @@ class Orchestrator:
         candidate_sha: str | None,
         is_autonomous: bool = False,
     ) -> Any:
-        """Compute and persist the frozen C13-F review-necessity decision.
+        """Compute and persist the frozen review-necessity decision.
 
         Returns the decision whether or not the persistence write
         succeeds: callers consult the returned value but the persisted
@@ -1648,7 +1648,7 @@ class Orchestrator:
         == "manual"``, otherwise the run row's persisted ``tier`` which
         ``update_run_tier`` keeps current through every escalation) so
         auto-classified / escalated T3 work carries the T3
-        hard-minimum signal into C13-F.
+        hard-minimum signal into adaptive review.
         """
         from saberops.review_adaptive import (
             ReviewDecision,
@@ -1789,7 +1789,7 @@ class Orchestrator:
     def _fail_run_for_project_scope_error(
         self, run_id: str, *, phase: str, exc: BaseException, base_commit: str
     ) -> None:
-        """Terminalize ``run_id`` after a fatal pre-dispatch C09 scope failure.
+        """Terminalize ``run_id`` after a fatal pre-dispatch scope failure.
 
         Called once from the outer guard around project-scope reconstruction/
         freezing in :meth:`_run_core`, before any worker is ever dispatched.
@@ -1883,14 +1883,14 @@ class Orchestrator:
         expected_owner_generation: int | None = None,
         expected_owner_id: str | None = None,
     ) -> RunResult:
-        """Resume a previously interrupted RUNNING run via C05 cold takeover.
+        """Resume a previously interrupted RUNNING run via supervisor cold takeover.
 
         Distinct from :meth:`run`: this entry point accepts only ``RUNNING``
         runs and only proceeds when both the strict positive-evidence recovery
         predicate is satisfied AND the calling process holds an authoritative
         fenced execution-owner reservation for ``expected_owner_generation``.
 
-        The fencing token requirement is what distinguishes C05 detached cold
+        The fencing token requirement is what distinguishes supervisor detached cold
         recovery from a generic continuation: every mutation under
         ``recover_run`` (closing the crashed attempt, persisting a checkpoint,
         launching a replacement worker) must be fenced to one exact new owner
@@ -1954,7 +1954,7 @@ class Orchestrator:
                     budgets=contract.budgets,
                     effort_policy=contract.effort_policy,
                     requested_effort=contract.requested_effort,
-                    # C15-XB-02: contract.binding_policy is the persisted
+                    # Contract.binding_policy is the persisted
                     # Orchestrator-model policy and is intentionally
                     # NOT consulted by worker-binding selection on
                     # restart; the supervisor reads it for read-only
@@ -2077,11 +2077,11 @@ class Orchestrator:
 
         ``autonomous`` is mandatory: without an explicit containment
         contract the autonomous production path would silently fall back
-        to plain ``adapter.run`` and bypass the C11-C sandbox/trace/effect
+        to plain ``adapter.run`` and bypass the sandbox/trace/effect
         boundary, so a missing contract is refused closed before any
         worker launch, run creation, or candidate-ready transition.
         ``reasoning_effort`` is an optional typed effort request resolved
-        through the canonical C11-B resolver (never a provider/model
+        through the canonical binding resolver (never a provider/model
         bypass: the exact binding still comes from the eligible ladder).
 
         Raw ``provider_override`` / ``model_override`` are refused here:
@@ -2093,7 +2093,7 @@ class Orchestrator:
         ``binding_registry`` or the supervisor stops with
         NO_ELIGIBLE_BINDING and zero launch.
 
-        C15-XB-02: ``binding_policy`` (an :class:`OrchBindingPolicy`)
+        ``binding_policy`` (an :class:`OrchBindingPolicy`)
         is preserved as an Orchestrator-model policy parameter for
         /orchestrator UI selection but is **not** consulted by worker
         binding selection in this lifecycle.  Changing
@@ -2177,12 +2177,12 @@ class Orchestrator:
         # input, and empty owner state leaves the fail-closed
         # NO_ELIGIBLE_BINDING path untouched.
         #
-        # C15-XB-02: ``binding_policy`` (an :class:`OrchBindingPolicy`)
+        # ``binding_policy`` (an :class:`OrchBindingPolicy`)
         # is the *Orchestrator-model* selection policy, NOT a worker
         # binding selection policy.  The autonomous supervisor derives
         # worker bindings from the canonical :class:`BindingRegistry`
         # plus the per-candidate :attr:`WorkerCandidate.binding_id`
-        # reference (C15-XB-01).  ``binding_policy`` is preserved in
+        # reference.  ``binding_policy`` is preserved in
         # the frozen runtime contract so the persisted owner choice is
         # reconstructable across restart, but it is no longer passed
         # to the supervisor's worker-binding selection logic.
@@ -2204,7 +2204,7 @@ class Orchestrator:
             budgets=supervisor_config,
             effort_policy=effort_policy,
             requested_effort=reasoning_effort,
-            # C15-XB-02: binding_policy (OrchBindingPolicy) is no longer
+            # Binding_policy (OrchBindingPolicy) is no longer
             # passed as worker-binding selection authority.  It is
             # preserved on the supervisor attribute for read-only
             # diagnostics but is deliberately not consulted by worker
@@ -2381,7 +2381,7 @@ class Orchestrator:
         continued_source = validate_continuation(self.db, config)
         if continued_source and run_id is None:
             raise ValueError("Continue must be admitted through the supervised run launcher.")
-        # C09: whether this call is adopting an existing run matters for which
+        # Whether this call is adopting an existing run matters for which
         # revision the frozen project graph/scope must be built against.  The
         # ``run_id`` parameter is overwritten further down once the run is
         # resolved, so its adoption/new-run meaning is captured once, here.
@@ -2398,7 +2398,7 @@ class Orchestrator:
         frozen_control_plane: FrozenControlPlane
         frozen_tools: FrozenToolContract
         frozen_gateway: FrozenGatewayConfig | None = None
-        # C09: the run's own authoritative base_commit, captured once the run
+        # The run's own authoritative base_commit, captured once the run
         # is resolved below; used only when ``is_adoption`` is True.
         adopted_base_commit: str = ""
 
@@ -2531,7 +2531,7 @@ class Orchestrator:
             effective_run_id = run_id
             adopted = self.db.get_run(effective_run_id)
             assert adopted is not None
-            # C15-XB-FREEZE-01 + SABEROPS persisted-binding-authority: for an
+            # Exact worker binding + SABEROPS persisted-binding-authority: for an
             # already-admitted Run, the Run's OWN durable frozen
             # ``worker_binding_registry`` is the SOLE source of ordinary
             # exact-binding identity.  The persisted value is forced into the
@@ -2587,7 +2587,7 @@ class Orchestrator:
                     f"Stored control-plane digest for run '{effective_run_id}' has no snapshot"
                 )
             else:
-                # Pre-R2 rows have no immutable policy column.  Preserve
+                # Older rows have no immutable policy column.  Preserve
                 # compatibility without consulting mutable owner state.
                 frozen_control_plane = legacy_frozen_control_plane(
                     required_capabilities=config.required_capabilities,
@@ -2610,7 +2610,7 @@ class Orchestrator:
             else:
                 routing_snapshot = load_packaged_default()
                 routing_payload = snapshot_to_payload(routing_snapshot, adopted.created_at)
-            # C10-R1: reconstruct the frozen gateway contract from the run row.
+            # Reconstruct the frozen gateway contract from the run row.
             # Live infrastructure observations (health, quota) are NOT frozen
             # here -- the dispatcher reads those at the per-dispatch boundary.
             if adopted.gateway_snapshot_json is not None:
@@ -2621,7 +2621,7 @@ class Orchestrator:
         else:
             # New run: load effective routing once before creation (fail-closed)
             routing_snapshot = load_effective_routing()
-            # C15-XB-FREEZE-01: freeze the effective owner binding registry
+            # Freeze the effective owner binding registry
             # together with the routing snapshot, before the Run is persisted,
             # whenever the snapshot can produce an exact-binding candidate.
             # A static-only snapshot loads nothing: the historical
@@ -2647,7 +2647,7 @@ class Orchestrator:
             effective_run_id = provenance.run_id
             routing_payload = snapshot_to_payload(routing_snapshot, created_at)
             frozen_tools = freeze_tool_contract(config.tool_refs, self.tool_registry)
-            # C10-R1: freeze the optional gateway contract and persist it on
+            # Freeze the optional gateway contract and persist it on
             # the run row.  When ``RunConfig`` does not carry a frozen
             # gateway, the dispatcher is DIRECT and no gateway evidence is
             # recorded at the dispatch boundary.
@@ -2688,11 +2688,11 @@ class Orchestrator:
                 phase=PhaseKind.LEDGER_DB,
                 source_kind="orchestrator._run_core",
                 boundary_kind="create_run",
-                notes="C14-C: time spent inside the create_run() persistence boundary",
+                notes="time spent inside the create_run() persistence boundary",
             ):
                 self.db.create_run(run)
 
-            # C14-C: phases whose exact production boundary is not
+            # Phases whose exact production boundary is not
             # currently observable without a larger architectural
             # redesign.  We never invent a number; we record an
             # explicit UNKNOWN row with a note explaining what would
@@ -2741,12 +2741,12 @@ class Orchestrator:
                 )
             except Exception:
                 # Telemetry MUST NOT corrupt the run; swallow only the
-                # C14-C write failure and continue.
+                # Write failure and continue.
                 pass
 
         run_id = effective_run_id
         assert routing_snapshot is not None and routing_payload is not None
-        # C15-XB-FREEZE-01: the single run-scoped BindingRegistry ordinary
+        # The single run-scoped BindingRegistry ordinary
         # exact-binding dispatch, retry, continuation and repair resolve
         # against.  Reconstructed from the Run's own durable frozen material;
         # never from ``load_owner_bindings()`` (the live owner store), which
@@ -2777,11 +2777,11 @@ class Orchestrator:
                 },
             )
 
-        # C09: freeze the run's project graph and initial scope exactly once.
+        # Freeze the run's project graph and initial scope exactly once.
         # An adopted/recovered run reconstructs its frozen scope instead of
         # re-analyzing; a new run analyzes the authoritative base revision.
         #
-        # C09-R3: by this point the run has already been created/adopted into
+        # By this point the run has already been created/adopted into
         # active execution state (RUNNING).  A fatal failure anywhere in this
         # block is pre-dispatch project-scope infrastructure failure -- never
         # a worker/provider/model failure -- and must never leave an orphaned
@@ -2802,7 +2802,7 @@ class Orchestrator:
                 authoritative_base_commit = adopted_base_commit if is_adoption else base_commit
                 scope_failure_phase = "base_revision_mismatch"
                 if is_adoption and base_commit != authoritative_base_commit:
-                    # Legacy/pre-C09 adoption safety: compatibility with a run
+                    # Legacy/older adoption safety: compatibility with a run
                     # that has no frozen scope is allowed only fail-closed.
                     # The working tree may only be analyzed as the run's
                     # historical base revision when the repository truly is
@@ -2816,7 +2816,7 @@ class Orchestrator:
                         "graph from the wrong revision"
                     )
                 try:
-                    # C09-R2: close the TOCTOU window between capturing
+                    # Close the TOCTOU window between capturing
                     # ``authoritative_base_commit`` and freezing the graph
                     # built from it -- re-check the repository both
                     # immediately before and immediately after analysis so a
@@ -2898,7 +2898,7 @@ class Orchestrator:
         # retain the standard lifecycle/events and do not incur planning model
         # calls; the deterministic sizing assessment never reads adapters.
         plan_steps: list[Any] = []
-        # R1-B.5: an adopting/recovering run must never re-plan an already
+        # An adopting/recovering run must never re-plan an already
         # durable decomposition.  A durable plan is the authority on
         # recovery: adopt its exact plan id, step ids, package ids and
         # persisted lifecycle state.  Multiple or inconsistent durable plans
@@ -2926,7 +2926,7 @@ class Orchestrator:
                     base_commit,
                 )
                 plan_steps = list(persisted.steps)
-                # C09: attach the deterministic module scope to each work package
+                # Attach the deterministic module scope to each work package
                 # so package workers receive their own bounded [PROJECT SCOPE].
                 assert scope_bundle is not None
                 for package in persisted.packages:
@@ -2984,7 +2984,7 @@ class Orchestrator:
             attempt_number = 0
             stage_attempts = 0
             package_dispatch_ordinal = 0
-            # C15-XEC: the bounded Orchestrator model has exactly ONE
+            # The bounded Orchestrator model has exactly ONE
             # semantic role in a normal run -- initial objective
             # interpretation / execution guidance.  It is invoked at
             # most once per run; the cache is consumed by the first
@@ -3005,9 +3005,9 @@ class Orchestrator:
             tier_has_escalation_evidence = False
             escalation_outcome: DispatchOutcome | None = None
             escalation_stage: DispatchStage | None = None
-            # C04: True only when the just-completed tier escalation is a
+            # True only when the just-completed tier escalation is a
             # GENUINE capability-bearing escalation (a real validation
-            # failure on actual candidate changes).  H3.1 removed gate
+            # failure on actual candidate changes).  Gate misconfiguration handling removed gate
             # failure from escalation authority, so no reachable escalation
             # sets this today; SURGEON stays dormant.  Reset alongside
             # tier_has_escalation_evidence wherever a fresh attempt-budget
@@ -3023,7 +3023,7 @@ class Orchestrator:
                 provider_override=config.provider_override,
                 snapshot=routing_snapshot,
             )
-            # C07 evaluates quota at the same pre-dispatch boundary as every
+            # Quota policy evaluates quota at the same pre-dispatch boundary as every
             # other hard control-plane filter, so excluded candidates still
             # produce typed decision evidence and cannot be resurrected by
             # ranking or overrides.
@@ -3036,13 +3036,13 @@ class Orchestrator:
             # evidence and the owner-facing summary are both derived from
             # this same list -- never re-derived or contradicted.
             skipped_candidate_details: list[dict[str, Any]] = []
-            # R1-B.1: skip details are scoped to the selected routing
+            # Skip details are scoped to the selected routing
             # chain.  The flag tracks whether terminal exhaustion
             # evidence was already recorded for the current context so
             # the mixed attempted+skipped case persists exactly one
             # terminal record without duplicating the zero-launch path.
             chain_exhaustion_recorded = False
-            # R1-B.3: chain-local attempt authority.  The terminal
+            # Chain-local attempt authority.  The terminal
             # summary must describe the CURRENT selected routing chain,
             # not the run-global ``attempts`` history.  This index marks
             # where the active chain's launches begin inside ``attempts``;
@@ -3124,7 +3124,7 @@ class Orchestrator:
             if existing_attempts:
                 attempts.extend(existing_attempts)
                 attempt_number = len(attempts)
-            # R1-B.4: the process-local marker cannot survive process death,
+            # The process-local marker cannot survive process death,
             # so the current-chain boundary is reconstructed from durable
             # evidence whenever history is adopted.  The durable authority
             # is the last fresh-chain install (next_package_started /
@@ -3156,7 +3156,7 @@ class Orchestrator:
             active_continuation_attempt: Attempt | None = None
             blocked_providers_in_cycle: set[str] = set()
 
-            # Strict positive-evidence recovery gate.  C05 cold-takeover must
+            # Strict positive-evidence recovery gate.  Cold-takeover must
             # only mutate persisted state when the strict predicate passes; an
             # ordinary ``run`` against a RUNNING attempt without positive
             # evidence falls through cleanly without checkpoint mutation.
@@ -3420,7 +3420,7 @@ class Orchestrator:
                                 },
                             )
                     if not may_escalate:
-                        # R1-B.3: chain-local exhaustion guard.  The ladder
+                        # Chain-local exhaustion guard.  The ladder
                         # is exhausted for the CURRENT chain; record
                         # evidence when that chain launched nothing or
                         # skipped something.  Uses the chain-local attempt
@@ -3482,7 +3482,7 @@ class Orchestrator:
                         escalation_outcome,
                         stage=escalation_stage,
                     )
-                    # C04: a genuine capability-bearing tier escalation may
+                    # A genuine capability-bearing tier escalation may
                     # activate SURGEON context semantics for the next
                     # dispatch.  Explicit CAPABILITY_FAILURE escalations and
                     # provider / quota / infrastructure / timeout / mutation
@@ -3537,12 +3537,12 @@ class Orchestrator:
                     )
                     candidate_idx = 0
                     stage_attempts = 0
-                    # R1-B.1: skip details are scoped to the selected
+                    # Skip details are scoped to the selected
                     # routing chain -- a real tier escalation changes
                     # selected_routing_context, so prior-tier skips must
                     # never render as though they belonged to the new
                     # tier.  Reset alongside the attempt-budget cycle.
-                    # R1-B.3: a genuinely fresh chain also restarts the
+                    # A genuinely fresh chain also restarts the
                     # terminal attempt scope; historical attempts stay
                     # durable in ``attempts``.
                     skipped_candidate_details.clear()
@@ -3551,7 +3551,7 @@ class Orchestrator:
                     tier_has_escalation_evidence = False
                     escalation_outcome = None
                     escalation_stage = None
-                    # C04: the next dispatch after a genuine escalation is a
+                    # The next dispatch after a genuine escalation is a
                     # SURGEON context.  After resetting the attempt-budget
                     # cycle we must also re-evaluate whether the next
                     # dispatch is a SURGEON (set above when the escalation
@@ -3560,19 +3560,19 @@ class Orchestrator:
                     continue
                 auto_pinned_candidate = None
                 auto_decision_effort: str | None = None
-                # C11-D exact executable binding: the resolved runtime
+                # Exact executable binding: the resolved runtime
                 # value (never the unexecuted decision) that both the
                 # semantic invocation and the dispatch evidence below
                 # are sourced from.  ``None`` on the ordinary
                 # (unsupervised) path, which preserves legacy behavior.
                 auto_resolved: ResolvedExecutionBinding | None = None
-                # C11-D failover start override: Attempt B starts at the
+                # Failover start override: Attempt B starts at the
                 # validated required-base anchor (or its proven
                 # checkpoint continuation), never at the run base or
                 # the advanced lineage.
                 auto_failover_start: str | None = None
                 if supervisor is not None:
-                    # C11-D canonical seam: the autonomous supervisor names
+                    # Canonical seam: the autonomous supervisor names
                     # the exact eligible binding (or STOP) from durable
                     # state; the canonical lifecycle below performs it.
                     # Production consumes decide() outputs only; the legacy
@@ -3698,7 +3698,7 @@ class Orchestrator:
                             payload=blocked_payload,
                         )
                     if candidate_idx >= len(candidates):
-                        # R1-B.3: same chain-local guard as above.
+                        # Same chain-local guard as above.
                         if len(attempts) <= chain_attempt_start or skipped_candidate_details:
                             self.db.record_event(
                                 run_id,
@@ -3723,7 +3723,7 @@ class Orchestrator:
                     candidate_idx += 1
 
                 if supervisor is None:
-                    # C15-XB-01 exact worker binding for the ordinary
+                    # Exact worker binding for the ordinary
                     # owner-facing dispatch path.  An ordinary routing
                     # candidate may carry an owner-approved ``binding_id``
                     # from the frozen routing snapshot.  A non-empty
@@ -3809,7 +3809,7 @@ class Orchestrator:
                             continue
 
                 if supervisor is not None:
-                    # C11-D: resolve the exact executable binding BEFORE
+                    # Resolve the exact executable binding BEFORE
                     # any worktree/attempt/evidence exists.  The decision
                     # alone never executes: resolution through the
                     # authoritative BindingRegistry is what the runtime
@@ -3871,7 +3871,7 @@ class Orchestrator:
                             "zero launch.",
                             SupervisorStopReason.NO_ELIGIBLE_BINDING.value,
                         )
-                    # C11-D: failover required-base validation.  The
+                    # Failover required-base validation.  The
                     # anchor is Attempt A's actual base (never
                     # run.base_commit).  Without a checkpoint the next
                     # Attempt starts exactly at the anchor; with an
@@ -3999,7 +3999,7 @@ class Orchestrator:
 
                 # Assemble final prompt BEFORE creating attempt/worktree for eligibility preflight.
                 #
-                # C04-R1: ONE worker dispatch -> ONE context projection ->
+                # ONE worker dispatch -> ONE context projection ->
                 # ONE rendered worker contract.  No composition of an INITIAL
                 # / REPAIR contract with a separate PACKAGE contract; the
                 # package branch selects ONE PACKAGE projection directly.  The
@@ -4201,7 +4201,7 @@ class Orchestrator:
                         pkg_role = _role_for_orchestrator_dispatch(
                             local_stage, surgeon_active=surgeon_active
                         )
-                        # C15-XEC: bounded initial-orchestrator-guidance
+                        # Bounded initial-orchestrator-guidance
                         # is consumed exactly once per run.  It is
                         # passed here as an advisory ``extra_sections``
                         # entry on the FIRST package dispatch.  Worker
@@ -4229,7 +4229,7 @@ class Orchestrator:
                     prior_checks = self.db.get_checks_for_attempt(prior_attempt.id)
                     prior_chk = prior_checks[-1] if prior_checks else None
                     if surgeon_active:
-                        # C04: a SURGEON dispatch after a genuine capability
+                        # A SURGEON dispatch after a genuine capability
                         # escalation receives a Surgical Escalation Capsule
                         # rather than the original epic task.
                         changed_paths: tuple[str, ...] = ()
@@ -4328,7 +4328,7 @@ class Orchestrator:
                     initial_role = _role_for_orchestrator_dispatch(
                         local_stage, surgeon_active=surgeon_active
                     )
-                    # C15-XEC: bounded initial-orchestrator-guidance
+                    # Bounded initial-orchestrator-guidance
                     # is consumed exactly once per run.  It is
                     # passed here as an advisory ``extra_sections``
                     # entry on the FIRST unsliced initial dispatch.
@@ -4360,7 +4360,7 @@ class Orchestrator:
                     source_kind="orchestrator._run_core",
                     boundary_kind="render_projection",
                     package_id=(current_package.id if current_package is not None else None),
-                    notes="C14-C: rendering sub-boundary only -- time spent "
+                    notes="rendering sub-boundary only -- time spent "
                     "inside render_projection() producing the worker prompt. "
                     "Projection construction (build_*_projection) happens "
                     "before this timing boundary and is NOT included in the "
@@ -4397,11 +4397,11 @@ class Orchestrator:
                     )
                 else:
                     readiness_pre = None
-                # C15-GC: governed worker dispatches against an
+                # Governed worker dispatches against an
                 # Orchestrator-managed worktree MUST have the canonical
                 # project instruction contract (e.g. the scope-first
                 # `python -m saberops.devscope scope` rule)
-                # faithfully delivered to the worker.  C07 evaluates the
+                # faithfully delivered to the worker.  Quota policy evaluates the
                 # adapter's factual instruction-compatibility evidence at
                 # the SAME pre-dispatch boundary as every other hard
                 # filter, so a candidate whose transport is proven
@@ -4422,8 +4422,8 @@ class Orchestrator:
                     policy=control_plane_policy,
                     required_capabilities=frozen_control_plane.required_capabilities,
                     control_plane_digest=frozen_control_plane.digest,
-                    # C11-D: the exact binding's quota pool gates the
-                    # canonical C07 evaluation (never a provider-wide
+                    # The exact binding's quota pool gates the
+                    # canonical quota evaluation (never a provider-wide
                     # default); ordinary dispatches keep legacy behavior.
                     binding_pool_id=(
                         auto_resolved.quota_pool_id if auto_resolved is not None else None
@@ -4452,8 +4452,8 @@ class Orchestrator:
                     source_kind="orchestrator._run_core",
                     boundary_kind="evaluate_eligibility",
                     package_id=(current_package.id if current_package is not None else None),
-                    notes="C14-C: eligibility-evaluation sub-boundary only -- "
-                    "time spent inside the C07 evaluate_eligibility() call. "
+                    notes="eligibility-evaluation sub-boundary only -- "
+                    "time spent inside the quota evaluate_eligibility() call. "
                     "The preceding control_plane_decision() call happens "
                     "before this timing boundary and is NOT included in the "
                     "measurement.",
@@ -4840,7 +4840,7 @@ class Orchestrator:
                 # Dispatch task to worker with live-output/activity hooks
                 adapter = adapter_pre
                 assert adapter is not None
-                # C16-C0: every worker dispatch is bounded.  The effective
+                # Every worker dispatch is bounded.  The effective
                 # timeout is the explicit owner value when supplied, else
                 # the tier default -- a single source of truth
                 # (RunConfig.worker_timeout_for), never an unbounded sentinel.
@@ -4901,7 +4901,7 @@ class Orchestrator:
                 on_monitor_transition = self._monitor_transition_hook(
                     run_id, attempt_id, candidate.provider, candidate.model
                 )
-                # C11-D: the exactly resolved binding's effort reaches
+                # The exactly resolved binding's effort reaches
                 # the actual execution request as a typed tier (parsed
                 # and capability-checked at resolution time, never
                 # re-derived here).  Ordinary (non-supervised)
@@ -4923,10 +4923,10 @@ class Orchestrator:
                     on_process_start=on_process_start,
                     on_monitor_transition=on_monitor_transition,
                     reasoning_effort=worker_effort,
-                    # C09: run-scoped identity (ORCH_RUN_ID/ORCH_DB_PATH) is
+                    # Run-scoped identity (ORCH_RUN_ID/ORCH_DB_PATH) is
                     # always provided so deterministic scope expansion works
                     # without any configured tool bindings; tool-specific keys
-                    # remain conditional on the frozen contract.  C11-D:
+                    # remain conditional on the frozen contract.
                     # the exactly resolved execution overlay (binding /
                     # profile / pool / backend identity, plus any
                     # provider-seam profile selector) rides the same
@@ -5025,7 +5025,7 @@ class Orchestrator:
                     control_plane_digest=frozen_control_plane.digest,
                     prior_failure_refs=([prior_attempt.id] if prior_attempt is not None else None),
                     handoff_id=continuation_handoff_id,
-                    # C11-D: the exact binding identity the resolved
+                    # The exact binding identity the resolved
                     # executable binding carries (binding_id/profile_id/
                     # quota_pool_id) plus the resolved effort tier --
                     # durable evidence sourced from the value the runtime
@@ -5067,7 +5067,7 @@ class Orchestrator:
                         dispatch_evidence.time_to_resume_seconds = (
                             linked_dispatch.time_to_resume_seconds
                         )
-                # C10-R4: consult the optional gateway before invoking
+                # Consult the optional gateway before invoking
                 # the worker.  Live infrastructure observations (health,
                 # quota, pool, affinity) are read per dispatch via the
                 # injectable gateway-owned provider and are NOT frozen.
@@ -5082,14 +5082,14 @@ class Orchestrator:
                             )
                         except Exception:
                             live_state = GatewayLiveState()
-                # C11-D: the executed transport path must agree with the
+                # The executed transport path must agree with the
                 # exact binding's backend.  DIRECT_CLI never traverses
                 # the gateway (pure DIRECT dispatch); GATEWAY executes
-                # only through the existing C10 boundary with direct
+                # only through the existing gateway boundary with direct
                 # fallback forbidden for this dispatch (a GATEWAY
                 # binding never silently degrades to DIRECT even when
                 # ordinary fallback would permit it) and with the
-                # binding's account pin supplied as the C10 affinity
+                # binding's account pin supplied as the gateway affinity
                 # hint where one exists. DIRECT_API also stays on
                 # its exact direct connection. Ordinary dispatches keep the
                 # run-configured gateway behavior verbatim.
@@ -5242,7 +5242,7 @@ class Orchestrator:
                 if gateway_outcome is not None and (
                     gateway_outcome.disposition == ExecutionDisposition.GATEWAY_BLOCKED
                 ):
-                    # C10-R3/R4: the worker is not invoked when the gateway
+                    # The worker is not invoked when the gateway
                     # blocks the dispatch. Synthesize a typed failed
                     # WorkerResult so the downstream orchestrator code can
                     # proceed uniformly. Preserve the actual failure reason
@@ -5348,7 +5348,7 @@ class Orchestrator:
                     result=worker_res,
                 )
 
-                # C14-C: the worker's aggregate subprocess duration
+                # The worker's aggregate subprocess duration
                 # (worker_res.duration_seconds) is MEASURED, but the
                 # current production architecture cannot honestly split
                 # it into PROCESS_STARTUP / MODEL_WAIT / TOOL_EXECUTION
@@ -5647,7 +5647,7 @@ class Orchestrator:
                         source_kind="orchestrator._run_core",
                         boundary_kind="gate_run",
                         attempt_id=attempt_id,
-                        notes="C14-C: time spent inside the gate subprocess boundary",
+                        notes="time spent inside the gate subprocess boundary",
                     ):
                         gate_res = _run_configured_gate(config,
                             gate_args,
@@ -5917,7 +5917,7 @@ class Orchestrator:
                                 candidate_idx = 0
                                 stage_attempts = 0
                                 package_dispatch_ordinal = 0
-                                # R1-B.2: skip evidence belongs only to the
+                                # Skip evidence belongs only to the
                                 # currently selected package/tier routing
                                 # chain.  A next-package transition installs
                                 # a fresh chain (possibly a new tier and
@@ -5925,7 +5925,7 @@ class Orchestrator:
                                 # must never leak into the next package's
                                 # terminal exhaustion.  Reset alongside the
                                 # fresh attempt-budget/escalation cycle.
-                                # R1-B.3: the same fresh chain restarts the
+                                # The same fresh chain restarts the
                                 # terminal attempt scope; prior-package
                                 # attempts stay durable in ``attempts``.
                                 skipped_candidate_details.clear()
@@ -6069,7 +6069,7 @@ class Orchestrator:
                         attempts.append(attempt)
                         active_attempt_id = None
 
-                        # C13-F: deterministic risk-adaptive review
+                        # Deterministic risk-adaptive review
                         # classification.  Computed once at candidate-ready
                         # time, persisted on the run row, and consulted by
                         # Accept + supervisor recovery + handoff + retry.
@@ -6108,10 +6108,10 @@ class Orchestrator:
                                     "is_autonomous": decision.is_autonomous,
                                 },
                             )
-                            # C14-C: at this exact seam the runtime
+                            # At this exact seam the runtime
                             # positively knows that an independent REVIEW
                             # phase does not apply to this candidate
-                            # (authoritative C13-F decision:
+                            # (authoritative review-necessity decision:
                             # ``independent_review_required == False``).
                             # The REVIEW phase is therefore recorded as
                             # NOT_APPLICABLE with truthful attribution --
@@ -6158,7 +6158,7 @@ class Orchestrator:
                                 registry=self.registry,
                                 readiness_service=self.readiness_service,
                             )
-                            # R3-E1.1: the owner-selected exact REVIEWER
+                            # The owner-selected exact REVIEWER
                             # binding (when configured) authorizes every
                             # in-run review dispatch below -- bounded/final
                             # and MAX alike.  A configured-but-invalid
@@ -6258,7 +6258,7 @@ class Orchestrator:
                                                 )
                                                 repair_adapter = None
                                         elif getattr(repair_candidate, "binding_id", None):
-                                            # C15-XB-01: ordinary repair
+                                            # Ordinary repair
                                             # dispatches preserve the exact
                                             # owner-approved binding too.  A
                                             # non-empty binding_id is
@@ -6287,12 +6287,12 @@ class Orchestrator:
                                             except BindingResolutionError as exc:
                                                 last_reason = f"exact_binding_{exc.reason.lower()}"
                                                 repair_adapter = None
-                                        # C15-GC: repair dispatches execute
+                                        # Repair dispatches execute
                                         # against an Orchestrator-managed
                                         # worktree containing the canonical
                                         # AGENTS.md, so the same
                                         # governed-instruction contract
-                                        # applies.  C07 evaluates the
+                                        # applies.  Quota policy evaluates the
                                         # adapter's typed
                                         # instruction-compatibility evidence
                                         # before any worker process is
@@ -6552,7 +6552,7 @@ class Orchestrator:
                                             "inherited_base_sha": cur_from_sha,
                                         },
                                     )
-                                    # C16-C0: repair dispatches share the same
+                                    # Repair dispatches share the same
                                     # bounded effective timeout as primary
                                     # dispatches (explicit owner value, else
                                     # the tier default).
@@ -6628,7 +6628,7 @@ class Orchestrator:
                                             if repair_resolved is not None
                                             else None
                                         ),
-                                        # C09: run-scoped identity is always
+                                        # Run-scoped identity is always
                                         # provided (see the primary dispatch).
                                         env=_filtered_worker_env(
                                             {
@@ -6798,7 +6798,7 @@ class Orchestrator:
                                             repair_dispatch_evidence.time_to_resume_seconds = (
                                                 linked_dispatch.time_to_resume_seconds
                                             )
-                                    # C10-R4: consult the optional gateway before
+                                    # Consult the optional gateway before
                                     # invoking the repair worker. Live state
                                     # is read per dispatch via the injectable
                                     # provider and never frozen.
@@ -8564,7 +8564,7 @@ class Orchestrator:
                         # Gate truth is recorded for a VALIDATION_FAILURE outcome
                         # on actual candidate changes (deterministic verification
                         # did not pass; cause not proven), but gate failure alone
-                        # carries NO cross-tier spend authority (H3.1):
+                        # carries NO cross-tier spend authority:
                         # process evidence cannot distinguish a misconfigured
                         # gate from a genuine candidate validation failure.
                         # INFRASTRUCTURE_FAILURE, TIMEOUT,
@@ -8618,7 +8618,7 @@ class Orchestrator:
                                     "reason": "gate_failed_committed_candidate",
                                 },
                             )
-                            # H3.1: a VALIDATION_FAILURE outcome on actual candidate
+                            # A VALIDATION_FAILURE outcome on actual candidate
                             # changes preserves gate truth and repair lineage
                             # but is NOT cross-tier escalation evidence.  The
                             # durable outcome stays GATE_FAILURE with
@@ -8640,7 +8640,7 @@ class Orchestrator:
                         else:
                             # Every other gate outcome, or VALIDATION_FAILURE
                             # with no candidate changes.  No gate outcome
-                            # carries cross-tier escalation authority (H3.1).
+                            # carries cross-tier escalation authority.
                             # Candidate SHA is preserved.
                             # INFRASTRUCTURE_FAILURE / TIMEOUT /
                             # TERMINATION_UNSAFE / MUTATION must never produce
@@ -8677,7 +8677,7 @@ class Orchestrator:
                                     "Gate check failed with no changes "
                                     f"(exit code {gate_res.exit_code})"
                                 )
-                            # C03 invariant: when the worker produced real
+                            # Invariant: when the worker produced real
                             # candidate changes, preserve the candidate commit
                             # SHA in durable evidence even though the gate did
                             # not succeed.  The candidate is not promoted (no
@@ -8751,7 +8751,7 @@ class Orchestrator:
                             # Do NOT spend down per-tier escalation budget for auto routing
                             if config.model_override is None:
                                 stage_attempts = max(0, stage_attempts - 1)
-                            # C03 invariant: deterministic-gate infrastructure
+                            # Invariant: deterministic-gate infrastructure
                             # / runtime / safety failures (INFRASTRUCTURE_FAILURE,
                             # TIMEOUT, TERMINATION_UNSAFE) must NEVER buy another
                             # model dispatch.  Fail the run closed at the
@@ -8976,12 +8976,12 @@ class Orchestrator:
 
             # All attempts exhausted
             now = current_iso_timestamp()
-            # R1-B.1 mixed exhaustion: the final selected chain is
+            # Mixed exhaustion: the final selected chain is
             # exhausted with both launched attempts and skipped
             # candidates.  Attempted candidates stay distinct from
             # skipped/ineligible ones; the launched model is never
             # described as ineligible.
-            # R1-B.3: all terminal attempt facts are scoped to the
+            # All terminal attempt facts are scoped to the
             # CURRENT selected routing chain via ``chain_attempt_start``.
             # ``chain_attempt_count`` counts genuinely launched attempts
             # in ``attempts[chain_attempt_start:]``; the run-global
@@ -9075,7 +9075,7 @@ class Orchestrator:
             )
             run_failed_payload: dict[str, Any] = {
                 "summary": summary,
-                # R1-B.3: ``attempts_count`` intentionally remains the total
+                # ``attempts_count`` intentionally remains the total
                 # run attempt count (durable history across packages/tiers).
                 # ``chain_attempts_count`` is the chain-local launched-attempt
                 # count described by the owner-facing summary.

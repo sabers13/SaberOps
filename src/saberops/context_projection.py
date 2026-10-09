@@ -1,4 +1,4 @@
-"""C04 — bounded worker-context projection and surgical escalation capsule.
+"""Bounded worker-context projection and surgical escalation capsule.
 
 This module owns the deterministic context-projection contract that decides
 what a worker actually sees for a given dispatch.  The contract is small,
@@ -76,7 +76,7 @@ _TRUNCATION_MARKER = "\n...[truncated]...\n"
 
 
 class DispatchContextMode(StrEnum):
-    """Canonical C04/C05 context modes for a worker dispatch.
+    """Canonical projection context modes for a worker dispatch.
 
     The mode describes WHAT KIND of context the worker sees, not which tier /
     provider / model is selected.  Modes are explicitly durable and recorded
@@ -117,7 +117,7 @@ class ContextProjection:
     * a single ``validation_policy`` block appended idempotently by the
       renderer.
 
-    C04-R1: the new ``source_original_task_bytes`` field captures the byte
+    The new ``source_original_task_bytes`` field captures the byte
     size of the durable source objective so durable evidence can answer
     "size of source objective" independently of "was the full source
     objective model-visible".
@@ -137,7 +137,7 @@ class ContextProjection:
     review_excerpt: str | None = None
     full_parent_included: bool = False
     original_task: str | None = None  # present only in INITIAL / FRESH_REIMPLEMENTATION
-    # C04-R1: source byte size of the parent objective for this dispatch.
+    # Source byte size of the parent objective for this dispatch.
     # Independent of whether the full source objective was model-visible.
     source_original_task_bytes: int = 0
     focused_verification: str = "Run focused tests and nearby regressions; return the candidate."
@@ -238,7 +238,7 @@ class ContextProjection:
     def event_payload(self) -> dict[str, object]:
         """Return the compact durable evidence payload for this projection.
 
-        C04-R1 semantics:
+        Semantics:
 
         * ``original_task_bytes`` is the byte size of the durable source
           parent objective for this dispatch.  It is non-zero even in
@@ -430,7 +430,7 @@ class SurgicalCapsule:
     changed_paths: tuple[str, ...] = ()
     diff_ref: str | None = None
     invariants_to_preserve: tuple[str, ...] = ()
-    # C04-R1: source parent objective byte size for accurate evidence.
+    # Source parent objective byte size for accurate evidence.
     source_original_task_bytes: int = 0
     focused_verification: str = (
         "Apply the bounded fix only; verify with focused tests and return the candidate."
@@ -688,7 +688,7 @@ def build_initial_projection(
 ) -> ContextProjection:
     """Build a :class:`ContextProjection` for the initial unsliced dispatch.
 
-    C04-R1: the raw full original task is model-visible EXACTLY ONCE, in
+    The raw full original task is model-visible EXACTLY ONCE, in
     the ``[ORIGINAL TASK]`` section.  The ``responsibility`` line uses a
     compact static placeholder so the same source text never appears
     twice in the rendered body.
@@ -743,7 +743,7 @@ def build_package_initial_projection(
     """Build a single :class:`ContextProjection` for an INITIAL sliced
     package dispatch.
 
-    C04-R1: this is the ONLY worker contract for an initial package
+    This is the ONLY worker contract for an initial package
     dispatch.  It does NOT concatenate with an INITIAL projection.  The
     raw full original task is NEVER model-visible in PACKAGE mode.
 
@@ -817,7 +817,7 @@ def build_package_retry_projection(
     """Build a single :class:`ContextProjection` for a PACKAGE retry
     dispatch (either a gate-failure retry or a review-repair).
 
-    C04-R1: this is the ONLY worker contract for a package retry
+    This is the ONLY worker contract for a package retry
     dispatch.  It does NOT concatenate with a generic REPAIR projection.
     The raw full original task is NEVER model-visible in PACKAGE mode.
     """
@@ -991,7 +991,7 @@ def render_projection(
     The validation policy is appended exactly once and idempotently.  The
     invariant contract prefix is byte-identical for identical
     (role, mode, parent_slug, package_id, dispatch_reason) tuples.
-    C09: an optional bounded ``[PROJECT SCOPE]`` section is appended exactly
+    An optional bounded ``[PROJECT SCOPE]`` section is appended exactly
     once, before the validation policy.
     """
     if projection.mode in MODES_WITHOUT_FULL_TASK:

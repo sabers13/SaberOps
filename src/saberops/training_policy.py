@@ -99,7 +99,7 @@ def training_requirement_for(
 ) -> TrainingRequirement:
     """Return the canonical frozen training requirement for a candidate.
 
-    R2-B.1 precedence: a known static v1 classification (``TRUE`` or
+    Precedence: a known static v1 classification (``TRUE`` or
     ``FALSE``) is authoritative and returned exactly before any
     dynamic/carried value that could contradict it.  Frozen dynamic
     evidence (explicit requirement, carried

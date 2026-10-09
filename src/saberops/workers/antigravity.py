@@ -101,7 +101,7 @@ class AntigravityAdapter(WorkerAdapter):
                 outcome=DispatchOutcome.ELIGIBILITY_SKIP,
             )
 
-        # C11-D: a typed autonomous effort always wins over ambient
+        # A typed autonomous effort always wins over ambient
         # ``ORCH_AGY_EFFORT``.  The neutral tier maps to the concrete
         # ``agy --effort`` option by lowercasing (LOW->low, MEDIUM->medium,
         # HIGH->high, ULTRA->ultra).  Legacy non-autonomous requests with

@@ -273,7 +273,7 @@ class DisposableWorkspace:
             # it is shared by every concurrent DisposableWorkspace under the
             # same replay base, and removing it here raced with another
             # workspace's in-flight quarantine_git_pointer() os.replace(),
-            # making that rename fail with FileNotFoundError (C12-D
+            # making that rename fail with FileNotFoundError (replay
             # deterministic-parallel arm surfaced this latent shared-state
             # race).  The directory lives in the disposable replay base,
             # outside all workspaces and outside authoritative Project truth.

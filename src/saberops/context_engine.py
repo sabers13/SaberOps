@@ -1,15 +1,15 @@
-"""C11-B: token-budgeted, ledger-aware context planning.
+"""Token-budgeted, ledger-aware context planning.
 
 The context engine composes the inputs that go into one worker /
 orchestrator dispatch, with explicit byte and token budgets, deterministic
 selection, content-addressable section digests, and a delta-vs-previous
 representation for prompt caching. It extends (does not replace) the
-existing C04 :class:`ContextProjection` -- the projection is still the
+existing context projection :class:`ContextProjection` -- the projection is still the
 authoritative render contract; the engine decides WHAT goes into it.
 
 Three architectural invariants the engine enforces:
 
-* **Bootstrap remains a cache.**  The engine reads the verified C11-A
+* **Bootstrap remains a cache.**  The engine reads the verified
   bootstrap (an :class:`OrchBootstrap`) and may include any of its
   bounded sections, but the bootstrap is never mutated and never
   declared authoritative for Project reconstruction.  Context omission
@@ -26,7 +26,7 @@ Three architectural invariants the engine enforces:
   deterministic ratio of bytes to tokens.  Hard byte limits coexist
   with estimated token limits; the estimate source is observable in
   every produced pack.  No structural dependence on any vendor
-  tokenizer; C12 will measure whether backend-native caching helps.
+  tokenizer; the replay harness will measure whether backend-native caching helps.
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ from saberops.project_ledger.store import ProjectLedger
 class TokenEstimateSource(StrEnum):
     """Where the token estimate for a section came from.
 
-    Honest accounting matters: callers (and C12 harness experiments)
+    Honest accounting matters: callers (and replay harness experiments)
     must be able to distinguish a vendor-derived number from a typed
     deterministic estimate, so that no estimate is ever mistaken for
     an exact measurement.
@@ -745,7 +745,7 @@ def render_pack(pack: ContextPack) -> str:
     """Render a context pack as a deterministic text body.
 
     Used for diagnostic inspection and for callers that want to feed a
-    pack into an existing C04 projection without parsing its typed
+    pack into an existing projection without parsing its typed
     fields.  Section order is stable so the rendered body itself is
     deterministic over the pack's content digests.
     """

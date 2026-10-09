@@ -240,7 +240,7 @@ def legacy_frozen_control_plane(
     reserve_override: bool = False,
     host_access: str = "governed",
 ) -> FrozenControlPlane:
-    """Provide a non-owner fallback for pre-R2 rows without a frozen contract."""
+    """Provide a non-owner fallback for older rows without a frozen contract."""
     return freeze_control_plane_policy(
         packaged_control_plane_policy(),
         required_capabilities=required_capabilities,

@@ -1,4 +1,4 @@
-"""C14-C production phase telemetry (ROADMAP §11 wall-clock decomposition).
+"""Production phase telemetry (ROADMAP §11 wall-clock decomposition).
 
 This module is observational ONLY.  It persists the canonical phase
 vocabulary into a dedicated, additive ``phase_observations`` table so the

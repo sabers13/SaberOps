@@ -1,11 +1,11 @@
-"""C06 durable observability and deterministic run reconstruction.
+"""Durable observability and deterministic run reconstruction.
 
 This package contains no provider or model execution.  Dispatch evidence is
 created by the callers at the real adapter boundary; snapshot functions only
 read persisted state.  The trace recorder (:mod:`saberops.observability.trace`)
-provides C11-C structured-execution-trace evidence and never becomes a
+provides structured-execution-trace evidence and never becomes a
 parallel reconstruction authority.  The phase recorder
-(:mod:`saberops.observability.phase_telemetry`) provides C14-C
+(:mod:`saberops.observability.phase_telemetry`) provides
 production phase telemetry (ROADMAP §11) and never becomes an authority for
 routing, effort, scheduling, lifecycle, review, or validation.
 """

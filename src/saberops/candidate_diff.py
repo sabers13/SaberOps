@@ -1,6 +1,6 @@
-"""R3-B: bounded read-only candidate-diff projection.
+"""Bounded read-only candidate-diff projection.
 
-Derives the exact current candidate selected by the R3-A
+Derives the exact current candidate selected by the
 ``project_candidate_state`` projection and renders the frozen
 ``base_commit .. candidate_sha`` diff from the run's persisted
 repository.  Projection only: no DB writes, no events, no worktree
@@ -12,7 +12,7 @@ project_candidate_state(...).candidate_sha -> validated run
 repository -> git diff base_commit candidate_sha``.  A later FAILED
 repair attempt carrying its own SHA never replaces the verified
 current candidate because candidate identity is never re-derived
-here -- it is always the R3-A projection's ``candidate_sha``.
+here -- it is always the projection's ``candidate_sha``.
 """
 
 from __future__ import annotations
@@ -100,8 +100,8 @@ def project_candidate_diff(db: Database, run_id: str) -> CandidateDiff:
         )
 
     base_sha = run.base_commit
-    # Candidate authority comes exclusively from the R3-A projection:
-    # the diff may proceed only when R3-A proves an owner-visible
+    # Candidate authority comes exclusively from the candidate projection:
+    # the diff may proceed only when the candidate projection proves an owner-visible
     # lifecycle state for the candidate (candidate_sha is not None AND
     # state is not None).  A SHA with state None (e.g.
     # "candidate_without_gate_success") is gate-unproven and must never

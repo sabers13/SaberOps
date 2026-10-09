@@ -17,7 +17,7 @@ Reproduced constraint (OpenCode 1.18.x, General Compute upstream):
 
 Compatibility is EVIDENCE, never routing.  This module reports factual,
 deterministic transport evidence only.  It never decides routing (never
-"use another model", never "change the routing chain"): Orch policy / C07
+"use another model", never "change the routing chain"): Orch policy / quota
 preflight consumes the evidence and owns eligibility.  Compatibility
 belongs to the ``provider + backend + transport`` combination (OpenCode
 CLI calling a specific upstream), never to a bare model name.
@@ -97,7 +97,7 @@ GENERAL_COMPUTE_MODEL_PREFIX = "generalcompute/"
 #:
 #: This is deliberately a small, deterministic prefix map and not a
 #: generic policy DSL or a second routing registry: it carries factual
-#: evidence only, and C07 still owns eligibility.  Adding a namespace
+#: evidence only, and quota policy still owns eligibility.  Adding a namespace
 #: here without concrete positive evidence is forbidden; unlisted
 #: namespaces stay ``UNKNOWN`` and fail closed.
 VERIFIED_COMPATIBLE_OPENCODE_UPSTREAM_PREFIXES = frozenset(

@@ -1,7 +1,7 @@
-"""C10 — Workflow-layer gateway execution boundary.
+"""Workflow-layer gateway execution boundary.
 
 This module owns the *one* shared gateway execution boundary that the
-orchestrator applies to every C10-enabled worker dispatch (initial,
+orchestrator applies to every gateway-enabled worker dispatch (initial,
 retry, repair, and review).  It encapsulates:
 
 * ``prepare_gateway_execution`` — selects an account/connection, starts
@@ -123,7 +123,7 @@ def _sanitize_base_env(
     * the exact configured ``FrozenGatewayConfig.authorization_env_var``;
     * the default ``OMNIROUTE_API_KEY`` when applicable;
     * ``_ORCH_BRIDGE_AUTH_SENTINEL``;
-    * every reserved C10 gateway-control variable.
+    * every reserved gateway-control variable.
 
     The sanitization is single-source-of-truth: every launch path inside
     :func:`run_worker_with_gateway_boundary` (and the boundary's
@@ -151,7 +151,7 @@ def _inherit_env_exclusions(
     *,
     frozen_gateway: FrozenGatewayConfig | None,
 ) -> tuple[str, ...]:
-    """Merge caller exclusions with C10 names forbidden from parent inheritance."""
+    """Merge caller exclusions with gateway names forbidden from parent inheritance."""
 
     c10_names = (
         _authorization_env_var_for(frozen_gateway),
@@ -167,7 +167,7 @@ def _sanitized_worker_request(
     frozen_gateway: FrozenGatewayConfig | None,
     env: dict[str, str],
 ) -> WorkerRequest:
-    """Apply C10 explicit-env and inherited-parent isolation in one place."""
+    """Apply gateway explicit-env and inherited-parent isolation in one place."""
 
     return replace(
         base_request,
@@ -346,7 +346,7 @@ class GatewayLiveStateProvider(Protocol):
 
 @dataclass
 class GatewayExecutionBoundary:
-    """Stateful C10-R3 execution boundary used by the orchestrator.
+    """Stateful gateway execution boundary used by the orchestrator.
 
     The orchestrator constructs one boundary per dispatch attempt; the
     boundary owns the bridge session, the GatewayDispatcher instance,
@@ -606,7 +606,7 @@ class GatewayExecutionBoundary:
             # Use latest observed if no sticky mismatch caller flag
             observed_account_id = observed_account_id or evidence.latest_observed_account_id
 
-        # Preserve exact provider/model chosen by Orch/C07 — never from
+        # Preserve exact provider/model chosen by Orch/quota policy — never from
         # selection_reason. Fall back to stored original if available.
         selection_provider = self._requested_provider or (
             self.selection_result.selected.provider
@@ -772,7 +772,7 @@ class GatewayExecutionBoundary:
             request_identifier=f"sel-{utc_now_iso()}",
         )
         # Determine typed error: mismatch has priority, otherwise map bridge
-        # evidence (status codes, transport failures) into the C10 taxonomy.
+        # evidence (status codes, transport failures) into the gateway taxonomy.
         error: GatewayError | None = None
         if account_mismatch:
             error = GatewayError(
@@ -909,7 +909,7 @@ def run_worker_with_gateway_boundary(
 
     # Case 1: No gateway or adapter does not support gateway transport
     if frozen_gateway is None or not frozen_gateway.enabled or not adapter_supports_gateway:
-        # Adapter does not advertise C10 gateway transport capability.
+        # Adapter does not advertise gateway transport capability.
         # When direct fallback is forbidden, this is a typed infrastructure
         # blockage with no worker invocation.
         if (

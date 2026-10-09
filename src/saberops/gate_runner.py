@@ -1,10 +1,10 @@
-"""Gate Runner + project-scoped GateScratchPolicy runtime (C13-B).
+"""Gate Runner + project-scoped GateScratchPolicy runtime.
 
 This module implements the bounded execution seam for Orchestrator-v2's
 authoritative post-integration gate and the per-project gate-scratch policy
 that decides where disposable gate/test scratch lives for that project.
 
-Design law (preserved verbatim from C13-A):
+Design law (preserved verbatim from gate scratch policy):
 
 * Orch owns the authoritative full gate.  The Gate Runner is *only* an
   Orch-owned bounded execution role, never an implementation, reviewer,

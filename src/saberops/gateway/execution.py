@@ -1,10 +1,10 @@
-"""C10 — Typed execution disposition for gateway-aware worker dispatch.
+"""Typed execution disposition for gateway-aware worker dispatch.
 
 This module owns the *single* gateway execution decision that the
 workflow layer applies to a worker dispatch.  It exists separately
 from :mod:`saberops.gateway.dispatch` because that module is
-the local-selection seam (no HTTP) that has been in place since C10-R1;
-this module is the C10-R3 *execution* boundary that actually wires
+the local-selection seam (no HTTP) that has been in place since the gateway;
+this module is the gateway *execution* boundary that actually wires
 the gateway transport into a real Codex dispatch.
 
 The contract:
@@ -24,7 +24,7 @@ The contract:
   automatic replay.  Infrastructure uncertainty is durably persisted.
 
 The disposition drives one Orch decision tree and is consumed at most
-once per worker attempt.  It is the canonical C10-R3 seam that the
+once per worker attempt.  It is the canonical gateway seam that the
 workflow layer consults to choose between code paths.
 """
 
@@ -38,7 +38,7 @@ from saberops.gateway.bridge import BridgeEvidence, BridgeForwardingState
 
 
 class ExecutionDisposition(StrEnum):
-    """Typed execution disposition for one C10-aware worker dispatch."""
+    """Typed execution disposition for one gateway-aware worker dispatch."""
 
     DIRECT = "DIRECT"
     GATEWAY_READY = "GATEWAY_READY"
@@ -68,7 +68,7 @@ class GatewayExecutionContext:
     bridge_evidence: BridgeEvidence | None = None
     forwarding_state: BridgeForwardingState | None = None
     last_error: str | None = None
-    # C10-R4: sticky vs latest forwarding aggregation
+    # Sticky vs latest forwarding aggregation
     any_request_forwarded: bool = False
     request_count: int = 0
 
@@ -100,7 +100,7 @@ class GatewayExecutionContext:
 class GatewayExecutionDecision:
     """Result of the gateway execution boundary.
 
-    ``disposition`` is the canonical C10-R3 routing signal.  ``reason``
+    ``disposition`` is the canonical gateway routing signal.  ``reason``
     is a short, non-secret description suitable for durable evidence;
     ``evidence`` is the optional bridge row that supports the decision.
     """
@@ -120,7 +120,7 @@ class GatewayExecutionDecision:
 def decide_gateway_execution(
     context: GatewayExecutionContext,
 ) -> GatewayExecutionDecision:
-    """Resolve the typed execution disposition for one C10-aware dispatch.
+    """Resolve the typed execution disposition for one gateway-aware dispatch.
 
     The rule order is fixed:
 

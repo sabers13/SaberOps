@@ -29,7 +29,7 @@ class CandidatePublicationError(RuntimeError):
 
 
 class RevisionRaceError(RuntimeError):
-    """The repository moved during project-graph analysis (C09 TOCTOU).
+    """The repository moved during project-graph analysis (scope TOCTOU).
 
     ``build_project_graph`` reads the working tree while ``base_revision`` is
     caller-supplied metadata; a run's frozen graph must never be labeled with

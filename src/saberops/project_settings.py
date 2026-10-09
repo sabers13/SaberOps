@@ -1,4 +1,4 @@
-"""R2-A project settings authority (owner-controlled run policy inputs).
+"""Project settings authority (owner-controlled run policy inputs).
 
 The logical owner-controlled settings are:
 
@@ -78,7 +78,7 @@ class ProjectSettings:
     """Persisted owner decisions that had no prior canonical store.
 
     ``None`` means "no explicit owner decision yet" -- callers must
-    apply the R2-A safe defaults rather than treating absence as consent.
+    apply the project-settings safe defaults rather than treating absence as consent.
     """
 
     gate_command: str | None = None
@@ -387,7 +387,7 @@ def clear_project_accept_target_branch(repo_path: Path | str) -> Path:
 def detect_authoritative_gate(repo_path: Path | str) -> str | None:
     """Return the narrow deterministic gate detection, if positively found.
 
-    R2-A rule (deliberately narrow; no build-system heuristics): when the
+    Rule (deliberately narrow; no build-system heuristics): when the
     repository root contains a Makefile variant (``Makefile``,
     ``makefile``, ``GNUmakefile``) that defines a ``gate:`` target, the
     authoritative gate is ``make gate``.  Anything else -- missing file,
@@ -413,7 +413,7 @@ def detect_authoritative_gate(repo_path: Path | str) -> str | None:
 def is_project_positively_public(repo_path: Path | str) -> bool:
     """Return True only when the project is positively established as public.
 
-    R2-A implements no automatic public inference: no remote-URL
+    The project-settings layer implements no automatic public inference: no remote-URL
     heuristic, license-file probe, or hosting check can positively
     establish public training consent, so this always returns False and
     an unset data policy resolves conservatively to Denied.  The seam

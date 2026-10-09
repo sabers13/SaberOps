@@ -158,15 +158,15 @@ class DispatchRole(StrEnum):
     * ``BULK``    — primary implementation work on a fresh slice.
     * ``REPAIR``  — bounded corrective work on a committed candidate (retry,
                     repair, final-repair).
-    * ``SURGEON`` — reserved for Surgical Escalation Capsule (C04+).  The value
+    * ``SURGEON`` — reserved for Surgical Escalation Capsule.  The value
                     exists today so durable evidence already answers "what role
                     was this dispatch performing?", but no automatic routing
-                    behaviour is wired to it in C03.
+                    behaviour is wired to it in the core runtime.
     * ``REVIEW``  — independent reviewer dispatch.
     * ``PLANNER`` — reserved for explicit planning/planner dispatches.  The
-                    value exists today but is not auto-selected in C03.
+                    value exists today but is not auto-selected in the core runtime.
 
-    SURGEON and PLANNER must never gain automatic routing behavior in C03;
+    SURGEON and PLANNER must never gain automatic routing behavior in the core runtime;
     they are placeholders for later slices.
     """
 
@@ -198,7 +198,7 @@ def role_for_stage(stage: DispatchStage) -> DispatchRole:
 
 
 # ---------------------------------------------------------------------------
-# C11-B: provider-neutral effort / risk / orch-binding vocabulary.
+# Provider-neutral effort / risk / orch-binding vocabulary.
 #
 # Effort and risk are deliberately separate.  Effort answers "how much
 # reasoning budget is requested"; risk answers "what governance / review /
@@ -313,7 +313,7 @@ class OrchBindingMode(StrEnum):
 
     PINNED              — exact owner-selected binding only; no silent
                           substitution; typed failure otherwise.
-    PREFERRED_WITH_FALLBACK — owner-ordered list; try in order; C07 hard
+    PREFERRED_WITH_FALLBACK — owner-ordered list; try in order; quota hard
                           policy still applies to every candidate.
     AUTO                — let existing routing policy choose among eligible
                           Orchestrator bindings.
@@ -344,13 +344,13 @@ class GateOutcome(StrEnum):
     The taxonomy is deliberately small and records the operational outcome
     of one gate execution.  It does NOT prove why a gate returned nonzero:
     current structured evidence does not distinguish a genuine candidate
-    validation failure from a launchable gate-configuration error (H3/H3.1;
+    validation failure from a launchable gate-configuration error (gate misconfiguration handling;
     e.g. ``make definitely_missing_target`` classifies as
     ``VALIDATION_FAILURE`` exactly like a genuinely failing assertion).
 
     Gate truth is distinct from routing authority: ``VALIDATION_FAILURE``
     means deterministic verification did not pass, but it carries no
-    cross-tier escalation authority under H3.1; only an explicit typed
+    cross-tier escalation authority under gate misconfiguration handling; only an explicit typed
     capability failure does.
 
     * ``PASS``                 — gate launched normally, completed normally,
@@ -369,7 +369,7 @@ class GateOutcome(StrEnum):
     * ``TERMINATION_UNSAFE``   — gate process tree could not be proven
       quiescent.  Fails closed.  This is NOT capability evidence.
     * ``MUTATION``             — gate exited successfully but introduced a
-      nonignored worktree mutation (C02 fail-closed).  This is NOT capability
+      nonignored worktree mutation (fail-closed).  This is NOT capability
       evidence merely because the deterministic gate mutated the worktree.
     """
 
@@ -486,7 +486,7 @@ class WorkerCheckpoint:
 
 
 # ---------------------------------------------------------------------------
-# C11-C: structured execution trace + tool-effect evidence.
+# Structured execution trace + tool-effect evidence.
 #
 # ``TraceCapability`` declares the evidence class the runtime actually has
 # for an autonomous Attempt: NATIVE_STRUCTURED when the backend emits a
@@ -548,7 +548,7 @@ class FailureKind(StrEnum):
     Distinct from :class:`DispatchOutcome` and :class:`GateOutcome`: this
     vocabulary is the runtime taxonomy the failover engine consumes.  It is
     deliberately small and intentionally refuses to collapse everything
-    into ``retry=True/False`` -- the supervisor (C11-D) will reason over
+    into ``retry=True/False`` -- the supervisor will reason over
     these typed values.
     """
 
@@ -570,7 +570,7 @@ class FailureKind(StrEnum):
 class ToolEffect:
     """One durable record of a tool operation / effect for an Attempt.
 
-    ``capability`` is the C08 logical ref (``github.merge_pull_request``)
+    ``capability`` is the tool-contract logical ref (``github.merge_pull_request``)
     when known, otherwise the canonical :class:`CapabilityOperation` value;
     ``resource_ref`` is the bounded target (e.g. a relative path or
     destination host); ``side_effect_class`` is the
@@ -742,10 +742,10 @@ class Run:
     result_summary: str | None = None
     config_json: str | None = None
     review_state_json: str | None = None
-    # C13-F: frozen, JSON-serializable review-necessity decision.  Persisted
+    # Frozen, JSON-serializable review-necessity decision.  Persisted
     # at candidate-ready time by :func:`saberops.review_adaptive.decide_review`
     # and consulted by acceptance, supervisor recovery, retry, repair, and
-    # handoff.  A missing value means the Run was created before C13-F --
+    # handoff.  A missing value means the Run was created before adaptive review --
     # conservative reconstruction (no retroactive skip) is required.
     review_risk_decision_json: str | None = None
     routing_snapshot_json: str | None = None
@@ -756,13 +756,13 @@ class Run:
     project_id: str | None = None
     project_identity_json: str | None = None
     objective_id: str | None = None
-    # Immutable non-secret C07 policy contract captured when the run is created.
+    # Immutable non-secret quota policy contract captured when the run is created.
     control_plane_snapshot_json: str | None = None
     control_plane_snapshot_digest: str | None = None
     tool_contract_json: str | None = None
     tool_contract_digest: str | None = None
-    # C10: immutable non-secret gateway contract captured at run creation.
-    # Both fields default to None for legacy rows predating C10.
+    # Immutable non-secret gateway contract captured at run creation.
+    # Both fields default to None for legacy rows predating the gateway.
     gateway_snapshot_json: str | None = None
     gateway_snapshot_digest: str | None = None
 
@@ -834,13 +834,13 @@ class WorkPackage:
 class IndependentWorkBranch:
     """One dependency-safe branch slot; representation only, never a launch.
 
-    C14-A explicit CONCURRENT-WRITE CONTRACT: every component of a
+    Explicit CONCURRENT-WRITE CONTRACT: every component of a
     concurrent-execution consumer's BWRAP-exact sandbox is carried directly
     on the branch:
 
     * ``writable_existing_paths``: canonical literal paths the branch may edit
       (derived from ``owned_files ∪ interface_files ∪ test_files`` of the
-      module).  Distinct C09 meanings are preserved: ``owned_files`` remain
+      module).  Distinct scope meanings are preserved: ``owned_files`` remain
       the production owner; ``interface_files``/``test_files`` are added to
       the contract only when structurally coherent (see planning.py).
     * ``writable_new_subtrees``: literal ``<canonical-dir>/**`` subtree
@@ -848,7 +848,7 @@ class IndependentWorkBranch:
       compatible literal prefix derived from a ``ProjectModule.root``;
       glob-language intersection is not implemented.
     * ``deny_paths``: sandbox deny patterns the contract commits to (the
-      existing C11-C default deny paths: ``.git/**``, ``.github/**``).
+      existing trace default deny paths: ``.git/**``, ``.github/**``).
     * ``write_contract_digest``: stable digest over all three components in
       canonical order; rotates when any component rotates.
 
@@ -969,7 +969,7 @@ class Handoff:
 class WorkerCandidate:
     """A specific worker candidate with provider and model identifiers.
 
-    ``binding_id`` is the *exact* C11-B :class:`ExecutionBinding` identity
+    ``binding_id`` is the *exact* binding layer :class:`ExecutionBinding` identity
     this candidate must execute through when present.  A non-empty value
     is the durable, restart-deterministic reference the autonomous
     supervisor and the dispatch lifecycle consume: provider/model alone
@@ -978,7 +978,7 @@ class WorkerCandidate:
     owner-approved dynamic candidate carries the binding id its
     :class:`~saberops.routing_config.DynamicCandidate` records.
 
-    ``training_required`` is the frozen R2-B data-policy classification
+    ``training_required`` is the frozen data-policy classification
     (``"TRUE"``/``"FALSE"``/``"UNKNOWN"``) attached at chain resolution
     from the Run's frozen routing snapshot.  ``None`` means unresolved:
     the canonical :mod:`saberops.training_policy` decision falls back to
@@ -1002,7 +1002,7 @@ class QuotaState:
     reset_at: str | None
     routing_state: RoutingState
     updated_at: str
-    # C07 additive fields. Legacy databases/constructors continue to work;
+    # Additive fields. Legacy databases/constructors continue to work;
     # the control plane uses these when a durable pool observation supplies
     # them.
     pool_id: str | None = None
@@ -1079,7 +1079,7 @@ class ReviewFinding:
 
 
 class CandidateState(StrEnum):
-    """Read-only lifecycle projection vocabulary for one run candidate (R3-A).
+    """Read-only lifecycle projection vocabulary for one run candidate.
 
     This is a PROJECTION, not a second state machine and not new authority:
     every value is derived on each read from existing durable evidence (see
@@ -1109,7 +1109,7 @@ class CandidateState(StrEnum):
       target state under the existing acceptance contract.
     * ``CLEANED`` -- reserved: cleanup removes worktrees without writing
       durable candidate-cleaned evidence, so nothing can prove it.
-      Unreachable until a later R3 slice adds real cleanup authority.
+      Unreachable until a later candidate slice adds real cleanup authority.
       Never synthesized from missing worktrees or filesystem state.
     """
 
@@ -1165,7 +1165,7 @@ class WorkerRequest:
     native_message_id: str | None = None
     control_interrupt: Callable[[], bool] | None = None
     session_runtime: AgentSessionRuntime | None = None
-    # C11-D: typed reasoning-effort decision.  When set, the adapter MUST
+    # Typed reasoning-effort decision.  When set, the adapter MUST
     # translate this tier to the concrete provider option for the chosen
     # binding and MUST NOT silently fall back to ambient env state
     # (``ORCH_AGY_EFFORT`` for the Antigravity adapter).  When ``None``,
@@ -1320,12 +1320,12 @@ class DispatchEvidence:
     tool_result_bytes: int | None = None
     tools_exposed_count: int | None = None
     tools_actually_used_count: int | None = None
-    # C10: per-dispatch non-secret gateway evidence (selection, observed
+    # Per-dispatch non-secret gateway evidence (selection, observed
     # account, latency, error classification). None for dispatches that did
     # not exercise a gateway.
     gateway_evidence_json: str | None = None
-    # C11-D: exact binding identity chosen by the supervisor (canonical
-    # C11-B ``ExecutionBinding``).  ``provider``/``model`` are
+    # Exact binding identity chosen by the supervisor (canonical
+    # ``ExecutionBinding``).  ``provider``/``model`` are
     # insufficient: two bindings with the same provider/model remain
     # distinguishable through ``binding_id`` (and the referenced profile
     # / quota pool).  Persisted verbatim so the same identity survives
@@ -1333,7 +1333,7 @@ class DispatchEvidence:
     binding_id: str | None = None
     profile_id: str | None = None
     quota_pool_id: str | None = None
-    # C11-D: typed resolved effort tier the adapter was instructed to
+    # Typed resolved effort tier the adapter was instructed to
     # execute at.  ``None`` for non-autonomous dispatches or whenever no
     # canonical resolution was available.
     reasoning_effort: str | None = None
@@ -1399,7 +1399,7 @@ class RunResult:
 
 
 # ---------------------------------------------------------------------------
-# C14-C: canonical production phase vocabulary.
+# Canonical production phase vocabulary.
 #
 # ROADMAP §11 asks for wall-clock decomposition of the orchestration runtime
 # into the eleven named phases below.  Each phase MUST be reported using one
@@ -1459,7 +1459,7 @@ CANONICAL_PHASE_STATUSES: frozenset[str] = frozenset(status.value for status in 
 
 @dataclass(frozen=True)
 class PhaseObservation:
-    """One durable C14-C production phase observation.
+    """One durable telemetry production phase observation.
 
     ``phase`` and ``status`` are persisted as the canonical enum strings
     so the row survives schema inspection without re-importing the enums.

@@ -1,6 +1,6 @@
 """Resource-scoped sandbox contracts.
 
-C11-C widens the canonical C08 *capability* contract into a *resource-scoped
+Execution tracing widens the canonical *capability* contract into a *resource-scoped
 authorization contract* and adds the deterministic per-Attempt enforcement
 boundary.  See :mod:`saberops.sandbox.grants`,
 :mod:`saberops.sandbox.policy`, and

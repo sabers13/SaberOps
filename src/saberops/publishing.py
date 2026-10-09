@@ -1,6 +1,6 @@
 """Publishing authority contract.
 
-C11-C distinguishes *implementation authority* (what an autonomous worker
+Execution tracing distinguishes *implementation authority* (what an autonomous worker
 may do inside its sandbox) from *authoritative publication authority*
 (what may merge / push authoritative refs, tag releases, deploy
 production, or mutate governance policy).

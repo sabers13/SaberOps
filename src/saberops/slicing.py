@@ -118,7 +118,7 @@ def assess_task_sizing(task: str) -> TaskSizingAssessment:
 def deterministic_plan(task: str, assessment: TaskSizingAssessment) -> list[ProposedPackage]:
     """Return a single coherent unsliced package.
 
-    C04: raw line-position slicing is no longer the default mechanism.  A
+    Raw line-position slicing is no longer the default mechanism.  A
     line position is not a semantic subsystem boundary and historically
     produced packages LARGER than the parent task and large enough to
     implement later packages.  When no semantic planner is available, the
@@ -185,7 +185,7 @@ def resolve_work_packages(
 ) -> tuple[TaskSizingAssessment, list[ProposedPackage]]:
     """Assess then plan, always validating an optional semantic planner result.
 
-    C04: when no semantic planner is available, never raw-line split.  When
+    When no semantic planner is available, never raw-line split.  When
     a planner IS available, its proposal is untrusted; we apply a small
     safety/efficiency guard before accepting it.  Harmful proposals (empty,
     duplicate, cyclic, missing acceptance criteria, parent-copy, or whose
@@ -228,7 +228,7 @@ def _planner_proposal_is_safe(
       genuinely large task.
 
     The function is intentionally cheap and deterministic; complex ratio
-    tuning is deferred to C09.
+    tuning is deferred to project scope.
     """
     parent_size = len(parent_task)
     large_parent_threshold = 1000

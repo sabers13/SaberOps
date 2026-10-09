@@ -1,14 +1,14 @@
-"""Normalize gateway-supplied quota observations into C07 semantics.
+"""Normalize gateway-supplied quota observations into semantics.
 
-C07 owns quota *policy*; C10 only normalizes *observations* from a
+Quota policy owns quota *policy*; the gateway only normalizes *observations* from a
 gateway into the canonical ``remaining_pct``/``reset_at``/``freshness``
-shape that C07 already consumes.
+shape that quota policy already consumes.
 
 Important invariants:
 
 * Unknown observations stay unknown; the gateway never reports
   ``0%`` or ``100%`` as a fabrication.
-* The 15% STRICT red line is enforced by C07; this module only emits the
+* The 15% STRICT red line is enforced by quota policy; this module only emits the
   raw numeric value.
 * Shared pools are honored: multiple accounts that share a pool produce
   one canonical observation when a shared upstream capacity figure is

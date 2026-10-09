@@ -1,7 +1,7 @@
-"""C10 — Bounded OmniRoute transport bridge for receipt capture.
+"""Bounded OmniRoute transport bridge for receipt capture.
 
 This module implements a *single-purpose*, hermetic, infrastructure-only
-transport proxy used **only** when the executor-side of C10 needs to
+transport proxy used **only** when the executor-side of the gateway needs to
 capture the OmniRoute selected-connection receipt
 (``X-OmniRoute-Selected-Connection-Id``) on a real Codex dispatch.
 
@@ -124,7 +124,7 @@ class BridgeEvidence:
     status_code: int | None
     latency_ms: float | None
     headers: dict[str, str] = field(default_factory=dict)
-    # C10-R4 multi-request aggregation (bounded, non-secret)
+    # Multi-request aggregation (bounded, non-secret)
     request_count: int = 0
     any_request_forwarded: bool = False
     completed_request_count: int = 0

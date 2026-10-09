@@ -1,6 +1,6 @@
-"""Durable contracts and measurement schema for C12-A real-project replay.
+"""Durable contracts and measurement schema for real-project replay.
 
-C12-A answers exactly one architectural question:
+The replay harness answers exactly one architectural question:
 Can Orch reproducibly replay the same real Project task from the same durable
 starting state and produce trustworthy comparable measurements without
 mutating authoritative Project truth?

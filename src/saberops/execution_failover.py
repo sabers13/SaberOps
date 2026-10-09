@@ -1,6 +1,6 @@
 """Attempt-level failover + effect reconciliation.
 
-C11-C widens the canonical C05 lifecycle so that an Attempt boundary is the
+Execution tracing widens the canonical supervisor lifecycle so that an Attempt boundary is the
 *only* place the runtime may hand off execution from one provider / backend
 to another.  A failover from ``Attempt A`` to ``Attempt B`` is therefore a
 purely deterministic decision: classify A's failure, reconcile A's tool
@@ -88,7 +88,7 @@ class AttemptFailoverDecision:
     ``source_attempt_id`` pins the terminal Attempt A this decision was
     derived from; Attempt A itself is never mutated or reopened.
 
-    Attempt B contract (consumed by the C11-D supervisor loop, which
+    Attempt B contract (consumed by the runtime supervisor loop, which
     owns ``new_attempt_id`` assignment and Attempt B creation -- this
     engine only emits a decision and never creates B):
 
@@ -99,7 +99,7 @@ class AttemptFailoverDecision:
       reconciled effects the next Attempt must respect;
     * ``failure_kind`` -- the typed classification of A's failure;
     * ``required_base_sha`` + ``requires_base_validation`` -- the base
-      reference C11-D must validate (checkpoint / ledger ancestry)
+      reference the autonomous runtime must validate (checkpoint / ledger ancestry)
       before creating B.
 
     The decision carries no raw transcript, no partial assistant

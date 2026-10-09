@@ -1,4 +1,4 @@
-"""Verifier-toolchain fingerprint for C12-B comparability hardening (F-04).
+"""Verifier-toolchain fingerprint for replay comparability hardening (F-04).
 
 Derives a deterministic fingerprint from distribution metadata installed under
 the dedicated verifier toolchain path (/usr/local/lib/orch-verifier) without

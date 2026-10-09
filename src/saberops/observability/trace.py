@@ -1,6 +1,6 @@
-"""C11-C structured execution trace + tool-effect evidence recorder.
+"""Structured execution trace + tool-effect evidence recorder.
 
-The runtime must be able to answer the supervisor (C11-D) questions:
+The runtime must be able to answer the supervisor questions:
 
 * Did the Attempt produce a structured execution trace?
 * What :class:`TraceCapability` class was established *before* semantic
@@ -116,7 +116,7 @@ def classify_failure(exc: BaseException | str) -> FailureKind:
 
     The mapping is intentionally small; an unmapped exception collapses to
     :attr:`FailureKind.UNKNOWN` rather than a misleading specific class.
-    The supervisor (C11-D) reasons over these values; it never collapses
+    The supervisor reasons over these values; it never collapses
     failures into ``retry=True/False`` upstream of this classifier.
     """
     if isinstance(exc, str):
@@ -370,7 +370,7 @@ class AttemptTraceRecorder:
 def is_autonomous_eligible(trace_class: TraceCapability) -> bool:
     """Return ``True`` iff ``trace_class`` permits autonomous execution.
 
-    Per the C11-C trace rule: an autonomous Attempt requires
+    Per the trace rule: an autonomous Attempt requires
     ``trace != NONE``.  ``NONE`` must reject the dispatch before any
     semantic execution; the recorder itself does not enforce that -- a
     runtime dispatcher asks this predicate before launching a worker.
@@ -379,7 +379,7 @@ def is_autonomous_eligible(trace_class: TraceCapability) -> bool:
 
 
 def operation_for_capability(value: str | None) -> str:
-    """Return the canonical operation string for a C08 capability ref.
+    """Return the canonical operation string for a tool-contract capability ref.
 
     The fallback is :attr:`CapabilityOperation.PROCESS_RUN` so a worker
     tool that does not match one of the canonical operation classes is

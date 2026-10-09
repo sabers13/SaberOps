@@ -315,7 +315,7 @@ def snapshot_references_exact_bindings(snapshot: RoutingSnapshot | None) -> bool
     approval names a non-empty ``binding_id``, an ordinary Run created from
     this snapshot may dispatch an exact binding and must therefore freeze the
     effective owner BindingRegistry alongside the snapshot
-    (C15-XB-FREEZE-01).  Static-only snapshots return ``False`` so the
+Static-only snapshots return ``False`` so the
     historical provider/model path neither loads nor requires owner bindings.
     """
     if snapshot is None:
@@ -508,7 +508,7 @@ def payload_to_snapshot(payload: Any, run_id: str | None = None) -> RoutingSnaps
             chain, ctx_key, source_label, approved=approved
         )
 
-    # C15-XR-01: a persisted snapshot is self-consistent only when its stored
+    # A persisted snapshot is self-consistent only when its stored
     # digest equals the canonical recomputation over the validated content.
     # A present digest is never trusted without verification: it must be a
     # non-empty string and must match exactly, otherwise reconstruction fails
@@ -573,7 +573,7 @@ def init_user_config(force: bool = False) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# C15: canonical routing-configuration mutation seam.
+# Canonical routing-configuration mutation seam.
 #
 # Routing configuration remains exclusively owned by this module.  The
 # helpers below let operator surfaces reuse the *existing* validated
@@ -612,17 +612,17 @@ class DynamicCandidate:
     * **execution evidence** -- ``execution_support`` must be ``SUPPORTED``:
       a real executable transport exists for this connection/backend/model.
 
-    The record also carries ``binding_id``: the *exact* C11-B
+    The record also carries ``binding_id``: the *exact* binding layer
     :class:`~saberops.control_plane.bindings.ExecutionBinding`
     identity this candidate executes through.  A raw ``provider/model``
     string never substitutes for it; the approval is only meaningful when
     the referenced binding exists and matches provider/model exactly.  The
     routing document keeps the canonical ``provider/model`` identity for
-    ordering and C07, while real execution recovers ``binding_id`` from the
+    ordering and quota policy, while real execution recovers ``binding_id`` from the
     canonical registry.
 
     It carries no provider credential, no endpoint and no secret material.
-    Eligibility in a given context is still decided by the existing C07
+    Eligibility in a given context is still decided by the existing quota
     routing authority: this record only makes the identity admissible.
     ``training_required`` is tri-state; ``UNKNOWN`` fails closed in
     training-denied contexts and is never inferred to mean "allowed".
@@ -672,7 +672,7 @@ class DynamicCandidate:
         if not binding_id:
             raise RoutingConfigError(
                 f"dynamic candidate {candidate_id!r}: binding_id must not be empty "
-                "(a dynamic candidate must reference an exact C11-B execution binding)"
+                "(a dynamic candidate must reference an exact execution binding)"
             )
         discovery_status = self.discovery_status.strip().upper()
         if discovery_status != "TRUE":

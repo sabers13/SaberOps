@@ -1,4 +1,4 @@
-"""C11-D canonical autonomous runtime: typed decisions plus accept closure.
+"""Canonical autonomous runtime: typed decisions plus accept closure.
 
 The canonical execution lifecycle is :meth:`Orchestrator._run_core` and only
 that.  This module owns exactly two things:
@@ -279,7 +279,7 @@ class AutonomousSupervisor:
     is read live from the persisted owner settings on every decision, so an
     owner narrowing authority mid-run takes effect on the next decision.
 
-    C15 separation invariant (C15-XB-02): worker binding selection
+    Separation invariant: worker binding selection
     derives from the canonical :class:`BindingRegistry` plus the per-
     candidate ``binding_id`` reference carried by the routing chain
     (a :class:`WorkerCandidate` whose ``binding_id`` is non-empty
@@ -312,7 +312,7 @@ class AutonomousSupervisor:
         # existing orchestration code that reads the attribute keeps
         # working, but it is **never** consulted by worker binding
         # selection.  Worker dispatch uses the canonical
-        # BindingRegistry + WorkerCandidate.binding_id.  See C15-XB-02.
+        # BindingRegistry + WorkerCandidate.binding_id.
         self.binding_policy = binding_policy
         self._failover = FailoverEngine(db=db)
 
@@ -339,7 +339,7 @@ class AutonomousSupervisor:
 
     # -- decisions ------------------------------------------------------------
 
-    # -- exact execution binding (C11-B identity, never provider/model) -------
+    # -- exact execution binding (identity, never provider/model) -------
 
     def _registry_bindings(self) -> tuple[Any, ...]:
         """Return every configured execution binding in registry order."""
@@ -354,14 +354,14 @@ class AutonomousSupervisor:
     def _worker_eligible_bindings(self) -> tuple[Any, ...]:
         """Return every WORKER-role binding in registry declaration order.
 
-        C15-XB-03: worker dispatch only consumes bindings whose
+        Worker dispatch only consumes bindings whose
         :class:`BindingRole` is :class:`BindingRole.WORKER`.  An
         ORCHESTRATOR-role binding is **not** eligible for worker
         execution; reusing one as worker dispatch authority would be a
         role violation.  The :class:`OrchBindingPolicy` (an
         Orchestrator-model concept) is deliberately ignored here --
         changing it MUST NOT change which binding a worker-routing
-        candidate resolves to (C15-XB-02).
+        candidate resolves to.
         """
         configured = self._registry_bindings()
         return tuple(
@@ -373,7 +373,7 @@ class AutonomousSupervisor:
     def _policy_bindings(self) -> tuple[Any, ...]:
         """Return the WORKER-role eligible bindings (historical alias).
 
-        C15 separation (C15-XB-02): the historical :class:`OrchBindingPolicy`
+        Separation: the historical :class:`OrchBindingPolicy`
         parameter is the Orchestrator-model policy, NOT a worker-binding
         selection policy.  Worker binding selection now consumes the
         canonical WORKER-role :class:`BindingRegistry` declarations
@@ -398,7 +398,7 @@ class AutonomousSupervisor:
     ) -> Any | None:
         """Return the exact eligible registry binding for one candidate.
 
-        Resolution order (C15-XB-01):
+        Resolution order:
 
         1. If ``binding_id`` is non-empty, the exact binding with that
            id is returned when its role is :class:`BindingRole.WORKER`
@@ -411,7 +411,7 @@ class AutonomousSupervisor:
            static-chain behavior preserved for non-approval candidates).
 
         The owner's persisted :class:`OrchBindingPolicy` is **not**
-        consulted here -- worker dispatch is not its authority (C15-XB-02).
+        consulted here -- worker dispatch is not its authority.
         """
         if not provider or not model:
             return None
@@ -512,12 +512,12 @@ class AutonomousSupervisor:
             return None
         return None
 
-    # -- canonical C11-B effort resolution (no local algorithm) ----------------
+    # -- canonical binding effort resolution (no local algorithm) ----------------
 
     def _resolve_binding_effort(
         self, binding: Any | None
     ) -> tuple[EffortDecisionStatus, ReasoningEffort | None, str]:
-        """Resolve effort through the canonical C11-B resolver.
+        """Resolve effort through the canonical binding resolver.
 
         Returns ``(status, resolved_tier, reason)`` preserving the typed
         RESOLVED / UNSUPPORTED / UNAUTHORIZED outcomes exactly -- never
@@ -690,8 +690,8 @@ class AutonomousSupervisor:
                 detail="first autonomous dispatch on the eligible ladder head",
             )
         last = terminal[-1]
-        # C11-D: every autonomous retry/failover is authorized by the
-        # canonical C11-C FailoverEngine after trace/effect
+        # Every autonomous retry/failover is authorized by the
+        # canonical FailoverEngine after trace/effect
         # reconciliation.  The supervisor never infers retry/failover
         # locally from provider/model, worker status, or remaining
         # ladder entries; the engine result below is authoritative.
@@ -843,7 +843,7 @@ class AutonomousSupervisor:
     def _ladder_compatible(
         self, ladder: Sequence[WorkerCandidate], *, provider: str, model: str
     ) -> bool:
-        """True iff ``(provider, model)`` is on the C07-eligible ladder."""
+        """True iff ``(provider, model)`` is on the quota-eligible ladder."""
         return any(
             c.provider == provider and c.model == model for c in ladder
         )
@@ -994,7 +994,7 @@ class AutonomousSupervisor:
     ) -> SupervisorDecision:
         """Consume a DIFFERENT_BINDING verdict with a different binding_id.
 
-        C15-XC-02: every worker-dispatch path -- initial attempt,
+        Every worker-dispatch path -- initial attempt,
         repair/continuation, SAME_BINDING and DIFFERENT_BINDING -- must
         enforce the same invariants through the canonical exact resolver:
 
@@ -1334,7 +1334,7 @@ def record_accepted_run_ledger(
             "Project projection refused: supplied project_id is empty or non-string."
         )
     if run.project_id is not None:
-        # C11 boundary: the caller-supplied project_id is an assertion to
+        # Boundary: the caller-supplied project_id is an assertion to
         # verify, never authority.  Before ANY Project mutation this
         # closure proves the complete identity chain:
         #

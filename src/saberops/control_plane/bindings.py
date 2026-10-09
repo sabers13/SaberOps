@@ -1,4 +1,4 @@
-"""C11-B: sparse provider-neutral execution bindings.
+"""Sparse provider-neutral execution bindings.
 
 A binding is the typed, capability-bearing description of one executable
 ``(provider, model)`` pair together with the profile that runs it, the
@@ -82,7 +82,7 @@ class ExecutionProfile:
     ``enabled`` is the configuration-level gate.  When ``False`` the
     profile and every binding that references it are ineligible for
     Orchestrator selection -- independent of any governance / training
-    / quota decision C07 may still take.
+    / quota decision quota policy may still take.
     """
 
     profile_id: str
@@ -123,17 +123,17 @@ class QuotaPool:
     is owned exclusively by
     :class:`saberops.control_plane.quota_policy.QuotaPoolPolicy`
     inside :class:`saberops.control_plane.policy.ControlPlanePolicy`
-    and is consulted by the single canonical C07 evaluator
+    and is consulted by the single canonical quota evaluator
     (:func:`saberops.control_plane.preflight.evaluate_control_plane`).
 
     A binding's ``quota_pool_id`` must match a key in the
     ``ControlPlanePolicy.quota_pools`` mapping for any quota decision to
-    apply.  When the binding references an unknown pool, the C07
+    apply.  When the binding references an unknown pool, the quota
     evaluation remains UNKNOWN/non-fabricated; the binding does not
     silently fall back to a provider-wide default pool.
 
     Pool membership ("which profiles share this scarcity") is
-    exclusively a C07 quota policy concept and is never stored here.
+    exclusively a quota policy concept and is never stored here.
     """
 
     pool_id: str
@@ -323,7 +323,7 @@ class ExecutionBinding:
         This descriptor is consumed by
         :func:`saberops.control_plane.capabilities.capability_profile_for`
         through the adapter's ``capability_profile_descriptor`` method,
-        which lets the existing C07 evaluator receive the binding's
+        which lets the existing quota evaluator receive the binding's
         factual capabilities without constructing a second capability
         evaluator.
 
@@ -338,7 +338,7 @@ class ExecutionBinding:
         }
 
     def capability_profile(self) -> CapabilityProfile:
-        """Return a C07 :class:`CapabilityProfile` derived from this binding."""
+        """Return a quota policy :class:`CapabilityProfile` derived from this binding."""
         return CapabilityProfile(
             provider=self.provider,
             transport=self.transport,
@@ -488,7 +488,7 @@ class BindingRegistry:
         """Return the identity-only quota pool referenced by ``binding``.
 
         The result carries no policy.  Hard quota policy for ``pool_id``
-        is read from ``ControlPlanePolicy.quota_pools`` by the C07
+        is read from ``ControlPlanePolicy.quota_pools`` by the
         evaluator; the registry stores nothing that could conflict.
         """
         for pool in self.pools:
@@ -738,7 +738,7 @@ def binding_from_mapping(
 
 
 # ---------------------------------------------------------------------------
-# C11-D: exact executable binding resolution.
+# Exact executable binding resolution.
 #
 # A SupervisorDecision names a ``binding_id``; that decision alone never
 # executes anything.  :func:`resolve_execution_binding` turns the named
@@ -995,7 +995,7 @@ def resolve_execution_binding(
     for (no ``execution_profile_overlay`` hook, or a hook whose
     overlay does not actually carry the claimed references), or a
     GATEWAY profile claims a non-empty ``backend_ref`` no existing
-    C10/backend mechanism can honor.
+    gateway/backend mechanism can honor.
     """
     if registry is None or not tuple(registry.list_bindings()):
         raise BindingResolutionError("NO_REGISTRY")
@@ -1049,7 +1049,7 @@ def resolve_execution_binding(
     gateway_pin: str | None = None
     if binding.backend is BindingKind.GATEWAY:
         if profile.backend_ref.strip():
-            # No existing C10/backend mechanism honors a gateway
+            # No existing gateway/backend mechanism honors a gateway
             # backend_ref: ignoring it would let two same-provider
             # profiles share one real backend under different
             # evidence.  Fail closed instead.
@@ -1080,7 +1080,7 @@ def resolve_worker_candidate_binding(
     """Resolve one WORKER candidate's exact binding, or ``None`` when it has none.
 
     This is the shared ordinary-dispatch counterpart to the autonomous
-    supervisor's exact-binding seam.  It preserves the C15-XB-01 law for
+    supervisor's exact-binding seam.  It preserves the law for
     the owner-facing run path:
 
     * a candidate with an empty/absent ``binding_id`` returns ``None`` --
@@ -1132,7 +1132,7 @@ def resolve_reviewer_candidate_binding(
 ) -> ResolvedExecutionBinding | None:
     """Resolve one REVIEWER candidate's exact binding, or ``None`` when it has none.
 
-    R3-E1.1: the reviewer-side counterpart to
+    The reviewer-side counterpart to
     :func:`resolve_worker_candidate_binding`, whose WORKER-role contract
     is deliberately left untouched.  The law is identical with the role
     swapped:

@@ -1,4 +1,4 @@
-"""R3-A: deterministic read-only CandidateState projection.
+"""Deterministic read-only CandidateState projection.
 
 CandidateState is a PROJECTION over existing durable run evidence.  It is
 not a second state machine and not new authority: no DB column, lifecycle
@@ -6,7 +6,7 @@ table, migration, shadow state file, write-on-read event, or state
 mutation from the Web is introduced here.  The projection is
 reconstructable from authoritative existing evidence on every read.
 
-R3-C adds exactly one durable owner-decision write seam on top of this
+Candidate rejection adds exactly one durable owner-decision write seam on top of this
 read path: :func:`reject_current_candidate`, the single authority that
 may record a ``candidate_rejected`` event.  The Web and the service call
 that seam; they never write rejection events directly.  Every other
@@ -78,7 +78,7 @@ answered per source):
   Missing worktrees or filesystem state are never synthesized into
   CLEANED.
 * Rejection evidence -- ``candidate_rejected`` events carrying a
-  canonical ``candidate_sha`` payload (R3-C).  Only an event whose
+  canonical ``candidate_sha`` payload.  Only an event whose
   ``candidate_sha`` is a canonical 40-lowercase-hex SHA naming the
   EXACT current candidate counts; the event's ``run_id`` already binds
   it to the run.  Branch HEAD, latest arbitrary attempt SHA, review
@@ -145,7 +145,7 @@ TargetHeadResolver = Callable[[str, str], str | None]
 
 
 #: Canonical durable event type for an explicit owner Reject decision
-#: (R3-C).  Only :func:`reject_current_candidate` may write it.
+#: Only :func:`reject_current_candidate` may write it.
 REJECTION_EVENT_TYPE: str = "candidate_rejected"
 
 #: Projection reason used when a matching rejection event proves REJECTED.
@@ -241,7 +241,7 @@ def reject_current_candidate(db: Database, run_id: str) -> CandidateProjection:
     The single Reject authority.  The Web and the service call this seam;
     they never write ``candidate_rejected`` events directly.
 
-    The decision succeeds only when the run exists, R3-A proves a current
+    The decision succeeds only when the run exists, candidate projection proves a current
     candidate SHA in an owner-visible state (therefore gate success is
     proven -- a SHA with ``state is None``, e.g.
     ``candidate_without_gate_success``, fails closed with no event
@@ -282,7 +282,7 @@ def reject_current_candidate(db: Database, run_id: str) -> CandidateProjection:
             "a canonical 40-character lowercase hex SHA; "
             "rejection requires a canonical gate-proven candidate."
         )
-    # Atomically idempotent durable append (R3-C.1): the check for an
+    # Atomically idempotent durable append: the check for an
     # existing matching decision and the insert happen inside one
     # BEGIN IMMEDIATE transaction at the SQLite boundary, so concurrent
     # writers on separate Database instances cannot both append.  A
@@ -468,7 +468,7 @@ def project_candidate_state(
     # candidate base (runs.base_commit) no longer equals the live
     # target HEAD.  Only reachable with a caller-supplied resolver;
     # without live HEAD evidence the branch is skipped (fail closed),
-    # never guessed.  R4 owns rebasing/recovery; this only projects.
+    # never guessed.  Rebasing and recovery are future work; this only projects.
     if target_head_resolver is not None:
         try:
             live_head = target_head_resolver(run_id, run.base_commit)

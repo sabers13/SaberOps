@@ -201,7 +201,7 @@ class AcceptEngine:
 
         Authority precedence:
 
-        1. C13-F frozen decision JSON on the run row (when present and
+        1. Frozen decision JSON on the run row (when present and
            valid).  Malformed persisted decisions fall through to (2)
            but conservatively require review -- the classifier will
            produce ``required=True`` for any non-trivial change anyway.
@@ -238,7 +238,7 @@ class AcceptEngine:
         # Legacy / partial / never-classified run: use the frozen
         # ``review_enabled`` boolean from the persisted config.
         #
-        # Pre-C13-F invariant: a malformed legacy persisted config
+        # Invariant: a malformed legacy persisted config
         # caused acceptance to hard-refuse with a RuntimeError
         # ("Cannot accept run '<id>': persisted run configuration is
         # invalid").  That fail-closed law is restored here: silently
@@ -248,7 +248,7 @@ class AcceptEngine:
         # weaken what the engine is about to execute.  Valid legacy
         # configs (``review_enabled=True`` -> required,
         # ``review_enabled=False`` -> not required) preserve their
-        # pre-C13-F behavior exactly.
+        # older behavior exactly.
         if not run.config_json:
             return False
         try:
@@ -955,7 +955,8 @@ class AcceptEngine:
             _pass("target_clean", "Target repository clean", "Working tree is clean")
         )
 
-        # Target HEAD must still equal the candidate base (no rebasing here; R4).
+        # Target HEAD must still equal the candidate base (no rebasing here;
+        # rebase and recovery are future work).
         try:
             current_head = GitManager.get_head_commit(target_repo)
         except Exception as exc:
@@ -1135,12 +1136,12 @@ class AcceptEngine:
             )
         )
 
-        # R0-B.1 parity: there is deliberately NO "accepted only once"
+        # Parity: there is deliberately NO "accepted only once"
         # projection blocker here.  accept_run() enforces no such
         # pre-CAS policy, so a prior run_accepted event must not make
-        # the projection ineligible -- the preserved pre-R0 acceptance
+        # the projection ineligible -- the preserved older acceptance
         # policy is authoritative and candidate lifecycle /
-        # accepted-state policy belongs to R3.  Prior acceptance
+        # accepted-state policy belongs to the candidate lifecycle.  Prior acceptance
         # remains visible in the run event stream; it is informational,
         # never a static eligibility blocker.
 
@@ -1149,9 +1150,9 @@ class AcceptEngine:
     def accept_run(self, run_id: str, gate_timeout: float = 300.0) -> AcceptResult:
         """Safely fast-forward integrate a completed candidate run and verify canonical gate.
 
-        Pre-R0 acceptance policy is preserved: there is no
+        Older acceptance policy is preserved: there is no
         "accepted only once" engine precondition here.  Candidate
-        lifecycle / accepted-state policy belongs to R3.
+        lifecycle / accepted-state policy belongs to the candidate lifecycle.
         """
         run = self.db.get_run(run_id)
         if not run:
@@ -1175,7 +1176,7 @@ class AcceptEngine:
                 run,
                 final_attempt,
                 lineage_base_sha=_lineage_base_sha(attempts, final_attempt),
-                # C11-D: a failover-legitimate final attempt based at
+                # A failover-legitimate final attempt based at
                 # its validated required-base anchor (re-verified live
                 # against durable decision evidence) remains provably
                 # a candidate of this run.
@@ -1229,7 +1230,7 @@ class AcceptEngine:
             )
 
         # The persisted run configuration decides whether a review is required.
-        # C13-F delegates the answer to the canonical helper
+        # Adaptive review delegates the answer to the canonical helper
         # :meth:`_resolve_review_required_from_persisted_run` which
         # consults the frozen risk-adaptive decision when present and
         # falls back to the legacy ``review_enabled`` boolean otherwise.

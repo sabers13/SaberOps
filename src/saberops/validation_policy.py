@@ -6,7 +6,7 @@ appended to every Orch-generated worker task contract (implementation, retry,
 repair, and final-repair) so that prompt builders never duplicate slightly
 different copies of the rule.
 
-C03 ownership invariant (UNAMBIGUOUS — one meaning only):
+Ownership invariant (UNAMBIGUOUS — one meaning only):
 
   WORKER        — focused validation only:
                     * smallest relevant focused tests

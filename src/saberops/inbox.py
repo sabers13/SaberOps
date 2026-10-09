@@ -1,4 +1,4 @@
-"""R3-D: cross-project owner Inbox -- a read-only attention projection.
+"""Cross-project owner Inbox -- a read-only attention projection.
 
 Inbox is the owner's cross-project work queue: candidates needing a
 decision or review action plus failed/orphaned runs needing owner
@@ -160,14 +160,14 @@ def classify_run(
 ) -> InboxItem | None:
     """Classify one run into at most one Inbox item, or ``None``.
 
-    Pure read path: derives from the existing R3-A candidate projection
+    Pure read path: derives from the existing candidate projection
     plus the durable ``RunStatus``.  Candidate authority outranks generic
     run status, so a run whose trustworthy candidate already classifies
     never gains a second run-failure row.
 
-    STALE is only reachable when the R3-A projection itself proves it;
+    STALE is only reachable when the candidate projection itself proves it;
     without a caller-supplied live-HEAD resolver that branch stays
-    unreachable (fail closed) rather than guessed -- R4 owns stale
+    unreachable (fail closed) rather than guessed -- future rebase/recovery work owns stale
     recovery.
     """
     from saberops.candidate_lifecycle import project_candidate_state
@@ -228,7 +228,7 @@ def classify_run(
         # "review not required".
         if state is CandidateState.READY:
             return _item(InboxAttentionKind.REVIEW_REQUIRED, projection.reason)
-        # D. STALE, only when R3-A actually proves it (display only).
+        # D. STALE, only when the candidate projection actually proves it (display only).
         if state is CandidateState.STALE:
             return _item(InboxAttentionKind.STALE_CANDIDATE, projection.reason)
         # E/F. IN_REVIEW (system acting) and ACCEPTED / REJECTED /

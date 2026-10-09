@@ -10,7 +10,7 @@ from saberops.db import Database
 _REFS = ("continuation", "checkpoint", "handoff", "gate", "review", "failure")
 
 # These are protocol limits, rather than limits derived from stored row size.
-# The capsule limit matches the C05 resume-capsule ceiling.
+# The capsule limit matches the supervisor resume-capsule ceiling.
 CONTEXT_FIELD_MAX_BYTES = 4 * 1024
 CONTEXT_CAPSULE_MAX_BYTES = 4 * 1024
 CONTEXT_RESPONSE_MAX_BYTES = 16 * 1024

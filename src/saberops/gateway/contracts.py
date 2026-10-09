@@ -1,12 +1,12 @@
 """Provider-neutral gateway contracts.
 
-C10 introduces an optional, account-level gateway layer that sits beneath
+The gateway introduces an optional, account-level gateway layer that sits beneath
 Orch's semantic dispatch. The architecture invariant is non-negotiable:
 
-    Orch selects provider/model -> C07 hard policy -> optional gateway
+    Orch selects provider/model -> quota hard policy -> optional gateway
     -> equivalent account/connection only
 
-This module declares the typed vocabulary used by every C10 backend
+This module declares the typed vocabulary used by every gateway backend
 (``OMNIROUTE``) and the first-class ``DIRECT`` no-gateway path. A gateway
 contract is intentionally minimal: it carries no provider/model authority,
 no tier, no role. Selection of an account/connection is a pure
@@ -78,7 +78,7 @@ class GatewayErrorKind(StrEnum):
 
 
 class GatewayQuotaFreshness(StrEnum):
-    """Freshness of a gateway-supplied quota observation, mirrored to C07."""
+    """Freshness of a gateway-supplied quota observation, mirrored to quota policy."""
 
     FRESH = "FRESH"
     STALE = "STALE"
@@ -109,7 +109,7 @@ class GatewayAccount:
     """Non-secret identity of one gateway account/connection.
 
     ``account_id`` is the gateway-side identifier used to pin selection
-    (``x-omniroute-connection`` for OmniRoute). ``pool_id`` is the C07
+    (``x-omniroute-connection`` for OmniRoute). ``pool_id`` is the quota
     shared-pool reference (None for solo accounts). ``free_capacity`` is a
     pure infrastructure-economic attribute: it never confers semantic
     eligibility, only ranking preference among already-eligible accounts.
@@ -185,10 +185,10 @@ class GatewayHealth:
 
 @dataclass(frozen=True)
 class GatewayQuotaObservation:
-    """Normalized gateway quota observation in C07-compatible semantics.
+    """Normalized gateway quota observation in quota-compatible semantics.
 
     ``remaining_pct`` is the canonical 0..100 *remaining* percentage that
-    C07 already consumes (see :mod:`saberops.control_plane`).
+    Quota policy already consumes (see :mod:`saberops.control_plane`).
     Unknown observations report ``remaining_pct=None`` and freshness
     ``UNKNOWN``; they never fabricate ``0.0`` or ``100.0``.
     """
@@ -389,7 +389,7 @@ _DEFAULT_AUTHORIZATION_ENV_VAR = "OMNIROUTE_API_KEY"
 
 @dataclass(frozen=True)
 class FrozenGatewayConfig:
-    """Immutable, non-secret C10 gateway contract captured for one run.
+    """Immutable, non-secret gateway contract captured for one run.
 
     The contract freezes the run's gateway kind, endpoint identity,
     permitted provider/model mapping, direct-fallback permission, and
@@ -658,7 +658,7 @@ def reconstruct_frozen_gateway_config(
     *,
     expected_digest: str | None = None,
 ) -> FrozenGatewayConfig:
-    """Reconstruct and integrity-check a persisted C10 gateway contract.
+    """Reconstruct and integrity-check a persisted gateway contract.
 
     The :func:`freeze_gateway_config` shape is JSON-friendly; the runtime
     can therefore persist it as a JSON object and restore it during

@@ -1,8 +1,8 @@
-"""Top-level C10 gateway dispatch surface.
+"""Top-level gateway dispatch surface.
 
 This module is the integration seam: it composes account selection,
 health, cooldown, quota, and affinity into a single callable that the
-workflow layer invokes *after* C07 hard policy has admitted the
+workflow layer invokes *after* quota hard policy has admitted the
 candidate. The dispatch surface never makes a semantic routing decision
 on its own; it only chooses an equivalent account/connection and reports
 the result back to Orch.
@@ -57,7 +57,7 @@ from saberops.models import WorkerRequest
 
 @dataclass
 class GatewayDispatcher:
-    """Composition root for C10 gateway dispatch.
+    """Composition root for gateway dispatch.
 
     The dispatcher owns the registry, the active frozen contract, the
     health store, and the current affinity hint. It exposes one method
@@ -81,7 +81,7 @@ class GatewayDispatcher:
         omniroute_transport: Any | None = None,
         omniroute_endpoint: str | None = None,
     ) -> GatewayDispatcher:
-        """Build a dispatcher from a frozen C10 gateway contract.
+        """Build a dispatcher from a frozen gateway contract.
 
         Control flow:
 
@@ -253,7 +253,7 @@ class GatewayDispatcher:
     ) -> AccountSelectionResult:
         """Select an account/connection locally without making an HTTP call.
 
-        This is the C10-R1 dispatch seam used when the worker adapter
+        This is the gateway dispatch seam used when the worker adapter
         (e.g. Codex / OpenCode / Cline / Antigravity) is the execution
         owner and the gateway is consulted only to pick the pinned
         account. The selected account is then handed to the worker via
@@ -272,7 +272,7 @@ class GatewayDispatcher:
         # The OmniRouteGateway's ``select`` ignores its own
         # ``affinity_hint`` attribute, so we thread the dispatcher's
         # affinity_hint through by temporarily setting it for this
-        # call.  C10-R3's boundary always builds a fresh
+        # call.  The gateway's boundary always builds a fresh
         # GatewayDispatcher per dispatch, so mutating the attribute
         # is safe and scoped.
         original_hint = self.omniroute.affinity_hint
@@ -304,7 +304,7 @@ def _matching_quota(
 
 
 class _LocalSelectionTransport:
-    """A sentinel transport for the C10-R1 local-selection seam.
+    """A sentinel transport for the gateway local-selection seam.
 
     The local selection path never invokes the transport; constructing an
     :class:`OmniRouteGateway` only requires a callable ``post_with_auth``
@@ -372,7 +372,7 @@ def _augment_request_with_gateway(
         on_resume=base_request.on_resume,
         on_process_start=base_request.on_process_start,
         on_monitor_transition=base_request.on_monitor_transition,
-        # C11-D: the gateway copy path must preserve the typed
+        # The gateway copy path must preserve the typed
         # execution fields it is supposed to carry -- never silently
         # reset the resolved effort or drop secret isolation.
         inherit_env_exclude=base_request.inherit_env_exclude,
@@ -457,7 +457,7 @@ def prepare_dispatch_decision(
 
     The frozen gateway contract is the authoritative source for whether a
     gateway is consulted at the dispatch boundary. The orchestration
-    layer (typically ``Orchestrator.run``) calls this helper *after* C07
+    layer (typically ``Orchestrator.run``) calls this helper *after* quota
     hard policy has admitted the candidate but *before* invoking the
     worker adapter.
 

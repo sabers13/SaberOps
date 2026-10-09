@@ -48,15 +48,15 @@ class WorkerAdapter(ABC):
     capability_transport: str = "DIRECT_CLI"
     factual_capabilities: frozenset[str] = frozenset()
     gateway_capabilities: frozenset[str] = frozenset()
-    # C10-R3: bounded list of gateway-transport capabilities the adapter has
+    # Bounded list of gateway-transport capabilities the adapter has
     # been IMPLEMENTED AND TESTED for.  Distinct from ``gateway_capabilities``
     # above, which the control plane coerces through the GatewayCapability
-    # enum (a C07 surface).  An adapter advertises a transport only after it
+    # enum (a quota surface).  An adapter advertises a transport only after it
     # has been proven to consume ``ORCH_GATEWAY_*`` env vars and route its
     # real HTTP requests through the configured OmniRoute transport.
     c10_gateway_transport_capabilities: frozenset[str] = frozenset()
 
-    # C11-C.8: True when the backend inherently needs provider network
+    # True when the backend inherently needs provider network
     # egress to function (every hosted-model CLI does).  Containment
     # cannot separate provider egress from worker/tool egress, so an
     # autonomous dispatch that requires provider network fails closed

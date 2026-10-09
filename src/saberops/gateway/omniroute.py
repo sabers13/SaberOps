@@ -1,16 +1,16 @@
 """OmniRoute provider-neutral gateway backend.
 
-This module implements the only required third-party C10 backend: an
+This module implements the only required third-party gateway backend: an
 optional :class:`OmniRouteGateway`. It is intentionally small: every
 network call goes through an injectable :class:`GatewayTransport`, every
 authorization value is supplied at invocation time, and the OmniRoute
 ``x-omniroute-connection`` pinning header is the only account-level
 control surface.
 
-OmniRoute features that would cross the C10 invariant are *never* used:
+OmniRoute features that would cross the gateway invariant are *never* used:
 
 * No ``auto``, ``combo``, ``fusion``, ``pipeline``, ``context-relay``.
-* No MCP tooling (C08 owns tool transport).
+* No MCP tooling (the tool-contract layer owns tool transport).
 * No memory/agent facilities.
 * No cross-provider model substitution.
 
@@ -615,7 +615,7 @@ def _classify_response(
                 kind=GatewayErrorKind.ACCOUNT_MISMATCH,
                 message=(
                     "OmniRoute served a different account than the pinned connection; "
-                    "failing closed per C10 invariant"
+                    "failing closed per the gateway invariant"
                 ),
                 recoverable=False,
                 request_forwarded=True,
@@ -738,7 +738,7 @@ def freeze_omniroute_config(
     enabled: bool,
     accounts: Iterable[GatewayAccount] = (),
 ) -> FrozenGatewayConfig:
-    """Return a frozen C10 gateway contract for the OmniRoute backend."""
+    """Return a frozen gateway contract for the OmniRoute backend."""
     return freeze_gateway_config(
         kind=GatewayKind.OMNIROUTE,
         enabled=enabled,

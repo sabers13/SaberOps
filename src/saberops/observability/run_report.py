@@ -1,4 +1,4 @@
-"""C16-B1 canonical run report and live monitoring projection.
+"""Canonical run report and live monitoring projection.
 
 Product-owned, strictly read-only projection over already-persisted run
 evidence.  This module performs no model calls, no Git reads, no network
@@ -51,7 +51,7 @@ from saberops.models import (
 )
 from saberops.observability._core import canonical_snapshot_json
 
-#: Canonical schema marker for the C16-B1 run report projection.
+#: Canonical schema marker for the run report projection.
 REPORT_SCHEMA: str = "saberops.run_report/v1"
 #: Integer schema version carried inside the payload for forward migration.
 REPORT_SCHEMA_VERSION: int = 1

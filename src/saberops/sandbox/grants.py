@@ -1,6 +1,6 @@
 """ToolGrant contracts: resource-scoped capability + operation vocabulary.
 
-C11-C widens the canonical C08 *capability* contract into a *resource-scoped
+Execution tracing widens the canonical *capability* contract into a *resource-scoped
 authorization contract*.  A bare capability name (e.g. ``FILE_WRITE``) is
 never a sufficient security boundary; the runtime must be able to evaluate
 whether an attempted operation is authorized against a concrete target.
@@ -18,12 +18,12 @@ The module owns:
 
 * :class:`SideEffectSemantics` -- the four-class taxonomy used to gate retry /
   failover decisions (READ_ONLY / LOCAL_REPLAY_SAFE / EXTERNAL_IDEMPOTENT /
-  EXTERNAL_UNCERTAIN).  Distinct from C08's coarser :class:`SideEffectClass`;
+  EXTERNAL_UNCERTAIN).  Distinct from the tool-contract layer's coarser :class:`SideEffectClass`;
   the runtime layer maps one to the other.
 * :class:`CapabilityOperation` -- the canonical *operation* vocabulary
   (``FILE_READ``, ``FILE_WRITE``, ``PROCESS_RUN``, ``NETWORK``,
   ``CREDENTIAL_ACCESS``).  These are operations the runtime enforces; the
-  higher-level :class:`ToolSpec` logical refs from C08 are bound to one of
+  higher-level :class:`ToolSpec` logical refs from the tool-contract layer are bound to one of
   these via :class:`CapabilityEntry.tool_ref`.
 * :class:`PathPattern` -- bounded canonical glob/literal pattern with
   traversal / symlink safety checks at construction time.
@@ -34,7 +34,7 @@ The module owns:
   triple inside a :class:`ToolGrant`.
 * :class:`ToolGrant` -- the typed, deterministic grant that an attempt's
   ToolGrant row freezes at run creation.
-* :func:`c08_to_runtime_side_effect` -- mapping from C08 SideEffectClass to
+* :func:`c08_to_runtime_side_effect` -- mapping from tool-contract SideEffectClass to
   the runtime semantics vocabulary.
 """
 
@@ -85,8 +85,8 @@ def validate_credential_ref(ref: str) -> str:
 # ---------------------------------------------------------------------------
 # Side-effect semantics: the four-class reconciliation taxonomy.
 #
-# Distinct from C08's coarse SideEffectClass: this is the runtime policy
-# vocabulary that gates retry / failover decisions, while C08's values name
+# Distinct from the tool-contract layer's coarse SideEffectClass: this is the runtime policy
+# vocabulary that gates retry / failover decisions, while the tool-contract layer's values name
 # the operational class of a logical tool.  A tool may carry both; a runtime
 # mapping (``c08_to_runtime_side_effect``) coerces one to the other.
 # ---------------------------------------------------------------------------
@@ -115,7 +115,7 @@ class SideEffectSemantics(StrEnum):
 # Canonical operation vocabulary.
 #
 # These are the bounded operation classes the runtime evaluates against a
-# resource scope.  The logical tool refs from C08 (e.g. ``github.merge``)
+# resource scope.  The logical tool refs from the tool-contract layer (e.g. ``github.merge``)
 # bind to one of these via :attr:`CapabilityEntry.tool_ref`; the worker
 # harness maps tool-invocation intent to the operation it represents, and
 # the sandbox answers ``authorize``.
@@ -234,7 +234,7 @@ class ResourceScope:
     them against the attempt's repository root when evaluating
     :meth:`authorize`.  Network destinations are plain host globs
     (``*.example.com``) and credential references use the existing
-    ``env:`` / ``profile:`` / ``store:`` vocabulary from C08.
+    ``env:`` / ``profile:`` / ``store:`` vocabulary from the tool-contract layer.
     """
 
     readable_paths: tuple[PathPattern, ...] = ()
@@ -406,14 +406,14 @@ class ToolGrant:
 
 
 # ---------------------------------------------------------------------------
-# Mapping helper: C08 SideEffectClass -> runtime SideEffectSemantics.
+# Mapping helper: tool-contract SideEffectClass -> runtime SideEffectSemantics.
 # ---------------------------------------------------------------------------
 
 
 def c08_to_runtime_side_effect(value: Any) -> SideEffectSemantics:
-    """Map a C08 :class:`SideEffectClass` (or its string value) to runtime semantics.
+    """Map a tool-contract :class:`SideEffectClass` (or its string value) to runtime semantics.
 
-    A live C08 SideEffectClass carries ``READ_ONLY`` / ``MUTATING`` /
+    A live tool-contract SideEffectClass carries ``READ_ONLY`` / ``MUTATING`` /
     ``UNKNOWN``.  ``READ_ONLY`` is an unambiguous projection.  ``MUTATING``
     cannot itself distinguish ``LOCAL_REPLAY_SAFE`` from
     ``EXTERNAL_IDEMPOTENT`` / ``EXTERNAL_UNCERTAIN``; the default projection

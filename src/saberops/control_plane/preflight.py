@@ -42,7 +42,7 @@ class _Adapter(Protocol):
 #: Instruction-compatibility statuses that prove faithful delivery of a
 #: required project instruction contract.  Compared by string value so
 #: this module never imports provider transport code: the adapter owns
-#: the typed evidence, C07 owns the eligibility meaning.  Anything else
+#: the typed evidence, quota policy owns the eligibility meaning.  Anything else
 #: (``INCOMPATIBLE``, ``UNKNOWN``, garbage, exceptions) fails closed.
 _COMPATIBLE_INSTRUCTION_STATUSES = frozenset({"FULL", "ADAPTED"})
 
@@ -141,13 +141,13 @@ def evaluate_control_plane(
     When ``binding_pool_id`` is supplied, the quota evaluation considers
     only observations whose canonical ``pool_id`` matches.  This is
     the seam through which a binding's ``quota_pool_id`` actually
-    gates C07 evaluation.  When ``None``, the legacy behaviour applies
+    gates quota evaluation.  When ``None``, the legacy behaviour applies
     (every supplied state is considered).
 
     ``training_required`` carries an already-resolved frozen requirement
     (``TRUE``/``FALSE``/``UNKNOWN``) and ``routing_snapshot`` the Run's
     frozen routing snapshot for owner-approved evidence lookup; both feed
-    the single canonical R2-B data-policy decision in
+    the single canonical data-policy decision in
     :mod:`saberops.training_policy` (never mutable live state).  When
     neither is supplied the candidate's own frozen classification, then
     the static v1 knowledge, decides; unknown ids fail closed under
@@ -183,7 +183,7 @@ def evaluate_control_plane(
         if max_bytes is not None and prompt_bytes > max_bytes:
             required.add(Capability.LARGE_PROMPT_STDIN.value)
     missing = tuple(sorted(required - {cap.value for cap in profile.capabilities}))
-    # Canonical R2-B data-policy decision shared with worker routing and
+    # Canonical data-policy decision shared with worker routing and
     # reviewer dispatch: Allowed excludes nothing; Denied permits only
     # FALSE while TRUE and UNKNOWN (fail closed) map to
     # TRAINING_PERMISSION_DENIED below -- never a provider/worker failure
@@ -229,7 +229,7 @@ def evaluate_control_plane(
     elif eligible and live_adapter and adapter is None:
         eligible, reason = False, PROVIDER_UNAVAILABLE
     # Readiness is composition-supplied evidence about the exact resolved
-    # connection. It follows all higher C07 authorities and never selects.
+    # connection. It follows all higher quota authorities and never selects.
     if eligible and readiness_state is not None:
         if not readiness_executable_available:
             eligible, reason = False, PROVIDER_EXECUTABLE_UNAVAILABLE
@@ -260,7 +260,7 @@ def evaluate_control_plane(
 def filter_control_plane_candidates(
     candidates: Iterable[WorkerCandidate], **kwargs: Any
 ) -> list[WorkerCandidate]:
-    """Keep only candidates surviving hard C07 preflight, preserving order."""
+    """Keep only candidates surviving hard quota preflight, preserving order."""
     return [
         candidate
         for candidate in candidates

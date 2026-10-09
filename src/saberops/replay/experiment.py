@@ -1,4 +1,4 @@
-"""C12-B bounded experiment campaign and evidence output (Sections 12, 14, 15, 20).
+"""Bounded experiment campaign and evidence output (Sections 12, 14, 15, 20).
 
 Runs the bounded context/cache campaign against representative frozen corpus
 tasks using ONLY real Project primitives:
@@ -7,7 +7,7 @@ tasks using ONLY real Project primitives:
   is materialized
   through the existing trusted Git/worktree primitives (ReplayEngine /
   DisposableWorkspace).  Context arms are built from the frozen checkout,
-  never from the live C12-B working tree.
+  never from the live replay working tree.
 - Real Project identity: canonical-path-derived identity from
   compute_project_identity via RealProjectRegistry / ReplayEngine /
   FrozenStartingState.  ``project_id = task_def.project_key`` is never used
@@ -152,7 +152,7 @@ class TaskExperimentEvidence:
 
 @dataclass(frozen=True)
 class ExperimentResult:
-    """Aggregate result of the C12-B bounded campaign."""
+    """Aggregate result of the replay bounded campaign."""
 
     task_evidence: tuple[TaskExperimentEvidence, ...]
     toolchain_fingerprint: str
@@ -526,7 +526,7 @@ def run_c12b_experiments(
     evidence_dir: Path | str | None = None,
     task_ids: tuple[str, ...] | None = None,
 ) -> ExperimentResult:
-    """Run the bounded C12-B context/cache campaign on real frozen corpus tasks.
+    """Run the bounded replay context/cache campaign on real frozen corpus tasks.
 
     Args:
         repo_path: Path to the authoritative repository (must be clean and
@@ -618,8 +618,8 @@ def write_campaign_evidence(
 ) -> dict[str, Any]:
     """Write one campaign's JSON evidence, summary, and SHA-256 manifest.
 
-    Canonical owner (C12-E consolidation) of the evidence-serialization
-    shape previously repeated once per campaign (C12-B/C/D).  Callers keep
+    Canonical owner (replay consolidation) of the evidence-serialization
+    shape previously repeated once per campaign.  Callers keep
     thin per-campaign ``write_experiment_evidence`` wrappers that fix the
     file names and manifest key; the byte layout is identical.
     """

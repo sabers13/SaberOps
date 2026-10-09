@@ -1,16 +1,16 @@
-"""C11-B: owner-selectable Orchestrator binding policy and selection.
+"""Owner-selectable Orchestrator binding policy and selection.
 
 The owner chooses the Orchestrator binding:
 
 * ``PINNED`` -- use the exact owner-selected eligible binding; no silent
   substitution; typed failure otherwise.
 * ``PREFERRED_WITH_FALLBACK`` -- try the owner-defined ordered list;
-  C07 hard policy still applies to every candidate.
+  Hard policy still applies to every candidate.
 * ``AUTO`` -- choose among eligible ``ORCHESTRATOR`` bindings using
   the configured ordinary routing preference (not incidental
   declaration order).
 
-Hard C07 policy (governance > training > required capabilities > quota
+Hard quota policy (governance > training > required capabilities > quota
 > transport > ordinary routing preference) is preserved verbatim: a
 binding disabled by policy stays disabled, a training-denied provider
 stays denied, a required capability cannot be waived by pinning, and a
@@ -19,12 +19,12 @@ substituted by another binding that happens to share a quota pool.
 
 PINNED never silently becomes AUTO: a pinned unavailable binding
 returns a typed ``ORCH_BINDING_PROFILE_DISABLED`` / ``ORCH_BINDING_*
-`` reason (or the corresponding C07 reason), never a quiet swap to a
+`` reason (or the corresponding quota reason), never a quiet swap to a
 different eligible binding.
 
 The selection-layer adapter is not a live adapter; it carries only the
 binding-derived facts (capability profile, transport, prompt-byte
-limit) that the canonical C07 evaluator consumes.  Real adapter /
+limit) that the canonical quota evaluator consumes.  Real adapter /
 process availability is confirmed at dispatch time and is never
 encoded as a planning-time positive observation.
 """
@@ -182,19 +182,19 @@ class OrchBindingSelection:
 
 
 def _binding_to_candidate(binding: ExecutionBinding) -> WorkerCandidate:
-    """Project a binding onto the legacy ``WorkerCandidate`` shape C07 needs."""
+    """Project a binding onto the legacy ``WorkerCandidate`` shape quota policy needs."""
     return WorkerCandidate(provider=binding.provider, model=binding.model)
 
 
 class _SelectionAdapter:
     """Selection-layer adapter carrying binding-derived facts.
 
-    This adapter exists solely so the existing canonical C07 evaluator
+    This adapter exists solely so the existing canonical quota evaluator
     can consume the binding's factual capabilities and transport
     through the same ``capability_profile_descriptor`` seam the real
     adapter surface uses.  It is **not** a live adapter:
 
-    * ``is_live_dispatch = False`` -- the C07 availability gate
+    * ``is_live_dispatch = False`` -- the quota availability gate
       skips this adapter; actual executable availability is confirmed
       at dispatch time, never encoded as a planning-time positive
       observation.
@@ -210,7 +210,7 @@ class _SelectionAdapter:
         self._binding = binding
 
     def capability_profile_descriptor(self) -> dict[str, Any]:
-        """Forward the binding's factual capabilities to the C07 evaluator."""
+        """Forward the binding's factual capabilities to the quota evaluator."""
         return self._binding.capability_profile_descriptor()
 
     def provider_name(self) -> str:
@@ -248,7 +248,7 @@ def _profile_enabled(
     """True iff the profile this binding references is owner-enabled.
 
     Profile ``enabled`` is the configuration gate.  When ``False`` the
-    binding is ineligible regardless of any C07 policy outcome.
+    binding is ineligible regardless of any quota policy outcome.
     """
     profile = registry.profile_of(binding)
     return bool(profile.enabled)
@@ -295,7 +295,7 @@ def _candidate_chain_for_auto(
 
     Returns the eligible orchestrator bindings in the configured
     ordinary routing preference order, then declaration order for any
-    binding not present in the preference.  C07 still decides
+    binding not present in the preference.  Quota policy still decides
     eligibility for each candidate individually.
     """
     candidates = _orchestrator_candidates(registry, risk=risk)
@@ -312,7 +312,7 @@ def _evaluate_binding(
     reserve_override: bool,
     prompt_bytes: int | None,
 ) -> ControlPlaneDecision:
-    """Run the canonical C07 evaluator over one binding.
+    """Run the canonical quota evaluator over one binding.
 
     The binding's facts (capability profile, transport, scarcity
     identity) reach the evaluator through the
@@ -354,7 +354,7 @@ def select_orch_binding(
     control-plane policy / preference routing preference the caller hands
     it.
 
-    C07 hard policy precedence is preserved verbatim:
+    Hard policy precedence is preserved verbatim:
 
     1. provider governance (disabled wins outright);
     2. training permission;
@@ -540,14 +540,14 @@ def select_orch_binding(
 
 
 def _orchestrator_reason(decision: ControlPlaneDecision) -> str:
-    """Translate a C07 preflight reason into the orchestrator vocabulary."""
+    """Translate a quota preflight reason into the orchestrator vocabulary."""
     if decision.reason == PROVIDER_DISABLED:
         return ORCH_BINDING_PINNED_DISABLED
     if decision.reason == TRAINING_PERMISSION_DENIED:
         return ORCH_BINDING_PINNED_TRAINING
     if decision.reason == REQUIRED_CAPABILITY_UNSUPPORTED:
         return ORCH_BINDING_PINNED_CAPABILITY
-    # C07 emits ``WEEKLY_QUOTA_RED_LINE`` (or other ``*_QUOTA_*`` variants);
+    # Quota policy emits ``WEEKLY_QUOTA_RED_LINE`` (or other ``*_QUOTA_*`` variants);
     # any quota-typed reason maps to the orchestrator quota vocabulary.
     if decision.reason and "QUOTA" in decision.reason:
         return ORCH_BINDING_PINNED_QUOTA

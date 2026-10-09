@@ -72,7 +72,7 @@ def select_reviewer_binding(
 
     ``owner`` is the canonical :class:`OwnerBindings` document;
     ``adapter_registry`` supplies the real adapters (``.get(provider)``)
-    used to prove the exact binding through the canonical C11-B
+    used to prove the exact binding through the canonical
     resolver.  Pure over its inputs: no provider contact, no CLI, no
     live process beyond the adapter handles the caller hands in.
     """
@@ -93,7 +93,7 @@ def select_reviewer_binding(
             requested_binding_id=wanted,
             reason=REVIEWER_BINDING_NOT_FOUND,
         )
-    # C11-B BindingRole: only a REVIEWER-role binding may authorize the
+    # BindingRole: only a REVIEWER-role binding may authorize the
     # reviewer slot.  A WORKER/ORCHESTRATOR binding with identical
     # provider/model text is a role violation, never reviewer authority.
     if binding.binding_role is not BindingRole.REVIEWER:

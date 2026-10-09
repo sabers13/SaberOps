@@ -1,8 +1,8 @@
-"""C12-C bounded tool-output representation observations over the canonical replay seam.
+"""Bounded tool-output representation observations over the canonical replay seam.
 
-C12-C is an EXPERIMENT / OBSERVATION layer.  It is NOT a second execution
+The replay harness is an EXPERIMENT / OBSERVATION layer.  It is NOT a second execution
 engine and NOT a second security or effort authority.  Every piece of real
-execution used by C12-C goes through the existing canonical ReplayEngine
+execution used by the replay harness goes through the existing canonical ReplayEngine
 execution seam (``ReplayEngine.execute_replay``): DisposableWorkspace
 lifecycle, SandboxPolicy construction, sandbox grant/interceptor/trace
 setup, ``run_sandboxed_process`` invocation, verifier sequencing, workspace
@@ -19,7 +19,7 @@ Honesty invariants for this campaign:
   turn-budget experiment is therefore recorded NOT_AVAILABLE.
 - A baseline verifier PASS is baseline evidence only.  No arm claims
   semantic task success: ``semantic_effect`` stays UNMEASURED unless a real
-  semantic executor performs the task objective, and the derived C12-C
+  semantic executor performs the task objective, and the derived replay
   observation arm records ``verified_success=False`` on both the record and
   its measurement.  The underlying canonical execution outcome is preserved
   separately as explicit baseline/process evidence (never as arm success).
@@ -31,13 +31,13 @@ Honesty invariants for this campaign:
   is never claimed.
 - Security identity: the canonical seam does not yet expose a positive,
   non-secret security-policy identity bound to the SandboxPolicy it
-  actually used.  C12-C fabricates none and admits none from ordinary
+  actually used.  The replay harness fabricates none and admits none from ordinary
   caller-written strategy evidence.  Security identity is therefore
-  UNESTABLISHED for every current C12-C execution record, and direct
+  UNESTABLISHED for every current replay execution record, and direct
   comparability always fails closed on that control.
 - EFFORT: the real campaign has no configured ExecutionBinding, so the
-  effort arm is NOT_AVAILABLE.  C11-B owns canonical effort resolution;
-  C12-C recreates none of it and accepts no substitute resolver.
+  effort arm is NOT_AVAILABLE.  The binding layer owns canonical effort resolution;
+  The replay harness recreates none of it and accepts no substitute resolver.
 - No production winner is adopted from any result.
 """
 
@@ -108,7 +108,7 @@ CANONICAL_COMMAND_KEY = "command"
 
 #: Strategy-evidence key for a positively bound security-policy identity.
 #: The current canonical ReplayEngine seam exposes no trustworthy actual
-#: policy identity, so C12-C never writes this key, never reads it as
+#: policy identity, so the replay harness never writes this key, never reads it as
 #: positive evidence, and security comparability always fails closed.
 #: Caller-written values under this key (including hand-written digests)
 #: are ignored: equality of unproven digests is never equivalence.
@@ -119,7 +119,7 @@ TOOL_REPRESENTATION_RAW = "raw"
 TOOL_REPRESENTATION_ARTIFACT_INDIRECTED = "artifact_indirected"
 
 #: Context strategy held constant: the frozen source is presented as-is
-#: (C12-B owns context-strategy arms).
+#: (the replay harness owns context-strategy arms).
 CONTEXT_STRATEGY_BASELINE = "baseline"
 
 #: Bounded excerpt length for artifact-indirected tool output (bytes).
@@ -139,7 +139,7 @@ _ARTIFACT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*\.bin$")
 
 @dataclass(frozen=True)
 class ToolOutputExperimentDefinition:
-    """Deterministic identity of one C12-C observation arm definition.
+    """Deterministic identity of one replay observation arm definition.
 
     Contains NO execution IDs, timestamps, or random values: the digest is
     purely a function of the declared experiment content.  Changing the
@@ -159,7 +159,7 @@ class ToolOutputExperimentDefinition:
     process_step: tuple[str, ...] = ()
     #: Tool-output representation under test.
     tool_representation: str = TOOL_REPRESENTATION_RAW
-    #: Held-constant context strategy (C12-B baseline; not varied here).
+    #: Held-constant context strategy (replay baseline; not varied here).
     context_strategy: str = CONTEXT_STRATEGY_BASELINE
     verifier: DeterministicVerifier = field(default_factory=DeterministicVerifier)
 
@@ -182,7 +182,7 @@ class ToolOutputExperimentDefinition:
         nothing else — owns its execution.  These keys are part of the
         ReplayDefinition digest, so changing the experimental
         representation changes the experiment identity deterministically.
-        No security descriptor is embedded: C12-C does not fabricate
+        No security descriptor is embedded: the replay harness does not fabricate
         security identity the canonical seam does not provide.
         """
         params: dict[str, Any] = {
@@ -303,12 +303,12 @@ def retrieve_indirected_result(
 def composite_tool_arm_status() -> tuple[bool, str]:
     """Report composite-tool arm availability honestly.
 
-    The existing C08/C11-C tooling primitives authorize ONE logical tool per
+    The existing tooling primitives authorize ONE logical tool per
     frozen contract (single invocation, single side-effect class).  A bounded
     composite operation (search+context, patch+verify, tests+failure
     extraction) expressed as ONE composite invocation would require a new
     load-bearing composite-contract subsystem with its own authorization and
-    trace composition.  C12-C does NOT expand scope to build one: the
+    trace composition.  The replay harness does NOT expand scope to build one: the
     composite arm is recorded NOT_AVAILABLE.
     """
     return (
@@ -401,7 +401,7 @@ def observe_tool_representation(
     a deterministic process step is not an Orch/model turn.
 
     Evidence-integrity derivation: no semantic model/Orch executor performed
-    the corpus task objective, so the derived C12-C observation arm records
+    the corpus task objective, so the derived replay observation arm records
     ``verified_success=False`` on both the record and its measurement even
     when the underlying canonical execution succeeded.  The underlying
     canonical outcome is preserved separately under
@@ -526,7 +526,7 @@ def observe_tool_representation(
 
 
 # ---------------------------------------------------------------------------
-# Dimension-aware comparability (C12-B layer NOT weakened)
+# Dimension-aware comparability (replay layer NOT weakened)
 # ---------------------------------------------------------------------------
 
 
@@ -552,9 +552,9 @@ def assert_efficiency_comparable(
     *,
     dimension: str,
 ) -> Any:
-    """Compare two C12-C records varying ONLY the declared dimension.
+    """Compare two replay records varying ONLY the declared dimension.
 
-    The accepted C12-B fail-closed comparability layer is applied UNCHANGED
+    The accepted replay fail-closed comparability layer is applied UNCHANGED
     to dimension-normalized records.  Before normalization, records whose
     record-level identity contradicts their embedded effective_definition
     are rejected outright.  Normalization removes ONLY the declared
@@ -563,7 +563,7 @@ def assert_efficiency_comparable(
     comparability requires POSITIVE policy identity bound to the actual
     canonical execution contract on BOTH records; the current canonical
     seam exposes no such identity and caller-written digests are never
-    admitted, so every current C12-C executed-arm comparison retains the
+    admitted, so every current replay executed-arm comparison retains the
     explicit fail-closed security reason (NOT_DIRECTLY_COMPARABLE).
     """
     if dimension not in _KNOWN_DIMENSIONS:
@@ -657,7 +657,7 @@ class EfficiencyArmResult:
 
 @dataclass(frozen=True)
 class TaskEfficiencyEvidence:
-    """All C12-C arm evidence for one corpus task."""
+    """All replay arm evidence for one corpus task."""
 
     task_id: str
     task_definition_digest: str
@@ -680,7 +680,7 @@ class TaskEfficiencyEvidence:
 
 @dataclass(frozen=True)
 class EfficiencyExperimentResult:
-    """Aggregate result of the bounded C12-C campaign."""
+    """Aggregate result of the bounded replay campaign."""
 
     task_evidence: tuple[TaskEfficiencyEvidence, ...]
     toolchain_fingerprint: str
@@ -845,7 +845,7 @@ def run_c12c_experiments(
     evidence_dir: Path | str | None = None,
     task_ids: tuple[str, ...] | None = None,
 ) -> EfficiencyExperimentResult:
-    """Run the bounded C12-C observation campaign on real frozen tasks.
+    """Run the bounded replay observation campaign on real frozen tasks.
 
     Campaign shape (bounded; observation only):
     - Tool-output representation: raw vs artifact-indirected observation of
@@ -854,7 +854,7 @@ def run_c12c_experiments(
     - Turn-budget arm: NOT_AVAILABLE — no semantic model/Orch turn executor
       participates; process steps are not turns.
     - Effort arm: NOT_AVAILABLE — no execution binding is configured;
-      C11-B owns canonical effort resolution and C12-C adds no substitute.
+      The binding layer owns canonical effort resolution and the replay harness adds no substitute.
     - Composite arm: NOT_AVAILABLE.
 
     No external model is invoked.  No production winner is adopted.

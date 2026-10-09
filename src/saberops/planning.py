@@ -50,7 +50,7 @@ def build_context_capsule(
 ) -> dict[str, object]:
     """Return bounded, source-context-free worker context for a package.
 
-    C04 projection: the raw full ``parent_objective`` is intentionally NOT
+    Projection: the raw full ``parent_objective`` is intentionally NOT
     exposed in the model-visible package capsule.  The full parent objective
     remains durably persisted on the :class:`WorkPackage` row for audit /
     reconstruction, but the package worker sees only the bounded
@@ -192,20 +192,20 @@ _C14_MAX_EVIDENCE = 24
 _C14_MAX_ITEM_CHARS = 240
 
 # Concurrent-mode security deny paths the represented contract commits to.
-# These are the existing C11-C default sandbox deny paths
+# These are the existing trace default sandbox deny paths
 # (see ``saberops.sandbox.policy.GIT_INTERNAL_DENY`` /
-# ``GITHUB_DENY``) -- the C09 ``FULL_GATE_PATTERNS`` vocabulary is a
+# ``GITHUB_DENY``) -- the scope ``FULL_GATE_PATTERNS`` vocabulary is a
 # verification-level escalation surface and is NOT reinterpreted here as
 # filesystem security denies.
 _C14_CONCURRENT_DENY_PATHS: tuple[str, ...] = (".git/**", ".github/**")
 
-# C09 graph construction already binds the repository's canonical devscope
+# Graph construction already binds the repository's canonical devscope
 # path-pattern matcher.  Workflow depends on project_scope (not devscope), so
 # consume that exact existing binding without creating a second matcher or a
 # new workflow -> devscope architecture edge.
 _C09_ROOT_MATCH_ANY = cast(
     Callable[[tuple[str, ...], str], bool],
-    project_scope_graph.match_any,  # type: ignore[attr-defined]  # existing C09 binding
+    project_scope_graph.match_any,  # type: ignore[attr-defined]  # existing scope binding
 )
 
 
@@ -341,7 +341,7 @@ def _validate_declared_category(paths: Sequence[str]) -> tuple[str, ...] | None:
 
     Cross-category role overlap (e.g. the same literal path appearing in
     ``owned_files`` AND ``interface_files``) is intentionally NOT detected
-    here -- the two roles carry distinct C09 semantics and may legitimately
+    here -- the two roles carry distinct scope semantics and may legitimately
     coexist.  Cross-category overlap is preserved, then reconciled by the
     envelope union after both categories pass category-level validation.
     """
@@ -363,9 +363,9 @@ def _authoritative_write_envelope(
 ) -> tuple[str, ...] | None:
     """Return one complete graph-authoritative module write envelope or fail closed.
 
-    C14-A: the envelope is the union ``owned_files ∪ interface_files ∪
+    The envelope is the union ``owned_files ∪ interface_files ∪
     test_files`` (per section B).  ``interface_files``/``test_files`` are NOT
-    C09 ownership claims; the section-B structural checks keep their distinct
+    Ownership claims; the section-B structural checks keep their distinct
     meanings.
 
     Each declared category is validated independently BEFORE the union, so an
@@ -410,8 +410,8 @@ def _authoritative_write_envelope(
         if owners and owners != (owner_module_id,):
             return None
 
-    # ProjectModule.roots are C09 path-pattern contracts, not literal
-    # directories.  Reuse the exact matcher already used by C09 graph
+    # ProjectModule.roots are scope path-pattern contracts, not literal
+    # directories.  Reuse the exact matcher already used by scope graph
     # construction so wildcard roots cannot hide ambiguous/unowned paths.
     for path, owners in graph.ambiguous_files:
         if owner_module_id in owners or _C09_ROOT_MATCH_ANY(module.roots, path):
@@ -587,7 +587,7 @@ def represent_independent_ready_work(
 
     Admission is deliberately fail-closed.  The existing persisted PlanStep /
     WorkPackage dependency graph is the scheduling authority, while the frozen
-    C09 project graph is the ownership/write-envelope authority.  Advisory
+    Project graph is the ownership/write-envelope authority.  Advisory
     ``WorkPackage.relevant_paths`` may be recorded as bounded evidence, but it
     never defines or narrows the authoritative potential-write envelope.
     """

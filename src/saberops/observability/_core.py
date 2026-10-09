@@ -1,4 +1,4 @@
-"""C06 durable observability and deterministic run reconstruction.
+"""Durable observability and deterministic run reconstruction.
 
 This module contains no provider or model execution.  Dispatch evidence is
 created by the callers at the real adapter boundary; snapshot functions only
@@ -72,7 +72,7 @@ def _load_frozen_tool_contract(run: Any) -> dict[str, Any] | None:
 
 
 def _load_frozen_gateway_contract(run: Any) -> dict[str, Any] | None:
-    """Validate persisted C10 gateway evidence without invoking the gateway.
+    """Validate persisted gateway evidence without invoking the gateway.
 
     Reconstruction must be a pure read of the persisted JSON; no network
     calls and no provider/model invocations. Legacy runs without a frozen
@@ -255,7 +255,7 @@ def normalize_remaining_percent(
 
 
 def canonical_snapshot_json(snapshot: dict[str, Any]) -> bytes:
-    """Serialize a snapshot using the stable C06 canonical JSON contract."""
+    """Serialize a snapshot using the stable observability canonical JSON contract."""
     return json.dumps(snapshot, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
         "utf-8"
     )
@@ -292,7 +292,7 @@ def _as_dispatch(row: DispatchEvidence) -> dict[str, Any]:
 
 
 def _project_scope_snapshot(db: Database, run_id: str) -> dict[str, Any] | None:
-    """Reconstruct C09 project-scope evidence from durable, plain JSON rows.
+    """Reconstruct project-scope evidence from durable, plain JSON rows.
 
     This reads generic persisted JSON through the persistence layer only; it
     never imports project-scope runtime code, so the observability dependency
@@ -359,7 +359,7 @@ def _project_scope_snapshot(db: Database, run_id: str) -> dict[str, Any] | None:
 
 
 def build_run_observability_snapshot(db: Database, run_id: str) -> dict[str, Any]:
-    """Read and aggregate all durable C06 evidence for ``run_id``."""
+    """Read and aggregate all durable observability evidence for ``run_id``."""
     run = db.get_run(run_id)
     if run is None:
         raise ValueError(f"unknown run: {run_id}")

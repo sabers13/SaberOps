@@ -1,4 +1,4 @@
-"""Durable non-blocking owner actions (R3-E2): detached Review and Accept.
+"""Durable non-blocking owner actions: detached Review and Accept.
 
 The Web dashboard must never execute a long-running Review or Accept inside
 the HTTP request: the browser may close, the owner may double-click, and the
@@ -204,7 +204,7 @@ def new_owner_action_id() -> str:
 def current_candidate_sha(db: Database, run_id: str) -> str | None:
     """Resolve the canonical current candidate SHA via lifecycle authority.
 
-    Single seam: the R3-A projection is the only definition of "which
+    Single seam: the candidate projection is the only definition of "which
     candidate the run refers to".  Returns ``None`` when no trustworthy
     candidate exists.
     """
@@ -736,7 +736,7 @@ def run_review_action_child(
     """Detached Review child contract: fence, run authority, persist state.
 
     Action-row authority -> candidate fence -> mark RUNNING -> existing
-    ``SaberOpsService.review_run()`` (with the R3-E1 exact Reviewer
+    ``SaberOpsService.review_run`` (with the exact Reviewer
     authority resolved inside the service) -> persist terminal state.
     Returns a process exit code (0 on SUCCEEDED).
     """

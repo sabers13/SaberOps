@@ -24,7 +24,7 @@ from saberops.project_scope.contracts import (
 
 
 class ProjectScopeIntegrityError(Exception):
-    """Raised when a run's persisted C09 scope evidence fails to verify.
+    """Raised when a run's persisted scope evidence fails to verify.
 
     The frozen graph, initial scope, current scope and expansion chain must
     reconstruct byte-for-byte to the digests recorded at freeze/expansion

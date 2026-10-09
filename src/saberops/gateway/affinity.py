@@ -6,7 +6,7 @@ that account remains healthy, quota-eligible, policy-eligible, and
 compatible with the exact provider/model. Affinity is broken by a
 single typed reason and the break evidence is always recorded.
 
-Affinity is NOT provider/session continuation (that is C05's
+Affinity is NOT provider/session continuation (that is the run supervisor's
 responsibility). It is a pure infrastructure hint scoped to one run.
 """
 

@@ -179,11 +179,11 @@ def _pre_dispatch_skip_reason(
     """Determine a deterministic pre-dispatch skip reason, or None to launch.
 
     Delegates to the shared dispatch evaluator to ensure single-source policy.
-    ``training_required`` / ``routing_snapshot`` carry the Run's frozen R2-B
+    ``training_required`` / ``routing_snapshot`` carry the Run's frozen
     data-policy evidence so reviewer dispatch reaches the same
-    decision/reason as worker dispatch and C07 preflight.
-    ``binding_pool_id`` scopes C07 quota evaluation to the exact resolved
-    reviewer's quota pool (R3-E1.2); ``None`` keeps the legacy
+    decision/reason as worker dispatch and quota preflight.
+    ``binding_pool_id`` scopes quota evaluation to the exact resolved
+    reviewer's quota pool; ``None`` keeps the legacy
     provider-wide behavior for unbound ladder candidates.
     """
     from saberops.dispatch import evaluate_eligibility
@@ -316,8 +316,8 @@ def select_reviewer_ladder(
 
     The ladder is keyed by the normalized implementer model basename (prefix- and
     case-insensitive) and the run tier. It never includes the implementer itself,
-    drops data-policy-denied entries under the canonical R2-B decision (the
-    same decision worker dispatch and C07 preflight reach), and only keeps
+    drops data-policy-denied entries under the canonical data-policy decision (the
+    same decision worker dispatch and quota preflight reach), and only keeps
     candidates whose provider adapter is currently available.
     """
     from saberops.training_policy import is_training_permitted
@@ -488,7 +488,7 @@ class ReviewEngine:
     ) -> None:
         self.db = db or Database()
         self.registry = registry or AdapterRegistry.default()
-        # C15-RDY-02A: ``None`` is an explicit test/compatibility-only
+        # ``None`` is an explicit test/compatibility-only
         # disable of readiness admission.  Production construction never
         # passes ``None``: the ``OrchestratorService`` composition seam
         # always injects a provider (owner-state service or the
@@ -542,7 +542,7 @@ class ReviewEngine:
             phase=PhaseKind.REVIEW,
             source_kind="review.ReviewEngine.review_run",
             boundary_kind="review_execution",
-            notes="C14-C: full review cycle wall-clock for this run "
+            notes="full review cycle wall-clock for this run "
             "(covers every reviewer candidate actually launched until "
             "a verdict is recorded).",
         ):
@@ -639,12 +639,12 @@ class ReviewEngine:
                 ladder.append(WorkerCandidate(provider=binding.provider, model=binding.model,
                                               binding_id=binding_id))
         elif reviewer_override is not None:
-            # R3-E1: an explicitly selected reviewer keeps the ladder's
+            # An explicitly selected reviewer keeps the ladder's
             # anti-self-review invariant (the legacy ladder excludes the
             # implementer by normalized model).  A configured reviewer
             # that IS the final implementer fails closed here -- it is
             # never silently replaced by another reviewer.
-            # R3-E1.1: the override's exact ``binding_id`` (when present)
+            # The override's exact ``binding_id`` (when present)
             # is re-resolved at the launch boundary below through the
             # canonical reviewer resolver; provider/model text alone
             # never authorizes the dispatch.
@@ -781,10 +781,10 @@ class ReviewEngine:
             )
         control_plane_policy = frozen_control_plane.policy
 
-        # R2-B: reviewer dispatch governs data policy from the Run's frozen
+        # Reviewer dispatch governs data policy from the Run's frozen
         # routing snapshot (reconstructed from the persisted payload, never
         # mutable live state) so it reaches the same decision/reason as
-        # worker dispatch and C07 preflight.  A missing/unreadable snapshot
+        # worker dispatch and quota preflight.  A missing/unreadable snapshot
         # (legacy runs) falls back to the candidate's frozen classification
         # plus the static v1 knowledge -- the historical behavior.
         routing_snapshot = None
@@ -809,7 +809,7 @@ class ReviewEngine:
         unusable_notes: list[dict[str, str | None]] = []
         review_dispatches: list[DispatchEvidence] = []
         skipped_candidate_details: list[dict[str, object]] = []
-        # R3-E1.1: the authoritative owner binding registry the launch
+        # The authoritative owner binding registry the launch
         # boundary re-resolves exact reviewer bindings against.  A
         # corrupt/unreadable store refuses bound candidates (fail closed)
         # while leaving the legacy ladder's provider/model path untouched.
@@ -818,10 +818,10 @@ class ReviewEngine:
             if tried_count >= limit:
                 break
             cand_adapter = self.registry.get(candidate.provider)
-            # R3-E1.1: exact REVIEWER binding authority at the launch
+            # Exact REVIEWER binding authority at the launch
             # boundary.  A candidate carrying a non-empty ``binding_id``
             # must re-resolve to exactly that REVIEWER-role binding with
-            # matching provider/model through the canonical C11-B seam
+            # matching provider/model through the canonical binding seam
             # with the real adapter.  Any failure refuses with zero
             # model launch and never substitutes a provider/model
             # sibling: no fallback, no budget consumed.
@@ -867,7 +867,7 @@ class ReviewEngine:
                 cand_adapter = reviewer_resolved.adapter
             if self.readiness_service is not None:
                 if reviewer_resolved is not None:
-                    # R3-E1.2: a bound reviewer admits through its exact
+                    # A bound reviewer admits through its exact
                     # resolved profile, never provider-wide.  The
                     # canonical readiness contract resolves
                     # ``discovered-profile:<connection>`` to that exact
@@ -885,8 +885,8 @@ class ReviewEngine:
                     )
             else:
                 readiness = None
-            # R3-E1.2: the selected exact binding's quota pool is the
-            # C07 quota authority; unbound ladder candidates keep the
+            # The selected exact binding's quota pool is the
+            # Quota authority; unbound ladder candidates keep the
             # legacy provider-wide (``None``) scope.  No new quota
             # semantics: the existing ``binding_pool_id`` seam filters
             # to observations for this pool only.
@@ -1012,7 +1012,7 @@ class ReviewEngine:
             tried_count += 1
             reviewer = candidate
             adapter = cand_adapter
-            # R3-E1.1: the resolved exact resource identity authorizing
+            # The resolved exact resource identity authorizing
             # this dispatch.  ``None`` for legacy ladder candidates
             # (historical provider/model behavior, unchanged).
             review_binding_id = (
@@ -1058,7 +1058,7 @@ class ReviewEngine:
                         model=reviewer.model,
                         timeout_seconds=timeout,
                         read_only=True,
-                        # R3-E1.1: the exactly resolved execution overlay
+                        # The exactly resolved execution overlay
                         # (binding / profile / pool / backend identity)
                         # rides the actual adapter invocation so the
                         # invocation observes what the evidence records.
@@ -1094,7 +1094,7 @@ class ReviewEngine:
                         authority_mode=load_authority_settings().mode.value,
                         routing_snapshot_digest=routing_digest,
                         control_plane_digest=frozen_control_plane.digest,
-                        # R3-E1.1: the exact reviewer binding identity
+                        # The exact reviewer binding identity
                         # authorizing this dispatch (binding / profile /
                         # quota-pool), sourced from the resolved value the
                         # runtime is about to invoke.  Legacy ladder
@@ -1165,7 +1165,7 @@ class ReviewEngine:
                 and readiness.connection_id is not None
             ):
                 # Successful reviewer execution is direct evidence
-                # for the exact connection used (R3-E1.2: bound reviewers
+                # for the exact connection used (bound reviewers
                 # admit through their exact profile, so this connection
                 # is the resolved reviewer's own); failures record
                 # nothing and never fabricate NOT_READY.
