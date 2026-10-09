@@ -54,68 +54,18 @@ def _verify_and_resolve_ledger_state(
     checkpoint_id: str | None,
     state_digest: str | None,
 ) -> tuple[str | None, str | None]:
-    """Authoritatively verify and resolve checkpoint and state digest against Project Ledger.
+    """Resolve the optional project checkpoint / state digest for a replay.
 
-    Semantics:
-    A. checkpoint_id + state_digest:
-       verify checkpoint belongs to live Project and digest matches.
-    B. checkpoint_id only:
-       verify checkpoint and derive authoritative state_digest.
-    C. state_digest only:
-       load authoritative Project Ledger and require exact digest match.
-    D. neither:
-       remain explicitly absent.
-
-    Raises:
-        ReplaySafetyViolationError: If checkpoint or state digest is claimed without db.
-        ReplayStateMismatchError: If checkpoint cannot be verified, does not match project,
-            or if state digest does not match the authoritative ledger / checkpoint digest.
+    The Project Ledger that could verify such claims was removed, so any
+    claim fails closed instead of being trusted unverified.
     """
+    del db, project_id
     if checkpoint_id is None and state_digest is None:
         return None, None
-
-    if db is None:
-        raise ReplaySafetyViolationError(
-            "Cannot claim Project Ledger checkpoint or state digest without "
-            "verification against authoritative database."
-        )
-
-    if checkpoint_id is not None:
-        from saberops.project_ledger.checkpoint import verify_checkpoint
-
-        try:
-            verified_ckpt = verify_checkpoint(
-                db, checkpoint_id, expected_project_id=project_id
-            )
-        except Exception as exc:
-            raise ReplayStateMismatchError(
-                f"Checkpoint verification failed for '{checkpoint_id}': {exc}"
-            ) from exc
-
-        auth_state_digest = verified_ckpt.checkpoint.state_digest
-        if state_digest is not None and auth_state_digest != state_digest:
-            raise ReplayStateMismatchError(
-                f"Supplied state digest '{state_digest}' does not match verified "
-                f"checkpoint state digest '{auth_state_digest}'."
-            )
-        return verified_ckpt.checkpoint_id, auth_state_digest
-
-    # state_digest only (checkpoint_id is None)
-    from saberops.project_ledger.store import load_project
-
-    try:
-        loaded_ledger = load_project(db, project_id)
-    except Exception as exc:
-        raise ReplayStateMismatchError(
-            f"Failed to load ledger for project '{project_id}': {exc}"
-        ) from exc
-
-    if loaded_ledger.state_digest != state_digest:
-        raise ReplayStateMismatchError(
-            f"Supplied state digest '{state_digest}' does not match authoritative "
-            f"ledger state digest '{loaded_ledger.state_digest}'."
-        )
-    return None, state_digest
+    raise ReplaySafetyViolationError(
+        "Project checkpoint and state-digest claims are unsupported: the Project "
+        "Ledger that verified them has been removed."
+    )
 
 
 class ReplayEngine:

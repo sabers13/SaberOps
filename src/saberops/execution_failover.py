@@ -15,10 +15,8 @@ Three architectural rules govern this module:
 * * **No blind replay of uncertain effects.**  ``EXTERNAL_UNCERTAIN`` and
   ``EXTERNAL_IDEMPOTENT`` effects that have not been verified must block
   the new Attempt.  Reconciliation is an obligation, not an option.
-* * **Project continuity wins over Attempt continuity.**  Reconstruction
-  authority is the Project Ledger / checkpoint, not this module.  Failover
-  consumes Project evidence to start the next Attempt; it does not
-  *create* Project evidence.
+* **Durable run evidence wins over Attempt continuity.**  Failover consumes
+  that evidence to start the next Attempt; it does not create it.
 
 This module contains no provider, model, or live network call.  The
 failover decision is a pure function of the database state plus the typed

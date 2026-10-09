@@ -93,9 +93,7 @@ class OrchBindingPolicy:
     requested risk level, ordered by the configured ordinary routing
     preference.
 
-    This is owner *execution* configuration.  It is not Project truth:
-    nothing here ever enters the Project Ledger as a fact, decision or
-    roadmap item.
+    This is owner *execution* configuration, not project state.
     """
 
     mode: OrchBindingMode

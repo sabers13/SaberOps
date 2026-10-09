@@ -343,11 +343,9 @@ DEFAULT_REVIEWER_EFFORT_POLICY = EffortPolicy(
 class OrchestratorExecutionConfig:
     """The owner's execution-time configuration for the Orchestrator slot.
 
-    This is owner *execution* configuration, not Project truth: nothing
-    here ever enters the Project Ledger as a fact, decision or roadmap
-    item.  If persistence is appropriate, it lives in
-    ``owner_execution_config`` records (out of scope for this tranche);
-    Project reconstruction must never depend on it.
+    This is owner *execution* configuration, not project state.  If
+    persistence is appropriate, it lives in ``owner_execution_config``
+    records; run reconstruction must never depend on it.
     """
 
     orch_effort: EffortPolicy = DEFAULT_ORCH_EFFORT_POLICY
