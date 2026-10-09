@@ -689,3 +689,9 @@ a.side-item, button.side-item { padding: 9px 8px; gap: 4px; }
 .setup-mode-option strong > small { margin-left: 6px; }
 .setup-policy-form [data-setup-gate] { display: grid; gap: 8px; }
 @media (max-width: 600px) { .setup-mode-options { grid-template-columns: 1fr; } }
+
+/* Authority setting */
+.authority-options { border: 0; margin: 0 0 12px; padding: 0; display: grid; gap: 8px; }
+.authority-options legend { font-weight: 600; margin-bottom: 4px; }
+.authority-option { display: block; line-height: 1.45; }
+.authority-line { margin: 4px 0 12px; }

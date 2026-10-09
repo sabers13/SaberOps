@@ -660,6 +660,47 @@ def resolve_orch_executable() -> str:
     """
     return " ".join(resolve_owner_argv_prefix())
 
+#: What each authority preset changes in SaberOps today. Policy fields that
+#: only the unwired autonomous project runner reads are not promised here.
+_AUTHORITY_EFFECTS: dict[str, str] = {
+    "ask_before_actions": "Runs behave like Supervised. Your synced OpenCode agent asks before every action.",
+    "supervised": "Gate and review run automatically. You accept every candidate.",
+    "autonomous": "Like Supervised, and every candidate that passes the gate is pushed to the repository's origin as orch/<run>/a<n>. You still accept.",
+    "full_autonomy": "Same as Autonomous today. Automatic acceptance is not wired yet.",
+    "full_autonomy_publish": "Same as Autonomous today. Automatic acceptance and publishing are not wired yet.",
+}
+
+
+def _authority_context() -> dict[str, Any]:
+    """Owner authority mode for display; never raises into a page render."""
+    from saberops.authority import (
+        AUTHORITY_ORDER,
+        AuthorityConfigError,
+        HostAccessMode,
+        label_for,
+        load_authority_settings,
+        policy_for,
+    )
+
+    try:
+        settings = load_authority_settings()
+    except (AuthorityConfigError, OSError) as exc:
+        return {"error": f"Authority settings unreadable: {exc}", "options": []}
+    return {
+        "error": "",
+        "mode": settings.mode.value,
+        "label": label_for(settings.mode),
+        "host_access": settings.host_access.value,
+        "host_options": [mode.value for mode in HostAccessMode],
+        "pushes_candidates": policy_for(settings.mode).auto_publish_candidate,
+        "effect": _AUTHORITY_EFFECTS.get(settings.mode.value, ""),
+        "options": [
+            {"value": mode.value, "label": label_for(mode),
+             "effect": _AUTHORITY_EFFECTS.get(mode.value, "")}
+            for mode in AUTHORITY_ORDER
+        ],
+    }
+
 
 def _dashboard_context(
     service: OrchestratorService,
@@ -739,6 +780,7 @@ def _dashboard_context(
         "effective_timeouts": _effective_timeout_display(resolved_form),
         "project_gate_scratch": project_gate_scratch,
         "project_settings": project_settings,
+        "authority": _authority_context(),
         "error": error,
         "notice": notice,
     }
@@ -2719,6 +2761,8 @@ def _notice_from_query(request: Request) -> str | None:
         return "Quota updated."
     if request.query_params.get("enabled") == "1":
         return "Quota enabled."
+    if request.query_params.get("authority_saved") == "1":
+        return "Authority settings saved. New runs use them."
     if request.query_params.get("connection_saved") == "1":
         auto = request.query_params.get("auto_discovered")
         if auto is not None:
@@ -3275,6 +3319,28 @@ def create_app(
                 status_code=400,
             )
         return RedirectResponse(url="/?gate_scratch_updated=1", status_code=303)
+
+    @app.post("/settings/authority", name="set_authority")
+    def set_authority(
+        mode: Annotated[str, Form()] = "",
+        host_access: Annotated[str, Form()] = "",
+    ) -> Response:
+        """Persist the owner authority mode and host access (same files as the CLI)."""
+        from saberops.authority import (
+            AuthorityConfigError,
+            parse_authority_mode,
+            set_authority_mode,
+            set_host_access,
+        )
+
+        try:
+            if mode.strip():
+                set_authority_mode(parse_authority_mode(mode.strip()))
+            if host_access.strip():
+                set_host_access(host_access.strip())
+        except (AuthorityConfigError, ValueError, OSError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return RedirectResponse(url="/?authority_saved=1#work", status_code=303)
 
     @app.get(
         "/projects/settings",
