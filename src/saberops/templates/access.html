@@ -200,6 +200,24 @@
   {% endif %}
 </div>
 
+{% if not omniroute_configured %}
+<div class="settings-section" id="omniroute">
+  <div class="settings-section-head"><h4>OmniRoute</h4><p>Use a running OmniRoute gateway as a provider. Its models appear under OmniRoute on the Routing page and can serve as worker, reviewer or orchestrator. The virtual <span class="mono">auto</span> routes are listed but not selectable, because each run must record the exact model.</p></div>
+  <div class="settings-card"><div class="settings-control-row" style="display: block;">
+    <form method="post" action="/access/connections" class="so-form" data-omniroute-add>
+      <input type="hidden" name="preset" value="omniroute">
+      <input type="hidden" name="connection_id" value="omniroute">
+      <div class="so-form-row">
+        <div class="advanced-field"><label for="omniroute_endpoint">Endpoint</label><input type="text" id="omniroute_endpoint" name="endpoint" value="{{ omniroute_endpoint }}"></div>
+        <div class="advanced-field"><label for="omniroute_credential">Credential reference (optional)</label><input type="text" id="omniroute_credential" name="credential_ref" value="" placeholder="env:OMNIROUTE_API_KEY"></div>
+      </div>
+      <p class="so-help">Leave the credential empty when OmniRoute runs locally without <span class="mono">REQUIRE_API_KEY</span>. Otherwise create an endpoint key in the OmniRoute dashboard, export it as <span class="mono">OMNIROUTE_API_KEY</span> before starting SaberOps, and enter <span class="mono">env:OMNIROUTE_API_KEY</span>.</p>
+      <div><button type="submit" class="text-button primary-button">Add OmniRoute</button></div>
+    </form>
+  </div></div>
+</div>
+{% endif %}
+
 <div class="settings-section">
   <div class="settings-section-head"><h4>Add connection</h4><p>Save a connection, refresh its models, then select models for roles on the Routing page. Other API protocols remain unavailable until their execution adapter is implemented.</p></div>
   <div class="settings-card"><div class="settings-control-row" style="display: block;">

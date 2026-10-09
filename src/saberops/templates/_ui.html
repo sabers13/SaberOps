@@ -21,7 +21,7 @@
 {%- endmacro %}
 
 {% macro provider_name(provider) -%}
-{{ {'codex': 'Codex', 'anthropic': 'Claude Code', 'copilot': 'GitHub Copilot', 'opencode': 'OpenCode', 'antigravity': 'Antigravity', 'cline': 'Cline'}.get(provider, provider) }}
+{{ {'codex': 'Codex', 'anthropic': 'Claude Code', 'copilot': 'GitHub Copilot', 'opencode': 'OpenCode', 'antigravity': 'Antigravity', 'cline': 'Cline', 'omniroute': 'OmniRoute'}.get(provider, provider) }}
 {%- endmacro %}
 
 {% macro run_state(state, tone='unknown') -%}

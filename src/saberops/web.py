@@ -80,6 +80,7 @@ from saberops.gate_runner import (
 from saberops.model_access import (
     ACCOUNT_BACKENDS,
     DEFAULT_READINESS_MAX_AGE,
+    OMNIROUTE_DEFAULT_ENDPOINT,
     AccessProtocol,
     AccessStore,
     AccessStoreError,
@@ -102,6 +103,7 @@ from saberops.model_access import (
     build_access_registry,
     default_account_connections,
     discover_connection_models,
+    is_virtual_route,
     list_presets,
     preset_connection,
 )
@@ -1777,7 +1779,9 @@ def _apply_exact_execution_bindings(
             continue
         if not connection.is_account_backed:
             from saberops.workers.direct_api import supports_connection
-            if not supports_connection(connection):
+            if not supports_connection(connection) or is_virtual_route(
+                connection.provider, model.model_id
+            ):
                 support[model.identity] = ExecutionSupport.UNSUPPORTED
                 continue
         if registry.get(connection.provider) is None:
@@ -2136,6 +2140,8 @@ def _access_context(
             if provider not in {descriptor.provider for descriptor in ACCOUNT_BACKENDS}
         ],
         "api_rows": api_rows,
+        "omniroute_configured": any(row["provider"] == "omniroute" for row in api_rows),
+        "omniroute_endpoint": OMNIROUTE_DEFAULT_ENDPOINT,
         "presets": list_presets(),
         "protocols": [protocol.value for protocol in AccessProtocol],
         "form": form if form is not None else dict(empty),

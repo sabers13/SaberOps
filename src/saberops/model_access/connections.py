@@ -903,6 +903,23 @@ def default_account_connections(*, owner: str = "") -> tuple[ProviderConnection,
     )
 
 
+#: OmniRoute's default local OpenAI-compatible base URL.
+OMNIROUTE_DEFAULT_ENDPOINT = "http://127.0.0.1:20128/v1"
+#: Presets whose endpoint may run without an API key (local servers).
+_NO_AUTH_PRESETS: frozenset[str] = frozenset({"local-openai-compatible", "omniroute"})
+
+
+def is_virtual_route(provider: str, model_id: str) -> bool:
+    """True for gateway routes that pick the model themselves.
+
+    OmniRoute's ``auto`` and ``auto/<goal>`` routes choose a different
+    upstream model per request, so a run could not record which model
+    did the work. They stay listed but are never executable.
+    """
+    model = model_id.strip().lower()
+    return provider == "omniroute" and (model == "auto" or model.startswith("auto/"))
+
+
 _PRESET_DEFAULTS: dict[str, dict[str, Any]] = {
     "minimax": {
         "provider": "minimax",
@@ -944,6 +961,18 @@ _PRESET_DEFAULTS: dict[str, dict[str, Any]] = {
         "model": "",
         "notes": ("Generic custom OpenAI-compatible endpoint.",),
     },
+    "omniroute": {
+        "provider": "omniroute",
+        "protocol": AccessProtocol.OPENAI_COMPATIBLE,
+        "backend": "openai-compatible-api",
+        "endpoint": OMNIROUTE_DEFAULT_ENDPOINT,
+        "model": "",
+        "notes": (
+            "OmniRoute gateway over the generic OpenAI-compatible protocol. "
+            "Virtual auto/* routes are listed but never routed: SaberOps "
+            "needs the exact model.",
+        ),
+    },
     "local-openai-compatible": {
         "provider": "local",
         "protocol": AccessProtocol.OPENAI_COMPATIBLE,
@@ -983,7 +1012,7 @@ def preset_connection(
     resolved_endpoint = endpoint.strip() or str(defaults["endpoint"])
     auth_mode = (
         AuthMode.LOCAL_NO_AUTH
-        if key == "local-openai-compatible" and not credential_ref.strip()
+        if key in _NO_AUTH_PRESETS and not credential_ref.strip()
         else AuthMode.API_KEY
     )
     return ProviderConnection(
