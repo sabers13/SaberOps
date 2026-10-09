@@ -202,7 +202,7 @@ def test_c16c2_run_detail_renders_inspector_and_actions(
         assert f'data-panel="{tab}"' in live.text, tab
     # A live run exposes cancel + the live surfaces.
     assert 'action="/runs/run_c16c2_live/cancel"' in live.text
-    assert "/runs/run_c16c2_live/events/stream" in live.text
+    assert 'data-run-refresh="events-status"' in live.text  # stream URL is built by app.js
     assert "/runs/run_c16c2_live/report" in live.text
     assert 'id="terminal"' in live.text
     assert 'id="runComposerStopButton"' in live.text
