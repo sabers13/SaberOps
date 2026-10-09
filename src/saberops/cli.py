@@ -2928,8 +2928,8 @@ def handle_quota_enable(args: argparse.Namespace) -> int:
     return 0
 
 
-def handle_doctor(args: argparse.Namespace) -> int:
-    """Handle `orch doctor` command. Strictly read-only: never mutates state."""
+def collect_doctor_findings(repo: Path, db_path: Path) -> list[DoctorFinding]:
+    """Run every read-only doctor check (shared by the CLI and the web page)."""
     project_root = _orch_project_root()
     findings: list[DoctorFinding] = []
 
@@ -2938,17 +2938,21 @@ def handle_doctor(args: argparse.Namespace) -> int:
     findings.append(_check_dev_imports(project_root))
     findings.append(_check_venv_tools(project_root))
     findings.append(_check_git_binary())
-
-    db_arg = getattr(args, "db", None)
-    db_path = Path(db_arg) if db_arg else get_default_db_path()
     db_finding, quota_rows = _check_database(db_path)
     findings.append(db_finding)
-
     findings.extend(_check_providers(quota_rows))
-    findings.append(_check_target_repo(Path(getattr(args, "repo", "."))))
+    findings.append(_check_target_repo(repo))
     legacy_manager = _check_legacy_manager_state()
     if legacy_manager is not None:
         findings.append(legacy_manager)
+    return findings
+
+
+def handle_doctor(args: argparse.Namespace) -> int:
+    """Handle `orch doctor` command. Strictly read-only: never mutates state."""
+    db_arg = getattr(args, "db", None)
+    db_path = Path(db_arg) if db_arg else get_default_db_path()
+    findings = collect_doctor_findings(Path(getattr(args, "repo", ".")), db_path)
 
     ok_count = sum(1 for f in findings if f.severity == "OK")
     warn_count = sum(1 for f in findings if f.severity == "WARN")

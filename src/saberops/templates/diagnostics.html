@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Diagnostics{% endblock %}
+{% block conversation_title %}Diagnostics{% endblock %}
+{% block run_meta %}{{ counts.OK }} OK · {{ counts.WARN }} warnings · {{ counts.FAIL }} failures{% endblock %}
+{% block page_return %}<nav class="page-return" aria-label="Page navigation"><a href="/">← Workspace</a></nav>{% endblock %}
+
+{% block workspace %}
+<div class="settings-section">
+  <div class="settings-section-head"><h4>Readiness</h4><p>The same read-only checks as <span class="mono">orch doctor</span>, run when this page loads. Nothing is changed. To repair run state, use <span class="mono">orch reconcile</span> in a terminal.</p></div>
+  {% if error %}<p class="so-error">{{ error }}</p>{% endif %}
+  <p><span class="badge badge-{{ 'pass' if ready else 'fail' }}">{{ 'READY' if ready else 'NOT READY' }}</span>{% if repo %} <span class="mono muted">{{ repo }}</span>{% endif %}</p>
+  {% if findings %}
+  <div class="so-table-wrap"><table class="so-table">
+    <thead><tr><th>Status</th><th>Check</th></tr></thead>
+    <tbody>
+    {% for f in findings %}
+      <tr><td><span class="badge badge-{{ {'OK':'pass','WARN':'warning','FAIL':'fail'}.get(f.severity, 'unknown') }}">{{ f.severity }}</span></td><td>{{ f.message }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {% endif %}
+</div>
+
+<div class="settings-section">
+  <div class="settings-section-head"><h4>This server</h4><p>Which code and database this dashboard is running. Also available as JSON at <a href="/health">/health</a>.</p></div>
+  <div class="so-table-wrap"><table class="so-table">
+    <tbody>
+      <tr><th>Version</th><td class="mono">{{ identity.version }}</td></tr>
+      <tr><th>Source</th><td class="mono">{{ identity.source_path }}</td></tr>
+      <tr><th>Git commit</th><td class="mono">{{ identity.source_git_sha }} · {{ identity.source_tree_state }}</td></tr>
+      <tr><th>Database</th><td class="mono">{{ identity.database_path }}</td></tr>
+      <tr><th>Worker launch</th><td class="mono">{{ identity.orch_executable }}</td></tr>
+      <tr><th>Server process</th><td class="mono">{{ identity.server_pid }}</td></tr>
+    </tbody>
+  </table></div>
+</div>
+{% endblock %}

@@ -6258,23 +6258,55 @@ def create_app(
             )
         return RedirectResponse(url=("/routing?role=reviewer&selected=1" if unified else "/reviewer?selected=1"), status_code=303)
 
+    def health_payload() -> dict[str, Any]:
+        source_root = _PACKAGE_DIR.parents[1]
+        sha, tree_state = _resolve_source_identity(_PACKAGE_DIR)
+        return {
+            "product": "SaberOps",
+            "version": saberops_version(),
+            "package_path": str(_PACKAGE_DIR),
+            "source_path": str(source_root),
+            "source_git_sha": sha,
+            "source_tree_state": tree_state,
+            "database_path": str(active_runtime().db.db_path),
+            "server_pid": os.getpid(),
+            "orch_executable": resolve_orch_executable(),
+        }
+
     @app.get("/health")
     def health() -> JSONResponse:
         """Expose non-secret runtime identity for stale-install diagnostics."""
-        source_root = _PACKAGE_DIR.parents[1]
-        sha, tree_state = _resolve_source_identity(_PACKAGE_DIR)
-        return JSONResponse(
+        return JSONResponse(health_payload())
+
+    @app.get("/diagnostics", response_class=HTMLResponse, name="diagnostics")
+    def diagnostics(request: Request) -> HTMLResponse:
+        """Read-only `orch doctor` checks plus runtime identity; never mutates."""
+        from saberops.cli import collect_doctor_findings
+
+        identity = health_payload()
+        repo = project_registry.active()
+        try:
+            findings = collect_doctor_findings(
+                Path(repo) if repo else Path("."), Path(identity["database_path"])
+            )
+            error = ""
+        except Exception as exc:  # a broken check must not break the page
+            findings, error = [], f"Diagnostics could not run: {exc}"
+        counts = {
+            level: sum(1 for f in findings if f.severity == level)
+            for level in ("OK", "WARN", "FAIL")
+        }
+        return templates.TemplateResponse(
+            request,
+            "diagnostics.html",
             {
-                "product": "SaberOps",
-                "version": saberops_version(),
-                "package_path": str(_PACKAGE_DIR),
-                "source_path": str(source_root),
-                "source_git_sha": sha,
-                "source_tree_state": tree_state,
-                "database_path": str(active_runtime().db.db_path),
-                "server_pid": os.getpid(),
-                "orch_executable": resolve_orch_executable(),
-            }
+                "identity": identity,
+                "findings": findings,
+                "counts": counts,
+                "ready": not error and counts["FAIL"] == 0,
+                "repo": str(repo or ""),
+                "error": error,
+            },
         )
 
     @app.on_event("shutdown")
