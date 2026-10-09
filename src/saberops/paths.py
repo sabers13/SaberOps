@@ -11,9 +11,7 @@ other module may hard-code an application directory name.
 
 Legacy private-development locations (``orchestrator-mvp`` under state,
 ``orchestrator-v2`` / ``orchestrator-mvp`` under config) are never
-selected as defaults.  They are listed explicitly via
-:func:`legacy_state_dirs` / :func:`legacy_config_dirs` for diagnostics
-only.  SaberOps never copies, mutates, or deletes legacy state
+selected as defaults.  SaberOps never copies, mutates, or deletes legacy state
 automatically; a fresh public install defaults to the new namespace and
 never silently inherits the old private database or configuration.
 
@@ -32,9 +30,6 @@ STATE_APP_DIR: Final[str] = "saberops"
 CONFIG_APP_DIR: Final[str] = "saberops"
 CACHE_APP_DIR: Final[str] = "saberops"
 PROFILE_ENV: Final[str] = "SABEROPS_PROFILE"
-
-LEGACY_STATE_APP_DIRS: Final[tuple[str, ...]] = ("orchestrator-mvp",)
-LEGACY_CONFIG_APP_DIRS: Final[tuple[str, ...]] = ("orchestrator-v2", "orchestrator-mvp")
 
 _PROJECTS_DIR: Final[str] = "projects"
 _PROFILE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
@@ -146,22 +141,6 @@ def get_tool_registry_path() -> Path:
 def get_projects_registry_path() -> Path:
     """Return the canonical UI project-registry path."""
     return saberops_state_dir() / "ui-projects.json"
-
-
-def legacy_state_dirs() -> tuple[Path, ...]:
-    """List legacy private-development state dirs (diagnostics only).
-
-    These are never selected as defaults and never mutated; they exist
-    so tests and diagnostics can prove the new namespace is independent.
-    """
-    base = state_home()
-    return tuple(base / name for name in LEGACY_STATE_APP_DIRS)
-
-
-def legacy_config_dirs() -> tuple[Path, ...]:
-    """List legacy private-development config dirs (diagnostics only)."""
-    base = config_home()
-    return tuple(base / name for name in LEGACY_CONFIG_APP_DIRS)
 
 
 def is_legacy_path(path: Path | str) -> bool:

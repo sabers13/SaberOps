@@ -153,8 +153,7 @@ and gates. Open choices are explicitly UNRESOLVED.
   workspace, workers dock, status bar, settings modal, and command palette.
   Dashboard and run-detail templates extend this shell.
 - **Application CSS order:** `static/css/console-v2.css`, then
-  `static/css/saberops-console.css`. The old `style.css` exists but is not loaded
-  by the current base template. Run detail also loads vendored xterm styling.
+  `static/css/saberops-console.css`. Run detail also loads vendored xterm styling.
 - **Application JavaScript:** `static/js/console.js` controls shell presentation;
   `app.js` and `terminal.js` also support backend-connected interactions. IDs and
   `data-od-id` hooks are existing contracts, not decorative attributes to rename.

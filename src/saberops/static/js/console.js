@@ -326,29 +326,10 @@
     closeModal("settingsLayer");
   }
 
-  /* --- Run actions / cancel --- */
-  function toggleRunActions() {
-    var menu = document.getElementById("runActionsMenu");
-    var button = document.getElementById("runActionsButton");
-    if (!menu) return;
-    var willShow = menu.hidden;
-    menu.hidden = !willShow;
-    if (button) button.setAttribute("aria-expanded", willShow ? "true" : "false");
-  }
-
-  function closeRunActions() {
-    var menu = document.getElementById("runActionsMenu");
-    var button = document.getElementById("runActionsButton");
-    if (menu) menu.hidden = true;
-    if (button) button.setAttribute("aria-expanded", "false");
-  }
-
+  /* --- Cancel run --- */
   function openCancelRunDialog() {
-    var fromMenu = document.activeElement === document.getElementById("cancelRunMenuItem");
-    closeRunActions();
     closeCommands();
     openModal("cancelRunLayer", "keepRunningButton");
-    if (fromMenu) modalOrigin = document.getElementById("runActionsButton");
   }
 
   function closeCancelRunDialog() {
@@ -393,29 +374,6 @@
     if (state === "live") {
       root.classList.remove("disconnected", "reconnected");
     }
-  }
-
-  /* --- Composer progressive enhancement (dashboard; moved from app.js) ---
-   *
-   * app.js loads only on the run-detail page, so dashboard-only
-   * enhancement must live here in the shell controller that loads
-   * everywhere. */
-
-  function initReviewMode() {
-    var modeSel = document.getElementById("review_mode");
-    var limitField = document.getElementById("review-limit-field");
-
-    function update() {
-      if (modeSel && limitField) {
-        var bounded = modeSel.value !== "max";
-        limitField.hidden = !bounded;
-        var limitInput = document.getElementById("review_limit");
-        if (limitInput) limitInput.disabled = !bounded;
-      }
-    }
-
-    if (modeSel) modeSel.addEventListener("change", update);
-    update();
   }
 
   function init() {
@@ -483,8 +441,6 @@
     if (leftToggle) leftToggle.addEventListener("click", toggleLeft);
     var rightToggle = document.getElementById("rightCollapseButton");
     if (rightToggle) rightToggle.addEventListener("click", toggleRight);
-    var workersToggle = document.getElementById("workersCollapseButton");
-    if (workersToggle) workersToggle.addEventListener("click", toggleRight);
     var workersHeading = document.getElementById("workersHeading");
     if (workersHeading) {
       workersHeading.addEventListener("click", toggleRight);
@@ -573,17 +529,6 @@
       });
     }
 
-    var runActionsButton = document.getElementById("runActionsButton");
-    if (runActionsButton) runActionsButton.addEventListener("click", toggleRunActions);
-    document.addEventListener("click", function (ev) {
-      var menu = document.getElementById("runActionsMenu");
-      if (!menu || menu.hidden) return;
-      var target = ev.target;
-      if (target instanceof Element && (menu.contains(target) || (runActionsButton && runActionsButton.contains(target)))) return;
-      closeRunActions();
-    });
-    var cancelMenuItem = document.getElementById("cancelRunMenuItem");
-    if (cancelMenuItem) cancelMenuItem.addEventListener("click", openCancelRunDialog);
     var commandCancel = document.getElementById("commandCancelRun");
     if (commandCancel) commandCancel.addEventListener("click", openCancelRunDialog);
     var keepRunning = document.getElementById("keepRunningButton");
@@ -644,7 +589,6 @@
         closeCommands();
         closeSettingsModal();
         closeCancelRunDialog();
-        closeRunActions();
         closeDrawers();
         return;
       }
@@ -702,7 +646,6 @@
         });
       });
     });
-    initReviewMode();
   }
 
   if (document.readyState === "loading") {

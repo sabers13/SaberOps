@@ -1381,41 +1381,6 @@ def _resolve_exact_binding(
     return binding
 
 
-def _exact_execution_support(
-    owner: OwnerBindings,
-    registry: AdapterRegistry,
-    connection: ProviderConnection,
-    model_id: str,
-) -> ExecutionSupport:
-    """Positive execution support requires an exact resolvable binding.
-
-    An account-backed connection with a registered adapter is necessary but
-    not sufficient: without a matching exact :class:`ExecutionBinding` the
-    result stays ``UNKNOWN``.  OpenAI-compatible API connections use their own exact
-    DIRECT_API bindings. Unsupported protocols remain unavailable.
-
-    The binding is resolved against the catalog row's own
-    ``connection_id`` so a model reached through two different
-    connections still resolves to *its* binding rather than the first
-    registry declaration.
-    """
-    if not connection.is_account_backed:
-        from saberops.workers.direct_api import supports_connection
-        if not supports_connection(connection):
-            return ExecutionSupport.UNSUPPORTED
-    if registry.get(connection.provider) is None:
-        return ExecutionSupport.UNSUPPORTED
-    if _resolve_exact_binding(
-        owner,
-        registry,
-        provider=connection.provider,
-        model=model_id,
-        connection_id=connection.connection_id,
-    ) is None:
-        return ExecutionSupport.UNKNOWN
-    return ExecutionSupport.SUPPORTED
-
-
 def _http_get(
     url: str,
     headers: dict[str, str],
@@ -2181,11 +2146,6 @@ def _access_context(
     }
 
 
-def _routing_context_keys() -> tuple[tuple[str, str], ...]:
-    """The canonical ``(tier, context)`` pairs owned by routing config."""
-    return tuple(CONTEXT_KEYS)
-
-
 def _orchestrator_context(
     *,
     error: str | None = None,
@@ -2726,27 +2686,6 @@ def _probe_api_connection(*, endpoint: str) -> dict[str, str]:
             "authentication NOT VERIFIED (credential never transmitted)"
         ),
     }
-
-
-def _reviewed_query_value(verdict: ReviewVerdict) -> str:
-    """Map an authoritative review verdict to a redirect query token.
-
-    Substantive reviewer outcomes (a reviewer actually completed a review)
-    keep the historical ``1`` token.  Infrastructure states that launched no
-    usable reviewer get their own token so the rendered notice stays
-    truthful.  Any other non-substantive verdict falls through to
-    ``failed``: it must never claim successful completion.
-    """
-    if verdict == ReviewVerdict.REVIEW_UNAVAILABLE:
-        return "unavailable"
-    if verdict in (
-        ReviewVerdict.PASS,
-        ReviewVerdict.BLOCK,
-        ReviewVerdict.PASS_WITH_BACKLOG,
-        ReviewVerdict.FINAL_BLOCK,
-    ):
-        return "1"
-    return "failed"
 
 
 def _notice_from_query(request: Request) -> str | None:

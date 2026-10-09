@@ -17,28 +17,6 @@ CODEX_PROVIDER = "codex"
 CODEX_WEEKLY_POOL = "weekly"
 
 
-def apply_c07_quota_to_chain(
-    candidates: list[WorkerCandidate],
-    quota_states: list[QuotaState],
-    *,
-    reserve_override: bool = False,
-) -> list[WorkerCandidate]:
-    """Apply the quota shared-pool red-line policy without ranking survivors.
-
-    The older helpers below remain source-compatible for callers;
-    actual quota dispatch paths use this function and the preflight evaluator.
-    """
-    from saberops.control_plane import quota_decision
-
-    return [
-        candidate
-        for candidate in candidates
-        if quota_decision(
-            candidate, quota_states, reserve_override=reserve_override
-        ).eligible
-    ]
-
-
 def derive_routing_state(
     provider: str,
     pool: str,
@@ -98,33 +76,6 @@ def apply_quota_policy(
         else:
             normal.append(candidate)
     return normal + lowered
-
-
-def apply_quota_to_chain(
-    candidates: list[WorkerCandidate],
-    quota_states: list[QuotaState],
-    model_override: str | None = None,
-    provider_override: str | None = None,
-) -> list[WorkerCandidate]:
-    """Apply quota policy to a resolved chain, bypassing explicit overrides.
-
-    An explicit model or provider override is an intentional owner routing
-    decision and is not silently rewritten by automatic quota policy.
-
-    Raises:
-        ValueError: If quota policy removes every automatic candidate.
-    """
-    if model_override or provider_override:
-        return candidates
-
-    effective = apply_quota_policy(candidates, quota_states)
-    if not effective:
-        raise ValueError(
-            "Quota policy blocked every automatic candidate for this tier. "
-            "Use an explicit --model/--provider override, or re-enable a provider "
-            "via 'orch quota enable'."
-        )
-    return effective
 
 
 def normalize_quota_observation(

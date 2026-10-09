@@ -175,7 +175,7 @@ def test_cli_exposes_local_commands() -> None:
 def test_packaged_runtime_resources_are_present() -> None:
     package = Path(__file__).resolve().parents[1] / "src" / "saberops"
     assert (package / "templates" / "base.html").is_file()
-    assert (package / "static" / "css" / "style.css").is_file()
+    assert (package / "static" / "css" / "saberops-console.css").is_file()
     assert (package / "defaults" / "routing.json").is_file()
 
 

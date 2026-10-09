@@ -186,7 +186,6 @@ from saberops.provenance import (
 
 # Kept as a compatibility module attribute for integrations that patch the
 # older chain helper; dispatch itself evaluates quota at preflight.
-from saberops.quota import apply_quota_to_chain  # noqa: F401
 from saberops.routing import resolve_candidate_chain
 from saberops.routing_config import (
     RoutingConfigError,
@@ -325,43 +324,6 @@ def _telemetry_total(records: list[dict[str, object]], key: str) -> int:
     return total
 
 
-def build_retry_task_prompt(
-    original_task: str,
-    attempt_idx: int,
-    prior_attempt: Attempt,
-    prior_check: CheckResult | None,
-    inherited_base_sha: str | None = None,
-    tool_contract: FrozenToolContract | None = None,
-) -> str:
-    """Build a concise, evidence-rich retry prompt for a subsequent attempt.
-
-    Projection: the raw full ``original_task`` is intentionally NOT
-    prepended.  The retry worker receives the bounded objective digest, the
-    inherited candidate SHA, and the exact failure evidence; the original
-    epic task remains durably persisted on the run/package for audit.
-    """
-    from saberops.context_projection import (
-        build_retry_projection,
-        render_projection,
-    )
-
-    projection = build_retry_projection(
-        original_task=original_task,
-        attempt_idx=attempt_idx,
-        prior_attempt=prior_attempt,
-        prior_check=prior_check,
-        inherited_base_sha=inherited_base_sha,
-        role="REPAIR",
-    )
-    rendered = render_projection(
-        projection,
-        validation_policy_text=VALIDATION_POLICY_TEXT,
-        validation_policy_marker=VALIDATION_POLICY_MARKER,
-        tool_contract=tool_contract,
-    )
-    return rendered.prompt
-
-
 def _render_repair_task(
     original_task: str,
     attempt_idx: int,
@@ -426,25 +388,6 @@ def _render_repair_task(
         run_verification_text=run_verification_text,
     )
     return rendered
-
-
-def build_repair_task_prompt(
-    original_task: str,
-    attempt_idx: int,
-    from_sha: str,
-    review: ReviewResult,
-    package: object | None = None,
-    tool_contract: FrozenToolContract | None = None,
-) -> str:
-    """Build a concise, evidence-rich repair prompt for an implementation worker."""
-    return _render_repair_task(
-        original_task=original_task,
-        attempt_idx=attempt_idx,
-        from_sha=from_sha,
-        review=review,
-        package=package,
-        tool_contract=tool_contract,
-    ).prompt
 
 
 def _render_final_repair_task(
@@ -518,25 +461,6 @@ def _render_final_repair_task(
         run_verification_text=run_verification_text,
     )
     return rendered
-
-
-def build_final_repair_task_prompt(
-    original_task: str,
-    attempt_idx: int,
-    from_sha: str,
-    reviews: list[ReviewResult],
-    package: object | None = None,
-    tool_contract: FrozenToolContract | None = None,
-) -> str:
-    """Build a bounded final-convergence repair prompt."""
-    return _render_final_repair_task(
-        original_task=original_task,
-        attempt_idx=attempt_idx,
-        from_sha=from_sha,
-        reviews=reviews,
-        package=package,
-        tool_contract=tool_contract,
-    ).prompt
 
 
 def _bounded_output(raw: str, limit: int = 4000) -> str:
