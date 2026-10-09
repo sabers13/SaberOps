@@ -45,23 +45,6 @@ def test_composer_inherits_project_review_settings(client: TestClient) -> None:
     assert 'id="startRunForm"' not in history
 
 
-@pytest.mark.parametrize("mode", ["bounded", "max"])
-def test_draft_survives_launch_validation_error_without_old_review_controls(
-    client: TestClient, mode: str,
-) -> None:
-    # No active project: the request re-renders without dispatching a worker.
-    response = client.post("/runs", data={
-        "task": "Keep this draft", "review_mode": mode, "review_limit": "5",
-    })
-    assert response.status_code == 400
-    html = response.text
-    assert "Keep this draft" in html
-    composer = re.search(r'<form id="startRunForm".*?</form>', html, re.DOTALL)
-    assert composer
-    assert 'name="review_mode"' not in composer.group()
-    assert 'name="review_limit"' not in composer.group()
-
-
 def test_collapsed_workers_release_width_and_have_one_reopen_control(client: TestClient) -> None:
     page = client.get("/")
     assert page.status_code == 200

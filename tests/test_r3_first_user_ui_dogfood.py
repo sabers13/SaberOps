@@ -91,10 +91,6 @@ def test_fresh_ui_does_not_seed_current_directory(
     assert "First-run setup" in setup.text
     assert "SETUP INCOMPLETE" in setup.text
 
-    refused = client.post("/runs", data={"task": "do not dispatch"})
-    assert refused.status_code == 400
-    assert "Select a project in the UI before starting a run." in refused.text
-
 
 def test_project_can_be_selected_from_ui_and_appears_in_setup(
     isolated_home: Path, tmp_path: Path

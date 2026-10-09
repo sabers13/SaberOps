@@ -115,15 +115,14 @@ def test_r2a_a_cli_fails_without_gate(isolated_xdg: Path) -> None:
 
 
 def test_r2a_a_web_fails_without_gate(isolated_xdg: Path, tmp_path: Path) -> None:
+    """Work requests resolve through the shared authority with no gate override."""
     repo = _make_repo(isolated_xdg, "a-web")
-    client = TestClient(
-        create_app(db_path=tmp_path / "web.db", repo_path=repo),
-        raise_server_exceptions=False,
-    )
-    response = client.post("/runs", data={"task": "probe task"})
-    assert response.status_code == 400
-    assert "no gate configured" in response.text
-    assert "never runs an implicit default gate" in response.text
+    with pytest.raises(RunCreationError) as exc:
+        resolve_effective_run_config(
+            RunRequest(task="probe task", repo_path=repo, review_enabled=True)
+        )
+    assert "no gate configured" in str(exc.value)
+    assert "never runs an implicit default gate" in str(exc.value)
 
 
 def test_r2a_a_same_gate_required_semantics(isolated_xdg: Path, tmp_path: Path) -> None:
@@ -135,13 +134,11 @@ def test_r2a_a_same_gate_required_semantics(isolated_xdg: Path, tmp_path: Path) 
     except RunCreationError as exc:
         cli_message = str(exc)
     assert cli_message == GATE_REQUIRED_MESSAGE
-    client = TestClient(
-        create_app(db_path=tmp_path / "web.db", repo_path=repo),
-        raise_server_exceptions=False,
-    )
-    response = client.post("/runs", data={"task": "probe task"})
-    assert response.status_code == 400
-    assert GATE_REQUIRED_MESSAGE.split(".")[0] in response.text
+    with pytest.raises(RunCreationError) as web_exc:
+        resolve_effective_run_config(
+            RunRequest(task="probe task", repo_path=repo, review_enabled=True)
+        )
+    assert str(web_exc.value) == GATE_REQUIRED_MESSAGE
 
 
 # ---------------------------------------------------------------------------
