@@ -107,6 +107,9 @@ class OpenCodeAdapter(WorkerAdapter):
                 outcome=DispatchOutcome.PROVIDER_OR_RUNTIME_FAILURE,
             )
 
+        if request.session_runtime is not None and self.runner is run_process:
+            return request.session_runtime.run_opencode(request, self.opencode_bin)
+
         prompt_bytes = len(request.task.encode("utf-8"))
         use_stdin = prompt_bytes > get_prompt_arg_limit()
 
@@ -131,6 +134,8 @@ class OpenCodeAdapter(WorkerAdapter):
                 "json",
             ]
         )
+        if request.native_resume_id:
+            cmd.extend(["--session", request.native_resume_id])
         # Installed OpenCode 1.18.25 exposes provider-native usage on JSONL
         # step_finish.part.tokens (including cache read/write). Missing final
         # events remain explicit unknowns; prompt bytes are never estimated.
@@ -152,6 +157,13 @@ class OpenCodeAdapter(WorkerAdapter):
         transport_used = "stdin" if use_stdin else "argv"
 
         display_stdout, usage = parse_opencode_jsonl(res.stdout)
+        if res.control_interrupted:
+            from saberops.models import WorkerInterruptionReason
+            return WorkerResult(provider=self.provider_name, model=request.model,
+                status=AttemptStatus.FAILED, summary="Interrupted for manual control",
+                stdout=display_stdout, stderr=res.stderr, has_changes=False,
+                interruption_reason=WorkerInterruptionReason.ABORTED,
+                duration_seconds=res.duration_seconds, usage=usage)
         changed_paths = GitManager.get_changed_paths(request.worktree_path)
         has_changes = len(changed_paths) > 0
 
@@ -195,4 +207,6 @@ class OpenCodeAdapter(WorkerAdapter):
             prompt_transport_used=transport_used,
             outcome=outcome,
             usage=usage,
+            provider_exit_code=res.exit_code,
+            execution_quiescent=not res.termination_incomplete,
         )

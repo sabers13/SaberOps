@@ -141,12 +141,14 @@ def test_r0a_orchestrator_kept_as_technical_role(
     assert "decision role" not in access
 
 
-def test_r0a_api_connections_are_experimental(isolated_xdg: None, tmp_path: Path) -> None:
-    """API/BYOK surface is clearly marked Experimental, never a normal path."""
+def test_r0a_api_connections_are_visible(isolated_xdg: None, tmp_path: Path) -> None:
+    """API connections remain visible while execution limits stay explicit."""
     client = _client(tmp_path)
     text = client.get("/access").text
-    assert "Experimental" in text
-    assert "cannot execute models yet" in text
+    assert "Experimental" not in text
+    assert '<section aria-label="API connections">' in text
+    assert "OpenAI-compatible APIs support worker, reviewer and orchestrator roles" in text
+    assert "subscription connections use their own CLIs" in text
 
 
 def test_r0a_health_reports_product_version_truthfully(

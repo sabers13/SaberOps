@@ -3,6 +3,7 @@
 from saberops.process import ORCH_PROMPT_ARG_LIMIT, get_prompt_arg_limit
 from saberops.workers.antigravity import AntigravityAdapter
 from saberops.workers.base import WorkerAdapter
+from saberops.workers.claude import ClaudeCodeAdapter
 from saberops.workers.cline import ClineAdapter
 from saberops.workers.codex import CodexAdapter
 from saberops.workers.copilot import (
@@ -27,6 +28,7 @@ __all__ = [
     "AdapterRegistry",
     "AntigravityAdapter",
     "ClineAdapter",
+    "ClaudeCodeAdapter",
     "CodexAdapter",
     "COPILOT_GITHUB_POOL_ID",
     "COPILOT_GITHUB_PROFILE_ID",

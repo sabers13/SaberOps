@@ -45,14 +45,19 @@ class ReadinessEvidenceSource(StrEnum):
     CONFIGURATION = "CONFIGURATION"
     CONNECTION_TEST = "CONNECTION_TEST"
     SUCCESSFUL_EXECUTION = "SUCCESSFUL_EXECUTION"
+    MODEL_ACCESS_TEST = "MODEL_ACCESS_TEST"
 
 
 READINESS_REASONS: tuple[str, ...] = (
     "READY",
+    "API_ENDPOINT_READY",
     "CONNECTION_DISABLED",
     *(reason.value for reason in ConnectionTestReason),
     "INSUFFICIENT_EVIDENCE",
     "STALE_READINESS_EVIDENCE",
+    "MODEL_CHECK_FAILED",
+    "MODEL_CHECK_TIMEOUT",
+    "MODEL_CHECK_UNCONFIRMED",
     # Fixed sanitized token for readiness-authority construction/read
     # failures (unconstructable service, unreadable store).  Never an
     # exception repr, path, or secret.
@@ -93,6 +98,7 @@ class ProviderReadinessEvidence:
     reason: str
     observed_at: str
     source: ReadinessEvidenceSource
+    model_id: str = ""
 
     def __post_init__(self) -> None:
         if not self.connection_id.strip():
@@ -119,6 +125,7 @@ class ProviderReadinessEvidence:
             "reason": self.reason,
             "observed_at": self.observed_at,
             "source": self.source.value,
+            **({"model_id": self.model_id} if self.model_id else {}),
         }
 
     def freshness(self, *, as_of: datetime, max_age: timedelta) -> ProviderReadinessEvidence:
@@ -234,6 +241,7 @@ def readiness_evidence_from_mapping(payload: Mapping[str, Any]) -> ProviderReadi
         reason=str(payload.get("reason", "")),
         observed_at=str(payload.get("observed_at", "")),
         source=source,
+        model_id=str(payload.get("model_id", "")),
     )
 
 

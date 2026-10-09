@@ -137,11 +137,18 @@ class CodexAdapter(WorkerAdapter):
             str(request.worktree_path),
             "--sandbox",
             sandbox_mode,
-            "--ephemeral",
             "--json",
         ]
+        if not request.persist_native_session:
+            cmd.append("--ephemeral")
+        if request.native_resume_id:
+            cmd = [self.codex_bin, "--cd", str(request.worktree_path),
+                   "--sandbox", sandbox_mode, "exec", "resume", request.native_resume_id,
+                   prompt_arg, "--model", request.model, "--json"]
         if request.read_only:
             cmd.append("--skip-git-repo-check")
+        for image in request.input_images:
+            cmd.extend(["--image", str(image)])
 
         # Installed Codex 0.147.0 exposes exact per-turn usage on the JSONL
         # turn.completed event. The parser consumes only that native payload.
@@ -167,6 +174,13 @@ class CodexAdapter(WorkerAdapter):
         transport_used = "stdin" if use_stdin else "argv"
 
         display_stdout, usage = parse_codex_jsonl(res.stdout)
+        if res.control_interrupted:
+            from saberops.models import WorkerInterruptionReason
+            return WorkerResult(provider=self.provider_name, model=request.model,
+                status=AttemptStatus.FAILED, summary="Interrupted for manual control",
+                stdout=display_stdout, stderr=res.stderr, has_changes=False,
+                interruption_reason=WorkerInterruptionReason.ABORTED,
+                duration_seconds=res.duration_seconds, usage=usage)
         changed_paths = GitManager.get_changed_paths(request.worktree_path)
         has_changes = len(changed_paths) > 0
 
@@ -210,6 +224,8 @@ class CodexAdapter(WorkerAdapter):
             prompt_transport_used=transport_used,
             outcome=outcome,
             usage=usage,
+            provider_exit_code=res.exit_code,
+            execution_quiescent=not res.termination_incomplete,
         )
 
     def _build_gateway_overrides(self, env: dict[str, str]) -> list[str] | None:

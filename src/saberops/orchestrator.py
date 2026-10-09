@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import time
 import uuid
@@ -215,6 +216,7 @@ from saberops.tooling.invocation import read_telemetry
 from saberops.validation_policy import (
     VALIDATION_POLICY_MARKER,
     VALIDATION_POLICY_TEXT,
+    verification_contract,
 )
 from saberops.workers.base import WorkerAdapter
 from saberops.workers.registry import AdapterRegistry
@@ -367,6 +369,7 @@ def _render_repair_task(
     review: ReviewResult,
     package: object | None = None,
     tool_contract: FrozenToolContract | None = None,
+    run_verification_text: str | None = None,
 ) -> RenderResult:
     """Build a concise, evidence-rich repair prompt for an implementation worker.
 
@@ -420,6 +423,7 @@ def _render_repair_task(
         validation_policy_text=VALIDATION_POLICY_TEXT,
         validation_policy_marker=VALIDATION_POLICY_MARKER,
         tool_contract=tool_contract,
+        run_verification_text=run_verification_text,
     )
     return rendered
 
@@ -450,6 +454,7 @@ def _render_final_repair_task(
     reviews: list[ReviewResult],
     package: object | None = None,
     tool_contract: FrozenToolContract | None = None,
+    run_verification_text: str | None = None,
 ) -> RenderResult:
     """Build a repair prompt that aggregates ALL outstanding findings for final convergence.
 
@@ -510,6 +515,7 @@ def _render_final_repair_task(
         validation_policy_text=VALIDATION_POLICY_TEXT,
         validation_policy_marker=VALIDATION_POLICY_MARKER,
         tool_contract=tool_contract,
+        run_verification_text=run_verification_text,
     )
     return rendered
 
@@ -941,7 +947,10 @@ def _classify_gate_outcome(
       5. exit_code == 0           -> PASS
       6. otherwise                -> VALIDATION_FAILURE
     """
-    if gate_res.launch_failed:
+    mutated_worktree = mutated_worktree or gate_res.verification_mutated
+    if gate_res.skipped:
+        outcome = GateOutcome.SKIPPED
+    elif gate_res.launch_failed:
         outcome = GateOutcome.INFRASTRUCTURE_FAILURE
     elif gate_res.termination_incomplete:
         outcome = GateOutcome.TERMINATION_UNSAFE
@@ -963,6 +972,7 @@ def _classify_gate_outcome(
         mutated_worktree=mutated_worktree,
         changed_paths=changed_paths,
         candidate_sha=candidate_sha,
+        source_tree_hash=gate_res.verification_tree,
     )
 
 
@@ -985,6 +995,7 @@ def _gate_disposition_payload(disposition: GateDisposition) -> dict[str, object]
         "gate_mutated_worktree": disposition.mutated_worktree,
         "changed_paths": list(disposition.changed_paths),
         "candidate_sha": disposition.candidate_sha,
+        "source_tree_hash": disposition.source_tree_hash,
     }
 
 
@@ -1133,8 +1144,22 @@ class Orchestrator:
         result -- no semantic child ever started -- so downstream
         dispatch accounting proceeds uniformly.
         """
+        from saberops.agent_sessions import observe_invocation
+        from saberops.session_control import ManualControlStopped
+
+        def _observe(invoke: Callable[[WorkerRequest], WorkerResult],
+                     request: WorkerRequest) -> WorkerResult:
+            result = observe_invocation(
+                invoke, request, root=Path(self.db.db_path).resolve().parent / "agent-sessions",
+                owner=run_id, role="worker", provider=provider, association=attempt_id,
+                allow_shared_runtime=autonomous is None,
+            )
+            if result.manual_control_stopped:
+                raise ManualControlStopped(result.error or result.summary)
+            return result
+
         if autonomous is None:
-            return adapter.run
+            return lambda request: _observe(adapter.run, request)
 
         def _invoke(request: WorkerRequest) -> WorkerResult:
             try:
@@ -1182,7 +1207,7 @@ class Orchestrator:
                     outcome=DispatchOutcome.PROVIDER_OR_RUNTIME_FAILURE,
                 )
 
-        return _invoke
+        return lambda request: _observe(_invoke, request)
 
     def _ensure_supervision(
         self,
@@ -1648,6 +1673,11 @@ class Orchestrator:
             try:
                 decision = ReviewDecision.from_json(persisted)
                 validate_project_review_policy_invariants(decision)
+                if (
+                    decision.review_requirement_source.value == "OWNER_DISABLED"
+                    and not config.review_disabled
+                ):
+                    raise ReviewPolicyError("Missing frozen owner authorization to skip review")
                 return decision
             except ReviewPolicyError:
                 return conservative_legacy_decision(
@@ -1714,7 +1744,21 @@ class Orchestrator:
             is_autonomous=is_autonomous,
             decision_id=f"c13f-{run_id}",
         )
-        if auto_tier_unresolvable and not decision.independent_review_required:
+        if config.review_disabled:
+            from saberops.review_adaptive import ReviewRequirementSource
+
+            decision = _frozen_replace(
+                decision,
+                independent_review_required=False,
+                owner_explicit_review=False,
+                review_requirement_source=ReviewRequirementSource.OWNER_DISABLED,
+                review_skip_reason="owner-disabled",
+            )
+        if (
+            auto_tier_unresolvable
+            and not config.review_disabled
+            and not decision.independent_review_required
+        ):
             # Auto-routed candidate with an unresolvable durable tier:
             # the classifier may have produced a LOW skip because the
             # observable diff looked LOW-eligible, but the actual tier
@@ -2104,7 +2148,7 @@ class Orchestrator:
                 review_timeout=review_timeout,
                 review_limit=review_limit,
             )
-        elif not config.review_enabled:
+        elif not config.review_enabled and not config.review_disabled:
             # Mandatory autonomous safety: ``review_enabled=True`` is the
             # boundary that gates candidate-ready/acceptance for autonomous
             # operation.  A caller-supplied RunConfig that disables review is
@@ -2333,6 +2377,10 @@ class Orchestrator:
             )
 
         base_commit = GitManager.get_head_commit(repo)
+        from saberops.continuation import validate_continuation
+        continued_source = validate_continuation(self.db, config)
+        if continued_source and run_id is None:
+            raise ValueError("Continue must be admitted through the supervised run launcher.")
         # C09: whether this call is adopting an existing run matters for which
         # revision the frozen project graph/scope must be built against.  The
         # ``run_id`` parameter is overwritten further down once the run is
@@ -2857,11 +2905,16 @@ class Orchestrator:
         # fail closed (bounded evidence, run stays RUNNING) rather than
         # silently planning the same objective again.
         adopted_plan_steps: tuple[PlanStep, ...] | None = None
+        if continued_source:
+            assert continued_source[1].commit_sha
+            self.db.inherit_continuation_plan(
+                continued_source[0].id, run_id, continued_source[1].commit_sha
+            )
         if is_adoption:
             adopted_plan_steps = _adopt_durable_plan_for_recovery(self.db, run_id)
         if adopted_plan_steps is not None:
             plan_steps = list(adopted_plan_steps)
-        else:
+        elif continued_source is None:
             sizing, package_proposals = resolve_work_packages(task)
             if sizing.should_slice:
                 persisted = persist_plan(
@@ -2888,7 +2941,10 @@ class Orchestrator:
                     )
         # Each successful package becomes the only permitted start point for
         # its dependent.  The ordinary, no-plan path retains the base commit.
-        lineage_base_sha = base_commit
+        lineage_base_sha = (
+            continued_source[1].commit_sha if continued_source else base_commit
+        )
+        assert lineage_base_sha is not None
 
         initial_step = next(
             (
@@ -2905,7 +2961,7 @@ class Orchestrator:
         )
         tier_decision: TierDecision = choose_tier(
             config,
-            stage=DispatchStage.IMPLEMENTATION,
+            stage=DispatchStage.REPAIR if continued_source else DispatchStage.IMPLEMENTATION,
             package=initial_package,
         )
         current_tier = tier_decision.effective_tier
@@ -3966,7 +4022,8 @@ class Orchestrator:
                 # in the dispatch block too, but we need it here to choose
                 # the right prompt renderer.
                 local_stage_label = (
-                    DispatchStage.IMPLEMENTATION.value
+                    (DispatchStage.REPAIR.value if continued_source and attempt_number == 0
+                     else DispatchStage.IMPLEMENTATION.value)
                     if package_dispatch_ordinal == 0
                     else DispatchStage.RETRY.value
                 )
@@ -4021,6 +4078,41 @@ class Orchestrator:
                         package=current_package,
                         role=DispatchRole.REPAIR.value,
                     )
+                elif continued_source and next_attempt_num == 1:
+                    parent, prior_attempt = continued_source
+                    prior_checks = self.db.get_checks_for_attempt(prior_attempt.id)
+                    prior_reviews = self.db.get_reviews_for_run(parent.id)
+                    failure = prune_evidence(parent.result_summary, limit=2000).text
+                    review_evidence = prune_evidence(
+                        "\n".join(
+                            f"{r.verdict.value}: {r.summary}\n{r.details}"
+                            for r in prior_reviews[-3:]
+                        ),
+                        limit=4000,
+                    ).text
+                    dispatch_projection = build_retry_projection(
+                        original_task=task, attempt_idx=next_attempt_num,
+                        prior_attempt=prior_attempt,
+                        prior_check=prior_checks[-1] if prior_checks else None,
+                        inherited_base_sha=lineage_base_sha,
+                        invariants=(
+                            f"Owner-requested continuation of failed run {parent.id}.",
+                            "The worktree already contains its candidate. "
+                            "Preserve existing work; repair the recorded failure.",
+                            "Prior run result: " + (failure or "unavailable"),
+                            "Prior review evidence: " + (review_evidence
+                                or "No independent review was recorded."),
+                        ),
+                    )
+                    if current_package is not None:
+                        dispatch_projection = build_package_retry_projection(
+                            original_task=task, package=current_package,
+                            inherited_base_sha=lineage_base_sha,
+                            prior_check=prior_checks[-1] if prior_checks else None,
+                            failure_excerpt=dispatch_projection.failure_excerpt,
+                            review_excerpt=review_evidence,
+                            role=DispatchRole.REPAIR.value,
+                        )
                 elif current_package is not None:
                     # PACKAGE branch: ONE package projection, NEVER composed
                     # with an INITIAL/REPAIR contract.
@@ -4279,6 +4371,10 @@ class Orchestrator:
                         validation_policy_text=VALIDATION_POLICY_TEXT,
                         validation_policy_marker=VALIDATION_POLICY_MARKER,
                         tool_contract=frozen_tools,
+                        run_verification_text=verification_contract(
+                            config.gate_command, config.gate_enabled,
+                            config.review_enabled, config.review_disabled,
+                        ),
                         project_scope_text=scope_section_for_run(
                             self.db,
                             run_id,
@@ -4287,7 +4383,8 @@ class Orchestrator:
                     )
                 task_for_worker_pre = rendered.prompt
                 prompt_bytes_pre = len(task_for_worker_pre.encode("utf-8"))
-                adapter_pre = self.registry.get(candidate.provider)
+                adapter_pre = (auto_resolved.adapter if auto_resolved is not None
+                               else self.registry.get(candidate.provider))
                 if self.readiness_service is not None:
                     auto_profile = (
                         auto_resolved.profile_id
@@ -4411,7 +4508,8 @@ class Orchestrator:
                         max_bytes_pre = None
                     payload_pre = build_skip_payload(
                         role=(
-                            DispatchRole.BULK
+                            (DispatchRole.REPAIR if local_stage == DispatchStage.REPAIR
+                             else DispatchRole.BULK)
                             if package_dispatch_ordinal == 0
                             else DispatchRole.REPAIR
                         ),
@@ -4459,11 +4557,7 @@ class Orchestrator:
                     payload_pre.update(
                         {
                             "outcome": DispatchOutcome.ELIGIBILITY_SKIP.value,
-                            "stage": (
-                                DispatchStage.IMPLEMENTATION.value
-                                if package_dispatch_ordinal == 0
-                                else DispatchStage.RETRY.value
-                            ),
+                            "stage": local_stage_label,
                             "tier": current_tier.value,
                             "routing_context": selected_routing_context,
                             "package_id": tier_decision.package_id,
@@ -4605,11 +4699,7 @@ class Orchestrator:
                     stage_attempts += 1
                     continue
 
-                stage_label = (
-                    DispatchStage.IMPLEMENTATION.value
-                    if package_dispatch_ordinal == 0
-                    else DispatchStage.RETRY.value
-                )
+                stage_label = local_stage_label
                 package_dispatch_ordinal += 1
                 stage_attempts += 1
                 effective_role = _role_for_orchestrator_dispatch(
@@ -5000,9 +5090,8 @@ class Orchestrator:
                 # binding never silently degrades to DIRECT even when
                 # ordinary fallback would permit it) and with the
                 # binding's account pin supplied as the C10 affinity
-                # hint where one exists.  DIRECT_API has no verified
-                # seam and never reaches this point (resolution
-                # refuses it).  Ordinary dispatches keep the
+                # hint where one exists. DIRECT_API also stays on
+                # its exact direct connection. Ordinary dispatches keep the
                 # run-configured gateway behavior verbatim.
                 gateway_frozen = frozen_gateway
                 gateway_endpoint = frozen_gateway.endpoint if frozen_gateway is not None else None
@@ -5016,7 +5105,9 @@ class Orchestrator:
                 # gateway): the typed FAILED result below carries zero
                 # worker launch.
                 gateway_unsatisfied = False
-                if auto_resolved is not None and (auto_resolved.backend is BindingKind.DIRECT_CLI):
+                if auto_resolved is not None and auto_resolved.backend in (
+                    BindingKind.DIRECT_CLI, BindingKind.DIRECT_API
+                ):
                     gateway_frozen = None
                     gateway_endpoint = None
                     gateway_accounts = ()
@@ -5512,7 +5603,9 @@ class Orchestrator:
                         run_id, attempt_number, WorkerActivationState.SUCCEEDED
                     )
                     # Check for candidate changes
-                    has_changes = GitManager.has_diff_against_base(wt_path, lineage_base_sha)
+                    has_changes = GitManager.has_diff_against_base(
+                        wt_path, base_commit if continued_source else lineage_base_sha
+                    )
                     changed_paths_in_wt = GitManager.get_changed_paths(wt_path)
                     if changed_paths_in_wt:
                         # Capture and commit changes in worktree
@@ -5526,7 +5619,7 @@ class Orchestrator:
                         if commit_sha is None:
                             raise RuntimeError("Candidate commit unexpectedly has no SHA")
                     else:
-                        commit_sha = start_point
+                        commit_sha = GitManager.get_head_commit(wt_path)
 
                     dispatch_evidence.candidate_sha = commit_sha
                     self.db.update_dispatch_evidence(dispatch_evidence)
@@ -5541,12 +5634,12 @@ class Orchestrator:
                         gate_payload["no_changes"] = True
                     self.db.record_event(
                         run_id,
-                        "gate_started",
+                        "gate_started" if config.gate_enabled else "gate_skip_requested",
                         attempt_id=attempt_id,
                         payload=gate_payload,
                     )
 
-                    gate_args = split_command(gate_command)
+                    gate_args = split_command(gate_command) if config.gate_enabled else []
                     with measure_phase(
                         self.db,
                         run_id=run_id,
@@ -5556,14 +5649,16 @@ class Orchestrator:
                         attempt_id=attempt_id,
                         notes="C14-C: time spent inside the gate subprocess boundary",
                     ):
-                        gate_res = run_process(
+                        gate_res = _run_configured_gate(config,
                             gate_args,
                             cwd=wt_path,
                             timeout=config.gate_timeout,
                         )
                     changed_paths = tuple(GitManager.get_changed_paths(wt_path))
                     post_gate_has_diff = (
-                        GitManager.has_diff_against_base(wt_path, lineage_base_sha)
+                        GitManager.has_diff_against_base(
+                            wt_path, base_commit if continued_source else lineage_base_sha
+                        )
                         if not has_changes
                         else True
                     )
@@ -5603,15 +5698,17 @@ class Orchestrator:
                         exit_code=gate_res.exit_code,
                         stdout=gate_res.stdout,
                         stderr=gate_res.stderr,
-                        passed=gate_res.passed,
+                        passed=gate_res.passed and not gate_res.skipped,
+                        skipped=gate_res.skipped,
                         created_at=current_iso_timestamp(),
                     )
                     self.db.create_check(check)
                     checks.append(check)
 
-                    is_clean_pass = disposition.outcome is GateOutcome.PASS and (
-                        has_changes or not post_gate_has_diff
-                    )
+                    is_clean_pass = disposition.outcome in (
+                        GateOutcome.PASS,
+                        GateOutcome.SKIPPED,
+                    ) and (has_changes or not post_gate_has_diff)
                     if is_clean_pass:
                         now = current_iso_timestamp()
                         attempt.status = AttemptStatus.SUCCESS
@@ -5647,14 +5744,18 @@ class Orchestrator:
                             "candidate_sha": commit_sha,
                             "gate_command": gate_command,
                             "role": effective_role.value,
-                            "gate_outcome": GateOutcome.PASS.value,
+                            "gate_outcome": (
+                                GateOutcome.PASS.value
+                                if config.gate_enabled
+                                else GateOutcome.SKIPPED.value
+                            ),
                         }
                         if not has_changes:
                             gate_passed_payload["no_changes"] = True
                             gate_passed_payload["already_satisfied"] = True
                         self.db.record_event(
                             run_id,
-                            "gate_passed",
+                            "gate_passed" if config.gate_enabled else "gate_skipped",
                             attempt_id=attempt_id,
                             payload=gate_passed_payload,
                         )
@@ -5847,14 +5948,22 @@ class Orchestrator:
                             summary = (
                                 f"Task completed successfully on attempt {attempt_number} "
                                 f"({candidate.provider}/{candidate.model}) with no diff "
-                                f"(already satisfied). Gate '{gate_command}' PASSED on "
-                                f"candidate {lineage_base_sha}."
+                                + (
+                                    f"(already satisfied). Gate '{gate_command}' PASSED "
+                                    f"on candidate {lineage_base_sha}."
+                                    if config.gate_enabled
+                                    else "Gate skipped by project policy."
+                                )
                             )
                         else:
                             summary = (
                                 f"Task completed successfully on attempt {attempt_number} "
                                 f"({candidate.provider}/{candidate.model}). "
-                                f"Gate '{gate_command}' PASSED."
+                                + (
+                                    f"Gate '{gate_command}' PASSED."
+                                    if config.gate_enabled
+                                    else "Gate skipped by project policy."
+                                )
                             )
 
                         def _mark_candidate_ready(
@@ -5983,7 +6092,9 @@ class Orchestrator:
                         if not decision.independent_review_required:
                             self.db.record_event(
                                 run_id,
-                                "review_skipped_by_risk_adaptive_policy",
+                                "review_skipped_by_owner_policy"
+                                if config.review_disabled
+                                else "review_skipped_by_risk_adaptive_policy",
                                 attempt_id=attempt_id,
                                 payload={
                                     "decision_id": decision.decision_id,
@@ -6015,7 +6126,9 @@ class Orchestrator:
                                     run_id=run_id,
                                     phase=PhaseKind.REVIEW,
                                     source_kind="orchestrator._run_core",
-                                    boundary_kind="review_skipped_by_risk_adaptive_policy",
+                                    boundary_kind="review_skipped_by_owner_policy"
+                                    if config.review_disabled
+                                    else "review_skipped_by_risk_adaptive_policy",
                                     attempt_id=attempt_id,
                                     package_id=(
                                         current_package.id if current_package is not None else None
@@ -6723,7 +6836,9 @@ class Orchestrator:
                                     repair_gateway_hint = live_state_rep.affinity_hint
                                     repair_gateway_unsatisfied = False
                                     if repair_resolved is not None:
-                                        if repair_resolved.backend is BindingKind.DIRECT_CLI:
+                                        if repair_resolved.backend in (
+                                            BindingKind.DIRECT_CLI, BindingKind.DIRECT_API
+                                        ):
                                             repair_gateway = None
                                             repair_gateway_endpoint = None
                                             repair_gateway_accounts = ()
@@ -6884,6 +6999,9 @@ class Orchestrator:
                                                 len(used_refs)
                                             )
                                     except Exception as exc:
+                                        from saberops.session_control import ManualControlStopped
+                                        if isinstance(exc, ManualControlStopped):
+                                            raise
                                         exception_result = WorkerResult(
                                             provider=cand_provider,
                                             model=cand_model,
@@ -7178,6 +7296,10 @@ class Orchestrator:
                                             validation_policy_text=VALIDATION_POLICY_TEXT,
                                             validation_policy_marker=VALIDATION_POLICY_MARKER,
                                             tool_contract=frozen_tools,
+                                            run_verification_text=verification_contract(
+                                                config.gate_command, config.gate_enabled,
+                                                config.review_enabled, config.review_disabled,
+                                            ),
                                             project_scope_text=scope_section_for_run(
                                                 self.db,
                                                 run_id,
@@ -7288,7 +7410,9 @@ class Orchestrator:
                                 self.db.update_dispatch_evidence(repair_dispatch_evidence)
                                 self.db.record_event(
                                     run_id,
-                                    "gate_started",
+                                    "gate_started"
+                                    if config.gate_enabled
+                                    else "gate_skip_requested",
                                     attempt_id=local_attempt_id,
                                     payload={
                                         "gate_command": gate_command,
@@ -7296,8 +7420,10 @@ class Orchestrator:
                                         "role": DispatchRole.REPAIR.value,
                                     },
                                 )
-                                gate_args_local = split_command(gate_command)
-                                gate_res_local = run_process(
+                                gate_args_local = (
+                                    split_command(gate_command) if config.gate_enabled else []
+                                )
+                                gate_res_local = _run_configured_gate(config,
                                     gate_args_local, cwd=local_wt_path, timeout=config.gate_timeout
                                 )
                                 changed_paths_local_t = tuple(
@@ -7334,12 +7460,16 @@ class Orchestrator:
                                     exit_code=gate_res_local.exit_code,
                                     stdout=gate_res_local.stdout,
                                     stderr=gate_res_local.stderr,
-                                    passed=gate_res_local.passed,
+                                    passed=gate_res_local.passed and not gate_res_local.skipped,
+                                    skipped=gate_res_local.skipped,
                                     created_at=current_iso_timestamp(),
                                 )
                                 self.db.create_check(check_local)
                                 checks.append(check_local)
-                                if rep_disposition.outcome is not GateOutcome.PASS:
+                                if rep_disposition.outcome not in (
+                                    GateOutcome.PASS,
+                                    GateOutcome.SKIPPED,
+                                ):
                                     now2 = current_iso_timestamp()
                                     rep_attempt.status = AttemptStatus.FAILED
                                     rep_attempt.worker_stdout = w_res.stdout
@@ -7433,7 +7563,11 @@ class Orchestrator:
                                 summary_local = (
                                     f"Task completed successfully on attempt {attempt_number} "
                                     f"({cand_provider}/{cand_model}). "
-                                    f"Gate '{gate_command}' PASSED."
+                                    + (
+                                        f"Gate '{gate_command}' PASSED."
+                                        if config.gate_enabled
+                                        else "Gate skipped by project policy."
+                                    )
                                 )
                                 attempts.append(rep_attempt)
                                 active_attempt_id = None
@@ -7462,6 +7596,10 @@ class Orchestrator:
                                             reviews=outstanding,
                                             package=current_package,
                                             tool_contract=frozen_tools,
+                                            run_verification_text=verification_contract(
+                                                config.gate_command, config.gate_enabled,
+                                                config.review_enabled, config.review_disabled,
+                                            ),
                                         )
                                         rep, to_sha_p, wt_p, is_no_diff = _do_repair(
                                             from_sha_pre,
@@ -7568,6 +7706,10 @@ class Orchestrator:
                                             review=rev_res,
                                             package=current_package,
                                             tool_contract=frozen_tools,
+                                            run_verification_text=verification_contract(
+                                                config.gate_command, config.gate_enabled,
+                                                config.review_enabled, config.review_disabled,
+                                            ),
                                         )
                                         rep2, to_sha2, wt2, is_no_diff2 = _do_repair(
                                             from_sha2,
@@ -7771,6 +7913,10 @@ class Orchestrator:
                                         review=rev_res,
                                         package=current_package,
                                         tool_contract=frozen_tools,
+                                        run_verification_text=verification_contract(
+                                            config.gate_command, config.gate_enabled,
+                                            config.review_enabled, config.review_disabled,
+                                        ),
                                     )
                                     rep_m, to_sha_m, wt_m, is_no_diff_m = _do_repair(
                                         from_sha_m,
@@ -8114,15 +8260,21 @@ class Orchestrator:
                                 # Full gate check on descendant worktree
                                 self.db.record_event(
                                     run_id,
-                                    "gate_started",
+                                    "gate_started"
+                                    if config.gate_enabled
+                                    else "gate_skip_requested",
                                     attempt_id=desc_attempt_id,
                                     payload={
                                         "gate_command": config.gate_command,
                                         "role": DispatchRole.REVIEW.value,
                                     },
                                 )
-                                gate_cmd_parts = split_command(config.gate_command)
-                                gate_res = run_process(
+                                gate_cmd_parts = (
+                                    split_command(config.gate_command)
+                                    if config.gate_enabled
+                                    else []
+                                )
+                                gate_res = _run_configured_gate(config,
                                     gate_cmd_parts,
                                     cwd=desc_wt_path,
                                     timeout=config.gate_timeout,
@@ -8135,7 +8287,8 @@ class Orchestrator:
                                     exit_code=gate_res.exit_code,
                                     stdout=gate_res.stdout,
                                     stderr=gate_res.stderr,
-                                    passed=gate_res.passed,
+                                    passed=gate_res.passed and not gate_res.skipped,
+                        skipped=gate_res.skipped,
                                     created_at=current_iso_timestamp(),
                                 )
                                 self.db.create_check(chk)
@@ -8150,7 +8303,10 @@ class Orchestrator:
                                     changed_paths=desc_changed_paths,
                                 )
 
-                                if desc_disposition.outcome is not GateOutcome.PASS:
+                                if desc_disposition.outcome not in (
+                                    GateOutcome.PASS,
+                                    GateOutcome.SKIPPED,
+                                ):
                                     err_gate = (
                                         f"Gate check failed on backlog descendant "
                                         f"(gate outcome {desc_disposition.outcome.value}, "
@@ -8212,12 +8368,16 @@ class Orchestrator:
                                 )
                                 self.db.record_event(
                                     run_id,
-                                    "gate_passed",
+                                    "gate_passed" if config.gate_enabled else "gate_skipped",
                                     attempt_id=desc_attempt_id,
                                     payload={
                                         "exit_code": 0,
                                         "role": DispatchRole.REVIEW.value,
-                                        "gate_outcome": GateOutcome.PASS.value,
+                                        "gate_outcome": (
+                                            GateOutcome.PASS.value
+                                            if config.gate_enabled
+                                            else GateOutcome.SKIPPED.value
+                                        ),
                                     },
                                 )
                                 # Post-gate mutation guard: re-check AFTER gate
@@ -8992,7 +9152,10 @@ class Orchestrator:
             # Bounded failure handler: prevent runaway RUNNING state in DB
             now = current_iso_timestamp()
             raw_msg = str(exc)
-            if raw_msg.startswith("explicit model is ineligible:"):
+            from saberops.session_control import ManualControlStopped
+            if isinstance(exc, ManualControlStopped):
+                err_msg = "Manual control stopped automation: " + raw_msg
+            elif raw_msg.startswith("explicit model is ineligible:"):
                 err_msg = raw_msg
             else:
                 err_msg = f"Unexpected error during run execution: {exc}"
@@ -9120,3 +9283,33 @@ class Orchestrator:
             "skipped_dirty": skipped_dirty,
             "skipped_missing": skipped_missing,
         }
+
+
+def _run_configured_gate(
+    config: RunConfig, args: list[str], *, cwd: Path, timeout: float
+) -> ProcessResult:
+    if config.gate_enabled:
+        from dataclasses import replace
+
+        from saberops.verification_snapshot import fixed_snapshot, source_tree
+
+        try:
+            with fixed_snapshot(cwd) as snapshot:
+                result = run_process(args, cwd=snapshot.path, timeout=timeout)
+                mutated = (source_tree(snapshot.path) != snapshot.tree
+                           or source_tree(cwd) != snapshot.tree)
+                return replace(result, verification_tree=snapshot.tree,
+                               verification_commit=snapshot.commit,
+                               verification_mutated=mutated)
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            return ProcessResult(args=args, exit_code=-1, stdout="",
+                stderr="Verification snapshot unavailable: " + str(exc),
+                duration_seconds=0, launch_failed=True)
+    return ProcessResult(
+        args=[],
+        exit_code=0,
+        stdout="Gate skipped by frozen project policy.",
+        stderr="",
+        duration_seconds=0.0,
+        skipped=True,
+    )

@@ -7,7 +7,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from saberops.session_runtime import AgentSessionRuntime
 
 
 class RunStatus(StrEnum):
@@ -370,6 +373,7 @@ class GateOutcome(StrEnum):
       evidence merely because the deterministic gate mutated the worktree.
     """
 
+    SKIPPED = "SKIPPED"
     PASS = "PASS"
     VALIDATION_FAILURE = "VALIDATION_FAILURE"
     INFRASTRUCTURE_FAILURE = "INFRASTRUCTURE_FAILURE"
@@ -401,6 +405,7 @@ class GateDisposition:
     mutated_worktree: bool = False
     changed_paths: tuple[str, ...] = ()
     candidate_sha: str | None = None
+    source_tree_hash: str | None = None
 
 
 class DispatchOutcome(StrEnum):
@@ -690,6 +695,7 @@ class CheckResult:
     stderr: str
     passed: bool
     created_at: str
+    skipped: bool = False
 
 
 @dataclass
@@ -760,6 +766,8 @@ class Run:
     gateway_snapshot_json: str | None = None
     gateway_snapshot_digest: str | None = None
 
+    # Presentation only; the original task remains the immutable objective.
+    display_title: str | None = None
 
 @dataclass(frozen=True)
 class RunPlan:
@@ -1152,6 +1160,11 @@ class WorkerRequest:
     on_process_start: Callable[[dict[str, Any]], None] | None = None
     on_monitor_transition: Callable[[dict[str, Any]], None] | None = None
     inherit_env_exclude: tuple[str, ...] = ()
+    persist_native_session: bool = False
+    native_resume_id: str | None = None
+    native_message_id: str | None = None
+    control_interrupt: Callable[[], bool] | None = None
+    session_runtime: AgentSessionRuntime | None = None
     # C11-D: typed reasoning-effort decision.  When set, the adapter MUST
     # translate this tier to the concrete provider option for the chosen
     # binding and MUST NOT silently fall back to ambient env state
@@ -1159,6 +1172,9 @@ class WorkerRequest:
     # adapters may keep their legacy fallback only when explicitly
     # required for backward compatibility with non-autonomous callers.
     reasoning_effort: ReasoningEffort | None = None
+
+    # Owner-provided visual reference inputs; execution authority is unchanged.
+    input_images: tuple[Path, ...] = ()
 
 
 @dataclass
@@ -1206,6 +1222,10 @@ class WorkerResult:
     outcome: DispatchOutcome | None = None
     usage: list[ProviderUsage] = field(default_factory=list)
     interruption_reason: WorkerInterruptionReason | None = None
+    manual_control_stopped: bool = False
+    provider_exit_code: int | None = None
+    provider_terminal_status: str | None = None
+    execution_quiescent: bool | None = None
 
 
 @dataclass(frozen=True)

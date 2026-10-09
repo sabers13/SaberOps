@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% set active_pane = "chats" %}
+{% set has_tabs = false %}
+{% set agent_dock = true %}
+{% block title %}{{ chat.title }}{% endblock %}
+{% block conversation_title %}SaberOps{% endblock %}
+{% block run_meta %}{{ chat.repo }}{% endblock %}
+{% block workspace_context %}<div class="chat-context"><span title="{{ chat.title }}">{{ chat.title }}</span><span id="chatModeHint">Discussion only</span></div>{% endblock %}
+{% block workspace %}
+{% include "_agent_workspace.html" %}
+{% endblock %}
+{% block workers_dock %}{% include "_agent_dock.html" %}{% endblock %}
+{% block extra_scripts %}<script src="/static/js/chat.js?v=work-console-1"></script><script src="/static/js/agent-workspace.js?v=work-console-1"></script>{% endblock %}

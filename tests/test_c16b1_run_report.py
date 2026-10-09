@@ -268,7 +268,7 @@ def test_c16b1_completed_successful_run(tmp_path: Path) -> None:
     assert report["worker"]["actual_model"] == "actual-model"
     assert report["worker"]["actual_identity_status"] == "KNOWN"
     assert report["gate"]["summary"] == {"check_total": 1, "check_passed": 1,
-                                         "check_failed": 0, "receipt_total": 0}
+                                         "check_failed": 0, "check_skipped": 0, "receipt_total": 0}
     assert report["review"]["review_required"] is True
     assert report["review"]["rounds"] == 1
     assert report["review"]["verdicts"] == ["PASS"]

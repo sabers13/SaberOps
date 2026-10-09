@@ -157,7 +157,7 @@ def test_r2a_b_unset_data_policy_denied(isolated_xdg: Path) -> None:
     config = resolve_effective_run_config(
         RunRequest(task="probe task", repo_path=repo, training_allowed=None)
     )
-    assert config.training_allowed is False
+    assert config.training_allowed is True
 
 
 def test_r2a_b_explicit_allowed_survives(isolated_xdg: Path) -> None:
@@ -236,7 +236,7 @@ def test_r2a_d_web_cli_parity(isolated_xdg: Path) -> None:
     )
     assert _policy_portion(cli_config) == _policy_portion(web_config)
     assert web_config.gate_command == "pytest -q -x"
-    assert web_config.training_allowed is False
+    assert web_config.training_allowed is True
     assert web_config.review_policy_mode is ReviewPolicyMode.ALWAYS_REQUIRED
     assert web_config.gate_scratch_mode is GateScratchMode.RAM_PREFERRED
     assert web_config.accept_target_branch == "main"
@@ -283,7 +283,7 @@ def test_r2a_e_old_run_immutable(isolated_xdg: Path) -> None:
     # WITHOUT rereading mutable project settings.
     revived = reconstruct_run_config(json.loads(json.dumps(frozen_payload)))
     assert revived.gate_command == "pytest -q"
-    assert revived.training_allowed is False
+    assert revived.training_allowed is True
     assert revived.accept_target_branch == "main"
 
     second = _resolve_cli_run_config(_cli_args(repo), str(repo))
@@ -316,7 +316,10 @@ def test_r2a_f_canonical_authorities(isolated_xdg: Path) -> None:
     assert project_review_policy_path(state_dir).is_file()
     assert (state_dir / "gate-runner-policy.json").is_file()
     raw = json.loads(project_settings_path(state_dir).read_text(encoding="utf-8"))
-    assert set(raw) <= {"version", "gate_command", "data_policy", "accept_target_branch"}
+    assert set(raw) <= {
+        "version", "gate_command", "data_policy", "accept_target_branch",
+        "gate_enabled", "review_disabled", "review_mode", "review_limit",
+    }
     assert "mode" not in raw
 
 
@@ -450,5 +453,197 @@ def test_r2a_i_single_project_settings_snapshot(
 
     assert calls["count"] == 1
     assert config.gate_command == "gate-A"
-    assert config.training_allowed is False
+    assert config.training_allowed is True
     assert config.accept_target_branch == "main"
+
+
+@pytest.mark.parametrize(
+    "preset,gate_enabled,review_disabled,mode,limit,policy",
+    [
+        ("quick", False, True, "bounded", 1, ReviewPolicyMode.RISK_ADAPTIVE),
+        ("balanced", True, False, "bounded", 3, ReviewPolicyMode.RISK_ADAPTIVE),
+        ("thorough", True, False, "bounded", 5, ReviewPolicyMode.ALWAYS_REQUIRED),
+        ("max", True, False, "max", 3, ReviewPolicyMode.ALWAYS_REQUIRED),
+    ],
+)
+def test_workflow_presets_freeze_and_preserve_project_settings(
+    isolated_xdg: Path, preset: str, gate_enabled: bool, review_disabled: bool,
+    mode: str, limit: int, policy: ReviewPolicyMode,
+) -> None:
+    from saberops.project_settings import set_project_workflow
+    from saberops.run_creation import effective_policy_summary
+
+    repo = _make_repo(isolated_xdg, preset)
+    set_project_gate_command(repo, "true")
+    set_project_accept_target_branch(repo, "main")
+    set_project_workflow(repo, preset=preset)
+    config = resolve_effective_run_config(RunRequest(task="probe", repo_path=repo))
+    assert config.gate_enabled is gate_enabled
+    assert config.review_disabled is review_disabled
+    assert config.review_mode == mode
+    assert config.review_limit == limit
+    assert config.review_policy_mode is policy
+    assert config.workflow_mode == preset
+    assert config.accept_target_branch == "main"
+    assert effective_policy_summary(repo)["workflow_preset"] == preset
+    frozen = config.as_dict()
+    set_project_gate_command(repo, "make gate-new")
+    assert load_project_settings(repo).review_limit == limit
+    set_project_workflow(repo, preset="balanced")
+    restored = reconstruct_run_config(frozen)
+    assert restored.gate_enabled is gate_enabled
+    assert restored.review_disabled is review_disabled
+    assert restored.review_mode == mode
+    assert restored.review_limit == limit
+
+
+def test_workflow_quick_allows_new_project_without_gate(isolated_xdg: Path) -> None:
+    from saberops.project_settings import set_project_workflow
+
+    repo = _make_repo(isolated_xdg, "without-gate")
+    with pytest.raises(RunCreationError, match="no gate configured"):
+        resolve_effective_run_config(RunRequest(task="probe", repo_path=repo))
+    set_project_workflow(repo, preset="quick")
+    config = resolve_effective_run_config(RunRequest(task="scaffold", repo_path=repo))
+    assert config.gate_command == ""
+    assert not config.review_enabled
+    assert config.review_disabled
+
+
+def test_workflow_custom_and_invalid_settings(isolated_xdg: Path) -> None:
+    from saberops.project_settings import ProjectSettingsError, set_project_workflow
+    from saberops.run_creation import effective_policy_summary
+
+    repo = _make_repo(isolated_xdg, "custom")
+    set_project_gate_command(repo, "true")
+    set_project_workflow(repo, gate_enabled=False, review="always-required", limit=7)
+    assert effective_policy_summary(repo)["workflow_preset"] == "custom"
+    config = resolve_effective_run_config(RunRequest(task="probe", repo_path=repo))
+    assert not config.gate_enabled
+    assert not config.review_disabled
+    assert config.review_limit == 7
+    before = load_project_settings(repo)
+    with pytest.raises(ProjectSettingsError):
+        set_project_workflow(repo, limit=0)
+    assert load_project_settings(repo) == before
+
+
+@pytest.mark.parametrize("field", ["gate_enabled", "review_disabled"])
+def test_workflow_malformed_frozen_authorization_refused(
+    isolated_xdg: Path, field: str,
+) -> None:
+    repo = _make_repo(isolated_xdg, "malformed-" + field)
+    set_project_gate_command(repo, "true")
+    payload = resolve_effective_run_config(RunRequest(task="probe", repo_path=repo)).as_dict()
+    payload.pop("gate_enabled")
+    payload.pop("review_disabled")
+    legacy = reconstruct_run_config(payload)
+    assert legacy.gate_enabled and not legacy.review_disabled
+    payload[field] = "false"
+    with pytest.raises(ValueError):
+        reconstruct_run_config(payload)
+
+
+def test_workflow_web_presets_and_manual_controls(
+    isolated_xdg: Path, tmp_path: Path,
+) -> None:
+    from saberops.project_settings import load_project_settings
+
+    repo = _make_repo(isolated_xdg, "web-workflow")
+    client = TestClient(create_app(db_path=tmp_path / "workflow.db", repo_path=repo))
+    response = client.post(
+        "/projects/settings/workflow", data={"preset": "quick"}, follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert load_project_settings(repo).review_disabled
+    html = client.get("/").text
+    assert 'data-project-workflow' in html
+    assert 'value="quick"' in html and 'value="balanced"' in html
+    assert 'data-workflow-limit' in html
+    assert '<span class="badge" data-workflow-label>Quick</span>' in html
+    assert 'name="review_limit" value="1"' in html
+    assert 'value="disabled" selected' in html
+    assert 'composer-review' not in html
+    response = client.post(
+        "/projects/settings/workflow",
+        data={"preset": "custom", "gate_mode": "required",
+              "review_policy": "always-required", "review_mode": "bounded", "review_limit": 4},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    settings = load_project_settings(repo)
+    assert settings.gate_enabled and not settings.review_disabled
+    assert settings.review_limit == 4
+    response = client.post(
+        "/projects/settings/workflow", data={"preset": "custom", "review_limit": 0},
+        follow_redirects=False,
+    )
+    assert response.status_code == 400
+    assert load_project_settings(repo) == settings
+
+
+def test_setup_workflow_pick_then_apply_advances_to_ready(
+    isolated_xdg: Path, tmp_path: Path,
+) -> None:
+    repo = _make_repo(isolated_xdg, "setup-workflow")
+    client = TestClient(create_app(db_path=tmp_path / "setup.db", repo_path=repo))
+    html = client.get("/setup").text
+    assert 'data-setup-policy' in html
+    for preset in ("quick", "balanced", "thorough", "max"):
+        assert f'type="radio" name="preset" value="{preset}"' in html
+    assert "Apply and continue" in html
+    # Rendering/selecting does not persist a choice.
+    assert not load_project_settings(repo).review_disabled
+    response = client.post(
+        "/projects/settings/workflow", data={"source": "setup", "preset": "quick"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == "/setup?policy_applied=1#setup-step-7"
+    assert load_project_settings(repo).review_disabled
+    assert not load_project_settings(repo).gate_enabled
+    html = client.get("/setup").text
+    assert 'name="preset" value="quick" checked' in html
+    assert "Gate: disabled" in html
+
+
+def test_setup_required_mode_requires_gate_before_saving(
+    isolated_xdg: Path, tmp_path: Path,
+) -> None:
+    repo = _make_repo(isolated_xdg, "setup-required")
+    client = TestClient(create_app(db_path=tmp_path / "setup.db", repo_path=repo))
+    before = load_project_settings(repo)
+    response = client.post(
+        "/projects/settings/workflow", data={"source": "setup", "preset": "thorough"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 400
+    assert "Enter a gate command" in response.text
+    assert 'name="preset" value="thorough" checked' in response.text
+    assert load_project_settings(repo) == before
+    response = client.post(
+        "/projects/settings/workflow",
+        data={"source": "setup", "preset": "thorough", "gate_command": "make check"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    settings = load_project_settings(repo)
+    assert settings.gate_enabled and not settings.review_disabled
+    assert settings.gate_command == "make check"
+    assert settings.review_limit == 5
+    assert load_project_review_policy(repo) is ReviewPolicyMode.ALWAYS_REQUIRED
+
+
+def test_setup_preset_preserves_existing_gate(
+    isolated_xdg: Path, tmp_path: Path,
+) -> None:
+    repo = _make_repo(isolated_xdg, "setup-existing")
+    set_project_gate_command(repo, "make verify")
+    client = TestClient(create_app(db_path=tmp_path / "setup.db", repo_path=repo))
+    response = client.post(
+        "/projects/settings/workflow", data={"source": "setup", "preset": "max"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert load_project_settings(repo).gate_command == "make verify"
+    assert load_project_settings(repo).review_mode == "max"

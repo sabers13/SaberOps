@@ -126,8 +126,15 @@ class ProjectRegistry:
         self._save(data)
         return True, val.note
 
-    def select(self, path: Path | str) -> tuple[bool, str]:
-        """Select project as active and update recents ordering."""
+    def select(self, path: Path | str, *, initialize: bool = False) -> tuple[bool, str]:
+        """Select a project, optionally preparing a new owner-selected folder."""
+        path = Path(path).expanduser().resolve()
+        if initialize:
+            from saberops.project_bootstrap import prepare_project
+
+            prepared, note = prepare_project(path)
+            if not prepared:
+                return False, note
         val = self.validate_project(path)
         if not val.is_git:
             return False, val.note

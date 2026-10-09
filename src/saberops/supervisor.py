@@ -191,6 +191,7 @@ class RunSupervisor:
         claim taken before the process is created.
         """
         from saberops.authority import load_authority_settings
+        from saberops.continuation import ContinuationExists, validate_continuation
         from saberops.control_plane import (
             freeze_control_plane_policy,
             load_control_plane_policy,
@@ -200,11 +201,18 @@ class RunSupervisor:
         )
         from saberops.routing_config import (
             load_effective_routing,
+            payload_to_snapshot,
             snapshot_references_exact_bindings,
             snapshot_to_payload,
         )
 
-        snapshot = load_effective_routing()
+        source = validate_continuation(self.db, config)
+        if source:
+            existing = self.db.get_continuation(source[0].id)
+            if existing:
+                return StartRunResult(run_id=existing)
+        snapshot = (payload_to_snapshot(json.loads(source[0].routing_snapshot_json))
+                    if source and source[0].routing_snapshot_json else load_effective_routing())
         resolve_candidate_chain(
             tier=config.initial_tier,
             model_override=config.model_override,
@@ -219,6 +227,8 @@ class RunSupervisor:
         # binding-store change must never alter this Run.  A static-only
         # snapshot loads no owner state.
         if (
+            source is None
+            and
             config.worker_binding_registry is None
             and snapshot_references_exact_bindings(snapshot)
         ):
@@ -239,13 +249,22 @@ class RunSupervisor:
         run_id = provenance.run_id
         created_at = current_iso_timestamp()
         routing_payload = snapshot_to_payload(snapshot, created_at)
-        frozen_control_plane = freeze_control_plane_policy(
-            load_control_plane_policy(),
-            required_capabilities=config.required_capabilities,
-            reserve_override=config.reserve_override,
-            host_access=load_authority_settings().host_access.value,
-        )
-        frozen_tools = freeze_tool_contract(config.tool_refs, self.tool_registry)
+        if source:
+            from saberops.control_plane.policy import reconstruct_frozen_control_plane
+            from saberops.tooling.contracts import FrozenToolContract
+            assert source[0].control_plane_snapshot_json and source[0].tool_contract_json
+            frozen_control_plane = reconstruct_frozen_control_plane(
+                source[0].control_plane_snapshot_json, source[0].control_plane_snapshot_digest
+            )
+            frozen_tools = FrozenToolContract.from_json(source[0].tool_contract_json)
+        else:
+            frozen_control_plane = freeze_control_plane_policy(
+                load_control_plane_policy(),
+                required_capabilities=config.required_capabilities,
+                reserve_override=config.reserve_override,
+                host_access=load_authority_settings().host_access.value,
+            )
+            frozen_tools = freeze_tool_contract(config.tool_refs, self.tool_registry)
         # C10: freeze the optional gateway contract.  When ``RunConfig`` does
         # not carry a frozen config, the run uses the first-class DIRECT
         # path and no gateway evidence is recorded.
@@ -280,7 +299,25 @@ class RunSupervisor:
             gateway_snapshot_json=gateway_snapshot_json,
             gateway_snapshot_digest=gateway_snapshot_digest,
         )
-        self.db.create_run(run)
+        if source:
+            parent = source[0]
+            run.routing_snapshot_json = parent.routing_snapshot_json
+            run.control_plane_snapshot_json = parent.control_plane_snapshot_json
+            run.control_plane_snapshot_digest = parent.control_plane_snapshot_digest
+            run.tool_contract_json = parent.tool_contract_json
+            run.tool_contract_digest = parent.tool_contract_digest
+            run.gateway_snapshot_json = parent.gateway_snapshot_json
+            run.gateway_snapshot_digest = parent.gateway_snapshot_digest
+        try:
+            self.db.create_run(run)
+        except ContinuationExists as exc:
+            return StartRunResult(run_id=exc.child_id)
+        if source:
+            self.db.record_event(run_id, "continuation_created", payload=config.continuation)
+            self.db.record_event(source[0].id, "run_continued", payload={
+                "child_run_id": run_id, "candidate_sha": source[1].commit_sha,
+                "attempt_id": source[1].id,
+            })
         self.db.record_event(
             run_id,
             "run_created",
@@ -805,6 +842,10 @@ class RunSupervisor:
             result["reason"] = "cancellation_in_progress"
             return result
 
+        if not dry_run:
+            from saberops.session_journal import SessionJournal
+            SessionJournal(Path(self.db.db_path).resolve().parent / "agent-sessions").recover(run_id)
+
         # Probe worker liveness before deciding on dead owner.  The default
         # is ``UNKNOWN``: a missing durable worker identity for a modern
         # C05 worker must never be classified as DEAD, because it is the
@@ -1299,6 +1340,9 @@ class RunSupervisor:
                     "predecessor_generation": predecessor_owner.generation,
                 },
             )
+
+        from saberops.session_journal import SessionJournal
+        SessionJournal(Path(self.db.db_path).resolve().parent / "agent-sessions").recover(run_id)
 
         # We hold per-run lock here.  Spawn the child and hand it the
         # ``successor`` fencing token via environment (mirroring the

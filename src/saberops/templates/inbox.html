@@ -3,6 +3,7 @@
 {% block title %}Inbox{% endblock %}
 {% block conversation_title %}Inbox{% endblock %}
 {% block run_meta %}{{ count }} item{{ "" if count == 1 else "s" }} need attention{% endblock %}
+{% block page_return %}<nav class="page-return" aria-label="Page navigation"><a href="/">← Dashboard</a></nav>{% endblock %}
 
 {% block workspace %}
 <div class="date-rule">Needs your attention</div>
@@ -22,12 +23,12 @@
       <td><span class="badge badge-{{ item.attention_class }}">{{ item.attention_label }}</span></td>
       <td class="mono muted">{% if item.candidate_sha %}{{ item.candidate_state }} · {{ item.short_sha }}{% else %}{{ item.run_status }}{% endif %}</td>
       <td class="mono muted">{{ fmt(item.updated_at) }}</td>
-      <td><a class="text-button" href="/runs/{{ item.run_id }}">Open run</a></td>
+      <td><a class="text-button" href="/runs/{{ item.run_id }}?from=inbox">Open run</a></td>
     </tr>
     {% endfor %}
   </tbody>
 </table></div>
 {% else %}
-<p class="so-notice">Nothing needs your attention.</p>
+<div class="so-empty"><strong>All caught up</strong>Nothing needs your attention. Results that need review will appear here.<p><a class="text-button" href="/?pane=runs">Browse runs</a> <a class="text-button" href="/">Open workspace</a></p></div>
 {% endif %}
 {% endblock %}

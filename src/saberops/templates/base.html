@@ -1,61 +1,93 @@
 <!DOCTYPE html>
-{# SaberOps console shell.
-   Visual/interaction source: OpenDesign project
-   25e96df8-02ca-468a-9335-0ea38e57308f, artifact
-   orchestrator-console-v2.html (canonical product UI per DESIGN-HANDOFF.md).
-   Layout, tokens, and data-od-id hooks follow the approved artifact.
-   Prototype-only controls with no backend capability (scenario switcher,
-   mock decision resolution) are intentionally not carried over. #}
-<html lang="en" data-theme="light">
+{# SaberOps shared workspace shell. Historical OpenDesign hooks and vendored
+   styles are retained; the approved October 2026 reconstruction lives in
+   workspace.css and DESIGN.md. Controls use real backend capabilities. #}
+<html lang="en" data-theme="light" data-palette="graphite-blue">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}SaberOps{% endblock %} · SaberOps</title>
+  <link rel="preload" href="/static/fonts/Manrope-Variable.ttf" as="font" type="font/ttf" crossorigin>
+  <link rel="preload" href="/static/fonts/IBMPlexMono-Regular.ttf" as="font" type="font/ttf" crossorigin>
   <link rel="stylesheet" href="/static/css/console-v2.css">
-  <link rel="stylesheet" href="/static/css/saberops-console.css">
+  <link rel="stylesheet" href="/static/css/saberops-console.css?v=agent-workspace-4-tmux-workspace">
+  <link rel="stylesheet" href="/static/css/workspace.css?v=setup-workflow-17">
   <script>
+    // Restore appearance before paint; console.js owns subsequent changes.
+    var soTheme = null;
+    var soPalette = null;
     try {
-      var soTheme = window.localStorage.getItem("saberops-theme");
-      if (soTheme === "dark" || soTheme === "light") {
-        document.documentElement.setAttribute("data-theme", soTheme);
-      } else if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) {
-        document.documentElement.setAttribute("data-theme", "dark");
-      }
-    } catch (_soErr) { /* ignore */ }
+      soTheme = window.localStorage.getItem("saberops-theme");
+      if (soTheme !== "dark" && soTheme !== "light") soTheme = window.localStorage.getItem("orch-theme");
+      soPalette = window.localStorage.getItem("saberops-palette");
+    } catch (_soErr) { /* Browser storage may be unavailable. */ }
+    if (soTheme === "dark" || soTheme === "light") {
+      document.documentElement.setAttribute("data-theme", soTheme);
+    } else if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) {
+      document.documentElement.setAttribute("data-theme", "dark");
+    }
+    if (soPalette === "neutral-ink" || soPalette === "graphite-blue") {
+      document.documentElement.setAttribute("data-palette", soPalette);
+    }
   </script>
+  <link rel="stylesheet" href="/static/css/chat-workspace.css?v=work-console-1">
   {% block extra_head %}{% endblock %}
 </head>
 <body>
+  {% import "_ui.html" as ui %}
+  {% set page_path = request.url.path %}
+  {% set runs_view = page_path == '/' and request.query_params.get('pane') == 'runs' %}
+  <a class="skip-link" href="#conversation">Skip to content</a>
   {% set shell = request.state.shell %}
-  <div class="app" id="app" data-od-id="orchestrator-chat-workspace">
-    <aside class="left-sidebar" data-od-id="left-sidebar" aria-label="Navigation and settings">
-      <nav class="activity-rail" aria-label="Workspace panes">
-        <div class="rail-brand" data-od-id="saber-logo" aria-label="Saber razor S inside coding brackets"><div class="brand-mark" aria-hidden="true"><svg class="saber-symbol" viewBox="0 0 32 20"><path class="saber-bracket" d="m9 3-6.5 7L9 17"/><path class="saber-bracket" d="m23 3 6.5 7-6.5 7"/><path class="saber-razor-s" d="M20.7 2.4h-5.2c-2.4 0-4.1 1.1-4.6 3-.4 1.8.5 3.2 2.9 4.1l2.4.9c1 .4 1.4.8 1.2 1.4-.2.7-.9 1.1-2 1.1h-4.2l-1.6 4.5h5.6c3.2 0 5.2-1.5 5.8-4.1.5-2.2-.7-3.9-3.5-5l-2-.7c-.7-.3-1-.6-.9-1 .1-.4.6-.6 1.4-.6h3.6Z"/><path class="saber-razor-edge" d="m12.1 14.9 4.1-.1m-.9-9.9 4.1-.1"/></svg><span class="brand-wordmark">SABER</span></div></div>
-        <button class="rail-button{% if active_pane == 'projects' %} active{% endif %}" data-pane="projects" data-od-id="pane-projects" aria-label="Open projects" title="Projects"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 5h6l2 2h8v12H4z"/></svg></button>
-        <button class="rail-button{% if active_pane|default('chats') == 'chats' %} active{% endif %}" data-pane="chats" data-od-id="pane-chats" aria-label="Open chats" title="Chats"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 5h16v11H8l-4 4z"/></svg></button>
-        <button class="rail-button{% if active_pane == 'runs' %} active{% endif %}" data-pane="runs" data-od-id="pane-runs" aria-label="Open runs" title="Runs"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 5h14v4H5zm0 7h14v7H5z"/></svg></button>
-        <a class="rail-button" href="/inbox" data-od-id="pane-inbox" aria-label="Open inbox" title="Inbox"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 5h16v6l-3 3H7l-3-3z"/><path d="M4 5l3 3h10l3-3"/></svg></a>
-        <button class="rail-button{% if active_pane == 'archive' %} active{% endif %}" data-pane="archive" data-od-id="pane-archive" aria-label="Open archive" title="Archive"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 7h16v13H4zM3 4h18v3H3zM9 11h6"/></svg></button>
-        <div class="rail-spacer"></div>
-        <button class="rail-button" data-od-id="pane-settings" aria-label="Open settings" title="Settings" id="railSettingsButton"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="3"/><path d="M12 3v3m0 12v3M3 12h3m12 0h3M5.6 5.6l2.1 2.1m8.6 8.6 2.1 2.1m0-12.8-2.1 2.1m-8.6 8.6-2.1 2.1"/></svg></button>
-        <button class="rail-button rail-collapse desktop-toggle" id="leftRailToggle" data-od-id="left-collapse" aria-label="Collapse navigation pane" title="Toggle pane"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 4h16v16H4zM9 4v16m5-5-3-3 3-3"/></svg></button>
+  {% set chat_shell = (page_path == "/" and not runs_view) or page_path.startswith("/chats/") or page_path.startswith("/runs/") %}
+  <div class="app workspace-shell{% if chat_shell %} chat-shell{% if page_path.startswith("/runs/") %} run-chat-shell{% endif %}{% if agent_dock|default(false) %} right-collapsed{% endif %}{% endif %}{% if not (has_tabs or agent_dock|default(false)) or missing|default(false) %} right-collapsed{% endif %}" id="app" data-conversation-mode="chat" data-od-id="orchestrator-chat-workspace" data-page="{{ page_path }}" data-thread-kind="{{ chat.kind if chat|default(none) else 'work' if page_path.startswith('/runs/') else '' }}" data-source-chat="{{ chat.source_chat_id or '' if chat|default(none) else '' }}" data-has-inspector="{{ 'true' if (has_tabs or agent_dock|default(false)) and not missing|default(false) else 'false' }}">
+    <aside class="left-sidebar" data-od-id="left-sidebar" aria-label="Navigation and settings" id="navigationSidebar">
+      <div class="sidebar-brand">
+        <a href="/" class="brand-home" aria-label="SaberOps workspace" data-od-id="saber-logo"><span class="brand-mark" aria-hidden="true"><svg class="saber-symbol" viewBox="0 0 32 20"><path class="saber-bracket" d="m9 3-6.5 7L9 17"/><path class="saber-bracket" d="m23 3 6.5 7-6.5 7"/><path class="saber-razor-s" d="M20.7 2.4h-5.2c-2.4 0-4.1 1.1-4.6 3-.4 1.8.5 3.2 2.9 4.1l2.4.9c1 .4 1.4.8 1.2 1.4-.2.7-.9 1.1-2 1.1h-4.2l-1.6 4.5h5.6c3.2 0 5.2-1.5 5.8-4.1.5-2.2-.7-3.9-3.5-5l-2-.7c-.7-.3-1-.6-.9-1 .1-.4.6-.6 1.4-.6h3.6Z"/><path class="saber-razor-edge" d="m12.1 14.9 4.1-.1m-.9-9.9 4.1-.1"/></svg></span><span class="brand-copy"><strong>SaberOps</strong><span>Engineering workspace</span></span></a>
+        <button class="icon-button mobile-only" aria-label="Close navigation" id="closeNavButton">{{ ui.icon('close') }}</button>
+      </div>
+      <nav class="activity-rail chat-navigation" aria-label="Main navigation">
+        <a class="rail-button" href="/" data-od-id="pane-chats">{{ ui.icon('workspace') }}<span id="newThreadLabel">New chat</span></a>
+        <button type="button" class="rail-button" data-chat-search>{{ ui.icon('search') }}<span>Search chats and runs</span></button>
+        <a class="rail-button" href="/access" data-od-id="pane-providers"{% if page_path.startswith('/access') %} aria-current="page"{% endif %}>{{ ui.icon('providers') }}<span>Connections</span></a>
+        <button class="rail-button" data-pane="projects" data-od-id="pane-projects">{{ ui.icon('projects') }}<span>{{ shell.active_project_short or 'Select project' }}</span></button>
       </nav>
+      <details class="workspace-navigation"><summary>Workspace tools</summary>
+      <nav class="activity-rail" aria-label="Workspace tools">
+        <a class="rail-button{% if runs_view or page_path.startswith('/runs/') %} active{% endif %}" href="/?pane=runs" data-od-id="pane-runs"{% if runs_view or page_path.startswith('/runs/') %} aria-current="page"{% endif %}>{{ ui.icon('runs') }}<span>Runs</span><span class="nav-count">{{ shell.run_count }}</span></a>
+        <a class="rail-button{% if page_path.startswith('/inbox') %} active{% endif %}" href="/inbox" data-od-id="pane-inbox"{% if page_path.startswith('/inbox') %} aria-current="page"{% endif %}>{{ ui.icon('inbox') }}<span>Inbox</span>{% if shell.inbox_count %}<span class="nav-count">{{ shell.inbox_count }}</span>{% endif %}</a>
+        <div class="nav-section-label">Configuration</div>
+        <a class="rail-button{% if page_path == '/setup' %} active{% endif %}" href="/setup"{% if page_path == '/setup' %} aria-current="page"{% endif %}>{{ ui.icon('check') }}<span>Setup guide</span></a>
+        <a class="rail-button{% if page_path.startswith('/routing') %} active{% endif %}" href="/routing"{% if page_path.startswith('/routing') %} aria-current="page"{% endif %}>{{ ui.icon('runs') }}<span>Routing</span></a>
+        <a class="rail-button{% if page_path.startswith('/quota') %} active{% endif %}" href="/quota"{% if page_path.startswith('/quota') %} aria-current="page"{% endif %}>{{ ui.icon('providers') }}<span>Usage &amp; quota</span></a>
+      </nav>
+      </details>
       <div class="pane-shell">
-        <header class="pane-head"><span class="pane-title" id="paneTitle">Chats</span><button class="icon-button mobile-only" aria-label="Close navigation" id="closeNavButton"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="m7 7 10 10M17 7 7 17"/></svg></button></header>
+        <header class="pane-head"><span class="pane-title" id="paneTitle">Projects</span><button class="icon-button" data-pane="archive" aria-label="Show completed runs" title="Completed runs">{{ ui.icon('archive', 16) }}</button></header>
         <div class="sidebar-body" id="sidebarBody">
           {% set shell = request.state.shell %}
           <div class="side-pane" data-side-pane="chats">
-            <div class="side-label">Conversations · runs</div>
-            {% if shell.recent_runs %}
-            {% for run in shell.recent_runs[:12] %}
-            <a class="side-item" href="/runs/{{ run.id }}">
-              <span class="side-copy">{{ run.summary or run.id }}</span>
-              <span class="side-meta"><span class="mono">{{ run.id }}</span> · {{ run.status }}</span>
-            </a>
-            {% endfor %}
-            {% else %}
-            <p class="side-copy muted">No runs yet. Start one from the composer.</p>
-            {% endif %}
+            {% for project in shell.project_folders|default([]) %}
+            {% set selected = namespace(value=project.active) %}
+            {% for item in project.entries %}{% if page_path == item.href.split('?')[0].split('#')[0] %}{% set selected.value = true %}{% endif %}{% endfor %}
+            <details class="project-folder" data-project-folder="{{ project.path }}"{% if selected.value %} open{% endif %}>
+              <summary title="{{ project.path }}">{{ ui.icon('projects', 16) }}<span>{{ project.label }}</span><span class="project-folder-count" title="Work items and chats shown in this folder">{{ project.work|length }} work · {{ project.chats|length }} chats</span></summary>
+              <div class="project-folder-items">
+              {% for section, label, items in [('chat','Chats',project.chats),('work','Work',project.work)] %}
+              <div data-history-section="{{ section }}"><div class="project-history-heading">{{ label }}</div>
+              {% for item in items %}
+              {% set current = page_path == item.href.split('?')[0].split('#')[0] %}
+              <a class="side-item project-history-item{% if current %} current-chat{% endif %}" href="{{ item.href }}" title="{{ item.title }} · {{ item.status }}" data-history-kind="{{ item.kind }}"{% if current %} aria-current="page"{% endif %}>
+                {{ ui.icon('runs' if item.kind != 'chat' else 'workspace', 14) }}<span class="side-copy">{{ item.title }}</span>
+                {% if item.kind == 'run' %}<span class="project-run-state" aria-label="{{ item.status }}" title="{{ item.status }}">{{ '◌' if item.status not in ['COMPLETED','FAILED','CANCELLED'] else '✓' if item.status == 'COMPLETED' else '×' if item.status == 'FAILED' else '■' }}</span>{% endif %}
+              </a>
+              {% else %}<p class="project-folder-empty muted">No {{ label|lower }} yet.</p>{% endfor %}
+              </div>{% endfor %}
+              {% if project.active %}<a class="text-button project-folder-switch" href="/#chat" data-project-new-thread>New chat in project</a>
+              {% elif project.path %}<form method="post" action="/projects/select" class="project-folder-switch"><input type="hidden" name="path" value="{{ project.path }}"><button type="submit" class="text-button">Use project</button></form>{% endif %}
+              </div>
+            </details>
+            {% else %}<p class="side-copy muted">Select a project to start chatting.</p>{% endfor %}
           </div>
           <div class="side-pane" data-side-pane="projects" hidden>
             <div class="side-label">Active repository</div>
@@ -63,9 +95,11 @@
             <form method="post" action="/projects/select" class="so-form" style="margin-top: 8px;">
               <div class="advanced-field">
                 <label for="side-project-path">Select / switch project</label>
-                <input type="text" id="side-project-path" name="path" class="mono" placeholder="/absolute/path/to/git/repository" required>
+                <input type="text" id="side-project-path" name="path" class="mono" placeholder="/absolute/path/to/project" required>
               </div>
-              <button type="submit" class="text-button">Select project</button>
+              <button type="button" class="text-button" data-project-browse>Select project</button>
+              <button type="submit" class="text-button">Use path</button>
+              <p class="so-help" data-project-picker-status role="status" aria-live="polite"></p>
             </form>
             {% if shell.recent_projects %}
             <div class="side-label" style="margin-top: 10px;">Recent projects</div>
@@ -81,10 +115,11 @@
             {% endif %}
           </div>
           <div class="side-pane" data-side-pane="runs" hidden>
+            <a class="side-item" href="/" data-od-id="runs-back-dashboard">← Dashboard</a>
             <div class="side-label">Runs</div>
             {% if shell.recent_runs %}
             {% for run in shell.recent_runs[:20] %}
-            <a class="side-item" href="/runs/{{ run.id }}">
+            <a class="side-item" href="/runs/{{ run.id }}?from=runs">
               <span class="side-copy">{{ run.summary or run.id }}</span>
               <span class="side-meta"><span class="mono">{{ run.id }}</span> · {{ run.tier }} · {{ run.status }}</span>
             </a>
@@ -97,7 +132,7 @@
             <div class="side-label">Archive · terminal runs</div>
             {% if shell.terminal_runs %}
             {% for run in shell.terminal_runs[:20] %}
-            <a class="side-item" href="/runs/{{ run.id }}">
+            <a class="side-item" href="/runs/{{ run.id }}?from=runs">
               <span class="side-copy">{{ run.summary or run.id }}</span>
               <span class="side-meta"><span class="mono">{{ run.id }}</span> · {{ run.status }}</span>
             </a>
@@ -108,48 +143,57 @@
           </div>
         </div>
       </div>
+      <div class="sidebar-footer">
+        <button class="rail-button quick-access-trigger" id="quickAccessButton" aria-label="Open quick access" aria-haspopup="dialog" aria-expanded="false" aria-controls="quickAccessPanel"><i class="workspace-avatar" aria-hidden="true">S</i><span>Workspace<small>Quick access</small></span></button>
+        <button class="rail-button" id="railSettingsButton" data-od-id="pane-settings" aria-label="Settings" title="Settings">{{ ui.icon('settings') }}<span>Settings</span></button>
+        <button class="icon-button desktop-toggle" id="leftRailToggle" data-od-id="left-collapse" aria-label="Collapse navigation" aria-controls="navigationSidebar" aria-expanded="true">{{ ui.icon('sidebar') }}</button>
+      </div>
     </aside>
 
-    <main class="workspace{% if has_tabs %} has-tabs{% endif %}" data-od-id="chat-main">
+    <main class="workspace{% if has_tabs %} has-tabs{% endif %}" data-od-id="chat-main" id="mainWorkspace">
       <header class="topbar" data-od-id="chat-header">
         <button class="icon-button mobile-only" data-od-id="mobile-nav-open" aria-label="Open navigation" id="mobileNavButton">
           <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
         </button>
+        <button type="button" class="icon-button" id="chatSidebarButton" aria-label="Open sidebar">{{ ui.icon('sidebar') }}</button>
+        {% block page_return %}{% endblock %}
         <div class="run-title">
           <h1 data-od-id="conversation-title">{% block conversation_title %}SaberOps{% endblock %}</h1>
           <p id="runMeta">{% block run_meta %}{{ shell.active_project or "No project selected" }}{% endblock %}</p>
         </div>
+        {% if chat_shell %}{% include "_chat_mode.html" %}{% endif %}
         <div class="top-actions">
-          {% if run_id is defined and run_id %}
-          <div class="run-actions">
-            <button class="icon-button" id="runActionsButton" data-od-id="run-actions" aria-label="Run actions" aria-expanded="false">
-              <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg>
-            </button>
-            <div class="run-actions-menu" id="runActionsMenu" hidden>
-              {% if can_cancel %}
-              <button id="cancelRunMenuItem">Cancel run</button>
-              {% else %}
-              <button disabled>Cancel run</button>
-              {% endif %}
-            </div>
+          {% if (page_path == '/' and not runs_view) or page_path.startswith('/chats/') or (page_path.startswith('/runs/') and not missing|default(false)) %}
+          <div class="chat-model-switcher">
+            <button type="button" class="chat-model-trigger" id="chatModelButton" aria-haspopup="dialog" aria-expanded="false" aria-controls="chatModelPanel"><span><small>Orchestrator</small><strong id="chatModelLabel">Choose model</strong></span><span aria-hidden="true">⌄</span></button>
+            <section id="chatModelPanel" class="chat-model-panel shell-popover" role="dialog" aria-label="Choose orchestrator model" hidden>
+              <div class="popover-heading"><strong>Orchestrator model</strong><button type="button" class="icon-button" data-close-popover aria-label="Close model picker">{{ ui.icon('close',16) }}</button></div>
+              <label class="sr-only" for="chatModelSearch">Search orchestrator models</label><input id="chatModelSearch" type="search" placeholder="Search models or providers…" autocomplete="off">
+              <p id="chatModelStatus" class="so-help" role="status">Loading models…</p>
+              <div id="chatModelOptions" class="chat-model-options" aria-label="Available orchestrator models"></div>
+              <a class="popover-link" href="/routing?role=orchestrator">Manage models in Routing {{ ui.icon('arrow',16) }}</a>
+            </section>
           </div>
           {% endif %}
+          {% block workspace_actions %}{% endblock %}
+          <button class="icon-button" id="commandOpenButton" aria-label="Search commands" aria-haspopup="dialog" title="Search commands (Ctrl/⌘ K)">{{ ui.icon('search') }}</button>
           <button class="theme-toggle" id="themeToggle" data-od-id="theme-toggle" aria-label="Switch light / dark theme">
             <span id="themeIcon" aria-hidden="true"></span>
             <span id="themeLabel">Dark</span>
           </button>
-          <button class="icon-button desktop-toggle" data-od-id="right-collapse" aria-label="Collapse workers" id="rightCollapseButton">
+          <button class="icon-button desktop-toggle" data-od-id="right-collapse" aria-label="Collapse workers" aria-controls="workerDock" aria-expanded="{{ 'true' if (has_tabs or agent_dock|default(false)) and not missing|default(false) else 'false' }}" id="rightCollapseButton" data-work-only{% if not (has_tabs or agent_dock|default(false)) or missing|default(false) %} hidden{% endif %}>
             <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 4h16v16H4zM15 4v16m-5-5 3-3-3-3"/></svg>
           </button>
-          <button class="icon-button mobile-only" data-od-id="mobile-workers-open" aria-label="Open workers" id="mobileWorkersButton">
+          <button class="icon-button mobile-only" data-od-id="mobile-workers-open" aria-label="Open workers" id="mobileWorkersButton" data-work-only{% if not (has_tabs or agent_dock|default(false)) or missing|default(false) %} hidden{% endif %}>
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="8" cy="8" r="3"/><circle cx="16" cy="16" r="3"/><path d="M10 10l4 4"/></svg>
           </button>
         </div>
       </header>
 
+      {% block workspace_context %}{% endblock %}
       {% block inspector_tabs %}{% endblock %}
 
-      <section class="conversation" id="conversation" data-od-id="conversation">
+      <section class="conversation" id="conversation" tabindex="-1" data-od-id="conversation">
         <div class="ambient-banner" id="ambientBanner" data-od-id="connection-banner"><span class="worker-state-dot terminal"></span><span id="ambientBannerText">Connection state</span></div>
         <div class="conversation-inner" id="viewHost">
           {% block workspace %}{% endblock %}
@@ -159,12 +203,9 @@
       {% block composer %}{% endblock %}
     </main>
 
-    <aside class="workers" data-od-id="workers-sidebar" aria-label="Active workers">
+    <aside data-work-only class="workers" id="workerDock" data-od-id="workers-sidebar" aria-label="Agents and sessions">
       <header class="workers-head">
-        <h2 data-od-id="workers-heading" role="button" tabindex="0" id="workersHeading">Workers</h2><span class="worker-count">{% block worker_count %}{{ shell.active_workers }}{% endblock %}</span>
-        <button class="icon-button desktop-toggle" data-od-id="workers-collapse" aria-label="Collapse workers" id="workersCollapseButton">
-          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 4h16v16H4zM15 4v16m-5-5 3-3-3-3"/></svg>
-        </button>
+        <h2 data-od-id="workers-heading" role="button" tabindex="0" id="workersHeading">{{ "Work inspector" if chat_shell else "Agents" if agent_dock|default(false) else "Workers" }}</h2><span class="worker-count">{% block worker_count %}{{ shell.active_workers }}{% endblock %}</span>
         <button class="icon-button mobile-only" aria-label="Close workers" id="closeWorkersButton">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="m7 7 10 10M17 7 7 17"/></svg>
         </button>
@@ -182,28 +223,30 @@
       <span class="status-project">{{ shell.active_project_short or "SaberOps" }}</span>
       <span class="status-workers" id="statusWorkers">Runs {{ shell.run_count }}</span>
       <span class="verdict attention-copy" id="statusVerdict">{{ shell.status_verdict }}</span>
-      <span class="connection-state" id="connectionState">Connected</span>
+      <span class="connection-state" id="connectionState"{% if not has_tabs %} hidden{% endif %}>Connecting</span>
     </footer>
-    <div class="drawer-backdrop" id="drawerBackdrop"></div>
+    <button class="drawer-backdrop" id="drawerBackdrop" aria-label="Close navigation overlay" tabindex="-1"></button>
   </div>
 
-  <div class="command-layer" id="commandLayer" data-od-id="command-palette">
+  {% block workspace_dialogs %}{% endblock %}
+  <div class="command-layer" id="commandLayer" aria-hidden="true" data-od-id="command-palette">
     <div class="command-dialog" role="dialog" aria-modal="true" aria-label="Command palette">
       <label class="sr-only" for="commandInput">Type a command</label>
       <input class="command-input" id="commandInput" placeholder="Type a command…">
       <div class="command-list" id="commandList">
-        <a class="command-item" href="/"><span>New run</span><span class="command-shortcut">⌘N</span></a>
+        <p id="commandEmptyResults" class="model-empty" role="status" hidden>No matching commands. Try another search.</p>
+        <a class="command-item" href="/"><span>New run</span><span class="command-shortcut">Go</span></a>
         <a class="command-item" href="/setup"><span>First-run setup</span><span class="command-shortcut">Go</span></a>
         <button class="command-item" id="commandSettingsItem"><span>Open settings</span><span class="command-shortcut">⌘,</span></button>
-        <button class="command-item" id="commandThemeItem"><span>Switch light / dark theme</span><span class="command-shortcut">⌘⇧T</span></button>
+        <button class="command-item" id="commandThemeItem"><span>Switch light / dark theme</span><span class="command-shortcut">Switch</span></button>
         <a class="command-item" href="/inbox"><span>Inbox</span><span class="command-shortcut">Go</span></a>
-        <a class="command-item" href="/routing"><span>Worker routing</span><span class="command-shortcut">Go</span></a>
-        <a class="command-item" href="/orchestrator"><span>Orchestrator role</span><span class="command-shortcut">Go</span></a>
-        <a class="command-item" href="/reviewer"><span>Reviewer role</span><span class="command-shortcut">Go</span></a>
+        <a class="command-item" href="/routing"><span>Routing</span><span class="command-shortcut">Go</span></a>
+        <a class="command-item" href="/routing?role=orchestrator"><span>Orchestrator role</span><span class="command-shortcut">Go</span></a>
+        <a class="command-item" href="/routing?role=reviewer"><span>Reviewer role</span><span class="command-shortcut">Go</span></a>
         <a class="command-item" href="/access"><span>Model access</span><span class="command-shortcut">Go</span></a>
         <a class="command-item" href="/quota"><span>Quota</span><span class="command-shortcut">Go</span></a>
         <button class="command-item" id="commandNavToggle"><span>Toggle navigation sidebar</span><span class="command-shortcut">⌘B</span></button>
-        <button class="command-item" id="commandWorkersToggle"><span>Toggle workers sidebar</span><span class="command-shortcut">⌘⇧B</span></button>
+        <button class="command-item" id="commandWorkersToggle"{% if not has_tabs %} hidden{% endif %}><span>Toggle workers sidebar</span><span class="command-shortcut">⌘⇧B</span></button>
         {% if run_id is defined and run_id and can_cancel %}
         <button class="command-item" id="commandCancelRun"><span>Cancel current run</span><span class="command-shortcut">Run</span></button>
         {% endif %}
@@ -211,7 +254,7 @@
     </div>
   </div>
 
-  <div class="settings-layer" id="settingsLayer" data-od-id="settings-modal">
+  <div class="settings-layer" id="settingsLayer" aria-hidden="true" data-od-id="settings-modal">
     <div class="settings-window" role="dialog" aria-modal="true" aria-labelledby="settingsModalTitle">
       <aside class="settings-nav" aria-label="Settings sections">
         <div class="settings-nav-head"><h2 id="settingsModalTitle">Settings</h2></div>
@@ -231,44 +274,54 @@
         </header>
         <div class="settings-content" id="settingsContent">
           <div class="settings-section" data-settings-section="general" data-od-id="settings-general">
-            <div class="settings-section-head"><h4>General</h4><p>Interface and workspace defaults</p></div>
+
             <div class="settings-card"><div class="settings-control-row">
               <div class="settings-control-copy"><strong>First-run setup</strong><p>Configure providers, worker routing, Orchestrator, project and policy through one guided path.</p></div>
               <a class="text-button" href="/setup">Open setup</a>
             </div></div>
-            <div class="settings-card"><div class="settings-control-row">
-              <div class="settings-control-copy"><strong>Theme</strong><p>Light / dark treatment follows the approved design tokens.</p></div>
-              <div class="segmented" role="group" aria-label="Theme">
-                <button type="button" data-set-theme="light">Light</button>
-                <button type="button" data-set-theme="dark">Dark</button>
+            <div class="settings-card"><div class="settings-control-row appearance-row">
+              <div class="settings-control-copy"><strong>Appearance</strong><p>Choose a color theme and a light or dark appearance.</p></div>
+              <div class="appearance-options">
+                <div class="appearance-option"><span class="appearance-label">Color theme</span>
+                  <div class="segmented" role="group" aria-label="Color theme">
+                    <button type="button" data-set-palette="graphite-blue" aria-pressed="true">Graphite Blue</button>
+                    <button type="button" data-set-palette="neutral-ink" aria-pressed="false">Neutral Ink</button>
+                  </div>
+                </div>
+                <div class="appearance-option"><span class="appearance-label">Mode</span>
+                  <div class="segmented" role="group" aria-label="Theme">
+                    <button type="button" data-set-theme="light">Light</button>
+                    <button type="button" data-set-theme="dark">Dark</button>
+                  </div>
+                </div>
               </div>
             </div></div>
           </div>
           <div class="settings-section" data-settings-section="execution" data-od-id="settings-execution" hidden>
             <div class="settings-section-head"><h4>Execution</h4><p>Timeouts and project execution policy</p></div>
             <div class="settings-card"><div class="settings-control-row">
-              <div class="settings-control-copy"><strong>Project settings</strong><p>Gate scratch policy and run timeouts live with the project.</p></div>
-              <a class="text-button" href="/">Open dashboard</a>
+              <div class="settings-control-copy"><strong>Project settings</strong><p>Workflow mode, gate and review settings live with the project.</p></div>
+              <a class="text-button" href="/?from=setup#execution">Configure project policy</a>
             </div></div>
           </div>
           <div class="settings-section" data-settings-section="providers" data-od-id="settings-providers" hidden>
-            <div class="settings-section-head"><h4>Providers</h4><p>Account and API access live on the Model Access page.</p></div>
+            <div class="settings-section-head"><h4>Providers</h4><p>Account and API access live on the Providers page.</p></div>
             <div class="settings-card"><div class="settings-control-row">
-              <div class="settings-control-copy"><strong>Model Access</strong><p>Connect providers and refresh discovered models.</p></div>
-              <a class="text-button" href="/access">Open Model Access</a>
+              <div class="settings-control-copy"><strong>Providers</strong><p>Connect providers and refresh discovered models.</p></div>
+              <a class="text-button" href="/access">Open Providers</a>
             </div></div>
           </div>
           <div class="settings-section" data-settings-section="models" data-od-id="settings-models" hidden>
-            <div class="settings-section-head"><h4>Models</h4><p>Discovered models live on the Model Access page.</p></div>
+            <div class="settings-section-head"><h4>Models</h4><p>Discovered models live on the Providers page.</p></div>
             <div class="settings-card"><div class="settings-control-row">
               <div class="settings-control-copy"><strong>Model catalog</strong><p>Discovery evidence only; routing decides execution.</p></div>
-              <a class="text-button" href="/access">Open Model Access</a>
+              <a class="text-button" href="/access">Open Providers</a>
             </div></div>
           </div>
           <div class="settings-section" data-settings-section="routing" data-od-id="settings-routing" hidden>
-            <div class="settings-section-head"><h4>Routing</h4><p>Worker routing chains live on the Routing page.</p></div>
+            <div class="settings-section-head"><h4>Routing</h4><p>Orchestrator, reviewer, and worker tiers live on the Routing page.</p></div>
             <div class="settings-card"><div class="settings-control-row">
-              <div class="settings-control-copy"><strong>Worker routing</strong><p>Owner-selected candidate order per tier and context.</p></div>
+              <div class="settings-control-copy"><strong>Worker routing</strong><p>Choose role models and the fallback order for T1, T2, and T3.</p></div>
               <a class="text-button" href="/routing">Open Routing</a>
             </div></div>
           </div>
@@ -278,10 +331,11 @@
               <form method="post" action="/projects/select" class="so-form">
                 <div class="advanced-field">
                   <label for="settings-project-path">Active repository</label>
-                  <input type="text" id="settings-project-path" name="path" class="mono" value="{{ shell.active_project or '' }}" placeholder="/absolute/path/to/git/repository" required>
+                  <input type="text" id="settings-project-path" name="path" class="mono" value="{{ shell.active_project or '' }}" placeholder="/absolute/path/to/project" required>
                 </div>
                 <p class="so-help">Current: <span class="mono">{{ shell.active_project or "none" }}</span>{% if shell.repo_ready %} · ready{% elif shell.active_project %} · not ready{% endif %}</p>
-                <div><button type="submit" class="text-button primary-button">Select project</button></div>
+                <div><button type="button" class="text-button primary-button" data-project-browse>Select project</button> <button type="submit" class="text-button">Use path</button></div>
+                <p class="so-help" data-project-picker-status role="status" aria-live="polite"></p>
               </form>
             </div></div>
           </div>
@@ -291,7 +345,7 @@
   </div>
 
   {% if run_id is defined and run_id and can_cancel %}
-  <div class="cancel-layer" id="cancelRunLayer" data-od-id="cancel-run-dialog">
+  <div class="cancel-layer" id="cancelRunLayer" aria-hidden="true" data-od-id="cancel-run-dialog">
     <div class="cancel-dialog" role="dialog" aria-modal="true" aria-labelledby="cancelRunTitle" aria-describedby="cancelRunDescription">
       <div class="cancel-dialog-copy"><h2 id="cancelRunTitle">Cancel this run?</h2><p id="cancelRunDescription">Active execution will be stopped safely. Existing worktree, transcript, and run evidence will be preserved.</p></div>
       <div class="cancel-dialog-actions">
@@ -305,7 +359,27 @@
   {% endif %}
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script src="/static/js/console.js"></script>
+  <section id="quickAccessPanel" class="quick-access-panel shell-popover" role="dialog" aria-labelledby="quickAccessTitle" hidden>
+    <div class="popover-heading"><div><strong id="quickAccessTitle">Your workspace</strong><small class="muted">{{ shell.active_project_short or 'SaberOps' }}</small></div><button type="button" class="icon-button" data-close-popover aria-label="Close quick access">{{ ui.icon('close',16) }}</button></div>
+    <details id="quickUsageDetails"><summary>{{ ui.icon('providers') }}<span>Usage remaining</span><span aria-hidden="true">⌄</span></summary>
+      <div class="quick-usage-toolbar"><span id="quickUsageStatus" class="muted" role="status">Reported account limits</span><button type="button" class="text-button" id="quickUsageRefresh">Refresh</button></div>
+      <div id="quickUsageContent" aria-live="polite"><p class="so-help">Open to read your CLI account limits.</p></div>
+      <a class="popover-link" href="/quota">Full usage &amp; quota {{ ui.icon('arrow',16) }}</a>
+    </details>
+    <button type="button" class="popover-link" id="quickSettingsButton">{{ ui.icon('settings') }} Settings</button>
+    <a class="popover-link" href="/access">{{ ui.icon('providers') }} Providers</a>
+    <a class="popover-link" href="/routing">{{ ui.icon('runs') }} Routing</a>
+  </section>
+
+  <script src="/static/js/console.js?v=live-results-7"></script>
+  <script src="/static/js/quick-access.js?v=composer-files-1"></script>
+  <script src="/static/js/project-picker.js?v=setup-workflow-3"></script>
+  {% include "_chat_work_dialog.html" %}
+  <script src="/static/vendor/chat/marked.js"></script>
+  <script src="/static/vendor/chat/purify.js"></script>
+  <script src="/static/js/chat-shell.js?v=work-console-1"></script>
+  <script src="/static/js/chat-attachments.js?v=composer-files-1"></script>
+  <script src="/static/js/composer-controls.js?v=work-console-1"></script>
   {% block extra_scripts %}{% endblock %}
 </body>
 </html>

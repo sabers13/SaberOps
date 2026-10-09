@@ -198,11 +198,16 @@ class ClineAdapter(WorkerAdapter):
             "-m",
             request.model,
             "--json",
-            "--yolo",
             "-c",
             str(request.worktree_path),
             request.task,
         ]
+        if request.read_only:
+            cmd.extend(["--plan", "--auto-approve", "false"])
+        else:
+            cmd.append("--yolo")
+        if request.native_resume_id:
+            cmd.extend(["--id", request.native_resume_id])
 
         kwargs: dict[str, Any] = {
             "cwd": request.worktree_path,

@@ -984,6 +984,7 @@ def render_projection(
     validation_policy_marker: str,
     tool_contract: FrozenToolContract | None = None,
     project_scope_text: str | None = None,
+    run_verification_text: str | None = None,
 ) -> RenderResult:
     """Render a deterministic worker prompt for ``projection``.
 
@@ -1016,6 +1017,8 @@ def render_projection(
     stripped = body.rstrip()
     if project_scope_text is not None and "[PROJECT SCOPE]" not in stripped:
         stripped = stripped + "\n\n" + project_scope_text.rstrip()
+    if run_verification_text is not None:
+        stripped += "\n\n" + run_verification_text.rstrip()
     if validation_policy_marker in stripped:
         final = stripped
     else:

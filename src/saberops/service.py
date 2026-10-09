@@ -49,7 +49,6 @@ from saberops.observability import build_run_observability_snapshot
 from saberops.orchestrator import Orchestrator
 from saberops.project import owner_state_dir
 from saberops.review import ReviewEngine
-from saberops.routing import is_peak_hours
 from saberops.routing_config import load_effective_routing
 from saberops.tooling import ToolRegistry
 from saberops.workers.registry import AdapterRegistry
@@ -459,19 +458,14 @@ class OrchestratorService:
         return self.orchestrator.cleanup_run(run_id=run_id)
 
     def list_models(self) -> dict[str, Any]:
-        """Return model routing tiers, current schedule, and quota states."""
-        peak = is_peak_hours()
+        """Return the three model routing tiers and quota states."""
         quota_states = self.db.list_quota()
         snap = load_effective_routing()
         return {
-            "peak": peak,
             "quota_states": quota_states,
             "tier_1_chain": snap.t1_default,
-            "tier_2_training_allowed_chain": snap.t2_training_allowed,
-            "tier_2_off_peak_chain": snap.t2_training_denied_off_peak,
-            "tier_2_peak_chain": snap.t2_training_denied_peak,
-            "tier_3_off_peak_chain": snap.t3_off_peak,
-            "tier_3_peak_chain": snap.t3_peak,
+            "tier_2_chain": snap.chain_for("T2", True, False),
+            "tier_3_chain": snap.chain_for("T3", True, False),
             "routing_snapshot": snap,
         }
 

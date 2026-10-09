@@ -22,6 +22,7 @@ from saberops.model_access.connections import (
     TriState,
     resolve_access,
 )
+from saberops.model_access.native_auth import native_authentication
 from saberops.model_access.readiness import (
     ProviderReadinessEvidence,
     ReadinessEvidenceSource,
@@ -31,6 +32,7 @@ from saberops.model_access.readiness import (
 from saberops.models import ProviderReadiness
 
 DEFAULT_READINESS_MAX_AGE = timedelta(hours=24)
+AUTH_STATUS_TIMEOUT_SECONDS = 8
 
 
 @dataclass(frozen=True)
@@ -140,6 +142,11 @@ class ReadinessService:
 
     def refresh(self, connection: ProviderConnection) -> ProviderReadinessEvidence:
         """Execute at most the declared non-inference status command and persist its projection."""
+        if not connection.is_account_backed:
+            from saberops.model_access.api_verification import verify_api
+            evidence = verify_api(connection)
+            self.store.replace(evidence)
+            return evidence
         descriptor = next(
             (
                 item
@@ -159,7 +166,21 @@ class ReadinessService:
                 ),
                 observed_at=observed_at,
             )
-        elif descriptor is None or not descriptor.auth_status_argv:
+        elif descriptor is None or not descriptor.has_auth_probe:
+            # Installation/catalog listings cannot supersede actual execution
+            # evidence. Freshness is still enforced when it is consumed.
+            previous = self.store.load().try_get(connection.connection_id)
+            if (
+                connection.enabled
+                and connection.is_configured
+                and previous is not None
+                and previous.source in (ReadinessEvidenceSource.SUCCESSFUL_EXECUTION,
+                                        ReadinessEvidenceSource.MODEL_ACCESS_TEST)
+                and previous.state == ProviderReadiness.READY
+                and previous.provider == connection.provider
+                and previous.backend == connection.backend
+            ):
+                return previous
             evidence = derive_dispatch_readiness(
                 connection,
                 discovery=DiscoveryState(connection.connection_id, installed=TriState.TRUE),
@@ -168,24 +189,29 @@ class ReadinessService:
         else:
             authenticated: bool | None = None
             try:
-                result = self.run(
-                    [descriptor.executable, *descriptor.auth_status_argv],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                # A nonzero exit never proves positive readiness.  An
-                # explicit negative verdict in the output is still
-                # truthful evidence (the command ran far enough to
-                # report it); anything else stays UNKNOWN.
-                parsed = _status_authentication(
-                    connection.backend, json.loads(result.stdout)
-                )
-                if result.returncode == 0:
-                    authenticated = parsed
-                elif parsed is False:
-                    authenticated = False
-            except (OSError, ValueError, json.JSONDecodeError):
+                if descriptor.auth_status_protocol:
+                    authenticated = native_authentication(
+                        self.which(descriptor.executable) or descriptor.executable,
+                        descriptor.auth_status_protocol, timeout=AUTH_STATUS_TIMEOUT_SECONDS,
+                    )
+                else:
+                    result = self.run(
+                        [descriptor.executable, *descriptor.auth_status_argv],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        timeout=AUTH_STATUS_TIMEOUT_SECONDS,
+                    )
+                    # Nonzero never proves positive readiness; only an
+                    # explicit negative verdict can prove NOT_READY.
+                    parsed = _status_authentication(
+                        connection.backend, json.loads(result.stdout)
+                    )
+                    if result.returncode == 0:
+                        authenticated = parsed
+                    elif parsed is False:
+                        authenticated = False
+            except (OSError, ValueError, subprocess.SubprocessError):
                 authenticated = None
             state = TriState.UNKNOWN if authenticated is None else (
                 TriState.TRUE if authenticated else TriState.FALSE
@@ -214,6 +240,55 @@ class ReadinessService:
         self.store.replace(evidence)
         return evidence
 
+    def verify_model(self, connection: ProviderConnection, model: str) -> ProviderReadinessEvidence:
+        """Owner-requested first-use test. Callers validate the exact catalog model.
+
+        This is separate from refresh: startup and status checks never infer.
+        The persisted receipt carries the tested model; readiness remains the
+        existing connection-level transport observation, not entitlement for
+        every model in a multi-provider catalog.
+        """
+        from saberops.model_access.model_verification import verify_native_model
+        descriptor = next((d for d in ACCOUNT_BACKENDS
+                           if d.connection_id == connection.connection_id), None)
+        if self.registry.try_get(connection.connection_id) != connection:
+            raise ValueError("connection identity does not match the access registry")
+        if (descriptor is None or descriptor.provider != connection.provider
+                or descriptor.backend != connection.backend):
+            raise ValueError("connection does not match its declared native backend")
+        if not connection.enabled or not connection.is_configured:
+            return self.refresh(connection)
+        executable = self.which(descriptor.executable) if descriptor else None
+        reason = (verify_native_model(executable, connection.backend, model)
+                  if executable else "BACKEND_NOT_INSTALLED")
+        state = (ProviderReadiness.READY if reason == "READY" else
+                 ProviderReadiness.NOT_READY if reason == "BACKEND_NOT_INSTALLED" else
+                 ProviderReadiness.UNKNOWN)
+        evidence = ProviderReadinessEvidence(
+            connection.connection_id, connection.provider, connection.backend,
+            state, reason, self.now(), ReadinessEvidenceSource.MODEL_ACCESS_TEST, model,
+        )
+        # A model-specific failure doesn't disprove access through another
+        # previously successful model on the same connection.
+        previous = self.store.load().try_get(connection.connection_id)
+        if (state == ProviderReadiness.READY or previous is None
+                or previous.state != ProviderReadiness.READY
+                or reason == "BACKEND_NOT_INSTALLED"):
+            self.store.replace(evidence)
+        return evidence
+
+    def refresh_accounts_on_startup(self) -> None:
+        """Detect declared CLIs and run only their supported login-status commands.
+
+        Called explicitly by the interactive UI launcher, never by page rendering
+        or application construction. API connections are excluded; no model
+        prompt, credentials, owner bindings or routing configuration are used.
+        """
+        for descriptor in ACCOUNT_BACKENDS:
+            connection = self.registry.try_get(descriptor.connection_id)
+            if connection is not None:
+                self.refresh(connection)
+
     def admission_for(
         self, *, provider: str, profile_id: str = "", backend_ref: str = ""
     ) -> ReadinessAdmission:
@@ -240,6 +315,21 @@ class ReadinessService:
                     ProviderReadiness.UNKNOWN, "INSUFFICIENT_EVIDENCE", True
                 )
             connection = matches[0]
+        if not connection.is_account_backed:
+            from saberops.workers.direct_api import credential_value, supports_connection
+
+            if not supports_connection(connection):
+                return ReadinessAdmission(
+                    ProviderReadiness.NOT_READY, "PROTOCOL_UNSUPPORTED", False,
+                    connection.connection_id,
+                )
+            try:
+                credential_value(connection)
+            except ValueError:
+                return ReadinessAdmission(
+                    ProviderReadiness.NOT_READY, "CREDENTIAL_MISSING", False,
+                    connection.connection_id,
+                )
         descriptor = next(
             (
                 item

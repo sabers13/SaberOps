@@ -216,6 +216,8 @@ class AcceptEngine:
         run = self.db.get_run(run_id)
         if run is None:
             return False
+        if self._validation_policy(run_id)[1]:
+            return False
         decision_json = self.db.get_review_risk_decision_json(run_id)
         if decision_json is not None:
             from saberops.review_adaptive import (
@@ -227,6 +229,8 @@ class AcceptEngine:
             try:
                 decision = ReviewDecision.from_json(decision_json)
                 validate_project_review_policy_invariants(decision)
+                if decision.review_requirement_source.value == "OWNER_DISABLED":
+                    return True  # no matching frozen owner authorization
                 return bool(decision.independent_review_required)
             except ReviewPolicyError:
                 # Malformed persisted decision: conservative.
@@ -270,6 +274,22 @@ class AcceptEngine:
                 f"{type(value).__name__}"
             )
         return value
+
+    def _validation_policy(self, run_id: str) -> tuple[bool, bool]:
+        run = self.db.get_run(run_id)
+        if run is None or not run.config_json:
+            return True, False
+        try:
+            data = json.loads(run.config_json)
+            if not isinstance(data, dict):
+                raise ValueError("config must be an object")
+            gate = data.get("gate_enabled", True)
+            review = data.get("review_disabled", False)
+            if type(gate) is not bool or type(review) is not bool:
+                raise ValueError("validation policy must use booleans")
+            return gate, review
+        except (ValueError, TypeError) as exc:
+            raise RuntimeError(f"Invalid frozen validation policy: {exc}") from exc
 
     @staticmethod
     def _gate_evidence_dir(target_repo: Path) -> Path:
@@ -1005,8 +1025,12 @@ class AcceptEngine:
         checks.append(
             _pass(
                 "deterministic_gate",
-                "Deterministic gate passed",
-                f"Attempt #{final_attempt.attempt_number} succeeded after its gate",
+                "Gate skipped by project policy"
+                if not self._validation_policy(run_id)[0]
+                else "Deterministic gate passed",
+                "Owner disabled the gate for this run"
+                if not self._validation_policy(run_id)[0]
+                else f"Attempt #{final_attempt.attempt_number} succeeded after its gate",
             )
         )
 
@@ -1342,36 +1366,47 @@ class AcceptEngine:
         #
         # There is no ordinary Exception path around it.  (BaseException,
         # KeyboardInterrupt and SystemExit are deliberately NOT caught.)
-        try:
-            outcome = self._execute_gate_phase(
-                run_id,
-                runner,
-                runner_request,
-                post_gate_sha_resolver=lambda: (
-                    GitManager.get_head_commit(target_repo),
-                    GitManager.is_clean(target_repo),
-                ),
-            )
-        except Exception as exc:
-            outcome = _GatePhaseFailure(
-                classification=UNEXPECTED_GATE_FAILURE,
-                unexpected_error=exc,
-            )
-        if isinstance(outcome, _GatePhaseFailure):
-            self._fail_closed_after_cas(
-                run_id,
-                target_repo,
-                run.base_commit,
-                candidate_sha=candidate_sha,
-                gate_command=run.gate_command,
-                failure=outcome,
-            )
-        gate_receipt = outcome
+        gate_enabled = self._validation_policy(run_id)[0]
+        gate_receipt: GateReceipt | None = None
+        if gate_enabled:
+            try:
+                outcome = self._execute_gate_phase(
+                    run_id,
+                    runner,
+                    runner_request,
+                    post_gate_sha_resolver=lambda: (
+                        GitManager.get_head_commit(target_repo),
+                        GitManager.is_clean(target_repo),
+                    ),
+                )
+            except Exception as exc:
+                outcome = _GatePhaseFailure(
+                    classification=UNEXPECTED_GATE_FAILURE,
+                    unexpected_error=exc,
+                )
+            if isinstance(outcome, _GatePhaseFailure):
+                self._fail_closed_after_cas(
+                    run_id,
+                    target_repo,
+                    run.base_commit,
+                    candidate_sha=candidate_sha,
+                    gate_command=run.gate_command,
+                    failure=outcome,
+                )
+            gate_receipt = outcome
+
+        else:
+            self.db.record_event(run_id, "post_integration_gate_skipped", payload={
+                "candidate_sha": new_sha, "reason": "owner-disabled"})
 
         final_branch = GitManager.get_current_branch(target_repo) or "HEAD"
         summary = (
             f"Candidate commit {new_sha[:8]} successfully integrated into '{final_branch}'. "
-            f"Post-integration gate '{run.gate_command}' PASSED."
+            + (
+                f"Post-integration gate '{run.gate_command}' PASSED."
+                if gate_enabled
+                else "Gate skipped by project policy."
+            )
         )
 
         self.db.record_event(
@@ -1382,7 +1417,8 @@ class AcceptEngine:
                 "final_branch": final_branch,
                 "gate_command": run.gate_command,
                 "provenance": provenance.as_dict(),
-                "gate_receipt": gate_receipt.as_dict(),
+                "gate_receipt": gate_receipt.as_dict() if gate_receipt is not None else None,
+                "gate_skipped": not gate_enabled,
             },
         )
 
@@ -1393,5 +1429,5 @@ class AcceptEngine:
             final_branch=final_branch,
             final_sha=new_sha,
             summary=summary,
-            gate_passed=True,
+            gate_passed=gate_enabled,
         )

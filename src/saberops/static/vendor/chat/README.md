@@ -1,0 +1,1 @@
+Marked 17.0.1 (MIT) and DOMPurify 3.3.1 (Apache-2.0/MPL-2.0). Original assets from npm packages; licenses alongside. Markdown is sanitized with a restricted tag/attribute list and remote images disabled.

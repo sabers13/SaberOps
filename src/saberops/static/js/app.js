@@ -14,11 +14,10 @@
     if (!header || !timerEl) return;
 
     var createdAtStr = header.getAttribute("data-created-at");
-    var completedAtStr = header.getAttribute("data-completed-at");
-    var status = header.getAttribute("data-run-status");
     if (!createdAtStr) return;
 
     var startTime = new Date(createdAtStr).getTime();
+    var interval;
 
     function formatDuration(ms) {
       if (isNaN(ms) || ms < 0) return "00:00";
@@ -29,6 +28,8 @@
     }
 
     function update() {
+      var status = header.getAttribute("data-run-status");
+      var completedAtStr = header.getAttribute("data-completed-at");
       if (status === "RUNNING" || status === "PENDING") {
         var now = Date.now();
         timerEl.textContent = "Elapsed: " + formatDuration(now - startTime);
@@ -36,20 +37,12 @@
         var endTime = new Date(completedAtStr).getTime();
         timerEl.textContent = "Duration: " + formatDuration(endTime - startTime);
       }
+      if (status !== "RUNNING" && status !== "PENDING") clearInterval(interval);
     }
 
     update();
-    if (status === "RUNNING" || status === "PENDING") {
-      var interval = setInterval(function () {
-        var currentStatus = header.getAttribute("data-run-status");
-        if (currentStatus !== "RUNNING" && currentStatus !== "PENDING") {
-          clearInterval(interval);
-          update();
-        } else {
-          update();
-        }
-      }, 1000);
-    }
+    document.addEventListener("saberops:run-refreshed", update);
+    if (/^(RUNNING|PENDING)$/.test(header.getAttribute("data-run-status"))) interval = setInterval(update, 1000);
   }
 
   // --- SSE Live Streaming ---
@@ -58,7 +51,6 @@
     if (!header) return;
 
     var runId = header.getAttribute("data-run-id");
-    var status = header.getAttribute("data-run-status");
     var eventsLog = document.getElementById("events-log");
     if (!runId || !eventsLog) return;
 
@@ -72,39 +64,109 @@
 
     var eventSource = new EventSource("/runs/" + encodeURIComponent(runId) + "/events/stream?after=" + highestId);
 
-    function refreshPlanProjection() {
-      var pane = document.getElementById("plan-pane");
-      if (!pane || !window.fetch) return;
-      window.fetch("/runs/" + encodeURIComponent(runId) + "/plan", { credentials: "same-origin" })
-        .then(function (response) { return response.ok ? response.json() : null; })
-        .then(function (projection) {
-          if (!projection || !projection.plan) return;
-          var meta = pane.querySelector(".compact-plan-meta");
-          if (meta) {
-            meta.innerHTML = "<dt>Worker</dt><dd></dd><dt>Health</dt><dd></dd>" +
-              "<dt>Supervisor</dt><dd></dd><dt>Review</dt><dd></dd>";
-            var cells = meta.querySelectorAll("dd");
-            cells[0].textContent =
-              (projection.current_provider || "UNKNOWN") +
-              " / " +
-              (projection.current_model || "UNKNOWN");
-            if (cells[1]) cells[1].textContent = projection.health || "UNKNOWN";
-            if (cells[2]) cells[2].textContent = projection.supervisor_state || "UNKNOWN";
-            if (cells[3]) cells[3].textContent = projection.review_state || "UNKNOWN";
-          }
-          var list = pane.querySelector(".plan-step-list");
-          if (list) {
-            list.innerHTML = "";
-            projection.steps.forEach(function (step) {
-              var item = document.createElement("li");
-              item.className = "plan-step plan-" + String(step.status).toLowerCase();
-              item.textContent = step.status + " " + step.title;
-              list.appendChild(item);
-            });
-          }
-        })
-        .catch(function () { /* transient SSE/API reconnect failure */ });
+    // Read the same escaped, server-rendered evidence as a fresh page.
+    // Only marked regions are replaced: the composer, confirmation forms,
+    // EventSource and PTY remain mounted. Coalesce event bursts and serialize
+    // reads so an older response cannot overwrite a newer snapshot.
+    var refreshTimer;
+    var refreshPending = false;
+    var refreshRunning = false;
+    function queueDetailsRefresh() {
+      if (!window.fetch) return;
+      refreshPending = true;
+      if (refreshRunning || refreshTimer) return;
+      refreshTimer = window.setTimeout(refreshDetails, 250);
     }
+    function refreshDetails() {
+      refreshTimer = null;
+      refreshPending = false;
+      refreshRunning = true;
+      window.fetch("/runs/" + encodeURIComponent(runId) + window.location.search, { credentials: "same-origin", cache: "no-store" })
+        .then(function (response) {
+          if (!response.ok) throw new Error("Run details unavailable");
+          return response.text();
+        })
+        .then(function (html) {
+          if (refreshPending) return; // An event arrived after this read began; read again.
+          var snapshot = new DOMParser().parseFromString(html, "text/html");
+          var nextHeader = snapshot.getElementById("run-header");
+          if (!nextHeader || nextHeader.getAttribute("data-run-id") !== runId) throw new Error("Invalid run details");
+          var conversation = document.getElementById("conversation");
+          var scrollTop = conversation ? conversation.scrollTop : 0;
+          var activeFilter = document.querySelector(".worker-mode-tab.active[data-worker-filter]");
+          var wanted = activeFilter && activeFilter.getAttribute("data-worker-filter");
+          document.querySelectorAll("[data-run-refresh]").forEach(function (region) {
+            // Live agent widgets own their state and event handlers via the session poller.
+            if (region.hasAttribute("data-agent-live")) return;
+            var key = region.getAttribute("data-run-refresh");
+            var next = snapshot.querySelector('[data-run-refresh="' + key + '"]');
+            if (!next) return;
+            var opened = Array.from(region.querySelectorAll("details")).map(function (detail) { return detail.open; });
+            var fileExpansions = {};
+            region.querySelectorAll("details[data-diff-path], details[data-diff-total]").forEach(function (detail) { fileExpansions[detail.hasAttribute("data-diff-total") ? "total:" : "file:" + detail.getAttribute("data-diff-path")] = detail.open; });
+            var expansion = {};
+            region.querySelectorAll(".worker-card[data-attempt]").forEach(function (card) {
+              expansion[card.getAttribute("data-attempt")] = card.classList.contains("open");
+            });
+            var focused = region.contains(document.activeElement) ? document.activeElement : null;
+            var focusedCard = focused && focused.closest(".worker-card[data-attempt]");
+            var focusedAttempt = focusedCard && focusedCard.getAttribute("data-attempt");
+            region.replaceChildren.apply(region, Array.from(next.childNodes).map(function (node) { return document.importNode(node, true); }));
+            region.querySelectorAll("details").forEach(function (detail, index) { if (index < opened.length) detail.open = opened[index]; });
+            region.querySelectorAll("details[data-diff-path], details[data-diff-total]").forEach(function (detail) {
+              var path = detail.hasAttribute("data-diff-total") ? "total:" : "file:" + detail.getAttribute("data-diff-path");
+              if (Object.prototype.hasOwnProperty.call(fileExpansions, path)) detail.open = fileExpansions[path];
+            });
+            region.querySelectorAll(".worker-card[data-attempt]").forEach(function (card) {
+              var attempt = card.getAttribute("data-attempt");
+              if (Object.prototype.hasOwnProperty.call(expansion, attempt)) card.classList.toggle("open", expansion[attempt]);
+            });
+            if (window.SaberOpsConsole) window.SaberOpsConsole.enhanceRunContent(region);
+            if (focusedAttempt) {
+              var head = region.querySelector('[data-attempt="' + focusedAttempt + '"] > .worker-card-head');
+              if (head) head.focus({ preventScroll: true });
+            }
+          });
+          if (wanted) {
+            var filter = document.querySelector('[data-worker-filter="' + wanted + '"]');
+            if (filter) filter.click();
+          }
+          // Named SSE subscriptions cover lifecycle updates. Merge other
+          // persisted events on the same read, retaining the mounted log and
+          // any newer streamed rows beyond the server's display bound.
+          snapshot.querySelectorAll("#events-log .event-row[data-event-id]").forEach(function (row) {
+            var id = parseInt(row.getAttribute("data-event-id"), 10);
+            if (!eventsLog.querySelector('[data-event-id="' + id + '"]')) {
+              var later = Array.from(eventsLog.querySelectorAll(".event-row[data-event-id]")).find(function (existing) {
+                return parseInt(existing.getAttribute("data-event-id"), 10) > id;
+              });
+              eventsLog.insertBefore(document.importNode(row, true), later || null);
+            }
+            highestId = Math.max(highestId, id);
+          });
+          ["data-run-status", "data-completed-at"].forEach(function (name) { header.setAttribute(name, nextHeader.getAttribute(name) || ""); });
+          var badge = document.getElementById("run-status-badge");
+          var nextBadge = snapshot.getElementById("run-status-badge");
+          if (badge && nextBadge) { badge.textContent = nextBadge.textContent; badge.className = nextBadge.className; }
+          if (conversation) conversation.scrollTop = scrollTop;
+          var feedback = document.getElementById("run-refresh-status");
+          if (feedback) feedback.hidden = true;
+          document.dispatchEvent(new CustomEvent("saberops:run-refreshed"));
+          refreshActionState();
+        })
+        .catch(function () {
+          var feedback = document.getElementById("run-refresh-status");
+          if (feedback) feedback.hidden = false;
+        })
+        .finally(function () {
+          refreshRunning = false;
+          if (refreshPending) queueDetailsRefresh();
+        });
+    }
+    document.addEventListener("saberops:run-tab", queueDetailsRefresh);
+    document.addEventListener("visibilitychange", function () { if (!document.hidden) queueDetailsRefresh(); });
+    var retryRefresh = document.getElementById("runRefreshRetry");
+    if (retryRefresh) retryRefresh.addEventListener("click", queueDetailsRefresh);
 
     function appendEvent(evData) {
       if (!evData || !evData.id) return;
@@ -142,7 +204,7 @@
 
       eventsLog.appendChild(row);
       eventsLog.scrollTop = eventsLog.scrollHeight;
-      refreshPlanProjection();
+      queueDetailsRefresh();
 
       // React to status changes: patch badges immediately, then refresh
       // every action control from authoritative server state so Accept /
@@ -172,6 +234,7 @@
         if (newStatus === "COMPLETED" || newStatus === "FAILED") {
           header.setAttribute("data-completed-at", evData.created_at || new Date().toISOString());
         }
+        document.dispatchEvent(new CustomEvent("saberops:run-refreshed"));
         refreshActionState();
       }
     }
@@ -195,16 +258,23 @@
             accept: !!actions.can_accept
           };
           Object.keys(flags).forEach(function (name) {
-            var scope = document.querySelector('[data-action="' + name + '"]');
-            if (!scope) return;
-            var button = scope.tagName === "BUTTON" ? scope : scope.querySelector("button");
-            if (!button) return;
-            if (flags[name]) {
-              button.removeAttribute("disabled");
-            } else {
-              button.setAttribute("disabled", "disabled");
-            }
+            document.querySelectorAll('[data-action="' + name + '"]').forEach(function (scope) {
+              var button = scope.tagName === "BUTTON" ? scope : scope.querySelector("button");
+              if (!button) return;
+              if (flags[name]) {
+                button.removeAttribute("disabled");
+              } else {
+                button.setAttribute("disabled", "disabled");
+              }
+            });
           });
+          var stopForm = document.getElementById("runComposerStopForm");
+          var newTask = document.getElementById("runComposerNewTask");
+          var composerStatus = document.getElementById("runComposerStatus");
+          if (stopForm) stopForm.hidden = !actions.can_cancel;
+          if (newTask) newTask.hidden = !!actions.can_cancel;
+          if (composerStatus) composerStatus.textContent = actions.can_cancel ? "Task is running" : "Run finished";
+          document.dispatchEvent(new CustomEvent("saberops:run-action-state", {detail: {run_id:runId, can_cancel:!!actions.can_cancel}}));
           var checklist = document.getElementById("accept-checklist");
           if (checklist && Array.isArray(actions.accept_checklist)) {
             checklist.setAttribute("data-accept-eligible", actions.can_accept ? "true" : "false");
@@ -246,7 +316,7 @@
     // explicitly so post-run Review/Accept work on an already-terminal
     // run reaches this same EventSource (no second polling loop).
     var eventTypes = [
-      "run_created", "run_started", "attempt_started", "worker_completed",
+      "run_created", "run_started", "attempt_started", "worker_started", "worker_completed",
       "gate_started", "gate_completed", "attempt_succeeded", "attempt_failed_no_changes",
       "gate_failed", "run_completed", "run_failed", "run_exception",
       "review_started", "review_completed", "review_failed", "run_accepted",
@@ -267,11 +337,12 @@
 
     eventSource.onopen = function () {
       reportConnection("live");
+      queueDetailsRefresh();
     };
 
     eventSource.onerror = function () {
       var currentStatus = header.getAttribute("data-run-status");
-      if (currentStatus === "COMPLETED" || currentStatus === "FAILED") {
+      if (currentStatus === "COMPLETED" || currentStatus === "FAILED" || currentStatus === "ORPHANED") {
         // R3-E2.1: a terminal run may still have an active post-run
         // owner action (Review/Accept). Keep the stream usable in that
         // case; close only once no owner action remains active. The

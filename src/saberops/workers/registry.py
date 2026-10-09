@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from saberops.workers.antigravity import AntigravityAdapter
 from saberops.workers.base import WorkerAdapter
+from saberops.workers.claude import ClaudeCodeAdapter
 from saberops.workers.cline import ClineAdapter
 from saberops.workers.codex import CodexAdapter
 from saberops.workers.copilot import CopilotAdapter
@@ -25,7 +26,20 @@ class AdapterRegistry:
 
     def get(self, provider: str) -> WorkerAdapter | None:
         """Get the adapter for a given provider name, or None if not registered."""
-        return self._adapters.get(provider.lower())
+        existing = self._adapters.get(provider.lower())
+        if existing is not None:
+            return existing
+        from saberops.workers.direct_api import (
+            DirectAPIAdapter,
+            api_connections,
+            supports_connection,
+        )
+
+        if any(
+            c.provider == provider.lower() and supports_connection(c) for c in api_connections()
+        ):
+            return DirectAPIAdapter(provider.lower())
+        return None
 
     def is_available(self, provider: str) -> bool:
         """Check if adapter for provider is registered and locally available."""
@@ -55,5 +69,6 @@ class AdapterRegistry:
                 AntigravityAdapter(),
                 ClineAdapter(),
                 CopilotAdapter(),
+                ClaudeCodeAdapter(),
             ]
         )

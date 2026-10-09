@@ -503,3 +503,59 @@ def test_worker_success_and_passing_gate_reaches_completed_state(tmp_path: Path)
     )
     assert result.passed is True
     assert result.status == RunStatus.COMPLETED
+
+
+@pytest.mark.parametrize("first_status", [AttemptStatus.FAILED, AttemptStatus.TIMEOUT])
+def test_orchestrator_chosen_chain_falls_back_only_on_failure(first_status: AttemptStatus) -> None:
+    from dataclasses import replace
+
+    class Scripted(_FakeAdapter):
+        def run(self, request: WorkerRequest) -> WorkerResult:
+            result = super().run(request)
+            assert request.read_only is True
+            if self.call_count == 1:
+                return replace(result, status=first_status, error="provider unavailable")
+            return result
+
+    adapter = Scripted(provider="opencode")
+    bindings = tuple(_binding(
+        binding_id=bid, provider="opencode", model="opencode/gemini-3.5-flash-lite",
+        profile_id=f"profile-{bid}", quota_pool_id=f"pool-{bid}",
+    ) for bid in ("first", "second", "unpicked"))
+    owner = OwnerBindings(registry=build_binding_registry(
+        bindings=bindings,
+        profiles=tuple(_profile(f"profile-{b.binding_id}", "opencode") for b in bindings),
+        pools=tuple(_pool(f"pool-{b.binding_id}", "opencode") for b in bindings),
+    )).with_role_order("orchestrator", ("first", "second"))
+    consumer = OrchestratorModelConsumer(db=None, registry=AdapterRegistry([adapter]),
+                                        owner_bindings=owner)
+    result = consumer.invoke(OrchestratorModelRequest(user_prompt="test", timeout_seconds=5))
+    assert result.status == "SUCCESS"
+    assert result.binding_id == "second"
+    assert [env["ORCH_EXECUTION_BINDING_ID"] for env in adapter.observed_envs] == [
+        "first", "second",
+    ]
+    assert result.profile_id == "profile-second"
+
+
+def test_orchestrator_chain_never_enrolls_an_unpicked_binding() -> None:
+    from dataclasses import replace
+
+    class AlwaysFails(_FakeAdapter):
+        def run(self, request: WorkerRequest) -> WorkerResult:
+            return replace(super().run(request), status=AttemptStatus.FAILED)
+
+    adapter = AlwaysFails(provider="opencode")
+    bindings = tuple(_binding(
+        binding_id=bid, provider="opencode", model="opencode/gemini-3.5-flash-lite",
+        profile_id="profile", quota_pool_id="pool",
+    ) for bid in ("chosen", "unpicked"))
+    owner = OwnerBindings(registry=build_binding_registry(
+        bindings=bindings, profiles=(_profile("profile", "opencode"),),
+        pools=(_pool("pool", "opencode"),),
+    )).with_role_order("orchestrator", ("missing", "chosen"))
+    result = OrchestratorModelConsumer(db=None, registry=AdapterRegistry([adapter]),
+        owner_bindings=owner).invoke(OrchestratorModelRequest(user_prompt="test"))
+    assert result.status == "FAILED"
+    assert adapter.call_count == 1
+    assert result.binding_id == "chosen"

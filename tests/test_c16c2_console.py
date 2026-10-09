@@ -111,7 +111,7 @@ def test_c16c2_dashboard_renders_approved_shell(
     assert 'data-od-id="chat-composer"' in text
     assert 'data-od-id="settings-modal"' in text
     assert 'data-od-id="command-palette"' in text
-    assert "SABER" in text
+    assert "SaberOps workspace" in text
     # Prototype-only fakes are not carried over.
     assert "scenario-switcher" not in text
     assert "setScenario" not in text
@@ -124,7 +124,7 @@ def test_c16c2_dashboard_renders_approved_shell(
     # Owner capabilities remain reachable.
     assert "/access" in text
     assert "/routing" in text
-    assert "/orchestrator" in text
+    assert "/routing?role=orchestrator" in text
     assert "/quota" in text
     # R0-A: the legacy Manager capability is gone from owner navigation.
     assert "/manager" not in text
@@ -141,24 +141,14 @@ def test_c16c2_start_run_form_posts_real_fields(
     """The composer form carries the real backend field names."""
     client = _client(tmp_path)
     text = client.get("/").text
-    assert 'action="/runs"' in text
-    for field in (
-        'name="task"',
-        'name="routing_mode"',
-        'name="manual_tier"',
-        'name="max_auto_tier"',
-        'name="training_allowed"',
-        'name="provider_override"',
-        'name="model_override"',
-        'name="gate_command"',
-        'name="worker_timeout"',
-        'name="gate_timeout"',
-        'name="review_timeout"',
-        'name="review_enabled"',
-        'name="review_mode"',
-        'name="review_limit"',
-    ):
+    assert 'action="/chats"' in text
+    for field in ('name="task"', 'name="training_allowed"'):
         assert field in text, field
+    for removed in ("review_mode", "review_limit", "manual_tier", "max_auto_tier",
+                    "provider_override", "model_override",
+                    "worker_timeout", "gate_timeout", "review_timeout", "gate_command",
+                    "review_enabled", "routing_mode"):
+        assert f'name="{removed}"' not in text
     # No prototype-only knobs with no backend capability.
     assert 'id="runPriority"' not in text
     assert 'id="maxAttempts"' not in text
@@ -192,6 +182,9 @@ def test_c16c2_run_detail_renders_inspector_and_actions(
     _seed_run(tmp_path, "run_c16c2_done", RunStatus.COMPLETED)
     live = client.get("/runs/run_c16c2_live")
     assert live.status_code == 200
+    assert 'data-od-id="run-detail-back" href="/inbox"' in live.text
+    from_runs = client.get("/runs/run_c16c2_live?from=runs")
+    assert 'data-od-id="run-detail-back" href="/?pane=runs"' in from_runs.text
     assert 'class="workspace has-tabs"' in live.text
     for tab in (
         "chat",
@@ -212,12 +205,17 @@ def test_c16c2_run_detail_renders_inspector_and_actions(
     assert "/runs/run_c16c2_live/events/stream" in live.text
     assert "/runs/run_c16c2_live/report" in live.text
     assert 'id="terminal"' in live.text
+    assert 'id="runComposerStopButton"' in live.text
+    assert 'aria-label="Stop task"' in live.text
+    assert 'id="runComposerStopForm" data-action="cancel">' in live.text
     # A completed run exposes retry/review/cleanup.
     done = client.get("/runs/run_c16c2_done")
     assert done.status_code == 200
     assert 'action="/runs/run_c16c2_done/retry"' in done.text
     assert 'action="/runs/run_c16c2_done/review"' in done.text
     assert 'action="/runs/run_c16c2_done/cleanup"' in done.text
+    assert 'id="runComposerStopForm" data-action="cancel" hidden' in done.text
+    assert 'id="runComposerNewTask" aria-label="New task" title="New task">' in done.text
     # No fake prototype controls on either.
     assert "resolveDecision" not in live.text
     assert "resolveDecision" not in done.text
@@ -268,9 +266,10 @@ def test_c16c2_owner_pages_keep_forms(
 
     routing = client.get("/routing")
     assert routing.status_code == 200
-    assert "Current chains" in routing.text
+    assert 'id="routing-T1"' in routing.text
     assert 'action="/routing/remove"' in routing.text
-    assert "Move up" in routing.text
+    assert "data-routing-order" in routing.text
+    assert "Move up" not in routing.text
 
     orch = client.get("/orchestrator")
     assert orch.status_code == 200
@@ -293,6 +292,15 @@ def test_c16c2_settings_modal_marks_unavailable_sections(
         "repositories",
     ):
         assert f'data-settings-section="{section}"' in text, section
+    # Color palette and light/dark mode can be selected independently.
+    assert 'aria-label="Color theme"' in text
+    assert 'data-set-palette="graphite-blue"' in text
+    assert 'data-set-palette="neutral-ink"' in text
+    assert text.count('data-set-palette=') == 2
+    assert 'data-set-theme="light"' in text
+    assert 'data-set-theme="dark"' in text
+    assert 'data-set-palette="moss"' not in text
+    assert 'data-set-palette="midnight-blue"' not in text
     # R0-A: placeholder Notifications/Retention surfaces are gone.
     assert 'data-settings-section="notifications"' not in text
     assert 'data-settings-section="retention"' not in text
@@ -306,6 +314,7 @@ def test_c16c2_console_assets_are_served(
     for asset in (
         "/static/css/console-v2.css",
         "/static/css/saberops-console.css",
+        "/static/css/workspace.css",
         "/static/js/console.js",
         "/static/js/app.js",
         "/static/js/terminal.js",
@@ -313,3 +322,35 @@ def test_c16c2_console_assets_are_served(
         response = client.get(asset)
         assert response.status_code == 200, asset
         assert len(response.text) > 100, asset
+
+
+def test_workspace_runs_view_lists_recorded_tasks_without_composer(
+    isolated_xdg: None, tmp_path: Path
+) -> None:
+    _seed_run(tmp_path)
+    client = _client(tmp_path)
+    history = client.get("/?pane=runs")
+    assert history.status_code == 200
+    assert "Run history" in history.text
+    assert 'class="run-list-item" href="/runs/run_c16c2?from=runs"' in history.text
+    assert "console integration probe" in history.text
+    assert 'data-od-id="chat-composer"' not in history.text
+    assert 'data-has-inspector="false"' in history.text
+    workspace = client.get("/")
+    assert 'data-od-id="chat-composer"' in workspace.text
+    assert 'class="run-list-item" href="/runs/run_c16c2?from=dashboard"' in workspace.text
+
+
+def test_contextual_inspector_and_missing_run_have_correct_layout(
+    isolated_xdg: None, tmp_path: Path
+) -> None:
+    _seed_run(tmp_path)
+    client = _client(tmp_path)
+    run = client.get("/runs/run_c16c2")
+    assert 'data-has-inspector="true"' in run.text
+    assert 'role="tablist"' in run.text
+    missing = client.get("/runs/no-such-run")
+    assert missing.status_code == 404
+    assert 'class="workspace has-tabs"' not in missing.text
+    assert 'data-has-inspector="false"' in missing.text
+    assert "Run not found" in missing.text

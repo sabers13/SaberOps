@@ -3,6 +3,7 @@
 {% block title %}Reviewer role{% endblock %}
 {% block conversation_title %}Reviewer role{% endblock %}
 {% block run_meta %}Model used for independent SaberOps code review{% endblock %}
+{% block page_return %}<nav class="page-return" aria-label="Setup navigation"><a href="/setup">← Setup</a></nav>{% endblock %}
 
 {% block workspace %}
 <div class="date-rule">Reviewer role</div>
@@ -14,13 +15,7 @@
 <p class="so-error">{{ error }}</p>
 {% endif %}
 
-<article class="message">
-  <div class="avatar assistant" aria-hidden="true">S</div>
-  <div>
-    <div class="message-head"><strong>SaberOps</strong></div>
-    <div class="message-body"><p>Only verified available models are listed. The saved choice names one specific reviewer model setup, not a free-floating provider/model setting, and it does not change worker routing order. Until a reviewer is selected, the existing reviewer policy is used.</p></div>
-  </div>
-</article>
+<div class="page-guidance"><p>Only verified available models are listed. The saved choice names one specific reviewer model setup, not a free-floating provider/model setting, and it does not change worker routing order. Until a reviewer is selected, the existing reviewer policy is used.</p></div>
 
 <div class="settings-section">
   <div class="settings-section-head"><h4>Current selection</h4><p>The saved exact reviewer model setup used for independent review.</p></div>

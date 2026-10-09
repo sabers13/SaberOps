@@ -72,9 +72,6 @@ from saberops.project import (
     owner_state_dir,
 )
 from saberops.review_adaptive import ReviewPolicyError
-from saberops.routing import (
-    is_peak_hours,
-)
 from saberops.routing_config import (
     RoutingConfigError,
     get_user_routing_path,
@@ -757,13 +754,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=None,
         dest="training_allowed",
-        help="Permit models that may use task data for training (explicit per-run opt-in).",
+        help=argparse.SUPPRESS,
     )
     training_group.add_argument(
         "--training-denied",
         action="store_false",
         dest="training_allowed",
-        help="Deny training-eligible models (explicit per-run opt-out).",
+        help=argparse.SUPPRESS,
     )
     # R2-A: no implicit default.  ``None`` means "follow the persisted
     # project data policy" (unset project policy resolves conservatively
@@ -1502,7 +1499,6 @@ def handle_run(args: argparse.Namespace) -> int:
             print(f"[*] Task              : {config.task}")
             print(f"[*] Gate command      : {config.gate_command}")
             print(f"[*] Routing           : {config.routing_mode} ({config.initial_tier.value})")
-            print(f"[*] Training allowed  : {config.training_allowed}")
             print(f"[*] Review policy     : {config.review_policy_mode.value}")
             print(f"[*] Gate storage      : {config.gate_scratch_mode.value}")
             print(
@@ -1605,7 +1601,6 @@ def handle_run(args: argparse.Namespace) -> int:
     print(f"[*] Task              : {config.task}")
     print(f"[*] Gate command      : {config.gate_command}")
     print(f"[*] Routing           : {config.routing_mode} ({config.initial_tier.value})")
-    print(f"[*] Training allowed  : {config.training_allowed}")
     print(f"[*] Review policy     : {config.review_policy_mode.value}")
     print(f"[*] Gate storage      : {config.gate_scratch_mode.value}")
     print(f"[*] Target branch     : {config.accept_target_branch or '(unknown legacy)' }")
@@ -2450,46 +2445,19 @@ def handle_models(
     if db is None:
         db = Database(getattr(args, "db", None))
     service = OrchestratorService(db=db, registry=registry)
-    peak = is_peak_hours()
     try:
         snap = load_effective_routing()
     except RoutingConfigError as exc:
         print(f"[!] Routing config invalid: {exc}", file=sys.stderr)
         return 1
     print("Configured Multi-Provider Execution Tiers & Routing Chains:\n")
-    print(f"Current Schedule State: {'PEAK' if peak else 'OFF-PEAK'}")
     print(f"Routing Source: {snap.source} {snap.source_path or '(packaged default)'}")
     print(f"Content Hash: {snap.content_hash}\n")
-
-    print("T1 (Standard / Fast Tier):")
-    for c in snap.t1_default:
-        avail = "✓ available" if registry.is_available(c.provider) else "✗ unavailable"
-        print(f"  → [{c.provider}] {c.model} ({avail})")
-
-    print("\nT2 (Advanced Tier - Training Denied):")
-    print("  [OFF-PEAK ORDER]:")
-    for c in snap.t2_training_denied_off_peak:
-        avail = "✓ available" if registry.is_available(c.provider) else "✗ unavailable"
-        print(f"    → [{c.provider}] {c.model} ({avail})")
-    print("  [PEAK ORDER]:")
-    for c in snap.t2_training_denied_peak:
-        avail = "✓ available" if registry.is_available(c.provider) else "✗ unavailable"
-        print(f"    → [{c.provider}] {c.model} ({avail})")
-
-    print("\nT2 (Advanced Tier - Training Allowed):")
-    for c in snap.t2_training_allowed:
-        avail = "✓ available" if registry.is_available(c.provider) else "✗ unavailable"
-        print(f"  → [{c.provider}] {c.model} ({avail})")
-
-    print("\nT3 (High Performance Tier):")
-    print("  [OFF-PEAK ORDER]:")
-    for c in snap.t3_off_peak:
-        avail = "✓ available" if registry.is_available(c.provider) else "✗ unavailable"
-        print(f"    → [{c.provider}] {c.model} ({avail})")
-    print("  [PEAK ORDER]:")
-    for c in snap.t3_peak:
-        avail = "✓ available" if registry.is_available(c.provider) else "✗ unavailable"
-        print(f"    → [{c.provider}] {c.model} ({avail})")
+    for tier in ("T1", "T2", "T3"):
+        print(f"{tier}:")
+        for c in snap.chain_for(tier, True, False):
+            avail = "✓ available" if registry.is_available(c.provider) else "✗ unavailable"
+            print(f"  → [{c.provider}] {c.model} ({avail})")
 
     print("\nLocal Provider Status:")
     quota_rows = service.list_quota()
@@ -2497,10 +2465,6 @@ def handle_models(
         status = _provider_status_line(registry, prov, quota_rows)
         print(f"  • {prov:<12}: {status}")
 
-    print(
-        "\nPolicy Note: Muse models are included by default; pass "
-        "--training-denied to exclude them."
-    )
     return 0
 
 
@@ -2517,18 +2481,8 @@ def handle_routing_show(args: argparse.Namespace) -> int:
             "content_hash": snap.content_hash,
             "schema_version": snap.schema_version,
             "chains": {
-                "T1.default": [f"{c.provider}/{c.model}" for c in snap.t1_default],
-                "T2.training_allowed": [
-                    f"{c.provider}/{c.model}" for c in snap.t2_training_allowed
-                ],  # noqa: E501
-                "T2.training_denied_off_peak": [
-                    f"{c.provider}/{c.model}" for c in snap.t2_training_denied_off_peak
-                ],  # noqa: E501
-                "T2.training_denied_peak": [
-                    f"{c.provider}/{c.model}" for c in snap.t2_training_denied_peak
-                ],  # noqa: E501
-                "T3.off_peak": [f"{c.provider}/{c.model}" for c in snap.t3_off_peak],
-                "T3.peak": [f"{c.provider}/{c.model}" for c in snap.t3_peak],
+                tier: [f"{c.provider}/{c.model}" for c in snap.chain_for(tier, True, False)]
+                for tier in ("T1", "T2", "T3")
             },
         }
         print(json.dumps(payload, indent=2))
@@ -2536,18 +2490,8 @@ def handle_routing_show(args: argparse.Namespace) -> int:
     print(f"Source: {snap.source} {snap.source_path or '(packaged default)'}")
     print(f"Hash: {snap.content_hash}")
     print(f"Schema: {snap.schema_version}")
-    print("T1.default:", [f"{c.provider}/{c.model}" for c in snap.t1_default])
-    print("T2.training_allowed:", [f"{c.provider}/{c.model}" for c in snap.t2_training_allowed])  # noqa: E501
-    print(
-        "T2.training_denied_off_peak:",
-        [f"{c.provider}/{c.model}" for c in snap.t2_training_denied_off_peak],
-    )  # noqa: E501
-    print(
-        "T2.training_denied_peak:",
-        [f"{c.provider}/{c.model}" for c in snap.t2_training_denied_peak],
-    )  # noqa: E501
-    print("T3.off_peak:", [f"{c.provider}/{c.model}" for c in snap.t3_off_peak])
-    print("T3.peak:", [f"{c.provider}/{c.model}" for c in snap.t3_peak])
+    for tier in ("T1", "T2", "T3"):
+        print(f"{tier}:", [f"{c.provider}/{c.model}" for c in snap.chain_for(tier, True, False)])
     return 0
 
 
@@ -2933,6 +2877,10 @@ def handle_ui(args: argparse.Namespace) -> int:
     """Handle `orch ui` command."""
     import uvicorn
 
+    from saberops.cli_environment import prepare_cli_environment
+
+    prepare_cli_environment()
+
     # Profile selection must happen before any SaberOps path/store is resolved.
     # It is a launch-time namespace choice only; every substantive owner choice
     # (providers, models, routing, Orchestrator, project and policy) stays in UI.
@@ -2944,8 +2892,15 @@ def handle_ui(args: argparse.Namespace) -> int:
         active_profile()  # fail closed before constructing any state path
 
     from saberops.db import Database
-    from saberops.web import create_app
+    from saberops.model_access import AccessStoreError, ReadinessStoreError
+    from saberops.web import create_app, initialize_account_readiness
 
+    try:
+        initialize_account_readiness()
+    except (AccessStoreError, ReadinessStoreError):
+        # Preserve unreadable owner state for repair; the Access page explains
+        # unavailable evidence. Never reset it or block the dashboard from opening.
+        print("Provider discovery could not read or save owner state; see Access.")
     app = create_app(db_path=args.db, repo_path=args.repo, seed_cwd_if_empty=False)
     startup_db = Database(args.db) if args.db else Database(get_default_db_path())
     url = f"http://{args.host}:{args.port}"

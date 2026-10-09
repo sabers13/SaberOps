@@ -65,13 +65,7 @@ def routing_context_for(
     selected context so empty-chain and exhaustion evidence can quote it.
     """
     cleaned = tier.strip().upper()
-    if cleaned == "T2" and training_allowed:
-        return "T2.training_allowed"
-    if cleaned == "T2":
-        return "T2.training_denied_peak" if is_peak else "T2.training_denied_off_peak"
-    if cleaned == "T3":
-        return "T3.peak" if is_peak else "T3.off_peak"
-    return "T1.default"
+    return f"{cleaned if cleaned in ('T1', 'T2', 'T3') else 'T1'}.default"
 
 
 def build_candidate_skip(

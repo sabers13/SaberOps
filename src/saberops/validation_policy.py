@@ -60,3 +60,36 @@ def with_validation_policy(task: str) -> str:
     if VALIDATION_POLICY_MARKER in stripped:
         return stripped
     return stripped + "\n\n" + VALIDATION_POLICY_TEXT
+
+
+def verification_contract(
+    gate_command: str, gate_enabled: bool, review_enabled: bool, review_disabled: bool
+) -> str:
+    """Describe the frozen engine policy, independently of model-authored guidance."""
+    lines = ["[RUN VERIFICATION]"]
+    if gate_enabled:
+        lines.extend(
+            [
+                f"Frozen authoritative gate command (from the project root): {gate_command}",
+                "Preserve or create the entrypoint required by this exact command. "
+                "A successful worker report or a different test script does not replace it.",
+            ]
+        )
+        if gate_command.strip() == "make gate":
+            lines.append(
+                "The project root must have a Makefile with a gate target. "
+                "You may create that root Makefile and delegate to an application test script."
+            )
+        lines.append(
+            "Use focused checks; SaberOps runs the authoritative full gate on the candidate."
+        )
+    else:
+        lines.append("The authoritative gate is disabled by the frozen project policy.")
+    if review_disabled:
+        lines.append("Independent engine review is disabled by the project policy.")
+    elif review_enabled:
+        lines.append("Independent SaberOps review is requested for this run.")
+    else:
+        lines.append("Independent SaberOps review follows the frozen review policy.")
+    lines.append("A worker's own subagent review is not an independent SaberOps reviewer dispatch.")
+    return "\n".join(lines)

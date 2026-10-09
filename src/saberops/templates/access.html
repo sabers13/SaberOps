@@ -1,11 +1,13 @@
 {% extends "base.html" %}
+{% import "_ui.html" as ui %}
 {% set active_pane = "chats" %}
-{% block title %}Model Access{% endblock %}
-{% block conversation_title %}Model Access{% endblock %}
-{% block run_meta %}How a selected binding connects — never what runs{% endblock %}
+{% block title %}Providers{% endblock %}
+{% block conversation_title %}Providers{% endblock %}
+{% block run_meta %}Installed tools, account readiness and available models{% endblock %}
+{% block page_return %}<nav class="page-return" aria-label="Setup navigation"><a href="/setup">← Setup</a></nav>{% endblock %}
 
 {% block workspace %}
-<div class="date-rule">Model access</div>
+<div class="page-intro"><div><h2>Your AI tools</h2><p>SaberOps finds installed CLIs when it starts and uses their existing account setup. Installation, login and execution support are shown separately.</p></div></div>
 
 {% if notice %}
 <p class="so-notice">{{ notice }}</p>
@@ -19,6 +21,7 @@
   <div class="settings-card"><div class="settings-control-row" style="display: block;">
     <p><span class="badge badge-{{ 'normal' if probe.ok == 'TRUE' else 'demoted' }}">{{ probe.reason }}</span></p>
     <p class="muted">{{ probe.detail }}</p>
+    {% if probe.model_id %}<p>Tested model: <span class="mono">{{ probe.model_id }}</span></p>{% endif %}
     {% if probe.readiness_state %}
     <p class="muted">Readiness: <span class="mono">{{ probe.readiness_state }} ({{ probe.readiness_reason }})</span>{% if probe.observed_at %} observed <span class="mono">{{ probe.observed_at }}</span>{% endif %}</p>
     {% endif %}
@@ -36,83 +39,116 @@
 </div>
 {% endfor %}
 
-<article class="message">
-  <div class="avatar assistant" aria-hidden="true">S</div>
-  <div>
-    <div class="message-head"><strong>SaberOps</strong></div>
-    <div class="message-body"><p>Next steps: <a href="/routing">Routing</a> (choose which discovered models workers may use) · <a href="/orchestrator">Orchestrator role</a> (choose the model for initial task guidance).</p></div>
+<nav class="access-next" aria-label="Next setup steps" data-od-id="access-next-steps">
+  <span>Next</span>
+  <a href="/routing">Choose Worker →</a>
+  <a href="/routing?role=reviewer">Choose Reviewer →</a>
+  <a href="/routing?role=orchestrator">Choose Orchestrator →</a>
+</nav>
+
+<section class="settings-section" data-od-id="account-providers">
+  <div class="settings-section-head"><h4>Account tools</h4><p>Check login status or refresh a tool’s model catalog. A discovered model still needs verified execution support before you can select it.</p></div>
+  <div class="access-provider-list">
+    {% for a in account_rows %}
+    <article class="access-provider" data-od-id="provider-{{ a.connection_id }}">
+      <div class="provider-summary">
+        <div><h5>{{ ui.provider_name(a.provider) }}</h5>
+          <div class="provider-status">
+            <span class="badge badge-{{ a.installed_class }}">{{ 'CLI installed' if a.installed == 'TRUE' else 'Not installed' }}</span>
+            <span class="badge badge-{{ 'normal' if a.authenticated == 'TRUE' else 'error' if a.authenticated == 'FALSE' else 'unknown' }}">{{ ('Access verified' if a.readiness.source == 'MODEL_ACCESS_TEST' else 'Login verified') if a.authenticated == 'TRUE' else 'Sign-in required' if a.authenticated == 'FALSE' else 'Login not verified' }}</span>
+            <span>{{ 'Execution supported' if a.execution_adapter == 'Registered' else 'Execution not supported yet' }}</span>
+          </div>
+        </div>
+        <div class="access-actions">
+          <form method="post" action="/access/test" class="so-inline-form"><input type="hidden" name="connection_id" value="{{ a.connection_id }}"><button type="submit" class="text-button">{{ 'Check login' if a.has_auth_probe else 'Check installation' }}</button></form>
+          <form method="post" action="/access/discover" class="so-inline-form"><input type="hidden" name="connection_id" value="{{ a.connection_id }}"><button type="submit" class="text-button"{% if not a.has_model_listing %} disabled title="Automatic model discovery is unavailable for this CLI"{% endif %}>Refresh models</button></form>
+        </div>
+      </div>
+      {% if not a.has_model_listing %}<p class="provider-capability-note">Automatic model discovery is unavailable for this CLI.</p>{% endif %}
+      {% if a.installed == 'TRUE' and a.authenticated != 'TRUE' %}
+      <p class="provider-capability-note">{{ a.login_help }}</p>
+      {% endif %}
+      {% if a.can_verify_model and a.installed == 'TRUE' %}
+      <form method="post" action="/access/verify-model" class="provider-verification" data-access-check>
+        <input type="hidden" name="connection_id" value="{{ a.connection_id }}">
+        <label for="verify-{{ a.connection_id }}">Model to verify</label>
+        <select name="model_id" id="verify-{{ a.connection_id }}" required>
+          <option value="">Choose a model…</option>
+          {% for m in a.models if m.execution_support == 'SUPPORTED' and m.evidence == 'FRESH' %}
+          <option value="{{ m.model_id }}"{% if probe and probe.connection_id == a.connection_id and probe.model_id == m.model_id %} selected{% endif %}>{{ m.model_id }}</option>
+          {% endfor %}
+        </select>
+        <button type="submit" class="text-button">Verify model access</button>
+        <p class="so-help" role="status">Sends one small model request using this CLI’s existing account setup. Uses account allowance. Checks in a temporary folder with tools denied; your project is not used. Usually completes within 45 seconds. Refresh models if the list is empty.</p>
+      </form>
+      {% endif %}
+      <details class="provider-details">
+        <summary>Technical details</summary>
+        <p class="access-readiness"><span class="badge badge-{{ 'normal' if a.readiness.state == 'READY' else 'unknown' }}">{{ a.readiness.display }}</span> {{ a.readiness.reason }}{% if a.readiness.observed_at %} · observed {{ a.readiness.observed_at }} ({{ a.readiness.age }}){% if not a.readiness.fresh %} · STALE{% endif %}{% elif a.readiness.age %} · {{ a.readiness.age }}{% endif %}</p>
+        {% if a.readiness.model_id %}<p>Last tested model: <span class="mono">{{ a.readiness.model_id }}</span>.</p>{% endif %}
+        {% if a.verification_detail %}<p class="muted">{{ a.verification_detail }}</p>{% endif %}
+        <dl class="access-facts">
+          <div><dt>Installed</dt><dd>{{ a.installed }} <span class="mono muted">{{ a.installed_detail }}</span></dd></div>
+          <div><dt>Authenticated</dt><dd>{{ a.authenticated }}</dd></div>
+          <div><dt>Execution adapter</dt><dd>{{ a.execution_adapter }}</dd></div>
+          <div><dt>Connection</dt><dd class="mono">{{ a.connection_id }}</dd></div>
+          <div><dt>Backend</dt><dd class="mono">{{ a.backend }} · {{ a.auth_mode }}</dd></div>
+          <div><dt>Models</dt><dd>{{ a.models|length }} discovered</dd></div>
+        </dl>
+      </details>
+      <details class="access-models">
+        <summary>Model evidence ({{ a.models|length }})</summary>
+        {% if a.models %}
+        <label class="model-search"><span>Search {{ ui.provider_name(a.provider) }} models</span><input type="search" data-model-search placeholder="Search by model name…"></label>
+        <p class="model-empty" role="status" hidden>No models match this search.</p>
+        <ul>
+          {% for m in a.models %}
+          <li data-model-row><strong class="mono">{{ m.model_id }}</strong>
+            <span class="badge badge-{{ 'normal' if m.execution_support == 'SUPPORTED' else 'demoted' }}">{{ m.execution_support }}</span>
+            <span class="badge badge-{{ 'normal' if m.routing_eligible == 'TRUE' else 'demoted' }}">{{ 'routing-eligible' if m.routing_eligible == 'TRUE' else 'not routing-eligible' }}</span>
+            {% if m.evidence == 'STALE' %}<span class="badge badge-demoted">STALE</span>{% endif %}
+            <small>{{ m.source }} · discovery {{ m.discovery_status }}{% if m.ineligible_reason %} · {{ m.ineligible_reason }}{% endif %}</small>
+          </li>
+          {% endfor %}
+        </ul>
+        {% else %}<p>No models discovered yet, or this backend cannot enumerate them.</p>{% endif %}
+      </details>
+    </article>
+    {% endfor %}
   </div>
-</article>
+</section>
 
-<div class="settings-section">
-  <div class="settings-section-head"><h4>Connected accounts</h4><p>Authenticated sessions owned by their own backends. SaberOps detects installation and reachability only — it never extracts account credentials. A CLI being installed is availability, not proven model execution readiness: readiness below is persisted evidence only.</p></div>
-  <div class="so-table-wrap"><table class="so-table">
-    <thead><tr><th>Account</th><th>Provider</th><th>Backend</th><th>Auth mode</th><th>Installed</th><th>Authenticated</th><th>Model readiness</th><th>Models</th><th></th></tr></thead>
-    <tbody>
-      {% for a in account_rows %}
-      <tr>
-        <td class="mono">{{ a.connection_id }}</td>
-        <td>{{ a.provider }}</td>
-        <td class="mono">{{ a.backend }}</td>
-        <td class="mono">{{ a.auth_mode }}</td>
-        <td><span class="badge badge-{{ a.installed_class }}">{{ a.installed }}</span><br><span class="mono muted">{{ a.installed_detail }}</span></td>
-        <td><span class="badge">{{ a.authenticated }}</span></td>
-        <td><span class="badge badge-{{ 'normal' if a.readiness.state == 'READY' else 'demoted' }}">{{ a.readiness.display }}</span><br><span class="mono muted">{{ a.readiness.reason }}</span>{% if a.readiness.observed_at %}<br><span class="mono muted">observed {{ a.readiness.observed_at }} ({{ a.readiness.age }}){% if not a.readiness.fresh %} · STALE{% endif %}</span>{% elif a.readiness.age %}<br><span class="mono muted">{{ a.readiness.age }}</span>{% endif %}</td>
-        <td>
-          {% if a.models %}
-          <ul class="mono">
-            {% for m in a.models %}
-            <li>
-              {{ m.model_id }}
-              <span class="badge badge-{{ 'normal' if m.execution_support == 'SUPPORTED' else 'demoted' }}">{{ m.execution_support }}</span>
-              <span class="muted">{{ m.source }} / discovered={{ m.discovery_status }}</span>
-              {% if m.evidence == 'STALE' %}<span class="badge badge-demoted">STALE</span>{% endif %}
-              {% if m.routing_eligible == 'TRUE' %}
-              <span class="badge badge-normal">routing-eligible</span>
-              {% else %}
-              <span class="badge badge-demoted">not routing-eligible</span>
-              {% if m.ineligible_reason %}<br><span class="muted">{{ m.ineligible_reason }}</span>{% endif %}
-              {% endif %}
-            </li>
-            {% endfor %}
-          </ul>
-          {% else %}
-          <span class="muted">UNKNOWN (backend exposes no supported enumeration, or no refresh has run)</span>
-          {% endif %}
-        </td>
-        <td>
-          <form method="post" action="/access/test" class="so-inline-form">
-            <input type="hidden" name="connection_id" value="{{ a.connection_id }}">
-            <button type="submit" class="text-button">Probe</button>
-          </form>
-          <form method="post" action="/access/discover" class="so-inline-form">
-            <input type="hidden" name="connection_id" value="{{ a.connection_id }}">
-            <button type="submit" class="text-button">Refresh models</button>
-          </form>
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table></div>
-</div>
+{% if other_cli_providers %}
+<section class="settings-section" data-od-id="other-installed-clis">
+  <div class="settings-section-head"><h4>Other installed agent CLIs</h4><p>Detected locally. Account verification and model discovery are not wired to this page yet.</p></div>
+  <div class="access-provider-list">
+    {% for provider in other_cli_providers %}
+    <article class="access-provider" data-od-id="installed-cli-{{ provider }}">
+      <div class="access-provider-head"><h5>{{ provider }}</h5><span class="badge">Installed</span></div>
+      <p>Execution adapter registered. Login and available models remain unverified here.</p>
+    </article>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
 
-<details class="settings-section" aria-label="Experimental API connections">
-  <summary class="settings-section-head" style="cursor: pointer;"><h4 style="display: inline;">Experimental: API connections</h4><p>API / BYOK connections cannot execute models yet. Saved connections and data are preserved.</p></summary>
+<section aria-label="API connections">
 <div class="settings-section">
-  <div class="settings-section-head"><h4>API connections</h4><p>User-owned API / BYOK access. Only credential <em>references</em> (e.g. <span class="mono">env:MINIMAX_API_KEY</span>) are stored — never secret values. Execution through these connections is not supported.</p></div>
+  <div class="settings-section-head"><h4>API connections</h4><p>API connections run directly; subscription connections use their own CLIs. OpenAI-compatible APIs support worker, reviewer and orchestrator roles. Credentials use <span class="mono">env:</span> references; secret values are never saved here.</p></div>
   {% if api_rows %}
-  <div class="so-table-wrap"><table class="so-table">
+  <div class="so-table-wrap"><table class="so-table access-api-table">
     <thead><tr><th>Name</th><th>Provider</th><th>Protocol</th><th>Endpoint</th><th>Credential</th><th>Model</th><th>Enabled</th><th></th></tr></thead>
     <tbody>
       {% for c in api_rows %}
       <tr>
         <td class="mono">{{ c.connection_id }}</td>
         <td>{{ c.provider }}</td>
-        <td class="mono">{{ c.protocol }}</td>
+        <td>{{ "OpenAI compatible" if c.protocol == "OPENAI_COMPATIBLE" else c.protocol|replace("_", " ") }}</td>
         <td class="mono">{{ c.endpoint }}</td>
         <td class="mono">{{ c.credential }}</td>
         <td>
           {% if c.models %}
+          <details><summary>{{ c.models|length }} models — evidence only</summary>
           <ul class="mono">
             {% for m in c.models %}
             <li>
@@ -129,6 +165,7 @@
             </li>
             {% endfor %}
           </ul>
+          </details>
           {% elif c.model %}
           <span class="mono">{{ c.model }}</span>
           <span class="muted">(owner-declared; not verified)</span>
@@ -136,11 +173,18 @@
           <span class="muted">UNKNOWN</span>
           {% endif %}
         </td>
-        <td><span class="badge">{{ c.enabled }}</span></td>
+        <td><span class="badge">{{ "Yes" if c.enabled == "TRUE" else "No" }}</span>
+          <p class="so-help">{{ c.readiness.display }} · {{ c.readiness.reason }}</p>
+          {% if c.readiness.reason == 'CREDENTIAL_MISSING' %}
+          <p class="so-help">The referenced environment variable is missing from the running app. Set it before starting SaberOps, then verify again.</p>
+          {% elif c.readiness.reason == 'API_ENDPOINT_READY' %}
+          <p class="so-help">Catalog reachable; authentication and model entitlement are not yet proven.</p>
+          {% endif %}
+        </td>
         <td>
           <form method="post" action="/access/test" class="so-inline-form">
             <input type="hidden" name="connection_id" value="{{ c.connection_id }}">
-            <button type="submit" class="text-button">Reachability</button>
+            <button type="submit" class="text-button">Verify API</button>
           </form>
           <form method="post" action="/access/discover" class="so-inline-form">
             <input type="hidden" name="connection_id" value="{{ c.connection_id }}">
@@ -157,7 +201,7 @@
 </div>
 
 <div class="settings-section">
-  <div class="settings-section-head"><h4>Add connection</h4><p>Saving a connection does not by itself authorize worker execution. API connections cannot execute models yet.</p></div>
+  <div class="settings-section-head"><h4>Add connection</h4><p>Save a connection, refresh its models, then select models for roles on the Routing page. Other API protocols remain unavailable until their execution adapter is implemented.</p></div>
   <div class="settings-card"><div class="settings-control-row" style="display: block;">
     <form method="post" action="/access/connections" class="so-form">
       <div class="so-form-row">
@@ -178,19 +222,18 @@
             {% endfor %}
           </select>
         </div>
-        <div class="advanced-field"><label for="endpoint">Endpoint (https URL, or loopback http)</label><input type="text" id="endpoint" name="endpoint" value="{{ form.endpoint }}"></div>
+        <div class="advanced-field"><label for="endpoint">Endpoint (https URL, or loopback http)</label><input type="text" id="endpoint" name="endpoint" value="{{ form.endpoint }}" placeholder="https://openrouter.ai/api/v1"></div>
       </div>
       <div class="so-form-row">
-        <div class="advanced-field"><label for="credential_ref">Credential reference (env:/profile:/store: handle — never paste a secret)</label><input type="text" id="credential_ref" name="credential_ref" value="{{ form.credential_ref }}" placeholder="env:MY_API_KEY"></div>
+        <div class="advanced-field"><label for="credential_ref">Credential reference (env: variable name — never paste a secret)</label><input type="text" id="credential_ref" name="credential_ref" value="{{ form.credential_ref }}" placeholder="env:MY_API_KEY"><p class="so-help">The named variable must be available to the running SaberOps process. Direct API execution currently supports env: references.</p></div>
         <div class="advanced-field"><label for="auth_header_name">Credential header name (optional; name only)</label><input type="text" id="auth_header_name" name="auth_header_name" value="{{ form.auth_header_name }}" placeholder="X-API-Key"></div>
       </div>
       <div class="advanced-field"><label for="model">Model identifier</label><input type="text" id="model" name="model" value="{{ form.model }}"></div>
       <div class="advanced-field"><label for="public_headers">Public headers (optional literal metadata, one <span class="mono">Name: value</span> per line)</label><textarea id="public_headers" name="public_headers" rows="3">{{ form.public_headers }}</textarea></div>
-      <p class="so-help">Reachability testing does not transmit credentials and does not verify authentication.</p>
+      <p class="so-help">Verification and model discovery can send the referenced API key to this endpoint. They do not run a model or select routing.</p>
       <div><button type="submit" class="text-button primary-button">Save connection</button></div>
     </form>
   </div></div>
 </div>
-</div>
-</details>
+</section>
 {% endblock %}

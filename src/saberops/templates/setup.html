@@ -2,125 +2,95 @@
 {% set active_pane = "projects" %}
 {% block title %}First-run setup{% endblock %}
 {% block conversation_title %}First-run setup{% endblock %}
-{% block run_meta %}Profile {{ profile }} · UI-only owner configuration{% endblock %}
+{% block run_meta %}Profile {{ profile }} · {{ setup_complete_count }} of 6 configuration steps complete{% endblock %}
 
 {% block workspace %}
-<div class="date-rule">Dogfood setup</div>
+<div class="date-rule">First-run setup</div>
+<header class="setup-intro" data-od-id="setup-progress">
+  <h2>Get ready for your first run</h2>
+  <p>Follow the steps in order. Your choices are saved on each linked page; return here to see what is ready.</p>
+  <div class="setup-progress-track" role="progressbar" aria-label="Setup progress" aria-valuenow="{{ setup_complete_count }}" aria-valuemin="0" aria-valuemax="6"><span style="width: {{ setup_complete_count * 100 / 6 }}%"></span></div>
+  <strong class="setup-summary">{% if ready_for_dogfood %}READY FOR DOGFOOD{% else %}SETUP INCOMPLETE{% endif %} · {{ setup_complete_count }}/6 configured</strong>
+</header>
 
-<article class="message">
-  <div class="avatar assistant" aria-hidden="true">S</div>
-  <div>
-    <div class="message-head"><strong>SaberOps</strong></div>
-    <div class="message-body">
-      <p>This page is the first-user path. Complete each owner decision here or through the linked UI pages. No JSON, database, or config-file edits are part of this flow.</p>
-      {% if ready_for_dogfood %}
-      <p><span class="badge badge-normal">READY FOR DOGFOOD</span> The project, worker routing, Reviewer model, Orchestrator model, and required project policy are configured.</p>
-      {% else %}
-      <p><span class="badge badge-demoted">SETUP INCOMPLETE</span> Finish the incomplete steps below before the first real SaberOps task.</p>
-      {% endif %}
+{% if error %}<div class="so-error" role="alert">{{ error }}</div>{% endif %}
+
+<ol class="setup-flow" aria-label="Setup steps">
+  <li id="setup-step-1" class="setup-step{% if setup_current_step == 1 %} current{% endif %}"{% if setup_current_step == 1 %} aria-current="step"{% endif %} data-od-id="setup-step-providers">
+    <span class="setup-number">1</span><div class="setup-step-body">
+      <div class="setup-step-head"><h3>Connect providers</h3><span class="badge badge-{{ 'normal' if providers_ready else 'demoted' }}">{{ 'READY' if providers_ready else 'NEEDS SETUP' }}</span></div>
+      <p>Refresh models, then check login or verify model access before your first task. OpenCode and Antigravity have a small model test when a login-status check is unavailable.</p>
+      <p class="setup-state">{{ discovered_model_count }} discovered · {{ routing_eligible_count }} routing-eligible · {% if providers_ready %}readiness confirmed{% else %}no confirmed ready provider{% endif %}</p>
+      <a class="text-button{% if setup_current_step == 1 %} primary-button{% endif %}" href="/access">Open Model Access</a>
     </div>
-  </div>
-</article>
-
-<section class="settings-section">
-  <div class="settings-section-head"><h4>1. Providers and models</h4><p>Use installed account backends, verify readiness, and discover the models each backend can enumerate.</p></div>
-  <div class="settings-card"><div class="settings-control-row" style="display:block;">
-    <p>Discovered models: <strong>{{ discovered_model_count }}</strong> · routing-eligible: <strong>{{ routing_eligible_count }}</strong></p>
-    <div class="so-table-wrap"><table class="so-table">
-      <thead><tr><th>Provider</th><th>Backend</th><th>Installed</th><th>Readiness</th><th>Models</th></tr></thead>
-      <tbody>
-        {% for a in account_rows %}
-        <tr>
-          <td>{{ a.provider }}</td>
-          <td class="mono">{{ a.backend }}</td>
-          <td>{{ a.installed }}</td>
-          <td>{{ a.readiness.display }}</td>
-          <td>{{ a.models|length }}</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table></div>
-    <p><a class="text-button primary-button" href="/access">Open Providers / Models</a></p>
-  </div></div>
-</section>
-
-<section class="settings-section">
-  <div class="settings-section-head"><h4>2. Worker categories</h4><p>Assign discovered executable models to the current worker routing categories and order them.</p></div>
-  <div class="settings-card"><div class="settings-control-row" style="display:block;">
-    <p>Configured worker placements: <strong>{{ routed_model_count }}</strong></p>
-    <div class="so-table-wrap"><table class="so-table">
-      <thead><tr><th>Tier</th><th>Context</th><th>Models</th></tr></thead>
-      <tbody>
-        {% for chain in routing_chains %}
-        <tr><td class="mono">{{ chain.tier }}</td><td class="mono">{{ chain.context }}</td><td>{{ chain.candidates|length }}</td></tr>
-        {% endfor %}
-      </tbody>
-    </table></div>
-    <p class="muted">These are the current deterministic T1/T2/T3 worker categories. Choose the exact reviewer model in step 3; worker routing order is unchanged by that choice.</p>
-    <p><a class="text-button primary-button" href="/routing">Choose Worker models</a></p>
-  </div></div>
-</section>
-
-<section class="settings-section">
-  <div class="settings-section-head"><h4>3. Reviewer model</h4><p>Choose the separate exact model binding used for independent code review.</p></div>
-  <div class="settings-card"><div class="settings-control-row" style="display:block;">
-    <p>Status: <span class="badge badge-{{ 'normal' if reviewer_ready else 'demoted' }}">{{ reviewer_status }}</span></p>
-    {% if reviewer_current %}
-    <p class="mono">binding = {{ reviewer_current }}</p>
-    {% endif %}
-    <p><a class="text-button primary-button" href="/reviewer">Choose Reviewer model</a></p>
-  </div></div>
-</section>
-
-<section class="settings-section">
-  <div class="settings-section-head"><h4>4. Orchestrator model</h4><p>Choose the separate exact model binding used for bounded Orchestrator guidance.</p></div>
-  <div class="settings-card"><div class="settings-control-row" style="display:block;">
-    <p>Status: <span class="badge badge-{{ 'normal' if orch_ready else 'demoted' }}">{{ orch_status }}</span></p>
-    {% if orch_current %}
-    <p class="mono">mode={{ orch_current.mode }}{% if orch_current.pinned_binding_id %} · {{ orch_current.pinned_binding_id }}{% endif %}</p>
-    {% endif %}
-    <p><a class="text-button primary-button" href="/orchestrator">Choose Orchestrator model</a></p>
-  </div></div>
-</section>
-
-<section class="settings-section">
-  <div class="settings-section-head"><h4>5. Project</h4><p>Select the repository SaberOps will modify. For self-dogfood, choose the clean SaberOps checkout.</p></div>
-  <div class="settings-card"><div class="settings-control-row" style="display:block;">
-    <form method="post" action="/projects/select" class="so-form">
-      <div class="advanced-field">
+  </li>
+  <li id="setup-step-2" class="setup-step{% if setup_current_step == 2 %} current{% endif %}"{% if setup_current_step == 2 %} aria-current="step"{% endif %} data-od-id="setup-step-worker">
+    <span class="setup-number">2</span><div class="setup-step-body">
+      <div class="setup-step-head"><h3>Choose Worker</h3><span class="badge badge-{{ 'normal' if routed_model_count > 0 else 'demoted' }}">{{ 'READY' if routed_model_count > 0 else 'NEEDS SETUP' }}</span></div>
+      <p>Put executable models in the worker routing order used for tasks.</p>
+      <p class="setup-state">{{ routed_model_count }} worker placement{{ '' if routed_model_count == 1 else 's' }}</p>
+      <a class="text-button{% if setup_current_step == 2 %} primary-button{% endif %}" href="/routing">Choose Worker</a>
+    </div>
+  </li>
+  <li id="setup-step-3" class="setup-step{% if setup_current_step == 3 %} current{% endif %}"{% if setup_current_step == 3 %} aria-current="step"{% endif %} data-od-id="setup-step-reviewer">
+    <span class="setup-number">3</span><div class="setup-step-body">
+      <div class="setup-step-head"><h3>Choose Reviewer</h3><span class="badge badge-{{ 'normal' if reviewer_ready else 'demoted' }}">{{ 'DISABLED' if review_disabled else ('READY' if reviewer_ready else 'NEEDS SETUP') }}</span></div>
+      <p>Choose the exact model that independently reviews code changes.</p>
+      <p class="setup-state">{{ "Review disabled by project policy" if review_disabled else (reviewer_current or reviewer_status) }}</p>
+      <a class="text-button{% if setup_current_step == 3 %} primary-button{% endif %}" href="/routing?role=reviewer">Choose Reviewer</a>
+    </div>
+  </li>
+  <li id="setup-step-4" class="setup-step{% if setup_current_step == 4 %} current{% endif %}"{% if setup_current_step == 4 %} aria-current="step"{% endif %} data-od-id="setup-step-orchestrator">
+    <span class="setup-number">4</span><div class="setup-step-body">
+      <div class="setup-step-head"><h3>Choose Orchestrator</h3><span class="badge badge-{{ 'normal' if orch_ready else 'demoted' }}">{{ 'READY' if orch_ready else 'NEEDS SETUP' }}</span></div>
+      <p>Choose the model that gives bounded guidance before workers run.</p>
+      <p class="setup-state">{{ orch_status }}{% if orch_current and orch_current.pinned_binding_id %} · {{ orch_current.pinned_binding_id }}{% endif %}</p>
+      <a class="text-button{% if setup_current_step == 4 %} primary-button{% endif %}" href="/routing?role=orchestrator">Choose Orchestrator</a>
+    </div>
+  </li>
+  <li id="setup-step-5" class="setup-step{% if setup_current_step == 5 %} current{% endif %}"{% if setup_current_step == 5 %} aria-current="step"{% endif %} data-od-id="setup-step-project">
+    <span class="setup-number">5</span><div class="setup-step-body">
+      <div class="setup-step-head"><h3>Choose Project</h3><span class="badge badge-{{ 'normal' if project_ready else 'demoted' }}">{{ 'READY' if project_ready else 'NEEDS SETUP' }}</span></div>
+      <p>Choose an existing project or a new folder. SaberOps sets up Git when needed.</p>
+      <p class="setup-state">{{ project_note }}{% if active_project %} · {{ active_project }}{% endif %}</p>
+      <form method="post" action="/projects/select?from=setup" class="setup-project-form">
         <label for="setup-project-path">Repository path</label>
-        <input type="text" id="setup-project-path" name="path" class="mono" value="{{ active_project }}" placeholder="/absolute/path/to/git/repository" required>
-      </div>
-      <button type="submit" class="text-button primary-button">Select project</button>
-    </form>
-    <p>Status: <span class="badge badge-{{ 'normal' if project_ready else 'demoted' }}">{{ 'READY' if project_ready else 'NOT READY' }}</span> {{ project_note }}</p>
-  </div></div>
-</section>
-
-<section class="settings-section">
-  <div class="settings-section-head"><h4>6. Project policy</h4><p>Gate, data use, review policy, accept target branch, and gate storage remain canonical project settings.</p></div>
-  <div class="settings-card"><div class="settings-control-row" style="display:block;">
-    {% if project_settings %}
-    <p>Gate: <span class="mono">{{ project_settings.gate_effective or 'not configured' }}</span></p>
-    <p>Data policy: <span class="mono">{{ project_settings.data_policy_label }}</span></p>
-    <p>Review policy: <span class="mono">{{ project_settings.review_policy_mode }}</span></p>
-    <p>Accept branch: <span class="mono">{{ project_settings.accept_target_branch_effective or 'not configured' }}</span></p>
-    {% else %}
-    <p class="muted">Select a valid project first.</p>
-    {% endif %}
-    <p><a class="text-button primary-button" href="/#execution">Configure project policy</a></p>
-  </div></div>
-</section>
-
-<section class="settings-section">
-  <div class="settings-section-head"><h4>7. Start dogfooding</h4><p>When every required step is ready, submit a real SaberOps task from the normal dashboard.</p></div>
-  <div class="settings-card"><div class="settings-control-row" style="display:block;">
-    {% if ready_for_dogfood %}
-    <p><span class="badge badge-normal">READY</span> The UI-only setup checkpoint is satisfied.</p>
-    <p><a class="text-button primary-button" href="/">Open run composer</a> <a class="text-button" href="/inbox">Open Inbox</a></p>
-    {% else %}
-    <p class="muted">The run composer stays available, but this setup page will not call the first-user checkpoint ready until the required owner choices resolve.</p>
-    {% endif %}
-  </div></div>
-</section>
+        <input type="text" id="setup-project-path" name="path" class="mono" value="{{ active_project }}" placeholder="/absolute/path/to/project" required>
+        <div class="project-picker-actions"><button type="button" data-project-browse class="text-button{% if setup_current_step == 5 %} primary-button{% endif %}">Select project</button>
+        <button type="submit" class="text-button">Use path</button></div>
+        <p class="so-help" data-project-picker-status role="status" aria-live="polite"></p>
+      </form>
+    </div>
+  </li>
+  <li id="setup-step-6" class="setup-step{% if setup_current_step == 6 %} current{% endif %}"{% if setup_current_step == 6 %} aria-current="step"{% endif %} data-od-id="setup-step-policy">
+    <span class="setup-number">6</span><div class="setup-step-body">
+      <div class="setup-step-head"><h3>Configure Project policy</h3><span class="badge badge-{{ 'normal' if project_policy_ready else 'demoted' }}">{{ 'READY' if project_policy_ready else 'NEEDS SETUP' }}</span></div>
+      <p>Choose a workflow mode and the branch where completed work is accepted.</p>
+      <p class="setup-state">{% if project_settings %}Gate: {{ 'disabled' if not project_settings.gate_enabled else (project_settings.gate_effective or 'not configured') }} · Branch: {{ project_settings.accept_target_branch_effective or 'not configured' }}{% else %}Choose a project first{% endif %}</p>
+      {% if project_ready and project_settings %}
+      {% set chosen_mode = selected_mode|default(project_settings.workflow_preset) %}
+      <form method="post" action="/projects/settings/workflow" class="so-form setup-policy-form" data-setup-policy>
+        <input type="hidden" name="source" value="setup">
+        <fieldset class="setup-mode-options"><legend>Workflow mode</legend>
+          {% for key,label,description in [('quick','Quick','Skip gate and review'),('balanced','Balanced','Gate · Adaptive review · 3 calls'),('thorough','Thorough','Gate · Required review · 5 calls'),('max','Max','Gate · Required review · No set limit')] %}
+          <label class="setup-mode-option"><input type="radio" name="preset" value="{{ key }}"{% if chosen_mode == key or (chosen_mode == 'custom' and key == 'balanced') %} checked{% endif %} required><span><strong>{{ label }}{% if key == 'balanced' %} <small>Default</small>{% endif %}</strong><small>{{ description }}</small></span></label>
+          {% endfor %}
+        </fieldset>
+        {% if not project_settings.gate_effective %}
+        <label data-setup-gate>Gate command<input type="text" name="gate_command" value="{{ setup_gate_command|default('') }}" placeholder="e.g. make gate"><span class="so-help">Required for Balanced, Thorough and Max. Quick skips the gate.</span></label>
+        {% endif %}
+        <div class="project-picker-actions"><button type="submit" class="text-button primary-button">Apply and continue</button><a class="text-button" href="/?from=setup#execution">Customize manually</a></div>
+        <p class="so-help">Pick a mode, then Apply to save it for this project. Existing runs keep their policy.</p>
+      </form>
+      {% else %}<a class="text-button" href="#setup-step-5">Choose Project first</a>{% endif %}
+    </div>
+  </li>
+  <li id="setup-step-7" class="setup-step{% if ready_for_dogfood %} current{% endif %}"{% if ready_for_dogfood %} aria-current="step"{% endif %} data-od-id="setup-step-ready">
+    <span class="setup-number">7</span><div class="setup-step-body">
+      <div class="setup-step-head"><h3>Ready</h3><span class="badge badge-{{ 'normal' if ready_for_dogfood else 'demoted' }}">{{ 'READY' if ready_for_dogfood else 'WAITING' }}</span></div>
+      <p>{% if ready_for_dogfood %}Your first run can start from the dashboard.{% else %}Finish the configuration steps above to reach the first-run checkpoint.{% endif %}</p>
+      {% if ready_for_dogfood %}<a class="text-button primary-button" href="/">Open run composer</a>{% else %}<a class="text-button" href="#setup-step-{{ setup_current_step }}">Go to next step</a>{% endif %}
+    </div>
+  </li>
+</ol>
 {% endblock %}

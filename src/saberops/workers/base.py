@@ -20,6 +20,8 @@ def streaming_process_kwargs(request: WorkerRequest) -> dict[str, Any]:
     """
     kwargs: dict[str, Any] = {}
     kwargs["inherit_env_exclude"] = request.inherit_env_exclude
+    if request.control_interrupt is not None:
+        kwargs["control_interrupt"] = request.control_interrupt
     if request.on_stdout is not None:
         kwargs["on_stdout"] = request.on_stdout
     if request.on_stderr is not None:

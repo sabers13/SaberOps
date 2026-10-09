@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import shutil
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from saberops.git import GitManager
@@ -17,6 +19,7 @@ from saberops.process import (
     launch_worker_process,
     run_process,
 )
+from saberops.workers.antigravity_events import parse_events
 from saberops.workers.base import WorkerAdapter, streaming_process_kwargs
 
 __all__ = ["AntigravityAdapter", "ORCH_PROMPT_ARG_LIMIT"]
@@ -124,9 +127,13 @@ class AntigravityAdapter(WorkerAdapter):
             "--add-dir",
             str(request.worktree_path),
             "--mode",
-            "accept-edits",
+            "plan" if request.read_only else "accept-edits",
+            "--output-format",
+            "stream-json",
         ]
-        if (
+        if request.native_resume_id:
+            cmd.extend(["--conversation", request.native_resume_id])
+        if not request.read_only and (
             os.environ.get("ORCH_AGY_SKIP_PERMISSIONS", "").strip().lower()
             not in _SKIP_PERMISSIONS_OPT_OUT
         ):
@@ -138,19 +145,43 @@ class AntigravityAdapter(WorkerAdapter):
         if math.isfinite(request.timeout_seconds):
             cmd.extend(["--print-timeout", f"{int(request.timeout_seconds)}s"])
 
+        # Keep the native account route. An API-key configuration is an explicit refusal.
+        settings = Path.home() / ".gemini/antigravity-cli/settings.json"
+        if settings.is_file():
+            try:
+                config = json.loads(settings.read_text())
+            except (OSError, ValueError):
+                config = {}
+            if config.get("modelProvider") == "gemini":
+                return WorkerResult(provider=self.provider_name, model=request.model,
+                    status=AttemptStatus.FAILED, summary="Antigravity subscription login required",
+                    stdout="", stderr="API-key mode is disabled for subscription execution",
+                    has_changes=False, outcome=DispatchOutcome.ELIGIBILITY_SKIP)
+        excluded = set(request.inherit_env_exclude) | {"GEMINI_API_KEY", "GOOGLE_API_KEY"}
         kwargs: dict[str, Any] = {
             "cwd": request.worktree_path,
             "timeout": request.timeout_seconds,
             **streaming_process_kwargs(request),
         }
+        kwargs["inherit_env_exclude"] = tuple(sorted(excluded))
         if request.env is not None:
-            kwargs["env"] = request.env
+            kwargs["env"] = {k: v for k, v in request.env.items() if k not in excluded}
 
         # The generic autonomous execution seam: direct launch when no
         # boundary is installed, kernel containment (or a typed
         # fail-closed refusal) when one is.
         res: ProcessResult = launch_worker_process(cmd, runner=self.runner, **kwargs)
 
+        parsed = parse_events(res.stdout)
+        if res.control_interrupted:
+            from saberops.models import WorkerInterruptionReason
+            return WorkerResult(provider=self.provider_name, model=request.model,
+                status=AttemptStatus.FAILED, summary="Interrupted for manual control",
+                stdout=parsed.text, stderr=res.stderr, has_changes=False, usage=parsed.usage,
+                duration_seconds=res.duration_seconds, provider_exit_code=res.exit_code,
+            execution_quiescent=not res.termination_incomplete,
+                provider_terminal_status=parsed.terminal_status,
+                interruption_reason=WorkerInterruptionReason.ABORTED)
         changed_paths = GitManager.get_changed_paths(request.worktree_path)
         has_changes = len(changed_paths) > 0
 
@@ -167,16 +198,18 @@ class AntigravityAdapter(WorkerAdapter):
                 "worktree is not safely quiescent"
             )
             summary = error
-        elif res.passed:
+        elif res.passed and parsed.terminal_status == "SUCCESS" and not parsed.denied:
             status = AttemptStatus.SUCCESS
             outcome = None
             error = None
-            out_strip = res.stdout.strip()
+            out_strip = parsed.text.strip()
             summary = out_strip[:300] if out_strip else "Worker completed successfully"
         else:
             status = AttemptStatus.FAILED
             outcome = DispatchOutcome.PROVIDER_OR_RUNTIME_FAILURE
-            error = f"Worker exited with code {res.exit_code}"
+            error = ("Antigravity denied a required tool step" if parsed.denied else
+                     "Antigravity did not report terminal SUCCESS" if res.passed else
+                     f"Worker exited with code {res.exit_code}")
             summary = (res.stderr.strip() or res.stdout.strip())[:300]
 
         return WorkerResult(
@@ -184,11 +217,17 @@ class AntigravityAdapter(WorkerAdapter):
             model=request.model,
             status=status,
             summary=summary,
-            stdout=res.stdout,
+            stdout=parsed.text,
             stderr=res.stderr,
             changed_paths=changed_paths,
             has_changes=has_changes,
             error=error,
             duration_seconds=res.duration_seconds,
             outcome=outcome,
+            provider_exit_code=res.exit_code,
+            execution_quiescent=not res.termination_incomplete,
+            provider_terminal_status=parsed.terminal_status,
+            usage=parsed.usage,
+            prompt_bytes=prompt_bytes,
+            prompt_transport_used="argv",
         )

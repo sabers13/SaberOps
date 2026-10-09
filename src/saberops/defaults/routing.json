@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "T1": {
     "default": [
       "antigravity/gemini-3.7-flash",
@@ -13,7 +13,7 @@
     ]
   },
   "T2": {
-    "training_allowed": [
+    "default": [
       "opencode/opencode/muse-spark-1.2-contributor-free",
       "opencode/opencode/hy3-free",
       "opencode/opencode-go/muse-spark-1.2-contributor",
@@ -26,29 +26,13 @@
       "opencode/opencode/big-pickle",
       "opencode/opencode/minimax-m3",
       "opencode/opencode/qwen3.7-plus",
-      "codex/gpt-5.6-luna"
-    ],
-    "training_denied_off_peak": [
-      "opencode/opencode-go/deepseek-v4-pro",
-      "codex/gpt-5.6-terra",
-      "opencode/opencode-go/deepseek-v4-flash",
+      "codex/gpt-5.6-luna",
       "opencode/opencode/deepseek-v4-flash",
-      "opencode/opencode/minimax-m3",
-      "opencode/opencode/qwen3.7-plus",
-      "opencode/opencode/deepseek-v4-pro",
-      "codex/gpt-5.6-luna"
-    ],
-    "training_denied_peak": [
-      "codex/gpt-5.6-terra",
-      "opencode/opencode-go/deepseek-v4-pro",
-      "opencode/opencode-go/deepseek-v4-flash",
-      "opencode/opencode/minimax-m3",
-      "opencode/opencode/qwen3.7-plus",
-      "codex/gpt-5.6-luna"
+      "opencode/opencode/deepseek-v4-pro"
     ]
   },
   "T3": {
-    "off_peak": [
+    "default": [
       "opencode/opencode-go/deepseek-v4-pro",
       "codex/gpt-5.6-terra",
       "codex/gpt-5.6-sol",
@@ -56,14 +40,6 @@
       "opencode/opencode/minimax-m3",
       "opencode/opencode/qwen3.7-plus",
       "opencode/opencode/deepseek-v4-pro",
-      "codex/gpt-5.6-luna"
-    ],
-    "peak": [
-      "codex/gpt-5.6-terra",
-      "opencode/opencode-go/deepseek-v4-pro",
-      "codex/gpt-5.6-sol",
-      "opencode/opencode/minimax-m3",
-      "opencode/opencode/qwen3.7-plus",
       "codex/gpt-5.6-luna"
     ]
   }

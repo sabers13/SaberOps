@@ -1,15 +1,11 @@
-"""Routing policy and multi-provider candidate resolution with training policy enforcement."""
+"""Tier-only routing and multi-provider candidate resolution."""
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
 from saberops.models import Tier, WorkerCandidate
-from saberops.training_policy import (
-    is_training_permitted,
-    training_requirement_for,
-)
 
 # Canonical worker candidates
 CANDIDATE_ANTIGRAVITY_FLASH = WorkerCandidate(provider="antigravity", model="gemini-3.7-flash")
@@ -97,30 +93,9 @@ TIER_3_PEAK_CHAIN: list[WorkerCandidate] = [
 ]
 
 
-PEAK_HOURS_UTC_WINDOWS: tuple[tuple[int, int], ...] = (
-    (1, 4),  # [01:00, 04:00) UTC
-    (6, 10),  # [06:00, 10:00) UTC
-)
-
-
 def is_peak_hours(now: datetime | None = None) -> bool:
-    """Determine if a datetime is within peak traffic hours in UTC.
-
-    Peak windows as of 2026-08-22:
-      - [01:00, 04:00) UTC
-      - [06:00, 10:00) UTC
-      - All other times: off-peak
-      - No weekday/weekend distinction.
-    """
-    if now is None:
-        dt = datetime.now(UTC)
-    elif now.tzinfo is None:
-        dt = now.replace(tzinfo=UTC)
-    else:
-        dt = now.astimezone(UTC)
-
-    hour = dt.hour
-    return any(start <= hour < end for start, end in PEAK_HOURS_UTC_WINDOWS)
+    """Retired compatibility helper; routing has no peak-hour mode."""
+    return False  # Retired compatibility helper: no scheduling exclusions.
 
 
 def is_muse_model(model_name: str) -> bool:
@@ -178,7 +153,7 @@ def resolve_candidate_chain(
     provider_override: str | None = None,
     snapshot: Any | None = None,
 ) -> list[WorkerCandidate]:
-    """Resolve ordered list of worker candidates to attempt based on tier, training, and peak state.
+    """Resolve ordered list of worker candidates to attempt based on tier only.
 
     Each :class:`WorkerCandidate` carries the exact C11-B ``binding_id`` the
     owner-approved :class:`~saberops.routing_config.DynamicCandidate`
@@ -189,8 +164,8 @@ def resolve_candidate_chain(
 
     Args:
         tier: Execution tier (T1, T2, T3).
-        training_allowed: Whether training data collection is permitted.
-        is_peak: Optional override for peak hours; defaults to is_peak_hours().
+        training_allowed: Ignored legacy compatibility argument.
+        is_peak: Ignored legacy compatibility argument.
         model_override: Explicit model specified by user.
         provider_override: Explicit provider specified by user. When supplied without
             a model override, the resolved chain is filtered to that provider.
@@ -203,65 +178,22 @@ def resolve_candidate_chain(
         substitutes for it (C15-XB-01).
 
     Raises:
-        ValueError: If a Muse model is requested when training is denied, or if a
-            provider override has no eligible candidates in the resolved chain.
+        ValueError: If a provider override has no candidates in the selected tier.
     """
     if model_override:
         candidate = parse_candidate_override(model_override, provider_override=provider_override)
-        # Canonical R2-B data-policy decision: the frozen snapshot record
-        # (when the override names an owner-approved candidate), else the
-        # static v1 knowledge; UNKNOWN fails closed under Denied so an
-        # explicit override can never bypass it.
-        requirement = training_requirement_for(candidate, snapshot=snapshot)
-        if not is_training_permitted(candidate, training_allowed, snapshot=snapshot):
-            if is_muse_model(candidate.model):
-                raise ValueError(
-                    f"Prohibited model '{candidate.model}': Muse models require training "
-                    "permission. Specify --training-allowed if permitted."
-                )
-            if requirement == "UNKNOWN":
-                raise ValueError(
-                    f"Prohibited model '{candidate.model}': model training requirement "
-                    "is unknown (fail closed). Specify --training-allowed if permitted."
-                )
-            raise ValueError(
-                f"Prohibited model '{candidate.model}': model requires training permission. "
-                "Specify --training-allowed if permitted."
-            )
         return [_with_frozen_evidence(candidate, snapshot)]
 
-    peak = is_peak if is_peak is not None else is_peak_hours()
-
     if snapshot is not None:
-        raw_chain = snapshot.chain_for(tier.value, training_allowed, peak)
-        chain = [_with_frozen_evidence(c, snapshot) for c in raw_chain]
-    elif tier == Tier.T1:
-        chain = list(TIER_1_CHAIN)
+        chain = [
+            _with_frozen_evidence(c, snapshot) for c in snapshot.chain_for(tier.value, True, False)
+        ]
     elif tier == Tier.T2:
-        if training_allowed:
-            chain = list(TIER_2_TRAINING_ALLOWED_CHAIN)
-        elif peak:
-            chain = list(TIER_2_PEAK_CHAIN)
-        else:
-            chain = list(TIER_2_OFF_PEAK_CHAIN)
+        chain = list(TIER_2_TRAINING_ALLOWED_CHAIN)
     elif tier == Tier.T3:
-        if peak:
-            chain = list(TIER_3_PEAK_CHAIN)
-        else:
-            chain = list(TIER_3_OFF_PEAK_CHAIN)
+        chain = list(TIER_3_OFF_PEAK_CHAIN)
     else:
         chain = list(TIER_1_CHAIN)
-
-    if not training_allowed:
-        # Canonical R2-B data-policy decision shared with C07 preflight
-        # and reviewer dispatch: only FALSE survives Denied; TRUE and
-        # UNKNOWN (fail closed) are excluded.  Allowed runs keep every
-        # candidate; other policies still apply downstream.
-        chain = [
-            c
-            for c in chain
-            if is_training_permitted(c, training_allowed, snapshot=snapshot)
-        ]
 
     if provider_override:
         provider_norm = provider_override.strip().lower()
@@ -269,15 +201,13 @@ def resolve_candidate_chain(
         if not chain:
             raise ValueError(
                 f"Provider override '{provider_override}' has no eligible candidates "
-                "in the resolved chain for this tier/training/peak configuration."
+                "in the resolved chain for this tier."
             )
 
     return chain
 
 
-def _with_frozen_evidence(
-    candidate: WorkerCandidate, snapshot: Any | None
-) -> WorkerCandidate:
+def _with_frozen_evidence(candidate: WorkerCandidate, snapshot: Any | None) -> WorkerCandidate:
     """Return ``candidate`` enriched with its frozen owner-approved evidence.
 
     The lookup consults only the frozen snapshot's ``approved_candidates``
@@ -320,8 +250,6 @@ def _with_frozen_evidence(
     return candidate
 
 
-def _with_binding_id(
-    candidate: WorkerCandidate, snapshot: Any | None
-) -> WorkerCandidate:
+def _with_binding_id(candidate: WorkerCandidate, snapshot: Any | None) -> WorkerCandidate:
     """Backward-compatible alias for :func:`_with_frozen_evidence`."""
     return _with_frozen_evidence(candidate, snapshot)

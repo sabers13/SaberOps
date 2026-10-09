@@ -633,3 +633,50 @@ def test_changed_paths_bound_reported(tmp_path: Path) -> None:
     assert diff.available is True
     assert len(diff.changed_paths) == CHANGED_PATHS_MAX
     assert diff.truncated is True
+
+
+def test_file_counts_numbering_binary_and_odd_paths(tmp_path: Path) -> None:
+    db = Database(tmp_path / 'file-diffs.db')
+    repo, base = _make_repo(tmp_path / 'files')
+    odd = 'odd\tname\n雪.txt'
+    (repo / 'f1.txt').write_text('changed\nsecond\n')
+    (repo / odd).write_text('<script>not markup</script>\n')
+    (repo / 'blob.bin').write_bytes(b'\x00\x01\x02')
+    _git(repo, 'add', '-A')
+    _git(repo, 'commit', '-m', 'mixed candidate')
+    candidate = _git(repo, 'rev-parse', 'HEAD')
+    _seed_run(db, 'run-file-diff', repo, base)
+    _gate_pass(db, 'run-file-diff', 'a1', 1, candidate, base)
+    before = _row_counts(db, 'run-file-diff')
+    diff = project_candidate_diff(db, 'run-file-diff')
+    files = {str(f['path']): f for f in diff.files}
+    assert files['f1.txt']['added'] == 2 and files['f1.txt']['removed'] == 1
+    assert files[odd]['added'] == 1 and files[odd]['status'] == 'Added'
+    assert files['blob.bin']['binary'] is True
+    assert files['blob.bin']['added'] is None
+    rows = files['f1.txt']['lines']
+    assert isinstance(rows, list)
+    removed = next(r for r in rows if r['kind'] == 'delete')
+    added = [r for r in rows if r['kind'] == 'add']
+    assert removed['old'] == 1 and removed['new'] is None
+    assert [r['new'] for r in added] == [1, 2]
+    page = TestClient(create_app(db_path=tmp_path / 'file-diffs.db')).get('/runs/run-file-diff')
+    assert 'class="file-diff"' in page.text and 'class="diff-number"' in page.text
+    assert 'diff-line diff-add' in page.text and 'diff-line diff-delete' in page.text
+    assert '<script>not markup</script>' not in page.text
+    assert '&lt;script&gt;not markup&lt;/script&gt;' in page.text
+    assert before == _row_counts(db, 'run-file-diff')
+
+
+def test_truncated_patch_keeps_exact_full_counts(tmp_path: Path) -> None:
+    db = Database(tmp_path / 'bounded-file.db')
+    repo, base = _make_repo(tmp_path / 'bounded')
+    candidate = _commit(repo, {'huge.txt': 'content\n' * 15000, 'z.txt': 'last\n'}, 'large')
+    _seed_run(db, 'run-bounded-file', repo, base)
+    _gate_pass(db, 'run-bounded-file', 'a1', 1, candidate, base)
+    diff = project_candidate_diff(db, 'run-bounded-file')
+    assert diff.truncated
+    files = {str(f['path']): f for f in diff.files}
+    assert files['huge.txt']['added'] == 15000 and files['huge.txt']['truncated']
+    assert files['z.txt']['added'] == 1 and files['z.txt']['patch_available'] is False
+    assert files['z.txt']['truncated']

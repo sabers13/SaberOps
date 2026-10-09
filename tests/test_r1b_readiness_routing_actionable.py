@@ -301,7 +301,7 @@ def test_r1b_verify_unprovable_stays_unknown(
 def test_r1b_verify_api_connection_not_falsely_not_ready(
     isolated_state: dict[str, Path], tmp_path: Path
 ) -> None:
-    """Descriptor-less API connections keep the reachability probe only."""
+    """API verification classifies a missing credential without requiring a CLI."""
     api = ProviderConnection(
         connection_id="byok-r1b-api",
         provider="testapi",
@@ -319,7 +319,9 @@ def test_r1b_verify_api_connection_not_falsely_not_ready(
 
     assert response.status_code == 200
     catalog = ReadinessStore(isolated_state["readiness"]).load()
-    assert catalog.try_get("byok-r1b-api") is None
+    evidence = catalog.try_get("byok-r1b-api")
+    assert evidence is not None and evidence.reason == "CREDENTIAL_MISSING"
+    assert evidence.state is ProviderReadiness.NOT_READY
 
 
 # ---------------------------------------------------------------------------
@@ -646,7 +648,7 @@ def test_r1b_static_training_denied_semantics_preserved(
         data={
             "connection_id": _STATIC_CONNECTION,
             "model_id": _STATIC_MODEL,
-            "context": "T2.training_denied_off_peak",
+            "context": "T2.default",
             "binding_id": worker_binding_id,
         },
         follow_redirects=False,
@@ -656,7 +658,7 @@ def test_r1b_static_training_denied_semantics_preserved(
     # admissibility: UNKNOWN would have failed closed here.
     assert response.status_code == 303
     payload = load_effective_routing_payload()
-    assert _STATIC_CID in payload["T2"]["training_denied_off_peak"]
+    assert _STATIC_CID in payload["T2"]["default"]
 
 
 def test_r1b_orchestrator_binding_cannot_satisfy_worker_routing(
@@ -727,12 +729,12 @@ def test_r1b_candidate_helpers_are_sanitized() -> None:
     )
 
     assert routing_context_for("T1") == "T1.default"
-    assert routing_context_for("T2", training_allowed=True) == "T2.training_allowed"
+    assert routing_context_for("T2", training_allowed=True) == "T2.default"
     assert (
         routing_context_for("T2", training_allowed=False, is_peak=True)
-        == "T2.training_denied_peak"
+        == "T2.default"
     )
-    assert routing_context_for("T3", is_peak=True) == "T3.peak"
+    assert routing_context_for("T3", is_peak=True) == "T3.default"
 
     skip = build_candidate_skip(
         provider="opencode",
@@ -940,7 +942,7 @@ def test_r1b1_prior_tier_skips_never_render_under_later_context(
     """
     payload = load_effective_routing_payload()
     payload["T1"]["default"] = [_CAND_A, _CAND_B]
-    payload["T2"]["training_allowed"] = [_CAND_C]
+    payload["T2"]["default"] = [_CAND_C]
     save_user_routing(payload)
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -974,26 +976,26 @@ def test_r1b1_prior_tier_skips_never_render_under_later_context(
     # record may carry the T1-skipped terra model.
     for event in no_elig:
         evidence = _payload(event)
-        if evidence.get("routing_context") == "T2.training_allowed":
+        if evidence.get("routing_context") == "T2.default":
             models = {
                 str(entry.get("model")) for entry in evidence["skipped_candidates"]
             }
             assert "gpt-5.6-terra" not in models
             assert "gpt-5.6-sol" in models
     terminal_evidence = _payload(no_elig[-1])
-    assert terminal_evidence["routing_context"] == "T2.training_allowed"
+    assert terminal_evidence["routing_context"] == "T2.default"
     assert {e["model"] for e in terminal_evidence["skipped_candidates"]} == {
         "gpt-5.6-sol"
     }
     run_failed = _payload(
         [e for e in events if e.event_type == "run_failed"][-1]
     )
-    assert run_failed["routing_context"] == "T2.training_allowed"
+    assert run_failed["routing_context"] == "T2.default"
     assert {e["model"] for e in run_failed["skipped_candidates"]} == {
         "gpt-5.6-sol"
     }
     report = build_run_report(db, result.run_id)
-    assert report["termination"]["routing_context"] == "T2.training_allowed"
+    assert report["termination"]["routing_context"] == "T2.default"
     assert {
         e["model"] for e in report["termination"]["skipped_candidates"]
     } == {"gpt-5.6-sol"}
@@ -1049,7 +1051,7 @@ def test_r1b2_package_transition_resets_skip_evidence_and_routing_context(
     pkg2_skip = "codex/gpt-5.6-sol"
     payload = load_effective_routing_payload()
     payload["T1"]["default"] = [pkg1_skip, pkg1_success]
-    payload["T2"]["training_allowed"] = [pkg2_skip]
+    payload["T2"]["default"] = [pkg2_skip]
     save_user_routing(payload)
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -1132,13 +1134,13 @@ def test_r1b2_package_transition_resets_skip_evidence_and_routing_context(
     assert len(resolved) >= 2
     pkg2_resolved = _payload(resolved[1])
     assert pkg2_resolved["tier"] == "T2"
-    assert pkg2_resolved["routing_context"] == "T2.training_allowed"
+    assert pkg2_resolved["routing_context"] == "T2.default"
 
     no_elig = [e for e in events if e.event_type == "no_eligible_candidate"]
     assert no_elig
     terminal = _payload(no_elig[-1])
     assert terminal["tier"] == "T2"
-    assert terminal["routing_context"] == "T2.training_allowed"
+    assert terminal["routing_context"] == "T2.default"
     assert terminal["routing_context"] == pkg2_resolved["routing_context"]
     terminal_models = {str(e.get("model")) for e in terminal["skipped_candidates"]}
     assert terminal_models == {"gpt-5.6-sol"}
@@ -1148,7 +1150,7 @@ def test_r1b2_package_transition_resets_skip_evidence_and_routing_context(
     run_failed = _payload(
         [e for e in events if e.event_type == "run_failed"][-1]
     )
-    assert run_failed["routing_context"] == "T2.training_allowed"
+    assert run_failed["routing_context"] == "T2.default"
     run_failed_models = {
         str(e.get("model")) for e in run_failed["skipped_candidates"]
     }
@@ -1158,7 +1160,7 @@ def test_r1b2_package_transition_resets_skip_evidence_and_routing_context(
     report = build_run_report(db, result.run_id)
     termination = report["termination"]
     assert isinstance(termination, dict)
-    assert termination["routing_context"] == "T2.training_allowed"
+    assert termination["routing_context"] == "T2.default"
     termination_models = {
         str(e.get("model")) for e in termination["skipped_candidates"]
     }
@@ -1169,7 +1171,7 @@ def test_r1b2_package_transition_resets_skip_evidence_and_routing_context(
     # chain.  Package 2 launched zero workers, so the summary is the
     # zero-launch explanation -- never a claim that package 1's PASSED
     # attempt failed its gate.
-    assert "No eligible candidate for T2.training_allowed" in result.summary
+    assert "No eligible candidate for T2.default" in result.summary
     assert "failed to pass gate" not in result.summary
     assert "All 1 attempt(s)" not in result.summary
     assert pkg1_success not in result.summary
@@ -1207,7 +1209,7 @@ def test_r1b3_mixed_current_chain_after_prior_success_is_truthful(
     pkg2_skip = "codex/gpt-5.6-sol"
     payload = load_effective_routing_payload()
     payload["T1"]["default"] = [pkg1_skip, pkg1_success]
-    payload["T2"]["training_allowed"] = [pkg2_fail, pkg2_skip]
+    payload["T2"]["default"] = [pkg2_fail, pkg2_skip]
     save_user_routing(payload)
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -1291,14 +1293,14 @@ def test_r1b3_mixed_current_chain_after_prior_success_is_truthful(
     assert "All 1 attempt(s) failed to pass gate" in result.summary
     assert "All 2 attempt(s)" not in result.summary
     # Package-1 success is never described as failed/ineligible.
-    assert "No eligible candidate for T2.training_allowed" in result.summary
+    assert "No eligible candidate for T2.default" in result.summary
     assert pkg2_skip in result.summary
     assert pkg1_success not in result.summary.split("No eligible candidate")[-1]
 
     no_elig = [e for e in events if e.event_type == "no_eligible_candidate"]
     assert no_elig
     terminal = _payload(no_elig[-1])
-    assert terminal["routing_context"] == "T2.training_allowed"
+    assert terminal["routing_context"] == "T2.default"
     terminal_models = {str(e.get("model")) for e in terminal["skipped_candidates"]}
     assert terminal_models == {"gpt-5.6-sol"}
 
@@ -1306,7 +1308,7 @@ def test_r1b3_mixed_current_chain_after_prior_success_is_truthful(
         [e for e in events if e.event_type == "run_failed"][-1]
     )
     assert run_failed["summary"] == result.summary
-    assert run_failed["routing_context"] == "T2.training_allowed"
+    assert run_failed["routing_context"] == "T2.default"
     assert {
         str(e.get("model")) for e in run_failed["skipped_candidates"]
     } == {"gpt-5.6-sol"}
@@ -1317,7 +1319,7 @@ def test_r1b3_mixed_current_chain_after_prior_success_is_truthful(
     termination = report["termination"]
     assert isinstance(termination, dict)
     assert termination["summary"] == result.summary
-    assert termination["routing_context"] == "T2.training_allowed"
+    assert termination["routing_context"] == "T2.default"
     assert {
         str(e["model"]) for e in termination["skipped_candidates"]
     } == {"gpt-5.6-sol"}
@@ -1472,7 +1474,7 @@ def _crashed_two_package_boundary(
     pkg2_skip = "codex/gpt-5.6-sol"
     payload = load_effective_routing_payload()
     payload["T1"]["default"] = [pkg1_skip, pkg1_success]
-    payload["T2"]["training_allowed"] = [pkg2_skip]
+    payload["T2"]["default"] = [pkg2_skip]
     save_user_routing(payload)
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -1560,7 +1562,7 @@ def _crashed_partial_two_package_plan(
 
     payload = load_effective_routing_payload()
     payload["T1"]["default"] = ["codex/gpt-5.6-terra", "opencode/opencode-go/deepseek-v4-flash"]
-    payload["T2"]["training_allowed"] = ["codex/gpt-5.6-sol"]
+    payload["T2"]["default"] = ["codex/gpt-5.6-sol"]
     save_user_routing(payload)
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -1702,7 +1704,7 @@ def test_r1b4_package_recovery_excludes_prior_package_attempts(
     pkg2_skip = "codex/gpt-5.6-sol"
     payload = load_effective_routing_payload()
     payload["T1"]["default"] = [pkg1_skip, pkg1_success]
-    payload["T2"]["training_allowed"] = [pkg2_skip]
+    payload["T2"]["default"] = [pkg2_skip]
     save_user_routing(payload)
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -1807,7 +1809,7 @@ def test_r1b4_package_recovery_excludes_prior_package_attempts(
 
     events = db2.get_events(run_id, limit=10000)
     # Current-chain attempt count is zero: package 2 launched nothing.
-    assert "No eligible candidate for T2.training_allowed" in result.summary
+    assert "No eligible candidate for T2.default" in result.summary
     assert "failed to pass gate" not in result.summary
     assert "All " not in result.summary.split("No eligible candidate")[0]
     assert pkg1_success not in result.summary
@@ -1819,7 +1821,7 @@ def test_r1b4_package_recovery_excludes_prior_package_attempts(
     assert run_failed["summary"] == result.summary
     assert run_failed["attempts_count"] == len(historical)
     assert run_failed["chain_attempts_count"] == 0
-    assert run_failed["routing_context"] == "T2.training_allowed"
+    assert run_failed["routing_context"] == "T2.default"
     run_failed_models = {
         str(e.get("model")) for e in run_failed["skipped_candidates"]
     }
@@ -1831,7 +1833,7 @@ def test_r1b4_package_recovery_excludes_prior_package_attempts(
     termination = report["termination"]
     assert isinstance(termination, dict)
     assert termination["summary"] == result.summary
-    assert termination["routing_context"] == "T2.training_allowed"
+    assert termination["routing_context"] == "T2.default"
     assert {
         str(e.get("model")) for e in termination["skipped_candidates"]
     } == {"gpt-5.6-sol"}
@@ -1853,7 +1855,7 @@ def test_r1b4_tier_boundary_reconstructs_from_durable_evidence(
     t2_skip = "codex/gpt-5.6-sol"
     payload = load_effective_routing_payload()
     payload["T1"]["default"] = [t1_fail]
-    payload["T2"]["training_allowed"] = [t2_skip]
+    payload["T2"]["default"] = [t2_skip]
     save_user_routing(payload)
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -1883,7 +1885,7 @@ def test_r1b4_tier_boundary_reconstructs_from_durable_evidence(
 
     assert result.passed is False
     assert result.status == RunStatus.FAILED
-    assert "No eligible candidate for T2.training_allowed" in result.summary
+    assert "No eligible candidate for T2.default" in result.summary
     assert "failed to pass gate" not in result.summary
     assert t2_skip in result.summary
     events = db.get_events(result.run_id, limit=10000)
@@ -1935,7 +1937,7 @@ def test_r1b4_ambiguous_chain_boundary_fails_closed(
     pkg2_skip = "codex/gpt-5.6-sol"
     payload = load_effective_routing_payload()
     payload["T1"]["default"] = [pkg1_skip, pkg1_success]
-    payload["T2"]["training_allowed"] = [pkg2_skip]
+    payload["T2"]["default"] = [pkg2_skip]
     save_user_routing(payload)
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -2087,7 +2089,7 @@ def test_r1b42_markerless_middle_attempt_blocks_boundary_reconstruction(
     pkg2_skip = "codex/gpt-5.6-sol"
     payload = load_effective_routing_payload()
     payload["T1"]["default"] = [pkg1_skip, pkg1_success]
-    payload["T2"]["training_allowed"] = [pkg2_skip]
+    payload["T2"]["default"] = [pkg2_skip]
     save_user_routing(payload)
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -2495,7 +2497,7 @@ def test_r1b5_recovery_does_not_create_second_plan(
     assert len([e for e in post_events if e.event_type == "plan_step_added"]) == 2
     # Recovery still continued package 2 from durable state and terminalized.
     assert result.status == RunStatus.FAILED
-    assert "No eligible candidate for T2.training_allowed" in result.summary
+    assert "No eligible candidate for T2.default" in result.summary
 
 
 def test_r1b5_recovery_adopts_durable_plan(
@@ -2590,11 +2592,11 @@ def test_r1b5_recovery_adopts_durable_plan(
         pre_attempts[0].id
     ]
     assert result.status == RunStatus.FAILED
-    assert "No eligible candidate for T2.training_allowed" in result.summary
+    assert "No eligible candidate for T2.default" in result.summary
     run_failed = _payload(
         [e for e in post_events if e.event_type == "run_failed"][-1]
     )
-    assert run_failed["routing_context"] == "T2.training_allowed"
+    assert run_failed["routing_context"] == "T2.default"
 
 
 def test_r1b5_fresh_run_plans_once(
@@ -2610,7 +2612,7 @@ def test_r1b5_fresh_run_plans_once(
     pkg2_skip = "codex/gpt-5.6-sol"
     payload = load_effective_routing_payload()
     payload["T1"]["default"] = [pkg1_skip, pkg1_success]
-    payload["T2"]["training_allowed"] = [pkg2_skip]
+    payload["T2"]["default"] = [pkg2_skip]
     save_user_routing(payload)
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -2658,7 +2660,7 @@ def test_r1b5_fresh_run_plans_once(
     # Normal planning persisted exactly one plan with the expected steps and
     # packages, and the run proceeded through its normal lifecycle.
     assert result.status == RunStatus.FAILED
-    assert "No eligible candidate for T2.training_allowed" in result.summary
+    assert "No eligible candidate for T2.default" in result.summary
     assert len(db.list_run_plans(result.run_id)) == 1
     events = db.get_events(result.run_id, limit=10000)
     assert len([e for e in events if e.event_type == "plan_created"]) == 1
@@ -3115,4 +3117,3 @@ def test_r1b4_same_chain_continuation_keeps_prior_attempts(
     assert run_failed["chain_attempts_count"] == 3
 
     _ = orchestrator_module
-

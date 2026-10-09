@@ -1,28 +1,10 @@
-"""R3-E1: owner-selected exact Reviewer binding.
+"""Owner-selected exact Reviewer bindings and ordered fallback.
 
-The owner chooses ONE exact ``REVIEWER``-role binding from the discovered
-executable models.  The selection lives in the canonical owner binding
-document (:class:`~saberops.control_plane.binding_store.OwnerBindings`
-``reviewer_binding_id``) -- never in a second reviewer config file, never
-as a pool, never as an ordered fallback list.
-
-Semantics (fail closed throughout):
-
-* ``None`` (unconfigured): the legacy review ladder remains available for
-  backward compatibility.  Callers keep the historical ``None`` override.
-* Configured: the exact selected ``REVIEWER`` binding is authoritative.
-  A missing, wrong-role, unresolvable, or otherwise ineligible binding
-  raises :class:`ReviewerSelectionError` -- the caller must refuse the
-  review rather than silently falling back to another reviewer.
-  A ``WORKER`` or ``ORCHESTRATOR`` binding id is never accepted as
-  reviewer authority merely because provider/model text matches.
-
-This seam proves only structural eligibility (registry identity, role,
-exact C11-B resolution with the real adapter).  Readiness, quota, data
-policy, capability/control-plane evaluation, review budgets, and
-read-only reviewer execution remain authoritative inside
-:class:`~saberops.review.ReviewEngine`, which evaluates the single
-supplied candidate and never substitutes another reviewer.
+Legacy single selections still resolve exactly. An explicit ordered list
+restricts dispatch to its chosen bindings; missing or unusable members may
+be skipped, but an exhausted or explicitly empty list refuses review.
+The ReviewEngine enforces readiness, budgets, anti-self-review and read-only
+execution on every attempt and stops on a substantive verdict.
 """
 
 from __future__ import annotations
@@ -159,6 +141,22 @@ def reviewer_candidate_for_dispatch(
     ``REVIEWER`` binding for the existing
     ``ReviewEngine.review_run(reviewer_override=...)`` seam.
     """
+    if owner.reviewer_binding_ids is not None:
+        from dataclasses import replace
+
+        for binding_id in owner.reviewer_binding_ids:
+            selected = select_reviewer_binding(
+                replace(owner, reviewer_binding_id=binding_id), adapter_registry=adapter_registry
+            )
+            if selected.status is ReviewerSelectionStatus.RESOLVED and selected.binding is not None:
+                return WorkerCandidate(
+                    provider=selected.binding.provider,
+                    model=selected.binding.model,
+                    binding_id=binding_id,
+                )
+        raise ReviewerSelectionError(
+            REVIEWER_UNRESOLVABLE, "No chosen reviewer can authorize review"
+        )
     selection = select_reviewer_binding(owner, adapter_registry=adapter_registry)
     if selection.status is ReviewerSelectionStatus.NOT_CONFIGURED:
         return None

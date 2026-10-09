@@ -64,7 +64,8 @@ C15 invariants preserved:
   mutated, no fabricated tier is persisted to evidence.  A binding
   whose profile is ``enabled=False`` returns typed
   ``PROFILE_DISABLED``; a binding whose backend has no verified
-  runtime seam (``DIRECT_API``) returns typed ``UNSUPPORTED_BACKEND``.
+  runtime seam returns typed ``UNSUPPORTED_BACKEND``. DIRECT_API resolves
+  only through its exact configured API connection and direct executor.
 * **OpenCode compatibility evidence (C15-GC-03):** when the persisted
   binding routes through OpenCode, the consumer consults the same
   :mod:`~saberops.workers.instruction_compat` evidence the governed
@@ -96,9 +97,12 @@ consumer owns execution semantics.
 from __future__ import annotations
 
 import hashlib
+import json
+import sqlite3
+import time
 import uuid
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -135,12 +139,14 @@ from saberops.control_plane.orch_binding import (
     ORCH_BINDING_PINNED_TRAINING,
     ORCH_BINDING_PINNED_UNAVAILABLE,
     ORCH_BINDING_PROFILE_DISABLED,
+    OrchBindingPolicy,
     OrchSelectionStatus,
     select_orch_binding,
 )
 from saberops.db import Database, current_iso_timestamp
 from saberops.models import (
     AttemptStatus,
+    OrchBindingMode,
     ReasoningEffort,
     Run,
     RunStatus,
@@ -231,6 +237,8 @@ class OrchestratorModelRequest:
     timeout_seconds: float = 60.0
     run_id: str | None = None
     correlation_id: str | None = None
+    control_interrupt: Callable[[], bool] | None = None
+    input_images: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -484,8 +492,14 @@ class OrchestratorModelConsumer:
         effort_policy: EffortPolicy | None = None,
         now_iso: Callable[[], str] | None = None,
         require_existing_run: bool = False,
+        event_recorder: Callable[[str, Mapping[str, Any]], int] | None = None,
+        session_root: Path | None = None,
     ) -> None:
+        self._session_root = session_root or (
+            Path(db.db_path).resolve().parent / "agent-sessions" if db is not None else None
+        )
         self._db = db
+        self._event_recorder = event_recorder
         self._registry = registry or AdapterRegistry.default()
         self._owner_bindings = owner_bindings
         self._binding_store_path = binding_store_path
@@ -500,6 +514,15 @@ class OrchestratorModelConsumer:
         # preserves the existing C15-XEC evidence stream for direct
         # callers (services, tests) that already operate on a parent run.
         self._require_existing_run = require_existing_run
+
+    def _emit_event(
+        self, db: Database | None, run_id: str, event_type: str, *,
+        payload: Mapping[str, Any], require_existing_run: bool = False,
+    ) -> int:
+        if self._event_recorder is not None:
+            return self._event_recorder(event_type, payload)
+        return _emit_event(db, run_id, event_type, payload=payload,
+                           require_existing_run=require_existing_run)
 
     @property
     def registry(self) -> AdapterRegistry:
@@ -626,7 +649,7 @@ class OrchestratorModelConsumer:
             "correlation_id": request.correlation_id,
             "invoked_at": self._now_iso(),
         }
-        return _emit_event(
+        return self._emit_event(
             self._db,
             run_id,
             "orchestrator_model_resolved",
@@ -669,7 +692,7 @@ class OrchestratorModelConsumer:
             "correlation_id": correlation_id,
             "recorded_at": self._now_iso(),
         }
-        return _emit_event(
+        return self._emit_event(
             self._db,
             run_id,
             "orchestrator_model_invoked",
@@ -691,7 +714,7 @@ class OrchestratorModelConsumer:
             "correlation_id": correlation_id,
             "refused_at": self._now_iso(),
         }
-        return _emit_event(
+        return self._emit_event(
             self._db,
             run_id,
             "orchestrator_model_refused",
@@ -786,9 +809,72 @@ class OrchestratorModelConsumer:
             return REASON_INSTRUCTION_UNKNOWN
         return None
 
-    def invoke(
+    def invoke(self, request: OrchestratorModelRequest) -> OrchestratorModelResult:
+        if request.run_id is None:
+            request = replace(request, run_id=f"orch_model_{uuid.uuid4().hex[:12]}")
+        try:
+            owner = self.load_owner_bindings()
+        except OrchestratorModelInvocationError as exc:
+            self._record_refusal_event(
+                run_id=request.run_id or "orch_model_unresolved",
+                reason=exc.reason,
+                detail=exc.detail,
+                correlation_id=request.correlation_id,
+            )
+            raise
+        if owner.policy is None or owner.policy.mode is not OrchBindingMode.PREFERRED_WITH_FALLBACK:
+            return self._invoke_one(request, owner)
+        deadline = time.monotonic() + request.timeout_seconds
+        last_error: OrchestratorModelInvocationError | None = None
+        last_result: OrchestratorModelResult | None = None
+        retryable = {
+            REASON_SELECTION_UNRESOLVED,
+            REASON_NO_ADAPTER,
+            REASON_RESOLUTION_FAILED,
+            REASON_INVOCATION_REFUSED,
+            REASON_INVOCATION_FAILED,
+            REASON_INSTRUCTION_INCOMPATIBLE,
+            REASON_INSTRUCTION_UNKNOWN,
+            *_ORCH_SELECTION_REASON_MAP.values(),
+            *_RESOLUTION_REASON_MAP.values(),
+        }
+        for binding_id in owner.role_binding_ids("orchestrator"):
+            if request.control_interrupt and request.control_interrupt():
+                raise OrchestratorModelInvocationError(
+                    REASON_INVOCATION_FAILED, message="Reply stopped by owner"
+                )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            attempt_owner = replace(
+                owner,
+                policy=OrchBindingPolicy(mode=OrchBindingMode.PINNED, pinned_binding_id=binding_id),
+            )
+            try:
+                result = self._invoke_one(
+                    replace(request, timeout_seconds=remaining), attempt_owner
+                )
+            except OrchestratorModelInvocationError as exc:
+                if exc.reason not in retryable:
+                    raise
+                last_error = exc
+                last_result = None
+                continue
+            if result.status == "SUCCESS":
+                return result
+            last_result = result
+        if last_result is not None:
+            return last_result
+        if last_error is not None:
+            raise last_error
+        raise OrchestratorModelInvocationError(
+            REASON_INVOCATION_TIMEOUT, message="Orchestrator routing deadline exhausted"
+        )
+
+    def _invoke_one(
         self,
         request: OrchestratorModelRequest,
+        owner: OwnerBindings,
     ) -> OrchestratorModelResult:
         """Resolve the persisted binding and invoke it through the adapter.
 
@@ -802,18 +888,6 @@ class OrchestratorModelConsumer:
         """
         correlation_id = request.correlation_id
         evidence_run_id = request.run_id or f"orch_model_{uuid.uuid4().hex[:12]}"
-
-        # 1. Load owner document.
-        try:
-            owner = self.load_owner_bindings()
-        except OrchestratorModelInvocationError as exc:
-            self._record_refusal_event(
-                run_id=evidence_run_id,
-                reason=exc.reason,
-                detail=exc.detail,
-                correlation_id=correlation_id,
-            )
-            raise
 
         if owner.policy is None:
             event_id = self._record_refusal_event(
@@ -1001,6 +1075,8 @@ class OrchestratorModelConsumer:
                 exc.detail.setdefault(key, value)
             raise
 
+        adapter = resolved.adapter
+
         # 6. OpenCode instruction-compatibility veto.  Only the
         # OpenCode adapter opts in; for every other adapter the
         # hook is absent and the consumer treats the binding as
@@ -1063,6 +1139,8 @@ class OrchestratorModelConsumer:
             env=dict(resolved.overlay),
             read_only=True,
             reasoning_effort=resolved_effort,
+            control_interrupt=request.control_interrupt,
+            input_images=request.input_images,
         )
 
         # 9. Run through the resolved adapter.  The consumer treats
@@ -1101,7 +1179,13 @@ class OrchestratorModelConsumer:
             )
 
         try:
-            worker_result: WorkerResult = adapter.run(worker_request)
+            from saberops.agent_sessions import observe_invocation
+
+            worker_result: WorkerResult = observe_invocation(
+                adapter.run, worker_request, root=self._session_root,
+                owner=evidence_run_id, role="orchestrator", provider=binding.provider,
+                association=correlation_id or "orchestrator-call",
+            )
         except Exception as exc:
             outcome_event_id = self._record_outcome_event(
                 run_id=evidence_run_id,
@@ -1206,7 +1290,7 @@ class OrchestratorModelConsumer:
 # normal run is "initial objective interpretation / execution guidance"
 # -- a single bounded invocation that produces a short advisory text
 # the first worker sees as ``extra_sections``.  These constants
-# enforce the "maximum Orchestrator semantic calls per normal run = 1"
+# enforce the "one logical Orchestrator invocation per run; fallback attempts share its deadline"
 # / "deterministic maximum returned text size" / "timeout" rules.
 INITIAL_GUIDANCE_MAX_PROMPT_BYTES = 4096
 INITIAL_GUIDANCE_MAX_OUTPUT_CHARS = 600
@@ -1261,11 +1345,24 @@ def fetch_initial_orchestrator_guidance(
     bounded_task = (original_task or "").strip()
     bounded_task_bytes = bounded_task.encode("utf-8")
     if len(bounded_task_bytes) > INITIAL_GUIDANCE_MAX_PROMPT_BYTES:
-        bounded_task = bounded_task_bytes[
-            :INITIAL_GUIDANCE_MAX_PROMPT_BYTES
-        ].decode("utf-8", errors="replace")
+        bounded_task = bounded_task_bytes[:INITIAL_GUIDANCE_MAX_PROMPT_BYTES].decode(
+            "utf-8", errors="replace"
+        )
 
     service_db = getattr(service, "db", None)
+    parent_run = service_db.get_run(run_id) if service_db else None
+    previous_titles = (
+        [
+            run.display_title
+            for run in service_db.list_runs(limit=30)
+            if run.id != run_id
+            and parent_run
+            and run.target_repo == parent_run.target_repo
+            and run.display_title
+        ]
+        if service_db
+        else []
+    )
 
     consumer = OrchestratorModelConsumer(
         db=service_db,
@@ -1283,12 +1380,19 @@ def fetch_initial_orchestrator_guidance(
             "implementation focus, ambiguity that flags, and validation "
             "concerns.  Do NOT invent provider / model / binding / "
             "shell / git / acceptance decisions -- those are owned "
-            "deterministically by the control plane.  Return plain "
-            "bounded text only; no lists, no JSON, no command lines."
+            "deterministically by the control plane. Return exactly a JSON object "
+            "with title and guidance. title is a descriptive 4–10 word task name "
+            "of at most 80 characters, including the action, subject and useful purpose, "
+            "rather than only an application name. Choose a distinct title from earlier "
+            "runs, using the specific requested change. Use the user's language without the "
+            "repository name, paths, IDs, or status. guidance is the bounded "
+            "advisory text; no command lines."
         ),
         user_prompt=(
             "User objective (verbatim):\n"
             f"{bounded_task}\n\n"
+            "Earlier run titles (context only): "
+            f"{json.dumps(previous_titles[:10], ensure_ascii=False)}\n\n"
             "Return a bounded advisory guidance text the first "
             "implementation worker will read as additional context."
         ),
@@ -1360,15 +1464,9 @@ def fetch_initial_orchestrator_guidance(
                 else None
             )
             outcome_provider = (
-                str(safe_provider)
-                if isinstance(safe_provider, str) and safe_provider
-                else None
+                str(safe_provider) if isinstance(safe_provider, str) and safe_provider else None
             )
-            outcome_model = (
-                str(safe_model)
-                if isinstance(safe_model, str) and safe_model
-                else None
-            )
+            outcome_model = str(safe_model) if isinstance(safe_model, str) and safe_model else None
             outcome_profile_id = (
                 str(safe_profile_id)
                 if isinstance(safe_profile_id, str) and safe_profile_id
@@ -1380,15 +1478,9 @@ def fetch_initial_orchestrator_guidance(
                 else None
             )
             outcome_backend = (
-                str(safe_backend)
-                if isinstance(safe_backend, str) and safe_backend
-                else None
+                str(safe_backend) if isinstance(safe_backend, str) and safe_backend else None
             )
-            if (
-                isinstance(safe_effort_str, str)
-                and safe_effort_str
-                and outcome_effort is None
-            ):
+            if isinstance(safe_effort_str, str) and safe_effort_str and outcome_effort is None:
                 try:
                     outcome_effort = ReasoningEffort(safe_effort_str)
                 except ValueError:
@@ -1401,9 +1493,7 @@ def fetch_initial_orchestrator_guidance(
         # consumer-level status remains authoritative for its own
         # evidence stream; this mapping is local to the bounded
         # guidance-result evidence contract.
-        outcome_status = (
-            "SUCCEEDED" if result.status == "SUCCESS" else "FAILED"
-        )
+        outcome_status = "SUCCEEDED" if result.status == "SUCCESS" else "FAILED"
         outcome_reason = result.reason
         outcome_binding_id = result.binding_id
         outcome_provider = result.provider
@@ -1414,9 +1504,7 @@ def fetch_initial_orchestrator_guidance(
         outcome_effort = result.reasoning_effort
         outcome_output_bytes = len((result.output_text or "").encode("utf-8"))
         if result.output_text:
-            outcome_output_digest = hashlib.sha256(
-                result.output_text.encode("utf-8")
-            ).hexdigest()
+            outcome_output_digest = hashlib.sha256(result.output_text.encode("utf-8")).hexdigest()
 
     # Record ONE canonical, sanitized result event against the parent run.
     # This is the bounded durable evidence the C15-XEC correction
@@ -1443,7 +1531,18 @@ def fetch_initial_orchestrator_guidance(
     if result is None or outcome_status != "SUCCEEDED":
         return "", outcome_reason or "ORCH_MODEL_NON_SUCCESS"
 
-    output = (result.output_text or "").strip()
+    from saberops.run_titles import parse_named_guidance
+
+    parent = service_db.get_run(run_id) if service_db is not None else None
+    title, output = parse_named_guidance(
+        (result.output_text or "").strip(), parent.target_repo if parent else ""
+    )
+    if title and service_db is not None:
+        try:
+            service_db.set_run_title(run_id, title)
+        except sqlite3.Error:
+            # A display-label failure cannot prevent implementation or alter its objective.
+            pass
     if len(output) > INITIAL_GUIDANCE_MAX_OUTPUT_CHARS:
         output = output[:INITIAL_GUIDANCE_MAX_OUTPUT_CHARS].rstrip()
     if not output:

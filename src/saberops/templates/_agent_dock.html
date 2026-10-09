@@ -1,0 +1,15 @@
+<div class="agent-dock-tools" data-run-refresh="worker-filters" data-agent-live role="group" aria-label="Agent view">
+  <button type="button" class="text-button" id="agentSessionRefresh" aria-label="Refresh agent activity">↻</button>
+  <div class="agent-tmux-toolbar" role="group" aria-label="Shared terminal workspace">
+    <button type="button" class="text-button" id="agentOpenAllTmux" title="Open each unique available session together. Live agents use controlled handoff.">Open all in tmux ↗</button>
+    <button type="button" class="text-button" id="agentOpenTmux" title="Show the shared workspace without starting another provider session">View tmux ↗</button>
+  </div>
+</div>
+<div class="agent-dock-body" id="workerDockBody" data-run-refresh="worker-dock" data-agent-live data-od-id="worker-dock-body">
+  <div id="agentWorkspaceFeedback" class="agent-workspace-feedback" role="status" hidden></div>
+  <div id="agentManualBanner" class="agent-control-banner" role="status" hidden></div>
+  <div class="agent-session-toolbar"><label class="sr-only" for="agentSessionSelect">Agent session</label><select id="agentSessionSelect"><option>Loading sessions…</option></select><label class="agent-follow"><input id="agentFollow" type="checkbox" checked> Follow live</label></div>
+  <p id="agentSessionError" class="so-error" role="status" hidden></p>
+  <div id="agentSessionCards" class="agent-session-cards"><p class="muted">Loading agents…</p></div>
+</div>
+<footer class="agent-dock-footer" data-run-refresh="worker-footer" data-agent-live><button type="button" class="text-button" id="agentOpenChatCli" title="This opens the app's synchronized text chat, separate from a provider's native CLI">Chat in terminal ↗</button><span class="muted">Orchestrator · workers · reviewers</span></footer>

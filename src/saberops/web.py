@@ -9,6 +9,7 @@ runs, reviews, accept, cleanup, and live SSE event streaming.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -23,12 +24,29 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import FastAPI, Form, Request, Response, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi import (
+    FastAPI,
+    File,
+    Form,
+    Request,
+    Response,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from saberops.accept import AcceptEngine
+from saberops.chat import ChatBusy, ChatCoordinator, ChatStore, run_explanation
+from saberops.cli_usage import CliUsageService
 from saberops.config import (
     reconstruct_run_config,
     resolve_run_config,
@@ -100,6 +118,7 @@ from saberops.models import (
     RunStatus,
     WorkerCandidate,
 )
+from saberops.navigation import project_folders
 from saberops.observability.run_report import build_run_report, saberops_version
 from saberops.owner_actions import (
     LAUNCH_FAILED_REASON,
@@ -109,7 +128,7 @@ from saberops.owner_actions import (
 from saberops.project import owner_state_dir
 from saberops.projects import ProjectRegistry, ProjectValidation
 from saberops.provenance import assert_run_repository
-from saberops.routing import is_peak_hours
+from saberops.routing import is_peak_hours, resolve_candidate_chain
 from saberops.routing_config import (
     ALLOWED_CANDIDATES,
     CONTEXT_KEYS,
@@ -120,7 +139,9 @@ from saberops.routing_config import (
     load_effective_routing,
     load_effective_routing_payload,
     move_candidate_in_chain,
+    normalize_routing_scope,
     remove_candidate_from_chain,
+    reorder_candidate_chain,
     requires_training_permission,
     save_user_routing,
 )
@@ -130,6 +151,7 @@ from saberops.run_creation import (
     effective_policy_summary,
     resolve_effective_run_config,
 )
+from saberops.run_titles import fallback_title
 from saberops.runtime import ProjectRuntime, ProjectRuntimeManager
 from saberops.service import OrchestratorService
 from saberops.wake import subscribe_run
@@ -321,45 +343,10 @@ def _build_tiers(registry: AdapterRegistry) -> list[dict[str, Any]]:
     """Build the configured tier/model matrix for the dashboard."""
     snap = load_effective_routing()
     return [
-        {
-            "name": "T1",
-            "title": "Standard / Fast Tier",
-            "groups": [
-                {"label": "Default", "candidates": _candidate_rows(registry, snap.t1_default)},
-            ],
-        },
-        {
-            "name": "T2",
-            "title": "Advanced Tier",
-            "groups": [
-                {
-                    "label": "Training Allowed",
-                    "candidates": _candidate_rows(registry, snap.t2_training_allowed),
-                },
-                {
-                    "label": "Training Denied (Off-Peak)",
-                    "candidates": _candidate_rows(registry, snap.t2_training_denied_off_peak),
-                },
-                {
-                    "label": "Training Denied (Peak)",
-                    "candidates": _candidate_rows(registry, snap.t2_training_denied_peak),
-                },
-            ],
-        },
-        {
-            "name": "T3",
-            "title": "High Performance Tier",
-            "groups": [
-                {
-                    "label": "Off-Peak",
-                    "candidates": _candidate_rows(registry, snap.t3_off_peak),
-                },
-                {
-                    "label": "Peak",
-                    "candidates": _candidate_rows(registry, snap.t3_peak),
-                },
-            ],
-        },
+        {"name": tier, "title": title, "groups": [
+            {"label": "Models", "candidates": _candidate_rows(registry, snap.chain_for(tier, True, False))}
+        ]}
+        for tier, title in (("T1", "Standard / Fast Tier"), ("T2", "Advanced Tier"), ("T3", "High Performance Tier"))
     ]
 
 
@@ -381,7 +368,7 @@ def _run_rows(runs: list[Run]) -> list[dict[str, Any]]:
             "status_class": _status_class(run.status.value),
             "created_at": run.created_at,
             "completed_at": run.completed_at,
-            "summary": _short_summary(run.task),
+            "summary": run.display_title or fallback_title(run.task, run.target_repo),
         }
         for run in runs
     ]
@@ -728,26 +715,7 @@ def _dashboard_context(
         # submission freezes the safe project values.
         summary = effective_policy_summary(active_repo)
         if "error" not in summary:
-            project_settings = {
-                "gate_command": summary["gate_command"],
-                "gate_configured": summary["gate_configured"],
-                "gate_detected": summary["gate_detected"],
-                "gate_effective": summary["gate_effective"],
-                "data_policy": summary["data_policy"],
-                "data_policy_label": summary["data_policy_label"],
-                "data_policy_explicit": summary["data_policy_explicit"],
-                "training_allowed": summary["training_allowed"],
-                "review_policy_mode": summary["review_policy_mode"],
-                "review_policy_explicit": summary["review_policy_explicit"],
-                "gate_scratch_mode": summary["gate_scratch_mode"],
-                "accept_target_branch": summary["accept_target_branch"],
-                "accept_target_branch_explicit": summary[
-                    "accept_target_branch_explicit"
-                ],
-                "accept_target_branch_effective": summary[
-                    "accept_target_branch_effective"
-                ],
-            }
+            project_settings = dict(summary)
             if form is None:
                 resolved_form["training_allowed"] = bool(summary["training_allowed"])
                 if summary["gate_configured"]:
@@ -827,6 +795,8 @@ def _run_detail_context(
     candidate_sha: str | None = None
     changed_files: list[str] = []
     diff_text = ""
+    diff_files: tuple[dict[str, object], ...] = ()
+    diff_totals: dict[str, int | bool] | None = None
     diff_truncated = False
     diff_available = False
     diff_unavailable_reason: str | None = None
@@ -847,6 +817,8 @@ def _run_detail_context(
         candidate_sha = diff.candidate_sha
         changed_files = list(diff.changed_paths)
         diff_text = diff.diff_text
+        diff_files = diff.files
+        diff_totals = diff.totals
         diff_truncated = diff.truncated
         diff_available = diff.available
         diff_unavailable_reason = diff.unavailable_reason
@@ -921,10 +893,23 @@ def _run_detail_context(
     else:
         owner_accept_last_error = None
 
+    from saberops.continuation import continuation_offer
+    can_continue, continue_reason, continued_run_id = continuation_offer(db, run)
+    try:
+        saved_config = json.loads(run.config_json) if run.config_json else {}
+        continuation_source = (saved_config.get("continuation")
+                               if isinstance(saved_config, dict) else None)
+    except ValueError:
+        continuation_source = None
     return {
         "missing": False,
+        "can_continue": can_continue,
+        "continue_reason": continue_reason,
+        "continued_run_id": continued_run_id,
+        "continuation_source": continuation_source,
         "run_id": run.id,
         "task": run.task,
+        "display_title": run.display_title or fallback_title(run.task, run.target_repo),
         "target_repo": run.target_repo,
         "base_commit": run.base_commit,
         "tier": run.tier.value,
@@ -945,6 +930,8 @@ def _run_detail_context(
         "candidate_sha": candidate_sha,
         "changed_files": changed_files,
         "diff_text": diff_text,
+        "diff_files": diff_files,
+        "diff_totals": diff_totals,
         "diff_truncated": diff_truncated,
         "diff_available": diff_available,
         "diff_unavailable_reason": diff_unavailable_reason,
@@ -975,6 +962,7 @@ def _run_detail_context(
         "current_dispatch": current_dispatch,
         "usage": usage,
         "run_report": run_report,
+        "chat_explanation": run_explanation(run_report) if run_report else run.result_summary,
     }
 
 
@@ -1044,6 +1032,9 @@ def _quota_context(
     db: Database,
     *,
     error: str | None = None,
+    cli_cards: list[dict[str, Any]] | None = None,
+    recorded_usage: dict[str, dict[str, Any]] | None = None,
+    usage_unreadable: int = 0,
     notice: str | None = None,
     form: dict[str, Any] | None = None,
     enable_form: dict[str, Any] | None = None,
@@ -1051,6 +1042,9 @@ def _quota_context(
     """Build the quota-management template context."""
     empty = {"provider": "", "pool": "", "remaining_percent": "", "reset_at": ""}
     return {
+        "cli_cards": cli_cards or [],
+        "recorded_usage": recorded_usage or {},
+        "usage_unreadable": usage_unreadable,
         "quota_states": _quota_rows(db.list_quota()),
         "form": form if form is not None else dict(empty),
         "enable_form": enable_form if enable_form is not None else {"provider": "", "pool": ""},
@@ -1397,8 +1391,8 @@ def _exact_execution_support(
 
     An account-backed connection with a registered adapter is necessary but
     not sufficient: without a matching exact :class:`ExecutionBinding` the
-    result stays ``UNKNOWN``.  API/BYOK connections have no execution
-    transport and stay ``UNSUPPORTED``.
+    result stays ``UNKNOWN``.  OpenAI-compatible API connections use their own exact
+    DIRECT_API bindings. Unsupported protocols remain unavailable.
 
     C15-XC-03: the binding is resolved against the catalog row's own
     ``connection_id`` so a model reached through two different
@@ -1406,7 +1400,9 @@ def _exact_execution_support(
     registry declaration.
     """
     if not connection.is_account_backed:
-        return ExecutionSupport.UNSUPPORTED
+        from saberops.workers.direct_api import supports_connection
+        if not supports_connection(connection):
+            return ExecutionSupport.UNSUPPORTED
     if registry.get(connection.provider) is None:
         return ExecutionSupport.UNSUPPORTED
     if _resolve_exact_binding(
@@ -1434,11 +1430,33 @@ def _http_get(
     if opener is not None:
         return opener(url, headers)
     from urllib.request import Request as UrlRequest
-    from urllib.request import urlopen
+    from urllib.request import build_opener
+
+    from saberops.workers.api_agent import NoRedirect
 
     request = UrlRequest(url, method="GET", headers=headers)
-    with urlopen(request, timeout=5) as response:  # noqa: S310
-        return bytes(response.read(1_000_000))
+    with build_opener(NoRedirect()).open(request, timeout=5) as response:
+        return bytes(response.read(8_000_001))
+
+
+def _model_list_url(endpoint: str) -> str:
+    """Derive a read-only catalog URL without changing connection configuration."""
+    from urllib.parse import urlsplit, urlunsplit
+
+    parsed = urlsplit(endpoint)
+    path = parsed.path.rstrip("/")
+    # OpenRouter's model catalog is shared across its API surfaces, including
+    # alpha/decisions. Never apply this host-specific rule to a custom server.
+    if parsed.hostname == "openrouter.ai":
+        path = "/api/v1/models"
+    else:
+        for suffix in ("/chat/completions", "/completions", "/responses"):
+            if path.endswith(suffix):
+                path = path[:-len(suffix)]
+                break
+        if not path.endswith("/models"):
+            path += "/models"
+    return urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, parsed.fragment))
 
 
 def _fetch_openai_compatible_models(
@@ -1462,7 +1480,7 @@ def _fetch_openai_compatible_models(
 
     if not endpoint:
         raise ModelListingError(ConnectionTestReason.CONFIG_INVALID, "endpoint not configured")
-    url = endpoint.rstrip("/") + "/models"
+    url = _model_list_url(endpoint)
     headers: dict[str, str] = {"Accept": "application/json"}
     credential_transmitted = False
     if auth_headers is not None:
@@ -1498,6 +1516,10 @@ def _fetch_openai_compatible_models(
             ConnectionTestReason.ENDPOINT_UNREACHABLE,
             f"model list endpoint unreachable: {exc.__class__.__name__}",
         ) from exc
+    if len(raw) > 8_000_000:
+        raise ModelListingError(
+            ConnectionTestReason.PROTOCOL_UNSUPPORTED, "model list exceeds response size limit"
+        )
     try:
         payload = json.loads(raw.decode("utf-8", errors="replace"))
     except ValueError as exc:
@@ -1626,7 +1648,7 @@ def _list_account_models(connection: ProviderConnection) -> list[str]:
         ),
         None,
     )
-    if descriptor is None or not descriptor.model_list_argv:
+    if descriptor is None or not descriptor.has_model_listing:
         raise ModelListingError(
             ConnectionTestReason.CAPABILITY_UNKNOWN,
             "backend exposes no supported model enumeration",
@@ -1637,7 +1659,19 @@ def _list_account_models(connection: ProviderConnection) -> list[str]:
             ConnectionTestReason.BACKEND_NOT_INSTALLED,
             f"backend executable '{descriptor.executable}' not found",
         )
+    if descriptor.model_list_protocol:
+        from saberops.model_access.native_listing import list_native_models
+
+        return list_native_models(executable, descriptor.model_list_protocol)
     stdout = _run_backend_listing([executable, *descriptor.model_list_argv])
+    if descriptor.backend == "antigravity":
+        # Native `agy models` emits exact ID<TAB>display name pairs.
+        # Never interpret headers, errors or display names as executable IDs.
+        return [
+            line.split("\t", 1)[0].strip()
+            for line in stdout.splitlines()
+            if "\t" in line and line.split("\t", 1)[0].strip()
+        ]
     return _parse_backend_model_list(stdout)
 
 
@@ -1645,6 +1679,9 @@ def _materialize_discovered_binding(
     connection: ProviderConnection,
     model_id: str,
     registry: AdapterRegistry,
+    *,
+    owner: OwnerBindings | None = None,
+    persist: bool = True,
 ) -> tuple[OwnerBindings, Any] | None:
     """Translate validated discovery evidence into exact C11-B bindings.
 
@@ -1675,6 +1712,13 @@ def _materialize_discovered_binding(
     adapter = registry.get(connection.provider)
     if adapter is None:
         return None
+    from saberops.control_plane.bindings import BindingKind
+    from saberops.workers.direct_api import DirectAPIAdapter, supports_connection
+    api = not connection.is_account_backed
+    if api:
+        if not supports_connection(connection):
+            return None
+        adapter = DirectAPIAdapter(connection.provider)
     profile = capability_profile_for(adapter)
     worker_binding, execution_profile, pool = materialize_discovered_binding(
         connection_id=connection.connection_id,
@@ -1683,6 +1727,7 @@ def _materialize_discovered_binding(
         provider_transport=profile.transport,
         harness_capabilities=profile.capabilities,
         binding_role=BindingRole.WORKER,
+        backend=BindingKind.DIRECT_API if api else BindingKind.DIRECT_CLI,
     )
     reviewer_binding, _reviewer_profile, _reviewer_pool = materialize_discovered_binding(
         connection_id=connection.connection_id,
@@ -1691,6 +1736,7 @@ def _materialize_discovered_binding(
         provider_transport=profile.transport,
         harness_capabilities=profile.capabilities,
         binding_role=BindingRole.REVIEWER,
+        backend=BindingKind.DIRECT_API if api else BindingKind.DIRECT_CLI,
     )
     orch_binding, _orch_profile, _orch_pool = materialize_discovered_binding(
         connection_id=connection.connection_id,
@@ -1699,8 +1745,9 @@ def _materialize_discovered_binding(
         provider_transport=profile.transport,
         harness_capabilities=profile.capabilities,
         binding_role=BindingRole.ORCHESTRATOR,
+        backend=BindingKind.DIRECT_API if api else BindingKind.DIRECT_CLI,
     )
-    owner = _load_owner_bindings_safely()
+    owner = owner if owner is not None else _load_owner_bindings_safely()
     candidate = upsert_owner_binding(
         owner, binding=worker_binding, profile=execution_profile, pool=pool
     )
@@ -1721,9 +1768,14 @@ def _materialize_discovered_binding(
             binding_id=reviewer_binding.binding_id,
             adapter=adapter,
         )
+        resolve_execution_binding(
+            registry=candidate.registry,
+            binding_id=orch_binding.binding_id,
+            adapter=adapter,
+        )
     except BindingResolutionError:
         return None
-    if not _save_owner_bindings(candidate):
+    if persist and not _save_owner_bindings(candidate):
         return None
     return candidate, worker_binding
 
@@ -1745,9 +1797,9 @@ def _apply_exact_execution_bindings(
     """Replace inferred execution support with exact-binding evidence.
 
     A successful enumeration on an account-backed connection with a real
-    adapter materializes one exact binding per discovered model and proves it
-    through the canonical resolver.  API/BYOK models and models with no
-    resolvable exact binding stay ``UNSUPPORTED`` / ``UNKNOWN``.  A failed or
+    adapter materializes exact role bindings per discovered model and proves them
+    through the canonical resolver. Unsupported protocols and models with no
+    resolvable exact binding stay ``UNSUPPORTED`` / ``UNKNOWN``. A failed or
     ``UNKNOWN`` refresh never creates a binding.
     """
     if not result.ok:
@@ -1759,19 +1811,26 @@ def _apply_exact_execution_bindings(
             support[model.identity] = model.execution_support
             continue
         if not connection.is_account_backed:
-            support[model.identity] = ExecutionSupport.UNSUPPORTED
-            continue
+            from saberops.workers.direct_api import supports_connection
+            if not supports_connection(connection):
+                support[model.identity] = ExecutionSupport.UNSUPPORTED
+                continue
         if registry.get(connection.provider) is None:
             support[model.identity] = ExecutionSupport.UNSUPPORTED
             continue
         materialized = _materialize_discovered_binding(
-            connection, model.model_id, registry
+            connection, model.model_id, registry, owner=owner, persist=False
         )
         if materialized is None:
             support[model.identity] = ExecutionSupport.UNKNOWN
             continue
         owner, _binding = materialized
         support[model.identity] = ExecutionSupport.SUPPORTED
+    if ExecutionSupport.SUPPORTED in support.values() and not _save_owner_bindings(owner):
+        support = {
+            identity: ExecutionSupport.UNKNOWN if value is ExecutionSupport.SUPPORTED else value
+            for identity, value in support.items()
+        }
     return replace(
         result,
         models=tuple(
@@ -1788,12 +1847,11 @@ def _discover_connection(
     """Run bounded discovery for one connection.
 
     Account-backed backends use their own supported listing boundary where
-    one exists (``codex debug models``, ``opencode models``); backends with no
+    one exists (listing commands or Claude/Copilot native control protocols); backends with no
     supported enumeration stay truthfully ``UNKNOWN`` rather than inventing a
-    catalog.  API connections attempt an unauthenticated OpenAI-compatible
-    ``/models`` listing: there is currently no canonical read-only credential
-    resolution seam suitable for this call, so an auth-requiring endpoint is
-    reported as NOT_AUTHENTICATED rather than as a rejected credential.
+    catalog. API connections use their configured env credential reference
+    for a read-only OpenAI-compatible catalog request; credentials never
+    enter durable discovery evidence. Missing credentials permit only public listing.
 
     Execution support is proven *after* enumeration by materializing an exact
     C11-B binding and resolving it with the real adapter -- never inferred
@@ -1809,7 +1867,7 @@ def _discover_connection(
             ),
             None,
         )
-        if descriptor is not None and descriptor.model_list_argv:
+        if descriptor is not None and descriptor.has_model_listing:
             result = discover_connection_models(
                 connection,
                 list_models=lambda: _list_account_models(connection),
@@ -1821,9 +1879,27 @@ def _discover_connection(
                 discovered_at=discovered_at,
             )
     else:
+        from saberops.workers.direct_api import credential_value, supports_connection
+
+        def api_headers() -> dict[str, str]:
+            headers = dict(connection.public_headers)
+            if supports_connection(connection):
+                try:
+                    credential = credential_value(connection)
+                except ValueError:
+                    credential = ""
+                if credential:
+                    name = connection.auth_header_name or "Authorization"
+                    headers[name] = (
+                        f"Bearer {credential}" if name.lower() == "authorization" else credential
+                    )
+            return headers
+
         result = discover_connection_models(
             connection,
-            list_models=lambda: _fetch_openai_compatible_models(connection.endpoint),
+            list_models=lambda: _fetch_openai_compatible_models(
+                connection.endpoint, auth_headers=api_headers
+            ),
             discovered_at=discovered_at,
         )
     return _apply_exact_execution_bindings(connection, result, registry)
@@ -1869,6 +1945,13 @@ def _readiness_store() -> ReadinessStore:
     if override:
         return ReadinessStore(Path(override).expanduser())
     return ReadinessStore(owner_state_dir() / ReadinessStore.FILENAME)
+
+
+def initialize_account_readiness() -> None:
+    """Acquire bounded native CLI evidence at UI launch, in the selected profile."""
+    ReadinessService(
+        registry=_access_store().load(), store=_readiness_store()
+    ).refresh_accounts_on_startup()
 
 
 def _readiness_age_display(observed_at: str) -> str:
@@ -1938,6 +2021,8 @@ def _readiness_presentation(
         "observed_at": evidence.observed_at,
         "age": _readiness_age_display(evidence.observed_at),
         "fresh": projected.state == evidence.state,
+        "model_id": evidence.model_id,
+        "source": evidence.source.value,
     }
 
 
@@ -1977,6 +2062,37 @@ def _access_context(
     for descriptor in ACCOUNT_BACKENDS:
         connection = access_registry.try_get(descriptor.connection_id)
         resolved = shutil.which(descriptor.executable)
+        readiness = _readiness_presentation(descriptor.connection_id, readiness_catalog)
+        verification_detail = ""
+        if resolved is not None and readiness["state"] == ProviderReadiness.UNKNOWN.value:
+            if not descriptor.has_auth_probe:
+                verification_detail = (
+                    "This CLI has no supported non-interactive login verification. "
+                    "Verify model access below before your first task, or after a successful run. "
+                    "Model discovery alone does not verify login."
+                )
+                if descriptor.backend == "opencode":
+                    verification_detail = (
+                        "OpenCode manages multiple upstream providers. Its credential "
+                        "list shows configuration, not a verified login for a model. "
+                        + verification_detail
+                    )
+            else:
+                verification_detail = (
+                    "No current login verdict is available. The native status command "
+                    "may have timed out or returned an unsupported format; probe again."
+                )
+        # Reuse canonical evidence; stale positive evidence becomes UNKNOWN.
+        # Rendering never probes a CLI or
+        # reads its credentials. Only an explicit login failure proves FALSE.
+        authenticated = TriState.UNKNOWN.value
+        if readiness["state"] == ProviderReadiness.READY.value:
+            authenticated = TriState.TRUE.value
+        elif (
+            readiness["state"] == ProviderReadiness.NOT_READY.value
+            and readiness["reason"] == ConnectionTestReason.NOT_AUTHENTICATED.value
+        ):
+            authenticated = TriState.FALSE.value
         account_rows.append(
             {
                 "connection_id": descriptor.connection_id,
@@ -1988,17 +2104,27 @@ def _access_context(
                     "available" if resolved is not None else "not-installed"
                 ),
                 "installed_detail": resolved or "not on PATH",
-                # Authentication is owned by the backend itself; the
-                # dashboard never extracts or inspects session material,
-                # so live auth state stays UNKNOWN until a supported
-                # backend status probe is wired per backend.
-                "authenticated": TriState.UNKNOWN.value,
+                "authenticated": authenticated,
+                "verification_detail": verification_detail,
+                "has_auth_probe": descriptor.has_auth_probe,
+                "can_verify_model": descriptor.backend in {"opencode", "antigravity"},
+                "login_help": {
+                    "codex": "Run codex login in your terminal, then check login again.",
+                    "claude-code": "Run claude auth login in your terminal, then check login again.",
+                    "copilot_cli": "Run copilot login in your terminal, then check login again.",
+                    "opencode": "Run opencode auth login in your terminal and sign in to the provider for your chosen model, then verify model access.",
+                    "antigravity": "Open agy in your terminal and complete Google sign-in, then verify model access.",
+                }.get(descriptor.backend, ""),
+                "has_model_listing": descriptor.has_model_listing,
+                "execution_adapter": (
+                    "Registered"
+                    if resolved_registry.get(descriptor.provider) is not None
+                    else "Not implemented"
+                ),
                 # Persisted model-execution readiness evidence (display
                 # only; never refreshed or probed here).  A CLI being
                 # installed is availability, not proven readiness.
-                "readiness": _readiness_presentation(
-                    descriptor.connection_id, readiness_catalog
-                ),
+                "readiness": readiness,
                 "present": "TRUE" if connection is not None else "FALSE",
                 "models": rows_for(descriptor.connection_id),
             }
@@ -2020,6 +2146,7 @@ def _access_context(
             "model": connection.model,
             "enabled": "TRUE" if connection.enabled else "FALSE",
             "models": rows_for(connection.connection_id),
+            "readiness": _readiness_presentation(connection.connection_id, readiness_catalog),
         }
         for connection in access_registry.list_connections()
         if connection.connection_id not in account_ids
@@ -2036,6 +2163,13 @@ def _access_context(
     }
     return {
         "account_rows": account_rows,
+        # Local executable detection only. These registered adapters lack
+        # account-status/model-discovery descriptors; do not invent readiness.
+        "other_cli_providers": [
+            provider
+            for provider in resolved_registry.get_available_providers()
+            if provider not in {descriptor.provider for descriptor in ACCOUNT_BACKENDS}
+        ],
         "api_rows": api_rows,
         "presets": list_presets(),
         "protocols": [protocol.value for protocol in AccessProtocol],
@@ -2274,6 +2408,13 @@ def _routing_chooser_row(
         "model_id": model.model_id,
         "candidate_id": candidate_id,
         "binding_id": binding_id,
+        "execution_path": (
+            "Direct API · API billing"
+            if binding is not None and binding.backend.value == "DIRECT_API"
+            else "Native CLI"
+            if binding is not None and binding.backend.value == "DIRECT_CLI"
+            else "Execution unavailable"
+        ),
         "discovery_status": model.discovery_status.value,
         "execution_support": model.execution_support.value,
         "stale": "TRUE" if model.is_stale else "FALSE",
@@ -2285,6 +2426,7 @@ def _routing_chooser_row(
 def _routing_context(
     *,
     error: str | None = None,
+    open_role: str | None = None,
     notice: str | None = None,
     owner: OwnerBindings | None = None,
     registry: AdapterRegistry | None = None,
@@ -2299,12 +2441,23 @@ def _routing_context(
     """
     resolved_owner = owner if owner is not None else _load_owner_bindings_safely()
     resolved_registry = registry if registry is not None else AdapterRegistry.default()
+    roles = {
+        "orchestrator_role": _orchestrator_context(registry=resolved_registry),
+        "reviewer_role": _reviewer_context(registry=resolved_registry),
+    }
+    for role in ("orchestrator", "reviewer"):
+        data = roles[f"{role}_role"]
+        by_id = {row["binding_id"]: row for row in data["bindings"]}
+        data["chosen"] = [by_id.get(bid, {"binding_id": bid, "provider": "Unavailable", "model": bid})
+                          for bid in resolved_owner.role_binding_ids(role)]
     catalog = _load_catalog_safely()
     chains: list[dict[str, Any]] = []
     try:
         payload = load_effective_routing_payload()
     except RoutingConfigError as exc:
         return {
+            **roles,
+            **({"open_role": open_role} if open_role else {}),
             "error": error or f"Routing config unreadable: {exc}",
             "notice": notice,
             "chains": [],
@@ -2326,7 +2479,53 @@ def _routing_context(
         _routing_chooser_row(model, owner=resolved_owner, registry=resolved_registry)
         for model in catalog.models
     ]
+    for row in chooser:
+        role_bindings: dict[str, str] = {}
+        for role_name, binding_role in (
+            ("orchestrator", BindingRole.ORCHESTRATOR),
+            ("reviewer", BindingRole.REVIEWER),
+        ):
+            binding = _resolve_exact_binding(
+                resolved_owner, resolved_registry, provider=row["provider"],
+                model=row["model_id"], connection_id=row["connection_id"],
+                role=binding_role,
+            )
+            if binding is not None:
+                role_bindings[role_name] = binding.binding_id
+        row["orchestrator_binding_id"] = role_bindings.get("orchestrator", "")
+        row["reviewer_binding_id"] = role_bindings.get("reviewer", "")
+        row["assignable"] = (
+            "TRUE" if row["routing_eligible"] == "TRUE" or role_bindings else "FALSE"
+        )
+    # Canonical role choices may predate the discovery catalog. Keep those
+    # exact eligible bindings selectable without authorizing worker enrollment.
+    represented = {row[key] for row in chooser for key in
+                   ("orchestrator_binding_id", "reviewer_binding_id") if row[key]}
+    supplemental: dict[tuple[str, str, str], dict[str, str]] = {}
+    for role_name in ("orchestrator", "reviewer"):
+        for role_row in roles[f"{role_name}_role"]["bindings"]:
+            if role_row["binding_id"] in represented:
+                continue
+            binding = resolved_owner.registry.try_get(role_row["binding_id"])
+            if binding is None:
+                continue
+            profile = resolved_owner.registry.profile_of(binding)
+            key = (binding.provider, binding.model, binding.profile_id)
+            if key not in supplemental:
+                supplemental[key] = {
+                    "provider": binding.provider, "model_id": binding.model,
+                    "connection_id": profile.account_ref or profile.profile_id,
+                    "binding_id": "", "routing_eligible": "FALSE", "assignable": "TRUE",
+                    "orchestrator_binding_id": "", "reviewer_binding_id": "",
+                    "ineligible_reason": "Worker routing requires fresh discovery evidence.",
+                    "discovery_status": "UNKNOWN", "execution_support": "SUPPORTED",
+                    "stale": "FALSE",
+                }
+            supplemental[key][f"{role_name}_binding_id"] = binding.binding_id
+    chooser.extend(supplemental.values())
     return {
+        **roles,
+        **({"open_role": open_role} if open_role else {}),
         "error": error,
         "notice": notice,
         "chains": chains,
@@ -2368,12 +2567,27 @@ def _setup_context(
         orch["current"] is not None
         and str(orch["selection_status"]).startswith("RESOLVED")
     )
-    reviewer_ready = bool(str(reviewer["selection_status"]).startswith("RESOLVED"))
+    review_disabled = bool(settings and settings.get("review_disabled") is True)
+    reviewer_ready = review_disabled or bool(
+        str(reviewer["selection_status"]).startswith("RESOLVED")
+    )
     project_ready = bool(validation and validation.ready)
     project_policy_ready = bool(
         settings
-        and settings.get("gate_effective")
+        and (settings.get("gate_effective") or settings.get("gate_enabled") is False)
         and settings.get("accept_target_branch_effective")
+    )
+    providers_ready = any(
+        row.get("readiness", {}).get("state") == "READY"
+        for row in access["account_rows"]
+    )
+    setup_statuses = (
+        providers_ready,
+        routed > 0,
+        reviewer_ready,
+        orch_ready,
+        project_ready,
+        project_policy_ready,
     )
     return {
         "profile": active_profile() or "default",
@@ -2388,18 +2602,19 @@ def _setup_context(
         "reviewer_current": reviewer["current"],
         "reviewer_status": reviewer["selection_status"],
         "reviewer_ready": reviewer_ready,
+        "review_disabled": review_disabled,
         "active_project": str(active_repo) if active_repo is not None else "",
         "project_ready": project_ready,
         "project_note": validation.note if validation is not None else "No project selected",
         "project_settings": settings,
         "project_policy_ready": project_policy_ready,
-        "ready_for_dogfood": bool(
-            project_ready
-            and project_policy_ready
-            and routed > 0
-            and orch_ready
-            and reviewer_ready
+        "providers_ready": providers_ready,
+        "setup_complete_count": sum(setup_statuses),
+        "setup_current_step": next(
+            (index for index, complete in enumerate(setup_statuses, start=1) if not complete),
+            7,
         ),
+        "ready_for_dogfood": all(setup_statuses),
     }
 
 
@@ -2464,9 +2679,9 @@ def _parse_public_headers(raw: str) -> dict[str, str]:
 def _probe_api_connection(*, endpoint: str) -> dict[str, str]:
     """Safely probe an API connection without transmitting any secret.
 
-    The probe performs an unauthenticated GET against the configured
-    endpoint with a short timeout: any HTTP response proves
-    reachability (authentication itself is reported as NOT VERIFIED --
+    The probe performs an unauthenticated GET against the derived model-list
+    URL with a short timeout. A 404 reports a missing catalog route; other
+    HTTP answers prove reachability (authentication remains NOT VERIFIED --
     the stored credential value is never read, let alone sent).
     """
     from urllib.error import HTTPError, URLError
@@ -2475,11 +2690,18 @@ def _probe_api_connection(*, endpoint: str) -> dict[str, str]:
 
     if not endpoint:
         return {"ok": "FALSE", "reason": "CONFIG_INVALID", "detail": "endpoint not configured"}
-    request = UrlRequest(endpoint, method="GET")
+    request = UrlRequest(_model_list_url(endpoint), method="GET")
     try:
         with urlopen(request, timeout=5) as response:  # noqa: S310
             status = int(getattr(response, "status", 200))
     except HTTPError as exc:
+        if exc.code == 404:
+            return {
+                "ok": "FALSE",
+                "reason": ConnectionTestReason.ENDPOINT_UNREACHABLE.value,
+                "detail": "server reachable, but model list endpoint not found (HTTP 404); "
+                "check the API base URL. Authentication NOT VERIFIED (credential never transmitted)",
+            }
         # An HTTP answer -- even 401/403 -- proves the endpoint is
         # reachable; auth acceptance stays NOT VERIFIED by design.
         return {
@@ -2582,7 +2804,11 @@ def _notice_from_query(request: Request) -> str | None:
     if request.query_params.get("routing_model_moved") == "1":
         return "Routing chain reordered (canonical order saved)."
     if request.query_params.get("selected") == "1":
-        return "Orchestrator model selection saved (exact binding identity)."
+        return (
+            "Reviewer model selection saved (exact binding identity)."
+            if request.query_params.get("role") == "reviewer"
+            else "Orchestrator model selection saved (exact binding identity)."
+        )
     if request.query_params.get("project_selected") == "1":
         return "Target project updated."
     return None
@@ -2643,6 +2869,9 @@ def create_app(
     db = startup_runtime.db
     service = startup_runtime.service
     supervisor = startup_runtime.supervisor
+    chat_store = ChatStore((Path(db_path).resolve().parent if db_path is not None
+                            else owner_state_dir()) / "conversations.db")
+    chats = ChatCoordinator(chat_store, runtimes, resolved_registry)
 
     app = FastAPI(title="SaberOps Dashboard")
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
@@ -2653,6 +2882,7 @@ def create_app(
     # requests do not re-run `git status` for every known project.
     validation_cache = ProjectValidationCache(project_registry)
     app.state.validation_cache = validation_cache
+    navigation_cache: dict[str, Any] = {"until": 0.0, "folders": [], "active": ""}
 
     @app.middleware("http")
     async def _attach_shell_context(request: Request, call_next: Callable[..., Any]) -> Response:
@@ -2665,6 +2895,17 @@ def create_app(
         A failure degrades to an empty shell rather than failing the page.
         """
         path = request.url.path
+        chat_mutation = request.method == "POST" and (
+            path == "/chats" or path.startswith("/chats/")
+            or "/sessions/" in path or path.endswith("/open-synchronized-cli")
+            or path.endswith("/conversation") or path.endswith("/try-worker")
+            or (path.startswith("/runs/") and path.endswith("/continue"))
+            or path == "/access/verify-model"
+        )
+        origin = request.headers.get("origin")
+        if chat_mutation and (request.headers.get("sec-fetch-site") == "cross-site"
+                              or (origin is not None and origin != str(request.base_url).rstrip("/"))):
+            return JSONResponse({"error": "Use the local SaberOps page for this action."}, status_code=403)
         if path == "/health" or path.startswith("/static"):
             request.state.shell = _empty_shell()
             response: Response = await call_next(request)
@@ -2678,6 +2919,26 @@ def create_app(
             )
         except Exception:
             request.state.shell = _empty_shell()
+        request.state.shell["recent_chats"] = chat_store.recent(
+            str(project_registry.active() or "")
+        )
+        # Navigation is needed by HTML views, never by chat/session/SSE polling.
+        segments = path.strip("/").split("/")
+        html_view = (len(segments) == 1 and not path.endswith(".json")) or (
+            len(segments) == 2 and segments[0] in ("runs", "chats")
+        )
+        if html_view:
+            active = str(project_registry.active() or "")
+            if time.monotonic() >= navigation_cache["until"] or active != navigation_cache["active"]:
+                try:
+                    navigation_cache["folders"] = project_folders(
+                        runtimes, chat_store, project_registry.list_projects(), active
+                    )
+                    navigation_cache["active"] = active
+                    navigation_cache["until"] = time.monotonic() + 3
+                except Exception:
+                    navigation_cache["folders"] = []
+            request.state.shell["project_folders"] = navigation_cache["folders"]
         response = await call_next(request)
         return response
     app.state.db = db
@@ -2685,6 +2946,12 @@ def create_app(
     app.state.supervisor = supervisor
     app.state.project_registry = project_registry
     app.state.runtimes = runtimes
+    app.state.chats = chats
+
+    @app.on_event("startup")
+    def _start_chat_monitor() -> None:
+        chats.separate_history()
+        chats.start()
 
     @app.get("/", response_class=HTMLResponse, name="dashboard")
     def dashboard(request: Request) -> HTMLResponse:
@@ -2699,6 +2966,244 @@ def create_app(
             ),
         )
 
+    @app.post("/chats", name="new_chat")
+    def new_chat(request: Request, task: Annotated[str, Form()] = "",
+                 mode: Annotated[str, Form()] = "auto",
+                 attachments: Annotated[str, Form()] = "") -> Response:
+        from saberops.chat_attachments import parse_ids
+        try:
+            ids = parse_ids(attachments)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        if ids and not task.strip():
+            task = "Please review the attached files."
+        repo = project_registry.active()
+        if mode not in ("auto", "chat", "work"):
+            return JSONResponse({"error": "Choose Chat or Work."}, status_code=400)
+        if repo is None or not task.strip() or len(task) > 32000:
+            return JSONResponse({"error": "Select a project and enter a message."}, status_code=400)
+        chat_id = chat_store.create(str(repo), task.strip(),
+                                    kind="work" if mode == "work" else "chat")
+        try:
+            kwargs = {"attachment_ids": ids} if ids else {}
+            chats.submit(chat_id, task, "first-message", mode=mode, **kwargs)
+        except (ValueError, ChatBusy) as exc:
+            if ids:
+                return JSONResponse({"error": str(exc)},
+                                    status_code=409 if isinstance(exc, ChatBusy) else 400)
+            token = chat_store.claim(chat_id, task, "first-message")
+            if token:
+                chat_store.finish(chat_id, token, str(exc))
+        return RedirectResponse(f"/chats/{chat_id}", status_code=303)
+
+    @app.post("/chat/attachments")
+    async def upload_chat_attachment(file: Annotated[UploadFile, File()]) -> Response:
+        from saberops.chat_attachments import MAX_FILE_BYTES
+        try:
+            content = await file.read(MAX_FILE_BYTES + 1)
+            return JSONResponse(chat_store.attachments.save(file.filename or "", content),
+                                status_code=201)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        finally:
+            await file.close()
+
+    @app.get("/chat/attachments/{identity}")
+    def read_chat_attachment(identity: str, download: bool = False) -> Response:
+        item = chat_store.attachments.get(identity)
+        if not item:
+            return JSONResponse({"error": "Attachment not found."}, status_code=404)
+        try:
+            path = chat_store.attachments.path(identity)
+        except ValueError:
+            return JSONResponse({"error": "Attachment not found."}, status_code=404)
+        return FileResponse(path, filename=item["name"], media_type=item["mime"],
+                            content_disposition_type="inline" if item["mime"].startswith("image/")
+                            and not download else "attachment",
+                            headers={"X-Content-Type-Options": "nosniff"})
+
+    @app.delete("/chat/attachments/{identity}")
+    def remove_chat_attachment(identity: str) -> Response:
+        if not chat_store.attachments.remove(identity):
+            return JSONResponse({"error": "Saved message attachments cannot be removed."},
+                                status_code=409)
+        return JSONResponse({"removed": True})
+
+    def work_view_url(chat: dict[str, Any]) -> str | None:
+        if chat.get("kind") != "work":
+            return None
+        with chat_store.connect() as conn:
+            link = conn.execute(
+                "SELECT run_id FROM chat_runs WHERE chat_id=? ORDER BY rowid DESC LIMIT 1",
+                (chat["id"],),
+            ).fetchone()
+        if link:
+            runtime = runtime_for_run(str(link["run_id"]))
+            if runtime and runtime.db.get_run(str(link["run_id"])):
+                return f"/runs/{link['run_id']}?from=runs#work"
+        return None
+
+    @app.get("/chats/{chat_id}", response_class=HTMLResponse, name="conversation")
+    def conversation(request: Request, chat_id: str) -> Response:
+        chat = chat_store.get(chat_id)
+        if chat is None:
+            return HTMLResponse("Conversation not found", status_code=404)
+        work_url = work_view_url(chat)
+        if work_url:
+            return RedirectResponse(work_url, status_code=307)
+        return templates.TemplateResponse(request, "chat.html", {"chat": chat_store.presentation(chat),
+            "session_endpoint": f"/chats/{chat_id}/sessions"})
+
+    @app.get("/chats/{chat_id}/messages")
+    def conversation_messages(chat_id: str) -> Response:
+        chat = chat_store.get(chat_id)
+        if chat is None:
+            return JSONResponse({"error": "Conversation not found"}, status_code=404)
+        # Observational GET: never dispatch or invoke a model.
+        try:
+            shared = chats.shared_native_chat(chat_id)
+        except ChatBusy as exc:
+            shared = None
+            chat["shared_native_chat"] = {"connected": False, "reason": str(exc)}
+            chat["busy"] = True
+        if shared:
+            chat["shared_native_chat"] = {"connected": True, "pending": shared[1]["pending"]}
+            chat["busy"] = chat["busy"] or bool(shared[1]["pending"])
+        from saberops.agent_sessions import read_sessions
+        active = [row for row in read_sessions(chat_store.path.parent / "agent-sessions", chat_id)
+                  if row.get("control_mode") in ("MANUAL", "REQUESTED", "RESUMING")]
+        with chat_store.connect() as conn:
+            links = conn.execute("SELECT run_id FROM chat_runs WHERE chat_id=?", (chat_id,)).fetchall()
+        for link in links:
+            projected = session_projection(str(link["run_id"]))
+            if projected:
+                active.extend(dict(row, run_id=link["run_id"]) for row in projected[0]
+                              if row.get("control_mode") in ("MANUAL", "REQUESTED", "RESUMING"))
+        if active:
+            selected = active[0]
+            run_id = selected.get("run_id") or (str(links[-1]["run_id"]) if links else None)
+            scope = f"/runs/{run_id}" if run_id else f"/chats/{chat_id}"
+            chat["manual_control"] = {"mode": selected["control_mode"], "role": selected["role"],
+                "endpoint": f"{scope}/sessions/{selected['id']}/control"}
+        from saberops.chat_progress import chat_progress
+        chat["progress"] = chat_progress(chat_store.path.parent / "agent-sessions", chat)
+        chat["can_stop"] = chat_id in chats.cancellations
+        with chat_store.connect() as conn:
+            chat["runs"] = [dict(row) for row in conn.execute(
+                "SELECT run_id FROM chat_runs WHERE chat_id=? ORDER BY rowid", (chat_id,)
+            )]
+        chat["run_titles"] = {}
+        for linked in chat["runs"]:
+            try:
+                runtime = runtime_for_run(linked["run_id"])
+                linked_run = runtime.db.get_run(linked["run_id"]) if runtime else None
+                if linked_run:
+                    chat["run_titles"][linked_run.id] = linked_run.display_title or fallback_title(
+                        linked_run.task, linked_run.target_repo
+                    )
+            except Exception:
+                continue
+        chat["work_url"] = work_view_url(chat)
+        return JSONResponse(chat_store.presentation(chat))
+
+    @app.post("/chats/{chat_id}/work")
+    def turn_chat_into_work(
+        chat_id: str, message: Annotated[str, Form()] = "",
+        request_id: Annotated[str, Form()] = "",
+        attachments: Annotated[str, Form()] = "",
+    ) -> Response:
+        from saberops.chat_attachments import parse_ids
+        try:
+            ids = parse_ids(attachments)
+            brief = message.strip() or ("Implement the attached brief." if ids else "")
+            work_id = chat_store.promote(chat_id, brief, request_id, ids)
+            chats.submit(work_id, brief, request_id, mode="work", attachment_ids=ids)
+        except ChatBusy as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return JSONResponse({"accepted": True, "work_chat_id": work_id,
+                             "redirect_url": f"/chats/{work_id}#work"}, status_code=202)
+
+    @app.post("/chats/{chat_id}/stop")
+    def stop_chat_reply(chat_id: str) -> Response:
+        if chat_store.get(chat_id) is None:
+            return JSONResponse({"error": "Conversation not found"}, status_code=404)
+        if not chats.cancel(chat_id):
+            return JSONResponse({"error": "There is no app-owned reply to stop. "
+                                 "Use the native session controls for terminal replies."},
+                                status_code=409)
+        return JSONResponse({"requested": True}, status_code=202)
+
+    @app.post("/chats/{chat_id}/messages")
+    def send_chat_message(
+        chat_id: str, message: Annotated[str, Form()] = "",
+        request_id: Annotated[str, Form()] = "",
+        mode: Annotated[str, Form()] = "auto",
+        attachments: Annotated[str, Form()] = "",
+    ) -> Response:
+        if chat_store.get(chat_id) is None:
+            return JSONResponse({"error": "Conversation not found"}, status_code=404)
+        if mode == "work" and (chat_store.get(chat_id) or {}).get("kind") == "chat":
+            with chat_store.connect() as conn:
+                accepted = conn.execute("SELECT 1 FROM messages WHERE chat_id=? AND request_id=?",
+                                        (chat_id, request_id)).fetchone()
+            if accepted:
+                return JSONResponse({"accepted": True}, status_code=202)
+            return turn_chat_into_work(chat_id, message, request_id, attachments)
+        try:
+            from saberops.chat_attachments import parse_ids
+            ids = parse_ids(attachments)
+            if ids and not message.strip():
+                message = "Please review the attached files."
+            kwargs = {"attachment_ids": ids} if ids else {}
+            chats.submit(chat_id, message, request_id, mode=mode, **kwargs)
+        except ChatBusy as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return JSONResponse({"accepted": True}, status_code=202)
+
+    @app.post("/runs/{run_id}/conversation")
+    def discuss_run(
+        run_id: str, message: Annotated[str, Form()] = "",
+        mode: Annotated[str, Form()] = "auto",
+        attachments: Annotated[str, Form()] = "",
+    ) -> Response:
+        from saberops.chat_attachments import parse_ids
+        try:
+            ids = parse_ids(attachments)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        if ids and not message.strip():
+            message = "Please review the attached files."
+        if mode not in ("auto", "chat", "work"):
+            return JSONResponse({"error": "Choose Chat or Work."}, status_code=400)
+        runtime = runtime_for_run(run_id)
+        run = runtime.db.get_run(run_id) if runtime else None
+        if runtime is None or run is None:
+            return JSONResponse({"error": "Run not found"}, status_code=404)
+        # Bind to this run's project, regardless of the selected project.
+        target = assert_run_repository(run)
+        chat_id = chat_store.for_run(run_id)
+        if chat_id is None:
+            chat_id = chat_store.create(str(target), run.task, kind="work")
+            token = chat_store.claim(chat_id, run.task, "imported-objective")
+            assert token is not None
+            report = build_run_report(runtime.db, run_id)
+            chat_store.finish(chat_id, token, run_explanation(report), run_id=run_id)
+            chat_store.link_run(chat_id, run_id)
+            if run.status in TERMINAL_RUN_STATUSES:
+                chat_store.reported(run_id)
+        if message.strip():
+            try:
+                import uuid
+                kwargs = {"attachment_ids": ids} if ids else {}
+                chats.submit(chat_id, message, uuid.uuid4().hex, mode=mode, **kwargs)
+            except (ValueError, ChatBusy) as exc:
+                return JSONResponse({"error": str(exc)}, status_code=409)
+        return RedirectResponse(f"/chats/{chat_id}", status_code=303)
+
     @app.get("/setup", response_class=HTMLResponse, name="first_user_setup")
     def first_user_setup(request: Request) -> HTMLResponse:
         """Render the canonical UI-only path from empty profile to first run."""
@@ -2711,6 +3216,27 @@ def create_app(
                 registry=resolved_registry,
             ),
         )
+
+    @app.post("/projects/browse")
+    def browse_project(request: Request) -> Response:
+        from ipaddress import ip_address
+
+        from saberops.folder_picker import FolderPickerError, choose_folder
+
+        # Only the local app may open a dialog on the owner's desktop.
+        try:
+            local = request.client is not None and ip_address(request.client.host).is_loopback
+        except ValueError:
+            local = False
+        origin = request.headers.get("origin")
+        if (not local or request.url.hostname not in ("127.0.0.1", "localhost", "::1")
+                or request.headers.get("sec-fetch-site") == "cross-site"
+                or (origin is not None and origin != str(request.base_url).rstrip("/"))):
+            return JSONResponse({"error": "Open the local app to choose a folder."}, status_code=403)
+        try:
+            return JSONResponse({"path": choose_folder()})
+        except FolderPickerError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=503)
 
     @app.post("/projects/select", name="select_project")
     def select_project(
@@ -2730,8 +3256,14 @@ def create_app(
                 ),
                 status_code=400,
             )
-        ok, note = project_registry.select(target_path)
+        ok, note = project_registry.select(target_path, initialize=True)
         if not ok:
+            if request.query_params.get("from") == "setup":
+                return templates.TemplateResponse(request, "setup.html", {
+                    **_setup_context(project_registry, validation_cache=validation_cache,
+                                     registry=resolved_registry),
+                    "error": f"Cannot select project: {note}",
+                }, status_code=400)
             return templates.TemplateResponse(
                 request,
                 "dashboard.html",
@@ -2746,7 +3278,10 @@ def create_app(
         # Selecting a project changes which cached validation is active and
         # reorders recents: drop the cached entry so the next render is live.
         validation_cache.invalidate(target_path)
-        return RedirectResponse(url="/?project_selected=1", status_code=303)
+        return RedirectResponse(
+            url="/setup" if request.query_params.get("from") == "setup" else "/?project_selected=1",
+            status_code=303,
+        )
 
     @app.get(
         "/projects/settings/gate-scratch",
@@ -2811,6 +3346,57 @@ def create_app(
         if "error" in summary:
             return JSONResponse({"error": str(summary["error"])}, status_code=400)
         return JSONResponse(summary)
+
+    @app.post("/projects/settings/workflow")
+    def set_workflow(request: Request, preset: Annotated[str, Form()] = "custom",
+                     gate_mode: Annotated[str, Form()] = "required",
+                     review_policy: Annotated[str, Form()] = "risk-adaptive",
+                     review_mode: Annotated[str, Form()] = "bounded",
+                     review_limit: Annotated[int, Form()] = 3,
+                     source: Annotated[str, Form()] = "workspace",
+                     gate_command: Annotated[str, Form()] = "") -> Response:
+        from saberops.project_settings import (
+            WORKFLOW_PRESETS,
+            ProjectSettingsError,
+            set_project_gate_command,
+            set_project_workflow,
+        )
+
+        repo = project_registry.active()
+        if repo is None:
+            return JSONResponse({"error": "Select a project first."}, status_code=400)
+        try:
+            if source not in ("workspace", "setup"):
+                raise ProjectSettingsError("Unknown workflow source")
+            if gate_mode not in ("required", "disabled"):
+                raise ProjectSettingsError("Unknown gate mode")
+            with routing_mutation_lock:
+                if source == "setup":
+                    if preset not in WORKFLOW_PRESETS:
+                        raise ProjectSettingsError("Choose a workflow mode")
+                    summary = effective_policy_summary(repo)
+                    if "error" in summary:
+                        raise ProjectSettingsError(str(summary["error"]))
+                    if preset != "quick" and not summary.get("gate_effective"):
+                        if not gate_command.strip():
+                            raise ProjectSettingsError(
+                                "Enter a gate command for this mode, or choose Quick to skip checks."
+                            )
+                        set_project_gate_command(repo, gate_command.strip())
+                set_project_workflow(repo, preset=preset, gate_enabled=gate_mode == "required",
+                                     review=review_policy, mode=review_mode, limit=review_limit)
+        except ProjectSettingsError as exc:
+            if source == "setup":
+                return templates.TemplateResponse(request, "setup.html", {
+                    **_setup_context(project_registry, validation_cache=validation_cache,
+                                     registry=resolved_registry),
+                    "error": str(exc), "selected_mode": preset,
+                    "setup_gate_command": gate_command,
+                }, status_code=400)
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        if source == "setup":
+            return RedirectResponse("/setup?policy_applied=1#setup-step-7", status_code=303)
+        return RedirectResponse("/?from=setup&project_settings_updated=1#execution", status_code=303)
 
     @app.post(
         "/projects/settings/gate",
@@ -3118,7 +3704,7 @@ def create_app(
                 status_code=400,
             )
 
-        return RedirectResponse(url=f"/runs/{result.run_id}", status_code=303)
+        return RedirectResponse(url=f"/runs/{result.run_id}?from=dashboard", status_code=303)
 
     @app.get("/runs/{run_id}", response_class=HTMLResponse, name="run_detail")
     def run_detail(request: Request, run_id: str) -> HTMLResponse:
@@ -3128,11 +3714,537 @@ def create_app(
             return templates.TemplateResponse(
                 request, "run_detail.html", _missing_run_context(run_id), status_code=404
             )
-        return templates.TemplateResponse(
-            request,
-            "run_detail.html",
-            _run_detail_context(runtime.db, run, notice=_notice_from_query(request)),
+        context = _run_detail_context(runtime.db, run, notice=_notice_from_query(request))
+        linked_chat = chat_store.for_run(run_id)
+        conversation = chat_store.get(linked_chat) if linked_chat else None
+        context["chat"] = chat_store.presentation(conversation) if conversation else None
+        context["session_endpoint"] = f"/runs/{run_id}/sessions"
+        return templates.TemplateResponse(request, "run_detail.html", context)
+
+    def session_projection(run_id: str) -> tuple[list[dict[str, Any]], Path] | None:
+        from saberops.agent_sessions import legacy_session, read_sessions
+
+        runtime = runtime_for_run(run_id)
+        run = runtime.db.get_run(run_id) if runtime else None
+        if runtime is None or run is None:
+            return None
+        root = Path(runtime.db.db_path).resolve().parent / "agent-sessions"
+        sessions = read_sessions(root, run_id)
+        observed = {row["association"] for row in sessions}
+        for attempt in runtime.db.get_attempts_for_run(run_id):
+            if attempt.id not in observed:
+                sessions.append(legacy_session(
+                    "attempt-" + attempt.id, "worker", attempt.id, attempt.provider,
+                    attempt.model, attempt.status.value,
+                    (attempt.worker_stdout or "") + ("\n[stderr]\n" + attempt.worker_stderr
+                                                     if attempt.worker_stderr else ""), created=attempt.created_at,
+                ))
+        for review in runtime.db.get_reviews_for_run(run_id):
+            if review.id not in observed:
+                sessions.append(legacy_session(
+                    "review-" + review.id, "reviewer", review.id,
+                    review.provider, review.model, review.verdict.value,
+                    review.summary + "\n\n" + (review.details or ""), created=review.created_at,
+                ))
+        chat_id = chat_store.for_run(run_id)
+        if chat_id:
+            sessions.extend(read_sessions(chat_store.path.parent / "agent-sessions", chat_id))
+            if not any(row["role"] == "orchestrator" for row in sessions):
+                chat = chat_store.get(chat_id)
+                if chat:
+                    replies = [m for m in chat["messages"] if m["role"] == "assistant"]
+                    if replies:
+                        last = replies[-1]
+                        provider, _, model = (last["model"] or "Unknown / Unknown").partition(" / ")
+                        sessions.append(legacy_session(
+                            "chat-" + str(last["id"]), "orchestrator", chat_id,
+                            provider, model, "RECORDED", last["text"], created=last["created"],
+                        ))
+        sessions.sort(key=lambda row: (row.get("state") == "ACTIVE", row.get("created", 0)),
+                      reverse=True)
+        return sessions[:24], root
+
+    def session_response(run_id: str) -> Response:
+        from saberops.native_access import tmux_workspace
+        projected = session_projection(run_id)
+        if projected is None:
+            return JSONResponse({"error": "Run not found"}, status_code=404)
+        sessions, _ = projected
+        terminal = shutil.which("gnome-terminal")
+        desktop = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+        return JSONResponse({
+            "sessions": sessions, "limit": 24, "run_id": run_id,
+            "tmux": tmux_workspace(),
+            "native_terminal_available": bool(terminal and desktop),
+            "native_terminal_reason": (
+                "No supported local desktop terminal is available. Use Pop out console."
+                if not terminal or not desktop else ""
+            ),
+            "chat_id": chat_store.for_run(run_id),
+            "takeover_reason": "Takeover becomes available when a live supported CLI reports its session. "
+                               "Older recorded calls remain read-only.",
+        })
+
+    @app.get("/runs/{run_id}/sessions")
+    def run_sessions(run_id: str) -> Response:
+        return session_response(run_id)
+
+    @app.get("/chats/{chat_id}/sessions")
+    def chat_sessions(chat_id: str) -> Response:
+        from saberops.native_access import tmux_workspace
+        chat = chat_store.get(chat_id)
+        if chat is None:
+            return JSONResponse({"error": "Conversation not found"}, status_code=404)
+        with chat_store.connect() as conn:
+            row = conn.execute("SELECT run_id FROM chat_runs WHERE chat_id=? ORDER BY rowid DESC LIMIT 1",
+                               (chat_id,)).fetchone()
+        if row:
+            return session_response(str(row["run_id"]))
+        from saberops.agent_sessions import read_sessions
+        return JSONResponse({"sessions": read_sessions(chat_store.path.parent / "agent-sessions", chat_id),
+                             "tmux": tmux_workspace(),
+                             "native_terminal_available": False,
+                             "native_terminal_reason": "Open the linked run to use a desktop terminal viewer.",
+                             "chat_id": chat_id,
+                             "takeover_reason": "Takeover is available for live supported provider sessions."})
+
+    @app.post("/runs/{run_id}/sessions/{session_id}/open-terminal")
+    def open_session_terminal(request: Request, run_id: str, session_id: str) -> Response:
+        # An explicit click opens a viewer only. No shell, provider execution,
+        # process signals, candidate mutation or arbitrary caller-supplied path.
+        from saberops.agent_sessions import owner_directory
+        projected = session_projection(run_id)
+        if projected is None:
+            return JSONResponse({"error": "Run not found"}, status_code=404)
+        sessions, root = projected
+        session = next((row for row in sessions if row["id"] == session_id), None)
+        if session is None:
+            return JSONResponse({"error": "Session not found"}, status_code=404)
+        terminal = shutil.which("gnome-terminal")
+        if not terminal or not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+            return JSONResponse({"error": "No supported desktop terminal is available."}, status_code=409)
+        log = owner_directory(root, run_id) / (
+            f"{session_id}.log" if re.fullmatch(r"[0-9a-f]{32}", session_id) else "missing.log"
         )
+        if not log.is_file() and re.fullmatch(r"[0-9a-f]{32}", session_id) and chat_store.for_run(run_id):
+            log = owner_directory(chat_store.path.parent / "agent-sessions", chat_store.for_run(run_id) or "") / f"{session_id}.log"
+        if not log.is_file():
+            folder = owner_directory(root, run_id)
+            folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+            # Legacy snapshots get an opaque filename, never a URL path fragment.
+            log = folder / f"viewer-{hashlib.sha256(session_id.encode()).hexdigest()}.log"
+            log.write_text(str(session["output"]), encoding="utf-8")
+            log.chmod(0o600)
+        try:
+            result = subprocess.run(
+                [terminal, "--title=SaberOps · Read-only CLI output", "--", sys.executable,
+                 str(Path(__file__).with_name("native_console.py")), str(log)],
+                capture_output=True, timeout=5, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return JSONResponse({"error": "Could not open the desktop terminal. Use Pop out console."}, status_code=503)
+        if result.returncode != 0:
+            return JSONResponse({"error": "Desktop terminal refused to open. Use Pop out console."}, status_code=503)
+        return JSONResponse({"opened": True, "mode": "read-only transcript viewer"})
+
+    def control_for_session(run_id: str, sid: str) -> tuple[Any, dict[str, Any]]:
+        from saberops.session_control import ControlConflict, SessionControls
+        projected = session_projection(run_id)
+        if projected is None:
+            raise ControlConflict("Run not found")
+        sessions, root = projected
+        if not any(row["id"] == sid for row in sessions):
+            raise ControlConflict("Session not found; older recorded calls cannot be taken over.")
+        candidates = [(root, run_id)]
+        chat_id = chat_store.for_run(run_id)
+        if chat_id:
+            candidates.append((chat_store.path.parent / "agent-sessions", chat_id))
+        for candidate_root, owner in candidates:
+            controls = SessionControls(candidate_root)
+            data = controls.get(sid)
+            if data and data["owner"] == owner:
+                return controls, data
+        raise ControlConflict("This recorded call has no live control owner. Start a new run.")
+
+    @app.get("/runs/{run_id}/sessions/{sid}/events")
+    def session_events(run_id: str, sid: str, after: int = 0) -> Response:
+        from saberops.session_control import ControlConflict
+        from saberops.session_journal import SessionJournal
+        try:
+            controls, _ = control_for_session(run_id, sid)
+            return JSONResponse(SessionJournal(controls.path.parent).view(sid, after=max(0, after)))
+        except ControlConflict as exc:
+            return JSONResponse({"error": str(exc)}, status_code=404)
+
+    def launch_native_client(controls: Any, data: dict[str, Any], backend: str,
+                             repository: str | None = None, *, show_workspace: bool = True) -> Response:
+        from saberops.agent_sessions import owner_directory
+        from saberops.native_access import (
+            capability,
+            client_state,
+            fail_launch,
+            focus_tmux_client,
+            reserve,
+            saved_directory,
+            session_key,
+            show_tmux_workspace,
+            supports_shared_chat,
+            terminal_launch,
+        )
+        from saberops.session_control import ControlConflict
+        from saberops.session_journal import SessionJournal
+        folder = owner_directory(controls.path.parent, data["owner"])
+        metadata_path = folder / (data["id"] + ".json")
+        job: dict[str, Any] | None = None
+        try:
+            metadata = json.loads(metadata_path.read_text())
+            metadata["completion"] = SessionJournal(controls.path.parent).view(data["id"], limit=1)["outcome"]
+            metadata["control_mode"] = data["mode"]
+            access = capability(metadata)
+            existing = client_state(controls, session_key(metadata))
+            if backend == "tmux" and existing and existing["state"] in ("STARTING", "ACTIVE"):
+                if focus_tmux_client(data["role"] + "-" + existing["session_id"][:8]):
+                    workspace = show_tmux_workspace() if show_workspace else {}
+                    return JSONResponse({"opened": True, "mode": "existing", "backend": backend,
+                                         "workspace": workspace, "message": workspace.get("message", "Selected the existing tmux client.")})
+                raise ControlConflict("This session has an open desktop CLI. Close it before adding it to tmux.")
+            if not access["native_cli_available"]:
+                raise ControlConflict(access["native_cli_access_reason"])
+            descriptor = folder / (data["id"] + ".native")
+            if metadata.get("native_attach_ready") and data["mode"] in ("ACTIVE", "REQUESTED", "MANUAL") and descriptor.is_file():
+                args = [sys.executable, str(Path(__file__).with_name("native_client.py")), str(descriptor)]
+                terminal_launch(args, backend, data["role"] + "-" + data["id"][:8])
+                workspace = show_tmux_workspace() if backend == "tmux" and show_workspace else {}
+                return JSONResponse({"opened": True, "mode": "attach", "backend": backend,
+                                     "workspace": workspace, "message": workspace.get("message", "Opened the native CLI.")})
+            metadata["repository"] = repository
+            if metadata["completion"]:
+                metadata["read_only"] = True
+            token = reserve(controls, metadata)
+            job = dict(metadata, controls_root=str(controls.path.parent),
+                       key=session_key(metadata), token=token,
+                       access_mode=access["native_cli_mode"], log=str(folder / (data["id"] + ".native.log")))
+            job["shared_chat"] = (metadata.get("role") == "orchestrator"
+                                  and supports_shared_chat(str(metadata.get("provider", ""))))
+            if job["shared_chat"] and metadata.get("provider") == "codex":
+                job["shared_transport"] = "codex-server"
+            # Reserve before restoring the snapshot: competing launch requests
+            # must not extract or remove each other's inspection directory.
+            job["directory"] = str(saved_directory(metadata, folder))
+            if access["native_cli_mode"] == "handoff":
+                if data["mode"] == "ACTIVE":
+                    controls.takeover(data["id"], chat_path=Path(data["chat_path"]), chat_id=data["chat_id"])
+                elif data["mode"] not in ("REQUESTED", "MANUAL"):
+                    raise ControlConflict("This invocation cannot be handed off safely.")
+            # Descriptors contain references only; provider passwords remain in the guarded live attach descriptor.
+            descriptor = folder / (data["id"] + "-" + token + ".handoff")
+            descriptor.write_text(json.dumps(job), encoding="utf-8")
+            descriptor.chmod(0o600)
+            Path(job["log"]).touch(mode=0o600)
+            args = [sys.executable, str(Path(__file__).with_name("native_handoff.py")), str(descriptor)]
+            terminal_launch(args, backend, data["role"] + "-" + data["id"][:8])
+        except ControlConflict as exc:
+            if job:
+                fail_launch(controls, job, str(exc))
+            return JSONResponse({"error": str(exc)}, status_code=409)
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            if job:
+                fail_launch(controls, job, str(exc))
+            return JSONResponse({"error": "Could not open the native session: " + str(exc)[:400]}, status_code=503)
+        workspace = show_tmux_workspace() if backend == "tmux" and show_workspace else {}
+        return JSONResponse({"opened": True, "mode": job["access_mode"], "backend": backend,
+                             "workspace": workspace, "message": workspace.get("message", "Opened the exact provider session.")})
+
+    @app.post("/runs/{run_id}/sessions/{sid}/open-native-cli")
+    def open_native_session(run_id: str, sid: str, backend: str = "desktop", show_workspace: bool = True) -> Response:
+        from saberops.session_control import ControlConflict
+        try:
+            controls, data = control_for_session(run_id, sid)
+            controls.link_chat(sid, chat_path=chat_store.path, chat_id=linked_conversation(run_id),
+                               saved=data["mode"] not in ("ACTIVE", "REQUESTED", "MANUAL", "RESUMING"))
+            data = controls.get(sid) or data
+            runtime = runtime_for_run(run_id)
+            run = runtime.db.get_run(run_id) if runtime else None
+            return launch_native_client(controls, data, backend, str(assert_run_repository(run)) if run else None,
+                                        show_workspace=show_workspace)
+        except ControlConflict as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+
+    def history_download(controls: Any, sid: str) -> Response:
+        from saberops.session_journal import SessionJournal
+        journal = SessionJournal(controls.path.parent)
+        if not journal.path.is_file():
+            return JSONResponse({"error": "No durable history was recorded."}, status_code=404)
+        name = hashlib.sha256(sid.encode()).hexdigest()[:16]
+        return StreamingResponse(journal.export(sid), media_type="application/x-ndjson",
+            headers={"Content-Disposition": f'attachment; filename="session-{name}.jsonl"'})
+
+    @app.get("/runs/{run_id}/sessions/{sid}/history")
+    def download_run_session(run_id: str, sid: str) -> Response:
+        from saberops.session_control import ControlConflict
+        try:
+            controls, _ = control_for_session(run_id, sid)
+            return history_download(controls, sid)
+        except ControlConflict as exc:
+            return JSONResponse({"error": str(exc)}, status_code=404)
+
+    def linked_conversation(run_id: str) -> str:
+        found = chat_store.for_run(run_id)
+        if found:
+            return found
+        runtime = runtime_for_run(run_id)
+        run = runtime.db.get_run(run_id) if runtime else None
+        if run is None:
+            raise ValueError("Run not found")
+        target = assert_run_repository(run)
+        found = chat_store.create(str(target), run.task)
+        token = chat_store.claim(found, run.task, "imported-objective")
+        if token:
+            chat_store.finish(found, token, "This conversation is linked to your existing run. "
+                              "Manual CLI messages appear here while that run is held.", run_id=run_id)
+        chat_store.link_run(found, run_id)
+        return found
+
+    @app.get("/runs/{run_id}/sessions/{sid}/control")
+    def session_control(run_id: str, sid: str) -> Response:
+        from saberops.session_control import ControlConflict, SessionControls
+        try:
+            controls, _ = control_for_session(run_id, sid)
+            return JSONResponse(SessionControls.public(controls.get(sid, messages=True)))
+        except ControlConflict as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+
+    @app.post("/runs/{run_id}/sessions/{sid}/takeover")
+    def take_session_control(run_id: str, sid: str) -> Response:
+        from saberops.session_control import ControlConflict
+        try:
+            controls, _ = control_for_session(run_id, sid)
+            chat_id = linked_conversation(run_id)
+            controls.takeover(sid, chat_path=chat_store.path, chat_id=chat_id)
+            runtime = runtime_for_run(run_id)
+            if runtime:
+                runtime.db.record_event(run_id, "manual_control_requested", payload={"session_id": sid})
+            return JSONResponse({"requested": True, "chat_id": chat_id}, status_code=202)
+        except (ControlConflict, ValueError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+
+    @app.post("/runs/{run_id}/sessions/{sid}/control/messages")
+    def manual_session_message(run_id: str, sid: str,
+                               message: Annotated[str, Form()] = "",
+                               request_id: Annotated[str, Form()] = "") -> Response:
+        from saberops.session_control import ControlConflict
+        try:
+            controls, _ = control_for_session(run_id, sid)
+            controls.submit(sid, message, request_id)
+            return JSONResponse({"accepted": True}, status_code=202)
+        except ControlConflict as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+
+    @app.post("/runs/{run_id}/sessions/{sid}/control/resume")
+    def resume_session_control(run_id: str, sid: str) -> Response:
+        from saberops.session_control import ControlConflict
+        try:
+            controls, _ = control_for_session(run_id, sid)
+            controls.resume(sid)
+            runtime = runtime_for_run(run_id)
+            if runtime:
+                runtime.db.record_event(run_id, "manual_control_return_requested",
+                                        payload={"session_id": sid})
+            return JSONResponse({"requested": True}, status_code=202)
+        except ControlConflict as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+
+    @app.post("/runs/{run_id}/sessions/{sid}/control/interrupt")
+    def interrupt_manual_reply(run_id: str, sid: str) -> Response:
+        from saberops.session_control import ControlConflict
+        try:
+            controls, _ = control_for_session(run_id, sid)
+            controls.interrupt(sid)
+            return JSONResponse({"requested": True}, status_code=202)
+        except ControlConflict as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+
+    def launch_synced_cli(request: Request, *, chat_id: str | None = None,
+                          control: str | None = None) -> Response:
+        terminal = shutil.which("gnome-terminal")
+        if not terminal or not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+            return JSONResponse({"error": "No local desktop terminal is available. Chat here instead."}, status_code=409)
+        # Host/Origin headers never choose where the local terminal sends data.
+        server = request.scope.get("server") or ("127.0.0.1", 8765)
+        port = int(server[1])
+        args = [terminal, "--title=SaberOps · Synchronized CLI", "--", sys.executable,
+                str(Path(__file__).with_name("synced_console.py")),
+                "--url", f"http://127.0.0.1:{port}"]
+        args.extend(["--chat", chat_id] if chat_id else ["--control", control or ""])
+        try:
+            result = subprocess.run(args, capture_output=True, timeout=5, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            return JSONResponse({"error": "Could not open synchronized CLI."}, status_code=503)
+        if result.returncode:
+            return JSONResponse({"error": "The desktop terminal refused to open."}, status_code=503)
+        return JSONResponse({"opened": True, "mode": "synchronized CLI"})
+
+    @app.post("/chats/{chat_id}/open-synchronized-cli")
+    def open_chat_cli(request: Request, chat_id: str) -> Response:
+        if chat_store.get(chat_id) is None:
+            return JSONResponse({"error": "Conversation not found"}, status_code=404)
+        return launch_synced_cli(request, chat_id=chat_id)
+
+    @app.post("/runs/{run_id}/open-synchronized-cli")
+    def open_run_chat_cli(request: Request, run_id: str) -> Response:
+        try:
+            chat_id = linked_conversation(run_id)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=404)
+        return launch_synced_cli(request, chat_id=chat_id)
+
+    @app.post("/runs/{run_id}/sessions/{sid}/open-synchronized-cli")
+    def open_control_cli(request: Request, run_id: str, sid: str) -> Response:
+        from saberops.session_control import ControlConflict
+        try:
+            _, data = control_for_session(run_id, sid)
+            if data["mode"] != "MANUAL":
+                raise ControlConflict("Take control and wait for the run to be held first.")
+        except ControlConflict as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+        return launch_synced_cli(request, control=f"/runs/{run_id}/sessions/{sid}/control")
+
+    def chat_control_for_session(chat_id: str, sid: str) -> tuple[Any, dict[str, Any]]:
+        from saberops.session_control import ControlConflict, SessionControls
+        if chat_store.get(chat_id) is None:
+            raise ControlConflict("Conversation not found")
+        controls = SessionControls(chat_store.path.parent / "agent-sessions")
+        data = controls.get(sid)
+        if data is None or data["owner"] != chat_id:
+            raise ControlConflict("This session does not belong to this conversation.")
+        return controls, data
+
+    @app.get("/chats/{chat_id}/sessions/{sid}/control")
+    def chat_session_control(chat_id: str, sid: str) -> Response:
+        from saberops.session_control import ControlConflict, SessionControls
+        try:
+            controls, _ = chat_control_for_session(chat_id, sid)
+            return JSONResponse(SessionControls.public(controls.get(sid, messages=True)))
+        except ControlConflict as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+
+    @app.post("/chats/{chat_id}/sessions/{sid}/open-native-cli")
+    def open_native_chat_session(chat_id: str, sid: str, backend: str = "desktop", show_workspace: bool = True) -> Response:
+        from saberops.session_control import ControlConflict
+        try:
+            controls, data = chat_control_for_session(chat_id, sid)
+            controls.link_chat(sid, chat_path=chat_store.path, chat_id=chat_id,
+                               saved=data["mode"] not in ("ACTIVE", "REQUESTED", "MANUAL", "RESUMING"))
+            return launch_native_client(controls, controls.get(sid) or data, backend, show_workspace=show_workspace)
+        except ControlConflict as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+
+    def open_shared_tmux(projected: Response, opener: Any, all_sessions: bool) -> Response:
+        from saberops.native_access import session_key, show_tmux_workspace
+        from saberops.session_control import ControlConflict
+        if projected.status_code != 200:
+            return projected
+        rows = json.loads(bytes(projected.body))["sessions"]
+        opened: list[str] = []
+        skipped: list[dict[str, str]] = []
+        seen: set[str] = set()
+        if all_sessions:
+            for row in rows:
+                label = str(row["role"]).capitalize() + " · " + str(row["provider"]) + " / " + str(row["model"])
+                if not row.get("native_cli_available"):
+                    skipped.append({"id": row["id"], "label": label, "reason": row.get("native_cli_access_reason") or "No saved native session is available."})
+                    continue
+                key = session_key(row)
+                if key in seen:
+                    continue
+                seen.add(key)
+                result = opener(row["id"])
+                if result.status_code == 200:
+                    opened.append(row["id"])
+                else:
+                    skipped.append({"id": row["id"], "label": label, "reason": json.loads(result.body).get("error", "Could not open this session.")})
+        try:
+            workspace = show_tmux_workspace() if all_sessions else show_tmux_workspace(force_window=True)
+        except (ControlConflict, OSError, subprocess.SubprocessError) as exc:
+            return JSONResponse({"error": str(exc), "opened_sessions": opened, "skipped": skipped}, status_code=503)
+        return JSONResponse({"opened": workspace["visible"], "workspace": workspace,
+                             "message": workspace["message"], "opened_sessions": opened, "skipped": skipped})
+
+    @app.post("/runs/{run_id}/sessions/open-tmux")
+    def open_run_tmux(run_id: str, all_sessions: bool = False) -> Response:
+        return open_shared_tmux(session_response(run_id),
+                                lambda sid: open_native_session(run_id, sid, "tmux", False), all_sessions)
+
+    @app.post("/chats/{chat_id}/sessions/open-tmux")
+    def open_chat_tmux(chat_id: str, all_sessions: bool = False) -> Response:
+        projected = chat_sessions(chat_id)
+        if projected.status_code != 200:
+            return projected
+        run_id = json.loads(bytes(projected.body)).get("run_id")
+        opener = (lambda sid: open_native_session(run_id, sid, "tmux", False)) if run_id else (lambda sid: open_native_chat_session(chat_id, sid, "tmux", False))
+        return open_shared_tmux(projected, opener, all_sessions)
+
+    @app.get("/chats/{chat_id}/sessions/{sid}/history")
+    def download_chat_session(chat_id: str, sid: str) -> Response:
+        from saberops.session_control import ControlConflict
+        try:
+            controls, _ = chat_control_for_session(chat_id, sid)
+            return history_download(controls, sid)
+        except ControlConflict as exc:
+            return JSONResponse({"error": str(exc)}, status_code=404)
+
+    @app.post("/chats/{chat_id}/sessions/{sid}/takeover")
+    def take_chat_control(chat_id: str, sid: str) -> Response:
+        from saberops.session_control import ControlConflict
+        try:
+            controls, _ = chat_control_for_session(chat_id, sid)
+            controls.takeover(sid, chat_path=chat_store.path, chat_id=chat_id)
+            return JSONResponse({"requested": True, "chat_id": chat_id}, status_code=202)
+        except ControlConflict as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+
+    @app.post("/chats/{chat_id}/sessions/{sid}/control/messages")
+    def manual_chat_message(chat_id: str, sid: str,
+                            message: Annotated[str, Form()] = "",
+                            request_id: Annotated[str, Form()] = "") -> Response:
+        from saberops.session_control import ControlConflict
+        try:
+            controls, _ = chat_control_for_session(chat_id, sid)
+            controls.submit(sid, message, request_id)
+            return JSONResponse({"accepted": True}, status_code=202)
+        except ControlConflict as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+
+    @app.post("/chats/{chat_id}/sessions/{sid}/control/resume")
+    def resume_chat_control(chat_id: str, sid: str) -> Response:
+        from saberops.session_control import ControlConflict
+        try:
+            controls, _ = chat_control_for_session(chat_id, sid)
+            controls.resume(sid)
+            return JSONResponse({"requested": True}, status_code=202)
+        except ControlConflict as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+
+    @app.post("/chats/{chat_id}/sessions/{sid}/control/interrupt")
+    def interrupt_chat_reply(chat_id: str, sid: str) -> Response:
+        from saberops.session_control import ControlConflict
+        try:
+            controls, _ = chat_control_for_session(chat_id, sid)
+            controls.interrupt(sid)
+            return JSONResponse({"requested": True}, status_code=202)
+        except ControlConflict as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+
+    @app.post("/chats/{chat_id}/sessions/{sid}/open-synchronized-cli")
+    def open_chat_control_cli(request: Request, chat_id: str, sid: str) -> Response:
+        from saberops.session_control import ControlConflict
+        try:
+            _, data = chat_control_for_session(chat_id, sid)
+            if data["mode"] != "MANUAL":
+                raise ControlConflict("Take control and wait for the session to be held first.")
+        except ControlConflict as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+        return launch_synced_cli(request, control=f"/chats/{chat_id}/sessions/{sid}/control")
 
     @app.get("/runs/{run_id}/plan")
     def run_plan(run_id: str) -> JSONResponse:
@@ -3504,6 +4616,60 @@ def create_app(
             except Exception:
                 pass
 
+    @app.post("/runs/{run_id}/try-worker")
+    def try_blocked_worker(run_id: str, binding_id: Annotated[str, Form()] = "") -> Response:
+        runtime = runtime_for_run(run_id)
+        run = runtime.db.get_run(run_id) if runtime else None
+        if runtime is None or run is None:
+            return JSONResponse({"error": "Run not found"}, status_code=404)
+        if run.status != RunStatus.FAILED:
+            return JSONResponse({"error": "Only a failed run can try a blocked worker."}, status_code=409)
+        from saberops.routing_config import load_effective_routing
+        report = build_run_report(runtime.db, run_id)
+        blocked = report["termination"].get("skipped_candidates", [])
+        wanted = next((row for row in blocked if row.get("binding_id") == binding_id
+                       and row.get("readiness_state") == "UNKNOWN"), None)
+        try:
+            snapshot = load_effective_routing()
+            candidates = resolve_candidate_chain(tier=run.tier, snapshot=snapshot)
+        except ValueError:
+            return JSONResponse({"error": "Worker routing is unavailable. Check Routing."}, status_code=400)
+        candidate = next((c for c in candidates if c.binding_id == binding_id), None)
+        if wanted is None or candidate is None or not binding_id or (
+            candidate.provider != wanted.get("provider") or candidate.model != wanted.get("model")
+        ):
+            return JSONResponse({"error": "This exact worker is no longer in the chosen routing list."}, status_code=400)
+        try:
+            target = assert_run_repository(run)
+            # Explicit owner POST is the existing exact-UNKNOWN bootstrap authority.
+            # Keep the failed run's frozen validation and acceptance policy.
+            if not run.config_json:
+                raise ValueError("Run policy is unavailable")
+            config = replace(reconstruct_run_config(json.loads(run.config_json)),
+                             target_repo=str(target), provider_override=candidate.provider,
+                             model_override=candidate.model, worker_binding_registry=None)
+            result = runtime.supervisor.start_supervised_run(config=config)
+            runtime.db.record_event(result.run_id, "owner_worker_bootstrap_requested", payload={
+                "source_run_id": run_id, "binding_id": binding_id,
+                "provider": candidate.provider, "model": candidate.model,
+            })
+        except Exception:
+            return JSONResponse({"error": "Could not start this worker. Check Routing and project policy."}, status_code=400)
+        chat_id = chat_store.for_run(run_id)
+        if chat_id:
+            chat_store.link_run(chat_id, result.run_id)
+            try:
+                token = chat_store.claim(chat_id, f"Try {candidate.model} for the original task.",
+                                         "bootstrap:" + result.run_id)
+                if token:
+                    chat_store.finish(chat_id, token,
+                        f"I've queued an explicit attempt with {candidate.model}. "
+                        "I'll bring the result back here.", run_id=result.run_id)
+            except ChatBusy:
+                pass
+            return RedirectResponse(f"/chats/{chat_id}", status_code=303)
+        return RedirectResponse(f"/runs/{result.run_id}?from=dashboard#chat", status_code=303)
+
     @app.post("/runs/{run_id}/retry", name="retry_run")
     def retry_run(request: Request, run_id: str) -> Response:
         runtime = runtime_for_run(run_id)
@@ -3540,6 +4706,36 @@ def create_app(
                 status_code=400,
             )
         return RedirectResponse(url=f"/runs/{result.run_id}", status_code=303)
+
+    @app.post("/runs/{run_id}/continue", name="continue_run")
+    def continue_run(request: Request, run_id: str) -> Response:
+        from saberops.continuation import prepare_continuation
+        runtime = runtime_for_run(run_id)
+        run = runtime.db.get_run(run_id) if runtime else None
+        if runtime is None or run is None:
+            return templates.TemplateResponse(
+                request, "run_detail.html", _missing_run_context(run_id), status_code=404
+            )
+        existing = runtime.db.get_continuation(run_id)
+        if existing:
+            return RedirectResponse(url=f"/runs/{existing}?from=runs", status_code=303)
+        try:
+            config = prepare_continuation(runtime.db, run_id)
+            result = runtime.supervisor.start_supervised_run(config=config)
+            chat_id = chat_store.for_run(run_id)
+            if chat_id:
+                chat_store.link_run(chat_id, result.run_id)
+                chat_store.evidence(chat_id, "run_continued", {
+                    "parent_run_id": run_id, "child_run_id": result.run_id,
+                    "candidate_sha": config.continuation["candidate_sha"] if config.continuation else None,
+                })
+        except Exception as exc:
+            return templates.TemplateResponse(
+                request, "run_detail.html",
+                _run_detail_context(runtime.db, run, error=f"Cannot continue: {exc}"),
+                status_code=400,
+            )
+        return RedirectResponse(url=f"/runs/{result.run_id}?from=runs#chat", status_code=303)
 
     @app.post("/runs/{run_id}/cancel", name="cancel_run")
     def cancel_run(request: Request, run_id: str) -> Response:
@@ -3827,12 +5023,69 @@ def create_app(
             snapshot = InboxSnapshot(items=())
         return JSONResponse(snapshot.as_dict())
 
+    cli_usage_service = CliUsageService()
+    app.state.cli_usage_service = cli_usage_service
+
+    @app.get("/quick-access/usage", response_class=HTMLResponse)
+    def quick_usage(request: Request) -> Response:
+        return templates.TemplateResponse(
+            request, "_quick_usage.html", {"cli_cards": cli_usage_service.snapshot()}
+        )
+
+    @app.post("/quick-access/usage", response_class=HTMLResponse)
+    def refresh_quick_usage(
+        request: Request, force: Annotated[str, Form()] = "0"
+    ) -> Response:
+        # Reuse the quota page's observation/cache authority. No inference,
+        # routing edits, quota-policy writes or cross-project activity scan.
+        return templates.TemplateResponse(
+            request, "_quick_usage.html",
+            {"cli_cards": cli_usage_service.snapshot(refresh=True, force=force == "1")},
+        )
+
+    def quota_context(db: Database, **kwargs: Any) -> dict[str, Any]:
+        recorded: dict[str, dict[str, Any]] = {}
+        known, unreadable = runtimes.list_known_runtimes()
+        for runtime in known:
+            try:
+                for row in runtime.db.aggregate_provider_usage():
+                    provider = str(row["provider"])
+                    if provider not in recorded:
+                        recorded[provider] = dict(row)
+                    else:
+                        previous = recorded[provider]
+                        for field in ("calls", "unknown_calls", "input_tokens",
+                                      "output_tokens", "cached_tokens"):
+                            value = row[field]
+                            if value is not None:
+                                previous[field] = (previous[field] or 0) + value
+                        previous["updated_at"] = max(
+                            previous["updated_at"] or "", row["updated_at"] or ""
+                        )
+            except Exception:
+                unreadable += 1
+        return _quota_context(db, cli_cards=cli_usage_service.snapshot(),
+                              recorded_usage=recorded, usage_unreadable=unreadable, **kwargs)
+
+    @app.post("/quota/refresh", name="refresh_cli_usage")
+    def quota_refresh(
+        request: Request,
+        fragment: Annotated[str, Form()] = "",
+        force: Annotated[str, Form()] = "1",
+    ) -> Response:
+        cli_usage_service.snapshot(refresh=True, force=force == "1")
+        if fragment == "1":
+            return templates.TemplateResponse(
+                request, "_quota_usage.html", quota_context(runtimes.owner_db)
+            )
+        return RedirectResponse(url="/quota?usage_refreshed=1", status_code=303)
+
     @app.get("/quota", response_class=HTMLResponse, name="quota")
     def quota(request: Request) -> HTMLResponse:
         return templates.TemplateResponse(
             request,
             "quota.html",
-            _quota_context(runtimes.owner_db, notice=_notice_from_query(request)),
+            quota_context(runtimes.owner_db, notice=_notice_from_query(request)),
         )
 
     @app.post("/quota/set", name="set_quota")
@@ -3856,7 +5109,7 @@ def create_app(
             return templates.TemplateResponse(
                 request,
                 "quota.html",
-                _quota_context(
+                quota_context(
                     db,
                     error="Provider and pool are required.",
                     form=form,
@@ -3869,7 +5122,7 @@ def create_app(
             return templates.TemplateResponse(
                 request,
                 "quota.html",
-                _quota_context(
+                quota_context(
                     db,
                     error="Remaining percentage must be a number.",
                     form=form,
@@ -3888,7 +5141,7 @@ def create_app(
             return templates.TemplateResponse(
                 request,
                 "quota.html",
-                _quota_context(db, error=f"Quota update failed: {exc}", form=form),
+                quota_context(db, error=f"Quota update failed: {exc}", form=form),
                 status_code=400,
             )
         return RedirectResponse(url="/quota?updated=1", status_code=303)
@@ -3906,7 +5159,7 @@ def create_app(
             return templates.TemplateResponse(
                 request,
                 "quota.html",
-                _quota_context(
+                quota_context(
                     db,
                     error="Provider and pool are required.",
                     enable_form=enable_form,
@@ -3939,11 +5192,9 @@ def create_app(
         subsequent automatic routing consumes.  Only the declared
         non-inference status command runs; no model call occurs and
         ``UNKNOWN`` stays ``UNKNOWN`` (a present CLI is availability,
-        never proven readiness).  API connections keep the safe
-        unauthenticated reachability probe -- there is no
-        truth-preserving readiness authority for them, so they are
-        never classified as ``BACKEND_NOT_INSTALLED``: the stored
-        credential value is never read or transmitted.
+        never proven readiness). Supported API connections verify through a
+        metadata-only request using their explicit API credential reference.
+        Unsupported transports keep the unauthenticated reachability probe.
         """
         wanted = connection_id.strip()
         if not wanted:
@@ -3970,7 +5221,8 @@ def create_app(
                 _access_context(error=f"Unknown connection: {wanted}"),
                 status_code=404,
             )
-        if connection.is_account_backed:
+        from saberops.workers.direct_api import supports_connection
+        if connection.is_account_backed or supports_connection(connection):
             # One authoritative verification path: the canonical
             # readiness refresh (non-inference status command only)
             # over the exact registry-loaded connection, composed with
@@ -4003,7 +5255,8 @@ def create_app(
                 ),
                 "reason": evidence.reason,
                 "detail": (
-                    "verified readiness persisted; "
+                    ("endpoint metadata verified; authentication/model entitlement not proven; "
+                     if evidence.reason == "API_ENDPOINT_READY" else "readiness evidence persisted; ") +
                     f"state={evidence.state.value} "
                     f"observed_at={evidence.observed_at}"
                 ),
@@ -4016,6 +5269,62 @@ def create_app(
                 endpoint=connection.endpoint,
             )
             probe = {"connection_id": connection.connection_id, **outcome}
+        return templates.TemplateResponse(request, "access.html", _access_context(probe=probe))
+
+    @app.post("/access/verify-model", name="verify_account_model")
+    def access_verify_model(
+        request: Request,
+        connection_id: Annotated[str, Form()] = "",
+        model_id: Annotated[str, Form()] = "",
+    ) -> Response:
+        """Explicit bounded inference check; never a task or automatic fallback."""
+        from saberops.model_access.model_verification import SUPPORTED_BACKENDS
+        try:
+            registry = _access_store().load()
+            connection = registry.try_get(connection_id.strip())
+            descriptor = next((d for d in ACCOUNT_BACKENDS
+                               if d.connection_id == connection_id.strip()), None)
+            if (connection is None or descriptor is None
+                    or connection.backend != descriptor.backend
+                    or connection.provider != descriptor.provider
+                    or connection.backend not in SUPPORTED_BACKENDS):
+                return templates.TemplateResponse(
+                    request, "access.html",
+                    _access_context(error="Choose a supported account connection."), status_code=400,
+                )
+            model = next((m for m in _load_catalog_safely().for_connection(connection.connection_id)
+                          if m.model_id == model_id.strip() and m.is_execution_supported
+                          and not m.is_stale and m.provider == connection.provider
+                          and m.backend == connection.backend), None)
+            if model is None:
+                return templates.TemplateResponse(
+                    request, "access.html",
+                    _access_context(error="Choose a current model from this provider’s catalog. Refresh models if needed."),
+                    status_code=400,
+                )
+            service = ReadinessService(registry, _readiness_store(), which=shutil.which)
+            evidence = service.verify_model(connection, model.model_id)
+        except (AccessStoreError, ReadinessStoreError):
+            return templates.TemplateResponse(
+                request, "access.html",
+                _access_context(error="Access evidence could not be read or saved. No readiness was assumed."),
+                status_code=500,
+            )
+        messages = {
+            "READY": "The selected model completed the access check. Readiness is saved for this account connection; other models may have different access or limits.",
+            "MODEL_CHECK_TIMEOUT": "The check timed out. Open the CLI to check sign-in and network access, then retry.",
+            "MODEL_CHECK_FAILED": "The CLI could not complete the check. Open it to check sign-in, model access and remaining allowance, then retry.",
+            "MODEL_CHECK_UNCONFIRMED": "The CLI did not return a confirmed model response. Check its version and sign-in, then retry.",
+            "BACKEND_NOT_INSTALLED": "Install this CLI, restart SaberOps, then retry.",
+            "CONNECTION_DISABLED": "Enable this connection before verifying access.",
+        }
+        probe = {
+            "connection_id": evidence.connection_id, "model_id": model.model_id,
+            "ok": "TRUE" if evidence.state == ProviderReadiness.READY else "FALSE",
+            "reason": evidence.reason, "detail": messages.get(evidence.reason, "Access remains unverified."),
+            "readiness_state": evidence.state.value, "readiness_reason": evidence.reason,
+            "observed_at": evidence.observed_at,
+        }
         return templates.TemplateResponse(request, "access.html", _access_context(probe=probe))
 
     @app.post("/access/discover", name="discover_access_models")
@@ -4239,6 +5548,46 @@ def create_app(
             ),
         )
 
+    routing_mutation_lock = threading.Lock()
+
+    @app.post("/routing/assign", name="assign_routing_model")
+    def routing_assign(
+        request: Request,
+        target: Annotated[str, Form()] = "",
+        connection_id: Annotated[str, Form()] = "",
+        model_id: Annotated[str, Form()] = "",
+        binding_id: Annotated[str, Form()] = "",
+        orchestrator_binding_id: Annotated[str, Form()] = "",
+        reviewer_binding_id: Annotated[str, Form()] = "",
+    ) -> Response:
+        if target in ("T1", "T2", "T3"):
+            return routing_add(
+                request, connection_id=connection_id, model_id=model_id,
+                context=f"{target}.default", binding_id=binding_id,
+            )
+        if target in ("orchestrator", "reviewer"):
+            wanted = (
+                orchestrator_binding_id if target == "orchestrator" else reviewer_binding_id
+            ).strip()
+            with routing_mutation_lock:
+                owner = _binding_store().load()
+                rows = (_orchestrator_context if target == "orchestrator" else _reviewer_context)(
+                    registry=resolved_registry)["bindings"]
+                if not any(row["binding_id"] == wanted for row in rows):
+                    return templates.TemplateResponse(request, "routing.html",
+                        _routing_context(error="This model cannot be added to this role.",
+                                         registry=resolved_registry), status_code=400)
+                order = owner.role_binding_ids(target)
+                if wanted not in order:
+                    save_owner_bindings(owner.with_role_order(target, (*order, wanted)))
+            return RedirectResponse(url=f"/routing?role={target}&routing_model_added=1", status_code=303)
+        return templates.TemplateResponse(
+            request, "routing.html",
+            _routing_context(error="Choose Orchestrator, Reviewer, T1, T2, or T3.",
+                             registry=resolved_registry),
+            status_code=400,
+        )
+
     @app.post("/routing/add", name="add_routing_model")
     def routing_add(
         request: Request,
@@ -4268,6 +5617,7 @@ def create_app(
                 request,
                 "routing.html",
                 _routing_context(
+                    open_role=context.partition(".")[0],
                     error=f"Access store unreadable: {exc}",
                     owner=owner,
                     registry=resolved_registry,
@@ -4280,6 +5630,7 @@ def create_app(
                 request,
                 "routing.html",
                 _routing_context(
+                    open_role=context.partition(".")[0],
                     error=f"Unknown connection: {connection_id.strip()}",
                     owner=owner,
                     registry=resolved_registry,
@@ -4298,6 +5649,7 @@ def create_app(
                 request,
                 "routing.html",
                 _routing_context(
+                    open_role=context.partition(".")[0],
                     error=(
                         "Model cannot enter routing: it is not a discovery-verified "
                         "provider model for this connection."
@@ -4312,6 +5664,7 @@ def create_app(
                 request,
                 "routing.html",
                 _routing_context(
+                    open_role=context.partition(".")[0],
                     error=(
                         "Model cannot enter routing: discovery evidence is stale; "
                         "refresh models first."
@@ -4334,6 +5687,7 @@ def create_app(
                 request,
                 "routing.html",
                 _routing_context(
+                    open_role=context.partition(".")[0],
                     error=(
                         "Model cannot enter routing: no exact executable "
                         "binding resolves for this connection/model."
@@ -4352,6 +5706,7 @@ def create_app(
                 request,
                 "routing.html",
                 _routing_context(
+                    open_role=context.partition(".")[0],
                     error=(
                         "Model cannot enter worker routing: exact binding "
                         f"role is {exact_binding.binding_role.value!r}, "
@@ -4368,6 +5723,7 @@ def create_app(
                 request,
                 "routing.html",
                 _routing_context(
+                    open_role=context.partition(".")[0],
                     error=(
                         "Model cannot enter routing: submitted binding identity "
                         "does not match the canonical registry binding."
@@ -4384,6 +5740,7 @@ def create_app(
                 request,
                 "routing.html",
                 _routing_context(
+                    open_role=context.partition(".")[0],
                     error=f"Invalid candidate: {exc}",
                     owner=owner,
                     registry=resolved_registry,
@@ -4391,11 +5748,13 @@ def create_app(
                 status_code=400,
             )
         top, _, sub = context.strip().partition(".")
+        top, sub = normalize_routing_scope(top, sub)
         if not top or not sub or (top, sub) not in CONTEXT_KEYS:
             return templates.TemplateResponse(
                 request,
                 "routing.html",
                 _routing_context(
+                    open_role=context.partition(".")[0],
                     error=f"Unknown routing context: {context!r}",
                     owner=owner,
                     registry=resolved_registry,
@@ -4403,71 +5762,73 @@ def create_app(
                 status_code=400,
             )
         try:
-            payload = load_effective_routing_payload()
-            if candidate_id in ALLOWED_CANDIDATES:
-                # A static candidate still needs its exact owner-selected
-                # WORKER binding to survive restart/freeze: record the
-                # binding-bearing approval in the same routing document.
-                # The static training semantics are authoritative, so the
-                # approval preserves them exactly (TRUE/FALSE from the
-                # closed static registry -- never UNKNOWN, which would
-                # fail closed and change training-denied behavior).
-                static_training_required = (
-                    "TRUE"
-                    if requires_training_permission(candidate_id)
-                    else "FALSE"
-                )
-                static_approval = DynamicCandidate(
-                    candidate_id=candidate_id,
-                    provider=entry.provider,
-                    model=entry.model_id,
-                    connection_id=connection.connection_id,
-                    backend=connection.backend,
-                    binding_id=exact_binding.binding_id,
-                    discovery_status=entry.discovery_status.value,
-                    execution_support=entry.execution_support.value,
-                    training_required=static_training_required,
-                    capabilities=tuple(
-                        (name, state.value) for name, state in entry.capabilities
-                    ),
-                )
-                updated = add_dynamic_candidate_to_chain(
-                    payload, top=top, sub=sub, candidate=static_approval
-                )
-            else:
-                approval = DynamicCandidate(
-                    candidate_id=candidate_id,
-                    provider=entry.provider,
-                    model=entry.model_id,
-                    connection_id=connection.connection_id,
-                    backend=connection.backend,
-                    binding_id=exact_binding.binding_id,
-                    discovery_status=entry.discovery_status.value,
-                    execution_support=entry.execution_support.value,
-                    # No provider exposes a training-permission classification
-                    # for a newly discovered model, so it stays UNKNOWN and
-                    # fails closed in training-denied contexts.
-                    training_required="UNKNOWN",
-                    capabilities=tuple(
-                        (name, state.value) for name, state in entry.capabilities
-                    ),
-                )
-                updated = add_dynamic_candidate_to_chain(
-                    payload, top=top, sub=sub, candidate=approval
-                )
-            save_user_routing(updated)
+            with routing_mutation_lock:
+                payload = load_effective_routing_payload()
+                if candidate_id in ALLOWED_CANDIDATES:
+                    # A static candidate still needs its exact owner-selected
+                    # WORKER binding to survive restart/freeze: record the
+                    # binding-bearing approval in the same routing document.
+                    # The static training semantics are authoritative, so the
+                    # approval preserves them exactly (TRUE/FALSE from the
+                    # closed static registry -- never UNKNOWN, which would
+                    # fail closed and change training-denied behavior).
+                    static_training_required = (
+                        "TRUE"
+                        if requires_training_permission(candidate_id)
+                        else "FALSE"
+                    )
+                    static_approval = DynamicCandidate(
+                        candidate_id=candidate_id,
+                        provider=entry.provider,
+                        model=entry.model_id,
+                        connection_id=connection.connection_id,
+                        backend=connection.backend,
+                        binding_id=exact_binding.binding_id,
+                        discovery_status=entry.discovery_status.value,
+                        execution_support=entry.execution_support.value,
+                        training_required=static_training_required,
+                        capabilities=tuple(
+                            (name, state.value) for name, state in entry.capabilities
+                        ),
+                    )
+                    updated = add_dynamic_candidate_to_chain(
+                        payload, top=top, sub=sub, candidate=static_approval
+                    )
+                else:
+                    approval = DynamicCandidate(
+                        candidate_id=candidate_id,
+                        provider=entry.provider,
+                        model=entry.model_id,
+                        connection_id=connection.connection_id,
+                        backend=connection.backend,
+                        binding_id=exact_binding.binding_id,
+                        discovery_status=entry.discovery_status.value,
+                        execution_support=entry.execution_support.value,
+                        # No provider exposes a training-permission classification
+                        # for a newly discovered model, so it stays UNKNOWN and
+                        # fails closed in training-denied contexts.
+                        training_required="UNKNOWN",
+                        capabilities=tuple(
+                            (name, state.value) for name, state in entry.capabilities
+                        ),
+                    )
+                    updated = add_dynamic_candidate_to_chain(
+                        payload, top=top, sub=sub, candidate=approval
+                    )
+                save_user_routing(updated)
         except RoutingConfigError as exc:
             return templates.TemplateResponse(
                 request,
                 "routing.html",
                 _routing_context(
+                    open_role=context.partition(".")[0],
                     error=f"Routing not saved: {exc}",
                     owner=owner,
                     registry=resolved_registry,
                 ),
                 status_code=400,
             )
-        return RedirectResponse(url="/routing?routing_model_added=1", status_code=303)
+        return RedirectResponse(url=f"/routing?role={top}&routing_model_added=1", status_code=303)
 
     @app.post("/routing/remove", name="remove_routing_model")
     def routing_remove(
@@ -4476,12 +5837,21 @@ def create_app(
         candidate_id: Annotated[str, Form()] = "",
     ) -> Response:
         """Remove one candidate from a routing chain (canonical writer)."""
+        if context in ("orchestrator", "reviewer"):
+            with routing_mutation_lock:
+                owner = _binding_store().load()
+                order = owner.role_binding_ids(context)
+                save_owner_bindings(owner.with_role_order(
+                    context, (bid for bid in order if bid != candidate_id)))
+            return RedirectResponse(url=f"/routing?role={context}&routing_model_removed=1", status_code=303)
         top, _, sub = context.strip().partition(".")
+        top, sub = normalize_routing_scope(top, sub)
         if not top or not sub or (top, sub) not in CONTEXT_KEYS:
             return templates.TemplateResponse(
                 request,
                 "routing.html",
                 _routing_context(
+                    open_role=context.partition(".")[0],
                     error=f"Unknown routing context: {context!r}",
                     owner=_load_owner_bindings_safely(),
                     registry=resolved_registry,
@@ -4489,23 +5859,77 @@ def create_app(
                 status_code=400,
             )
         try:
-            payload = load_effective_routing_payload()
-            updated = remove_candidate_from_chain(
-                payload, top=top, sub=sub, candidate_id=candidate_id.strip()
-            )
-            save_user_routing(updated)
+            with routing_mutation_lock:
+                payload = load_effective_routing_payload()
+                updated = remove_candidate_from_chain(
+                    payload, top=top, sub=sub, candidate_id=candidate_id.strip()
+                )
+                save_user_routing(updated)
         except RoutingConfigError as exc:
             return templates.TemplateResponse(
                 request,
                 "routing.html",
                 _routing_context(
+                    open_role=context.partition(".")[0],
                     error=f"Routing not saved: {exc}",
                     owner=_load_owner_bindings_safely(),
                     registry=resolved_registry,
                 ),
                 status_code=400,
             )
-        return RedirectResponse(url="/routing?routing_model_removed=1", status_code=303)
+        return RedirectResponse(url=f"/routing?role={top}&routing_model_removed=1", status_code=303)
+
+    @app.post("/routing/reorder", name="reorder_routing_models")
+    def routing_reorder(
+        context: Annotated[str, Form()] = "",
+        order: Annotated[str, Form()] = "",
+        expected_order: Annotated[str, Form()] = "",
+    ) -> JSONResponse:
+        """Save a complete drag order through the canonical routing writer."""
+        if context in ("orchestrator", "reviewer"):
+            try:
+                proposed = json.loads(order)
+                expected = json.loads(expected_order)
+                if not isinstance(proposed, list) or not isinstance(expected, list):
+                    raise BindingStoreError("orders must be lists")
+                if any(not isinstance(bid, str) for bid in proposed):
+                    raise BindingStoreError("invalid binding identity")
+                with routing_mutation_lock:
+                    owner = _binding_store().load()
+                    current_ids = owner.role_binding_ids(context)
+                    if list(current_ids) != expected:
+                        return JSONResponse({"error": "This role changed. Refresh before reordering."}, status_code=409)
+                    if len(proposed) != len(current_ids) or set(proposed) != set(current_ids):
+                        raise BindingStoreError("order must contain exactly the chosen models")
+                    save_owner_bindings(owner.with_role_order(context, proposed))
+                return JSONResponse({"order": proposed})
+            except (BindingStoreError, json.JSONDecodeError) as exc:
+                return JSONResponse({"error": f"Order not saved: {exc}"}, status_code=400)
+        top, _, sub = context.partition(".")
+        top, sub = normalize_routing_scope(top, sub)
+        if (top, sub) not in CONTEXT_KEYS:
+            return JSONResponse({"error": "Unknown routing chain."}, status_code=400)
+        try:
+            proposed = json.loads(order)
+            expected = json.loads(expected_order)
+            if not isinstance(proposed, list) or not isinstance(expected, list):
+                raise RoutingConfigError("candidate orders must be lists")
+            with routing_mutation_lock:
+                payload = load_effective_routing_payload()
+                section = payload.get(top)
+                current = section.get(sub) if isinstance(section, dict) else None
+                if not isinstance(current, list):
+                    raise RoutingConfigError("routing chain is missing or invalid")
+                if current != expected:
+                    return JSONResponse(
+                        {"error": "This chain changed. Refresh the page before reordering."},
+                        status_code=409,
+                    )
+                updated = reorder_candidate_chain(payload, top=top, sub=sub, order=proposed)
+                save_user_routing(updated)
+        except (RoutingConfigError, json.JSONDecodeError) as exc:
+            return JSONResponse({"error": f"Order not saved: {exc}"}, status_code=400)
+        return JSONResponse({"order": proposed})
 
     @app.post("/routing/move", name="move_routing_model")
     def routing_move(
@@ -4521,6 +5945,7 @@ def create_app(
         the routing page.
         """
         top, _, sub = context.strip().partition(".")
+        top, sub = normalize_routing_scope(top, sub)
         if not top or not sub or (top, sub) not in CONTEXT_KEYS:
             return templates.TemplateResponse(
                 request,
@@ -4533,15 +5958,16 @@ def create_app(
                 status_code=400,
             )
         try:
-            payload = load_effective_routing_payload()
-            updated = move_candidate_in_chain(
-                payload,
-                top=top,
-                sub=sub,
-                candidate_id=candidate_id.strip(),
-                direction=direction.strip(),
-            )
-            save_user_routing(updated)
+            with routing_mutation_lock:
+                payload = load_effective_routing_payload()
+                updated = move_candidate_in_chain(
+                    payload,
+                    top=top,
+                    sub=sub,
+                    candidate_id=candidate_id.strip(),
+                    direction=direction.strip(),
+                )
+                save_user_routing(updated)
         except RoutingConfigError as exc:
             return templates.TemplateResponse(
                 request,
@@ -4577,22 +6003,34 @@ def create_app(
         offered and resolves through the existing ``select_orch_binding``
         authority.  A selection that cannot resolve is refused.
         """
+        unified = request.query_params.get("view") == "routing"
+
+        def selection_context(**kwargs: Any) -> dict[str, Any]:
+            if unified:
+                return {
+                    **_routing_context(
+                        error=kwargs.get("error"), registry=resolved_registry
+                    ),
+                    "open_role": "orchestrator",
+                }
+            return _orchestrator_context(**kwargs)
+
         owner = _load_owner_bindings_safely()
         try:
             parsed_mode = OrchBindingMode(mode.strip().upper())
         except ValueError:
             return templates.TemplateResponse(
                 request,
-                "orchestrator.html",
-                _orchestrator_context(error=f"Unknown Orchestrator mode: {mode!r}"),
+                "routing.html" if unified else "orchestrator.html",
+                selection_context(error=f"Unknown Orchestrator mode: {mode!r}"),
                 status_code=400,
             )
         if parsed_mode is OrchBindingMode.PREFERRED_WITH_FALLBACK:
             # Not exposed in this bounded UI; never silently reinterpret it.
             return templates.TemplateResponse(
                 request,
-                "orchestrator.html",
-                _orchestrator_context(
+                "routing.html" if unified else "orchestrator.html",
+                selection_context(
                     error="PREFERRED_WITH_FALLBACK is not available in this view."
                 ),
                 status_code=400,
@@ -4603,8 +6041,8 @@ def create_app(
             if binding is None:
                 return templates.TemplateResponse(
                     request,
-                    "orchestrator.html",
-                    _orchestrator_context(
+                    "routing.html" if unified else "orchestrator.html",
+                    selection_context(
                         error=(
                             "No such canonical binding: "
                             f"{wanted or '(empty)'}"
@@ -4619,8 +6057,8 @@ def create_app(
             if binding.binding_role is not BindingRole.ORCHESTRATOR:
                 return templates.TemplateResponse(
                     request,
-                    "orchestrator.html",
-                    _orchestrator_context(
+                    "routing.html" if unified else "orchestrator.html",
+                    selection_context(
                         error=(
                             "Binding is not qualified for the Orchestrator "
                             "slot: role is "
@@ -4638,8 +6076,8 @@ def create_app(
         if selection.status is not OrchSelectionStatus.RESOLVED:
             return templates.TemplateResponse(
                 request,
-                "orchestrator.html",
-                _orchestrator_context(
+                "routing.html" if unified else "orchestrator.html",
+                selection_context(
                     error=(
                         "Orchestrator selection refused: "
                         f"{selection.reason or 'no eligible binding'}"
@@ -4653,11 +6091,54 @@ def create_app(
         except BindingStoreError as exc:
             return templates.TemplateResponse(
                 request,
-                "orchestrator.html",
-                _orchestrator_context(error=f"Orchestrator policy not saved: {exc}"),
+                "routing.html" if unified else "orchestrator.html",
+                selection_context(error=f"Orchestrator policy not saved: {exc}"),
                 status_code=500,
             )
-        return RedirectResponse(url="/orchestrator?selected=1", status_code=303)
+        return RedirectResponse(url=("/routing?role=orchestrator&selected=1" if unified else "/orchestrator?selected=1"), status_code=303)
+
+    @app.get("/chat/models")
+    def chat_models() -> Response:
+        context = _orchestrator_context(registry=resolved_registry)
+        owner = _load_owner_bindings_safely()
+        selected_id = ""
+        if owner.policy is not None:
+            selection = select_orch_binding(owner.policy, owner.registry)
+            if selection.status is OrchSelectionStatus.RESOLVED and selection.binding is not None:
+                selected_id = selection.binding.binding_id
+        by_id = {row["binding_id"]: row for row in context["bindings"]}
+        chosen = [by_id[bid] for bid in owner.role_binding_ids("orchestrator") if bid in by_id]
+        if selected_id not in {row["binding_id"] for row in chosen}:
+            selected_id = ""
+        return JSONResponse({"bindings": chosen, "selected_binding_id": selected_id})
+
+    @app.post("/chat/model")
+    def select_chat_model(
+        request: Request, binding_id: Annotated[str, Form()] = ""
+    ) -> Response:
+        wanted = binding_id.strip()
+        rows = _orchestrator_context(registry=resolved_registry)["bindings"]
+        if not any(row["binding_id"] == wanted for row in rows):
+            return JSONResponse(
+                {"error": "This orchestrator model is no longer available. Refresh the list."},
+                status_code=400,
+            )
+        try:
+            with routing_mutation_lock:
+                owner = _binding_store().load()
+                chosen = owner.role_binding_ids("orchestrator")
+                if wanted not in chosen:
+                    return JSONResponse({"error": "Add this model to Orchestrator routing first."}, status_code=400)
+                selection = select_orch_binding(OrchBindingPolicy(
+                    mode=OrchBindingMode.PINNED, pinned_binding_id=wanted), owner.registry)
+                if selection.status is not OrchSelectionStatus.RESOLVED:
+                    return JSONResponse({"error": "This chosen model is currently unavailable."},
+                                        status_code=400)
+                order = (wanted, *(bid for bid in chosen if bid != wanted))
+                save_owner_bindings(owner.with_role_order("orchestrator", order))
+        except BindingStoreError:
+            return JSONResponse({"error": "Could not save the orchestrator selection."}, status_code=500)
+        return JSONResponse({"selected_binding_id": wanted})
 
     @app.get("/reviewer", response_class=HTMLResponse, name="reviewer_selection")
     def reviewer_selection(request: Request) -> HTMLResponse:
@@ -4684,14 +6165,26 @@ def create_app(
         binding, an unknown id, or an unresolvable binding is refused;
         nothing is persisted on refusal.
         """
+        unified = request.query_params.get("view") == "routing"
+
+        def selection_context(**kwargs: Any) -> dict[str, Any]:
+            if unified:
+                return {
+                    **_routing_context(
+                        error=kwargs.get("error"), registry=resolved_registry
+                    ),
+                    "open_role": "reviewer",
+                }
+            return _reviewer_context(**kwargs)
+
         owner = _load_owner_bindings_safely()
         wanted = binding_id.strip()
         binding = owner.registry.try_get(wanted)
         if binding is None:
             return templates.TemplateResponse(
                 request,
-                "reviewer.html",
-                _reviewer_context(
+                "routing.html" if unified else "reviewer.html",
+                selection_context(
                     error=(
                         "No such canonical binding: "
                         f"{wanted or '(empty)'}"
@@ -4707,8 +6200,8 @@ def create_app(
         if binding.binding_role is not BindingRole.REVIEWER:
             return templates.TemplateResponse(
                 request,
-                "reviewer.html",
-                _reviewer_context(
+                "routing.html" if unified else "reviewer.html",
+                selection_context(
                     error=(
                         "Binding is not qualified for the Reviewer slot: "
                         f"role is {binding.binding_role.value!r}"
@@ -4729,8 +6222,8 @@ def create_app(
         except BindingResolutionError:
             return templates.TemplateResponse(
                 request,
-                "reviewer.html",
-                _reviewer_context(
+                "routing.html" if unified else "reviewer.html",
+                selection_context(
                     error=(
                         "Reviewer selection refused: exact binding does not "
                         "resolve for this adapter"
@@ -4739,20 +6232,20 @@ def create_app(
                 ),
                 status_code=400,
             )
-        new_owner = replace(owner, reviewer_binding_id=wanted)
+        new_owner = owner.with_role_order("reviewer", (wanted,))
         try:
             save_owner_bindings(new_owner)
         except BindingStoreError as exc:
             return templates.TemplateResponse(
                 request,
-                "reviewer.html",
-                _reviewer_context(
+                "routing.html" if unified else "reviewer.html",
+                selection_context(
                     error=f"Reviewer selection not saved: {exc}",
                     registry=resolved_registry,
                 ),
                 status_code=500,
             )
-        return RedirectResponse(url="/reviewer?selected=1", status_code=303)
+        return RedirectResponse(url=("/routing?role=reviewer&selected=1" if unified else "/reviewer?selected=1"), status_code=303)
 
     @app.get("/health")
     def health() -> JSONResponse:
@@ -4776,6 +6269,7 @@ def create_app(
     @app.on_event("shutdown")
     def _shutdown_pty() -> None:
         """Server shutdown must not orphan PTY child or corrupt transcript."""
+        chats.shutdown()
         try:
             runtimes.shutdown()
         except Exception:

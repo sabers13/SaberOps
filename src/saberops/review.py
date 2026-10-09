@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -61,6 +62,7 @@ from saberops.routing import (
 from saberops.routing_config import RoutingConfigError, payload_to_snapshot
 from saberops.routing_decision import TierDecision, choose_tier
 from saberops.telemetry import persist_worker_usage
+from saberops.verification_snapshot import fixed_snapshot, source_tree
 from saberops.workers.base import WorkerAdapter
 from saberops.workers.registry import AdapterRegistry
 
@@ -614,7 +616,29 @@ class ReviewEngine:
         # Choose reviewer candidate ladder. Unfiltered ordering is used so that
         # training-policy, availability, quota, and transport exclusions are
         # surfaced as recorded skip events instead of being silently dropped.
-        if reviewer_override is not None:
+        try:
+            role_owner = load_owner_bindings()
+        except BindingStoreError:
+            role_owner = None
+        configured_chain = (
+            role_owner is not None and role_owner.reviewer_binding_ids is not None
+            and (reviewer_override is None
+                 or reviewer_override.binding_id in role_owner.reviewer_binding_ids)
+        )
+        if role_owner is not None and role_owner.reviewer_binding_ids == ():
+            raise ValueError("No reviewer models selected")
+        if configured_chain and role_owner is not None:
+            ladder = []
+            for binding_id in role_owner.role_binding_ids("reviewer"):
+                binding = role_owner.registry.try_get(binding_id)
+                if (binding is None or _normalized_model(binding.model)
+                        == _normalized_model(final_attempt.model)):
+                    self.db.record_event(run_id, "review_candidate_skipped", payload={
+                        "binding_id": binding_id, "reason": "missing binding or self-review"})
+                    continue
+                ladder.append(WorkerCandidate(provider=binding.provider, model=binding.model,
+                                              binding_id=binding_id))
+        elif reviewer_override is not None:
             # R3-E1: an explicitly selected reviewer keeps the ladder's
             # anti-self-review invariant (the legacy ladder excludes the
             # implementer by normalized model).  A configured reviewer
@@ -789,10 +813,7 @@ class ReviewEngine:
         # boundary re-resolves exact reviewer bindings against.  A
         # corrupt/unreadable store refuses bound candidates (fail closed)
         # while leaving the legacy ladder's provider/model path untouched.
-        try:
-            _owner_binding_registry = load_owner_bindings().registry
-        except BindingStoreError:
-            _owner_binding_registry = None
+        _owner_binding_registry = role_owner.registry if role_owner is not None else None
         for candidate in ladder:
             if tried_count >= limit:
                 break
@@ -842,6 +863,8 @@ class ReviewEngine:
                     )
                     skipped_count += 1
                     continue
+            if reviewer_resolved is not None:
+                cand_adapter = reviewer_resolved.adapter
             if self.readiness_service is not None:
                 if reviewer_resolved is not None:
                     # R3-E1.2: a bound reviewer admits through its exact
@@ -1082,8 +1105,36 @@ class ReviewEngine:
                     )
                     self.db.create_dispatch_evidence(review_dispatch_evidence)
                     review_dispatches.append(review_dispatch_evidence)
-                    worker_res = adapter.run(req)
+                    from saberops.agent_sessions import observe_invocation
+
+                    snapshot_mutated = False
+                    with fixed_snapshot(wt_path) as snapshot:
+                        if snapshot.commit != final_attempt.commit_sha:
+                            raise ValueError("Review candidate revision changed before dispatch")
+                        worker_res = observe_invocation(
+                            adapter.run, replace(req, worktree_path=snapshot.path),
+                            root=Path(self.db.db_path).resolve().parent / "agent-sessions",
+                            owner=run_id, role="reviewer", provider=reviewer.provider,
+                            association=review_association_id,
+                        )
+                        if source_tree(snapshot.path) != snapshot.tree:
+                            snapshot_mutated = True
+                            self.db.record_event(run_id, "review_snapshot_mutated", payload={
+                                "review_id": review_association_id,
+                                "candidate_sha": snapshot.commit,
+                                "diff": run_process(["git", "diff", "HEAD"],
+                                                    cwd=snapshot.path).stdout,
+                            })
+                            worker_res.status = AttemptStatus.FAILED
+                            worker_res.error = "Reviewer mutated the verification snapshot"
+                            worker_res.stdout = ""
+                        self.db.record_event(run_id, "review_snapshot_verified", payload={
+                            "review_id": review_association_id,
+                            "candidate_sha": snapshot.commit, "source_tree_hash": snapshot.tree,
+                            "valid": worker_res.status == AttemptStatus.SUCCESS,
+                        })
             except Exception as exc:
+                snapshot_mutated = False
                 worker_res = WorkerResult(
                     provider=reviewer.provider,
                     model=reviewer.model,
@@ -1102,6 +1153,10 @@ class ReviewEngine:
                 update_dispatch_from_result(review_dispatch_evidence, worker_res)
                 review_dispatch_evidence.candidate_sha = final_attempt.commit_sha
                 self.db.update_dispatch_evidence(review_dispatch_evidence)
+
+            if worker_res.manual_control_stopped:
+                from saberops.session_control import ManualControlStopped
+                raise ManualControlStopped(worker_res.error or worker_res.summary)
 
             if (
                 worker_res.status is AttemptStatus.SUCCESS
@@ -1143,7 +1198,8 @@ class ReviewEngine:
             diff_after = run_process(["git", "diff", "HEAD"], cwd=wt_path).stdout
 
             has_mutated = (
-                sha_before != sha_after
+                snapshot_mutated
+                or                 sha_before != sha_after
                 or status_before != status_after
                 or diff_before != diff_after
             )
@@ -1154,7 +1210,7 @@ class ReviewEngine:
 
             infrastructure_failure = worker_res.status != AttemptStatus.SUCCESS or not is_usable
 
-            if infrastructure_failure:
+            if infrastructure_failure and not has_mutated:
                 # Provider down, transport error, reviewer process timeout, or
                 # empty/unusable output: never a substantive BLOCK.
                 unusable_count += 1
@@ -1177,7 +1233,7 @@ class ReviewEngine:
                     "review_execution_failed",
                     payload=dict(note),
                 )
-                if reviewer_override is not None or tried_count >= limit:
+                if (reviewer_override is not None and not configured_chain) or tried_count >= limit:
                     break
                 else:
                     continue

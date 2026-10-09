@@ -787,11 +787,13 @@ class AccountBackend:
     The executable name is used for installed-detection only.
     ``auth_status_argv`` names a documented non-inference status command only
     when its successful result can provide authentication/readiness evidence.
+    ``auth_status_protocol`` selects a native metadata-only login-status RPC,
+    without creating an inference session (Copilot's ``auth.getStatus``).
     ``model_list_argv`` names the backend's own *supported*
     model-enumeration subcommand when one exists (e.g. ``codex debug models``);
-    an empty tuple means the backend exposes no supported listing seam and
-    discovery truthfully stays ``UNKNOWN``.  Empty status/listing tuples mean
-    that fact remains unknown. The non-secret argv tails run against the
+    ``model_list_protocol`` selects a supported native control-protocol seam.
+    Without either listing seam discovery truthfully stays ``UNKNOWN``. Empty
+    status seams likewise leave login unknown. The non-secret argv tails run against the
     backend's own session; Orchestrator never reads session material.
     """
 
@@ -801,10 +803,20 @@ class AccountBackend:
     executable: str
     auth_mode: AuthMode = AuthMode.SUBSCRIPTION_BACKEND
     auth_status_argv: tuple[str, ...] = ()
+    auth_status_protocol: str = ""
     model_list_argv: tuple[str, ...] = ()
+    model_list_protocol: str = ""
+
+    @property
+    def has_model_listing(self) -> bool:
+        return bool(self.model_list_argv or self.model_list_protocol)
+
+    @property
+    def has_auth_probe(self) -> bool:
+        return bool(self.auth_status_argv or self.auth_status_protocol)
 
 
-#: The four account-backed connections this foundation represents.
+#: Account-backed CLI connections represented by the access UI.
 #: Detection reuses each adapter's existing executable; authentication
 #: is always owned by the backend itself.
 ACCOUNT_BACKENDS: tuple[AccountBackend, ...] = (
@@ -832,6 +844,7 @@ ACCOUNT_BACKENDS: tuple[AccountBackend, ...] = (
         executable="claude",
         auth_mode=AuthMode.SUBSCRIPTION_BACKEND,
         auth_status_argv=("auth", "status", "--json"),
+        model_list_protocol="claude",
     ),
     AccountBackend(
         connection_id="copilot-github-account",
@@ -839,6 +852,8 @@ ACCOUNT_BACKENDS: tuple[AccountBackend, ...] = (
         backend="copilot_cli",
         executable="copilot",
         auth_mode=AuthMode.ACCOUNT_SESSION,
+        auth_status_protocol="copilot",
+        model_list_protocol="copilot",
     ),
     AccountBackend(
         connection_id="opencode-account",
@@ -848,11 +863,19 @@ ACCOUNT_BACKENDS: tuple[AccountBackend, ...] = (
         auth_mode=AuthMode.ACCOUNT_SESSION,
         model_list_argv=("models",),
     ),
+    AccountBackend(
+        connection_id="antigravity-google-account",
+        provider="antigravity",
+        backend="antigravity",
+        executable="agy",
+        auth_mode=AuthMode.ACCOUNT_SESSION,
+        model_list_argv=("models",),
+    ),
 )
 
 
 def default_account_connections(*, owner: str = "") -> tuple[ProviderConnection, ...]:
-    """Return the four account-backed connection declarations.
+    """Return the supported account-backed connection declarations.
 
     Declarations carry no secret bytes: the backend owns
     authentication.  They are distinguishable from API connections by
@@ -862,7 +885,7 @@ def default_account_connections(*, owner: str = "") -> tuple[ProviderConnection,
 
     Each declaration's ``provider`` is the canonical provider identity
     of the already-selected binding (``codex``, ``anthropic``,
-    ``copilot``, ``opencode``), never a vendor-brand alias:
+    ``copilot``, ``opencode``, ``antigravity``), never a vendor-brand alias:
     :func:`resolve_access` compares providers for exact equality and
     this module owns no normalization, aliasing or routing.
     """
@@ -874,7 +897,7 @@ def default_account_connections(*, owner: str = "") -> tuple[ProviderConnection,
             backend=descriptor.backend,
             auth_mode=descriptor.auth_mode,
             account_owner=owner,
-            notes=(f"Authenticated {descriptor.executable} session.",),
+            notes=(f"Authentication managed by the {descriptor.executable} CLI.",),
         )
         for descriptor in ACCOUNT_BACKENDS
     )

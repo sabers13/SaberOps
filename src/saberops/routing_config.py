@@ -11,7 +11,7 @@ from typing import Any
 
 from saberops.models import WorkerCandidate
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # Closed registry of allowed canonical ids
 ALLOWED_CANDIDATES: frozenset[str] = frozenset(
@@ -50,13 +50,19 @@ ALLOWED_CANDIDATES: frozenset[str] = frozenset(
 _APPROVED_TOP_KEY = "approved_candidates"
 
 # Context keys mapping: (top_key, sub_key)
-CONTEXT_KEYS: tuple[tuple[str, str], ...] = (
+LEGACY_CONTEXT_KEYS: tuple[tuple[str, str], ...] = (
     ("T1", "default"),
     ("T2", "training_allowed"),
     ("T2", "training_denied_off_peak"),
     ("T2", "training_denied_peak"),
     ("T3", "off_peak"),
     ("T3", "peak"),
+)
+
+CONTEXT_KEYS: tuple[tuple[str, str], ...] = (
+    ("T1", "default"),
+    ("T2", "default"),
+    ("T3", "default"),
 )
 
 
@@ -172,22 +178,6 @@ def _validate_context_chain(
             raise RoutingConfigError(
                 f"Routing config at {source_label}: context {ctx_key} unknown candidate id {cid!r}"
             )
-        if "training_denied" in ctx_key:
-            if approved_entry is not None:
-                # A dynamic candidate's training requirement is classified from
-                # evidence.  UNKNOWN fails closed here: it is never inferred to be
-                # "training allowed".
-                if approved_entry.training_required != "FALSE":
-                    raise RoutingConfigError(
-                        f"Routing config at {source_label}: context {ctx_key} candidate {cid!r} "
-                        f"training requirement is {approved_entry.training_required} "
-                        f"(fail closed in {ctx_key})"
-                    )
-            elif requires_training_permission(cid):
-                raise RoutingConfigError(
-                    f"Routing config at {source_label}: context {ctx_key} candidate {cid!r} "
-                    f"requires training permission (forbidden in {ctx_key})"
-                )
         cids.append(cid)
     return cids
 
@@ -209,35 +199,53 @@ def _validate_structure(
     if "schema_version" not in data:
         raise RoutingConfigError(f"Routing config at {source_label}: missing schema_version")
     sv = data["schema_version"]
-    if type(sv) is not int or sv != SCHEMA_VERSION:
+    if type(sv) is not int or sv not in (1, SCHEMA_VERSION):
         raise RoutingConfigError(
             f"Routing config at {source_label}: schema_version must be integer {SCHEMA_VERSION}, got {sv!r}"  # noqa: E501
         )
     if approved is None:
         approved = _parse_approved_candidates(data, source_label)
-    # Check each context present and validate
+    keys = LEGACY_CONTEXT_KEYS if sv == 1 else CONTEXT_KEYS
     result: dict[str, list[str]] = {}
-    for top, sub in CONTEXT_KEYS:
+    for top, sub in keys:
         ctx_key = _canonical_chain_key(top, sub)
         top_val = data.get(top)
-        if not isinstance(top_val, dict):
-            raise RoutingConfigError(
-                f"Routing config at {source_label}: missing or invalid section {top!r} for context {ctx_key}"  # noqa: E501
-            )
-        if sub not in top_val:
+        if not isinstance(top_val, dict) or sub not in top_val:
             raise RoutingConfigError(f"Routing config at {source_label}: missing context {ctx_key}")
-        chain = top_val[sub]
-        result[ctx_key] = _validate_context_chain(
-            chain, ctx_key, source_label, approved=approved
-        )
-        # Check unknown sub-keys within this top
-        allowed_subs_for_top = {s for t, s in CONTEXT_KEYS if t == top}
-        unknown_subs = set(top_val.keys()) - allowed_subs_for_top
+        unknown_subs = set(top_val) - {s for t, s in keys if t == top}
         if unknown_subs:
             raise RoutingConfigError(
-                f"Routing config at {source_label}: unknown keys in {top!r}: {sorted(unknown_subs)}"
+                f"Routing config at {source_label}: unknown keys in {top}: {sorted(unknown_subs)}"
             )
+        result[ctx_key] = _validate_context_chain(
+            top_val[sub], ctx_key, source_label, approved=approved
+        )
     return result
+
+
+def canonical_routing_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Migrate legacy scopes in memory, retaining selected identities and approvals."""
+    data: dict[str, Any] = json.loads(json.dumps(payload))
+    validated = _validate_structure(data, None)
+    result: dict[str, Any] = {"schema_version": SCHEMA_VERSION}
+    for tier in ("T1", "T2", "T3"):
+        merged: list[str] = []
+        for key, chain in validated.items():
+            if key.startswith(tier + "."):
+                for cid in chain:
+                    if cid not in merged:
+                        merged.append(cid)
+        result[tier] = {"default": merged}
+    if _APPROVED_TOP_KEY in data:
+        result[_APPROVED_TOP_KEY] = data[_APPROVED_TOP_KEY]
+    return result
+
+
+def normalize_routing_scope(top: str, sub: str) -> tuple[str, str]:
+    """Accept old caller scopes as aliases for their one tier chain."""
+    if (top, sub) in LEGACY_CONTEXT_KEYS:
+        return top, "default"
+    return top, sub
 
 
 def _content_hash(
@@ -249,9 +257,7 @@ def _content_hash(
     # Only owner-approved dynamic candidates contribute; an empty approval set
     # hashes exactly as before, so existing static snapshots stay byte-stable.
     if approved:
-        body[_APPROVED_TOP_KEY] = {
-            cid: entry.to_dict() for cid, entry in sorted(approved.items())
-        }
+        body[_APPROVED_TOP_KEY] = {cid: entry.to_dict() for cid, entry in sorted(approved.items())}
     canonical = json.dumps(body, sort_keys=True)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -278,17 +284,27 @@ class RoutingSnapshot:
     approved_candidates: tuple[DynamicCandidate, ...] = ()
 
     def chain_for(self, tier: str, training_allowed: bool, is_peak: bool) -> list[WorkerCandidate]:
-        if tier == "T1":
-            return list(self.t1_default)
-        if tier == "T2":
-            if training_allowed:
-                return list(self.t2_training_allowed)
+        if self.schema_version == 2:
             return list(
-                self.t2_training_denied_peak if is_peak else self.t2_training_denied_off_peak
+                {"T1": self.t1_default, "T2": self.t2_training_allowed, "T3": self.t3_off_peak}.get(
+                    tier, self.t1_default
+                )
             )
-        if tier == "T3":
-            return list(self.t3_peak if is_peak else self.t3_off_peak)
-        return list(self.t1_default)
+        groups = {
+            "T1": [self.t1_default],
+            "T2": [
+                self.t2_training_allowed,
+                self.t2_training_denied_off_peak,
+                self.t2_training_denied_peak,
+            ],
+            "T3": [self.t3_off_peak, self.t3_peak],
+        }
+        result: list[WorkerCandidate] = []
+        for chain in groups.get(tier, groups["T1"]):
+            for candidate in chain:
+                if candidate not in result:
+                    result.append(candidate)
+        return result
 
 
 def snapshot_references_exact_bindings(snapshot: RoutingSnapshot | None) -> bool:
@@ -328,14 +344,18 @@ def _build_snapshot(
         source_path=str(source_path) if source_path else None,
         content_hash=ch,
         t1_default=to_candidates("T1.default"),
-        t2_training_allowed=to_candidates("T2.training_allowed"),
-        t2_training_denied_off_peak=to_candidates("T2.training_denied_off_peak"),
-        t2_training_denied_peak=to_candidates("T2.training_denied_peak"),
-        t3_off_peak=to_candidates("T3.off_peak"),
-        t3_peak=to_candidates("T3.peak"),
-        approved_candidates=tuple(
-            entry for _, entry in sorted((approved or {}).items())
+        t2_training_allowed=to_candidates(
+            "T2.default" if schema_version == 2 else "T2.training_allowed"
         ),
+        t2_training_denied_off_peak=to_candidates(
+            "T2.default" if schema_version == 2 else "T2.training_denied_off_peak"
+        ),
+        t2_training_denied_peak=to_candidates(
+            "T2.default" if schema_version == 2 else "T2.training_denied_peak"
+        ),
+        t3_off_peak=to_candidates("T3.default" if schema_version == 2 else "T3.off_peak"),
+        t3_peak=to_candidates("T3.default" if schema_version == 2 else "T3.peak"),
+        approved_candidates=tuple(entry for _, entry in sorted((approved or {}).items())),
     )
 
 
@@ -350,6 +370,7 @@ def load_packaged_default() -> RoutingSnapshot:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise RoutingConfigError(f"Packaged default routing.json invalid JSON: {exc}") from exc
+    data = canonical_routing_payload(data)
     validated = _validate_structure(data, path)
     approved = _parse_approved_candidates(data, str(path))
     return _build_snapshot(validated, SCHEMA_VERSION, "default", None, approved=approved)
@@ -370,6 +391,7 @@ def load_effective_routing() -> RoutingSnapshot:
             data = json.loads(raw)
         except json.JSONDecodeError as exc:
             raise RoutingConfigError(f"Routing config at {user_path}: invalid JSON: {exc}") from exc
+        data = canonical_routing_payload(data)
         validated = _validate_structure(data, user_path)
         approved = _parse_approved_candidates(data, str(user_path))
         return _build_snapshot(validated, SCHEMA_VERSION, "user", user_path, approved=approved)
@@ -402,6 +424,14 @@ def snapshot_to_payload(snapshot: RoutingSnapshot, created_at: str) -> dict[str,
         },
         "created_at": created_at,
     }
+    if snapshot.schema_version == 2:
+        payload["chains"] = {
+            f"{tier}.default": [
+                {"provider": c.provider, "model": c.model}
+                for c in snapshot.chain_for(tier, True, False)
+            ]
+            for tier in ("T1", "T2", "T3")
+        }
     if snapshot.approved_candidates:
         payload[_APPROVED_TOP_KEY] = {
             entry.candidate_id: entry.to_dict() for entry in snapshot.approved_candidates
@@ -449,7 +479,7 @@ def payload_to_snapshot(payload: Any, run_id: str | None = None) -> RoutingSnaps
     if "schema_version" not in payload:
         raise RoutingConfigError(f"Routing config at {source_label}: missing schema_version")
     sv = payload["schema_version"]
-    if type(sv) is not int or sv != SCHEMA_VERSION:
+    if type(sv) is not int or sv not in (1, SCHEMA_VERSION):
         raise RoutingConfigError(
             f"Routing config at {source_label}: schema_version must be integer {SCHEMA_VERSION}, got {sv!r}"  # noqa: E501
         )
@@ -459,14 +489,15 @@ def payload_to_snapshot(payload: Any, run_id: str | None = None) -> RoutingSnaps
             f"Routing config at {source_label}: missing or invalid 'chains' object"
         )
     approved = _parse_approved_candidates(payload, source_label)
-    expected_contexts = {_canonical_chain_key(top, sub) for top, sub in CONTEXT_KEYS}
+    keys = LEGACY_CONTEXT_KEYS if sv == 1 else CONTEXT_KEYS
+    expected_contexts = {_canonical_chain_key(top, sub) for top, sub in keys}
     unknown_contexts = set(chains_obj.keys()) - expected_contexts
     if unknown_contexts:
         raise RoutingConfigError(
             f"Routing config at {source_label}: unknown context keys in chains: {sorted(unknown_contexts)}"  # noqa: E501
         )
     validated: dict[str, list[str]] = {}
-    for top, sub in CONTEXT_KEYS:
+    for top, sub in keys:
         ctx_key = _canonical_chain_key(top, sub)
         if ctx_key not in chains_obj:
             raise RoutingConfigError(
@@ -514,11 +545,15 @@ def payload_to_snapshot(payload: Any, run_id: str | None = None) -> RoutingSnaps
         else None,
         content_hash=str(ch),
         t1_default=to_candidates("T1.default"),
-        t2_training_allowed=to_candidates("T2.training_allowed"),
-        t2_training_denied_off_peak=to_candidates("T2.training_denied_off_peak"),
-        t2_training_denied_peak=to_candidates("T2.training_denied_peak"),
-        t3_off_peak=to_candidates("T3.off_peak"),
-        t3_peak=to_candidates("T3.peak"),
+        t2_training_allowed=to_candidates("T2.default" if sv == 2 else "T2.training_allowed"),
+        t2_training_denied_off_peak=to_candidates(
+            "T2.default" if sv == 2 else "T2.training_denied_off_peak"
+        ),
+        t2_training_denied_peak=to_candidates(
+            "T2.default" if sv == 2 else "T2.training_denied_peak"
+        ),
+        t3_off_peak=to_candidates("T3.default" if sv == 2 else "T3.off_peak"),
+        t3_peak=to_candidates("T3.default" if sv == 2 else "T3.peak"),
         approved_candidates=tuple(entry for _, entry in sorted(approved.items())),
     )
 
@@ -694,16 +729,12 @@ class DynamicCandidate:
             "discovery_status": self.discovery_status,
             "execution_support": self.execution_support,
             "training_required": self.training_required,
-            "capabilities": [
-                {"name": name, "state": state} for name, state in self.capabilities
-            ],
+            "capabilities": [{"name": name, "state": state} for name, state in self.capabilities],
             "approved_at": self.approved_at,
         }
 
     @classmethod
-    def from_mapping(
-        cls, candidate_id: str, payload: Mapping[str, Any]
-    ) -> DynamicCandidate:
+    def from_mapping(cls, candidate_id: str, payload: Mapping[str, Any]) -> DynamicCandidate:
         """Reconstruct an approval record from its durable mapping."""
         if not isinstance(payload, Mapping):
             raise RoutingConfigError("approved candidate mapping must be a mapping")
@@ -761,20 +792,16 @@ def load_effective_routing_payload() -> dict[str, Any]:
         try:
             raw = user_path.read_text(encoding="utf-8")
         except OSError as exc:
-            raise RoutingConfigError(
-                f"Routing config at {user_path}: cannot read: {exc}"
-            ) from exc
+            raise RoutingConfigError(f"Routing config at {user_path}: cannot read: {exc}") from exc
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise RoutingConfigError(
-                f"Routing config at {user_path}: invalid JSON: {exc}"
-            ) from exc
+            raise RoutingConfigError(f"Routing config at {user_path}: invalid JSON: {exc}") from exc
         if not isinstance(data, dict):
             raise RoutingConfigError(
                 f"Routing config at {user_path}: top-level must be JSON object"
             )
-        return data
+        return canonical_routing_payload(data)
     path = _packaged_default_path()
     try:
         raw = path.read_text(encoding="utf-8")
@@ -786,7 +813,7 @@ def load_effective_routing_payload() -> dict[str, Any]:
         raise RoutingConfigError(f"Packaged default routing.json invalid JSON: {exc}") from exc
     if not isinstance(data, dict):
         raise RoutingConfigError("Packaged default routing.json top-level must be JSON object")
-    return data
+    return canonical_routing_payload(data)
 
 
 def add_candidate_to_chain(
@@ -805,13 +832,14 @@ def add_candidate_to_chain(
     structure validator, so unknown candidate ids, training-denied
     placements and unknown contexts fail closed.
     """
+    top, sub = normalize_routing_scope(top, sub)
     context = _canonical_chain_key(top, sub)
     if context not in {_canonical_chain_key(t, s) for t, s in CONTEXT_KEYS}:
         raise RoutingConfigError(f"unknown routing context {context!r}")
     cleaned = candidate_id.strip()
     if not cleaned:
         raise RoutingConfigError("candidate id must not be empty")
-    data: dict[str, Any] = json.loads(json.dumps(payload))
+    data = canonical_routing_payload(payload)
     section = data.get(top)
     if not isinstance(section, dict):
         raise RoutingConfigError(f"routing section {top!r} is missing or invalid")
@@ -842,10 +870,11 @@ def add_dynamic_candidate_to_chain(
     stay authoritative.  Appending is idempotent; ordering is never
     rewritten.
     """
+    top, sub = normalize_routing_scope(top, sub)
     context = _canonical_chain_key(top, sub)
     if context not in {_canonical_chain_key(t, s) for t, s in CONTEXT_KEYS}:
         raise RoutingConfigError(f"unknown routing context {context!r}")
-    data: dict[str, Any] = json.loads(json.dumps(payload))
+    data = canonical_routing_payload(payload)
     approved = data.get(_APPROVED_TOP_KEY)
     if not isinstance(approved, dict):
         approved = {}
@@ -881,13 +910,14 @@ def remove_candidate_from_chain(
     from a chain is an ordering decision, not a revocation of discovery
     evidence, and an approval that is no longer referenced is inert.
     """
+    top, sub = normalize_routing_scope(top, sub)
     context = _canonical_chain_key(top, sub)
     if context not in {_canonical_chain_key(t, s) for t, s in CONTEXT_KEYS}:
         raise RoutingConfigError(f"unknown routing context {context!r}")
     cleaned = candidate_id.strip()
     if not cleaned:
         raise RoutingConfigError("candidate id must not be empty")
-    data: dict[str, Any] = json.loads(json.dumps(payload))
+    data = canonical_routing_payload(payload)
     section = data.get(top)
     if not isinstance(section, dict):
         raise RoutingConfigError(f"routing section {top!r} is missing or invalid")
@@ -916,6 +946,7 @@ def move_candidate_in_chain(
     this helper only reorders.  The result is re-validated by the canonical
     structure validator, so unknown contexts fail closed.
     """
+    top, sub = normalize_routing_scope(top, sub)
     context = _canonical_chain_key(top, sub)
     if context not in {_canonical_chain_key(t, s) for t, s in CONTEXT_KEYS}:
         raise RoutingConfigError(f"unknown routing context {context!r}")
@@ -924,10 +955,8 @@ def move_candidate_in_chain(
         raise RoutingConfigError("candidate id must not be empty")
     cleaned_direction = direction.strip().lower()
     if cleaned_direction not in ("up", "down"):
-        raise RoutingConfigError(
-            f"invalid move direction {direction!r}: expected 'up' or 'down'"
-        )
-    data: dict[str, Any] = json.loads(json.dumps(payload))
+        raise RoutingConfigError(f"invalid move direction {direction!r}: expected 'up' or 'down'")
+    data = canonical_routing_payload(payload)
     section = data.get(top)
     if not isinstance(section, dict):
         raise RoutingConfigError(f"routing section {top!r} is missing or invalid")
@@ -943,6 +972,30 @@ def move_candidate_in_chain(
     return data
 
 
+def reorder_candidate_chain(
+    payload: Mapping[str, Any], *, top: str, sub: str, order: list[str]
+) -> dict[str, Any]:
+    """Reorder an existing chain without changing membership or approvals."""
+    top, sub = normalize_routing_scope(top, sub)
+    if (top, sub) not in CONTEXT_KEYS:
+        raise RoutingConfigError("unknown routing context")
+    data = canonical_routing_payload(payload)
+    section = data.get(top)
+    chain = section.get(sub) if isinstance(section, dict) else None
+    if not isinstance(chain, list) or not all(isinstance(cid, str) for cid in chain):
+        raise RoutingConfigError("routing chain is missing or invalid")
+    if (
+        not all(isinstance(cid, str) for cid in order)
+        or len(order) != len(chain)
+        or len(set(order)) != len(order)
+        or set(order) != set(chain)
+    ):
+        raise RoutingConfigError("reordering must preserve every existing candidate exactly once")
+    data[top][sub] = list(order)
+    _validate_structure(data, None)
+    return data
+
+
 def save_user_routing(payload: Mapping[str, Any]) -> Path:
     """Persist the canonical user routing document (validated, atomic).
 
@@ -952,7 +1005,7 @@ def save_user_routing(payload: Mapping[str, Any]) -> Path:
     """
     if not isinstance(payload, Mapping):
         raise RoutingConfigError("routing payload must be a mapping")
-    data: dict[str, Any] = json.loads(json.dumps(payload))
+    data = canonical_routing_payload(payload)
     _validate_structure(data, get_user_routing_path())
     user_path = get_user_routing_path()
     try:

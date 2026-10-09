@@ -1,9 +1,14 @@
 {% extends "base.html" %}
 {% set active_pane = "runs" %}
-{% set has_tabs = True %}
-{% block title %}Run {{ run_id }}{% endblock %}
-{% block conversation_title %}{{ task[:60] if task else run_id }}{% endblock %}
-{% block run_meta %}{{ target_repo }} · <span class="mono">{{ run_id }}</span> · {{ status }}{% endblock %}
+{% set has_tabs = not missing %}
+{% set agent_dock = not missing %}
+{% block title %}{{ display_title|default("Run") }}{% endblock %}
+{% block conversation_title %}SaberOps{% endblock %}
+{% block run_meta %}<span data-run-refresh="metadata">{{ target_repo }} · <span class="mono">{{ run_id }}</span> · {{ status }}</span>{% endblock %}
+{% block page_return %}
+{% set return_from = request.query_params.get('from') %}
+<nav class="page-return" aria-label="Return to run list"><a id="runReturnLink" data-od-id="run-detail-back" href="{{ '/?pane=runs' if return_from == 'runs' else '/' if return_from == 'dashboard' else '/inbox' }}">← {{ 'Runs' if return_from == 'runs' else 'Dashboard' if return_from == 'dashboard' else 'Inbox' }}</a></nav>
+{% endblock %}
 
 {% block extra_head %}
 <link rel="stylesheet" href="/static/vendor/xterm/xterm.css">
@@ -11,9 +16,9 @@
 
 {% block inspector_tabs %}
 {% if not missing %}
-<nav class="run-tabs" data-od-id="run-inspector-tabs" aria-label="Run inspector">
-  <button class="run-tab" data-tab="chat" aria-selected="false">Chat</button>
-  <button class="run-tab" data-tab="overview" aria-selected="true">Overview</button>
+<nav data-work-only class="run-tabs" data-od-id="run-inspector-tabs" aria-label="Run inspector" role="tablist">
+  <button class="run-tab" data-tab="chat" aria-selected="true">Conversation</button>
+  <button class="run-tab" data-tab="overview" aria-selected="false">Overview</button>
   <button class="run-tab" data-tab="workers" aria-selected="false">Workers</button>
   <button class="run-tab" data-tab="changes" aria-selected="false">Changes</button>
   <button class="run-tab" data-tab="checks" aria-selected="false">Checks</button>
@@ -26,19 +31,17 @@
 {% endif %}
 {% endblock %}
 
+{% block workspace_context %}
+{% if not missing %}<div class="chat-context run-chat-context"><span data-run-refresh="display-title">{{ display_title }}</span><span data-work-only class="run-status-line"><span id="run-status-badge" class="badge badge-{{ status_class }}">{{ status }}</span> · <span class="elapsed-badge mono muted" id="elapsed-timer">Elapsed: --:--</span></span></div>{% endif %}
+{% endblock %}
+
 {% block workspace %}
 {% if missing %}
 <div class="date-rule">Missing run</div>
-<article class="message">
-  <div class="avatar assistant" aria-hidden="true">S</div>
-  <div>
-    <div class="message-head"><strong>SaberOps</strong></div>
-    <div class="message-body"><p>No run with identifier <span class="mono">{{ run_id }}</span> exists in the local database. Return to the <a href="/">dashboard</a> to browse recorded runs.</p></div>
-  </div>
-</article>
+<div class="so-empty"><strong>Run not found</strong>No run with identifier <span class="mono">{{ run_id }}</span> exists in the local database.<p><a class="text-button" href="/?pane=runs">Browse recorded runs</a></p></div>
 {% else %}
-<div id="run-header" data-run-id="{{ run_id }}" data-run-status="{{ status }}" data-created-at="{{ created_at }}" data-completed-at="{{ completed_at or '' }}"></div>
-<div class="date-rule">Run <span class="mono">{{ run_id }}</span> · <span id="run-status-badge" class="badge badge-{{ status_class }}">{{ status }}</span> · <span class="elapsed-badge mono muted" id="elapsed-timer">Elapsed: --:--</span></div>
+<div id="run-header" data-run-id="{{ run_id }}" data-run-status="{{ status }}" data-can-cancel="{{ 'true' if can_cancel else 'false' }}" data-created-at="{{ created_at }}" data-completed-at="{{ completed_at or '' }}"></div>
+<p id="run-refresh-status" class="so-notice" role="status" hidden>Couldn't update the run details. <button type="button" class="text-button" id="runRefreshRetry">Retry refresh</button></p>
 
 {% if notice %}
 <p class="so-notice">{{ notice }}</p>
@@ -48,7 +51,10 @@
 {% endif %}
 
 {# --- Chat panel: task + live plan projection --- #}
-<div class="run-tab-panel" data-panel="chat" style="display: none;">
+<div class="run-tab-panel" data-panel="chat">
+{% include "_agent_workspace.html" %}
+<details data-work-only class="run-recorded-brief"><summary>Recorded run briefing and actions</summary>
+  <form method="post" action="/runs/{{ run_id }}/conversation" class="so-inline-form"><button type="submit" class="text-button primary-button">Continue with orchestrator</button></form>
   <article class="message" data-od-id="message-user-task">
     <div class="avatar">Y</div>
     <div>
@@ -60,10 +66,10 @@
     <div class="avatar assistant" aria-hidden="true">S</div>
     <div>
       <div class="message-head"><strong>SaberOps</strong><button class="copy-output" aria-label="Copy response" title="Copy response"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg></button></div>
-      <div class="message-body">
+      <div class="message-body" data-run-refresh="chat-result">
         {% if plan_projection.plan %}
         <div class="run-update" data-od-id="run-progress">
-          <div class="update-head"><div class="live-state"><span class="live-dot"></span>{{ plan_projection.health }}{% if plan_projection.stalled %} · stalled (soft){% endif %}</div><span class="update-meta">{{ plan_projection.current_provider or "UNKNOWN" }} / {{ plan_projection.current_model or "UNKNOWN" }}</span></div>
+          <div class="update-head"><div class="live-state">{% if can_cancel %}<span class="live-dot"></span>{{ plan_projection.health }}{% if plan_projection.stalled %} · stalled (soft){% endif %}{% else %}{{ status|capitalize }}{% endif %}</div><span class="update-meta">{{ plan_projection.current_provider or "UNKNOWN" }} / {{ plan_projection.current_model or "UNKNOWN" }}</span></div>
           <div class="branch-progress">
             {% for step in plan_projection.steps %}
             <div class="branch-step{% if step.status == 'DONE' %} done{% elif step.status in ('RUNNING', 'IN_PROGRESS') %} active{% endif %}"><span class="branch-node"></span><div><strong>{{ step.title }}</strong><p>{{ step.goal }}</p></div><span class="step-state">{{ step.status }}</span></div>
@@ -74,12 +80,31 @@
         <p>Legacy run: no persisted execution plan. Attempts and events below carry the full evidence.</p>
         {% endif %}
         {% if summary or failure_reason %}
-        <p>{{ summary or failure_reason }}</p>
+        <p class="user-prompt">{{ chat_explanation }}</p>
         {% endif %}
       </div>
     </div>
   </article>
-  <div class="quick-actions" data-od-id="quick-actions">
+  {% if run_report and run_report.termination.outcome == 'NO_ELIGIBLE_CANDIDATE' %}
+  <div class="settings-card">
+    <p>No worker started. Choose an explicit first attempt below, or update <a href="/routing">Routing</a>.</p>
+    {% for worker in run_report.termination.skipped_candidates %}
+    {% if worker.readiness_state == 'UNKNOWN' and worker.binding_id %}
+    <form method="post" action="/runs/{{ run_id }}/try-worker" class="so-inline-form">
+      <input type="hidden" name="binding_id" value="{{ worker.binding_id }}">
+      <button type="submit" class="text-button">Try {{ worker.model }}</button>
+    </form>
+    {% endif %}
+    {% endfor %}
+    <p class="so-help">Uses the selected worker for a new run under the saved project policy. A successful call verifies that exact connection.</p>
+  </div>
+  {% endif %}
+  <div data-work-only class="quick-actions" data-od-id="quick-actions" data-run-refresh="chat-actions">
+    {% if can_continue %}
+    <form method="post" action="/runs/{{ run_id }}/continue" class="so-inline-form"><button type="submit">Continue from saved work</button></form>
+    {% elif continued_run_id %}
+    <a class="text-button" href="/runs/{{ continued_run_id }}?from=runs">Open continuation →</a>
+    {% endif %}
     {% if can_retry %}
     <form method="post" action="/runs/{{ run_id }}/retry" class="so-inline-form"><button type="submit">Retry run (new attempt)</button></form>
     {% endif %}
@@ -90,18 +115,41 @@
     <form method="post" action="/runs/{{ run_id }}/cleanup" class="so-inline-form"><input type="hidden" name="confirm" value="0"><button type="submit">Clean up worktrees</button></form>
     {% endif %}
   </div>
+</details>
 </div>
 
 {# --- Overview panel --- #}
-<div class="run-tab-panel" data-panel="overview">
+<div class="run-tab-panel" data-panel="overview" style="display: none;">
   <div class="inspector-shell">
-    <div class="inspector-section" id="plan-pane" aria-label="Persisted execution plan">
+    <div class="inspector-section run-result" data-run-refresh="result" aria-label="Run result">
+      <div class="inspector-head"><strong>{{ 'Result' if not can_cancel else 'Progress' }}</strong><span class="badge badge-{{ status_class }}">{{ status }}</span></div>
+      {% if summary %}<p>{{ summary }}</p>{% elif can_cancel %}<p>The worker's results will appear here as this run progresses.</p>{% else %}<p>No result summary was recorded. Inspect the evidence below.</p>{% endif %}
+      {% if run_report and run_report.acceptance.acceptance_status == 'ACCEPTED' %}
+      <p><strong>Accepted.</strong> The recorded candidate was integrated into the project.</p>
+      {% elif candidate_state == 'REJECTED' %}
+      <p><strong>Candidate rejected.</strong> The recorded work remains available for inspection.</p>
+      {% elif status == 'COMPLETED' and candidate_sha %}
+      {% if run_report and run_report.acceptance.acceptance_status == 'NOT_ACCEPTED' %}
+      <p><strong>Awaiting your acceptance.</strong> The changes are in a separate candidate; they have not been applied to <span class="mono">{{ target_repo }}</span>. Inspect the result, then use Accept run in Actions when you are ready.</p>
+      {% else %}<p>A candidate is available for inspection. Acceptance status is unavailable; check the evidence before taking an action.</p>{% endif %}
+      {% endif %}
+      {% if diff_available %}<p>{{ changed_files|length }} changed file{{ '' if changed_files|length == 1 else 's' }} in the recorded candidate.</p>{% endif %}
+      {% for attempt in attempts %}{% if candidate_sha and attempt.commit_sha == candidate_sha %}<p>Candidate folder: <span class="mono">{{ attempt.worktree_path }}</span></p>{% endif %}{% endfor %}
+      {% if run_report %}
+      <p>Checks: {{ run_report.gate.summary.check_passed }} passed, {{ run_report.gate.summary.check_failed }} failed, {{ run_report.gate.summary.check_skipped }} skipped. Review: {{ run_report.review.verdicts|join(', ') if run_report.review.verdicts else 'No verdict recorded' }}.</p>
+      {% endif %}
+      <p><a class="text-button" href="#changes" data-run-tab="changes">View changes</a> <a class="text-button" href="#checks" data-run-tab="checks">View checks</a> <a class="text-button" href="#review" data-run-tab="review">View review</a> <a class="text-button" href="#workers" data-run-tab="workers">Worker output</a></p>
+      {% for attempt in attempts %}{% if candidate_sha and attempt.commit_sha == candidate_sha and attempt.worker_stdout %}
+      <details><summary>What the worker built · worker response</summary><pre class="so-pre mono">{{ attempt.worker_stdout }}</pre></details>
+      {% endif %}{% endfor %}
+    </div>
+    <div class="inspector-section" id="plan-pane" data-run-refresh="plan" aria-label="Persisted execution plan">
       <div class="inspector-head"><strong>Plan</strong>{% if plan_projection.plan %}<span class="muted mono">v{{ plan_projection.plan.version }} · {{ plan_projection.plan.status }}</span>{% endif %}</div>
       {% if plan_projection.plan %}
       <dl class="so-kv compact-plan-meta">
         <dt>Worker</dt><dd>{{ plan_projection.current_provider or "UNKNOWN" }} / {{ plan_projection.current_model or "UNKNOWN" }}</dd>
-        <dt>Health</dt><dd>{{ plan_projection.health }}{% if plan_projection.stalled %} (stalled, soft){% endif %}</dd>
-        <dt>Supervisor</dt><dd>{{ plan_projection.supervisor_state }}</dd>
+        {% if can_cancel %}<dt>Health</dt><dd>{{ plan_projection.health }}{% if plan_projection.stalled %} (stalled, soft){% endif %}</dd>{% endif %}
+        <dt>{{ 'Supervisor' if can_cancel else 'Recorded supervisor' }}</dt><dd>{{ plan_projection.supervisor_state }}</dd>
         {% if plan_projection.manager_state == "ATTENTION_REQUIRED" %}<dt>Needs attention</dt><dd>Yes — this run needs owner review</dd>{% endif %}
         <dt>Review</dt><dd>{{ plan_projection.review_state }}</dd>
       </dl>
@@ -115,12 +163,15 @@
       {% endif %}
     </div>
 
-    <div class="inspector-section">
+    <div class="inspector-section" data-run-refresh="details">
       <div class="inspector-head"><strong>Details</strong></div>
       <dl class="so-kv">
         <dt>Run ID</dt><dd class="mono">{{ run_id }}</dd>
         <dt>Target Repository</dt><dd class="mono">{{ target_repo }}</dd>
-        <dt>Task</dt><dd>{{ task }}</dd>
+        <dt>Task</dt><dd><details class="run-task-disclosure">
+          <summary><span class="run-task-preview">{{ task }}</span><span class="run-task-show">Read full task</span><span class="run-task-hide">Hide full task</span></summary>
+          <div class="run-task-full">{{ task }}</div>
+        </details></dd>
         <dt>Base Commit</dt><dd class="mono">{{ base_commit }}</dd>
         {% if candidate_sha %}
         <dt>Candidate SHA</dt><dd class="mono">{{ candidate_sha }}</dd>
@@ -133,9 +184,12 @@
         <dt>Current Dispatch</dt><dd class="mono">{{ current_dispatch.stage }} · {{ current_dispatch.tier }} · {{ current_dispatch.provider }} / {{ current_dispatch.model }}</dd>
         <dt>Tier Reason</dt><dd class="mono">{{ current_dispatch.tier_reason }}</dd>
         {% endif %}
-        <dt>Training Policy</dt><dd>{{ training_policy }}</dd>
+
         <dt>Status</dt><dd id="detail-status" class="badge badge-{{ status_class }}">{{ status }}</dd>
         <dt>Gate Command</dt><dd class="mono">{{ gate_command }}</dd>
+        {% if continuation_source %}
+        <dt>Continued from</dt><dd><a href="/runs/{{ continuation_source.parent_run_id }}?from=runs">{{ continuation_source.parent_run_id }}</a> · saved commit <span class="mono">{{ continuation_source.candidate_sha[:12] }}</span></dd>
+        {% endif %}
         <dt>Review Attempts</dt><dd class="mono">{{ review_attempt_counter }}</dd>
         <dt>Summary / Reason</dt><dd id="detail-summary">{{ summary or failure_reason or "N/A" }}</dd>
         <dt>Created</dt><dd class="mono">{{ fmt(created_at) }}</dd>
@@ -146,6 +200,13 @@
     <div class="inspector-section">
       <div class="inspector-head"><strong>Actions</strong></div>
       <div id="run-actions" data-run-id="{{ run_id }}" data-run-status="{{ status }}" style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+        {% if status == 'FAILED' %}
+        {% if continued_run_id %}
+        <a class="text-button primary-button" href="/runs/{{ continued_run_id }}?from=runs">Open continuation →</a>
+        {% else %}
+        <form method="post" action="/runs/{{ run_id }}/continue" class="so-inline-form"><button type="submit" class="text-button primary-button"{% if not can_continue %} disabled{% endif %} title="{{ continue_reason }}">Continue from saved work</button></form>
+        {% endif %}
+        {% endif %}
         <form method="post" action="/runs/{{ run_id }}/retry" class="so-inline-form" data-action="retry"><button type="submit" class="text-button"{% if not can_retry %} disabled title="Retry unlocks once the run completes or fails"{% endif %}>Retry Run (New Attempt)</button></form>
         <button type="button" class="text-button" id="overviewCancelButton" data-action="cancel"{% if not can_cancel %} disabled title="Nothing to cancel on a terminal run"{% endif %}>Cancel Run</button>
         <form method="post" action="/runs/{{ run_id }}/review" class="so-inline-form" data-action="review"><button type="submit" class="text-button primary-button"{% if not can_review or owner_review_active %} disabled title="{% if owner_review_active %}A Review owner action is already running{% else %}Review unlocks once the run completes{% endif %}"{% endif %}>Request review</button></form>
@@ -206,9 +267,10 @@
         </div>
         {% endif %}
       </div>
+      {% if status == 'FAILED' and not continued_run_id %}<p class="so-help">{{ continue_reason }} Continue uses the saved candidate in a new repair run. Retry starts again from the project.</p>{% endif %}
     </div>
 
-    <div class="inspector-section" id="accept-checklist-section">
+    <div class="inspector-section" id="accept-checklist-section" data-run-refresh="checklist">
       <div class="inspector-head"><strong>Acceptance checklist</strong><span class="muted">engine-derived · same rules as the Accept button</span></div>
       {% if accept_checklist %}
       <ul class="so-kv" id="accept-checklist" data-accept-eligible="{{ 'true' if can_accept else 'false' }}" style="list-style: none; padding-left: 0;">
@@ -238,7 +300,7 @@
     </div>
     {% endif %}
 
-    <div class="inspector-section">
+    <div class="inspector-section" data-run-refresh="monitoring">
       <div class="inspector-head"><strong>Live Monitoring</strong><span class="muted">canonical projection · same as <span class="mono">orch report {{ run_id }} --json</span></span></div>
       {% if run_report %}
       <dl class="so-kv">
@@ -246,7 +308,7 @@
         <dt>Worker Requested</dt><dd class="mono">{{ run_report.worker.requested_provider }} / {{ run_report.worker.requested_model }}</dd>
         <dt>Worker Actual</dt><dd class="mono">{{ run_report.worker.actual_provider }} / {{ run_report.worker.actual_model }} ({{ run_report.worker.actual_identity_status }})</dd>
         <dt>Dispatches</dt><dd class="mono">worker {{ run_report.execution.worker_dispatch_count }} · retry {{ run_report.execution.retry_dispatch_count }} · repair {{ run_report.execution.repair_dispatch_count }} · reviewer {{ run_report.execution.reviewer_dispatch_count }} · resumes {{ run_report.execution.resume_count }}</dd>
-        <dt>Gate</dt><dd class="mono">{{ run_report.gate.summary.check_passed }} passed / {{ run_report.gate.summary.check_failed }} failed / {{ run_report.gate.summary.check_total }} checks · {{ run_report.gate.summary.receipt_total }} receipt(s)</dd>
+        <dt>Gate</dt><dd class="mono">{% if run_report.gate.disabled %}Disabled by project policy · {% endif %}{{ run_report.gate.summary.check_skipped }} skipped / {{ run_report.gate.summary.check_passed }} passed / {{ run_report.gate.summary.check_failed }} failed / {{ run_report.gate.summary.check_total }} checks · {{ run_report.gate.summary.receipt_total }} receipt(s)</dd>
         <dt>Review</dt><dd class="mono">required={{ run_report.review.review_required }} · rounds={{ run_report.review.rounds }} · verdicts={{ run_report.review.verdicts | join(", ") if run_report.review.verdicts else "none" }}</dd>
         <dt>Usage Events</dt><dd class="mono">{{ run_report.usage.provider_usage_event_count }} events · in={{ run_report.usage.input_tokens }} out={{ run_report.usage.output_tokens }} cache_r={{ run_report.usage.cache_read_tokens }} cache_w={{ run_report.usage.cache_write_tokens }} reason={{ run_report.usage.reasoning_tokens }} total={{ run_report.usage.total_tokens }}</dd>
         <dt>Acceptance</dt><dd class="mono">{{ run_report.acceptance.acceptance_status }} · {{ run_report.acceptance.accepted_candidate_sha }}</dd>
@@ -267,11 +329,11 @@
 </div>
 
 {# --- Workers panel --- #}
-<div class="run-tab-panel" data-panel="workers" style="display: none;">
+<div class="run-tab-panel" data-panel="workers" data-run-refresh="workers" style="display: none;">
   <div class="date-rule">Attempts & verification</div>
   {% if attempts %}
   {% for attempt in attempts %}
-  <div class="worker-card" data-attempt="{{ attempt.attempt_number }}">
+  <div class="worker-card{% if not can_cancel and loop.last %} open{% endif %}" data-attempt="{{ attempt.attempt_number }}">
     <div class="worker-card-head" role="button" tabindex="0" style="cursor: pointer;">
       <span class="worker-title">Attempt #{{ attempt.attempt_number }} · <span class="mono">{{ attempt.provider }} / {{ attempt.model }}</span></span>
       <span class="badge badge-{{ attempt.status_class }}">{{ attempt.status }}</span>
@@ -309,7 +371,7 @@
 </div>
 
 {# --- Changes panel --- #}
-<div class="run-tab-panel" data-panel="changes" style="display: none;">
+<div class="run-tab-panel" data-panel="changes" data-run-refresh="changes" style="display: none;">
   <div class="date-rule">Changes</div>
   {% if candidate_sha %}
   <dl class="so-kv">
@@ -318,21 +380,21 @@
   </dl>
   {% endif %}
   {% if diff_available %}
-  {% if changed_files %}
-  <div class="so-table-wrap"><table class="so-table">
-    <thead><tr><th>Changed files</th></tr></thead>
-    <tbody>
-      {% for cf in changed_files %}
-      <tr><td class="mono">{{ cf }}</td></tr>
-      {% endfor %}
-    </tbody>
-  </table></div>
-  {% else %}
-  <p class="muted">No file changes between base and candidate.</p>
-  {% endif %}
-  {% if diff_text %}
-  <pre class="so-pre mono">{{ diff_text }}</pre>
-  {% endif %}
+  <div class="diff-actions"><span class="muted">{{ changed_files|length }} changed files · unified diff</span><button type="button" class="text-button" data-diff-expand>Expand all</button><button type="button" class="text-button" data-diff-collapse>Collapse all</button></div>
+  <details class="file-diff diff-total" data-diff-total>
+    <summary><span class="diff-path">Total changes</span><span class="diff-kind">{{ diff_totals.files if diff_totals and diff_totals.available else changed_files|length }} files</span><span class="diff-counts mono">{% if diff_totals and diff_totals.available %}<span class="diff-added">+{{ diff_totals.added }}</span> <span class="diff-removed">−{{ diff_totals.removed }}</span>{% else %}Counts unavailable{% endif %}</span></summary>
+    <div class="diff-file-description">All file changes from base to candidate.{% if diff_totals and diff_totals.binary %} {{ diff_totals.binary }} binary files excluded from line counts.{% endif %}{% if diff_truncated %} Patch display is limited; line counts cover the full candidate.{% endif %}</div>
+    {% for file in diff_files %}<div class="diff-total-file">{{ file.path }} · {{ file.status if file.lines else 'Changed' }}{% if file.added is not none %} <span class="diff-added">+{{ file.added }}</span> <span class="diff-removed">−{{ file.removed }}</span>{% endif %}</div>{% include "_diff_lines.html" %}{% endfor %}
+    {% if diff_truncated %}<p class="so-notice">The combined patch is incomplete at the display limit.</p>{% endif %}
+  </details>
+  {% for file in diff_files %}
+  <details class="file-diff" data-diff-path="{{ file.path }}">
+    <summary><span class="diff-path mono">{{ file.path }}</span><span class="diff-kind">{{ file.status if file.lines else 'Changed' }}</span><span class="diff-counts mono">{% if file.binary %}Binary{% elif file.added is not none %}<span class="diff-added">+{{ file.added }}</span> <span class="diff-removed">−{{ file.removed }}</span>{% else %}Counts unavailable{% endif %}</span></summary>
+    <div class="diff-file-description">{{ file.status if file.lines else 'Changed' }} file.{% if file.added is not none %} {{ file.added }} lines added, {{ file.removed }} lines removed compared with the run’s base.{% endif %}{% if file.binary %} Binary contents are not displayed.{% endif %}</div>
+    {% include "_diff_lines.html" %}
+    {% if file.truncated %}<p class="so-notice">This file’s patch is incomplete at the display limit. Line counts describe the full file diff.</p>{% endif %}
+  </details>
+  {% else %}<p class="muted">No file changes between base and candidate.</p>{% endfor %}
   {% if diff_truncated %}
   <p class="so-notice">Diff truncated at the display bound; showing a prefix only.</p>
   {% endif %}
@@ -342,7 +404,7 @@
 </div>
 
 {# --- Checks panel --- #}
-<div class="run-tab-panel" data-panel="checks" style="display: none;">
+<div class="run-tab-panel" data-panel="checks" data-run-refresh="checks" style="display: none;">
   <div class="date-rule">Gate checks · <span class="mono">{{ gate_command }}</span></div>
   {% if attempts %}
   {% for attempt in attempts %}
@@ -358,7 +420,7 @@
 </div>
 
 {# --- Review panel --- #}
-<div class="run-tab-panel" data-panel="review" style="display: none;">
+<div class="run-tab-panel" data-panel="review" data-run-refresh="review" style="display: none;">
   <div class="date-rule">Independent code review · {{ review_attempt_counter }}</div>
   {% if reviews %}
   {% for review in reviews %}
@@ -392,8 +454,8 @@
 {# --- Events panel --- #}
 <div class="run-tab-panel" data-panel="events" style="display: none;">
   <div class="date-rule">Live event log</div>
-  <div class="terminal-toolbar"><span class="muted">Streaming</span><span class="mono muted">/runs/{{ run_id }}/events/stream</span></div>
-  <div id="events-log" class="terminal-output" style="max-height: 320px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; font-family: monospace; font-size: 12px; padding: 10px;">
+  <div class="terminal-toolbar"><span class="muted" data-run-refresh="events-status">{{ 'Streaming' if can_cancel else 'Recorded events · run finished' }}</span><span class="mono muted">/runs/{{ run_id }}/events/stream</span></div>
+  <div id="events-log" class="terminal-output" style="max-height: 320px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; font-family: var(--font-mono); font-size: 12px; padding: 10px;">
     {% for ev in events %}
     <div class="event-row" data-event-id="{{ ev.id }}">
       <span class="muted">#{{ ev.id }}</span>
@@ -406,7 +468,7 @@
 </div>
 
 {# --- Routing panel --- #}
-<div class="run-tab-panel" data-panel="routing" style="display: none;">
+<div class="run-tab-panel" data-panel="routing" data-run-refresh="routing" style="display: none;">
   <div class="date-rule">Routing for this run</div>
   {% if current_dispatch %}
   <dl class="so-kv">
@@ -419,11 +481,11 @@
   {% else %}
   <div class="so-empty"><strong>No dispatch recorded</strong>Dispatch details appear here once a worker is assigned.</div>
   {% endif %}
-  <p><a class="text-button" href="/routing">Open worker routing</a> <a class="text-button" href="/orchestrator">Orchestrator role</a></p>
+  <p><a class="text-button" href="/routing">Open worker routing</a> <a class="text-button" href="/routing?role=orchestrator">Orchestrator role</a></p>
 </div>
 
 {# --- Usage panel --- #}
-<div class="run-tab-panel" data-panel="usage" style="display: none;">
+<div class="run-tab-panel" data-panel="usage" data-run-refresh="usage" style="display: none;">
   <div class="date-rule">Exact token usage</div>
   <dl class="so-kv">
     <dt>Known Input Tokens</dt><dd class="mono">{{ usage.known_input_tokens if usage.known_input_tokens is not none else "Unknown" }}</dd>
@@ -448,38 +510,41 @@
 {% endif %}
 {% endblock %}
 
-{% block workers_dock %}
-<div class="worker-mode-tabs" data-od-id="worker-mode-tabs" aria-label="Worker views">
-  <button class="worker-mode-tab active" data-worker-filter="all">All workers</button>
-  {% for attempt in attempts %}
-  <button class="worker-mode-tab" data-worker-filter="{{ attempt.attempt_number }}">Attempt {{ attempt.attempt_number }}</button>
-  {% endfor %}
-</div>
-<div class="worker-list" id="workerDockBody" data-od-id="worker-dock-body">
-  {% if attempts %}
-  {% for attempt in attempts %}
-  <div class="worker-card" data-attempt="{{ attempt.attempt_number }}">
-    <div class="worker-card-head" role="button" tabindex="0" style="cursor: pointer;">
-      <span class="worker-title mono">{{ attempt.provider }} / {{ attempt.model }}</span>
-      <span class="badge badge-{{ attempt.status_class }}">{{ attempt.status }}</span>
-    </div>
-    <div class="worker-detail">
-      <p class="muted mono">Attempt #{{ attempt.attempt_number }} · {{ attempt.stage }} / {{ attempt.tier }} · {{ attempt.commit_sha or "no commit yet" }}</p>
+{% block composer %}
+{% if not missing %}
+<div class="composer-wrap run-composer-wrap{% if chat|default(none) %} run-secondary-composer{% endif %}">
+  <div class="composer run-composer" aria-label="Run controls">
+    <form method="post" action="/runs/{{ run_id }}/conversation" id="runConversationForm">
+      <input type="hidden" name="mode" value="chat" data-chat-mode-input>
+      <label class="sr-only" for="runningTask">Message the orchestrator about this run</label>
+      <textarea id="runningTask" name="message" rows="2" maxlength="32000" placeholder="Ask your orchestrator about this run…"></textarea>
+    </form>
+    <div class="composer-bar">
+      <span class="run-composer-status" id="runComposerStatus" role="status">{{ 'Task is running' if can_cancel else 'Run finished' }}</span>
+      <form method="post" action="/runs/{{ run_id }}/cancel" id="runComposerStopForm" data-action="cancel"{% if not can_cancel %} hidden{% endif %}>
+        <button type="submit" class="send-button composer-stop" id="runComposerStopButton" aria-label="Stop task" title="Stop task"{% if not can_cancel %} disabled{% endif %}><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button>
+      </form>
+      <button type="submit" form="runConversationForm" class="send-button" aria-label="Send to orchestrator" title="Send to orchestrator"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6"/></svg></button>
+      <a href="/" class="composer-new-task" id="runComposerNewTask" aria-label="New task" title="New task"{% if can_cancel %} hidden{% endif %}><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6"/></svg></a>
     </div>
   </div>
-  {% endfor %}
-  {% else %}
-  <p class="side-copy muted" style="padding: 10px 12px;">No attempts recorded yet.</p>
-  {% endif %}
 </div>
-<footer class="worker-footer"><span class="side-meta" style="padding: 0 12px;">{% if attempts %}Attempts {{ attempts|length }} · {% endif %}Each attempt runs with a bounded time limit</span></footer>
+{% endif %}
+{% endblock %}
+
+{% block workers_dock %}
+{% if not missing %}
+<div class="run-inspector-controls"><form method="post" action="/runs/{{ run_id }}/cancel" data-action="cancel"{% if not can_cancel %} hidden{% endif %}><button type="submit" class="text-button"{% if not can_cancel %} disabled{% endif %}>Stop run</button></form><div data-run-refresh="continuation-inspector">{% if can_continue %}<form method="post" action="/runs/{{ run_id }}/continue"><button type="submit" class="text-button">Continue from saved work</button></form>{% elif continued_run_id %}<a class="text-button" href="/runs/{{ continued_run_id }}?from=runs">Open continuation</a>{% endif %}</div></div>
+{% include "_agent_dock.html" %}{% endif %}
 {% endblock %}
 
 {% block extra_scripts %}
 {% if not missing %}
-<script src="/static/js/app.js"></script>
+<script src="/static/js/app.js?v=work-console-1"></script>
+<script src="/static/js/chat.js?v=work-console-1"></script>
+<script src="/static/js/agent-workspace.js?v=work-console-1"></script>
 <script src="/static/vendor/xterm/xterm.js"></script>
-<script src="/static/js/terminal.js"></script>
+<script src="/static/js/terminal.js?v=balanced-workspace-1"></script>
 <script>
   (function () {
     var btn = document.getElementById("overviewCancelButton");

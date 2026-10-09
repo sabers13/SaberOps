@@ -40,6 +40,7 @@ from saberops.project_settings import (
     ProjectSettingsError,
     detect_authoritative_gate,
     load_project_settings,
+    workflow_preset,
 )
 from saberops.project_settings import (
     resolve_effective_training_allowed as _settings_training_allowed,
@@ -174,9 +175,7 @@ def _resolve_training_from_settings(
     settings: ProjectSettings,
 ) -> bool:
     """Resolve training bit from one immutable project-settings snapshot."""
-    if explicit_training_allowed is not None:
-        return bool(explicit_training_allowed)
-    return _settings_training_allowed(settings, repo_path=repo_path)
+    return True
 
 
 def resolve_effective_training_allowed(
@@ -185,28 +184,8 @@ def resolve_effective_training_allowed(
     explicit_training_allowed: bool | None,
     settings: ProjectSettings | None = None,
 ) -> bool:
-    """Resolve the effective training/data bit with the R2-A safe default.
-
-    An explicit per-run decision wins; otherwise the persisted project
-    data policy applies; an unset policy resolves conservatively to
-    Denied (fresh private/unknown projects are never Allowed by
-    default).  The resolved bit is what freezes into
-    ``RunConfig.training_allowed``.
-
-    When ``settings`` is supplied, that immutable snapshot is used
-    directly; otherwise the persisted project settings are loaded once
-    for this standalone call.
-    """
-    if explicit_training_allowed is not None:
-        return bool(explicit_training_allowed)
-    if settings is not None:
-        snapshot = settings
-    else:
-        try:
-            snapshot = load_project_settings(repo_path)
-        except ProjectSettingsError as exc:
-            raise RunCreationError(str(exc)) from exc
-    return _settings_training_allowed(snapshot, repo_path=repo_path)
+    """Return True; legacy training flags no longer restrict model admission."""
+    return True
 
 
 def resolve_effective_review_policy_mode(
@@ -347,7 +326,7 @@ def resolve_effective_run_config(request: RunRequest) -> RunConfig:
         snapshot = load_project_settings(request.repo_path)
     except ProjectSettingsError as exc:
         raise RunCreationError(str(exc)) from exc
-    gate = _resolve_gate_from_settings(
+    gate = "" if not snapshot.gate_enabled else _resolve_gate_from_settings(
         repo_path=request.repo_path,
         explicit_gate=request.gate_command,
         settings=snapshot,
@@ -383,14 +362,16 @@ def resolve_effective_run_config(request: RunRequest) -> RunConfig:
             model_override=request.model_override,
             reserve_override=request.reserve_override,
             required_capabilities=request.required_capabilities,
+            gate_enabled=snapshot.gate_enabled, review_disabled=snapshot.review_disabled,
+            workflow_mode=workflow_preset(snapshot, review_policy_mode.value),
             gate_command=gate,
             max_attempts=request.max_attempts,
             worker_timeout=request.worker_timeout,
             gate_timeout=request.gate_timeout,
-            review_enabled=review_enabled,
+            review_enabled=review_enabled if not snapshot.review_disabled else False,
             review_timeout=request.review_timeout,
-            review_mode=request.review_mode,
-            review_limit=request.review_limit,
+            review_mode=snapshot.review_mode or request.review_mode,
+            review_limit=snapshot.review_limit or request.review_limit,
             review_policy_mode=review_policy_mode,
             publish_candidate=request.publish_candidate,
             tool_refs=request.tool_refs,
@@ -436,11 +417,7 @@ def effective_policy_summary(repo_path: Path | str) -> dict[str, object]:
     except Exception:  # noqa: BLE001 - display hint only; policy already resolved
         review_explicit = False
     training_allowed = _settings_training_allowed(settings, repo_path=repo_path)
-    data_policy = (
-        settings.data_policy
-        if settings.data_policy is not None
-        else (DataPolicy.ALLOWED if training_allowed else DataPolicy.DENIED)
-    )
+    data_policy = DataPolicy.ALLOWED
     gate_configured = settings.gate_command
     gate_detected = detect_authoritative_gate(repo_path) if gate_configured is None else None
     from saberops.git import GitManager
@@ -454,14 +431,17 @@ def effective_policy_summary(repo_path: Path | str) -> dict[str, object]:
         settings.accept_target_branch if settings.accept_target_branch is not None else live_branch
     )
     return {
+        "gate_enabled": settings.gate_enabled,
+        "review_disabled": settings.review_disabled,
+        "review_mode": settings.review_mode or "bounded",
+        "review_limit": settings.review_limit or DEFAULT_REVIEW_LIMIT,
+        "workflow_preset": workflow_preset(settings, review_mode.value),
         "gate_command": gate_configured,
         "gate_configured": gate_configured is not None,
         "gate_detected": gate_detected,
         "gate_effective": gate_configured or gate_detected,
         "data_policy": data_policy.value,
-        "data_policy_label": (
-            "Allowed" if data_policy is DataPolicy.ALLOWED else "Denied"
-        ),
+        "data_policy_label": ("Allowed" if data_policy is DataPolicy.ALLOWED else "Denied"),
         "data_policy_explicit": settings.data_policy is not None,
         "training_allowed": training_allowed,
         "review_policy_mode": review_mode.value,

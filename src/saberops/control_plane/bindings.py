@@ -986,7 +986,7 @@ def resolve_execution_binding(
     Fails closed with :class:`BindingResolutionError` when there is no
     authoritative non-empty registry, the id is unknown, the profile
     is missing/disabled, the pool is unknown, the backend has no
-    verified runtime seam (``DIRECT_API``), no live adapter serves
+    verified runtime seam, no live adapter serves
     the binding's provider, the requested effort tier is outside the
     binding's declared capabilities, a copilot-family profile
     cannot be mapped onto the adapter's existing profile seam, a
@@ -1015,9 +1015,10 @@ def resolve_execution_binding(
     except KeyError as exc:
         raise BindingResolutionError("POOL_UNKNOWN") from exc
     if binding.backend is BindingKind.DIRECT_API:
-        # No verified runtime seam exists for DIRECT_API bindings; a
-        # new API backend must never be invented to satisfy dispatch.
-        raise BindingResolutionError("UNSUPPORTED_BACKEND")
+        from saberops.workers.direct_api import DirectAPIAdapter
+        api_adapter = DirectAPIAdapter(binding.provider)
+        api_adapter.validate_profile(binding, profile)
+        adapter = api_adapter
     if adapter is None:
         raise BindingResolutionError("NO_ADAPTER")
     if reasoning_effort is not None and not binding.supports_effort(reasoning_effort):

@@ -99,6 +99,9 @@ class RunConfig:
     # and model overrides are intentionally separate and do not set this.
     reserve_override: bool = False
     required_capabilities: tuple[str, ...] = ()
+    gate_enabled: bool = True
+    review_disabled: bool = False
+    workflow_mode: str = "custom"
     gate_command: str = "make gate"
     max_attempts: int = 2
     worker_timeout: float | None = None
@@ -166,6 +169,8 @@ class RunConfig:
     # runs is unchanged (the AcceptEngine still reads live repo state).
     # R4 owns moved-HEAD acceptance; R2-A establishes and freezes policy.
     accept_target_branch: str = ""
+    # A linked repair run inherits a committed candidate, never a live provider session.
+    continuation: dict[str, str] | None = None
 
     @property
     def initial_tier(self) -> Tier:
@@ -300,6 +305,9 @@ def resolve_run_config(
     model_override: str | None = None,
     reserve_override: bool = False,
     required_capabilities: tuple[str | Capability, ...] = (),
+    gate_enabled: bool = True,
+    review_disabled: bool = False,
+    workflow_mode: str = "custom",
     gate_command: str | None = None,
     max_attempts: int = 2,
     worker_timeout: float | None = None,
@@ -326,6 +334,8 @@ def resolve_run_config(
     accept_target_branch: str | None = None,
 ) -> RunConfig:
     """Normalize all public launch inputs into the one canonical policy object."""
+    if type(gate_enabled) is not bool or type(review_disabled) is not bool:
+        raise ValueError("Gate and review authorization must be boolean")
     target = target_repo if target_repo is not None else repo_path
     if target is None:
         raise ValueError("target repository is required")
@@ -341,14 +351,11 @@ def resolve_run_config(
         resolved_review_policy_mode = review_policy_mode
     else:
         try:
-            resolved_review_policy_mode = ReviewPolicyMode(
-                str(review_policy_mode).strip().upper()
-            )
+            resolved_review_policy_mode = ReviewPolicyMode(str(review_policy_mode).strip().upper())
         except ValueError as exc:
             known = ", ".join(mode.value for mode in ReviewPolicyMode)
             raise ValueError(
-                f"review_policy_mode must be one of {known}; got "
-                f"{review_policy_mode!r}"
+                f"review_policy_mode must be one of {known}; got {review_policy_mode!r}"
             ) from exc
     legacy_tier = _as_tier(tier)
     manual = _as_tier(manual_tier, default=legacy_tier)
@@ -389,7 +396,10 @@ def resolve_run_config(
         model_override=model_override.strip() if model_override else None,
         reserve_override=bool(reserve_override),
         required_capabilities=normalize_required_capabilities(required_capabilities),
-        gate_command=(gate_command or "make gate").strip(),
+        gate_enabled=gate_enabled,
+        review_disabled=review_disabled,
+        workflow_mode=workflow_mode,
+        gate_command=(gate_command or "make gate").strip() if gate_enabled else "",
         max_attempts=max_attempts,
         worker_timeout=(float(worker_timeout) if worker_timeout is not None else None),
         worker_timeout_explicit=explicit_worker,
@@ -411,13 +421,9 @@ def resolve_run_config(
         ),
         tool_refs=normalized_tool_refs,
         gateway_frozen_config=dict(gateway_frozen_config) if gateway_frozen_config else None,
-        gateway_frozen_digest=(
-            str(gateway_frozen_digest) if gateway_frozen_digest else None
-        ),
+        gateway_frozen_digest=(str(gateway_frozen_digest) if gateway_frozen_digest else None),
         gate_scratch_mode=resolved_gate_scratch_mode,
-        accept_target_branch=(
-            str(accept_target_branch).strip() if accept_target_branch else ""
-        ),
+        accept_target_branch=(str(accept_target_branch).strip() if accept_target_branch else ""),
     )
 
 
@@ -454,6 +460,9 @@ def reconstruct_run_config(data: dict[str, Any]) -> RunConfig:
         required_capabilities=normalize_required_capabilities(
             tuple(data.get("required_capabilities", ()))
         ),
+        gate_enabled=_validation_bool(data, "gate_enabled", True),
+        review_disabled=_validation_bool(data, "review_disabled", False),
+        workflow_mode=str(data.get("workflow_mode", "custom")),
         gate_command=str(data.get("gate_command", "make gate")),
         max_attempts=int(data.get("max_attempts", 2)),
         worker_timeout=(
@@ -479,22 +488,13 @@ def reconstruct_run_config(data: dict[str, Any]) -> RunConfig:
         # conservative (no automatic remote mutation).
         publish_candidate=bool(data.get("publish_candidate", False)),
         tool_refs=tuple(
-            sorted(
-                {
-                    validate_logical_ref(str(ref))
-                    for ref in (data.get("tool_refs") or ())
-                }
-            )
+            sorted({validate_logical_ref(str(ref)) for ref in (data.get("tool_refs") or ())})
         ),
         gateway_frozen_config=(
-            dict(data["gateway_frozen_config"])
-            if data.get("gateway_frozen_config")
-            else None
+            dict(data["gateway_frozen_config"]) if data.get("gateway_frozen_config") else None
         ),
         gateway_frozen_digest=(
-            str(data["gateway_frozen_digest"])
-            if data.get("gateway_frozen_digest")
-            else None
+            str(data["gateway_frozen_digest"]) if data.get("gateway_frozen_digest") else None
         ),
         autonomous_runtime=(
             dict(data["autonomous_runtime"])
@@ -519,4 +519,22 @@ def reconstruct_run_config(data: dict[str, Any]) -> RunConfig:
         # R2-A: legacy payloads predate the frozen target branch; ""
         # preserves their acceptance behavior (live repo state).
         accept_target_branch=str(data.get("accept_target_branch", "") or ""),
+        continuation=_reconstruct_continuation(data.get("continuation")),
     )
+
+
+def _reconstruct_continuation(raw: object) -> dict[str, str] | None:
+    if raw is None:
+        return None
+    if (not isinstance(raw, dict)
+        or set(raw) != {"parent_run_id", "attempt_id", "candidate_sha", "base_sha"}
+        or not all(isinstance(value, str) and value for value in raw.values())):
+        raise ValueError("Invalid continuation reference")
+    return dict(raw)
+
+
+def _validation_bool(data: dict[str, Any], name: str, default: bool) -> bool:
+    value = data.get(name, default)
+    if type(value) is not bool:
+        raise ValueError(f"Invalid frozen {name}")
+    return value

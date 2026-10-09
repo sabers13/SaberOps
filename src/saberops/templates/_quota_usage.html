@@ -1,0 +1,31 @@
+<div class="usage-cards">
+{% for c in cli_cards %}
+<article class="settings-card usage-card" data-usage-provider="{{ c.provider }}">
+<header><div><h4>{{ c.name }}</h4><small class="muted">{{ 'CLI installed' if c.installed else 'CLI not installed' }}</small></div><span class="badge {{ 'badge-normal' if c.installed else 'badge-demoted' }}">{{ 'Detected' if c.installed else 'Unavailable' }}</span></header>
+<div class="usage-card-body">
+<h5>Account limits</h5>
+{% if c.windows %}
+{% if c.limits_error %}<p class="so-help">Showing last-known limits. {{ c.limits_error }}</p>{% endif %}
+{% for w in c.windows %}
+<div class="usage-window"><div class="usage-window-label"><strong>{{ w.label }}</strong><span>{{ 'Unlimited' if w.unlimited else '%g'|format(w.remaining) ~ '% remaining' }}{% if w.used is defined and w.used is not none %} · {{ '%g'|format(w.used) }}% used{% endif %}</span></div>
+{% if not w.unlimited %}<progress max="100" value="{{ w.remaining }}" aria-label="{{ w.label }} remaining allowance"></progress>{% endif %}
+{% if not w.unlimited and w.used_requests is defined and w.used_requests is not none and w.entitlement_requests %}<small class="muted">{{ '%g'|format(w.used_requests) }} of {{ '%g'|format(w.entitlement_requests) }} requests used</small><br>{% endif %}
+<small class="muted">{% if w.reset_text is defined and w.reset_text %}{{ w.reset_text }}{% else %}{% if w.duration %}{{ '%g'|format(w.duration / 60) }} hour window{% endif %}{% if w.reset_at %}{% if w.duration %} · {% endif %}Resets {{ fmt(w.reset_at) }}{% elif not w.unlimited and not w.duration %}Reset time unavailable from CLI{% endif %}{% endif %}</small></div>
+{% endfor %}
+<p class="muted usage-source">{{ c.source }} · Checked {{ fmt(c.checked_at) }}</p>
+{% else %}<p class="muted">{{ c.limits_error or (c.hint if c.installed else 'Install this CLI to read its usage evidence.') }}</p>{% endif %}
+<details class="usage-activity"><summary>Activity details</summary>
+<h5>Local CLI activity</h5>
+{% if c.activity %}
+<dl class="usage-metrics"><div><dt>Input tokens</dt><dd>{{ '{:,.0f}'.format(c.activity.input_tokens) if c.activity.input_tokens is not none else 'Unknown' }}</dd></div><div><dt>Output tokens</dt><dd>{{ '{:,.0f}'.format(c.activity.output_tokens) if c.activity.output_tokens is not none else 'Unknown' }}</dd></div><div><dt>Cached tokens</dt><dd>{{ '{:,.0f}'.format(c.activity.cached_tokens) if c.activity.cached_tokens is not none else 'Unknown' }}</dd></div></dl>
+<p class="muted usage-source">{{ c.activity.sessions }} saved sessions · {{ c.activity.source }}<br>{{ c.activity.coverage }} · Read {{ fmt(c.activity_checked_at) }}</p>
+{% else %}<p class="muted">No readable local usage records.</p>{% endif %}
+{% set recorded = recorded_usage.get(c.provider) %}
+<h5>SaberOps activity</h5>
+{% if recorded %}<p>{{ recorded.calls }} recorded calls{% if recorded.unknown_calls %} · {{ recorded.unknown_calls }} without complete token evidence{% endif %}</p>
+<dl class="usage-metrics"><div><dt>Input tokens</dt><dd>{{ '{:,.0f}'.format(recorded.input_tokens) if recorded.input_tokens is not none else 'Unknown' }}</dd></div><div><dt>Output tokens</dt><dd>{{ '{:,.0f}'.format(recorded.output_tokens) if recorded.output_tokens is not none else 'Unknown' }}</dd></div></dl>
+{% else %}<p class="muted">No recorded SaberOps calls.</p>{% endif %}
+</details></div></article>
+{% endfor %}
+</div>
+{% if usage_unreadable %}<p class="so-help">{{ usage_unreadable }} project usage store(s) could not be read. Recorded totals may be incomplete.</p>{% endif %}

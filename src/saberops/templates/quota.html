@@ -1,11 +1,14 @@
 {% extends "base.html" %}
 {% set active_pane = "chats" %}
-{% block title %}Quota Management{% endblock %}
-{% block conversation_title %}Quota Management{% endblock %}
-{% block run_meta %}Owner-supplied quota state for quota-aware routing{% endblock %}
+{% block title %}Usage &amp; quota{% endblock %}
+{% block conversation_title %}Usage &amp; quota{% endblock %}
+{% block run_meta %}CLI activity and account limits{% endblock %}
 
 {% block workspace %}
-<div class="date-rule">Quota</div>
+<div class="page-intro"><h3>Usage &amp; quota</h3><p>Your providers’ account limits and reset times, read through their own CLIs. Expand Activity details for local token counts.</p></div>
+<form method="post" action="/quota/refresh" class="usage-refresh" data-usage-refresh><button type="submit" class="text-button">Refresh usage</button><span class="muted" role="status" data-usage-status>Updates automatically when you open this page.</span></form>
+<div id="cli-usage-cards">{% include "_quota_usage.html" %}</div>
+<details class="settings-section usage-manual"><summary>Routing quota controls</summary><p class="muted">These saved limits control routing. Account observations above do not overwrite them.</p>
 
 {% if notice %}
 <p class="so-notice">{{ notice }}</p>
@@ -66,4 +69,7 @@
     </form>
   </div></div>
 </div>
+</details>
 {% endblock %}
+
+{% block extra_scripts %}<script src="/static/js/quota.js?v=cli-usage-1"></script>{% endblock %}

@@ -132,6 +132,7 @@ class ReviewRequirementSource(StrEnum):
     CLASSIFIER_MEDIUM = "CLASSIFIER_MEDIUM"
     CLASSIFIER_LOAD_BEARING = "CLASSIFIER_LOAD_BEARING"
     CLASSIFIER_DOCS_ESCALATED = "CLASSIFIER_DOCS_ESCALATED"
+    OWNER_DISABLED = "OWNER_DISABLED"
     CLASSIFIER_LOW_SKIPPED = "CLASSIFIER_LOW_SKIPPED"
     CLASSIFIER_AUTO_TIER_UNRESOLVABLE = "CLASSIFIER_AUTO_TIER_UNRESOLVABLE"
 
@@ -1134,8 +1135,18 @@ def validate_project_review_policy_invariants(
 
     Public seam for tests and external callers that want to assert a
     freshly-built decision does not contradict C13-F hard minimums.
+    OWNER_DISABLED is an explicit owner exception; consumers additionally
+    require matching frozen run authorization before honoring that decision.
     Raises :class:`ReviewPolicyError` on violation.
     """
+    if decision.review_requirement_source is ReviewRequirementSource.OWNER_DISABLED:
+        if (
+            decision.independent_review_required
+            or decision.owner_explicit_review
+            or decision.review_skip_reason != "owner-disabled"
+        ):
+            raise ReviewPolicyError("Invalid owner-disabled review decision")
+        return
     if decision.is_autonomous and not decision.independent_review_required:
         raise ReviewPolicyError(
             "autonomous execution must require independent review"

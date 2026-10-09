@@ -24,7 +24,7 @@ SaberOps separates **semantic work** from **execution authority**:
 
 | AI models | Deterministic SaberOps control plane |
 | --- | --- |
-| Orchestrator role provides one bounded piece of initial task guidance | Validates exact provider/backend/model bindings |
+| Orchestrator holds the owner conversation and proposes worker tasks | Validates exact provider/backend/model bindings |
 | Worker model proposes implementation changes | Enforces routing admission, readiness, quota, and policy |
 | Optional reviewer provides an independent read-only assessment | Owns Git worktrees, gates, provenance, durable state, and acceptance |
 | Models never decide whether their own result is accepted | Fails closed when required evidence is missing |
@@ -36,7 +36,7 @@ SaberOps separates **semantic work** from **execution authority**:
 ```mermaid
 flowchart LR
     T[Task] --> C[SaberOps control plane]
-    C --> O[Orchestrator role<br/>bounded initial guidance]
+    C --> O[Orchestrator role<br/>conversation + bounded guidance]
     O --> C
     C --> R[Exact worker binding<br/>readiness / quota / policy]
     R --> W[Isolated Git worktree]
@@ -68,6 +68,49 @@ A normal run follows these boundaries:
 ### Exact execution identity
 
 SaberOps preserves provider, backend, and model identity from discovery through binding and dispatch. Same-named models from different upstreams remain distinct, and exact bindings prevent silent sibling-model or first-match substitution.
+
+### Conversational orchestration
+
+The workspace composer starts a persistent conversation with the selected
+Orchestrator. Questions and discussion receive replies without launching a
+worker. Implementation requests use the existing supervised worker flow under
+project policy; completed or failed runs are explained in the same conversation.
+Follow-ups retain the original objective and recent conversation context. Each
+implementation request creates a separate candidate run against the project's
+current base; previous unaccepted candidates are not integrated automatically.
+
+Conversations are stored separately from run evidence, with exact Orchestrator
+identity and invocation evidence. Page loads and message polling never invoke
+models. Interrupted replies remain visible and are not replayed automatically.
+The latest 20 messages, including the original objective, supply model context;
+the full transcript remains stored. Run screens can continue into a conversation.
+
+Result conversations receive the canonical candidate file list, matching worker
+handoff, persisted gate output and reviewer responses alongside the run report.
+These reads do not run project code or integrate changes. Long evidence is
+explicitly truncated, retaining log beginnings and final results within a shared
+budget. Worker prose remains advisory; gate/review records and acceptance evidence
+retain their existing authority. Fresh artifacts supersede earlier conversational
+claims about missing files or test output. A gate PASS does not prove browser
+verification, and a completed run remains separate from owner acceptance.
+
+A run blocked by UNKNOWN worker readiness exposes an explicit “Try” action for
+an exact worker still in the owner-picked routing chain. It launches a new run
+through the existing explicit-override authority and retains the failed run's
+frozen validation policy. It never marks installation as readiness; a successful
+execution records readiness for the exact connection. Automatic routing continues
+to refuse UNKNOWN readiness.
+
+A failed run with a saved candidate exposes **Continue from saved work**. This
+creates a linked repair run in a new worktree at that candidate; the failed run
+and the project's original checkout remain intact. It carries forward the task,
+frozen execution policy, gate errors, review findings, and any durable plan with
+completed prerequisites. Verification covers the full candidate against the
+original project base, with review enabled unless the owner explicitly disabled
+it. Acceptance remains a separate owner action. Repeated clicks open the same
+continuation. Changed or missing source work, unresolved execution effects, and
+live or uncertain previous workers block continuation. **Retry** starts fresh
+from the project base instead. Continue does not reopen a finished provider turn.
 
 ### Separate Orchestrator and worker roles
 
@@ -150,7 +193,84 @@ Start the local dashboard with an isolated first-run profile (binds to `127.0.0.
 orch ui --profile first-run
 ```
 
+At launch, SaberOps detects CLIs on PATH and in common user installation folders
+(including OpenCode and nvm), then runs supported native login-status commands
+with a timeout. The same PATH is used to launch workers. Antigravity (`agy`) is
+included in Access, with native model discovery. Installation and model catalogs
+do not prove login. Copilot verifies its existing account through the native
+`auth.getStatus` control request, alongside Codex and Claude's status commands.
+Unsupported CLI versions truthfully remain unverified.
+Startup does not send model prompts, read CLI credentials or choose routing.
+
+Before your first task, open Providers and refresh models. For OpenCode and
+Antigravity, choose an exact model and use **Verify model access**. This explicit
+action sends one small request using the CLI's existing account setup and consumes
+account allowance. It runs in a temporary directory with native tools denied,
+outside your project, with a 45-second deadline and process cleanup. A completed
+challenge response saves readiness and the tested model; installation, catalogs,
+empty output and exit zero alone never establish access. Checks are never
+started automatically. For sign-in, the page gives the provider's native login
+instructions. A failed test of another model retains earlier successful evidence.
+Readiness follows the existing connection-level 24-hour freshness policy; one
+model's success does not prove entitlement or remaining quota for every catalog
+model, particularly across OpenCode upstream providers.
+
+Access model refresh also supports Claude Code’s native initialize catalog and
+Copilot’s native `models.list` control request. These metadata-only calls use the
+installed CLI’s own account session, run in a temporary working directory, and
+never send an inference prompt. CLI/version failures retain stale evidence rather
+than manufacturing model names or authentication readiness.
+
+Saved API connections are visible directly in Access. OpenRouter discovery uses
+`https://openrouter.ai/api/v1/models`, including when a saved connection points at
+another OpenRouter API surface. Other OpenAI-compatible connections accept base,
+model-list, chat-completions, and responses URLs. OpenAI-compatible API models
+can execute directly in worker, reviewer and orchestrator roles after discovery
+and explicit selection in Routing. Subscription connections continue through
+their native CLI harnesses; an API connection never borrows subscription credentials.
+
+Configure an API connection with an `env:MY_API_KEY` reference, and make that
+variable available to the SaberOps process before starting it (including the
+service environment when launched as a service). Secret values are neither saved
+in connection/binding documents nor logged. `profile:`/`store:` references and
+other API protocols currently have no direct executor and remain unavailable.
+Verify API and Refresh models are metadata-only requests that may transmit the
+referenced API key to the configured endpoint. OpenRouter verification uses its
+read-only `/api/v1/key` endpoint. A generic `/models` success proves catalog
+reachability, not authentication or entitlement to every listed model. Missing
+credentials fail closed with `CREDENTIAL_MISSING`; discovery never selects a role.
+
+Direct API workers use a bounded tool loop with worktree file tools and command
+execution. Reviewers and orchestrators get read-only file tools. The existing
+monitored process boundary handles stop/deadline controls and records actual
+response usage; autonomous containment requirements continue to apply. API models
+must support Chat Completions and function tools; unsupported responses fail
+explicitly. These calls consume the API account's billing, independently of CLI
+subscriptions. API verification and model discovery perform no inference; the
+separate native **Verify model access** action is an explicit inference check.
+
+Claude account execution launches the installed `claude` CLI and retains its
+native tools, agent loop, and system prompt. It checks the CLI’s subscription
+login before sending the task, removes API/gateway/cloud-provider overrides from
+the child environment, and disables Fast mode. It never extracts OAuth tokens,
+implements an Anthropic HTTP transport, or retries a refused subscription call
+through a paid API. User/project settings are excluded for this connection so
+they cannot change the billing source; managed provider policies still apply.
+Tasks consume the account’s normal usage allowance. Disable usage credits in your
+Claude account if you require no additional charges: native CLI use alone cannot
+guarantee subscription terms or zero additional provider billing.
+
 Then use **First-run setup** in the UI to discover providers/models, choose Worker/Reviewer/Orchestrator roles, select the target repository, and configure project policy.
+
+Project policy includes **Quick**, **Balanced** (default), **Thorough**, **Max**,
+and manual settings. Quick disables gate and independent review. Balanced
+requires a configured gate and uses risk-adaptive review with 3 reviewer calls;
+Thorough requires gate and review with 5 calls. Max requires both without an
+owner-set reviewer-call limit, while runtime and failure bounds still apply.
+Manual settings let you choose gate required/disabled, review disabled/adaptive/
+required, and bounded/Max review. Required gates need a configured command or a
+Makefile `gate:` target. Settings freeze at run creation, including acceptance;
+skipped checks are recorded as SKIPPED, never PASS.
 
 ### Example provider-backed run
 
@@ -187,6 +307,7 @@ Run `orch <command> --help` for the full command and option reference. Runtime s
 | Adapter | Implemented in the codebase |
 | --- | :---: |
 | Codex | Yes |
+| Claude Code (native subscription CLI) | Yes |
 | Copilot | Yes |
 | Cline | Yes |
 | OpenCode | Yes |
@@ -219,6 +340,17 @@ pytest -q
 
 GitHub Actions runs the same checks on Python 3.12 without provider credentials or model calls.
 
+Frontend iteration follows the five modes in [AGENTS.md](AGENTS.md), with current
+UI direction and source evidence in [DESIGN.md](src/saberops/DESIGN.md).
+With the existing development environment and Node.js available,
+`bash scripts/gate-ui-fast.sh` runs the presentation-only template/asset checks;
+`bash scripts/gate-full.sh` preserves the complete checks above for UI FINALIZE.
+The wrappers use `.venv/bin/python` when present, otherwise the active `python`.
+Use the fast gate only within the documented UI scope and after inspecting the
+rendered result. The approved October reconstruction keeps the FastAPI/Jinja
+frontend, with shared primitives and responsive light/dark styles in
+`workspace.css`; no frontend build step is required.
+
 ### Repository layout
 
 ```text
@@ -243,3 +375,162 @@ THIRD_PARTY_NOTICES.md   shipped third-party notices
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+### Worker routing policy
+
+Worker selection uses one ordered chain per tier: T1, T2 and T3. Training
+classifications and peak-hour scheduling no longer restrict workers or reviewers.
+Existing training flags are accepted for compatibility and do not change admission.
+Provider readiness, quota, capabilities, exact bindings and owner model enrollment
+still apply. Schema 2 routing files contain `T1.default`, `T2.default` and
+`T3.default`. Legacy schema 1 chains merge by stable union: retain primary order
+and append unique models from the other scopes. Historical run snapshots keep
+their original serialized provenance and hash checks.
+
+### CLI usage in the local dashboard
+
+The Usage & quota page detects Codex, Claude Code, GitHub Copilot, OpenCode,
+Antigravity and Cline; Gemini CLI appears when installed. Account limits use the
+CLI's own supported metadata interface where available. Local token activity
+comes from numeric session records on this machine and is shown separately from
+SaberOps's cross-project recorded calls. Local activity is not a subscription bill
+or an account-wide allowance. Missing counters remain unknown; large histories
+are explicitly labeled as samples. Refresh uses no prompts, reads no credential
+files, and does not change saved routing quotas.
+
+Native limit interfaces: [Codex app server](https://developers.openai.com/codex/app-server)
+and [Copilot usage and billing metrics](https://docs.github.com/en/copilot/how-tos/copilot-sdk/features/usage-and-billing).
+On POSIX systems, Claude Code and Antigravity account limits are read through
+their native [/usage](https://code.claude.com/docs/en/costs)
+[panels](https://antigravity.google/docs/cli/commands/usage). Each bounded query
+uses an isolated empty workspace and submits only `/usage`, without inference.
+`pyte` reconstructs the terminal screen; only quota percentages and displayed
+reset labels enter the dashboard. CLI layout changes or login dialogs can make
+the query unavailable; the dashboard retains any last-known observation with
+its original timestamp. Cline and OpenCode providers other than Go still need
+their own account quota interface; local token totals stay inside Activity details.
+
+OpenCode Go rolling, weekly and monthly account percentages are queried through
+an ephemeral OpenCode auth plugin while running `opencode models opencode-go`.
+The CLI supplies its saved Go authentication to the plugin; SaberOps receives
+only percentages and reset dates. The read-only endpoint is implemented in
+[OpenCode's own source](https://github.com/anomalyco/opencode/blob/dev/packages/console/app/src/routes/zen/go/v1/usage.ts).
+No inference runs or permanent plugin/configuration changes are made. Connect
+Go in OpenCode first; missing connections, rejected keys, and missing Go
+subscriptions are reported separately.
+
+### Chat and agent consoles
+
+The interface follows [Apple-guided UI design principles](docs/ui-design-principles.md)
+within SaberOps' own web design. These principles are part of AGENTS.md and
+DESIGN.md and guide every frontend change and browser verification.
+
+Long replies expand on demand. Follow live tracks active calls, and session
+metadata stays under Session details. Console excerpts remain bounded
+(4 MiB per call, recent excerpts, at most 24 calls shown). The separate SQLite
+session journal retains complete output and structured events, control transitions,
+and one immutable outcome per invocation, independently of those display limits.
+Session details includes Download full session history for newly recorded calls. Older calls
+show recorded results; polling never dispatches work.
+
+The Chat view contains conversation only. The right **Agents** sidebar lists
+orchestrator, worker and reviewer calls, including finished calls. Expand a card
+for output, final response, controls and session details; **All consoles** expands
+the sidebar. The run view selector keeps every tab reachable when the sidebar is
+open. **Pop out console** opens a separate browser view; **View log in terminal**
+is a read-only transcript viewer. **Chat in terminal** is the app's synchronized
+text conversation, separate from a provider-native CLI.
+
+Native access uses explicit provider-reported session IDs. OpenCode's live
+**Open native CLI** attaches through the execution owner's guarded server;
+provider messages join the same manual queue. Other CLI providers use **Take over
+in CLI**: the existing owner stops its invocation before the terminal resumes
+that exact saved session. Codex, Claude Code, Antigravity, Cline and GitHub Copilot
+have provider-specific launch recipes. Missing IDs, missing installations,
+unconfirmed shutdown and unsupported isolated/backend configurations show a reason
+instead of opening a new session. **Open all in tmux** opens each unique available
+session as a pane in the shared `saberops-clients` workspace and attaches a visible
+desktop terminal. **Add to tmux** adds or selects one agent in that workspace;
+**View tmux** shows it without starting another provider session. Existing clients
+are reused, and unavailable calls are reported individually. If the desktop
+terminal cannot open, the message explains why and offers the manual fallback
+`tmux attach -t saberops-clients`.
+Terminal clients never own a SaberOps run. App turns and return to automation are
+blocked while a managed resumed native CLI owns the session.
+
+**Reopen saved CLI** remains available after a confirmed finished invocation.
+Removed reviewer worktrees are restored from the recorded Git tree; finished
+access uses an inspection copy and read-only provider settings. Reopening does
+not restart the run, overwrite its completion record, or replace gate/review
+results. Recent native terminal output is shown separately; downloaded history
+includes its complete captured output. Saved provider history may have been
+removed by the provider or user, in which case the provider reports the failure.
+Console output can be resized vertically; **Expand console** opens a larger
+reading view that follows live output and closes with its Close action or Escape.
+The shared tmux terminal opens maximized. In tmux, press **Ctrl+B, then Z** to
+expand the selected agent pane; repeat to return to all panes.
+Mouse support is enabled for this workspace. For terminal history, press
+**Ctrl+B, then [**, scroll with Page Up/Down, and press **Q** to return to input.
+Each provider uses its own native interface, with colors and terminal resizing
+preserved; the launchers remove inherited headless display flags. Reopen existing
+CLI clients to apply changed display settings. Historical orchestrator JSON stays
+in the provider history; resumed Claude orchestrator chat is guided to use natural
+replies for new messages. These display settings do not change run authority,
+provider permissions or subscription authentication.
+
+Native Claude/Codex/Copilot user/assistant messages are mirrored when the local
+provider history exposes supported structured records. Cline and Antigravity
+native TUI output is captured, but this does not claim structured chat-message
+mirroring for those providers. Use **Chat in terminal** for guaranteed message
+synchronization. Unmanaged clients opened outside SaberOps remain outside its
+ownership guard. Native settings retain subscription login for Claude and
+Antigravity, exclude API billing overrides, and disable Claude fast mode. Provider
+account billing preferences still belong to the provider. See
+[session architecture](docs/session-architecture.md) for the capability boundary.
+
+A compatible Claude orchestrator CLI can stay open while you send app messages
+through its preview Channels feature. Reopen an existing client once to connect
+the local bridge; the composer then says **shared native CLI**. Both interfaces
+use that same provider session, and work requests go through SaberOps' existing
+worker workflow. A disconnected bridge never silently launches a second agent or
+repeats an uncertain request. This capability is provider-specific: other native
+clients keep their handoff rules. The bridge uses native subscription login and
+adds no API billing route. Account-backed message delivery remains subject to
+the installed CLI's preview support and requires live validation.
+
+For a live supported call with a reported native session, Take control requests
+interruption by its existing execution owner. Manual input is enabled only after
+the process group is confirmed stopped or the shared provider session confirms idle.
+Automation stays held before returning
+to gates, review, commits or further dispatch. App and synchronized CLI manual
+messages share a durable queue and conversation; worker/reviewer messages are
+labelled separately from orchestrator instructions. The adapter's frozen account,
+model, worktree and permissions remain in force. No client signals an arbitrary
+PID or launches a second writer.
+
+Return to automation refuses a pending manual reply and verifies the worktree
+revision and branch. Dirty file edits are allowed and the original assignment
+must inspect and validate them. Manual reviewer replies never become formal
+verdicts; returning starts a fresh formal review. The original invocation deadline
+continues during manual control. Failure, expiry or a dead execution owner does
+not automatically resume it. Closing a manual terminal keeps automation held;
+`/resume` returns control, and `/interrupt` or Ctrl+C while waiting interrupts a
+manual reply. Older calls without captured native IDs cannot be taken over.
+
+Changes includes a Total changes card above per-file cards, with exact full Git
+addition/deletion totals and the combined expandable red/green numbered patch.
+Binary files are excluded from line counts and identified. Bounded patches are
+labelled; totals remain exact when patch output is truncated. Renames appear as
+deletion/addition. External diff/textconv programs are disabled. Acceptance and
+canonical candidate selection are unchanged.
+
+### Fixed-source candidate verification
+
+Candidate gates and independent reviews run in separate detached verification
+worktrees at the exact candidate commit. Their tree hash is recorded in evidence.
+Uncommitted candidate changes block snapshot creation; changes to the snapshot
+or candidate during verification invalidate that result. This prevents terminal
+edits in the implementation worktree from changing the code under an active
+candidate gate or review. Acceptance remains tied to the verified commit and its
+authoritative post-integration gate. A transient source edit cannot contaminate
+a gate that runs against a separate fixed checkout.

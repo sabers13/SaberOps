@@ -1,54 +1,8 @@
-"""Canonical training/data-policy decision (R2-B single authority).
+"""Historical training evidence and compatibility helpers.
 
-Worker routing (:mod:`saberops.routing`), C07 preflight
-(:mod:`saberops.control_plane.preflight`) and reviewer dispatch
-(:mod:`saberops.review`, via :mod:`saberops.dispatch`) must reach the
-*same* candidate-level data-policy decision.  This module owns it.
-
-Semantics (over the Run's already-frozen ``training_allowed`` bit and the
-best frozen candidate training-requirement evidence):
-
-* ``training_allowed == True``: data policy excludes nothing.  Other
-  readiness/quota/capability/provider policies still apply normally.
-* ``training_allowed == False``: ``FALSE`` is permitted; ``TRUE`` and
-  ``UNKNOWN`` are denied.  ``UNKNOWN`` is never interpreted as safe
-  (fail closed) under Denied.
-
-Evidence resolution for one candidate (R2-B.1 static authority):
-
-0. the static v1 compatibility knowledge (``TRAINING_REQUIRED_CANDIDATES``
-   plus the ``"muse"`` heuristic, then the closed
-   ``ALLOWED_CANDIDATES`` registry): known training-required is
-   ``TRUE``, known static is ``FALSE``.  A known static classification
-   is authoritative and returned exactly: frozen approvals, carried
-   :attr:`WorkerCandidate.training_required` values, explicit
-   requirements, and any other dynamic evidence never change it.
-   Static approvals still carry ``binding_id`` and other frozen
-   evidence; they are not an alternate training-policy authority.
-
-For identities with no known static classification (non-static
-owner-approved/discovered ids and unknown custom ids), first hit wins:
-
-1. an explicitly passed, normalized ``TRUE``/``FALSE``/``UNKNOWN``
-   requirement (callers that already resolved frozen evidence);
-2. the frozen classification carried on the candidate itself
-   (:attr:`WorkerCandidate.training_required`, attached at chain
-   resolution from the Run's frozen routing snapshot);
-3. the frozen routing snapshot's owner-approved record
-   (``DynamicCandidate.training_required``) for this
-   ``provider/model`` identity;
-4. anything else is ``UNKNOWN`` (fail closed under Denied).
-
-The static tables stay authoritative for v1 behind this function (R6
-owns their retirement); no call site reimplements them.  Mutable live
-discovery/catalog/routing state is never consulted: only the frozen
-candidate, the frozen snapshot, and the frozen static tables.
-
-The denial reason vocabulary is unchanged: data-policy denial stays
-``TRAINING_PERMISSION_DENIED`` at the C07 boundary and projects to the
-compatibility skip ``training_policy_excludes_model``
-(``SKIP_TRAINING_POLICY``).  Denial is never a provider failure, a
-worker failure, or capability-escalation evidence.
+Training-based admission restrictions have been retired. All classifications
+are permitted; stored requirement evidence remains readable for old snapshots.
+Provider, binding, readiness, capability and quota checks remain independent.
 """
 
 from __future__ import annotations
@@ -109,9 +63,7 @@ def approved_training_requirement(
     for entry in approved:
         if getattr(entry, "candidate_id", None) != wanted:
             continue
-        return normalize_training_requirement(
-            str(getattr(entry, "training_required", "UNKNOWN"))
-        )
+        return normalize_training_requirement(str(getattr(entry, "training_required", "UNKNOWN")))
     return None
 
 
@@ -132,9 +84,7 @@ def static_training_requirement(candidate: Any) -> TrainingRequirement:
 
     cid = candidate_id_of(candidate)
     model = str(getattr(candidate, "model", "")).strip()
-    if requires_training_permission(cid) or (
-        model and requires_training_permission(model)
-    ):
+    if requires_training_permission(cid) or (model and requires_training_permission(model)):
         return REQUIREMENT_TRUE
     if cid.strip().lower() in ALLOWED_CANDIDATES:
         return REQUIREMENT_FALSE
@@ -163,9 +113,7 @@ def training_requirement_for(
     explicit = normalize_training_requirement(training_required)
     if explicit is not None:
         return explicit
-    carried = normalize_training_requirement(
-        getattr(candidate, "training_required", None)
-    )
+    carried = normalize_training_requirement(getattr(candidate, "training_required", None))
     if carried is not None:
         return carried
     approved = approved_training_requirement(snapshot, candidate_id_of(candidate))
@@ -181,22 +129,9 @@ def is_training_permitted(
     snapshot: Any | None = None,
     training_required: str | None = None,
 ) -> bool:
-    """Return True iff data policy permits the candidate under the Run bit.
-
-    When ``training_allowed`` is True, data policy never excludes.
-    Under Denied only ``FALSE`` is permitted; ``TRUE`` and ``UNKNOWN``
-    are denied.  ``candidate`` may be a :class:`WorkerCandidate` or an
-    already-resolved requirement string.
-    """
-    if training_allowed:
-        return True
-    if isinstance(candidate, str) and candidate.strip().upper() in _REQUIREMENTS:
-        requirement = normalize_training_requirement(candidate)
-    else:
-        requirement = training_requirement_for(
-            candidate, snapshot=snapshot, training_required=training_required
-        )
-    return requirement == REQUIREMENT_FALSE
+    """Always permit: legacy training flags no longer restrict execution."""
+    # Compatibility arguments retain historical evidence; this filter is retired.
+    return True
 
 
 def training_excluded(

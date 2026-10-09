@@ -149,3 +149,101 @@ def test_r0b_cli_installed_is_not_proven_readiness(
     assert "Not verified yet" in page.text
     readiness_cells = page.text.count("Not verified yet")
     assert readiness_cells == len(ACCOUNT_BACKENDS)
+
+
+@pytest.mark.parametrize(
+    ("state", "reason", "age_hours", "authenticated"),
+    [
+        (ProviderReadiness.READY, "READY", 0, "TRUE"),
+        (ProviderReadiness.READY, "READY", 25, "UNKNOWN"),
+        (ProviderReadiness.NOT_READY, "NOT_AUTHENTICATED", 0, "FALSE"),
+        # Canonical freshness expires only positive evidence. A recorded
+        # login failure remains explicit until a later probe supersedes it.
+        (ProviderReadiness.NOT_READY, "NOT_AUTHENTICATED", 25, "FALSE"),
+        (ProviderReadiness.NOT_READY, "BACKEND_NOT_INSTALLED", 0, "UNKNOWN"),
+        (ProviderReadiness.UNKNOWN, "CAPABILITY_UNKNOWN", 0, "UNKNOWN"),
+    ],
+)
+def test_r0b_authentication_display_uses_fresh_evidence(
+    isolated_xdg: None,
+    tmp_path: Path,
+    state: ProviderReadiness,
+    reason: str,
+    age_hours: int,
+    authenticated: str,
+) -> None:
+    """Login display follows canonical evidence, including positive expiry."""
+    connection_id = "codex-chatgpt-account"
+    observed = (
+        (datetime.now(UTC) - timedelta(hours=age_hours))
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+    store_path = Path(os.environ["ORCH_READINESS_STORE"])
+    _seed(store_path, [_evidence(connection_id, state, reason, observed)])
+
+    page = _client(tmp_path).get("/access")
+    assert page.status_code == 200
+    card = page.text.split(f'data-od-id="provider-{connection_id}"', 1)[1].split(
+        "</article>", 1
+    )[0]
+    assert f"<dt>Authenticated</dt><dd>{authenticated}</dd>" in card
+
+
+def test_r0b_verified_login_does_not_imply_execution_adapter(
+    isolated_xdg: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verified login does not invent an adapter when the registry lacks one."""
+    connection_id = "claude-code-subscription"
+    observed = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    store_path = Path(os.environ["ORCH_READINESS_STORE"])
+    _seed(store_path, [_evidence(connection_id, ProviderReadiness.READY, "READY", observed)])
+
+    from saberops.workers import AdapterRegistry
+
+    monkeypatch.setattr(AdapterRegistry, "default", lambda: AdapterRegistry([]))
+    client = _client(tmp_path)
+    page = client.get("/access")
+    assert page.status_code == 200
+    card = page.text.split(f'data-od-id="provider-{connection_id}"', 1)[1].split(
+        "</article>", 1
+    )[0]
+    assert "<dt>Authenticated</dt><dd>TRUE</dd>" in card
+    assert "<dt>Execution adapter</dt><dd>Not implemented</dd>" in card
+
+
+@pytest.mark.parametrize("installed", [True, False])
+def test_r0b_other_installed_clis_do_not_claim_readiness(
+    isolated_xdg: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, installed: bool
+) -> None:
+    """Installed adapters without account descriptors remain visible and unverified."""
+    import shutil
+
+    monkeypatch.setattr(
+        shutil,
+        "which",
+        lambda executable: f"/fake/{executable}"
+        if installed and executable == "cline"
+        else None,
+    )
+    page = _client(tmp_path).get("/access")
+    assert page.status_code == 200
+    for provider in ("cline",):
+        assert (f'data-od-id="installed-cli-{provider}"' in page.text) is installed
+    if installed:
+        assert "Login and available models remain unverified here." in page.text
+    else:
+        assert 'data-od-id="other-installed-clis"' not in page.text
+
+
+def test_model_refresh_is_unavailable_without_native_listing(
+    isolated_xdg: None, tmp_path: Path
+) -> None:
+    page = _client(tmp_path).get("/access")
+    assert page.status_code == 200
+    for descriptor in ACCOUNT_BACKENDS:
+        card = page.text.split(
+            f'data-od-id="provider-{descriptor.connection_id}"', 1
+        )[1].split("</article>", 1)[0]
+        disabled_listing = 'disabled title="Automatic model discovery is unavailable for this CLI"'
+        assert (disabled_listing in card) == (not descriptor.has_model_listing)

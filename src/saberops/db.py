@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 import uuid
@@ -70,6 +71,7 @@ from saberops.ownership import (
     probe_liveness,
 )
 from saberops.quota import derive_routing_state, normalize_quota_observation
+from saberops.run_titles import clean_title, fallback_title, unique_title
 from saberops.wake import notify_run
 
 DB_SCHEMA_VERSION: Final[int] = 1
@@ -598,6 +600,11 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_checks_attempt_id ON checks(attempt_id);
                 CREATE INDEX IF NOT EXISTS idx_reviews_run_id ON reviews(run_id);
                 CREATE INDEX IF NOT EXISTS idx_events_run_id ON events(run_id);
+
+                CREATE TABLE IF NOT EXISTS run_continuations (
+                    parent_run_id TEXT PRIMARY KEY REFERENCES runs(id),
+                    child_run_id TEXT NOT NULL UNIQUE REFERENCES runs(id)
+                );
 
                 -- R3-E2: durable non-blocking owner actions (detached Review /
                 -- Accept).  One row per requested action, fenced to the exact
@@ -1169,7 +1176,14 @@ class Database:
                 # Additive, non-destructive migration for databases created before the
                 # per-run effective config column existed. New databases already include
                 # it via the CREATE TABLE statement above.
+                check_columns = {
+                    str(row["name"]) for row in conn.execute("PRAGMA table_info(checks)")
+                }
+                if "skipped" not in check_columns:
+                    conn.execute("ALTER TABLE checks ADD COLUMN skipped INTEGER NOT NULL DEFAULT 0")
                 columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(runs)")}
+                if "display_title" not in columns:
+                    conn.execute("ALTER TABLE runs ADD COLUMN display_title TEXT")
                 if "config_json" not in columns:
                     conn.execute("ALTER TABLE runs ADD COLUMN config_json TEXT")
                 if "review_state_json" not in columns:
@@ -1178,9 +1192,7 @@ class Database:
                 # Existing rows keep NULL and remain readable; reconstruction
                 # falls back to the conservative decision.
                 if "review_risk_decision_json" not in columns:
-                    conn.execute(
-                        "ALTER TABLE runs ADD COLUMN review_risk_decision_json TEXT"
-                    )
+                    conn.execute("ALTER TABLE runs ADD COLUMN review_risk_decision_json TEXT")
                 if "routing_snapshot_json" not in columns:
                     conn.execute("ALTER TABLE runs ADD COLUMN routing_snapshot_json TEXT")
                 if "control_plane_snapshot_json" not in columns:
@@ -1219,9 +1231,7 @@ class Database:
                     "reasoning_effort",
                 ):
                     if dispatch_columns and _c11d_col not in dispatch_columns:
-                        conn.execute(
-                            f"ALTER TABLE dispatch_evidence ADD COLUMN {_c11d_col} TEXT"
-                        )
+                        conn.execute(f"ALTER TABLE dispatch_evidence ADD COLUMN {_c11d_col} TEXT")
                 # Project/objective provenance.  Existing rows keep NULL and stay
                 # readable; they are never retro-attached to a project.
                 for column in ("project_id", "project_identity_json", "objective_id"):
@@ -1268,6 +1278,9 @@ class Database:
                         f"unsupported database schema at {self.db_path}: "
                         f"user_version={current_version}, expected {DB_SCHEMA_VERSION}"
                     )
+                if not conn.in_transaction:
+                    conn.execute("BEGIN IMMEDIATE")
+                self._backfill_run_titles(conn)
                 conn.commit()
         except sqlite3.OperationalError as exc:
             if "readonly" not in str(exc).lower():
@@ -1336,7 +1349,130 @@ class Database:
                 ):
                     raise
                 self._insert_run_pre_provenance(conn, run)
+            self._save_run_title(
+                conn, run.id, run.display_title or fallback_title(run.task, run.target_repo)
+            )
+            reference = json.loads(run.config_json).get("continuation") if run.config_json else None
+            if reference:
+                inserted = conn.execute(
+                    "INSERT OR IGNORE INTO run_continuations VALUES (?,?)",
+                    (reference["parent_run_id"], run.id),
+                )
+                if not inserted.rowcount:
+                    from saberops.continuation import ContinuationExists
+
+                    child = conn.execute(
+                        "SELECT child_run_id FROM run_continuations WHERE parent_run_id=?",
+                        (reference["parent_run_id"],),
+                    ).fetchone()
+                    assert child is not None
+                    raise ContinuationExists(str(child[0]))
             conn.commit()
+
+    def get_continuation(self, parent_id: str) -> str | None:
+        with self._get_connection() as conn:
+            try:
+                row = conn.execute(
+                    "SELECT child_run_id FROM run_continuations WHERE parent_run_id=?",
+                    (parent_id,),
+                ).fetchone()
+            except sqlite3.OperationalError as exc:
+                if "no such table" in str(exc):
+                    return None
+                raise
+        return str(row[0]) if row else None
+
+    def inherit_continuation_plan(self, parent_id: str, child_id: str, sha: str) -> None:
+        """Atomically clone the frozen plan footprint, keeping completed prerequisites."""
+        with self._get_connection() as conn:
+            parent = conn.execute("SELECT * FROM run_plans WHERE run_id=?", (parent_id,)).fetchone()
+            if parent is None:
+                return
+            if conn.execute("SELECT 1 FROM run_plans WHERE run_id=?", (child_id,)).fetchone():
+                return  # Recovery adopts the already durable child plan.
+            steps = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT * FROM plan_steps WHERE run_id=? ORDER BY ordering", (parent_id,)
+                )
+            ]
+            packages = [
+                dict(r)
+                for r in conn.execute("SELECT * FROM work_packages WHERE run_id=?", (parent_id,))
+            ]
+            step_ids = {r["id"]: child_id + ":step:" + r["id"] for r in steps}
+            package_ids = {r["id"]: child_id + ":package:" + r["id"] for r in packages}
+            completed = {r["id"] for r in steps if r["status"] == "COMPLETED"}
+            plan = dict(parent)
+            now = current_iso_timestamp()
+            plan.update(
+                id=child_id + ":continued-plan",
+                run_id=child_id,
+                status="COMPLETED" if len(completed) == len(steps) else "ACTIVE",
+                created_at=now,
+                updated_at=now,
+            )
+
+            def insert(table: str, row: dict[str, Any]) -> None:
+                columns = ",".join('"' + key.replace('"', '""') + '"' for key in row)
+                marks = ",".join("?" for _ in row)
+                conn.execute(f"INSERT INTO {table} ({columns}) VALUES ({marks})", tuple(row.values()))
+
+            insert("run_plans", plan)
+            for step in steps:
+                old_id = step["id"]
+                deps = json.loads(step["dependency_ids_json"])
+                step.update(
+                    id=step_ids[old_id],
+                    run_id=child_id,
+                    plan_id=plan["id"],
+                    dependency_ids_json=json.dumps([step_ids[d] for d in deps]),
+                    work_package_id=package_ids[step["work_package_id"]],
+                    status="COMPLETED"
+                    if old_id in completed
+                    else "READY"
+                    if all(d in completed for d in deps)
+                    else "PENDING",
+                    attempt_id=None,
+                    review_id=None,
+                    blocker=None,
+                    error=None,
+                    created_at=now,
+                    updated_at=now,
+                )
+                insert("plan_steps", step)
+            for package in packages:
+                package.update(
+                    id=package_ids[package["id"]],
+                    run_id=child_id,
+                    plan_step_id=step_ids[package["plan_step_id"]],
+                    base_candidate_sha=sha,
+                    dependency_package_ids_json=json.dumps(
+                        [package_ids[d] for d in json.loads(package["dependency_package_ids_json"])]
+                    ),
+                    created_at=now,
+                    updated_at=now,
+                )
+                if package["context_capsule_json"]:
+                    capsule = json.loads(package["context_capsule_json"])
+                    capsule["base_candidate_sha"] = sha
+                    package["context_capsule_json"] = json.dumps(capsule)
+                insert("work_packages", package)
+            conn.execute(
+                "INSERT INTO events(run_id,event_type,payload_json,created_at) VALUES (?,?,?,?)",
+                (
+                    child_id,
+                    "plan_created",
+                    json.dumps(
+                        {
+                            "plan_id": plan["id"],
+                            "package_count": len(packages),
+                            "continued_from": parent_id,
+                        }
+                    ),
+                    current_iso_timestamp(),
+                ),
+            )
 
     def _insert_run_pre_provenance(self, conn: sqlite3.Connection, run: Run) -> None:
         """Insert into a database predating the provenance columns.
@@ -1494,6 +1630,7 @@ class Database:
                 gate_command=str(row["gate_command"]),
                 status=RunStatus(str(row["status"])),
                 created_at=str(row["created_at"]),
+                display_title=_optional_text(row, "display_title"),
                 completed_at=str(row["completed_at"]) if row["completed_at"] else None,
                 final_attempt_id=str(row["final_attempt_id"]) if row["final_attempt_id"] else None,
                 result_summary=str(row["result_summary"]) if row["result_summary"] else None,
@@ -1531,6 +1668,54 @@ class Database:
                 (status.value, completed_at, final_attempt_id, result_summary, run_id),
             )
             conn.commit()
+
+    def set_run_title(self, run_id: str, title: str) -> None:
+        """Persist a display label without modifying objective or execution state."""
+        with self._get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._save_run_title(conn, run_id, title)
+            conn.commit()
+
+    @staticmethod
+    def _save_run_title(conn: sqlite3.Connection, run_id: str, title: str) -> None:
+        row = conn.execute("SELECT target_repo, task FROM runs WHERE id=?", (run_id,)).fetchone()
+        if row is None:
+            return
+        existing = [
+            str(item[0])
+            for item in conn.execute(
+                "SELECT display_title FROM runs WHERE target_repo=? AND id<>? AND display_title IS NOT NULL",
+                (row["target_repo"], run_id),
+            )
+        ]
+        label = clean_title(title, row["target_repo"]) or fallback_title(
+            row["task"], row["target_repo"]
+        )
+        quoted = re.search(r'[“\"]([^”\"]+)[”\"]', row["task"])
+        if quoted and label.casefold() == quoted.group(1).strip(" ,.:;").casefold():
+            label = fallback_title(row["task"], row["target_repo"])
+        conn.execute(
+            "UPDATE runs SET display_title=? WHERE id=?", (unique_title(label, existing), run_id)
+        )
+
+    @staticmethod
+    def _backfill_run_titles(conn: sqlite3.Connection) -> None:
+        """Upgrade legacy labels once without rewriting objective/provenance."""
+        used: dict[str, list[str]] = {}
+        for row in conn.execute(
+            "SELECT id, task, target_repo, display_title FROM runs ORDER BY created_at, id"
+        ).fetchall():
+            label = row["display_title"]
+            quoted = re.search(r"[“\"]([^”\"]+)[”\"]", row["task"])
+            if not label or (
+                quoted and label.casefold() == quoted.group(1).strip(" ,.:;").casefold()
+            ):
+                label = fallback_title(row["task"], row["target_repo"])
+            names = used.setdefault(row["target_repo"], [])
+            label = unique_title(label, names)
+            names.append(label)
+            if label != row["display_title"]:
+                conn.execute("UPDATE runs SET display_title=? WHERE id=?", (label, row["id"]))
 
     def update_run_tier(self, run_id: str, tier: Tier) -> None:
         """Persist the concrete tier currently executing for an auto-routed run."""
@@ -2587,6 +2772,7 @@ class Database:
                         gate_command=str(row["gate_command"]),
                         status=RunStatus(str(row["status"])),
                         created_at=str(row["created_at"]),
+                        display_title=_optional_text(row, "display_title"),
                         completed_at=str(row["completed_at"]) if row["completed_at"] else None,
                         final_attempt_id=str(row["final_attempt_id"])
                         if row["final_attempt_id"]
@@ -2755,8 +2941,8 @@ class Database:
             conn.execute(
                 """
                 INSERT INTO checks (
-                    id, attempt_id, gate_command, exit_code, stdout, stderr, passed, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    id, attempt_id, gate_command, exit_code, stdout, stderr, passed, created_at, skipped
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     check.id,
@@ -2767,6 +2953,7 @@ class Database:
                     check.stderr,
                     1 if check.passed else 0,
                     check.created_at,
+                    int(check.skipped),
                 ),
             )
             conn.commit()
@@ -2790,6 +2977,7 @@ class Database:
                         stderr=str(row["stderr"]),
                         passed=bool(row["passed"]),
                         created_at=str(row["created_at"]),
+                        skipped=bool(row["skipped"]),
                     )
                 )
             return results
@@ -2816,6 +3004,7 @@ class Database:
                 stderr=str(row["stderr"]),
                 passed=bool(row["passed"]),
                 created_at=str(row["created_at"]),
+                        skipped=bool(row["skipped"]),
             )
             for row in rows
         ]
@@ -2952,6 +3141,19 @@ class Database:
             )
             for row in rows
         ]
+
+    def aggregate_provider_usage(self) -> list[dict[str, Any]]:
+        """Numeric recorded call activity by provider; unknown tokens stay NULL."""
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT provider, count(*) AS calls, "
+                "sum(input_tokens) AS input_tokens, sum(output_tokens) AS output_tokens, "
+                "sum(cached_tokens) AS cached_tokens, max(created_at) AS updated_at, "
+                "sum(CASE WHEN input_tokens IS NULL OR output_tokens IS NULL "
+                "THEN 1 ELSE 0 END) AS unknown_calls "
+                "FROM model_call_usage GROUP BY provider ORDER BY provider"
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def aggregate_model_call_usage(self, run_id: str) -> dict[str, object]:
         """Return deterministic run-level token totals and coverage."""

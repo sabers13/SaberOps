@@ -43,3 +43,6 @@ htmlcov/
 # Orchestrator runtime state
 .orch/
 .orch-worktrees/
+
+# Local browser automation artifacts (MCP remains globally configured)
+.playwright-mcp/

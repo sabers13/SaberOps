@@ -26,7 +26,7 @@ import os
 import re
 import tempfile
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import Final
@@ -84,6 +84,10 @@ class ProjectSettings:
     gate_command: str | None = None
     data_policy: DataPolicy | None = None
     accept_target_branch: str | None = None
+    gate_enabled: bool = True
+    review_disabled: bool = False
+    review_mode: str | None = None
+    review_limit: int | None = None
 
     def as_dict(self) -> dict[str, object]:
         """Serialize for durable storage (only explicit decisions persist)."""
@@ -94,6 +98,11 @@ class ProjectSettings:
             payload["data_policy"] = self.data_policy.value
         if self.accept_target_branch is not None:
             payload["accept_target_branch"] = self.accept_target_branch
+        payload.update(gate_enabled=self.gate_enabled, review_disabled=self.review_disabled)
+        if self.review_mode is not None:
+            payload["review_mode"] = self.review_mode
+        if self.review_limit is not None:
+            payload["review_limit"] = self.review_limit
         return payload
 
 
@@ -108,8 +117,7 @@ def _coerce_data_policy(value: object, source: str) -> DataPolicy:
     except ValueError as exc:
         known = ", ".join(m.value for m in DataPolicy)
         raise ProjectSettingsError(
-            f"project settings at {source}: unknown data policy {value!r}; "
-            f"expected one of {known}"
+            f"project settings at {source}: unknown data policy {value!r}; expected one of {known}"
         ) from exc
 
 
@@ -131,21 +139,16 @@ def _coerce_branch(value: object, source: str) -> str:
         raise ProjectSettingsError(f"project settings at {source}: target branch is empty")
     if len(text) > _MAX_BRANCH_LENGTH:
         raise ProjectSettingsError(
-            f"project settings at {source}: target branch exceeds "
-            f"{_MAX_BRANCH_LENGTH} characters"
+            f"project settings at {source}: target branch exceeds {_MAX_BRANCH_LENGTH} characters"
         )
     if text == "HEAD" or text.startswith("-") or ".." in text or " " in text:
-        raise ProjectSettingsError(
-            f"project settings at {source}: invalid target branch {value!r}"
-        )
+        raise ProjectSettingsError(f"project settings at {source}: invalid target branch {value!r}")
     return text
 
 
 def _parse_document(data: object, source: str) -> ProjectSettings:
     if not isinstance(data, dict):
-        raise ProjectSettingsError(
-            f"project settings at {source}: payload must be a JSON object"
-        )
+        raise ProjectSettingsError(f"project settings at {source}: payload must be a JSON object")
     version = data.get("version")
     if version != _SETTINGS_SCHEMA_VERSION:
         raise ProjectSettingsError(
@@ -155,13 +158,24 @@ def _parse_document(data: object, source: str) -> ProjectSettings:
     gate_raw = data.get("gate_command")
     data_raw = data.get("data_policy")
     branch_raw = data.get("accept_target_branch")
+    gate_enabled = data.get("gate_enabled", True)
+    review_disabled = data.get("review_disabled", False)
+    review_mode = data.get("review_mode")
+    review_limit = data.get("review_limit")
+    if (
+        type(gate_enabled) is not bool
+        or type(review_disabled) is not bool
+        or review_mode not in (None, "bounded", "max")
+        or (review_limit is not None and (type(review_limit) is not int or review_limit < 1))
+    ):
+        raise ProjectSettingsError("Invalid project workflow policy")
     return ProjectSettings(
-        gate_command=(
-            _coerce_gate_command(gate_raw, source) if gate_raw is not None else None
-        ),
-        data_policy=(
-            _coerce_data_policy(data_raw, source) if data_raw is not None else None
-        ),
+        gate_enabled=gate_enabled,
+        review_disabled=review_disabled,
+        review_mode=review_mode,
+        review_limit=review_limit,
+        gate_command=(_coerce_gate_command(gate_raw, source) if gate_raw is not None else None),
+        data_policy=(_coerce_data_policy(data_raw, source) if data_raw is not None else None),
         accept_target_branch=(
             _coerce_branch(branch_raw, source) if branch_raw is not None else None
         ),
@@ -179,15 +193,11 @@ def _read_settings_file(path: Path) -> ProjectSettings | None:
     try:
         raw = path.read_text(encoding="utf-8")
     except OSError as exc:
-        raise ProjectSettingsError(
-            f"project settings at {path}: cannot read: {exc}"
-        ) from exc
+        raise ProjectSettingsError(f"project settings at {path}: cannot read: {exc}") from exc
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise ProjectSettingsError(
-            f"project settings at {path}: invalid JSON: {exc}"
-        ) from exc
+        raise ProjectSettingsError(f"project settings at {path}: invalid JSON: {exc}") from exc
     return _parse_document(data, str(path))
 
 
@@ -204,8 +214,7 @@ def _resolve_state_dir(repo_path: Path | str) -> Path:
         return bind_project_state_dir(identity)
     except ProjectIdentityError as exc:
         raise ProjectSettingsError(
-            f"cannot resolve project state directory for "
-            f"{Path(repo_path).expanduser()}: {exc}"
+            f"cannot resolve project state directory for {Path(repo_path).expanduser()}: {exc}"
         ) from exc
 
 
@@ -291,9 +300,7 @@ def set_project_settings_for_state_dir(
         branch = None
     elif accept_target_branch is not None:
         branch = _coerce_branch(accept_target_branch, str(state_dir))
-    merged = ProjectSettings(
-        gate_command=gate, data_policy=policy, accept_target_branch=branch
-    )
+    merged = replace(current, gate_command=gate, data_policy=policy, accept_target_branch=branch)
     path = project_settings_path(state_dir)
     _atomic_write_json(path, merged.as_dict())
     return path
@@ -303,7 +310,8 @@ def set_project_gate_command(repo_path: Path | str, gate_command: str) -> Path:
     """Validate and persist the project's explicit gate command."""
     state_dir = _resolve_state_dir(repo_path)
     current = load_project_settings_for_state_dir(state_dir)
-    merged = ProjectSettings(
+    merged = replace(
+        current,
         gate_command=_coerce_gate_command(gate_command, str(repo_path)),
         data_policy=current.data_policy,
         accept_target_branch=current.accept_target_branch,
@@ -317,7 +325,8 @@ def clear_project_gate_command(repo_path: Path | str) -> Path:
     """Remove the explicit gate decision (field returns to unset)."""
     state_dir = _resolve_state_dir(repo_path)
     current = load_project_settings_for_state_dir(state_dir)
-    merged = ProjectSettings(
+    merged = replace(
+        current,
         gate_command=None,
         data_policy=current.data_policy,
         accept_target_branch=current.accept_target_branch,
@@ -334,7 +343,8 @@ def set_project_data_policy(repo_path: Path | str, policy: DataPolicy | str) -> 
     resolved = (
         policy if isinstance(policy, DataPolicy) else _coerce_data_policy(policy, str(repo_path))
     )
-    merged = ProjectSettings(
+    merged = replace(
+        current,
         gate_command=current.gate_command,
         data_policy=resolved,
         accept_target_branch=current.accept_target_branch,
@@ -348,7 +358,8 @@ def set_project_accept_target_branch(repo_path: Path | str, branch: str) -> Path
     """Validate and persist the owner-selectable accept target branch."""
     state_dir = _resolve_state_dir(repo_path)
     current = load_project_settings_for_state_dir(state_dir)
-    merged = ProjectSettings(
+    merged = replace(
+        current,
         gate_command=current.gate_command,
         data_policy=current.data_policy,
         accept_target_branch=_coerce_branch(branch, str(repo_path)),
@@ -362,7 +373,8 @@ def clear_project_accept_target_branch(repo_path: Path | str) -> Path:
     """Remove the explicit target-branch decision (field returns to unset)."""
     state_dir = _resolve_state_dir(repo_path)
     current = load_project_settings_for_state_dir(state_dir)
-    merged = ProjectSettings(
+    merged = replace(
+        current,
         gate_command=current.gate_command,
         data_policy=current.data_policy,
         accept_target_branch=None,
@@ -417,18 +429,8 @@ def resolve_effective_data_policy(
     *,
     repo_path: Path | str | None = None,
 ) -> DataPolicy:
-    """Resolve the effective data policy with the R2-A safe default.
-
-    An explicit persisted decision always wins.  Otherwise the project
-    must be positively established as public to Allow; every other
-    case (private, unknown, unresolvable) is Denied.  R2-A never
-    auto-establishes publicness, so unset is Denied.
-    """
-    if settings.data_policy is not None:
-        return settings.data_policy
-    if repo_path is not None and is_project_positively_public(repo_path):
-        return DataPolicy.ALLOWED
-    return DataPolicy.DENIED
+    """Return Allowed; retained project policy records are historical metadata."""
+    return DataPolicy.ALLOWED  # Training-based model restrictions are retired.
 
 
 def resolve_effective_training_allowed(
@@ -493,3 +495,62 @@ __all__ = [
     "set_project_review_policy",
     "set_project_settings_for_state_dir",
 ]
+
+
+WORKFLOW_PRESETS: Final[dict[str, tuple[bool, str, str, int]]] = {
+    "quick": (False, "disabled", "bounded", 1),
+    "balanced": (True, "risk-adaptive", "bounded", 3),
+    "thorough": (True, "always-required", "bounded", 5),
+    "max": (True, "always-required", "max", 3),
+}
+
+
+def workflow_preset(settings: ProjectSettings, review_policy: str) -> str:
+    review = "disabled" if settings.review_disabled else review_policy.lower().replace("_", "-")
+    values = (
+        settings.gate_enabled,
+        review,
+        settings.review_mode or "bounded",
+        settings.review_limit or 3,
+    )
+    for name, preset in WORKFLOW_PRESETS.items():
+        if values[:3] == preset[:3] and (values[2] == "max" or values[3] == preset[3]):
+            return name
+    return "custom"
+
+
+def set_project_workflow(
+    repo_path: Path | str,
+    *,
+    preset: str = "custom",
+    gate_enabled: bool = True,
+    review: str = "risk-adaptive",
+    mode: str = "bounded",
+    limit: int = 3,
+) -> Path:
+    if preset != "custom":
+        if preset not in WORKFLOW_PRESETS:
+            raise ProjectSettingsError("Unknown workflow preset")
+        gate_enabled, review, mode, limit = WORKFLOW_PRESETS[preset]
+    if review not in ("disabled", "risk-adaptive", "always-required") or mode not in (
+        "bounded",
+        "max",
+    ):
+        raise ProjectSettingsError("Invalid review settings")
+    if type(limit) is not int or limit < 1 or type(gate_enabled) is not bool:
+        raise ProjectSettingsError("Review limit must be a positive whole number")
+    current = load_project_settings(repo_path)
+    # Review policy continues to use its canonical store, not a copied field.
+    set_project_review_policy(
+        repo_path, "ALWAYS_REQUIRED" if review == "always-required" else "RISK_ADAPTIVE"
+    )
+    updated = replace(
+        current,
+        gate_enabled=gate_enabled,
+        review_disabled=review == "disabled",
+        review_mode=mode,
+        review_limit=limit,
+    )
+    path = project_settings_path(_resolve_state_dir(repo_path))
+    _atomic_write_json(path, updated.as_dict())
+    return path

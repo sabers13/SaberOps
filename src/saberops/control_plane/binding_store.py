@@ -16,8 +16,8 @@ those bindings plus the owner's :class:`OrchBindingPolicy`.
 Authority boundaries preserved here:
 
 * This is a **control-plane** (C11-B) document.  It is not Project truth and
-  it is not a second routing configuration: routing chains remain owned by
-  :mod:`saberops.routing_config`.
+  worker chains remain owned by :mod:`saberops.routing_config`; exact role
+  selections and their order live here.
 * Only non-secret identity is persisted.  :class:`ExecutionProfile` carries
   credential *references* (account/backend names) and never secret values;
   the schema has no field capable of holding an API key or session token.
@@ -47,7 +47,7 @@ from saberops.control_plane.bindings import (
 )
 from saberops.control_plane.capabilities import Capability, ProviderTransport
 from saberops.control_plane.orch_binding import OrchBindingPolicy
-from saberops.models import ReasoningEffort
+from saberops.models import OrchBindingMode, ReasoningEffort
 
 #: Reason code surfaced when discovery cannot determine a binding's reasoning
 #: effort tier evidence.  This is *not* a permission to fabricate any
@@ -105,24 +105,61 @@ class OwnerBindings:
     ``registry`` is the exact binding/profile/pool identity set; ``policy``
     is the owner's Orchestrator binding choice expressed over those exact
     binding ids; ``reviewer_binding_id`` is the owner's optional exact
-    Reviewer binding choice (R3-E1: one binding id, never a pool or an
-    ordered fallback list).  None of these carry secret material or
-    routing order.
+    Reviewer primary, retained for compatibility. ``reviewer_binding_ids``
+    stores the owner-chosen ordered fallback chain; the Orchestrator chain
+    is stored in ``policy.preferred_binding_ids``. None carry secret material.
     """
 
     registry: BindingRegistry = field(default_factory=BindingRegistry)
     policy: OrchBindingPolicy | None = None
     reviewer_binding_id: str | None = None
+    # None preserves the legacy unconfigured reviewer; () is explicitly empty.
+    reviewer_binding_ids: tuple[str, ...] | None = None
+
+    def role_binding_ids(self, role: str) -> tuple[str, ...]:
+        if role == "reviewer":
+            if self.reviewer_binding_ids is not None:
+                return self.reviewer_binding_ids
+            return (self.reviewer_binding_id,) if self.reviewer_binding_id else ()
+        if role != "orchestrator":
+            raise ValueError("unknown routing role")
+        if self.policy is None:
+            return ()
+        if self.policy.mode is OrchBindingMode.PINNED:
+            return (self.policy.pinned_binding_id,) if self.policy.pinned_binding_id else ()
+        return self.policy.preferred_binding_ids
+
+    def with_role_order(self, role: str, order: Iterable[str]) -> OwnerBindings:
+        ids = tuple(order)
+        if any(not isinstance(bid, str) or not bid.strip() for bid in ids) or len(set(ids)) != len(
+            ids
+        ):
+            raise BindingStoreError("role order must contain unique nonempty binding ids")
+        if role == "reviewer":
+            return replace(
+                self, reviewer_binding_ids=ids, reviewer_binding_id=ids[0] if ids else None
+            )
+        if role != "orchestrator":
+            raise BindingStoreError("unknown routing role")
+        policy = (
+            OrchBindingPolicy(
+                mode=OrchBindingMode.PREFERRED_WITH_FALLBACK, preferred_binding_ids=ids
+            )
+            if ids
+            else None
+        )
+        return replace(self, policy=policy)
 
     def to_dict(self) -> dict[str, Any]:
         """Canonical non-secret rendering (sorted by the registry renderer)."""
         return {
             "schema_version": BINDING_STORE_SCHEMA_VERSION,
             "binding_registry": self.registry.to_dict(),
-            "orch_binding_policy": (
-                None if self.policy is None else self.policy.to_dict()
-            ),
+            "orch_binding_policy": (None if self.policy is None else self.policy.to_dict()),
             "reviewer_binding_id": self.reviewer_binding_id,
+            "reviewer_binding_ids": None
+            if self.reviewer_binding_ids is None
+            else list(self.reviewer_binding_ids),
         }
 
     @classmethod
@@ -149,9 +186,7 @@ class OwnerBindings:
             try:
                 policy = OrchBindingPolicy.from_mapping(policy_raw)
             except ValueError as exc:
-                raise BindingStoreError(
-                    f"owner orch binding policy invalid: {exc}"
-                ) from exc
+                raise BindingStoreError(f"owner orch binding policy invalid: {exc}") from exc
         else:
             raise BindingStoreError("owner orch binding policy must be a mapping or null")
         reviewer_raw = payload.get("reviewer_binding_id")
@@ -162,8 +197,20 @@ class OwnerBindings:
             reviewer_binding_id = cleaned or None
         else:
             raise BindingStoreError("owner reviewer binding id must be a string or null")
+        ids = payload.get("reviewer_binding_ids")
+        if ids is not None and (
+            not isinstance(ids, list)
+            or any(not isinstance(bid, str) or not bid.strip() for bid in ids)
+            or len(set(ids)) != len(ids)
+        ):
+            raise BindingStoreError("invalid reviewer routing order")
+        if ids is not None and reviewer_binding_id != (ids[0] if ids else None):
+            raise BindingStoreError("reviewer primary does not match routing order")
         return cls(
-            registry=registry, policy=policy, reviewer_binding_id=reviewer_binding_id
+            registry=registry,
+            policy=policy,
+            reviewer_binding_id=reviewer_binding_id,
+            reviewer_binding_ids=None if ids is None else tuple(ids),
         )
 
 

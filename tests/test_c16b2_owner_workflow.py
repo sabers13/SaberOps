@@ -520,7 +520,7 @@ def test_c16b2_owner_pages_are_reachable_from_dashboard(
     assert dashboard.status_code == 200
     assert "/access" in dashboard.text
     assert "/routing" in dashboard.text
-    assert "/orchestrator" in dashboard.text
+    # Role configuration now lives in the shared Routing page.
 
     access = client.get("/access")
     assert access.status_code == 200
@@ -529,9 +529,10 @@ def test_c16b2_owner_pages_are_reachable_from_dashboard(
 
     routing = client.get("/routing")
     assert routing.status_code == 200
-    assert "Move up" in routing.text
+    assert "Orchestrator" in routing.text and "Reviewer" in routing.text
+    assert "data-routing-order" in routing.text
+    assert "Move up" not in routing.text
 
     orch = client.get("/orchestrator")
     assert orch.status_code == 200
     assert "Available models" in orch.text
-

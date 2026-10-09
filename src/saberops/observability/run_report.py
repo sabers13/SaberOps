@@ -481,7 +481,8 @@ def _gate_section(
             "gate_command": check.gate_command,
             "exit_code": check.exit_code,
             "passed": check.passed,
-            "verdict": "PASS" if check.passed else "FAIL",
+            "verdict": "SKIPPED" if check.skipped else "PASS" if check.passed else "FAIL",
+            "skipped": check.skipped,
             "created_at": check.created_at,
             "duration_seconds": UNKNOWN,
         }
@@ -514,19 +515,22 @@ def _gate_section(
                 "created_at": event.created_at,
             }
         )
-    if checks and not receipts:
+    if any(not check.skipped for check in checks) and not receipts:
         gaps.append("gate durations UNKNOWN: no durable gate_receipt event persisted")
     if not checks and run.status in TERMINAL_RUN_STATUSES:
         gaps.append("no gate check rows persisted for a terminal run")
     passed = sum(1 for row in check_rows if row["passed"])
+    skipped = sum(1 for row in check_rows if row["skipped"])
     return {
         "gate_command": run.gate_command,
+        "disabled": bool(check_rows and skipped == len(check_rows)),
         "checks": check_rows,
         "receipts": receipts,
         "summary": {
             "check_total": len(check_rows),
             "check_passed": passed,
-            "check_failed": len(check_rows) - passed,
+            "check_failed": len(check_rows) - passed - skipped,
+            "check_skipped": skipped,
             "receipt_total": len(receipts),
         },
     }
@@ -923,6 +927,7 @@ def render_report_text(report: dict[str, Any]) -> str:
         f"  command  {_fmt_scalar(gate['gate_command'])}",
         f"  checks   {gate['summary']['check_passed']} passed / "
         f"{gate['summary']['check_failed']} failed / "
+        f"{gate['summary']['check_skipped']} skipped / "
         f"{gate['summary']['check_total']} total; "
         f"{gate['summary']['receipt_total']} receipt(s)",
     ]

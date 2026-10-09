@@ -30,6 +30,7 @@ class ProcessResult:
     stderr: str
     duration_seconds: float
     timed_out: bool = False
+    skipped: bool = False
     # True when the worker process group could not be confirmed extinct
     # before returning.  Such a result is a deterministic execution failure:
     # the worktree may still be mutated by surviving descendants, so callers
@@ -42,6 +43,10 @@ class ProcessResult:
     # ``exit_code`` (defaults to -1) and the typed outcome is an
     # INFRASTRUCTURE_FAILURE, never a VALIDATION_FAILURE.
     launch_failed: bool = False
+    control_interrupted: bool = False
+    verification_tree: str | None = None
+    verification_commit: str | None = None
+    verification_mutated: bool = False
 
     @property
     def passed(self) -> bool:
@@ -51,6 +56,7 @@ class ProcessResult:
             and not self.timed_out
             and not self.termination_incomplete
             and not self.launch_failed
+            and not self.verification_mutated
         )
 
 
@@ -1238,6 +1244,7 @@ def run_process(
     termination_grace_seconds: float = _DEFAULT_TERMINATION_GRACE_SECONDS,
     worker_monitor: Any | None = None,
     on_monitor_transition: Callable[[dict[str, Any]], None] | None = None,
+    control_interrupt: Callable[[], bool] | None = None,
 ) -> ProcessResult:
     """Execute a subprocess deterministically without shell=True.
 
@@ -1320,7 +1327,8 @@ def run_process(
     if env is not None:
         resolved_env.update(env)
 
-    streaming = on_stdout is not None or on_stderr is not None or inactivity_timeout is not None
+    streaming = (on_stdout is not None or on_stderr is not None
+                 or inactivity_timeout is not None or control_interrupt is not None)
     # Soft inactivity supervision needs the streaming wait loop; the blocking
     # non-streaming path has no line granularity to evaluate it against.
     if inactivity_timeout is not None and not streaming:
@@ -1485,6 +1493,7 @@ def run_process(
         except Exception:
             _monitor = None
 
+    control_interrupted = False
     stdout_chunks: list[str] = []
     stderr_chunks: list[str] = []
     drain_errors: list[str] = []
@@ -1566,6 +1575,24 @@ def run_process(
             stall_reported = False
             monitor_stall_terminated = False
             while True:
+                interrupt = False
+                if control_interrupt is not None:
+                    try:
+                        interrupt = control_interrupt()
+                    except Exception:
+                        # Losing the control channel cannot leave a mutating child
+                        # alive while the owner unwinds or retries.
+                        interrupt = True
+                if interrupt:
+                    ok, reason = _terminate_group_and_reap(proc, termination_grace_seconds)
+                    control_interrupted = ok
+                    termination_incomplete = not ok
+                    termination_note = (
+                        "\n[Provider invocation interrupted for manual control]" if ok else
+                        f"\n[Execution error: extinction unconfirmed during takeover: {reason}]"
+                    )
+                    exit_code = -1
+                    break
                 try:
                     proc.wait(timeout=_WAIT_SLICE_SECONDS)
                     exit_code = proc.returncode if proc.returncode is not None else -1
@@ -1843,4 +1870,5 @@ def run_process(
         timed_out=timed_out,
         termination_incomplete=termination_incomplete,
         launch_failed=launch_failed,
+        control_interrupted=control_interrupted,
     )
