@@ -197,6 +197,22 @@
       </dl>
     </div>
 
+    {% if resume_capsule %}
+    <div class="inspector-section" id="resume-capsule">
+      <details>
+        <summary><strong>What the next attempt receives</strong> <span class="muted">resume capsule v{{ resume_capsule.version }} · {{ fmt(resume_capsule.created_at) }}</span></summary>
+        <p class="muted">Retry and Continue start from this bounded summary, not the full conversation. Also available with <span class="mono">orch handoff {{ run_id }} --capsule</span>.</p>
+        <pre class="mono so-pre">{{ resume_capsule.text }}</pre>
+      </details>
+    </div>
+    {% endif %}
+    {% if frozen_tools %}
+    <div class="inspector-section" id="frozen-tools">
+      <div class="inspector-head"><strong>Tools frozen for this run</strong></div>
+      <p>{% for ref in frozen_tools %}<span class="badge mono">{{ ref }}</span> {% endfor %}</p>
+    </div>
+    {% endif %}
+
     <div class="inspector-section">
       <div class="inspector-head"><strong>Actions</strong></div>
       <div id="run-actions" data-run-id="{{ run_id }}" data-run-status="{{ status }}" style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">

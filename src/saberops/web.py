@@ -786,6 +786,32 @@ def _dashboard_context(
     }
 
 
+def _resume_capsule_view(db: Database, run_id: str) -> dict[str, Any] | None:
+    """Latest bounded resume capsule: what a retry or continuation receives."""
+    try:
+        capsule = db.get_latest_handoff(run_id, "handoff_resume_capsule")
+    except Exception:
+        return None
+    if capsule is None:
+        return None
+    text = capsule.content
+    try:
+        text = json.dumps(json.loads(text), indent=2, ensure_ascii=False)
+    except ValueError:
+        pass
+    return {"version": capsule.version, "created_at": capsule.created_at, "text": text}
+
+
+def _frozen_tool_refs(run: Run) -> list[str]:
+    """Logical tools frozen into this run's config (attached with ``--tool``)."""
+    try:
+        payload = json.loads(run.config_json or "{}")
+    except ValueError:
+        return []
+    refs = payload.get("tool_refs") if isinstance(payload, dict) else None
+    return sorted(str(ref) for ref in refs) if isinstance(refs, list) else []
+
+
 def _run_detail_context(
     db: Database,
     run: Run,
@@ -951,6 +977,8 @@ def _run_detail_context(
         "continue_reason": continue_reason,
         "continued_run_id": continued_run_id,
         "continuation_source": continuation_source,
+        "resume_capsule": _resume_capsule_view(db, run.id),
+        "frozen_tools": _frozen_tool_refs(run),
         "run_id": run.id,
         "task": run.task,
         "display_title": run.display_title or fallback_title(run.task, run.target_repo),
