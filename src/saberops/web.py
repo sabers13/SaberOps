@@ -504,8 +504,44 @@ def _review_rows(db: Database, run: Run) -> list[dict[str, Any]]:
                 "summary": review.summary,
                 "details": review.details,
                 "created_at": review.created_at,
+                "findings": _finding_rows(db, review.id),
             }
         )
+    return rows
+
+
+def _finding_rows(db: Database, review_id: str) -> list[dict[str, Any]]:
+    """Structured reviewer findings for one review, blocking ones first."""
+    from saberops.review_policy import FINDING_LABELS
+
+    try:
+        findings = db.get_findings_for_review(review_id)
+    except Exception:
+        return []
+    rows = [
+        {
+            "code": f.classification,
+            "label": FINDING_LABELS.get(f.classification, f.classification),
+            "tone": "fail" if f.blocking else (
+                "warning" if f.classification == "D1" else "pass"
+            ),
+            "blocking": f.blocking,
+            "title": f.title,
+            "severity": f.severity,
+            "location": f.code_location or "",
+            "requirement": f.invariant_or_requirement,
+            "contract": f.contract_reference or "",
+            "failure": f.failure_scenario,
+            "evidence": f.evidence,
+            "correction": f.minimum_correction,
+            "scope": f.repair_scope.replace("_", " ").lower(),
+        }
+        for f in findings
+    ]
+    order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    rows.sort(
+        key=lambda r: (not r["blocking"], r["code"] != "D1", order.get(str(r["severity"]), 4))
+    )
     return rows
 
 

@@ -695,3 +695,9 @@ a.side-item, button.side-item { padding: 9px 8px; gap: 4px; }
 .authority-options legend { font-weight: 600; margin-bottom: 4px; }
 .authority-option { display: block; line-height: 1.45; }
 .authority-line { margin: 4px 0 12px; }
+
+/* Structured review findings */
+.review-findings { display: grid; gap: 8px; margin: 8px 0 12px; }
+.review-finding { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+.review-finding > summary { cursor: pointer; line-height: 1.5; }
+.review-finding .so-kv { margin-top: 8px; }

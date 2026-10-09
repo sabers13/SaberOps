@@ -451,6 +451,23 @@
         <dt>Created</dt><dd class="mono">{{ fmt(review.created_at) }}</dd>
       </dl>
       <p><strong>Summary:</strong> {{ review.summary }}</p>
+      {% if review.findings %}
+      <div class="review-findings" aria-label="Structured findings">
+        <p class="muted">{{ review.findings|length }} finding{{ '' if review.findings|length == 1 else 's' }} · {{ review.findings|selectattr('blocking')|list|length }} blocking</p>
+        {% for f in review.findings %}
+        <details class="review-finding"{% if f.blocking %} open{% endif %}>
+          <summary><span class="badge badge-{{ f.tone }}">{{ f.code }} {{ f.label }}</span> <strong>{{ f.title }}</strong> <span class="muted">{{ f.severity }}{% if f.location %} · <span class="mono">{{ f.location }}</span>{% endif %}</span></summary>
+          <dl class="so-kv">
+            {% if f.contract %}<dt>Requirement cited</dt><dd>{{ f.contract }}</dd>{% endif %}
+            <dt>Invariant</dt><dd>{{ f.requirement }}</dd>
+            <dt>Failure</dt><dd>{{ f.failure }}</dd>
+            <dt>Evidence</dt><dd>{{ f.evidence }}</dd>
+            <dt>Fix</dt><dd>{{ f.correction }} <span class="muted">({{ f.scope }})</span></dd>
+          </dl>
+        </details>
+        {% endfor %}
+      </div>
+      {% endif %}
       {% if review.details %}
       <details><summary class="muted" style="cursor: pointer;">Review Details</summary><pre class="so-pre mono">{{ review.details }}</pre></details>
       {% endif %}

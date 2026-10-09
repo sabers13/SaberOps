@@ -37,6 +37,7 @@ from saberops.models import (
     PhaseKind,
     ProviderReadiness,
     QuotaState,
+    ReviewFinding,
     ReviewResult,
     ReviewVerdict,
     RoutingState,
@@ -52,6 +53,14 @@ from saberops.observability.phase_telemetry import measure_phase
 from saberops.process import run_process
 from saberops.provenance import ProvenanceError, assert_run_repository
 from saberops.quota import CODEX_PROVIDER, CODEX_WEEKLY_POOL
+from saberops.review_policy import (
+    FINDING_LABELS,
+    FINDINGS_PROMPT,
+    ReviewPolicyVerdict,
+    ReviewProtocolError,
+    StructuredFinding,
+    parse_review_findings,
+)
 from saberops.routing import (
     CANDIDATE_CODEX_SOL,
     CANDIDATE_CODEX_TERRA,
@@ -355,6 +364,59 @@ FINAL_CONVERGENCE_NOTICE = (
     "Minor, stylistic, optional, deferred or compromisable issues must NOT produce "
     "FINAL_BLOCK - they belong in a backlog list returned with the verdict."
 )
+
+
+_VERDICT_RANK: dict[ReviewVerdict, int] = {
+    ReviewVerdict.PASS: 0,
+    ReviewVerdict.PASS_WITH_BACKLOG: 1,
+    ReviewVerdict.BLOCK: 2,
+    ReviewVerdict.FINAL_BLOCK: 3,
+}
+
+
+def structured_review_outcome(
+    output_text: str, line_verdict: ReviewVerdict, *, is_final: bool = False
+) -> tuple[ReviewVerdict, tuple[StructuredFinding, ...], str]:
+    """Combine the ``VERDICT:`` line with the reviewer's structured findings.
+
+    Findings are parsed by :func:`parse_review_findings` and their disposition
+    is computed, never read from prose. The result is the stricter of the
+    line verdict and the computed disposition, so findings can turn a PASS
+    into a BLOCK but never the reverse. Without a valid findings block the
+    line verdict stands and the reason is returned as a note.
+    """
+    if line_verdict not in _VERDICT_RANK:
+        return line_verdict, (), ""
+    try:
+        parsed = parse_review_findings(output_text, is_final_round=is_final)
+    except ReviewProtocolError as exc:
+        return line_verdict, (), f"Structured findings not recorded: {exc}"
+    disposition = parsed.verdict
+    if disposition is ReviewPolicyVerdict.PASS_WITH_BACKLOG:
+        mapped = ReviewVerdict.PASS_WITH_BACKLOG if is_final else ReviewVerdict.PASS
+    elif disposition is ReviewPolicyVerdict.PASS:
+        mapped = ReviewVerdict.PASS
+    elif is_final:
+        # BLOCK, FINAL_BLOCK and DESIGN_RETURN all stop a final review.
+        mapped = ReviewVerdict.FINAL_BLOCK
+    else:
+        mapped = ReviewVerdict.BLOCK
+    verdict = mapped if _VERDICT_RANK[mapped] > _VERDICT_RANK[line_verdict] else line_verdict
+    return verdict, parsed.findings, ""
+
+
+def render_findings(findings: tuple[StructuredFinding, ...]) -> str:
+    """Plain-text findings for review details and the repair worker's context."""
+    if not findings:
+        return ""
+    lines = ["Structured findings:"]
+    for f in findings:
+        label = FINDING_LABELS.get(f.classification.value, f.classification.value)
+        where = f" ({f.code_location})" if f.code_location else ""
+        lines.append(f"- [{f.classification.value} {label}, {f.severity}] {f.title}{where}")
+        lines.append(f"  Failure: {f.failure_scenario}")
+        lines.append(f"  Minimum correction: {f.minimum_correction}")
+    return "\n".join(lines)
 
 
 def parse_review_output(output_text: str, is_final: bool = False) -> tuple[ReviewVerdict, str, str]:
@@ -725,6 +787,7 @@ class ReviewEngine:
                 "Followed by concise feedback."
             )
 
+        final_instructions += "\n" + FINDINGS_PROMPT
         review_prompt = (
             "IMPORTANT: You have NO filesystem access to the repository under review. The complete "  # noqa: E501
             "candidate diff and task context are embedded in this prompt. Base your review SOLELY on the "  # noqa: E501
@@ -1240,6 +1303,7 @@ class ReviewEngine:
 
             # Usable output from a successful reviewer: proceed to mutation
             # detection then parse into a substantive verdict.
+            structured_findings: tuple[StructuredFinding, ...] = ()
             if has_mutated:
                 # Do NOT destructive-reset or clean. Preserve mutated  # noqa: E501
                 # worktree for forensic inspection.  # noqa: E501
@@ -1273,6 +1337,13 @@ class ReviewEngine:
                 details = "\n\n".join(evidence_lines)
             else:
                 verdict, summary, details = parse_review_output(raw, is_final=is_final)
+                verdict, structured_findings, findings_note = structured_review_outcome(
+                    raw, verdict, is_final=is_final
+                )
+                details = "\n\n".join(
+                    part for part in (details, render_findings(structured_findings), findings_note)
+                    if part
+                )
 
             review_id = review_association_id
             review = ReviewResult(
@@ -1286,6 +1357,29 @@ class ReviewEngine:
                 created_at=current_iso_timestamp(),
             )
             self.db.create_review(review)
+            if structured_findings:
+                self.db.create_review_findings(
+                    [
+                        ReviewFinding(
+                            id=f"{review_id}-{finding.id}",
+                            review_id=review_id,
+                            run_id=run_id,
+                            classification=finding.classification.value,
+                            title=finding.title,
+                            severity=finding.severity,
+                            contract_reference=finding.contract_reference,
+                            invariant_or_requirement=finding.invariant_or_requirement,
+                            code_location=finding.code_location,
+                            failure_scenario=finding.failure_scenario,
+                            evidence=finding.evidence,
+                            minimum_correction=finding.minimum_correction,
+                            repair_scope=finding.repair_scope.value,
+                            blocking=finding.blocking,
+                            created_at=review.created_at,
+                        )
+                        for finding in structured_findings
+                    ]
+                )
             self.db.link_model_calls_to_review(
                 run_id,
                 [review_dispatch_evidence.association_id]

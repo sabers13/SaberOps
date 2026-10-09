@@ -279,6 +279,86 @@ def parse_structured_review(
     return ParsedStructuredReview(disposition, summary, tuple(findings), REVIEW_POLICY_VERSION)
 
 
+_JSON_FINDINGS_FENCE = re.compile(
+    r"```(?:json|JSON)[ \t]*\r?\n(?P<body>.*?)\r?\n?[ \t]*```",
+    re.DOTALL,
+)
+
+FINDING_LABELS: dict[str, str] = {
+    FindingClassification.CONTRACT_VIOLATION.value: "Contract violation",
+    FindingClassification.CORRECTNESS_OR_SAFETY_DEFECT.value: "Correctness or safety",
+    FindingClassification.MISSING_REQUIRED_EVIDENCE.value: "Missing evidence",
+    FindingClassification.DESIGN_QUESTION.value: "Design question",
+    FindingClassification.NON_BLOCKING_IMPROVEMENT.value: "Non-blocking note",
+}
+
+
+def parse_review_findings(
+    raw_text: str, *, is_final_round: bool = False
+) -> ParsedStructuredReview:
+    """Parse the findings block a production reviewer appends to its answer.
+
+    The reviewer's answer is prose with a ``VERDICT:`` line plus one fenced
+    ```json block holding ``{"findings": [...]}`` (``summary`` optional).
+    The last such block is used. Every finding must parse and pass
+    :func:`validate_finding_evidence`; otherwise :class:`ReviewProtocolError`
+    is raised and nothing is trusted. Unlike :func:`parse_structured_review`,
+    any ``verdict`` field is ignored rather than compared: the disposition is
+    always computed from the findings.
+    """
+    blocks = list(_JSON_FINDINGS_FENCE.finditer(raw_text))
+    if not blocks:
+        raise ReviewProtocolError("no ```json findings block in reviewer output")
+    try:
+        data = json.loads(blocks[-1].group("body"))
+    except json.JSONDecodeError as exc:
+        raise ReviewProtocolError(f"malformed JSON in findings block: {exc}") from exc
+    if not isinstance(data, dict) or not isinstance(data.get("findings"), list):
+        raise ReviewProtocolError("findings block must be an object with a 'findings' list")
+    summary = data.get("summary", "")
+    if not isinstance(summary, str):
+        raise ReviewProtocolError("field 'summary' must be a string")
+    findings: list[StructuredFinding] = []
+    seen_ids: set[str] = set()
+    for index, item in enumerate(data["findings"]):
+        finding = _parse_finding(item, index)
+        if finding.id in seen_ids:
+            raise ReviewProtocolError(f"duplicate finding id: {finding.id}")
+        seen_ids.add(finding.id)
+        findings.append(finding)
+    evidence_failures = [
+        f"'{finding.id}': {', '.join(violations)}"
+        for finding in findings
+        if (violations := validate_finding_evidence(finding))
+    ]
+    if evidence_failures:
+        raise ReviewProtocolError(
+            f"finding evidence validation failed: {'; '.join(evidence_failures)}"
+        )
+    disposition = compute_disposition(findings, is_final_round=is_final_round)
+    return ParsedStructuredReview(disposition, summary, tuple(findings), REVIEW_POLICY_VERSION)
+
+
+#: Instructions appended to every production review prompt.
+FINDINGS_PROMPT = """
+After the VERDICT line and your feedback, add ONE fenced ```json block:
+{"findings": [ ... ]}   (an empty list when you have no findings)
+Each finding is an object with these string fields:
+  "id": "F1", "F2", ...
+  "classification": "B1" contract violation (cite the requirement in
+      "contract_reference") | "B2" correctness or safety defect | "B3" required
+      evidence is missing (say what is missing) | "D1" design question (name the
+      decision to make) | "N1" non-blocking note (say why it is non-blocking)
+  "title", "severity": "critical" | "high" | "medium" | "low",
+  "contract_reference" (or null), "invariant_or_requirement",
+  "code_location" (file:line, or null), "failure_scenario", "evidence",
+  "minimum_correction", "repair_scope": "LOCAL_MECHANICAL" | "DESIGN_AFFECTING"
+B1, B2 and B3 block the candidate; D1 returns it for a decision; N1 never blocks.
+Your VERDICT must agree: BLOCK (FINAL_BLOCK on a final review) when any
+B1/B2/B3/D1 finding exists.
+"""
+
+
 def compute_disposition(
     findings: Sequence[StructuredFinding], *, is_final_round: bool
 ) -> ReviewPolicyVerdict:
