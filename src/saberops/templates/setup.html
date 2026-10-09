@@ -10,7 +10,7 @@
   <h2>Get ready for your first run</h2>
   <p>Follow the steps in order. Your choices are saved on each linked page; return here to see what is ready.</p>
   <div class="setup-progress-track" role="progressbar" aria-label="Setup progress" aria-valuenow="{{ setup_complete_count }}" aria-valuemin="0" aria-valuemax="6"><span style="width: {{ setup_complete_count * 100 / 6 }}%"></span></div>
-  <strong class="setup-summary">{% if ready_for_dogfood %}READY FOR DOGFOOD{% else %}SETUP INCOMPLETE{% endif %} · {{ setup_complete_count }}/6 configured</strong>
+  <strong class="setup-summary">{% if ready_for_dogfood %}SETUP COMPLETE{% else %}SETUP INCOMPLETE{% endif %} · {{ setup_complete_count }}/6 configured</strong>
 </header>
 
 {% if error %}<div class="so-error" role="alert">{{ error }}</div>{% endif %}
@@ -43,7 +43,7 @@
   <li id="setup-step-4" class="setup-step{% if setup_current_step == 4 %} current{% endif %}"{% if setup_current_step == 4 %} aria-current="step"{% endif %} data-od-id="setup-step-orchestrator">
     <span class="setup-number">4</span><div class="setup-step-body">
       <div class="setup-step-head"><h3>Choose Orchestrator</h3><span class="badge badge-{{ 'normal' if orch_ready else 'demoted' }}">{{ 'READY' if orch_ready else 'NEEDS SETUP' }}</span></div>
-      <p>Choose the model that gives bounded guidance before workers run.</p>
+      <p>Choose the model you chat with. It plans the work and explains the results.</p>
       <p class="setup-state">{{ orch_status }}{% if orch_current and orch_current.pinned_binding_id %} · {{ orch_current.pinned_binding_id }}{% endif %}</p>
       <a class="text-button{% if setup_current_step == 4 %} primary-button{% endif %}" href="/routing?role=orchestrator">Choose Orchestrator</a>
     </div>
@@ -88,8 +88,8 @@
   <li id="setup-step-7" class="setup-step{% if ready_for_dogfood %} current{% endif %}"{% if ready_for_dogfood %} aria-current="step"{% endif %} data-od-id="setup-step-ready">
     <span class="setup-number">7</span><div class="setup-step-body">
       <div class="setup-step-head"><h3>Ready</h3><span class="badge badge-{{ 'normal' if ready_for_dogfood else 'demoted' }}">{{ 'READY' if ready_for_dogfood else 'WAITING' }}</span></div>
-      <p>{% if ready_for_dogfood %}Your first run can start from the dashboard.{% else %}Finish the configuration steps above to reach the first-run checkpoint.{% endif %}</p>
-      {% if ready_for_dogfood %}<a class="text-button primary-button" href="/">Open run composer</a>{% else %}<a class="text-button" href="#setup-step-{{ setup_current_step }}">Go to next step</a>{% endif %}
+      <p>{% if ready_for_dogfood %}Start your first task from Work.{% else %}Finish the configuration steps above to reach the first-run checkpoint.{% endif %}</p>
+      {% if ready_for_dogfood %}<a class="text-button primary-button" href="/">Open Work</a>{% else %}<a class="text-button" href="#setup-step-{{ setup_current_step }}">Go to next step</a>{% endif %}
     </div>
   </li>
 </ol>

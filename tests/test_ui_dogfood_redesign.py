@@ -78,9 +78,9 @@ def test_collapsed_workers_release_width_and_have_one_reopen_control(client: Tes
 def test_runs_and_inbox_offer_a_dashboard_return(client: TestClient) -> None:
     inbox = client.get("/inbox")
     assert inbox.status_code == 200
-    assert 'aria-label="Page navigation"><a href="/">← Dashboard</a>' in inbox.text
+    assert 'aria-label="Page navigation"><a href="/">← Workspace</a>' in inbox.text
     assert 'data-od-id="runs-back-dashboard"' in inbox.text
-    assert 'href="/" data-od-id="runs-back-dashboard">← Dashboard</a>' in inbox.text
+    assert 'href="/" data-od-id="runs-back-dashboard">← Workspace</a>' in inbox.text
     assert 'window.location.assign(pane === "runs" ? "/?pane=runs" : "/")' in SHELL_JS.read_text()
 
 

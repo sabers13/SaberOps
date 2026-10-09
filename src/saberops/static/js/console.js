@@ -418,7 +418,7 @@
         returnLink.textContent = "← Runs";
       } else if (from === "dashboard") {
         returnLink.href = "/";
-        returnLink.textContent = "← Dashboard";
+        returnLink.textContent = "← Workspace";
       }
     }
     // Project history stays grouped on every page, including the runs index.

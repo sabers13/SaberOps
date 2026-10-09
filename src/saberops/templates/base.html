@@ -115,7 +115,7 @@
             {% endif %}
           </div>
           <div class="side-pane" data-side-pane="runs" hidden>
-            <a class="side-item" href="/" data-od-id="runs-back-dashboard">← Dashboard</a>
+            <a class="side-item" href="/" data-od-id="runs-back-dashboard">← Workspace</a>
             <div class="side-label">Runs</div>
             {% if shell.recent_runs %}
             {% for run in shell.recent_runs[:20] %}
@@ -371,13 +371,13 @@
     <a class="popover-link" href="/routing">{{ ui.icon('runs') }} Routing</a>
   </section>
 
-  <script src="/static/js/console.js?v=live-results-7"></script>
+  <script src="/static/js/console.js?v=live-results-8"></script>
   <script src="/static/js/quick-access.js?v=composer-files-1"></script>
   <script src="/static/js/project-picker.js?v=setup-workflow-3"></script>
   {% include "_chat_work_dialog.html" %}
   <script src="/static/vendor/chat/marked.js"></script>
   <script src="/static/vendor/chat/purify.js"></script>
-  <script src="/static/js/chat-shell.js?v=work-console-1"></script>
+  <script src="/static/js/chat-shell.js?v=work-console-2"></script>
   <script src="/static/js/chat-attachments.js?v=composer-files-1"></script>
   <script src="/static/js/composer-controls.js?v=work-console-1"></script>
   {% block extra_scripts %}{% endblock %}

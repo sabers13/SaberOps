@@ -207,7 +207,7 @@
         <form method="post" action="/runs/{{ run_id }}/continue" class="so-inline-form"><button type="submit" class="text-button primary-button"{% if not can_continue %} disabled{% endif %} title="{{ continue_reason }}">Continue from saved work</button></form>
         {% endif %}
         {% endif %}
-        <form method="post" action="/runs/{{ run_id }}/retry" class="so-inline-form" data-action="retry"><button type="submit" class="text-button"{% if not can_retry %} disabled title="Retry unlocks once the run completes or fails"{% endif %}>Retry Run (New Attempt)</button></form>
+        <form method="post" action="/runs/{{ run_id }}/retry" class="so-inline-form" data-action="retry"><button type="submit" class="text-button"{% if not can_retry %} disabled title="Retry unlocks once the run completes or fails"{% endif %}>Retry run (new attempt)</button></form>
         <button type="button" class="text-button" id="overviewCancelButton" data-action="cancel"{% if not can_cancel %} disabled title="Nothing to cancel on a terminal run"{% endif %}>Cancel Run</button>
         <form method="post" action="/runs/{{ run_id }}/review" class="so-inline-form" data-action="review"><button type="submit" class="text-button primary-button"{% if not can_review or owner_review_active %} disabled title="{% if owner_review_active %}A Review owner action is already running{% else %}Review unlocks once the run completes{% endif %}"{% endif %}>Request review</button></form>
         {% if can_cleanup %}
@@ -301,7 +301,7 @@
     {% endif %}
 
     <div class="inspector-section" data-run-refresh="monitoring">
-      <div class="inspector-head"><strong>Live Monitoring</strong><span class="muted">canonical projection · same as <span class="mono">orch report {{ run_id }} --json</span></span></div>
+      <div class="inspector-head"><strong>Live Monitoring</strong><span class="muted">Same data as <span class="mono">orch report {{ run_id }} --json</span></span></div>
       {% if run_report %}
       <dl class="so-kv">
         <dt>Live Stage</dt><dd class="mono">{{ run_report.lifecycle.current_stage }} ({{ run_report.lifecycle.current_stage_source }})</dd>
@@ -320,7 +320,7 @@
       {% if run_report.evidence_gaps %}
       <p class="muted">Evidence gaps: {{ run_report.evidence_gaps | join("; ") }}</p>
       {% endif %}
-      <p class="muted">UNKNOWN is never zero. Also available at <a class="mono" href="/runs/{{ run_id }}/report">GET /runs/{{ run_id }}/report</a>.</p>
+      <p class="muted">UNKNOWN means the value was not reported; it is not zero. <a href="/runs/{{ run_id }}/report">View as JSON</a></p>
       {% else %}
       <p class="muted">Canonical report unavailable for this run.</p>
       {% endif %}
@@ -454,7 +454,7 @@
 {# --- Events panel --- #}
 <div class="run-tab-panel" data-panel="events" style="display: none;">
   <div class="date-rule">Live event log</div>
-  <div class="terminal-toolbar"><span class="muted" data-run-refresh="events-status">{{ 'Streaming' if can_cancel else 'Recorded events · run finished' }}</span><span class="mono muted">/runs/{{ run_id }}/events/stream</span></div>
+  <div class="terminal-toolbar"><span class="muted" data-run-refresh="events-status">{{ 'Streaming' if can_cancel else 'Recorded events · run finished' }}</span></div>
   <div id="events-log" class="terminal-output" style="max-height: 320px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; font-family: var(--font-mono); font-size: 12px; padding: 10px;">
     {% for ev in events %}
     <div class="event-row" data-event-id="{{ ev.id }}">
@@ -505,7 +505,7 @@
   <div class="date-rule">Terminal · read-only live monitor</div>
   <p class="muted">Read-only view of the supervised run (Linux PTY, argv only, no shell). Reconnect replays the persisted ANSI transcript, then continues live.</p>
   <div id="terminal" class="so-terminal"></div>
-  <p class="so-terminal-meta">WebSocket: <span class="mono">/runs/{{ run_id }}/terminal/ws</span> · raw PTY bytes (ANSI) · no input channel.</p>
+  <p class="so-terminal-meta">Read-only live output from the worker terminal.</p>
 </div>
 {% endif %}
 {% endblock %}

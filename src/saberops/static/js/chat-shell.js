@@ -90,6 +90,8 @@
     var hint = document.getElementById("chatModeHint");
     var welcome = document.querySelector("[data-chat-welcome]");
     if (welcome) welcome.textContent = mode === "chat" ? "What can I help with?" : "What would you like to work on?";
+    var welcomeText = document.querySelector("[data-chat-welcome-text]");
+    if (welcomeText) welcomeText.textContent = mode === "chat" ? "Ask a question, think through an idea, or turn your conversation into work." : "Describe a change. Your workers implement it, then checks and review run before you decide.";
     var permission = document.getElementById("chatPermissionHint");
     var text = mode === "chat" ? "Discussion only" : "Configured workers · project checks";
     if (hint) hint.textContent = text;

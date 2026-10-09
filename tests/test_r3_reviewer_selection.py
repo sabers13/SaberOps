@@ -572,7 +572,7 @@ def test_setup_incomplete_without_reviewer_selection(
     setup = _setup_client_with_project(tmp_path).get("/setup")
     assert setup.status_code == 200
     assert "SETUP INCOMPLETE" in setup.text
-    assert "READY FOR DOGFOOD" not in setup.text
+    assert "SETUP COMPLETE" not in setup.text
 
 
 def test_setup_becomes_reviewer_ready_after_valid_selection(
@@ -617,7 +617,7 @@ def test_setup_ready_for_dogfood_requires_reviewer(
     setup = client.get("/setup")
     assert setup.status_code == 200
     assert "SETUP INCOMPLETE" in setup.text
-    assert "READY FOR DOGFOOD" not in setup.text
+    assert "SETUP COMPLETE" not in setup.text
     ReadinessStore(readiness_path).replace(
         ProviderReadinessEvidence(
             connection_id=_CONNECTION,
@@ -630,7 +630,7 @@ def test_setup_ready_for_dogfood_requires_reviewer(
         )
     )
     setup = client.get("/setup")
-    assert "READY FOR DOGFOOD" in setup.text
+    assert "SETUP COMPLETE" in setup.text
 
 
 # --- role separation ------------------------------------------------------

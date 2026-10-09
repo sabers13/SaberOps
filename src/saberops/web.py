@@ -1070,7 +1070,7 @@ def _inbox_context(snapshot: Any) -> dict[str, Any]:
                 "project_short": (
                     Path(project_path).name if project_path else ""
                 ),
-                "task_summary": _short_summary(payload["task"]),
+                "task_summary": fallback_title(payload["task"], project_path),
                 "attention_class": _status_class(payload["attention_label"]),
                 "short_sha": item.short_sha,
                 "updated_at": item.updated_at,

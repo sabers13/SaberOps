@@ -15,7 +15,7 @@
 <section class="workspace-welcome" aria-label="Workspace status">
   <span class="eyebrow">{{ 'Your workspace' if repo_ready else 'Welcome to SaberOps' }}</span>
   <h2{% if repo_ready %} data-chat-welcome{% endif %}>{{ 'What can I help with?' if repo_ready else 'Set up your first workspace' }}</h2>
-  <p>{% if repo_ready %}Ask a question, think through an idea, or turn your conversation into work.{% else %}Connect your installed tools, choose your models and select a repository. The setup guide walks you through each step.{% if repo_note %} {{ repo_note }}.{% endif %}{% endif %}</p>
+  <p{% if repo_ready %} data-chat-welcome-text{% endif %}>{% if repo_ready %}Ask a question, think through an idea, or turn your conversation into work.{% else %}Connect your installed tools, choose your models and select a repository. The setup guide walks you through each step.{% if repo_note %} {{ repo_note }}.{% endif %}{% endif %}</p>
   <div data-work-only class="workspace-actions"><a class="text-button{% if not repo_ready %} primary-button{% endif %}" href="/setup">{{ 'Review setup' if repo_ready else 'Start setup' }} {{ ui.icon('arrow',16) }}</a>{% if repo_ready %}<a class="text-button" href="#prompt">Describe a task</a>{% endif %}</div>
 </section>
 <div data-work-only class="workspace-links">

@@ -58,7 +58,7 @@
 {% endfor %}
 {% for chain in chains %}
 <details class="routing-role settings-card" name="routing-roles" id="routing-{{ chain.tier }}"{% if expanded == chain.tier %} open{% endif %}>
-<summary><span class="routing-role-heading"><strong>{{ chain.tier }}</strong><small class="muted">Worker models · Ordered fallback</small></span><span class="routing-role-choice">{% if chain.candidates %}<span class="routing-role-primary mono">{{ chain.candidates[0] }}</span><span class="badge">{{ chain.candidates|length }} models</span>{% else %}No models selected{% endif %}</span></summary>
+<summary><span class="routing-role-heading"><strong>{{ chain.tier }}</strong><small class="muted">Worker models · Ordered fallback</small></span><span class="routing-role-choice">{% if chain.candidates %}<span class="routing-role-primary mono">{{ chain.candidates[0] }}</span><span class="badge">{{ chain.candidates|length }} {{ 'model' if chain.candidates|length == 1 else 'models' }}</span>{% else %}No models selected{% endif %}</span></summary>
 <div class="routing-role-editor">
 <h4>Model order</h4><p class="muted">Drag a handle to reorder, or focus it and use ↑ or ↓. Changes save automatically.</p>
       {% if chain.candidates %}
@@ -92,7 +92,7 @@
         </div>
         <details class="routing-all-models access-models">
           <summary>All models <span class="muted">{{ models|length }} total</span></summary>
-          <p class="muted">Available models are shown above. The remaining {{ unavailable|length }} models appear below with their availability reasons.</p>
+          <p class="muted">Available models are shown above. The remaining {{ unavailable|length }} {{ 'model appears' if unavailable|length == 1 else 'models appear' }} below with {{ 'its availability reason' if unavailable|length == 1 else 'their availability reasons' }}.</p>
           {% if unavailable %}<label class="model-search"><span>Search remaining {{ ui.provider_name(provider) }} models</span><input type="search" data-model-search placeholder="Search the rest of the catalog…"></label><p class="model-empty" role="status" hidden>No models match this search.</p><ul class="routing-model-list">{% for m in unavailable %}<li data-model-row>{{ model_row(m) }}</li>{% endfor %}</ul>{% else %}<p class="muted">Every model from this provider is available above.</p>{% endif %}
         </details>
       </div>
