@@ -166,6 +166,8 @@ def test_worker_committed_revision_is_the_verified_candidate(
         monkeypatch.delenv(key, raising=False)
     committed: list[str] = []
     adapter = CodexAdapter()
+    # Hermetic: availability must not depend on a real `codex` binary being installed.
+    monkeypatch.setattr(adapter, "is_available", lambda: True)
     gate = "make gate" if make_gate else f"{sys.executable} -c pass"
 
     def invoke(request: WorkerRequest) -> WorkerResult:

@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from saberops import folder_picker
+from saberops.projects import ProjectRegistry
 from saberops.web import create_app
 
 
@@ -154,3 +155,26 @@ def test_native_picker_unavailable_has_manual_fallback(
     page = client.get("/setup").text
     assert 'type="button" data-project-browse' in page
     assert "Use path" in page and "/static/js/project-picker.js" in page
+
+
+def test_select_rejects_unresolvable_paths_instead_of_raising(tmp_path: Path) -> None:
+    """A NUL byte, or an unknown ~user, is an invalid path, not a server error."""
+    registry = ProjectRegistry(tmp_path / "projects.json")
+    for bad in ("/tmp/bad\x00path", "~no-such-user-xyz/project"):
+        ok, note = registry.select(bad, initialize=True)
+        assert ok is False
+        assert note
+        assert registry.validate_project(bad).is_git is False
+
+
+def test_preparing_a_project_rejects_relative_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A relative path would create a repo under the server's launch directory."""
+    monkeypatch.chdir(tmp_path)
+    registry = ProjectRegistry(tmp_path / "projects.json")
+    ok, note = registry.select("../escaped/project", initialize=True)
+    assert ok is False
+    assert "absolute" in note
+    assert not (tmp_path.parent / "escaped").exists()
+    assert not (tmp_path / "project").exists()

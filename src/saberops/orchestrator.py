@@ -11,7 +11,7 @@ import subprocess
 import sys
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import replace as _frozen_replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -890,6 +890,22 @@ def _classify_gate_outcome(
         candidate_sha=candidate_sha,
         source_tree_hash=gate_res.verification_tree,
     )
+
+
+def _last_attempt_cause(attempts: Sequence[Attempt], chain_start: int) -> str:
+    """Return `` Last attempt: <reason>`` when the final launched attempt recorded one.
+
+    The generic exhaustion summary names the gate even when the worker itself
+    crashed, timed out or hit a provider limit and the gate never ran; the
+    recorded attempt error is the only owner-visible hint of the real cause.
+    """
+    launched = attempts[chain_start:]
+    if not launched:
+        return ""
+    error = " ".join((launched[-1].worker_error or "").split())
+    if not error:
+        return ""
+    return f" Last attempt: {error[:200]}" + ("..." if len(error) > 200 else "")
 
 
 def _gate_disposition_payload(disposition: GateDisposition) -> dict[str, object]:
@@ -8330,10 +8346,14 @@ class Orchestrator:
                             # worker ran.
                             if disposition.outcome is GateOutcome.MUTATION:
                                 reason = "gate_mutated_worktree"
+                                mutated = ", ".join(list(disposition.changed_paths)[:5])
                                 attempt.worker_error = (
                                     "Gate check passed but mutated worktree "
-                                    f"with nonignored changes "
-                                    f"({', '.join(list(disposition.changed_paths)[:5])})"
+                                    f"with nonignored changes ({mutated})"
+                                    if mutated
+                                    else "Gate check passed but mutated the verified tree "
+                                    "with nonignored files (the gate likely wrote caches or "
+                                    "build output; add them to .gitignore)"
                                 )
                             elif disposition.outcome is GateOutcome.INFRASTRUCTURE_FAILURE:
                                 reason = "gate_infrastructure_failure"
@@ -8721,12 +8741,13 @@ class Orchestrator:
                 )
                 summary = (
                     f"All {chain_attempt_count} attempt(s) failed to pass gate "
-                    f"'{gate_command}'. {exhaustion_summary}"
+                    f"'{gate_command}'.{_last_attempt_cause(attempts, chain_attempt_start)} "
+                    f"{exhaustion_summary}"
                 )
             else:
                 summary = (
                     f"All {chain_attempt_count} attempt(s) failed to pass gate "
-                    f"'{gate_command}'."
+                    f"'{gate_command}'.{_last_attempt_cause(attempts, chain_attempt_start)}"
                 )
             failed_step = next(
                 (

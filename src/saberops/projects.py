@@ -59,8 +59,18 @@ class ProjectRegistry:
 
     def validate_project(self, path: Path | str) -> ProjectValidation:
         """Validate if target path is an existing git repo and clean."""
-        p = Path(path).resolve()
-        if not p.exists() or not p.is_dir():
+        try:
+            p = Path(path).resolve()
+            exists = p.exists() and p.is_dir()
+        except (ValueError, OSError):  # e.g. embedded NUL byte, over-long component
+            return ProjectValidation(
+                path=str(path),
+                is_git=False,
+                is_clean=False,
+                ready=False,
+                note="Path is not valid",
+            )
+        if not exists:
             return ProjectValidation(
                 path=str(p),
                 is_git=False,
@@ -128,7 +138,16 @@ class ProjectRegistry:
 
     def select(self, path: Path | str, *, initialize: bool = False) -> tuple[bool, str]:
         """Select a project, optionally preparing a new owner-selected folder."""
-        path = Path(path).expanduser().resolve()
+        try:
+            requested = Path(path).expanduser()
+            if initialize and not requested.is_absolute():
+                # Preparing a folder creates it and runs ``git init``.  A relative path
+                # would resolve against the server's launch directory, which the owner
+                # cannot see from the browser.
+                return False, "Enter an absolute path, for example /home/you/project"
+            path = requested.resolve()
+        except (ValueError, OSError, RuntimeError):  # NUL byte, unknown ~user, symlink loop
+            return False, "Path is not valid"
         if initialize:
             from saberops.project_bootstrap import prepare_project
 
