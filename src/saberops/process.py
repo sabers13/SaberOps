@@ -1815,13 +1815,24 @@ def run_process(
             # stream wrappers referenced so GC can never attempt a blocking
             # close behind run_process's back.  Drain threads are daemons
             # and were bounded-joined above.
-            if any(t.is_alive() for t in threads):
+            drain_orphaned = any(t.is_alive() for t in threads)
+            if drain_orphaned:
                 _ORPHANED_PIPE_STREAMS.append((proc.stdout, proc.stderr))
             for stream in (proc.stdout, proc.stderr):
                 if stream is None:
                     continue
                 try:
-                    os.close(stream.fileno())
+                    if drain_orphaned:
+                        # A drain thread may hold the buffer lock; close only the raw
+                        # descriptor.  The wrapper stays referenced (above), so it is
+                        # never finalized and cannot close this descriptor a second time.
+                        os.close(stream.fileno())
+                    else:
+                        # Every drain thread has exited: close the wrapper itself, once.
+                        # Closing the raw fd and leaving the wrapper to the garbage
+                        # collector closed the same fd number twice (EBADF, or worse,
+                        # an unrelated descriptor that reused the number meanwhile).
+                        stream.close()
                 except Exception:
                     try:
                         stream.close()
