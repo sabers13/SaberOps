@@ -146,6 +146,38 @@ rendered result, including relevant narrow/wide widths, focus and interactive st
 and both existing themes for shared style changes. Report unavailable browser
 inspection as unverified, never as visual acceptance.
 
+For engineering (non-presentation) work there is a per-task gate that runs only the
+tests the diff affects:
+
+```bash
+bash scripts/gate-affected.sh [--base REF]
+```
+
+`scripts/select_tests.py` diffs against the base ref (default: merge-base with the
+branch upstream, else `HEAD~1`) plus staged, unstaged and untracked files, then
+selects every test file that imports a changed module directly or transitively. The
+graph is a static `ast` scan over `src/**` and `tests/**`, imports plus dotted patch
+targets written as strings; `if TYPE_CHECKING:` imports are not edges because they
+never execute. The wrapper prints the base ref, the changed files and the reason for
+each selected test first, so saved gate output is self-auditing. It keeps
+`ruff check .` and `mypy --strict src tests` over the whole repository (mypy is
+incremental and type changes ripple) and runs pytest on the selection only. A change
+that cannot be reasoned about safely (any conftest, `pyproject.toml` and other setup
+files, gate scripts, CI workflows, the top-level package init, a `.py` outside the
+scanned roots, any unknown file type) selects the FULL suite and the wrapper runs
+`pytest -q`; a docs-only or `.md`/`.orch` diff selects no test and pytest is skipped.
+
+The per-task loop is:
+
+`change → affected gate → inspect → repeat`
+
+`bash scripts/gate-full.sh` stays the authoritative milestone/merge gate: ruff, mypy
+and the complete pytest suite with nothing filtered out. Using the affected gate does
+not certify a change for merge, does not replace the full gate, and does not relax
+the UI FINALIZE rule that the full wrapper is what finalization requires. Both
+wrappers use `.venv/bin/python` when present, otherwise `python` from the active
+development environment, and neither installs anything.
+
 For UI FINALIZE:
 
 ```bash
