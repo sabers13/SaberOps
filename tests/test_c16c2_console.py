@@ -144,11 +144,15 @@ def test_c16c2_start_run_form_posts_real_fields(
     assert 'action="/chats"' in text
     for field in ('name="task"', 'name="training_allowed"'):
         assert field in text, field
+    # The project-settings card on the same page legitimately owns review_mode and
+    # review_limit; only the composer form must not carry run-time knobs.
+    start = text.index('<form id="startRunForm"')
+    composer = text[start:text.index("</form>", start)]
     for removed in ("review_mode", "review_limit", "manual_tier", "max_auto_tier",
                     "provider_override", "model_override",
                     "worker_timeout", "gate_timeout", "review_timeout", "gate_command",
                     "review_enabled", "routing_mode"):
-        assert f'name="{removed}"' not in text
+        assert f'name="{removed}"' not in composer
     # No prototype-only knobs with no backend capability.
     assert 'id="runPriority"' not in text
     assert 'id="maxAttempts"' not in text
