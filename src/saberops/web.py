@@ -2867,6 +2867,52 @@ def _notice_from_query(request: Request) -> str | None:
     return None
 
 
+_STATE_CHANGING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+_LOOPBACK_HOSTNAMES = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _forged_request_refusal(request: Request) -> str | None:
+    """Return a refusal message for a request another website could have forged.
+
+    Binding to loopback does not stop the owner's own browser from being used as the
+    attacker: any page can submit a form to ``http://127.0.0.1:<port>``.  Two checks:
+
+    * Every state-changing request must come from this app's own origin.  Browsers
+      label a cross-site request ``Sec-Fetch-Site: cross-site`` and send ``Origin``;
+      a request with neither header (curl, the CLI, tests) is not browser-forged.
+    * DNS rebinding makes a foreign hostname resolve to loopback, so the browser then
+      treats the attacker's page as same-origin.  A request that arrives *from this
+      machine* with a non-loopback ``Host`` is refused.  Names the owner serves the UI
+      under deliberately (a hosts-file alias, a tunnel) go in ``SABEROPS_ALLOWED_HOSTS``
+      (comma separated); a listener bound to a LAN address sees non-loopback clients,
+      which this check never touches.
+    """
+    from ipaddress import ip_address
+
+    try:
+        local_client = request.client is not None and ip_address(request.client.host).is_loopback
+    except ValueError:
+        local_client = False
+    if local_client:
+        extra = {
+            name.strip().lower()
+            for name in os.environ.get("SABEROPS_ALLOWED_HOSTS", "").split(",")
+            if name.strip()
+        }
+        if (request.url.hostname or "").lower() not in _LOOPBACK_HOSTNAMES | extra:
+            return (
+                "Open SaberOps at http://127.0.0.1 or http://localhost. "
+                "Other host names are refused (set SABEROPS_ALLOWED_HOSTS to allow one)."
+            )
+    if request.method in _STATE_CHANGING_METHODS:
+        origin = request.headers.get("origin")
+        if request.headers.get("sec-fetch-site") == "cross-site" or (
+            origin is not None and origin != str(request.base_url).rstrip("/")
+        ):
+            return "Use the local SaberOps page for this action."
+    return None
+
+
 def create_app(
     db_path: str | Path | None = None,
     repo_path: str | Path | None = None,
@@ -2948,17 +2994,9 @@ def create_app(
         A failure degrades to an empty shell rather than failing the page.
         """
         path = request.url.path
-        chat_mutation = request.method == "POST" and (
-            path == "/chats" or path.startswith("/chats/")
-            or "/sessions/" in path or path.endswith("/open-synchronized-cli")
-            or path.endswith("/conversation") or path.endswith("/try-worker")
-            or (path.startswith("/runs/") and path.endswith("/continue"))
-            or path == "/access/verify-model"
-        )
-        origin = request.headers.get("origin")
-        if chat_mutation and (request.headers.get("sec-fetch-site") == "cross-site"
-                              or (origin is not None and origin != str(request.base_url).rstrip("/"))):
-            return JSONResponse({"error": "Use the local SaberOps page for this action."}, status_code=403)
+        refusal = _forged_request_refusal(request)
+        if refusal is not None:
+            return JSONResponse({"error": refusal}, status_code=403)
         if path == "/health" or path.startswith("/static"):
             request.state.shell = _empty_shell()
             response: Response = await call_next(request)
