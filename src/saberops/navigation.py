@@ -55,13 +55,18 @@ def project_folders(
                 title_column = (
                     "display_title" if "display_title" in columns else "NULL AS display_title"
                 )
+                visible_work = (
+                    "(CASE WHEN json_valid(config_json) THEN "
+                    "json_extract(config_json,'$.parallel_parent_run_id') ELSE NULL END) IS NULL"
+                    if "config_json" in columns else "1"
+                )
                 runs = conn.execute(f"""
                     SELECT id, task, target_repo, status, created_at, display_title FROM (
                         SELECT id, task, target_repo, status, created_at, {title_column},
                             ROW_NUMBER() OVER (
                                 PARTITION BY target_repo ORDER BY created_at DESC
                             ) AS position
-                        FROM runs
+                        FROM runs WHERE {visible_work}
                     ) WHERE position <= 50 ORDER BY created_at DESC
                 """).fetchall()
         except sqlite3.Error:

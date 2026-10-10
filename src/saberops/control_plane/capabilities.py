@@ -129,7 +129,8 @@ _PROFILES: dict[str, CapabilityProfile] = {
     "antigravity": CapabilityProfile(
         "antigravity",
         ProviderTransport.DIRECT_CLI,
-        frozenset({Capability.STREAMING, Capability.PROCESS_IDENTITY, Capability.CANCELLATION}),
+        frozenset({Capability.STREAMING, Capability.LARGE_PROMPT_STDIN,
+                   Capability.PROCESS_IDENTITY, Capability.CANCELLATION}),
     ),
 }
 

@@ -115,7 +115,11 @@
   setMode(mode);
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", function () {setMode(mode);}, {once:true});
   document.querySelectorAll('[data-tab]:not([data-tab="chat"])').forEach(function (tab) { tab.addEventListener("click", function () { if (mode !== "work") setMode("work"); }); });
-  window.addEventListener("hashchange", function () { if (document.querySelector("[data-tab]")) setMode(fixedKind || (location.hash === "#chat" ? "chat" : "work")); });
+  window.addEventListener("hashchange", function () {
+    if (document.querySelector("[data-tab]") || (!fixedKind && ["#chat", "#work"].includes(location.hash))) {
+      setMode(fixedKind || (location.hash === "#chat" ? "chat" : "work"));
+    }
+  });
   function resize() {
     if (!input) return;
     input.style.height = "auto"; input.style.height = Math.min(170, input.scrollHeight) + "px";
@@ -144,12 +148,25 @@
   document.addEventListener("saberops:run-tab", function (event) {moveModelPicker(event.detail.tab);});
   var workDialog = document.getElementById("chatWorkDialog");
   var brief = document.getElementById("chatWorkBrief");
+  var briefMode = document.getElementById("workBriefMode");
+  var workModePicker = document.getElementById("workExecutionMode");
+  function workOptions() {
+    document.getElementById("workBriefWorkersLabel").hidden = briefMode.value !== "parallel";
+    document.getElementById("workBriefModeHelp").textContent = briefMode.value === "parallel" ?
+      "The orchestrator plans separate tasks. Workers use isolated branches; one combined result is checked and reviewed." : "One worker implements the brief.";
+  }
+  if (briefMode) briefMode.addEventListener("change", workOptions);
+  if (workModePicker) workModePicker.addEventListener("change", function () {
+    form.querySelector('[name="execution_mode"]').value = workModePicker.value;
+  });
   function promote() {
     if (!input || !form || form.getAttribute("aria-busy") === "true") return;
     var last = document.querySelectorAll(".chat-user-message .message-body");
     brief.value = input.value.trim().replace(/^Implement the following brief:\s*/, "") || (last.length ? last[last.length - 1].textContent : "");
     if (brief.value.trim().startsWith("<")) brief.value = "";
-    workDialog.showModal(); brief.focus();
+    briefMode.value = form.querySelector('[name="execution_mode"]').value;
+    document.getElementById("workBriefWorkers").value = form.querySelector('[name="max_parallel_workers"]').value;
+    workOptions(); workDialog.showModal(); brief.focus();
   }
   var promoteButton = document.getElementById("chatPromote");
   if (promoteButton) promoteButton.addEventListener("click", promote);
@@ -160,6 +177,9 @@
       form.dataset.promoting = "true";
       form.querySelector("[data-chat-mode-input]").value = "work";
     } else setMode("work");
+    form.querySelector('[name="execution_mode"]').value = briefMode.value;
+    form.querySelector('[name="max_parallel_workers"]').value = document.getElementById("workBriefWorkers").value;
+    if (workModePicker) workModePicker.value = briefMode.value;
     input.value = "Implement the following brief:\n\n" + brief.value.trim();
     input.dispatchEvent(new Event("input")); workDialog.close(); form.requestSubmit();
   });

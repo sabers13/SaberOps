@@ -1004,7 +1004,10 @@ def _run_detail_context(
                                if isinstance(saved_config, dict) else None)
     except ValueError:
         continuation_source = None
+    from saberops.parallel_work import git_projection
+    git_work = git_projection(db, run)
     return {
+        "git_work": git_work,
         "missing": False,
         "can_continue": can_continue,
         "continue_reason": continue_reason,
@@ -3019,7 +3022,9 @@ def create_app(
     @app.post("/chats", name="new_chat")
     def new_chat(request: Request, task: Annotated[str, Form()] = "",
                  mode: Annotated[str, Form()] = "auto",
-                 attachments: Annotated[str, Form()] = "") -> Response:
+                 attachments: Annotated[str, Form()] = "",
+                 execution_mode: Annotated[str, Form()] = "single",
+                 max_parallel_workers: Annotated[int, Form()] = 3) -> Response:
         from saberops.chat_attachments import parse_ids
         try:
             ids = parse_ids(attachments)
@@ -3030,12 +3035,18 @@ def create_app(
         repo = project_registry.active()
         if mode not in ("auto", "chat", "work"):
             return JSONResponse({"error": "Choose Chat or Work."}, status_code=400)
+        if execution_mode not in ("single", "parallel") or not 2 <= max_parallel_workers <= 4:
+            return JSONResponse({"error": "Choose a work mode with two to four workers."},
+                                status_code=400)
         if repo is None or not task.strip() or len(task) > 32000:
             return JSONResponse({"error": "Select a project and enter a message."}, status_code=400)
         chat_id = chat_store.create(str(repo), task.strip(),
                                     kind="work" if mode == "work" else "chat")
         try:
-            kwargs = {"attachment_ids": ids} if ids else {}
+            kwargs: dict[str, Any] = {"attachment_ids": ids} if ids else {}
+            if mode == "work" and execution_mode != "single":
+                kwargs.update(execution_mode=execution_mode,
+                              max_parallel_workers=max_parallel_workers)
             chats.submit(chat_id, task, "first-message", mode=mode, **kwargs)
         except (ValueError, ChatBusy) as exc:
             if ids:
@@ -3161,13 +3172,20 @@ def create_app(
         chat_id: str, message: Annotated[str, Form()] = "",
         request_id: Annotated[str, Form()] = "",
         attachments: Annotated[str, Form()] = "",
+        execution_mode: Annotated[str, Form()] = "single",
+        max_parallel_workers: Annotated[int, Form()] = 3,
     ) -> Response:
         from saberops.chat_attachments import parse_ids
         try:
+            if execution_mode not in ("single", "parallel") or not 2 <= max_parallel_workers <= 4:
+                raise ValueError("Choose a work mode with two to four workers.")
             ids = parse_ids(attachments)
             brief = message.strip() or ("Implement the attached brief." if ids else "")
             work_id = chat_store.promote(chat_id, brief, request_id, ids)
-            chats.submit(work_id, brief, request_id, mode="work", attachment_ids=ids)
+            options: dict[str, Any] = ({"execution_mode": execution_mode,
+                        "max_parallel_workers": max_parallel_workers}
+                       if execution_mode != "single" else {})
+            chats.submit(work_id, brief, request_id, mode="work", attachment_ids=ids, **options)
         except ChatBusy as exc:
             return JSONResponse({"error": str(exc)}, status_code=409)
         except ValueError as exc:
@@ -3191,6 +3209,8 @@ def create_app(
         request_id: Annotated[str, Form()] = "",
         mode: Annotated[str, Form()] = "auto",
         attachments: Annotated[str, Form()] = "",
+        execution_mode: Annotated[str, Form()] = "single",
+        max_parallel_workers: Annotated[int, Form()] = 3,
     ) -> Response:
         if chat_store.get(chat_id) is None:
             return JSONResponse({"error": "Conversation not found"}, status_code=404)
@@ -3200,13 +3220,17 @@ def create_app(
                                         (chat_id, request_id)).fetchone()
             if accepted:
                 return JSONResponse({"accepted": True}, status_code=202)
-            return turn_chat_into_work(chat_id, message, request_id, attachments)
+            return turn_chat_into_work(chat_id, message, request_id, attachments,
+                                       execution_mode, max_parallel_workers)
         try:
             from saberops.chat_attachments import parse_ids
             ids = parse_ids(attachments)
             if ids and not message.strip():
                 message = "Please review the attached files."
-            kwargs = {"attachment_ids": ids} if ids else {}
+            kwargs: dict[str, Any] = {"attachment_ids": ids} if ids else {}
+            if execution_mode != "single":
+                kwargs.update(execution_mode=execution_mode,
+                              max_parallel_workers=max_parallel_workers)
             chats.submit(chat_id, message, request_id, mode=mode, **kwargs)
         except ChatBusy as exc:
             return JSONResponse({"error": str(exc)}, status_code=409)
@@ -3219,6 +3243,8 @@ def create_app(
         run_id: str, message: Annotated[str, Form()] = "",
         mode: Annotated[str, Form()] = "auto",
         attachments: Annotated[str, Form()] = "",
+        execution_mode: Annotated[str, Form()] = "single",
+        max_parallel_workers: Annotated[int, Form()] = 3,
     ) -> Response:
         from saberops.chat_attachments import parse_ids
         try:
@@ -3248,7 +3274,10 @@ def create_app(
         if message.strip():
             try:
                 import uuid
-                kwargs = {"attachment_ids": ids} if ids else {}
+                kwargs: dict[str, Any] = {"attachment_ids": ids} if ids else {}
+                if execution_mode != "single":
+                    kwargs.update(execution_mode=execution_mode,
+                                  max_parallel_workers=max_parallel_workers)
                 chats.submit(chat_id, message, uuid.uuid4().hex, mode=mode, **kwargs)
             except (ValueError, ChatBusy) as exc:
                 return JSONResponse({"error": str(exc)}, status_code=409)
@@ -4129,6 +4158,15 @@ def create_app(
         except ControlConflict as exc:
             return JSONResponse({"error": str(exc)}, status_code=409)
         return launch_synced_cli(request, control=f"/chats/{chat_id}/sessions/{sid}/control")
+
+    @app.get("/runs/{run_id}/git")
+    def run_git(run_id: str) -> Response:
+        from saberops.parallel_work import git_projection
+        runtime = runtime_for_run(run_id)
+        run = runtime.db.get_run(run_id) if runtime else None
+        if not runtime or not run:
+            return JSONResponse({"error": "Run not found"}, status_code=404)
+        return JSONResponse(git_projection(runtime.db, run))
 
     @app.get("/runs/{run_id}/plan")
     def run_plan(run_id: str) -> JSONResponse:

@@ -54,7 +54,7 @@ def handle(bridge: NativeSharedChat, data: dict[str, Any], request: dict[str, An
         result = {
             "protocolVersion": "2025-03-26",
             "capabilities": {"tools": {}, "experimental": {"claude/channel": {}}},
-            "serverInfo": {"name": "saberops", "version": "0.3.7"},
+            "serverInfo": {"name": "saberops", "version": "0.3.8"},
             "instructions": INSTRUCTIONS,
         }
     elif method == "notifications/initialized":

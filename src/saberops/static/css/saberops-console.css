@@ -615,3 +615,30 @@ button.side-item .side-copy {
   .agent-workspace-toolbar { padding: 8px; }
   .agent-workspace-tools .text-button { padding: 6px; }
 }
+
+
+/* Git thread tracking uses the existing workspace palette and disclosures. */
+.git-work-pane { max-width: 1050px; margin: 0 auto; padding: 24px; }
+.git-work-heading, .git-thread-card > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.git-work-heading h2 { margin: 4px 0 10px; }
+.git-work-heading p { margin: 0 0 6px; }
+.git-work-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--border); border-radius: 12px; margin: 20px 0; }
+.git-work-summary > div { display: flex; flex-direction: column; gap: 8px; padding: 16px; min-width: 0; overflow-wrap: anywhere; }
+.git-work-summary > div + div { border-left: 1px solid var(--border); }
+.git-thread-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin: 20px 0; }
+.git-thread-card { min-width: 0; padding: 18px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); overflow-wrap: anywhere; }
+.git-thread-card h3 { margin: 0; font-size: 15px; }
+.git-thread-card dl { display: grid; grid-template-columns: 60px minmax(0, 1fr); gap: 8px 12px; margin: 18px 0; }
+.git-thread-card dt { color: var(--muted); font-size: 12px; }
+.git-thread-card dd { margin: 0; font-size: 12px; }
+.git-thread-card footer, .git-work-actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-start; }
+.git-thread-card[data-thread-status="Integrated"] { border-color: var(--accent); }
+.git-integration-details, .git-work-timeline { padding: 14px 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+.git-work-timeline li { margin: 12px 0; }
+.git-work-timeline li > span { margin-left: 12px; }
+.work-plan-options { display: flex; flex-wrap: wrap; gap: 16px; }
+.work-plan-options label { display: flex; flex: 1; flex-direction: column; gap: 8px; }
+.work-plan-options select { width: 100%; min-height: 40px; }
+.work-mode-picker select { background: transparent; color: inherit; font: inherit; border: 0; max-width: 120px; }
+.work-mode-picker select:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+@media (max-width: 700px) { .git-work-pane { padding: 16px; } .git-thread-list { grid-template-columns: 1fr; } .git-work-summary { grid-template-columns: 1fr; } .git-work-summary > div + div { border-left: 0; border-top: 1px solid var(--border); } }

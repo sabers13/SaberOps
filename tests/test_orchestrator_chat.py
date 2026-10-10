@@ -18,6 +18,140 @@ from saberops.project_bootstrap import prepare_project
 from saberops.web import create_app
 
 
+def parallel_plan() -> list[dict[str, Any]]:
+    return [
+        {
+            "title": "Storage",
+            "goal": "Implement storage and storage tests",
+            "acceptance_criteria": ["Storage tests pass"],
+            "relevant_paths": ["storage.py"],
+            "dependency_indexes": [],
+        },
+        {
+            "title": "Interface",
+            "goal": "Implement interface and interface tests",
+            "acceptance_criteria": ["Interface tests pass"],
+            "relevant_paths": ["interface.py"],
+            "dependency_indexes": [],
+        },
+    ]
+
+
+def test_parallel_promotion_plans_once_and_preserves_original_chat(
+    chat_app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from saberops.config import RunConfig
+    from saberops.orchestrator_consumer import OrchestratorModelConsumer
+    from saberops.project_settings import set_project_gate_command
+    from saberops.supervisor import RunSupervisor
+
+    chats = coordinator(chat_app)
+    repo = chat_app.state.project_registry.active()
+    set_project_gate_command(repo, "true")
+    source_id = chats.store.create(str(repo), "Discuss a board", kind="chat")
+    calls: list[dict[str, Any]] = []
+    launches: list[RunConfig] = []
+
+    def invoke(self: Any, request: Any) -> Any:
+        context = json.loads(request.user_prompt)
+        calls.append(context)
+        assert context["execution_mode"] == "parallel"
+        assert "work_plan" in request.system_prompt
+        return SimpleNamespace(
+            status="SUCCESS",
+            reason=None,
+            provider="test",
+            model="test",
+            output_text=json.dumps(
+                {
+                    "reply": "Build storage and an interface.",
+                    "action": "work",
+                    "work_plan": parallel_plan(),
+                }
+            ),
+        )
+
+    def launch(self: RunSupervisor, config: RunConfig) -> Any:
+        launches.append(config)
+        return SimpleNamespace(run_id="planned-team")
+
+    monkeypatch.setattr(OrchestratorModelConsumer, "invoke", invoke)
+    monkeypatch.setattr(RunSupervisor, "start_supervised_run", launch)
+    with TestClient(chat_app) as client:
+        response = client.post(
+            f"/chats/{source_id}/work",
+            data={
+                "message": "Build a useful board",
+                "request_id": "team-request",
+                "execution_mode": "parallel",
+                "max_parallel_workers": "4",
+            },
+        )
+        assert response.status_code == 202
+        work_id = response.json()["work_chat_id"]
+        work = wait_reply(chats.store, work_id)
+        assert work["execution_mode"] == "parallel" and work["max_parallel_workers"] == 4
+        assert len(launches) == 1 and launches[0].execution_mode == "parallel"
+        assert launches[0].max_parallel_workers == 4 and len(launches[0].parallel_plan) == 2
+        assert launches[0].gate_command == "true" and launches[0].review_enabled
+        assert chats.store.get(source_id)["messages"] == []  # type: ignore[index]
+        # A retry may not change the accepted turn's mode or create a second team.
+        retry = client.post(
+            f"/chats/{source_id}/work",
+            data={
+                "message": "Build a useful board",
+                "request_id": "team-request",
+                "execution_mode": "single",
+                "max_parallel_workers": "2",
+            },
+        )
+        assert retry.json()["work_chat_id"] == work_id
+        assert len(calls) == len(launches) == 1
+        assert chats.store.get(work_id)["execution_mode"] == "parallel"  # type: ignore[index]
+        assert "Parallel team" in client.get(f"/chats/{work_id}").text
+
+
+def test_invalid_parallel_proposal_cannot_launch_work(
+    chat_app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from saberops.orchestrator_consumer import OrchestratorModelConsumer
+    from saberops.supervisor import RunSupervisor
+
+    chats = coordinator(chat_app)
+    work_id = chats.store.create(
+        str(chat_app.state.project_registry.active()), "Build a useful board", kind="work"
+    )
+    proposals = parallel_plan()
+    proposals[0]["relevant_paths"] = ["../other-repo.py"]
+    monkeypatch.setattr(
+        OrchestratorModelConsumer,
+        "invoke",
+        lambda *args: SimpleNamespace(
+            status="SUCCESS",
+            reason=None,
+            provider="test",
+            model="test",
+            output_text=json.dumps({"reply": "Build it", "action": "work", "work_plan": proposals}),
+        ),
+    )
+    monkeypatch.setattr(
+        RunSupervisor,
+        "start_supervised_run",
+        lambda *args, **kwargs: pytest.fail("Invalid proposal launched a worker"),
+    )
+    chats.submit(work_id, "Build the board", "invalid-plan", mode="work", execution_mode="parallel")
+    work = wait_reply(chats.store, work_id)
+    assert "couldn't complete" in work["messages"][-1]["text"]
+    assert all(m["run_id"] is None for m in work["messages"])
+    assert not chat_app.state.db.list_runs()
+
+
 @pytest.fixture()
 def chat_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FastAPI:
     for name in ("XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"):

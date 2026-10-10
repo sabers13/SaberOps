@@ -199,20 +199,24 @@ class RunSupervisor:
         from saberops.gateway import (
             reconstruct_frozen_gateway_config,
         )
+        from saberops.parallel_work import validate_team_child, validate_work_config
         from saberops.routing_config import (
             load_effective_routing,
             payload_to_snapshot,
             snapshot_references_exact_bindings,
             snapshot_to_payload,
         )
-
+        validate_work_config(config)
+        team_parent = validate_team_child(self.db, config)
         source = validate_continuation(self.db, config)
+        frozen_source = source[0] if source else team_parent
         if source:
             existing = self.db.get_continuation(source[0].id)
             if existing:
                 return StartRunResult(run_id=existing)
-        snapshot = (payload_to_snapshot(json.loads(source[0].routing_snapshot_json))
-                    if source and source[0].routing_snapshot_json else load_effective_routing())
+        snapshot = (payload_to_snapshot(json.loads(frozen_source.routing_snapshot_json))
+                    if frozen_source and frozen_source.routing_snapshot_json
+                    else load_effective_routing())
         resolve_candidate_chain(
             tier=config.initial_tier,
             model_override=config.model_override,
@@ -227,7 +231,7 @@ class RunSupervisor:
         # binding-store change must never alter this Run.  A static-only
         # snapshot loads no owner state.
         if (
-            source is None
+            frozen_source is None
             and
             config.worker_binding_registry is None
             and snapshot_references_exact_bindings(snapshot)
@@ -249,14 +253,14 @@ class RunSupervisor:
         run_id = provenance.run_id
         created_at = current_iso_timestamp()
         routing_payload = snapshot_to_payload(snapshot, created_at)
-        if source:
+        if frozen_source:
             from saberops.control_plane.policy import reconstruct_frozen_control_plane
             from saberops.tooling.contracts import FrozenToolContract
-            assert source[0].control_plane_snapshot_json and source[0].tool_contract_json
+            assert frozen_source.control_plane_snapshot_json and frozen_source.tool_contract_json
             frozen_control_plane = reconstruct_frozen_control_plane(
-                source[0].control_plane_snapshot_json, source[0].control_plane_snapshot_digest
+                frozen_source.control_plane_snapshot_json, frozen_source.control_plane_snapshot_digest
             )
-            frozen_tools = FrozenToolContract.from_json(source[0].tool_contract_json)
+            frozen_tools = FrozenToolContract.from_json(frozen_source.tool_contract_json)
         else:
             frozen_control_plane = freeze_control_plane_policy(
                 load_control_plane_policy(),
@@ -299,8 +303,8 @@ class RunSupervisor:
             gateway_snapshot_json=gateway_snapshot_json,
             gateway_snapshot_digest=gateway_snapshot_digest,
         )
-        if source:
-            parent = source[0]
+        if frozen_source:
+            parent = frozen_source
             run.routing_snapshot_json = parent.routing_snapshot_json
             run.control_plane_snapshot_json = parent.control_plane_snapshot_json
             run.control_plane_snapshot_digest = parent.control_plane_snapshot_digest
@@ -312,6 +316,10 @@ class RunSupervisor:
             self.db.create_run(run)
         except ContinuationExists as exc:
             return StartRunResult(run_id=exc.child_id)
+        if team_parent:
+            self.db.record_event(team_parent.id, "team_worker_created", payload={
+                "child_run_id": run_id, "task_index": config.parallel_task_index,
+            })
         if source:
             self.db.record_event(run_id, "continuation_created", payload=config.continuation)
             self.db.record_event(source[0].id, "run_continued", payload={
@@ -412,6 +420,14 @@ class RunSupervisor:
                 f"project scope analysis failed for run '{run_id}': {exc}"
             ) from exc
 
+        if team_parent:
+            try:
+                validate_team_child(self.db, config, existing_run_id=run_id)
+            except ValueError:
+                self.db.fail_run_if_nonterminal(run_id=run_id,
+                    result_summary="Parent team stopped before worker launch",
+                    completed_at=current_iso_timestamp())
+                raise
         self._launch(run_id, config)
         return StartRunResult(run_id=run_id)
 
@@ -1572,6 +1588,10 @@ class RunSupervisor:
             )
         except OwnershipError as exc:
             self.db.record_event(run_id, "execution_owner_rejected", payload={"reason": str(exc)})
+            if config.parallel_parent_run_id and self.db.get_execution_owner(run_id) is None:
+                self.db.fail_run_if_nonterminal(run_id=run_id,
+                    result_summary="Parent team stopped before worker ownership was claimed",
+                    completed_at=current_iso_timestamp())
             return False
 
         args = self._build_cli_args(run_id, config)
@@ -1736,6 +1756,20 @@ class RunSupervisor:
             )
             return False
 
+        if owner is not None and run.config_json:
+            try:
+                saved = json.loads(run.config_json)
+            except (ValueError, TypeError):
+                saved = {}
+            parent_id = saved.get("parallel_parent_run_id") if isinstance(saved, dict) else None
+            parent_owner = (self.db.get_execution_owner(parent_id)
+                            if isinstance(parent_id, str) and parent_id else None)
+            if (parent_owner and parent_owner.identity == owner.identity
+                    and liveness is Liveness.LIVE):
+                self.db.record_event(run_id, "cancel_refused", payload={
+                    "reason": "team_worker_launch_reservation_in_parent_process",
+                })
+                return False
         terminated = False
         termination_reason = "no_execution_owner"
         if owner is not None:
@@ -1761,6 +1795,19 @@ class RunSupervisor:
                 payload={"owner_id": owner.owner_id, "generation": owner.generation},
             )
             try:
+                from saberops.parallel_work import team_children
+                for child_id in team_children(self.db, run_id):
+                    child = self.db.get_run(child_id)
+                    if child and child.status not in TERMINAL_RUN_STATUSES:
+                        if not self.cancel(child_id):
+                            self.db.abort_execution_cancellation(
+                                run_id, owner_id=owner.owner_id, generation=owner.generation
+                            )
+                            self.db.record_event(run_id, "cancel_refused", payload={
+                                "reason": "team_worker_not_confirmed_stopped",
+                                "child_run_id": child_id,
+                            })
+                            return False
                 if liveness is Liveness.LIVE:
                     # Kill the worker process tree first using fenced identity.
                     # A valid persisted worker_identity is required; no PID-only

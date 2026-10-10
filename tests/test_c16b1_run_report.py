@@ -226,6 +226,55 @@ def test_c16b1_unknown_run_raises(tmp_path: Path) -> None:
     raise AssertionError("expected ValueError for unknown run")
 
 
+def test_team_report_rejects_foreign_and_recursive_links(tmp_path: Path) -> None:
+    db = Database(tmp_path / "state.db")
+    parent = _run(db, "parent", config={
+        "execution_mode": "parallel", "parallel_plan": [{"title": "A"}, {"title": "B"}],
+    })
+    foreign = _run(db, "foreign", config={"execution_mode": "single"})
+    recursive = _run(db, "recursive", config={
+        "execution_mode": "parallel", "parallel_parent_run_id": parent.id,
+        "parallel_task_index": 1, "parallel_plan": [{"title": "A"}, {"title": "B"}],
+    })
+    _dispatch(db, foreign.id, "foreign-dispatch", DispatchStage.IMPLEMENTATION, DispatchRole.BULK)
+    for index, child in enumerate((foreign, recursive)):
+        db.record_event(parent.id, "team_worker_created", payload={
+            "task_index": index, "child_run_id": child.id,
+        })
+    db.record_event(recursive.id, "team_worker_created", payload={
+        "task_index": 0, "child_run_id": parent.id,
+    })
+    report = build_run_report(db, parent.id)
+    assert report["team"]["workers"] == []
+    assert report["team"]["execution"]["worker_dispatch_count"] == 0
+    assert not report["team"]["links_complete"]
+    assert canonical_report_json(report) == canonical_report_json(build_run_report(db, parent.id))
+
+
+def test_team_failed_check_keeps_error_and_summary_after_long_test_output(tmp_path: Path) -> None:
+    db = Database(tmp_path / "state.db")
+    parent = _run(db, "parent", config={
+        "execution_mode": "parallel", "parallel_plan": [{"title": "Backend"}, {"title": "UI"}],
+    })
+    child = _run(db, "child", config={
+        "execution_mode": "single", "parallel_parent_run_id": parent.id,
+        "parallel_task_index": 0,
+    })
+    db.record_event(parent.id, "team_worker_created", payload={
+        "task_index": 0, "child_run_id": child.id,
+    })
+    _attempt(db, child.id, "child_attempt", 1, status=AttemptStatus.FAILED)
+    stderr = "passing test ... ok\n" * 300 + "BrokenPipeError: upload failed\nFAILED (errors=1)\n"
+    db.create_check(CheckResult(
+        id="failed", attempt_id="child_attempt", gate_command="python3 -B -m unittest",
+        exit_code=1, stdout="", stderr=stderr, passed=False, created_at=_CREATED,
+    ))
+    failed = build_run_report(db, parent.id)["team"]["workers"][0]["last_failed_check"]
+    assert len(failed["stderr"]) == 2000
+    assert failed["stderr"].endswith("BrokenPipeError: upload failed\nFAILED (errors=1)\n")
+    assert failed["truncated"] and failed["excerpt"] == "tail"
+
+
 # --- completed successful run ----------------------------------------------
 
 

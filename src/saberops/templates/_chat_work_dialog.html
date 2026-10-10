@@ -3,6 +3,11 @@
     <header><div><h2 id="chatWorkTitle">Turn this into work</h2><p>Review the brief before starting an implementation run.</p></div><button type="button" class="icon-button" data-dialog-close aria-label="Close work brief">×</button></header>
     <label for="chatWorkBrief">What should be built or changed?</label>
     <textarea id="chatWorkBrief" rows="6" maxlength="31900" required></textarea>
+    <div class="work-plan-options">
+      <label for="workBriefMode">How to work<select id="workBriefMode"><option value="single">Single worker</option><option value="parallel">Parallel team</option></select></label>
+      <label for="workBriefWorkers" id="workBriefWorkersLabel" hidden>Maximum workers<select id="workBriefWorkers"><option value="2">2 workers</option><option value="3" selected>3 workers</option><option value="4">4 workers</option></select></label>
+    </div>
+    <p class="so-help" id="workBriefModeHelp">One worker implements the brief.</p>
     <p class="so-help">Uses your configured workers and project checks. {% if chat|default(none) and chat.kind|default('legacy') == 'chat' %}Your chat stays here. A linked Work thread holds the implementation and results.{% else %}The implementation and results stay in Work for review.{% endif %}</p>
     <div class="chat-dialog-actions"><button type="button" class="text-button" data-dialog-close>Keep chatting</button><button type="submit" class="text-button primary-button">Start work</button></div>
   </form>

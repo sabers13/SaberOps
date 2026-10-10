@@ -172,7 +172,7 @@ from saberops.provenance import (
     ProvenanceError,
     assert_candidate_provenance,
     assert_run_repository,
-    failover_authorized_bases,
+    execution_authorized_bases,
     mint_run_provenance,
 )
 
@@ -1416,7 +1416,7 @@ class Orchestrator:
                 # validated required-base anchor (re-verified live
                 # against durable decision evidence) remains provably
                 # a candidate of this run.
-                extra_authorized_bases=failover_authorized_bases(self.db, run_id),
+                extra_authorized_bases=execution_authorized_bases(self.db, run_id),
             )
         except ProvenanceError as exc:
             raise CandidatePublicationError(
@@ -2008,6 +2008,12 @@ class Orchestrator:
                 review=review,
                 review_timeout=review_timeout,
             )
+        from saberops.parallel_work import validate_team_child, validate_work_config
+        validate_work_config(config)
+        validate_team_child(self.db, config, existing_run_id=run_id)
+        if config.execution_mode == "parallel":
+            if autonomous is not None or config.autonomous_runtime is not None:
+                raise ValueError("Parallel teams currently use supervised worker execution.")
         task = config.task
         gate_command = config.gate_command
         repo = Path(config.target_repo)
@@ -2561,7 +2567,10 @@ class Orchestrator:
             plan_steps = list(adopted_plan_steps)
         elif continued_source is None:
             sizing, package_proposals = resolve_work_packages(task)
-            if sizing.should_slice:
+            if config.execution_mode == "parallel":
+                from saberops.parallel_work import team_proposals
+                package_proposals = team_proposals(config)
+            if sizing.should_slice or config.execution_mode == "parallel":
                 persisted = persist_plan(
                     self.db,
                     run_id,
@@ -2604,6 +2613,8 @@ class Orchestrator:
             if initial_step is not None and initial_step.work_package_id
             else None
         )
+        if config.execution_mode == "parallel":
+            initial_package = None  # The parent worker validates the full assembled objective.
         tier_decision: TierDecision = choose_tier(
             config,
             stage=DispatchStage.REPAIR if continued_source else DispatchStage.IMPLEMENTATION,
@@ -2999,6 +3010,26 @@ class Orchestrator:
                     active_continuation_dispatch_reason = DispatchReason.COLD_TAKEOVER
                 if active_continuation_reason == WorkerInterruptionReason.QUOTA_EXHAUSTED.value:
                     blocked_providers_in_cycle.add(last_att.provider)
+
+            if config.execution_mode == "parallel" and not continued_source:
+                from saberops.parallel_work import execute_team
+                from saberops.supervisor import RunSupervisor
+                if any(e.event_type == "team_started"
+                       for e in self.db.get_complete_events_for_run(run_id)):
+                    raise RuntimeError(
+                        "Interrupted team is preserved; retry explicitly to start a new team."
+                    )
+                lineage_base_sha = execute_team(
+                    self.db, config, run_id, base_wt_dir,
+                    RunSupervisor(db=self.db, registry=self.registry,
+                                  worktree_base=base_wt_dir, tool_registry=self.tool_registry),
+                )
+                task = (
+                    "Finish the assembled team candidate. Inspect the combined changes against "
+                    "the owner objective, fix integration defects only, and report verification. "
+                    "The existing worker branches have already been integrated. Do not recreate "
+                    "their work or merge/push/accept branches.\n\nOwner objective:\n" + config.task
+                )
 
             while True:
                 current_plan_step = next(
@@ -5249,7 +5280,10 @@ class Orchestrator:
                     )
                     # Check for candidate changes
                     has_changes = GitManager.has_diff_against_base(
-                        wt_path, base_commit if continued_source else lineage_base_sha
+                        wt_path,
+                        base_commit
+                        if continued_source or config.execution_mode == "parallel"
+                        else lineage_base_sha,
                     )
                     changed_paths_in_wt = GitManager.get_changed_paths(wt_path)
                     if changed_paths_in_wt:
@@ -5302,7 +5336,10 @@ class Orchestrator:
                     changed_paths = tuple(GitManager.get_changed_paths(wt_path))
                     post_gate_has_diff = (
                         GitManager.has_diff_against_base(
-                            wt_path, base_commit if continued_source else lineage_base_sha
+                            wt_path,
+                            base_commit
+                            if continued_source or config.execution_mode == "parallel"
+                            else lineage_base_sha,
                         )
                         if not has_changes
                         else True

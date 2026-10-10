@@ -20,6 +20,7 @@
   <button class="run-tab" data-tab="chat" aria-selected="true">Conversation</button>
   <button class="run-tab" data-tab="overview" aria-selected="false">Overview</button>
   <button class="run-tab" data-tab="workers" aria-selected="false">Workers</button>
+  <button class="run-tab" data-tab="git" aria-selected="false">Git &amp; threads</button>
   <button class="run-tab" data-tab="changes" aria-selected="false">Changes</button>
   <button class="run-tab" data-tab="checks" aria-selected="false">Checks</button>
   <button class="run-tab" data-tab="review" aria-selected="false">Review</button>
@@ -51,6 +52,10 @@
 {% endif %}
 
 {# --- Chat panel: task + live plan projection --- #}
+<div class="run-tab-panel" data-panel="git" style="display: none;">
+  <div data-run-refresh="git-work">{% include "_git_work.html" %}</div>
+</div>
+
 <div class="run-tab-panel" data-panel="chat">
 {% include "_agent_workspace.html" %}
 <details data-work-only class="run-recorded-brief"><summary>Recorded run briefing and actions</summary>
@@ -136,7 +141,14 @@
       {% if diff_available %}<p>{{ changed_files|length }} changed file{{ '' if changed_files|length == 1 else 's' }} in the recorded candidate.</p>{% endif %}
       {% for attempt in attempts %}{% if candidate_sha and attempt.commit_sha == candidate_sha %}<p>Candidate folder: <span class="mono">{{ attempt.worktree_path }}</span></p>{% endif %}{% endfor %}
       {% if run_report %}
-      <p>Checks: {{ run_report.gate.summary.check_passed }} passed, {{ run_report.gate.summary.check_failed }} failed, {{ run_report.gate.summary.check_skipped }} skipped. Review: {{ run_report.review.verdicts|join(', ') if run_report.review.verdicts else 'No verdict recorded' }}.</p>
+      <p>{{ 'Parent checks' if run_report.team is defined else 'Checks' }}: {{ run_report.gate.summary.check_passed }} passed, {{ run_report.gate.summary.check_failed }} failed, {{ run_report.gate.summary.check_skipped }} skipped. Review: {{ run_report.review.verdicts|join(', ') if run_report.review.verdicts else 'No verdict recorded' }}.</p>
+      {% if run_report.team is defined %}
+      <p><strong>Team activity:</strong> {{ run_report.team.linked_worker_count }} linked worker{{ '' if run_report.team.linked_worker_count == 1 else 's' }} · {{ run_report.team.execution.worker_dispatch_count }} implementation dispatches · {{ run_report.team.gate.check_passed }} passed, {{ run_report.team.gate.check_failed }} failed, {{ run_report.team.gate.check_skipped }} skipped checks.</p>
+      {% if not run_report.team.links_complete %}<p class="so-error">Some worker links could not be verified. Team totals may be incomplete.</p>{% endif %}
+      {% for worker in run_report.team.workers %}{% if worker.last_failed_check %}
+      <div class="so-error"><strong>{{ worker.title }}</strong><p><code>{{ worker.last_failed_check.command }}</code> exited {{ worker.last_failed_check.exit_code }}.</p><pre class="so-pre mono">{{ worker.last_failed_check.stderr or worker.last_failed_check.stdout }}</pre><a href="/runs/{{ worker.run_id }}#checks">Inspect worker checks →</a></div>
+      {% endif %}{% endfor %}
+      {% endif %}
       {% endif %}
       <p><a class="text-button" href="#changes" data-run-tab="changes">View changes</a> <a class="text-button" href="#checks" data-run-tab="checks">View checks</a> <a class="text-button" href="#review" data-run-tab="review">View review</a> <a class="text-button" href="#workers" data-run-tab="workers">Worker output</a></p>
       {% for attempt in attempts %}{% if candidate_sha and attempt.commit_sha == candidate_sha and attempt.worker_stdout %}
@@ -548,6 +560,8 @@
 <div class="composer-wrap run-composer-wrap{% if chat|default(none) %} run-secondary-composer{% endif %}">
   <div class="composer run-composer" aria-label="Run controls">
     <form method="post" action="/runs/{{ run_id }}/conversation" id="runConversationForm">
+      <input type="hidden" name="execution_mode" value="single">
+      <input type="hidden" name="max_parallel_workers" value="3">
       <input type="hidden" name="mode" value="chat" data-chat-mode-input>
       <label class="sr-only" for="runningTask">Message the orchestrator about this run</label>
       <textarea id="runningTask" name="message" rows="2" maxlength="32000" placeholder="Ask your orchestrator about this run…"></textarea>
@@ -573,8 +587,8 @@
 
 {% block extra_scripts %}
 {% if not missing %}
-<script src="/static/js/app.js?v=work-console-1"></script>
-<script src="/static/js/chat.js?v=work-console-1"></script>
+<script src="/static/js/app.js?v=parallel-git-1"></script>
+<script src="/static/js/chat.js?v=parallel-git-1"></script>
 <script src="/static/js/agent-workspace.js?v=work-console-1"></script>
 <script src="/static/vendor/xterm/xterm.js"></script>
 <script src="/static/js/terminal.js?v=balanced-workspace-1"></script>

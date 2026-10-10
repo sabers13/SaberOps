@@ -1,0 +1,531 @@
+/* SaberOps polish layer — October 2026.
+ * Loaded last. Three parts, in this order:
+ *   1. Shared tokens (motion, elevation, scrim, radii, chart colours)
+ *   2. Consistency fixes for rules that drifted across the earlier layers
+ *   3. Motion and the chart primitives used by visuals.js
+ * console-v2.css stays untouched; nothing here renames a hook, id or data-*.
+ * Motion is disabled wholesale by the prefers-reduced-motion rule in
+ * workspace.css (animation/transition: none !important), so every animation
+ * below is safe to declare unconditionally. */
+
+/* ---------------------------------------------------------------- 1. Tokens */
+:root {
+  /* Motion: three durations, two curves. Springs are for things that arrive. */
+  --dur-1: 120ms;
+  --dur-2: 200ms;
+  --dur-3: 320ms;
+  --dur-4: 520ms;
+  --ease-out: cubic-bezier(.22, 1, .36, 1);
+  --ease-in-out: cubic-bezier(.65, 0, .35, 1);
+  --ease-spring: cubic-bezier(.34, 1.36, .64, 1);
+
+  /* Radii from DESIGN.md (6 / 10 / 14). */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+
+  /* Neutral elevation. The earlier shadow and scrim were tinted green
+   * (#182a22, #102018), left over from the retired Moss palette. */
+  --shadow-1: 0 1px 2px rgb(0 0 0 / .05), 0 1px 1px rgb(0 0 0 / .03);
+  --shadow-2: 0 0 0 .5px rgb(0 0 0 / .06), 0 8px 28px rgb(0 0 0 / .12), 0 2px 6px rgb(0 0 0 / .06);
+  --shadow-3: 0 0 0 .5px rgb(0 0 0 / .08), 0 28px 80px rgb(0 0 0 / .22), 0 8px 24px rgb(0 0 0 / .10);
+  --shadow: var(--shadow-3);
+  --scrim: rgb(20 20 22 / .32);
+
+  /* Charts. Status colours mean state and nothing else; series colours mean
+   * identity. Both sets were checked for colour-blind separation. */
+  --viz-good: #0ca30c;
+  --viz-warn: #fab219;
+  --viz-crit: #d03b3b;
+  --viz-neutral: #b5b5b0;
+  --viz-s1: #2a78d6;
+  --viz-s2: #eb6834;
+  --viz-s3: #1baf7a;
+  --viz-grid: color-mix(in srgb, var(--fg) 9%, transparent);
+  --viz-track: color-mix(in srgb, var(--fg) 8%, transparent);
+}
+html[data-theme="dark"] {
+  --shadow-1: 0 1px 2px rgb(0 0 0 / .4);
+  --shadow-2: 0 0 0 .5px rgb(255 255 255 / .08), 0 10px 32px rgb(0 0 0 / .5);
+  --shadow-3: 0 0 0 .5px rgb(255 255 255 / .1), 0 30px 90px rgb(0 0 0 / .65);
+  --scrim: rgb(0 0 0 / .56);
+  --viz-neutral: #6b6b68;
+  --viz-s1: #3987e5;
+  --viz-s2: #d95926;
+  --viz-s3: #199e70;
+}
+
+/* ------------------------------------------------------- 2. Consistency fixes */
+
+/* 2.1 Overlays live outside .app, so they kept the Graphite/Neutral palette
+ * while the shell around them is neutral with a teal accent. Give every
+ * overlay the shell's own values so a dialog matches the page it covers. */
+.settings-layer, .command-layer, .cancel-layer, .toast, .quick-access-panel,
+.chat-dialog, .agent-console-dialog, .so-tip {
+  --bg: #fff; --panel: #f9f9f9; --surface: #fff; --raised: #fff;
+  --fg: #171717; --muted: #686868; --border: #e7e7e7;
+  --accent: #087f70; --accent-strong: #07685c; --accent-soft: #e1f4ef; --on-accent: #fff;
+}
+html[data-theme="dark"] :is(.settings-layer, .command-layer, .cancel-layer, .toast,
+.quick-access-panel, .chat-dialog, .agent-console-dialog, .so-tip) {
+  --bg: #212121; --panel: #171717; --surface: #303030; --raised: #303030;
+  --fg: #ececec; --muted: #b2b2b2; --border: #3c3c3c;
+  --accent: #5de0cb; --accent-strong: #7aead8; --accent-soft: #193b34; --on-accent: #042821;
+}
+.settings-layer .primary-button, .cancel-layer .primary-button, .chat-dialog .primary-button {
+  background: var(--accent); border-color: var(--accent); color: var(--on-accent);
+}
+
+/* 2.2 One scrim and one material for every modal surface. */
+.command-layer, .settings-layer, .cancel-layer {
+  background: var(--scrim);
+  -webkit-backdrop-filter: blur(10px) saturate(1.3);
+  backdrop-filter: blur(10px) saturate(1.3);
+}
+.chat-dialog::backdrop, .agent-console-dialog::backdrop { background: var(--scrim); }
+@media (max-width: 860px) { .drawer-backdrop { background: var(--scrim); } }
+@media (prefers-reduced-transparency: reduce) {
+  .command-layer, .settings-layer, .cancel-layer { -webkit-backdrop-filter: none; backdrop-filter: none; background: var(--bg); }
+}
+
+/* 2.3 Dialog family: one radius, one shadow, one surface. */
+.settings-window, .command-dialog, .cancel-dialog, .chat-dialog, .agent-console-dialog, .shell-popover {
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-3);
+}
+.shell-popover { box-shadow: var(--shadow-2); }
+.command-dialog, .cancel-dialog { background: var(--surface); }
+
+/* 2.4 Command palette: links and buttons were styled differently in one list. */
+.command-item, .command-item:visited { color: var(--fg); text-decoration: none; }
+.command-item:focus-visible { outline: 0; background: var(--accent-soft); }
+.command-shortcut { font-family: var(--font-body); }
+
+/* 2.5 The theme toggle showed a label ("Dark") on some pages and only an icon
+ * on others. It is an icon button everywhere; its aria-label names the action. */
+.topbar #themeLabel { display: none; }
+.topbar .theme-toggle { min-width: 44px; justify-content: center; padding: 0; border: 0; background: transparent; border-radius: var(--radius-md); }
+.topbar .theme-toggle:hover { background: color-mix(in srgb, var(--fg) 7%, transparent); color: var(--fg); }
+
+/* 2.6 Usage and Routing put a bare h3 inside .page-intro, which is a
+ * space-between row: the title sat left at 16px and the description floated
+ * to the far right. Match the h2 intros used on the other pages. */
+.page-intro:has(> h3) { display: block; }
+.page-intro > h3 { margin: 0; font-size: 22px; font-weight: 600; letter-spacing: -.035em; line-height: 1.3; }
+
+/* 2.7 Status badges. Some arrived in sentence case ("Completed"), others in
+ * raw capitals ("NEEDS SETUP", "COMPLETED", "ORPHANED"). The text is left to
+ * the templates and the live updater; presentation normalises it here. */
+.badge { border-radius: var(--radius-sm); font-weight: 550; }
+.setup-step-head .badge, .settings-section > p > .badge,
+:is(.badge-running, .badge-completed, .badge-failed, .badge-pending, .badge-cancelled, .badge-orphaned,
+.badge-paused, .badge-stalled, .badge-blocked, .badge-queued) {
+  display: inline-block; line-height: 1.4; text-transform: lowercase;
+}
+.setup-step-head .badge::first-letter, .settings-section > p > .badge::first-letter,
+:is(.badge-running, .badge-completed, .badge-failed, .badge-pending, .badge-cancelled, .badge-orphaned,
+.badge-paused, .badge-stalled, .badge-blocked, .badge-queued)::first-letter { text-transform: uppercase; }
+.run-chat-shell .run-status-line .badge { font-size: 11px; }
+/* Statuses the status-class helper can emit that had no colour at all. */
+.badge-orphaned, .badge-needs-attention, .badge-degraded { background: var(--warning-bg); color: var(--warning); }
+.badge-queued { background: var(--panel); color: var(--muted); }
+
+/* 2.8 A live run reads as live: one pulsing dot, driven by the same class the
+ * SSE updater already rewrites. */
+.badge-running { position: relative; padding-left: 20px; }
+.badge-running::before {
+  content: ""; position: absolute; left: 8px; top: 50%; width: 6px; height: 6px; margin-top: -3px;
+  border-radius: 50%; background: currentColor;
+  animation: so-pulse 1.6s var(--ease-in-out) infinite;
+}
+
+/* 2.9 Text below the 11px floor (9px and 10px labels) is raised to it. */
+.project-folder-count, .project-history-heading, .project-folder-switch button,
+.chat-shell .composer-hint, .chat-context, .run-chat-shell .run-status-line,
+.chat-model-trigger small, .chat-model-option small, .quick-usage-provider small,
+.chat-code-copy, .agent-dock-footer, .agent-dock-body .agent-session-head .badge { font-size: 11px; }
+
+/* 2.10 `--text` was never defined; the active view button had no colour. */
+.agent-view-buttons .text-button.is-active { color: var(--fg); box-shadow: var(--shadow-1); }
+
+/* 2.11 Controls: one radius and one height for the default button and field. */
+.text-button, .advanced-field input, .advanced-field select,
+.so-form input[type="text"], .so-form input[type="number"], .so-form select, .so-form textarea,
+.access-next a, .page-return a { border-radius: 8px; }
+.access-actions .text-button, .setup-step .text-button, .access-next a { min-height: 38px; }
+:where(input:not([type="checkbox"]):not([type="radio"]), select, textarea):focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent); outline-offset: 1px;
+}
+.chat-shell .composer textarea:focus-visible, .command-input:focus-visible { outline: 0; }
+
+/* 2.12 Disclosures. Seven different markers were in use (native triangle,
+ * "›", "›" swapped for "⌄", "▸/▾", "⌄/⌃"). One chevron, one rotation. */
+details > summary { list-style: none; }
+details > summary::-webkit-details-marker { display: none; }
+details > summary::before,
+.provider-details > summary::before, .routing-provider > summary::before,
+.project-folder > summary::before, .file-diff > summary::before,
+.run-task-disclosure > summary::before, .agent-dock-body .agent-session-head::before {
+  content: ""; display: inline-block; flex: 0 0 auto; box-sizing: border-box;
+  width: 7px; height: 7px; margin: 0 10px 0 2px;
+  border: solid currentColor; border-width: 0 1.5px 1.5px 0; border-radius: 1px;
+  font-size: 0; opacity: .55; vertical-align: 2px;
+  transform: rotate(-45deg); transition: transform var(--dur-2) var(--ease-out);
+}
+details[open] > summary::before,
+.provider-details[open] > summary::before, .routing-provider[open] > summary::before,
+.project-folder[open] > summary::before, .file-diff[open] > summary::before,
+.run-task-disclosure[open] > summary::before,
+.agent-dock-body .agent-session-card[open] > .agent-session-head::before {
+  content: ""; transform: rotate(45deg) translate(-1px, -1px);
+}
+.project-folder > summary::before { margin-right: 4px; }
+.run-task-disclosure > summary::before { margin: 6px 0 0 2px; }
+/* These summaries carry their own trailing indicator. */
+#quickUsageDetails > summary::before, .quick-usage-provider > summary::before,
+.routing-role > summary::before, #chatThinking > summary::before { content: none; display: none; }
+.access-models summary::after, .access-models[open] summary::after { content: none; }
+.routing-role > summary::after, #chatThinking > summary::after, #chatThinking[open] > summary::after {
+  content: ""; display: inline-block; flex: 0 0 auto; box-sizing: border-box;
+  width: 8px; height: 8px; margin-left: 4px;
+  border: solid currentColor; border-width: 0 1.5px 1.5px 0; border-radius: 1px;
+  font-size: 0; opacity: .55;
+  transform: rotate(-45deg); transition: transform var(--dur-2) var(--ease-out);
+}
+.routing-role[open] > summary::after, #chatThinking[open] > summary::after { transform: rotate(45deg) translate(-1px, -1px); }
+#quickUsageDetails > summary > span:last-child,
+.quick-provider-heading > span > span[aria-hidden] { display: inline-block; transition: transform var(--dur-2) var(--ease-out); }
+#quickUsageDetails[open] > summary > span:last-child,
+.quick-usage-provider[open] .quick-provider-heading > span > span[aria-hidden] { transform: rotate(180deg); }
+
+/* 2.12b Chat dialogs: the search field and work brief used browser-default
+ * controls, results stacked their icon above the title, and the close control
+ * was a 9px "×" while every other dialog uses a 44px icon button. */
+.chat-dialog input[type="search"], .chat-dialog textarea, .chat-dialog select, .chat-model-panel input[type="search"] {
+  min-height: 42px; padding: 9px 12px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--surface); color: var(--fg); font: inherit; font-size: 14px;
+}
+.chat-dialog [data-dialog-close].icon-button { font-size: 22px; line-height: 1; margin: -8px -8px 0 0; }
+#chatSearchResults a { display: flex; align-items: center; gap: 10px; min-height: 42px; padding: 8px 10px; transition: background-color var(--dur-1) ease; }
+#chatSearchResults a > svg { color: var(--muted); }
+.chat-dialog::backdrop, .agent-console-dialog::backdrop { -webkit-backdrop-filter: blur(10px) saturate(1.3); backdrop-filter: blur(10px) saturate(1.3); }
+
+/* 2.13 Work-mode policy disclosures ran edge to edge while the conversation
+ * and composer sit in a 740px column. */
+.chat-shell .project-policy { width: min(740px, calc(100% - 48px)); margin: 0 auto 8px; border-radius: var(--radius-md); font-size: 12px; }
+.chat-shell .project-policy > summary { font-weight: 500; }
+
+/* 2.14 Sidebar run state used four tiny glyphs (◌ ✓ × ■) at 10px. A dot
+ * carries the same state; the status stays in aria-label and title. */
+.project-run-state {
+  flex: 0 0 auto; width: 7px; height: 7px; margin: 0 2px; border-radius: 50%;
+  font-size: 0; background: var(--viz-neutral);
+}
+.project-run-state[aria-label="COMPLETED"] { background: var(--viz-good); }
+.project-run-state[aria-label="FAILED"] { background: var(--viz-crit); }
+.project-run-state[aria-label="CANCELLED"], .project-run-state[aria-label="ORPHANED"] { border-radius: 2px; }
+.project-run-state[aria-label="PENDING"] { background: transparent; box-shadow: inset 0 0 0 1.5px var(--viz-neutral); }
+.project-run-state[aria-label="RUNNING"] { background: var(--viz-warn); animation: so-ping 1.8s var(--ease-out) infinite; }
+
+/* 2.15 Elevation: the composer and cards used three unrelated hard-coded shadows. */
+.chat-shell .composer { box-shadow: var(--shadow-1); }
+.chat-mode-switch button[aria-pressed="true"] { box-shadow: var(--shadow-1); }
+
+/* --------------------------------------------------------------- 3. Motion */
+
+@keyframes so-rise { from { opacity: 0; transform: translateY(8px); } }
+@keyframes so-fade { from { opacity: 0; } }
+@keyframes so-pop { from { opacity: 0; transform: scale(.96) translateY(4px); } }
+@keyframes so-grow-x { from { transform: scaleX(0); } }
+@keyframes so-grow-y { from { transform: scaleY(0); } }
+@keyframes so-pulse { 50% { opacity: .35; } }
+@keyframes so-ping {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--viz-warn) 55%, transparent); }
+  80%, 100% { box-shadow: 0 0 0 6px transparent; }
+}
+@keyframes so-drift {
+  from { transform: translate(-54%, -8%) scale(1); }
+  to { transform: translate(-46%, 6%) scale(1.08); }
+}
+@keyframes so-dash { to { stroke-dashoffset: var(--so-dash-to, 0); } }
+
+/* 3.1 Navigating between pages cross-fades the content while the sidebar holds
+ * still, so a server-rendered app stops flashing on every click. */
+@view-transition { navigation: auto; }
+@media (prefers-reduced-motion: reduce) { @view-transition { navigation: none; } }
+.left-sidebar { view-transition-name: so-sidebar; }
+::view-transition-old(root), ::view-transition-new(root) { animation-duration: 180ms; animation-timing-function: ease; }
+::view-transition-group(so-sidebar) { animation-duration: 200ms; animation-timing-function: var(--ease-out); }
+::view-transition-old(so-sidebar) { animation: none; opacity: 0; }
+::view-transition-new(so-sidebar) { animation: none; }
+
+/* 3.2 Content arrives in reading order. */
+.app:not(.chat-shell) .conversation-inner > * { animation: so-rise var(--dur-3) var(--ease-out) backwards; }
+.app:not(.chat-shell) .conversation-inner > :nth-child(2) { animation-delay: 35ms; }
+.app:not(.chat-shell) .conversation-inner > :nth-child(3) { animation-delay: 70ms; }
+.app:not(.chat-shell) .conversation-inner > :nth-child(4) { animation-delay: 105ms; }
+.app:not(.chat-shell) .conversation-inner > :nth-child(n+5) { animation-delay: 140ms; }
+.chat-shell .workspace-welcome > * { animation: so-rise var(--dur-4) var(--ease-out) backwards; }
+.chat-shell .workspace-welcome > :nth-child(2) { animation-delay: 60ms; }
+.chat-shell .workspace-welcome > :nth-child(3) { animation-delay: 120ms; }
+.chat-shell .workspace-welcome > :nth-child(n+4) { animation-delay: 180ms; }
+.run-tab-panel:not([data-panel="chat"]) { animation: so-rise var(--dur-3) var(--ease-out); }
+.run-tab-panel[data-panel="chat"] { animation: so-fade var(--dur-2) ease; }
+.settings-section:not([hidden]) { animation: so-fade var(--dur-2) ease; }
+.side-pane:not([hidden]) { animation: so-fade var(--dur-2) ease; }
+.chat-shell .agent-chat-pane .message { animation: so-rise var(--dur-3) var(--ease-out); }
+.chat-live-reply:not([hidden]) { animation: so-fade var(--dur-2) ease; }
+.run-list-item { animation: so-rise var(--dur-3) var(--ease-out) backwards; }
+.run-list-item:nth-child(2) { animation-delay: 25ms; }
+.run-list-item:nth-child(3) { animation-delay: 50ms; }
+.run-list-item:nth-child(4) { animation-delay: 75ms; }
+.run-list-item:nth-child(5) { animation-delay: 100ms; }
+.run-list-item:nth-child(6) { animation-delay: 125ms; }
+.run-list-item:nth-child(n+7) { animation-delay: 150ms; }
+.so-notice, .so-error:not([hidden]) { animation: so-pop var(--dur-3) var(--ease-spring); }
+
+/* 3.3 Controls answer the pointer. */
+.text-button, .icon-button, .rail-button, .side-item, .send-button, .run-tab, .command-item,
+.popover-link, .settings-nav-button, .segmented button, .chat-mode-switch button, .workspace-link,
+.run-list-item, .project-folder > summary, .chat-model-option, .chat-model-trigger, .theme-toggle,
+.routing-role > summary, .setup-mode-option, .quick-actions button, .chat-attach-button {
+  transition: background-color var(--dur-1) ease, border-color var(--dur-1) ease, color var(--dur-1) ease,
+    box-shadow var(--dur-2) ease, opacity var(--dur-1) ease, transform var(--dur-1) var(--ease-out);
+}
+.text-button:active:not(:disabled), .icon-button:active:not(:disabled), .theme-toggle:active,
+.rail-button:active, .quick-actions button:active { transform: scale(.97); }
+.send-button:active:not(:disabled), .chat-attach-button:active { transform: scale(.92); }
+.chat-shell .send-button:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 4px 12px color-mix(in srgb, var(--accent) 35%, transparent); }
+.chat-shell .send-button:active:not(:disabled) { transform: scale(.92); box-shadow: none; }
+.workspace-link:hover { transform: translateY(-1px); box-shadow: var(--shadow-2); }
+.brand-home .saber-bracket { transition: transform var(--dur-3) var(--ease-spring); }
+.brand-home:hover .saber-bracket:first-of-type { transform: translateX(-1.5px); }
+.brand-home:hover .saber-bracket:nth-of-type(2) { transform: translateX(1.5px); }
+.chat-shell .chat-user-message .chat-message-actions { transition: opacity var(--dur-2) ease; }
+.routing-candidate { transition: background-color var(--dur-1) ease, box-shadow var(--dur-2) ease; }
+.routing-candidate.is-dragging { box-shadow: var(--shadow-2); }
+.so-table tbody tr { transition: background-color var(--dur-1) ease; }
+
+/* The composer lights up when it has focus instead of only darkening its border. */
+.chat-shell .composer { transition: border-color var(--dur-2) ease, box-shadow var(--dur-3) var(--ease-out); }
+.chat-shell .composer:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 12%, transparent), var(--shadow-1);
+}
+.attachment-drag .composer { outline-offset: 6px; transition: outline-offset var(--dur-2) var(--ease-spring); }
+
+/* 3.4 Chat / Work: the selection slides between the two segments. */
+@supports selector(:has(a)) {
+  .chat-shell .chat-mode-switch { display: grid; grid-template-columns: 1fr 1fr; isolation: isolate; }
+  .chat-shell .chat-mode-switch::before {
+    content: ""; position: absolute; z-index: -1; top: 3px; bottom: 3px; left: 3px;
+    width: calc((100% - 6px) / 2); border-radius: 6px; background: var(--bg);
+    box-shadow: var(--shadow-1); transition: transform var(--dur-3) var(--ease-spring);
+  }
+  .chat-shell .chat-mode-switch:has(button:last-child[aria-pressed="true"])::before { transform: translateX(100%); }
+  .chat-shell .chat-mode-switch button[aria-pressed="true"] { background: transparent; box-shadow: none; }
+  @media (max-width: 1250px) { .chat-shell:not(.right-collapsed) .chat-mode-switch { position: relative; } }
+}
+
+/* 3.5 Run tabs: the indicator grows from its centre. */
+.run-tab::after {
+  content: ""; position: absolute; left: 12px; right: 12px; bottom: 0; height: 2px; border-radius: 2px 2px 0 0;
+  background: var(--accent); transform: scaleX(0); transition: transform var(--dur-3) var(--ease-out);
+}
+.run-tab.active::after, .run-tab.is-active::after, .run-tab[aria-selected="true"]::after { transform: scaleX(1); }
+.run-chat-shell .run-tab[aria-selected="true"] { border-color: transparent; }
+
+/* 3.6 Modal layers fade in and out; the window settles with a small spring.
+ * Browsers without discrete transitions simply show and hide as before. */
+.command-layer, .settings-layer, .cancel-layer {
+  opacity: 0;
+  transition: opacity var(--dur-2) ease, display var(--dur-2) allow-discrete;
+}
+.command-layer.open, .settings-layer.open, .cancel-layer.open { opacity: 1; }
+.command-dialog, .settings-window, .cancel-dialog {
+  transform: translateY(10px) scale(.97);
+  transition: transform var(--dur-3) var(--ease-spring);
+}
+.open > .command-dialog, .open > .settings-window, .open > .cancel-dialog { transform: none; }
+@starting-style {
+  .command-layer.open, .settings-layer.open, .cancel-layer.open { opacity: 0; }
+  .open > .command-dialog, .open > .settings-window, .open > .cancel-dialog { transform: translateY(10px) scale(.97); }
+}
+.chat-dialog, .agent-console-dialog {
+  opacity: 0; transform: translateY(12px) scale(.97);
+  transition: opacity var(--dur-2) ease, transform var(--dur-3) var(--ease-spring),
+    overlay var(--dur-2) allow-discrete, display var(--dur-2) allow-discrete;
+}
+.chat-dialog[open], .agent-console-dialog[open] { opacity: 1; transform: none; }
+.chat-dialog::backdrop, .agent-console-dialog::backdrop {
+  opacity: 0;
+  transition: opacity var(--dur-2) ease, overlay var(--dur-2) allow-discrete, display var(--dur-2) allow-discrete;
+}
+.chat-dialog[open]::backdrop, .agent-console-dialog[open]::backdrop { opacity: 1; }
+@starting-style {
+  .chat-dialog[open], .agent-console-dialog[open] { opacity: 0; transform: translateY(12px) scale(.97); }
+  .chat-dialog[open]::backdrop, .agent-console-dialog[open]::backdrop { opacity: 0; }
+}
+
+/* 3.7 Popovers grow from the control that opened them. */
+.shell-popover:not([hidden]) { animation: so-pop var(--dur-2) var(--ease-out); }
+.quick-access-panel { transform-origin: 12% 100%; }
+.chat-model-panel { transform-origin: 85% 0; }
+.toast { transition: opacity var(--dur-2) ease, transform var(--dur-3) var(--ease-spring); box-shadow: var(--shadow-2); border-radius: var(--radius-md); }
+
+/* 3.8 Disclosures open and close smoothly where the browser can animate to
+ * an intrinsic height; elsewhere they toggle instantly as before. */
+@supports (interpolate-size: allow-keywords) {
+  :root { interpolate-size: allow-keywords; }
+  details::details-content {
+    block-size: 0; opacity: 0; overflow-y: clip; overflow-clip-margin: 4px;
+    transition: block-size var(--dur-3) var(--ease-out), opacity var(--dur-2) ease,
+      content-visibility var(--dur-3) allow-discrete;
+  }
+  details[open]::details-content { block-size: auto; opacity: 1; }
+  /* Live agent consoles are resized by hand and refreshed constantly. */
+  .agent-session-card::details-content { transition: none; overflow-y: visible; }
+}
+
+/* 3.9 Theme changes cross-fade. visuals.js adds this class for one frame-set
+ * when data-theme changes; console.js stays the only theme owner. */
+@media (prefers-reduced-motion: no-preference) {
+  html.so-theme-fade, html.so-theme-fade *, html.so-theme-fade *::before, html.so-theme-fade *::after {
+    transition: background-color 260ms ease, color 260ms ease, border-color 260ms ease,
+      fill 260ms ease, stroke 260ms ease, box-shadow 260ms ease !important;
+  }
+}
+
+/* 3.10 The empty workspace gets one quiet, slow light behind its heading. It
+ * exists only until the first message; it never sits behind working content. */
+.chat-shell .workspace-welcome { position: relative; isolation: isolate; }
+.chat-shell .workspace-welcome::before {
+  content: ""; position: absolute; z-index: -1; left: 50%; top: 0; width: min(560px, 90%); height: 240px;
+  border-radius: 50%; pointer-events: none;
+  background: radial-gradient(closest-side, color-mix(in srgb, var(--accent) 16%, transparent), transparent);
+  filter: blur(56px); opacity: .55;
+  animation: so-drift 11s var(--ease-in-out) infinite alternate;
+  transform: translate(-50%, 0);
+}
+html[data-theme="dark"] .chat-shell .workspace-welcome::before { opacity: .4; }
+@media (prefers-reduced-transparency: reduce) { .chat-shell .workspace-welcome::before { display: none; } }
+
+/* 3.11 Setup reads as a path: done steps are checked and joined by a line. */
+.setup-progress-track { border-radius: 999px; background: var(--viz-track); }
+.setup-progress-track span { border-radius: 999px; transform-origin: left; animation: so-grow-x var(--dur-4) var(--ease-out) 120ms backwards; }
+.setup-step { position: relative; border-top: 0; }
+.setup-number { position: relative; transition: background-color var(--dur-2) ease, border-color var(--dur-2) ease; }
+.setup-step:not(:last-child)::before {
+  content: ""; position: absolute; left: 17px; top: 68px; bottom: -16px; width: 2px; border-radius: 2px;
+  background: var(--border);
+}
+.setup-step:has(.setup-step-head .badge-normal) .setup-number { background: var(--accent-soft); border-color: transparent; color: transparent; }
+.setup-step:has(.setup-step-head .badge-normal) .setup-number::after {
+  content: ""; position: absolute; left: 50%; top: 46%; width: 6px; height: 11px;
+  border: solid var(--accent-strong); border-width: 0 2px 2px 0; border-radius: 1px;
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+.setup-step:has(.setup-step-head .badge-normal):not(:last-child)::before { background: color-mix(in srgb, var(--accent) 55%, var(--border)); }
+.setup-step.current .setup-number { box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 16%, transparent); }
+
+/* ------------------------------------------------------ 4. Chart primitives */
+
+.so-viz { --viz-ink: var(--fg); --viz-ink-2: var(--muted); font-family: var(--font-body); }
+.so-card { border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface); }
+.so-viz-title { margin: 0; font-size: 13px; font-weight: 600; color: var(--fg); }
+.so-viz-note { margin: 2px 0 0; font-size: 12px; color: var(--muted); }
+
+/* Tooltip shared by every chart. */
+.so-tip {
+  position: fixed; z-index: 220; top: 0; left: 0; max-width: 260px; padding: 8px 10px; pointer-events: none;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--fg);
+  box-shadow: var(--shadow-2); font: 12px/1.45 var(--font-body);
+  opacity: 0; transform: translateY(4px); transition: opacity var(--dur-1) ease, transform var(--dur-1) ease;
+}
+.so-tip.show { opacity: 1; transform: none; }
+.so-tip-head { margin-bottom: 4px; color: var(--muted); font-size: 11px; }
+.so-tip-row { display: flex; align-items: center; gap: 8px; }
+.so-tip-row strong { font-weight: 600; font-variant-numeric: tabular-nums; }
+.so-tip-row span { color: var(--muted); }
+.so-tip-row i { flex: 0 0 auto; width: 10px; height: 3px; border-radius: 2px; background: var(--c, var(--viz-neutral)); }
+
+/* Legend: swatch plus label; text never wears the series colour. */
+.so-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 0; padding: 0; list-style: none; font-size: 12px; color: var(--muted); }
+.so-legend li { display: inline-flex; align-items: center; gap: 6px; }
+.so-legend i { width: 10px; height: 10px; border-radius: 3px; background: var(--c); }
+.so-legend b { color: var(--fg); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+/* Run history: stat tiles beside a 14-day outcome chart. */
+.so-insights { display: grid; grid-template-columns: minmax(200px, 250px) minmax(0, 1fr); margin: 0 0 20px; overflow: hidden; animation: so-rise var(--dur-3) var(--ease-out) backwards; }
+.so-stats { display: grid; align-content: stretch; border-right: 1px solid var(--border); }
+.so-stat { display: grid; align-content: center; gap: 2px; padding: 14px 20px; }
+.so-stat + .so-stat { border-top: 1px solid var(--border); }
+.so-stat dt { font-size: 12px; color: var(--muted); }
+.so-stat dd { margin: 0; font-size: 26px; font-weight: 600; letter-spacing: -.03em; line-height: 1.15; color: var(--fg); }
+.so-stat dd small { margin-left: 6px; font-size: 12px; font-weight: 400; letter-spacing: 0; color: var(--muted); }
+.so-stat-hero dd { font-size: 40px; }
+.so-chart { display: grid; gap: 12px; min-width: 0; padding: 16px 20px 14px; }
+.so-chart-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px 20px; flex-wrap: wrap; }
+.so-plot { position: relative; display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 0 8px; height: 148px; }
+.so-yaxis { position: relative; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; margin-bottom: 22px; }
+.so-yaxis span { position: absolute; right: 0; transform: translateY(50%); line-height: 1; }
+.so-cols { position: relative; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); min-width: 0; }
+.so-grid { position: absolute; inset: 0 0 22px 0; pointer-events: none; }
+.so-grid i { position: absolute; left: 0; right: 0; height: 1px; background: var(--viz-grid); }
+.so-grid i:first-child { background: color-mix(in srgb, var(--fg) 22%, transparent); }
+.so-col { position: relative; display: grid; grid-template-rows: minmax(0, 1fr) 22px; justify-items: center; min-width: 0; border-radius: 6px; outline-offset: -2px; }
+.so-col:hover, .so-col:focus-visible { background: color-mix(in srgb, var(--fg) 4%, transparent); }
+.so-stack { display: flex; flex-direction: column-reverse; justify-content: flex-start; gap: 2px; width: min(24px, 62%); height: 100%; transform-origin: bottom; animation: so-grow-y var(--dur-4) var(--ease-out) backwards; animation-delay: calc(var(--i, 0) * 22ms + 120ms); }
+.so-seg { flex: 0 0 auto; min-height: 3px; background: var(--c); transition: filter var(--dur-1) ease; }
+.so-seg:last-child { border-radius: 4px 4px 0 0; }
+.so-col:hover .so-seg, .so-col:focus-visible .so-seg { filter: brightness(1.12); }
+.so-xlabel { align-self: end; font-size: 11px; line-height: 16px; color: var(--muted); white-space: nowrap; }
+.so-col[data-today] .so-xlabel { color: var(--fg); font-weight: 600; }
+.so-empty-day { align-self: end; width: 4px; height: 4px; border-radius: 50%; background: var(--viz-grid); }
+
+/* Meters replace the bare <progress> bars; the element itself stays for
+ * assistive technology. Fill colour carries severity, track is a lighter step. */
+.so-meter-source { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; opacity: 0; }
+.so-meter { --c: var(--accent); height: 6px; margin: 10px 0; border-radius: 999px; overflow: hidden; background: color-mix(in srgb, var(--c) 16%, transparent); }
+.so-meter > span { display: block; width: calc(var(--v) * 1%); height: 100%; border-radius: 999px; background: var(--c); transform-origin: left; animation: so-grow-x var(--dur-4) var(--ease-out) backwards; }
+.so-meter[data-tone="warn"] { --c: var(--viz-warn); }
+.so-meter[data-tone="crit"] { --c: var(--viz-crit); }
+.quick-usage-provider .so-meter, .quick-usage-window .so-meter { height: 5px; margin: 7px 0; }
+
+/* Usage: one ring per provider that reports a limit, tightest window shown. */
+.so-rings { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 0; margin: 0 0 16px; overflow: hidden; }
+.so-ring { display: grid; justify-items: center; gap: 6px; padding: 18px 12px 16px; text-align: center; min-width: 0; }
+.so-ring + .so-ring { border-left: 1px solid var(--border); }
+.so-ring-figure { position: relative; width: 84px; height: 84px; }
+.so-ring svg { display: block; width: 84px; height: 84px; transform: rotate(-90deg); }
+.so-ring circle { fill: none; stroke-width: 7; }
+.so-ring .so-ring-track { stroke: color-mix(in srgb, var(--c) 16%, transparent); }
+.so-ring .so-ring-value { stroke: var(--c); stroke-linecap: round; animation: so-dash var(--dur-4) var(--ease-out) 150ms forwards; }
+.so-ring[data-tone="ok"] { --c: var(--accent); }
+.so-ring[data-tone="warn"] { --c: var(--viz-warn); }
+.so-ring[data-tone="crit"] { --c: var(--viz-crit); }
+.so-ring-number { position: absolute; inset: 0; display: grid; place-items: center; font-size: 18px; font-weight: 600; letter-spacing: -.02em; color: var(--fg); }
+.so-ring-number small { font-size: 11px; font-weight: 500; color: var(--muted); }
+.so-ring strong { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.so-ring > small { font-size: 11px; color: var(--muted); }
+
+/* Proportion bar: token mix on a run, check results on Diagnostics. */
+.so-split { display: grid; gap: 10px; margin: 12px 0 18px; padding: 16px 20px; }
+.so-split-bar { display: flex; gap: 2px; height: 10px; border-radius: 999px; overflow: hidden; background: var(--viz-track); }
+.so-split-bar > span { flex: var(--v) 1 0; min-width: 3px; background: var(--c); transform-origin: left; animation: so-grow-x var(--dur-4) var(--ease-out) backwards; transition: filter var(--dur-1) ease; }
+.so-split-bar > span:hover, .so-split-bar > span:focus-visible { filter: brightness(1.12); }
+
+@media (max-width: 700px) {
+  .so-insights { grid-template-columns: 1fr; }
+  .so-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); border-right: 0; border-bottom: 1px solid var(--border); }
+  .so-stat { padding: 12px 14px; }
+  .so-stat + .so-stat { border-top: 0; border-left: 1px solid var(--border); }
+  .so-stat dd, .so-stat-hero dd { font-size: 22px; }
+  .so-stat dd small { display: block; margin: 2px 0 0; }
+  .so-chart { padding: 14px; }
+  .so-col:nth-child(even) .so-xlabel { visibility: hidden; }
+  .so-ring + .so-ring { border-left: 0; }
+}
+@media (forced-colors: active) {
+  .so-seg, .so-meter > span, .so-split-bar > span, .so-legend i { forced-color-adjust: none; }
+}

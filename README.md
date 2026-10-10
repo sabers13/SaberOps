@@ -12,7 +12,7 @@ SaberOps lets AI models propose software changes while deterministic code contro
 > **Core principle: the LLM advises; deterministic software decides.**
 
 > [!IMPORTANT]
-> **v0.3.7 adds the UI-first owner workflow for real product testing.** It adds isolated first-run profiles, guided setup, exact Worker/Reviewer/Orchestrator selection, project policy configuration, candidate Inbox/diff/Reject flows, and durable detached Review/Accept owner actions. This release is still **preview software**: not production-ready, stable, or complete.
+> **v0.3.8 adds parallel Work with isolated worker branches and a Git & threads pane.** It also separates Chat from Work, keeps linked original chats, unifies project navigation, and improves native session controls and provider reporting. See the [release notes](docs/releases/0.3.8.md) and [parallel workflow guide](docs/parallel-work.md). This release is still **preview software**: not production-ready, stable, or complete.
 
 ---
 
@@ -73,8 +73,9 @@ SaberOps preserves provider, backend, and model identity from discovery through 
 
 The workspace composer starts a persistent conversation with the selected
 Orchestrator. Questions and discussion receive replies without launching a
-worker. Implementation requests use the existing supervised worker flow under
-project policy; completed or failed runs are explained in the same conversation.
+worker. **Turn into work** keeps the original chat and creates a separate linked
+Work thread. Implementation requests in Work use the supervised worker flow under
+project policy; completed or failed runs are explained in that Work thread.
 Follow-ups retain the original objective and recent conversation context. Each
 implementation request creates a separate candidate run against the project's
 current base; previous unaccepted candidates are not integrated automatically.
@@ -142,7 +143,7 @@ How much SaberOps may do without asking is an explicit, persisted owner setting.
 | `full_autonomy` | Yes | Yes |
 | `full_autonomy_publish` | Yes | Yes |
 
-Acceptance authority never bypasses verification; a candidate must still satisfy the fail-closed acceptance requirements. `full_autonomy_publish` additionally grants publication of accepted work, but v0.3.7 has no governed publication command, so it stops at the accepted state. Inspect or change the mode with `orch authority show`, `orch authority list`, and `orch authority set`.
+Acceptance authority never bypasses verification; a candidate must still satisfy the fail-closed acceptance requirements. `full_autonomy_publish` additionally grants publication of accepted work, but v0.3.8 has no governed publication command, so it stops at the accepted state. Inspect or change the mode with `orch authority show`, `orch authority list`, and `orch authority set`.
 
 ---
 
@@ -310,7 +311,7 @@ Run `orch <command> --help` for the full command and option reference. Runtime s
 | OpenCode | Yes |
 | Antigravity | Yes |
 
-"Implemented" means the adapter exists in the codebase. It does **not** mean that every adapter has been live-certified against a real provider account in v0.3.7.
+"Implemented" means the adapter exists in the codebase. It does **not** mean that every adapter has been live-certified against a real provider account in v0.3.8.
 
 ---
 
@@ -363,7 +364,7 @@ THIRD_PARTY_NOTICES.md   shipped third-party notices
 
 ## Current limitations
 
-- v0.3.7 is the first UI-first owner workflow release: isolated profiles and setup, explicit Worker/Reviewer/Orchestrator selection, project policy configuration, candidate Inbox/diff/Reject workflows, and durable detached Review/Accept owner actions.
+- Parallel Work supports two to six tasks with up to four concurrent workers. Conflicts stop integration; automatic mid-team recovery and automatic conflict repair are not implemented. See the [workflow guide](docs/parallel-work.md).
 - This is a preview release: interfaces and workflows may change.
 - SaberOps is not production-ready, stable, or feature-complete.
 
@@ -371,6 +372,11 @@ THIRD_PARTY_NOTICES.md   shipped third-party notices
 
 ## Further reading
 
+- [v0.3.8 release notes](docs/releases/0.3.8.md): changes, upgrade instructions and validation.
+- [Chat and Work guide](docs/chat-and-work.md): projects, separate conversations, attachments and linked Work.
+
+- [Parallel Work and Git tracking](docs/parallel-work.md): team planning, isolated
+  worker branches, ordered integration, checks and owner acceptance.
 - [Operating notes](docs/operations.md): worker routing, CLI usage limits, the
   chat and agent consoles, and fixed-source candidate verification.
 - [Session architecture](docs/session-architecture.md): native sessions,

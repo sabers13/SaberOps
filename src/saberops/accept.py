@@ -30,7 +30,7 @@ from saberops.provenance import (
     ProvenanceError,
     assert_candidate_provenance,
     assert_run_repository,
-    failover_authorized_bases,
+    execution_authorized_bases,
 )
 
 
@@ -188,6 +188,14 @@ def _lineage_base_sha(attempts: list[Attempt], final_attempt: Attempt) -> str | 
         ),
         None,
     )
+
+
+def _is_internal_team_worker(run: Run) -> bool:
+    try:
+        config = json.loads(run.config_json) if run.config_json else {}
+    except (ValueError, TypeError):
+        return False  # Canonical frozen-policy validation reports malformed configuration.
+    return isinstance(config, dict) and bool(config.get("parallel_parent_run_id"))
 
 
 class AcceptEngine:
@@ -835,6 +843,10 @@ class AcceptEngine:
         checks: list[AcceptPrecondition] = []
 
         run = self.db.get_run(run_id)
+        if run and _is_internal_team_worker(run):
+            checks.append(_fail("team_worker", "Combined parent Work",
+                                "Internal worker: review and accept the parent team result."))
+            return AcceptEligibility(run_id=run_id, eligible=False, checks=tuple(checks))
         if run is None:
             checks.append(_fail("run_completed", "Run completed", f"Run '{run_id}' not found"))
             return AcceptEligibility(run_id=run_id, eligible=False, checks=tuple(checks))
@@ -877,7 +889,7 @@ class AcceptEngine:
                 run,
                 final_attempt,
                 lineage_base_sha=_lineage_base_sha(attempts, final_attempt),
-                extra_authorized_bases=failover_authorized_bases(self.db, run_id),
+                extra_authorized_bases=execution_authorized_bases(self.db, run_id),
             )
             candidate_sha = provenance.candidate_sha
             candidate_branch = final_attempt.branch_name
@@ -1158,6 +1170,9 @@ class AcceptEngine:
         if not run:
             raise ValueError(f"Run '{run_id}' not found")
 
+        if _is_internal_team_worker(run):
+            raise RuntimeError("Accept the combined parent Work, not an internal team worker.")
+
         if run.status != RunStatus.COMPLETED:
             raise RuntimeError(
                 f"Cannot accept run '{run_id}': status is {run.status.value}, expected COMPLETED"
@@ -1180,7 +1195,7 @@ class AcceptEngine:
                 # its validated required-base anchor (re-verified live
                 # against durable decision evidence) remains provably
                 # a candidate of this run.
-                extra_authorized_bases=failover_authorized_bases(self.db, run_id),
+                extra_authorized_bases=execution_authorized_bases(self.db, run_id),
             )
         except ProvenanceError as exc:
             raise RuntimeError(f"Cannot accept run '{run_id}': {exc}") from exc

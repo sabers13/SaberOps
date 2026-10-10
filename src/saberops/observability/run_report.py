@@ -728,6 +728,104 @@ def _warnings(
     return sorted(set(warnings))
 
 
+def _team_section(db: Database, run: Run, report: dict[str, Any]) -> dict[str, Any] | None:
+    """Include linked worker evidence without reassigning it to the parent.
+
+    A matching creation event and the child's frozen parent/task reference are
+    both required. Never follow a claimed child team recursively, or confer
+    candidate/acceptance authority on preserved worker commits.
+    """
+    try:
+        config = json.loads(run.config_json or "{}")
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(config, dict) or config.get("execution_mode") != "parallel":
+        return None
+    plan = config.get("parallel_plan")
+    if not isinstance(plan, list) or not 2 <= len(plan) <= 6:
+        return None
+    workers: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    execution = dict(report["execution"])
+    gate = dict(report["gate"]["summary"])
+    complete = True
+    for event in db.get_complete_events_for_run(run.id):
+        if event.event_type != "team_worker_created":
+            continue
+        link = event.payload if isinstance(event.payload, dict) else {}
+        index, child_id = link.get("task_index"), link.get("child_run_id")
+        if (type(index) is not int or not 0 <= index < len(plan)
+                or not isinstance(child_id, str) or index in seen):
+            complete = False
+            continue
+        child = db.get_run(child_id)
+        try:
+            frozen = json.loads(child.config_json or "{}") if child else {}
+        except (ValueError, TypeError):
+            frozen = {}
+        if (not child or not isinstance(frozen, dict)
+                or frozen.get("execution_mode") != "single"
+                or frozen.get("parallel_parent_run_id") != run.id
+                or type(frozen.get("parallel_task_index")) is not int
+                or frozen.get("parallel_task_index") != index
+                or child.project_id != run.project_id):
+            complete = False
+            continue
+        seen.add(index)
+        evidence = build_run_report(db, child_id)
+        for key in execution:
+            execution[key] += evidence["execution"][key]
+        for key in gate:
+            gate[key] += evidence["gate"]["summary"][key]
+        failed = next(
+            (check for check in reversed(db.get_checks_for_run(child_id))
+             if not check.passed and not check.skipped), None,
+        )
+        attempts = db.get_attempts_for_run(child_id)
+        spec = plan[index] if isinstance(plan[index], dict) else {}
+        workers.append({
+            "task_index": index,
+            "title": str(spec.get("title", f"Task {index + 1}"))[:120],
+            "run_id": child_id,
+            "status": child.status.value,
+            "execution": evidence["execution"],
+            "gate": evidence["gate"]["summary"],
+            "review": {key: evidence["review"][key] for key in ("rounds", "verdicts")},
+            "termination": evidence["termination"],
+            "last_failed_check": {
+                "id": failed.id,
+                "command": failed.gate_command,
+                "exit_code": failed.exit_code,
+                "stdout": failed.stdout[-2000:],
+                "stderr": failed.stderr[-2000:],
+                "excerpt": "tail",
+                "truncated": len(failed.stdout) > 2000 or len(failed.stderr) > 2000,
+            } if failed else None,
+            "preserved_attempts": [{
+                "attempt_id": attempt.id,
+                "status": attempt.status.value,
+                "scheduled_provider": attempt.provider,
+                "scheduled_model": attempt.model,
+                "commit_sha": attempt.commit_sha or UNKNOWN,
+                "branch": attempt.branch_name,
+                "worktree": attempt.worktree_path,
+            } for attempt in attempts[-3:]],
+            "preserved_attempts_complete": len(attempts) <= 3,
+        })
+    return {
+        "scope": "parent_and_linked_workers",
+        "task_count": len(plan),
+        "linked_worker_count": len(workers),
+        "links_complete": complete,
+        "execution": execution,
+        "gate": gate,
+        "workers": workers,
+        "evidence_note": "Parent fields describe only the parent run. Team totals include "
+        "linked workers. Preserved worker commits do not establish a verified parent candidate "
+        "or acceptance; use the parent's candidate, gate, review and acceptance evidence.",
+    }
+
+
 def build_run_report(db: Database, run_id: str) -> dict[str, Any]:
     """Build the canonical read-only run report for ``run_id``.
 
@@ -810,6 +908,9 @@ def build_run_report(db: Database, run_id: str) -> dict[str, Any]:
         "warnings": warnings,
         "evidence_gaps": sorted(set(gaps)),
     }
+    team = _team_section(db, run, report)
+    if team is not None:
+        report["team"] = team
     return report
 
 
@@ -968,6 +1069,21 @@ def render_report_text(report: dict[str, Any]) -> str:
             f"{entry['branch']} exists_now={entry['exists_now']}"
         )
     lines.append(f"  cleanup_state  {workspace['cleanup_state']}")
+    team = report.get("team")
+    if isinstance(team, dict):
+        lines += ["", "team (parent and linked workers)",
+                  f"  linked_workers {team['linked_worker_count']}/{team['task_count']} "
+                  f"links_complete={team['links_complete']}"]
+        for key, value in team["execution"].items():
+            lines.append(f"  {key} {value}")
+        for key, value in team["gate"].items():
+            lines.append(f"  {key} {value}")
+        for member in team["workers"]:
+            lines.append(f"  {member['title']} [{member['status']}] {member['run_id']}")
+            failed = member["last_failed_check"]
+            if failed:
+                lines.append(f"    check {failed['command']} exit={failed['exit_code']} "
+                             + (failed["stderr"] or failed["stdout"]))
     warnings = report["warnings"]
     lines += ["", f"warnings ({len(warnings)})"]
     for warning in warnings:
@@ -1039,6 +1155,16 @@ def render_monitor_frame(report: dict[str, Any], *, now_iso: str | None = None) 
     ]
     warnings = report["warnings"]
     gaps = report["evidence_gaps"]
+    team = report.get("team")
+    if isinstance(team, dict):
+        lines.append(f"Team (parent and linked workers): "
+                     f"workers={team['linked_worker_count']}/{team['task_count']} "
+                     f"implementation={team['execution']['worker_dispatch_count']} "
+                     f"retry={team['execution']['retry_dispatch_count']} "
+                     f"repair={team['execution']['repair_dispatch_count']} "
+                     f"checks={team['gate']['check_total']} "
+                     f"failed={team['gate']['check_failed']} "
+                     f"links_complete={team['links_complete']}")
     if warnings:
         lines.append(f"Warnings ({len(warnings)}): " + "; ".join(warnings[:5]))
     if gaps:

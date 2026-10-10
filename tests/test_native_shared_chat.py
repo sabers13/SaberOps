@@ -208,7 +208,17 @@ def test_native_channel_recipe_keeps_subscription_readonly_tools_and_exact_sessi
     assert list(config["mcpServers"]) == ["saberops"]
     assert config["mcpServers"]["saberops"]["args"][-1] == data["descriptor"]
     assert argv[argv.index("--resume") + 1] == data["native_id"]
-    assert argv[argv.index("--permission-mode") + 1] == "plan"
+    # Shared chat must be able to reply through its two governed channel tools.
+    # Read-only local access comes from the exact tool allowlist, not plan mode.
+    assert argv[argv.index("--permission-mode") + 1] == "default"
+    channel_tools = "mcp__saberops__reply,mcp__saberops__request_work"
+    assert argv[argv.index("--tools") + 1] == "Read,Glob,Grep," + channel_tools
+    assert argv[argv.index("--allowedTools") + 1] == channel_tools
+    plain = native_argv(dict(data, shared_chat=False))
+    assert plain[plain.index("--permission-mode") + 1] == "plan"
+    assert plain[plain.index("--tools") + 1] == "Read,Glob,Grep"
+    assert "--allowedTools" not in plain
+    assert json.loads(plain[plain.index("--mcp-config") + 1]) == {"mcpServers": {}}
     assert "--dangerously-skip-permissions" not in argv
     assert "Write" not in argv[argv.index("--tools") + 1]
     assert json.loads(argv[argv.index("--settings") + 1])["forceLoginMethod"] == "claudeai"

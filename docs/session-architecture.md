@@ -163,6 +163,11 @@ recorded session and linked owner chat. The development-channel flag enables thi
 custom channel; it does not disable file permissions. Subscription authentication,
 disabled Fast Mode and read-only orchestrator settings remain enforced. The
 channel adds no API billing route; normal provider subscription limits still apply.
+Claude shared chat uses `default` permission mode with the exact local tool list
+`Read,Glob,Grep` plus `mcp__saberops__reply` and `mcp__saberops__request_work`.
+Only those two channel tools are preapproved. Ordinary read-only native resume
+uses `plan` mode and no MCP servers. Neither recipe enables local write or shell
+tools or skips permission checks; work requests still enter governed dispatch.
 
 App messages have stable identifiers and a durable bounded inbox. One app turn is
 delivered at a time. The native agent replies through the channel tool, and local

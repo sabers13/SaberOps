@@ -139,7 +139,7 @@ and gates. Open choices are explicitly UNRESOLVED.
   provenance, and acceptance. Source: [README](../../README.md).
 - **Primary user:** The repository owner/operator configuring providers, exact
   Worker/Reviewer/Orchestrator bindings, project policies, and candidate decisions.
-- **Product type:** Professional developer tool; v0.3.7 dogfood/preview release.
+- **Product type:** Professional developer tool; v0.3.8 dogfood/preview release.
 - **Current surfaces:** Shared console shell, new-run dashboard, run inspector,
   first-run setup, access/providers, routing, reviewer, orchestrator, quota, and
   candidate Inbox. Sources: [templates](templates/) and `web.py`.
@@ -733,3 +733,41 @@ page with controlled GET responses verifies first-run navigation preserves text 
 file drafts. Owner conversations, messages, attachments, runs/attempts/reviews and
 Git HEAD/status/refs match the pre-change snapshot. No provider calls or owner
 run/acceptance/terminal actions were started during validation.
+
+
+## Polish layer — 10 October 2026
+
+Owner-requested pass: Apple-guided polish, motion, consistency fixes and data
+visuals. It adds `static/css/polish.css` (loaded last) and
+`static/js/visuals.js`; `console-v2.css` and the earlier layers are unchanged.
+`base.html` gains the two asset links and `dashboard.html` gains two
+read-only `data-run-*` attributes on run rows. No route, form, id, existing
+`data-*` hook or backend context changed.
+
+- **Tokens:** motion (`--dur-1..4`, `--ease-out`, `--ease-spring`), radii
+  (`--radius-sm/md/lg` = 6/10/14), neutral elevation (`--shadow-1..3`), one
+  `--scrim`, and chart colours (`--viz-*`). The former shadow and scrim were
+  tinted with the retired Moss green.
+- **Consistency:** overlays outside `.app` (settings, command palette, cancel,
+  toast, quick access, chat dialogs) now use the shell's neutral/teal values
+  instead of the Graphite/Neutral palette. One disclosure chevron replaces
+  seven markers. Status badges render in sentence case. The theme toggle is an
+  icon button on every page. 9–10px labels are raised to 11px.
+- **Motion:** cross-document view transitions with a stable sidebar, staggered
+  content entry, spring-settled dialogs and popovers with fade-out, a sliding
+  Chat/Work selection, animated disclosures and a theme cross-fade. All of it
+  is removed by the existing `prefers-reduced-motion` rule.
+- **Visuals:** run-history summary (completion rate, 14-day outcome columns),
+  provider allowance rings and severity meters on Usage, a token-mix bar on a
+  run's Usage tab, a readiness bar on Diagnostics, and a checked setup path.
+  Each figure is drawn in the browser from values the server already rendered;
+  the source `<progress>` elements and tables remain for assistive technology.
+- **UNRESOLVED:** the Graphite Blue / Neutral Ink selector no longer changes
+  anything visible, because `.workspace-shell` in `chat-workspace.css`
+  overrides the palette tokens for the whole app. Either rewire the shell to
+  the palette tokens or retire the selector.
+- **Verification:** UI fast gate plus the owner-pages, settings-modal and
+  runs-view render checks pass. Inspected at 1440, 1100 and 390px in both
+  modes, with motion and with reduced motion, on temporary inspection state.
+  Usage rings, meters and the token-mix bar were checked against rendered
+  fixtures because the inspection machine had no logged-in CLI.

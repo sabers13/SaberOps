@@ -172,6 +172,11 @@ class RunConfig:
     accept_target_branch: str = ""
     # A linked repair run inherits a committed candidate, never a live provider session.
     continuation: dict[str, str] | None = None
+    execution_mode: str = "single"
+    max_parallel_workers: int = 3
+    parallel_plan: tuple[dict[str, Any], ...] = ()
+    parallel_parent_run_id: str | None = None
+    parallel_task_index: int | None = None
 
     @property
     def initial_tier(self) -> Tier:
@@ -448,7 +453,7 @@ def reconstruct_run_config(data: dict[str, Any]) -> RunConfig:
     manual_tier = _as_tier(data.get("manual_tier"))
     max_auto_tier = _as_tier(data.get("max_auto_tier"), default=Tier.T3)
     assert max_auto_tier is not None
-    return RunConfig(
+    config = RunConfig(
         task=str(data.get("task", "")).strip(),
         target_repo=str(data.get("target_repo", "")),
         routing_mode=raw_mode,  # type: ignore[arg-type]
@@ -521,7 +526,15 @@ def reconstruct_run_config(data: dict[str, Any]) -> RunConfig:
         # preserves their acceptance behavior (live repo state).
         accept_target_branch=str(data.get("accept_target_branch", "") or ""),
         continuation=_reconstruct_continuation(data.get("continuation")),
+        execution_mode=str(data.get("execution_mode", "single")),
+        max_parallel_workers=data.get("max_parallel_workers", 3),
+        parallel_plan=tuple(data.get("parallel_plan", ())),
+        parallel_parent_run_id=data.get("parallel_parent_run_id"),
+        parallel_task_index=data.get("parallel_task_index"),
     )
+    from saberops.parallel_work import validate_work_config
+    validate_work_config(config)
+    return config
 
 
 def _reconstruct_continuation(raw: object) -> dict[str, str] | None:

@@ -52,6 +52,11 @@ worker prose is advisory. A passing gate/review does not establish browser verif
 Respect truncation and unavailable evidence; do not invent test counts or file changes.
 Fresh artifact evidence supersedes earlier assistant statements about missing evidence;
 workspace.changed_paths UNKNOWN does not negate canonical artifact filenames.
+For parallel runs, parent counts describe only the parent; use team.execution,
+team.gate and team.workers for linked worker activity. Zero parent dispatches,
+checks or artifacts never prove no worker ran or no partial work was saved.
+Report a worker's failed checks before its later routing/fallback blocker.
+Preserved worker commits are partial work, not a verified parent candidate.
 Distinguish completion from acceptance. Do not lead with commit IDs or timing unless asked.
 Use concise Markdown when helpful. Conversation mode is software authority: in chat mode,
 always use action respond. In work mode, request work only for explicit implementation.
@@ -94,6 +99,10 @@ class ChatStore:
                     source_chat_id TEXT NOT NULL, request_id TEXT NOT NULL,
                     work_chat_id TEXT NOT NULL, brief TEXT NOT NULL,
                     PRIMARY KEY(source_chat_id,request_id));
+                CREATE TABLE IF NOT EXISTS chat_turn_work_options (
+                    chat_id TEXT NOT NULL, request_id TEXT NOT NULL,
+                    execution_mode TEXT NOT NULL, max_workers INTEGER NOT NULL,
+                    PRIMARY KEY(chat_id,request_id));
                 CREATE TABLE IF NOT EXISTS run_thread_origins (
                     run_id TEXT PRIMARY KEY, source_chat_id TEXT);
             """)
@@ -359,6 +368,15 @@ class ChatStore:
                 (chat_id,),
             ).fetchone()
             data["mode"] = mode[0] if mode else "auto"
+            last_user: dict[str, Any] = next(
+                (m for m in reversed(data["messages"]) if m["role"] == "user"), {}
+            )
+            options = conn.execute(
+                "SELECT execution_mode,max_workers FROM chat_turn_work_options "
+                "WHERE chat_id=? AND request_id=?", (chat_id, last_user.get("request_id", "")),
+            ).fetchone()
+            data["execution_mode"] = options[0] if options else "single"
+            data["max_parallel_workers"] = options[1] if options else 3
             data["busy"] = bool(row["token"])
             return data
 
@@ -552,7 +570,33 @@ def parse_reply(output: str) -> tuple[str, str]:
 
 def run_explanation(report: dict[str, Any]) -> str:
     termination = report["termination"]
-    if termination.get("outcome") == "NO_ELIGIBLE_CANDIDATE":
+    team = report.get("team")
+    execution = team["execution"] if isinstance(team, dict) else report["execution"]
+    dispatched = sum(execution.get(key, 0) for key in (
+        "worker_dispatch_count", "retry_dispatch_count", "repair_dispatch_count",
+    ))
+    if isinstance(team, dict) and team["workers"]:
+        counts = team["gate"]
+        lines = [
+            f"The parallel run is {report['lifecycle']['status'].lower()}. "
+            f"The team recorded {dispatched} implementation dispatch(es) and "
+            f"{counts['check_passed']} passed, {counts['check_failed']} failed, "
+            f"{counts['check_skipped']} skipped gate checks.",
+        ]
+        for worker in team["workers"]:
+            failed = worker["last_failed_check"]
+            if failed:
+                output = failed["stderr"] or failed["stdout"]
+                lines.append(f"Task '{worker['title']}' failed its check "
+                             f"'{failed['command']}' (exit {failed['exit_code']}): "
+                             + output[:1000])
+            if worker["termination"].get("outcome") == "NO_ELIGIBLE_CANDIDATE":
+                lines.append("No additional worker could be selected for this task: "
+                             + str(worker["termination"].get("summary", ""))[:2000])
+        lines.append(team["evidence_note"])
+        lines.append(str(termination.get("summary", "")))
+        return "\n\n".join(lines)
+    if termination.get("outcome") == "NO_ELIGIBLE_CANDIDATE" and dispatched == 0:
         skipped = termination.get("skipped_candidates", [])
         names = ", ".join(str(row.get("model", "Unknown model")) for row in skipped)
         return (
@@ -674,7 +718,11 @@ class ChatCoordinator:
         *,
         mode: str = "auto",
         attachment_ids: tuple[str, ...] = (),
+        execution_mode: str = "single",
+        max_parallel_workers: int = 3,
     ) -> None:
+        if execution_mode not in ("single", "parallel") or not 2 <= max_parallel_workers <= 4:
+            raise ValueError("Choose Single worker or Parallel team with two to four workers.")
         if mode not in ("auto", "chat", "work"):
             raise ValueError("Choose Chat or Work.")
         if not message.strip() or len(message) > MAX_MESSAGE or not request_id:
@@ -684,8 +732,12 @@ class ChatCoordinator:
             if mode == "work":
                 raise ValueError("Use Turn into work to create a separate Work thread.")
             mode = "chat"
+        if mode == "chat":
+            execution_mode = "single"
         target = self.shared_native_chat(chat_id)
         if target:
+            if execution_mode == "parallel":
+                raise ChatBusy("Return control to the app before planning a parallel team.")
             from saberops.session_control import ControlConflict
 
             bridge, row = target
@@ -762,6 +814,9 @@ class ChatCoordinator:
             if token is None:
                 self.capacity.release()
                 return
+            with self.store.connect() as conn:
+                conn.execute("INSERT OR IGNORE INTO chat_turn_work_options VALUES (?,?,?,?)",
+                             (chat_id, request_id, execution_mode, max_parallel_workers))
             with self.turn_lock:
                 self.cancellations[chat_id] = threading.Event()
             thread = threading.Thread(target=self._turn, args=(chat_id, token), daemon=True)
@@ -894,6 +949,8 @@ class ChatCoordinator:
                         )
                     }
                 )
+                if "team" in report:
+                    runs[-1]["team"] = report["team"]
                 try:
                     runs[-1]["artifacts"] = build_chat_artifacts(runtime.db, row["run_id"])
                 except Exception as exc:
@@ -901,6 +958,8 @@ class ChatCoordinator:
                     # outcome question into a failed reply or worker launch.
                     runs[-1]["artifacts"] = {"unavailable_reason": type(exc).__name__}
         return {
+            "execution_mode": chat.get("execution_mode", "single"),
+            "max_parallel_workers": chat.get("max_parallel_workers", 3),
             "repository": chat["repo"],
             "source_discussion": chat.get("source_discussion", []),
             "mode": "chat" if chat.get("kind") == "chat" else chat.get("mode", "auto"),
@@ -921,9 +980,26 @@ class ChatCoordinator:
                 session_root=self.store.path.parent / "agent-sessions",
                 event_recorder=lambda kind, payload: self.store.evidence(chat["id"], kind, payload),
             )
+            system = SYSTEM_PROMPT
+            if chat.get("execution_mode") == "parallel" and not outcome:
+                system = system.replace("Return exactly a JSON object with two fields:",
+                    "Return a JSON object with three fields for work: work_plan (task array),")
             result = consumer.invoke(
                 OrchestratorModelRequest(
-                    system_prompt=SYSTEM_PROMPT,
+                    system_prompt=system + (
+                        "\nFor an explicit work request in parallel execution_mode, also return "
+                        "work_plan: an array of 2-6 coherent independently testable tasks. "
+                        "Each task has title, goal, acceptance_criteria (array of checks), "
+                        "relevant_paths (array of relative file paths or directory/** scopes), "
+                        "dependency_indexes (zero-based task indexes; empty when independent). "
+                        "Define shared interfaces in the goals. Disjoint file scopes can run "
+                        "concurrently; shared scopes and dependencies run in sequence. "
+                        "Keep each task within its declared files. Do not copy the full objective "
+                        "into every task. The control plane validates your plan. If the objective "
+                        "cannot be split safely, respond with an explanation and action respond. "
+                        "Never invent multiple tasks just to fill the team."
+                        if chat.get("execution_mode") == "parallel" and not outcome else ""
+                    ),
                     user_prompt=json.dumps(context, ensure_ascii=False)
                     + (
                         "\nExplain this newly finished run. Use action respond: " + outcome
@@ -945,6 +1021,17 @@ class ChatCoordinator:
         if result.status != "SUCCESS":
             raise ValueError(result.reason or "Orchestrator provider did not complete its reply")
         reply, action = parse_reply(result.output_text)
+        if (action == "work" and not outcome and chat.get("kind") != "chat"
+                and chat.get("execution_mode") == "parallel"):
+            from saberops.parallel_work import validate_team_plan
+            value = result.output_text.strip()
+            if value.startswith("```json") and value.endswith("```"):
+                value = value[7:-3].strip()
+            plan = validate_team_plan(json.loads(value).get("work_plan"))
+            self.store.evidence(chat["id"], "parallel_plan_proposed", {
+                "request_id": next(m["request_id"] for m in reversed(chat["messages"])
+                                   if m["role"] == "user"), "plan": plan,
+            })
         return reply, action, f"{result.provider} / {result.model}"
 
     def _apply_reply(self, chat: dict[str, Any], reply: str, action: str) -> tuple[str, str | None]:
@@ -987,6 +1074,22 @@ class ChatCoordinator:
                         review_enabled=True,
                     )
                 )
+                if chat.get("execution_mode") == "parallel":
+                    from dataclasses import replace
+
+                    from saberops.parallel_work import validate_team_plan
+                    request_id = next(m["request_id"] for m in reversed(chat["messages"])
+                                      if m["role"] == "user")
+                    with self.store.connect() as conn:
+                        rows = conn.execute(
+                            "SELECT payload FROM chat_evidence WHERE chat_id=? "
+                            "AND event_type='parallel_plan_proposed' ORDER BY id DESC", (chat_id,),
+                        ).fetchall()
+                    plan = next((json.loads(r[0])["plan"] for r in rows
+                                 if json.loads(r[0]).get("request_id") == request_id), None)
+                    config = replace(config, execution_mode="parallel",
+                                     max_parallel_workers=int(chat.get("max_parallel_workers", 3)),
+                                     parallel_plan=validate_team_plan(plan))
                 launched = runtime.supervisor.start_supervised_run(config=config)
                 run_id = launched.run_id
                 self.store.link_run(chat_id, run_id)

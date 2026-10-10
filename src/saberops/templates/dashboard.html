@@ -30,7 +30,7 @@
 {% if runs %}
 <div{% if not history %} data-work-only{% endif %} class="run-list" aria-label="{{ 'Run history' if history else 'Recent runs' }}">
 {% for run in (runs if history else runs[:5]) %}
-  <a class="run-list-item" href="/runs/{{ run.id }}?from={{ 'runs' if history else 'dashboard' }}"><div><strong>{{ run.summary or run.id }}</strong><small>{{ fmt(run.created_at) }} · {{ run.tier }} · {{ run.id }}</small></div>{{ ui.run_state(run.status,run.status_class) }}</a>
+  <a class="run-list-item" href="/runs/{{ run.id }}?from={{ 'runs' if history else 'dashboard' }}" data-run-status="{{ run.status }}" data-run-created="{{ run.created_at }}"><div><strong>{{ run.summary or run.id }}</strong><small>{{ fmt(run.created_at) }} · {{ run.tier }} · {{ run.id }}</small></div>{{ ui.run_state(run.status,run.status_class) }}</a>
 {% endfor %}
 </div>
 {% else %}
@@ -134,12 +134,14 @@
 {% if request.query_params.get("pane") != "runs" %}
 <div class="composer-wrap">
   <form id="startRunForm" class="composer" data-od-id="chat-composer" method="post" action="/chats">
+    <input type="hidden" name="execution_mode" value="single">
+    <input type="hidden" name="max_parallel_workers" value="3">
     <input type="hidden" name="mode" value="chat" data-chat-mode-input>
     <input type="hidden" name="training_allowed" value="1">
     <label class="sr-only" for="prompt">Message the orchestrator</label>
     <textarea id="prompt" name="task" placeholder="Ask a question, describe a task, or talk through an idea…" rows="1" maxlength="32000" required>{{ form.task }}</textarea>
     <div class="composer-bar">
-      <div class="composer-context"><span data-work-only class="composer-control repository-control">Repository<span class="mono muted">{{ repo_path or "none" }}</span></span></div>
+      <div class="composer-context"><span data-work-only class="composer-control repository-control">Repository<span class="mono muted">{{ repo_path or "none" }}</span></span><label data-work-only class="work-mode-picker"><span class="sr-only">Work execution</span><select id="workExecutionMode" aria-label="Work execution"><option value="single">Single worker</option><option value="parallel">Parallel team</option></select></label></div>
       <div class="composer-actions">
         {% if project_settings %}<a data-work-only class="text-button" href="/?from=setup#execution">{{ project_settings.workflow_preset|capitalize }}{% if not project_settings.gate_enabled and project_settings.review_disabled %} · Checks skipped{% endif %}</a>{% endif %}
         <button class="send-button composer-submit" type="submit" data-od-id="send-message" aria-label="Send message" title="Send message"{% if not repo_ready %} disabled{% endif %}><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6"/></svg></button>

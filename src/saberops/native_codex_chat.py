@@ -94,7 +94,7 @@ class InboxConnection:
                     raise ControlConflict("The private Codex server did not start.")
             with unix_connect(self.socket, proxy=None, open_timeout=5, max_size=8_000_000) as ws:
                 initialize = self.request(ws, "initialize", {
-                    "clientInfo": {"name": "saberops", "version": "0.3.7"},
+                    "clientInfo": {"name": "saberops", "version": "0.3.8"},
                     "capabilities": {},
                 })
                 resume: int | None = None

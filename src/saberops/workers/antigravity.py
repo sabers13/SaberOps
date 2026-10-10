@@ -31,7 +31,9 @@ class AntigravityAdapter(WorkerAdapter):
     """Worker adapter dispatching tasks via Antigravity (agy) CLI."""
 
     capability_transport = "DIRECT_CLI"
-    factual_capabilities = frozenset({"streaming", "process_identity", "cancellation"})
+    factual_capabilities = frozenset(
+        {"streaming", "large_prompt_stdin", "process_identity", "cancellation"}
+    )
 
     def __init__(
         self,
@@ -51,19 +53,21 @@ class AntigravityAdapter(WorkerAdapter):
             return True
         return shutil.which(self.agy_bin) is not None
 
-    def max_prompt_bytes(self) -> int:
-        """Return Antigravity's verified argv prompt capability.
+    def max_prompt_bytes(self) -> int | None:
+        """Antigravity has a verified plain-text stdin fallback for large prompts.
 
-        Antigravity has no verified non-argv prompt transport: the prompt is
-        always passed as a positional ``argv`` argument. Its verified capability
-        is the orchestrator prompt-argument limit (``ORCH_PROMPT_ARG_LIMIT``,
-        default ``DEFAULT_PROMPT_ARG_LIMIT``). Callers must preflight-skip
-        oversized prompts rather than launch a process that cannot receive them.
+        The installed CLI accepts piped text without ``--print`` and emits the
+        same stream-json terminal result. Verified with a 42,421-byte prompt,
+        an exact response and terminal SUCCESS; ``--print=`` refuses empty input.
+        Small prompts keep the existing explicit ``--print`` argv path.
         """
-        return get_prompt_arg_limit()
+        return None
 
     def prompt_transport(self) -> str:
-        return "argv"
+        return "stdin"
+
+    def prompt_transport_for(self, prompt_bytes: int) -> str:
+        return "stdin" if prompt_bytes > get_prompt_arg_limit() else "argv"
 
     def run(self, request: WorkerRequest) -> WorkerResult:
         """Dispatch task to Antigravity CLI non-interactively in the specified worktree."""
@@ -82,24 +86,7 @@ class AntigravityAdapter(WorkerAdapter):
             )
 
         prompt_bytes = len(request.task.encode("utf-8"))
-        limit = get_prompt_arg_limit()
-        if prompt_bytes > limit:
-            msg = (
-                f"{self.provider_name} prompt size ({prompt_bytes} bytes) exceeds configured "
-                f"limit ({limit} bytes); provider adapter has no verified non-argv prompt transport"
-            )
-            return WorkerResult(
-                provider=self.provider_name,
-                model=request.model,
-                status=AttemptStatus.FAILED,
-                summary=msg,
-                stdout="",
-                stderr=msg,
-                changed_paths=[],
-                has_changes=False,
-                error=msg,
-                outcome=DispatchOutcome.ELIGIBILITY_SKIP,
-            )
+        use_stdin = prompt_bytes > get_prompt_arg_limit()
 
         # A typed autonomous effort always wins over ambient
         # ``ORCH_AGY_EFFORT``.  The neutral tier maps to the concrete
@@ -114,12 +101,20 @@ class AntigravityAdapter(WorkerAdapter):
                 else str(typed_effort).lower()
             )
         else:
-            effort = os.environ.get("ORCH_AGY_EFFORT") or "medium"
+            # Explicit AGY model presets already encode their effort. A legacy
+            # default of medium conflicts with a selected -high/-low preset.
+            # Keep owner-supplied effort authoritative; derive only the default.
+            preset_effort = request.model.rsplit("-", 1)[-1]
+            effort = os.environ.get("ORCH_AGY_EFFORT") or (
+                preset_effort if preset_effort in {"low", "medium", "high"} else "medium"
+            )
 
-        cmd = [
-            self.agy_bin,
-            "--print",
-            request.task,
+        cmd = [self.agy_bin]
+        if use_stdin:
+            cmd.extend(["--input-format", "text"])
+        else:
+            cmd.extend(["--print", request.task])
+        cmd.extend([
             "--model",
             request.model,
             "--effort",
@@ -130,7 +125,7 @@ class AntigravityAdapter(WorkerAdapter):
             "plan" if request.read_only else "accept-edits",
             "--output-format",
             "stream-json",
-        ]
+        ])
         if request.native_resume_id:
             cmd.extend(["--conversation", request.native_resume_id])
         if not request.read_only and (
@@ -166,6 +161,8 @@ class AntigravityAdapter(WorkerAdapter):
         kwargs["inherit_env_exclude"] = tuple(sorted(excluded))
         if request.env is not None:
             kwargs["env"] = {k: v for k, v in request.env.items() if k not in excluded}
+        if use_stdin:
+            kwargs["input_text"] = request.task
 
         # The generic autonomous execution seam: direct launch when no
         # boundary is installed, kernel containment (or a typed
@@ -229,5 +226,5 @@ class AntigravityAdapter(WorkerAdapter):
             provider_terminal_status=parsed.terminal_status,
             usage=parsed.usage,
             prompt_bytes=prompt_bytes,
-            prompt_transport_used="argv",
+            prompt_transport_used="stdin" if use_stdin else "argv",
         )

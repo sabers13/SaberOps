@@ -309,3 +309,26 @@ def failover_authorized_bases(db: Database, run_id: str) -> set[str]:
         except Exception:
             continue
     return authorized
+
+
+def execution_authorized_bases(db: Database, run_id: str) -> set[str]:
+    """Shared publication/acceptance proof for governed execution start anchors."""
+    from saberops.parallel_work import team_authorized_bases
+
+    authorized = failover_authorized_bases(db, run_id) | team_authorized_bases(db, run_id)
+    run = db.get_run(run_id)
+    if run and run.config_json:
+        import json
+
+        from saberops.config import reconstruct_run_config
+        from saberops.continuation import validate_continuation
+
+        try:
+            saved = json.loads(run.config_json)
+            if saved.get("execution_mode") == "parallel" and saved.get("continuation"):
+                source = validate_continuation(db, reconstruct_run_config(saved))
+                if source and source[1].commit_sha:
+                    authorized.add(source[1].commit_sha)
+        except (ValueError, TypeError, RuntimeError, AttributeError):
+            pass  # Unproven continuation never grants candidate authority.
+    return authorized

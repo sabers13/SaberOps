@@ -1645,7 +1645,7 @@ class Database:
         with self._get_connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             run_row = conn.execute(
-                "SELECT status, project_id FROM runs WHERE id = ?", (run_id,)
+                "SELECT status, project_id, config_json FROM runs WHERE id = ?", (run_id,)
             ).fetchone()
             if run_row is None:
                 raise OwnershipError(f"Cannot claim execution of unknown run '{run_id}'")
@@ -1654,6 +1654,20 @@ class Database:
                 raise OwnershipError(
                     f"Cannot claim execution of run '{run_id}': status {status.value} is terminal"
                 )
+            try:
+                work_config = json.loads(run_row["config_json"] or "{}")
+                team_parent = (work_config.get("parallel_parent_run_id")
+                               if isinstance(work_config, dict) else None)
+            except (ValueError, TypeError):
+                team_parent = None
+            if team_parent:
+                parent_row = conn.execute(
+                    "SELECT r.status, o.state FROM runs r LEFT JOIN execution_owners o "
+                    "ON o.run_id=r.id WHERE r.id=?", (team_parent,),
+                ).fetchone()
+                if (parent_row is None or parent_row["status"] != RunStatus.RUNNING.value
+                        or parent_row["state"] == ExecutionOwner.CANCELLING):
+                    raise OwnershipConflictError("Parent team is stopping; worker claim refused")
             resolved_project = project_id or _optional_text(run_row, "project_id")
             existing_row = conn.execute(
                 "SELECT * FROM execution_owners WHERE run_id = ?", (run_id,)
@@ -2399,12 +2413,18 @@ class Database:
         with self._get_connection() as conn:
             if project_id is not None:
                 cursor = conn.execute(
-                    "SELECT * FROM runs WHERE project_id = ? ORDER BY created_at DESC LIMIT ?",
+                    "SELECT * FROM runs WHERE project_id = ? AND "
+                    "(CASE WHEN json_valid(config_json) THEN "
+                    "json_extract(config_json, '$.parallel_parent_run_id') ELSE NULL END) IS NULL "
+                    "ORDER BY created_at DESC LIMIT ?",
                     (project_id, limit),
                 )
             else:
                 cursor = conn.execute(
-                    "SELECT * FROM runs ORDER BY created_at DESC LIMIT ?",
+                    "SELECT * FROM runs WHERE "
+                    "(CASE WHEN json_valid(config_json) THEN "
+                    "json_extract(config_json, '$.parallel_parent_run_id') ELSE NULL END) IS NULL "
+                    "ORDER BY created_at DESC LIMIT ?",
                     (limit,),
                 )
             runs: list[Run] = []

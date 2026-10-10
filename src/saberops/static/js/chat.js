@@ -22,13 +22,15 @@
   var renderedPreview = "";
   var requestKey = draftKey + ":request";
   var followLatest = true;
+  var requestExecution = "single";
+  var requestWorkers = 3;
   var posting = false;
   var polling = false;
   var manualControl = null;
   try {
     input.value = localStorage.getItem(draftKey) || "";
     var savedRequest = JSON.parse(localStorage.getItem(requestKey) || "null");
-    if (savedRequest) { requestId = savedRequest.id; lastDraft = savedRequest.text; requestTarget = savedRequest.target || endpoint; requestMode = savedRequest.mode || "auto"; requestAttachments = savedRequest.attachments || ""; }
+    if (savedRequest) { requestId = savedRequest.id; lastDraft = savedRequest.text; requestTarget = savedRequest.target || endpoint; requestMode = savedRequest.mode || "auto"; requestAttachments = savedRequest.attachments || ""; requestExecution = savedRequest.execution || "single"; requestWorkers = savedRequest.workers || 3; }
   } catch (_) { /* optional */ }
   function saveDraft() {
     try { localStorage.setItem(draftKey, input.value); } catch (_) { /* optional */ }
@@ -167,22 +169,31 @@
     var text = input.value || "Please review the attached files.";
     var modeField = form.querySelector("[data-chat-mode-input]");
     var selectedMode = modeField ? modeField.value : "auto";
+    var execution = selectedMode === "chat" ? "single" : form.querySelector('[name="execution_mode"]')?.value || "single";
+    var workers = Number(form.querySelector('[name="max_parallel_workers"]')?.value || 3);
+    if (execution === "parallel" && manualControl) {
+      error.textContent = "Return control to the app before starting a parallel team.";
+      error.hidden = false; return;
+    }
     if (attachments && manualControl && selectedMode !== "chat") {
       error.textContent = "Switch to Chat to send these attachments to the orchestrator."; error.hidden = false; return;
     }
-    if (lastDraft !== text || !requestId || requestMode !== selectedMode || requestAttachments !== attachments) {
+    if (lastDraft !== text || !requestId || requestMode !== selectedMode || requestAttachments !== attachments || requestExecution !== execution || requestWorkers !== workers) {
       requestId = window.crypto.randomUUID();
       lastDraft = text;
       requestMode = selectedMode;
       requestAttachments = attachments;
+      requestExecution = execution; requestWorkers = workers;
       requestTarget = root.dataset.threadKind === "chat" && selectedMode === "work" ? "/chats/" + encodeURIComponent(root.dataset.chatId) + "/work" : manualControl && selectedMode !== "chat" ? manualControl.endpoint + "/messages" : endpoint;
-      try { localStorage.setItem(requestKey, JSON.stringify({id: requestId, text: text, target: requestTarget, mode: requestMode, attachments: requestAttachments})); } catch (_) { /* optional */ }
+      try { localStorage.setItem(requestKey, JSON.stringify({id: requestId, text: text, target: requestTarget, mode: requestMode, attachments: requestAttachments, execution: requestExecution, workers: requestWorkers})); } catch (_) { /* optional */ }
     }
     var body = new FormData();
     body.append("message", text);
     body.append("request_id", requestId);
     body.append("mode", requestMode || "auto");
     body.append("attachments", requestAttachments);
+    body.append("execution_mode", requestExecution);
+    body.append("max_parallel_workers", String(requestWorkers));
     followLatest = true;
     posting = true;
     busy(true);

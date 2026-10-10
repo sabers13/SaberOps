@@ -35,7 +35,9 @@ def source_candidate(db: Database, parent_id: str) -> tuple[Run, Attempt]:
         raise ContinuationError("Continue is available only for failed runs.")
     if not parent.config_json:
         raise ContinuationError("This historical run has no saved execution configuration.")
-    reconstruct_run_config(json.loads(parent.config_json))
+    frozen = reconstruct_run_config(json.loads(parent.config_json))
+    if frozen.parallel_parent_run_id:
+        raise ContinuationError("Continue or retry the parent Work, not an internal team worker.")
     if any(
         effect.state in (SideEffectState.STARTED, SideEffectState.UNCERTAIN)
         for effect in db.get_side_effects_for_run(parent.id)

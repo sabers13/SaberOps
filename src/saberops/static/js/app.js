@@ -316,6 +316,8 @@
     // explicitly so post-run Review/Accept work on an already-terminal
     // run reaches this same EventSource (no second polling loop).
     var eventTypes = [
+      "team_started", "team_worker_created", "team_wave_started", "team_worker_status",
+      "team_merge_started", "team_worker_integrated", "team_merge_conflict", "team_integrated", "team_failed",
       "run_created", "run_started", "attempt_started", "worker_started", "worker_completed",
       "gate_started", "gate_completed", "attempt_succeeded", "attempt_failed_no_changes",
       "gate_failed", "run_completed", "run_failed", "run_exception",

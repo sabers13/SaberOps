@@ -19,6 +19,7 @@ import pytest
 from saberops.agent_sessions import observe_invocation, owner_directory, read_sessions
 from saberops.chat import ChatStore
 from saberops.config import RunConfig
+from saberops.control_plane.capabilities import Capability, capability_profile_for
 from saberops.models import AttemptStatus, ReasoningEffort, WorkerRequest, WorkerResult
 from saberops.orchestrator import _run_configured_gate
 from saberops.ownership import ProcessIdentity
@@ -464,6 +465,95 @@ def test_antigravity_requires_terminal_success_and_no_denied_tools(
     assert result.status == expected and result.provider_exit_code == 0
     assert "stream-json" in calls[0] and "plan" in calls[0] and "--conversation" in calls[0]
     assert "--dangerously-skip-permissions" not in calls[0]
+
+
+@pytest.mark.parametrize(
+    ("model", "ambient", "typed", "expected"),
+    [
+        ("gemini-3.8-flash-high", None, None, "high"),
+        ("gemini-3.8-flash-low", None, None, "low"),
+        ("claude-sonnet-5-5-medium", None, None, "medium"),
+        ("legacy-model", None, None, "medium"),
+        ("gemini-3.8-flash-high", "low", None, "low"),
+        ("gemini-3.8-flash-low", "medium", ReasoningEffort.HIGH, "high"),
+    ],
+)
+def test_antigravity_default_effort_matches_preset_without_overriding_explicit_effort(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    model: str, ambient: str | None, typed: ReasoningEffort | None, expected: str,
+) -> None:
+    monkeypatch.setattr("saberops.workers.antigravity.Path.home", lambda: tmp_path)
+    monkeypatch.setattr("saberops.workers.antigravity.GitManager.get_changed_paths", lambda _: [])
+    if ambient is None:
+        monkeypatch.delenv("ORCH_AGY_EFFORT", raising=False)
+    else:
+        monkeypatch.setenv("ORCH_AGY_EFFORT", ambient)
+    calls: list[list[str]] = []
+
+    def runner(args: list[str], **kwargs: Any) -> ProcessResult:
+        calls.append(args)
+        return ProcessResult(args, 0, json.dumps({
+            "event": "result", "result": {"status": "SUCCESS", "response": "Done"},
+        }), "", 0.01)
+
+    result = AntigravityAdapter(runner=runner).run(WorkerRequest(
+        "task", tmp_path, model, read_only=True, reasoning_effort=typed,
+    ))
+    assert result.status == AttemptStatus.SUCCESS
+    assert calls[0][calls[0].index("--model") + 1] == model
+    assert calls[0][calls[0].index("--effort") + 1] == expected
+
+
+@pytest.mark.parametrize("task", ["small", "é" * 8, "é" * 9, "x" * 200_000])
+@pytest.mark.parametrize("terminal", ["SUCCESS", "ERROR", None])
+def test_antigravity_prompt_transport_preserves_text_and_completion_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, task: str, terminal: str | None,
+) -> None:
+    monkeypatch.setenv("ORCH_PROMPT_ARG_LIMIT", "16")
+    monkeypatch.setattr("saberops.workers.antigravity.Path.home", lambda: tmp_path)
+    monkeypatch.setattr("saberops.workers.antigravity.GitManager.get_changed_paths", lambda _: [])
+    use_stdin = len(task.encode("utf-8")) > 16
+    calls: list[list[str]] = []
+    def on_stdout(chunk: str) -> None:
+        pass
+
+    def runner(args: list[str], **kwargs: Any) -> ProcessResult:
+        calls.append(args)
+        assert args[args.index("--model") + 1] == "gemini-3.8-flash-high"
+        assert args[args.index("--mode") + 1] == "plan"
+        assert "--dangerously-skip-permissions" not in args
+        assert args[args.index("--conversation") + 1] == "native_conversation1234"
+        assert kwargs["on_stdout"] is on_stdout
+        assert "GEMINI_API_KEY" not in kwargs["env"]
+        assert {"GEMINI_API_KEY", "GOOGLE_API_KEY"} <= set(kwargs["inherit_env_exclude"])
+        if use_stdin:
+            assert task not in args and "--print" not in args
+            assert args[args.index("--input-format") + 1] == "text"
+            assert kwargs["input_text"] == task
+        else:
+            assert args[args.index("--print") + 1] == task
+            assert "input_text" not in kwargs
+        raw = json.dumps({"event": "result", "result": {"status": terminal,
+                                                          "response": "Done"}})
+        return ProcessResult(args, 0, raw, "", 0.01)
+
+    adapter = AntigravityAdapter(runner=runner)
+    assert adapter.max_prompt_bytes() is None
+    assert adapter.prompt_transport() == "stdin"
+    expected_transport = "stdin" if use_stdin else "argv"
+    assert adapter.prompt_transport_for(len(task.encode("utf-8"))) == expected_transport
+    assert Capability.LARGE_PROMPT_STDIN in capability_profile_for(adapter).capabilities
+    assert "large_prompt_stdin" in adapter.factual_capabilities
+    result = adapter.run(WorkerRequest(
+        task, tmp_path, "gemini-3.8-flash-high", read_only=True,
+        native_resume_id="native_conversation1234", on_stdout=on_stdout,
+        env={"GEMINI_API_KEY": "excluded"},
+    ))
+    assert len(calls) == 1
+    assert result.prompt_bytes == len(task.encode("utf-8"))
+    assert result.prompt_transport_used == expected_transport
+    expected_status = AttemptStatus.SUCCESS if terminal == "SUCCESS" else AttemptStatus.FAILED
+    assert result.status == expected_status
 
 
 def test_history_export_includes_completion_and_latest_output_after_display_cap(
