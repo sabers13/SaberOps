@@ -385,11 +385,34 @@
       var raw = dd.textContent.trim().replace(/,/g, "");
       if (/^\d+$/.test(raw)) values[dt.textContent.trim().toLowerCase()] = Number(raw);
     });
-    var parts = [
-      { label: "Input", value: values["known input tokens"], color: "var(--viz-s1)" },
-      { label: "Output", value: values["known output tokens"], color: "var(--viz-s2)" },
-      { label: "Cached", value: values["known cached tokens"], color: "var(--viz-s3)" }
-    ].filter(function (part) { return typeof part.value === "number"; });
+    var input = values["known input tokens"];
+    var output = values["known output tokens"];
+    var cached = values["known cached tokens"];
+    var known = values["known total tokens"];
+    var parts;
+    if (typeof input === "number" && typeof output === "number" && typeof cached === "number" &&
+        typeof known === "number" && known === input + output && cached <= input) {
+      /* Cached input is a subset of input (the known total is input + output), so
+         split input into its uncached and cached parts: the segments sum to the total. */
+      parts = [
+        { label: "Input", value: input - cached, color: "var(--viz-s1)" },
+        { label: "Cached input", value: cached, color: "var(--viz-s3)" },
+        { label: "Output", value: output, color: "var(--viz-s2)" }
+      ];
+    } else if (typeof input === "number" && typeof output === "number" && typeof cached === "number" &&
+               typeof known === "number" && known === input + output + cached) {
+      parts = [
+        { label: "Input", value: input, color: "var(--viz-s1)" },
+        { label: "Output", value: output, color: "var(--viz-s2)" },
+        { label: "Cached", value: cached, color: "var(--viz-s3)" }
+      ];
+    } else {
+      /* Cached tokens cannot be placed without double counting; show what is certain. */
+      parts = [
+        { label: "Input", value: input, color: "var(--viz-s1)" },
+        { label: "Output", value: output, color: "var(--viz-s2)" }
+      ].filter(function (part) { return typeof part.value === "number"; });
+    }
     var total = parts.reduce(function (sum, part) { return sum + part.value; }, 0);
     if (old) old.remove();
     if (parts.length < 2 || !total) return;
