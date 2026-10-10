@@ -46,3 +46,4 @@ htmlcov/
 
 # Local browser automation artifacts (MCP remains globally configured)
 .playwright-mcp/
+.scenario-runs/
