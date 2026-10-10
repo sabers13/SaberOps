@@ -17,6 +17,7 @@ from saberops.process import (
 )
 from saberops.telemetry import parse_codex_jsonl
 from saberops.workers.base import WorkerAdapter, streaming_process_kwargs
+from saberops.workers.env import hermetic_env
 
 __all__ = ["CodexAdapter", "ORCH_PROMPT_ARG_LIMIT"]
 
@@ -162,8 +163,13 @@ class CodexAdapter(WorkerAdapter):
         gateway_overrides = self._build_gateway_overrides(base_env)
         if gateway_overrides is not None:
             cmd.extend(gateway_overrides)
-        if base_env:
-            kwargs["env"] = base_env
+        # Hermetic child environment: only the allowlist plus the explicit
+        # request overlay reach the child.  The overlay carries the non-secret
+        # gateway control vars and bridge sentinel the Codex adapter consumes;
+        # ambient CODEX_API_KEY / CODEX_ACCESS_TOKEN / OPENAI_* credentials can
+        # never switch Codex to API billing.
+        kwargs["env"] = hermetic_env("codex", request.env)
+        kwargs["inherit_env"] = False
         if use_stdin:
             kwargs["input_text"] = request.task
 

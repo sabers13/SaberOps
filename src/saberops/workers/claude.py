@@ -8,7 +8,6 @@ from __future__ import annotations
 import base64
 import json
 import mimetypes
-import os
 import shutil
 from collections.abc import Callable
 from typing import Any
@@ -17,17 +16,13 @@ from saberops.git import GitManager
 from saberops.models import AttemptStatus, DispatchOutcome, WorkerRequest, WorkerResult
 from saberops.process import ProcessResult, launch_worker_process, run_process
 from saberops.workers.base import WorkerAdapter, streaming_process_kwargs
+from saberops.workers.env import hermetic_env
 
 # CLI configuration is invocation-local. Keep the native agent loop and system
 # prompt, but prevent project/user settings from selecting an API credential or
 # gateway instead of the explicitly selected subscription connection.
 _SETTINGS = json.dumps({"forceLoginMethod": "claudeai", "disableAllHooks": True,
                         "promptSuggestionEnabled": False})
-
-
-def _billing_override(key: str) -> bool:
-    return (key.startswith("ANTHROPIC_") or key.startswith("ORCH_GATEWAY_")
-            or key.startswith("CLAUDE_CODE_USE_"))
 
 
 def _native_result(stdout: str) -> tuple[str, bool, str | None]:
@@ -107,18 +102,18 @@ class ClaudeCodeAdapter(WorkerAdapter):
         if prompt_bytes > self.max_prompt_bytes():
             return refusal("Claude Code stdin prompt exceeds the supported 10 MB limit")
 
-        excluded = tuple(sorted(set(request.inherit_env_exclude) | {
-            key for key in os.environ if _billing_override(key)
-        }))
-        env = {key: value for key, value in (request.env or {}).items()
-               if not _billing_override(key)}
         # Fast mode is separately billed; never enable it for this connection.
-        env["CLAUDE_CODE_DISABLE_FAST_MODE"] = "1"
+        # The child environment is an explicit hermetic allowlist: only safe
+        # runtime variables plus the request overlay survive, so API, gateway,
+        # and cloud-provider credentials can never switch the billing source.
+        overlay = dict(request.env or {})
+        overlay["CLAUDE_CODE_DISABLE_FAST_MODE"] = "1"
+        env = hermetic_env("claude", overlay)
         common = [self.claude_bin, "--setting-sources=", "--settings", _SETTINGS]
         auth = launch_worker_process(
             [*common, "auth", "status", "--json"], runner=self.runner,
             cwd=request.worktree_path, timeout=min(8.0, request.timeout_seconds),
-            env=env, inherit_env_exclude=excluded,
+            env=env, inherit_env=False,
         )
         try:
             login = json.loads(auth.stdout)
@@ -172,7 +167,7 @@ class ClaudeCodeAdapter(WorkerAdapter):
             )
         kwargs: dict[str, Any] = streaming_process_kwargs(request)
         kwargs.update(cwd=request.worktree_path, timeout=remaining, env=env,
-                      inherit_env_exclude=excluded, input_text=input_text)
+                      inherit_env=False, input_text=input_text)
         process = launch_worker_process(argv, runner=self.runner, **kwargs)
         output, completed, actual_model = _native_result(process.stdout)
         if process.control_interrupted:

@@ -39,6 +39,7 @@ from saberops.process import (
 )
 from saberops.telemetry import ClineStructuredRun, parse_cline_jsonl
 from saberops.workers.base import WorkerAdapter, streaming_process_kwargs
+from saberops.workers.env import hermetic_env
 
 __all__ = ["CLINE_PASS_PROVIDER_ID", "ClineAdapter", "ORCH_PROMPT_ARG_LIMIT"]
 
@@ -221,8 +222,11 @@ class ClineAdapter(WorkerAdapter):
             "on_stdout": request.on_stdout if request.on_stdout is not None else _sink,
             **streaming_process_kwargs(request),
         }
-        if request.env is not None:
-            kwargs["env"] = request.env
+        # Hermetic child environment: only safe runtime variables plus the
+        # explicit request overlay survive; ambient provider credentials never
+        # reach the child.
+        kwargs["env"] = hermetic_env("cline", request.env)
+        kwargs["inherit_env"] = False
 
         # The generic autonomous execution seam: direct launch when no
         # boundary is installed, kernel containment (or a typed

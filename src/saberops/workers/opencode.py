@@ -17,6 +17,7 @@ from saberops.process import (
 )
 from saberops.telemetry import parse_opencode_jsonl
 from saberops.workers.base import WorkerAdapter, streaming_process_kwargs
+from saberops.workers.env import hermetic_env
 from saberops.workers.instruction_compat import (
     InstructionCompatibility,
     instruction_compatibility_for_opencode_model,
@@ -145,8 +146,11 @@ class OpenCodeAdapter(WorkerAdapter):
             "timeout": request.timeout_seconds,
             **streaming_process_kwargs(request),
         }
-        if request.env is not None:
-            kwargs["env"] = request.env
+        # Hermetic child environment: provider API keys in the ambient
+        # environment can never activate a provider unless SaberOps explicitly
+        # supplied them in the request overlay.
+        kwargs["env"] = hermetic_env("opencode", request.env)
+        kwargs["inherit_env"] = False
         if use_stdin:
             kwargs["input_text"] = request.task
 

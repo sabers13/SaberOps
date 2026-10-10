@@ -36,6 +36,7 @@ from saberops.process import ProcessResult, launch_worker_process
 from saberops.session_control import ControlConflict, SessionControls
 from saberops.session_journal import SessionJournal
 from saberops.telemetry import parse_opencode_jsonl
+from saberops.workers.env import hermetic_env
 
 
 class SessionRuntimeError(RuntimeError):
@@ -157,7 +158,11 @@ class AgentSessionRuntime:
                 self.process_result = launch_worker_process(
                     [binary, "serve", "--pure", "--hostname", "127.0.0.1", "--port", "0"],
                     cwd=request.worktree_path,
-                    env=env,
+                    # Hermetic child environment: only safe runtime variables
+                    # plus the explicit request overlay (including the injected
+                    # OPENCODE_SERVER_* values) reach the OpenCode server.
+                    env=hermetic_env("opencode", env),
+                    inherit_env=False,
                     inherit_env_exclude=request.inherit_env_exclude,
                     timeout=request.timeout_seconds,
                     control_interrupt=self.stop.is_set,

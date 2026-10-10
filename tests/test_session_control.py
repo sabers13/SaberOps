@@ -357,7 +357,7 @@ def test_native_resume_keeps_readonly_permissions_and_frozen_environment(
         "Manual reply",
         tmp_path,
         "m",
-        env={"FROZEN": "same"},
+        env={"ORCH_EXECUTION_BINDING_ID": "same"},
         read_only=True,
         persist_native_session=True,
         native_resume_id="native_12345678",
@@ -365,7 +365,8 @@ def test_native_resume_keeps_readonly_permissions_and_frozen_environment(
     )
     adapters[provider].run(req)
     args, kwargs = calls[-1]
-    assert kwargs["control_interrupt"] is callback and kwargs["env"]["FROZEN"] == "same"
+    assert kwargs["control_interrupt"] is callback
+    assert kwargs["env"]["ORCH_EXECUTION_BINDING_ID"] == "same"
     assert "native_12345678" in args and kwargs["cwd"] == tmp_path
     if provider == "codex":
         assert "--ephemeral" not in args and args[args.index("--sandbox") + 1] == "read-only"

@@ -39,7 +39,8 @@ def test_native_dispatch_and_billing_source(
     def callback(line: str) -> None:
         pass
     request = WorkerRequest('Task with unicode λ', worktree, 'sonnet', timeout_seconds=30,
-                            env={'ANTHROPIC_AUTH_TOKEN': 'explicit-test-value', 'CUSTOM': 'kept'},
+                            env={'ANTHROPIC_AUTH_TOKEN': 'explicit-test-value', 'CUSTOM': 'kept',
+                                 'ORCH_RUN_ID': 'run-1'},
                             on_stdout=callback)
     result = adapter.run(request)
     assert result.status == AttemptStatus.SUCCESS
@@ -52,8 +53,12 @@ def test_native_dispatch_and_billing_source(
     assert kwargs['cwd'] == worktree and kwargs['timeout'] == 29.9
     assert kwargs['on_stdout'] is callback
     assert 'on_stdout' not in calls[0][1]
-    assert 'ANTHROPIC_API_KEY' in kwargs['inherit_env_exclude']
-    assert kwargs['env'] == {'CUSTOM': 'kept', 'CLAUDE_CODE_DISABLE_FAST_MODE': '1'}
+    assert kwargs['inherit_env'] is False
+    assert 'ANTHROPIC_API_KEY' not in kwargs['env']
+    assert 'ANTHROPIC_AUTH_TOKEN' not in kwargs['env']
+    assert 'CUSTOM' not in kwargs['env']
+    assert kwargs['env']['ORCH_RUN_ID'] == 'run-1'
+    assert kwargs['env']['CLAUDE_CODE_DISABLE_FAST_MODE'] == '1'
     assert '--bare' not in argv and '--dangerously-skip-permissions' not in argv
     assert json.loads(argv[argv.index('--settings') + 1])['forceLoginMethod'] == 'claudeai'
     assert '--setting-sources=' in argv

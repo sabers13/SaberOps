@@ -454,7 +454,8 @@ def test_antigravity_requires_terminal_success_and_no_denied_tools(
 
     def runner(args: list[str], **kwargs: Any) -> ProcessResult:
         calls.append(args)
-        assert "GEMINI_API_KEY" in kwargs["inherit_env_exclude"]
+        assert kwargs["inherit_env"] is False
+        assert "GEMINI_API_KEY" not in kwargs["env"]
         return ProcessResult(args, 0, raw, "", 0.01)
 
     result = AntigravityAdapter(runner=runner).run(
@@ -524,8 +525,9 @@ def test_antigravity_prompt_transport_preserves_text_and_completion_authority(
         assert "--dangerously-skip-permissions" not in args
         assert args[args.index("--conversation") + 1] == "native_conversation1234"
         assert kwargs["on_stdout"] is on_stdout
+        assert kwargs["inherit_env"] is False
         assert "GEMINI_API_KEY" not in kwargs["env"]
-        assert {"GEMINI_API_KEY", "GOOGLE_API_KEY"} <= set(kwargs["inherit_env_exclude"])
+        assert "GOOGLE_API_KEY" not in kwargs["env"]
         if use_stdin:
             assert task not in args and "--print" not in args
             assert args[args.index("--input-format") + 1] == "text"

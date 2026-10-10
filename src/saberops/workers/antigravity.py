@@ -21,6 +21,7 @@ from saberops.process import (
 )
 from saberops.workers.antigravity_events import parse_events
 from saberops.workers.base import WorkerAdapter, streaming_process_kwargs
+from saberops.workers.env import hermetic_env
 
 __all__ = ["AntigravityAdapter", "ORCH_PROMPT_ARG_LIMIT"]
 
@@ -152,15 +153,17 @@ class AntigravityAdapter(WorkerAdapter):
                     status=AttemptStatus.FAILED, summary="Antigravity subscription login required",
                     stdout="", stderr="API-key mode is disabled for subscription execution",
                     has_changes=False, outcome=DispatchOutcome.ELIGIBILITY_SKIP)
-        excluded = set(request.inherit_env_exclude) | {"GEMINI_API_KEY", "GOOGLE_API_KEY"}
         kwargs: dict[str, Any] = {
             "cwd": request.worktree_path,
             "timeout": request.timeout_seconds,
             **streaming_process_kwargs(request),
         }
-        kwargs["inherit_env_exclude"] = tuple(sorted(excluded))
-        if request.env is not None:
-            kwargs["env"] = {k: v for k, v in request.env.items() if k not in excluded}
+        # Hermetic child environment: only safe runtime variables plus the
+        # request overlay survive.  The overlay denylist drops GEMINI_API_KEY /
+        # GOOGLE_API_KEY, so an API-key configuration can never replace the
+        # native account route.
+        kwargs["env"] = hermetic_env("antigravity", request.env)
+        kwargs["inherit_env"] = False
         if use_stdin:
             kwargs["input_text"] = request.task
 
