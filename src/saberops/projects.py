@@ -139,7 +139,13 @@ class ProjectRegistry:
     def select(self, path: Path | str, *, initialize: bool = False) -> tuple[bool, str]:
         """Select a project, optionally preparing a new owner-selected folder."""
         try:
-            path = Path(path).expanduser().resolve()
+            requested = Path(path).expanduser()
+            if initialize and not requested.is_absolute():
+                # Preparing a folder creates it and runs ``git init``.  A relative path
+                # would resolve against the server's launch directory, which the owner
+                # cannot see from the browser.
+                return False, "Enter an absolute path, for example /home/you/project"
+            path = requested.resolve()
         except (ValueError, OSError, RuntimeError):  # NUL byte, unknown ~user, symlink loop
             return False, "Path is not valid"
         if initialize:

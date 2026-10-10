@@ -165,3 +165,16 @@ def test_select_rejects_unresolvable_paths_instead_of_raising(tmp_path: Path) ->
         assert ok is False
         assert note
         assert registry.validate_project(bad).is_git is False
+
+
+def test_preparing_a_project_rejects_relative_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A relative path would create a repo under the server's launch directory."""
+    monkeypatch.chdir(tmp_path)
+    registry = ProjectRegistry(tmp_path / "projects.json")
+    ok, note = registry.select("../escaped/project", initialize=True)
+    assert ok is False
+    assert "absolute" in note
+    assert not (tmp_path.parent / "escaped").exists()
+    assert not (tmp_path / "project").exists()
