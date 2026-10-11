@@ -22,25 +22,8 @@ from saberops.workers.env import hermetic_env
 __all__ = ["CodexAdapter", "ORCH_PROMPT_ARG_LIMIT"]
 
 
-# Gateway-aware env-var names published by :mod:`saberops.gateway`.
-# They MUST match the public constant module used by the gateway dispatch
-# seam so the Codex adapter can detect when a real gateway dispatch was
-# prepared for it.
-_GATEWAY_ENDPOINT_ENV = "ORCH_GATEWAY_ENDPOINT"
-_GATEWAY_CONNECTION_ENV = "ORCH_GATEWAY_CONNECTION"
-_GATEWAY_AUTHORIZATION_ENV = "ORCH_GATEWAY_AUTHORIZATION_ENV"
-_GATEWAY_LOOPBACK_ENV = "ORCH_GATEWAY_LOOPBACK_URL"
-_GATEWAY_PROVIDER_ENV = "ORCH_GATEWAY_PROVIDER_ID"
-
-# Sentinel env-var name for the OmniRoute bearer token when the bridge
-# is the transport owner. The bridge resolves the value at relay time;
-# the Codex CLI never sees the bearer value directly when the bridge
-# is in use. The Codex CLI itself resolves this env-var to obtain its
-# own ``Authorization`` header on the loopback hop.
-_BRIDGE_AUTH_SENTINEL_ENV = "_ORCH_BRIDGE_AUTH_SENTINEL"
-
-# Billing-relevant ``-c`` pins applied to the direct (non-gateway) Codex
-# path only.  Each key is confirmed to exist in the installed Codex CLI
+# Billing-relevant ``-c`` pins applied to every Codex invocation.  Each
+# key is confirmed to exist in the installed Codex CLI
 # (0.162.x; see the adapter docstring for evidence):
 # * ``forced_login_method="chatgpt"`` forces ChatGPT login so an API key
 #   can never switch the turn to API billing;
@@ -50,9 +33,7 @@ _BRIDGE_AUTH_SENTINEL_ENV = "_ORCH_BRIDGE_AUTH_SENTINEL"
 #   config cannot opt the turn into separately billed Fast mode.
 # ``-c`` overrides have the highest config precedence (above project and
 # user config files), and project ``.codex/`` layers cannot override
-# ``model_provider``/``model_providers`` at all.  The gateway path is
-# unchanged: it already passes its own ``-c model_provider=...`` override
-# selecting the gateway provider.
+# ``model_provider``/``model_providers`` at all.
 _DIRECT_COVERRIDE_FLAGS: tuple[str, ...] = (
     "-c",
     'forced_login_method="chatgpt"',
@@ -66,19 +47,12 @@ _DIRECT_COVERRIDE_FLAGS: tuple[str, ...] = (
 class CodexAdapter(WorkerAdapter):
     """Worker adapter dispatching tasks via Codex CLI.
 
-    The adapter is gateway-capable: when ``WorkerRequest.env`` carries
-    the standard gateway env vars (set by
-    :func:`saberops.gateway.prepare_dispatch_decision`), the
-    adapter emits the per-process ``-c model_providers.<id>={...}`` and
-    ``-c model_provider="<id>"`` overrides that the Codex CLI
-    ``rust-v0.147.0`` accepts to dynamically select a custom provider.
-
-    The direct (non-gateway) path additionally pins billing-relevant
-    configuration per invocation via ``-c`` overrides (highest config
-    precedence, above user and project ``config.toml`` layers), so user
-    or project config files can never change the billing of a worker
-    turn.  Key evidence, all verified against the installed Codex CLI
-    0.162.0 plus the official configuration reference
+    Every invocation pins billing-relevant configuration via ``-c``
+    overrides (highest config precedence, above user and project
+    ``config.toml`` layers), so user or project config files can never
+    change the billing of a worker turn.  Key evidence, all verified
+    against the installed Codex CLI 0.162.0 plus the official
+    configuration reference
     (https://developers.openai.com/codex/config-reference):
     ``forced_login_method`` accepts ``chatgpt | api`` ("Restrict Codex to
     a specific authentication method"); ``model_provider`` is a string
@@ -91,11 +65,6 @@ class CodexAdapter(WorkerAdapter):
     speed'); and project ``.codex/`` layers load "only when you trust
     the project" and can never override ``model_provider`` /
     ``model_providers``.
-
-    When the loopback URL of the bounded gateway bridge is also present,
-    the adapter uses the bridge as the ``base_url`` so the bridge can
-    observe ``X-OmniRoute-Selected-Connection-Id`` from the upstream
-    response on the worker's behalf.
     """
 
     capability_transport = "DIRECT_CLI"
@@ -107,20 +76,6 @@ class CodexAdapter(WorkerAdapter):
             "structured_usage",
             "process_identity",
             "cancellation",
-        }
-    )
-    gateway_capabilities = frozenset()
-    # Codex 0.147.0 has been proven to consume the
-    # ORCH_GATEWAY_* env vars emitted by the dispatch seam and
-    # route its real HTTP request through the configured OmniRoute
-    # transport via ``-c model_providers.<id>={...}`` and
-    # ``-c model_provider="<id>"``.  Advertise this ONLY because the
-    # mechanism has been implemented and tested.
-    c10_gateway_transport_capabilities = frozenset(
-        {
-            "codex_custom_provider",
-            "responses_wire",
-            "env_http_headers",
         }
     )
 
@@ -201,19 +156,13 @@ class CodexAdapter(WorkerAdapter):
             "timeout": request.timeout_seconds,
             **streaming_process_kwargs(request),
         }
-        base_env = dict(request.env) if request.env is not None else {}
-        gateway_overrides = self._build_gateway_overrides(base_env)
-        if gateway_overrides is not None:
-            cmd.extend(gateway_overrides)
-        else:
-            # Direct path: pin billing-relevant configuration for this
-            # invocation only.  No persistent Codex config mutation.
-            cmd.extend(_DIRECT_COVERRIDE_FLAGS)
+        # Pin billing-relevant configuration for this invocation only.
+        # No persistent Codex config mutation.
+        cmd.extend(_DIRECT_COVERRIDE_FLAGS)
         # Hermetic child environment: only the allowlist plus the explicit
-        # request overlay reach the child.  The overlay carries the non-secret
-        # gateway control vars and bridge sentinel the Codex adapter consumes;
-        # ambient CODEX_API_KEY / CODEX_ACCESS_TOKEN / OPENAI_* credentials can
-        # never switch Codex to API billing.
+        # request overlay reach the child.  Ambient CODEX_API_KEY /
+        # CODEX_ACCESS_TOKEN / OPENAI_* credentials can never switch
+        # Codex to API billing.
         kwargs["env"] = hermetic_env("codex", request.env)
         kwargs["inherit_env"] = False
         if use_stdin:
@@ -279,78 +228,3 @@ class CodexAdapter(WorkerAdapter):
             provider_exit_code=res.exit_code,
             execution_quiescent=not res.termination_incomplete,
         )
-
-    def _build_gateway_overrides(self, env: dict[str, str]) -> list[str] | None:
-        """Return the ``-c`` flags that select a gateway provider.
-
-        The Codex CLI accepts repeated ``-c key=value`` flags to layer
-        configuration on top of ``~/.codex/config.toml`` *for that
-        invocation only*.  This adapter uses that mechanism to
-        dynamically route the Codex request to the configured gateway
-        transport.
-
-        The adapter returns ``None`` when no gateway preparation is
-        present in ``env``, so callers may keep the legacy direct
-        command unchanged.
-
-        The selection is process-local: no persistent Codex config
-        mutation, no provider/model/account authority.  The provider id
-        itself is a deterministic, non-secret identifier derived from
-        the gateway pinning variables already in the worker request.
-
-        Secret hygiene: the bearer-token env-var *name* is passed to
-        Codex; Codex resolves the actual token value at request time.
-        When the bounded gateway bridge is the transport owner, the
-        adapter hands Codex a sentinel env-var name so the Codex CLI
-        never sees the real OmniRoute token.
-        """
-
-        if (
-            _GATEWAY_ENDPOINT_ENV not in env
-            and _GATEWAY_LOOPBACK_ENV not in env
-        ):
-            return None
-
-        loopback_url = env.get(_GATEWAY_LOOPBACK_ENV)
-        endpoint = env.get(_GATEWAY_ENDPOINT_ENV)
-        if not endpoint:
-            return None
-        base_url = loopback_url or endpoint
-        provider_id = env.get(_GATEWAY_PROVIDER_ENV) or "orch_omniroute"
-        authorization_env_name = env.get(
-            _GATEWAY_AUTHORIZATION_ENV, "OMNIROUTE_API_KEY"
-        )
-        effective_auth_env = (
-            _BRIDGE_AUTH_SENTINEL_ENV
-            if loopback_url
-            else authorization_env_name
-        )
-        # Codex expects the env-var *name* for ``env_http_headers``
-        # mapping -- the CLI resolves the value per request and we
-        # never persist the connection id value in command-line args
-        # or evidence.
-        env_http_headers: dict[str, str] = {}
-        if _GATEWAY_CONNECTION_ENV in env:
-            env_http_headers["x-omniroute-connection"] = _GATEWAY_CONNECTION_ENV
-
-        provider_table_parts = [
-            f'name = "orchestrator-c10-{provider_id}"',
-            f'base_url = "{base_url}"',
-            f'env_key = "{effective_auth_env}"',
-            'wire_api = "responses"',
-        ]
-        if env_http_headers:
-            pairs = ", ".join(
-                f'"{name}" = "{value}"'
-                for name, value in sorted(env_http_headers.items())
-            )
-            provider_table_parts.append(f"env_http_headers = {{{pairs}}}")
-        provider_table_value = "{" + ", ".join(provider_table_parts) + "}"
-        select_value = f'model_provider = "{provider_id}"'
-        provider_key = f"model_providers.{provider_id}"
-        return [
-            "-c",
-            f"{select_value}",
-            "-c",
-            f"{provider_key} = {provider_table_value}",
-        ]

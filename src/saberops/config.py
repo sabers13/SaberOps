@@ -130,13 +130,6 @@ class RunConfig:
     # never accepted-target/main publication.
     publish_candidate: bool = False
     tool_refs: tuple[str, ...] = ()
-    # Optional non-secret frozen gateway contract, built by the caller
-    # (CLI/Web) before :func:`resolve_run_config` and stored
-    # verbatim. ``None`` means the run uses the first-class no-gateway
-    # ``DIRECT`` path.  The value is opaque to RunConfig so this module
-    # never imports from :mod:`saberops.gateway`.
-    gateway_frozen_config: dict[str, Any] | None = None
-    gateway_frozen_digest: str | None = None
     # Autonomous execution is a run-scoped contract.  It contains
     # references and policy, never resolved secret material.
     autonomous_runtime: dict[str, Any] | None = None
@@ -329,8 +322,6 @@ def resolve_run_config(
     review_policy_mode: ReviewPolicyMode | str | None = None,
     publish_candidate: bool | None = None,
     tool_refs: tuple[str, ...] = (),
-    gateway_frozen_config: dict[str, Any] | None = None,
-    gateway_frozen_digest: str | None = None,
     # ``tier`` keeps legacy callers source-compatible while normalizing them.
     tier: Tier | str | None = None,
     gate_scratch_mode: GateScratchMode | str | None = None,
@@ -426,8 +417,6 @@ def resolve_run_config(
             else load_authority_policy().auto_publish_candidate
         ),
         tool_refs=normalized_tool_refs,
-        gateway_frozen_config=dict(gateway_frozen_config) if gateway_frozen_config else None,
-        gateway_frozen_digest=(str(gateway_frozen_digest) if gateway_frozen_digest else None),
         gate_scratch_mode=resolved_gate_scratch_mode,
         accept_target_branch=(str(accept_target_branch).strip() if accept_target_branch else ""),
     )
@@ -495,12 +484,6 @@ def reconstruct_run_config(data: dict[str, Any]) -> RunConfig:
         publish_candidate=bool(data.get("publish_candidate", False)),
         tool_refs=tuple(
             sorted({validate_logical_ref(str(ref)) for ref in (data.get("tool_refs") or ())})
-        ),
-        gateway_frozen_config=(
-            dict(data["gateway_frozen_config"]) if data.get("gateway_frozen_config") else None
-        ),
-        gateway_frozen_digest=(
-            str(data["gateway_frozen_digest"]) if data.get("gateway_frozen_digest") else None
         ),
         autonomous_runtime=(
             dict(data["autonomous_runtime"])

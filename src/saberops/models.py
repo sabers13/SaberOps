@@ -761,8 +761,9 @@ class Run:
     control_plane_snapshot_digest: str | None = None
     tool_contract_json: str | None = None
     tool_contract_digest: str | None = None
-    # Immutable non-secret gateway contract captured at run creation.
-    # Both fields default to None for legacy rows predating the gateway.
+    # Legacy gateway contract, kept readable for rows written before
+    # the gateway cut.  New runs never write these (always None); old
+    # rows with snapshots must still load.
     gateway_snapshot_json: str | None = None
     gateway_snapshot_digest: str | None = None
 
@@ -1320,9 +1321,9 @@ class DispatchEvidence:
     tool_result_bytes: int | None = None
     tools_exposed_count: int | None = None
     tools_actually_used_count: int | None = None
-    # Per-dispatch non-secret gateway evidence (selection, observed
-    # account, latency, error classification). None for dispatches that did
-    # not exercise a gateway.
+    # Legacy per-dispatch gateway evidence, kept readable for rows
+    # written before the gateway cut.  New dispatches never write this
+    # (always None).
     gateway_evidence_json: str | None = None
     # Exact binding identity chosen by the supervisor (canonical
     # ``ExecutionBinding``).  ``provider``/``model`` are

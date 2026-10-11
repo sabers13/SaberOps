@@ -166,7 +166,8 @@ def test_opencode_serve_entry_refuses_model_without_prefix(tmp_path: Path) -> No
 
 
 # ---------------------------------------------------------------------------
-# codex direct vs gateway path
+# codex direct path (the gateway cut removed the gateway path entirely:
+# every invocation carries the billing pins)
 # ---------------------------------------------------------------------------
 
 
@@ -193,9 +194,12 @@ def test_codex_direct_path_carries_billing_pins(
         assert flag in argv, f"direct path is missing -c {flag}: {argv}"
 
 
-def test_codex_gateway_path_has_no_billing_pins(
+def test_codex_pins_apply_even_with_stale_gateway_env(
     stub_bin: tuple[Path, Path], tmp_path: Path
 ) -> None:
+    # Stale ORCH_GATEWAY_* values in the request overlay must neither
+    # reach the child nor divert the invocation: the gateway cut removed
+    # the gateway provider selection, so the billing pins still apply.
     bindir, outfile = stub_bin
     _write_recording_stub(bindir, "stub-codex", outfile)
     adapter = CodexAdapter(codex_bin="stub-codex")
@@ -213,11 +217,23 @@ def test_codex_gateway_path_has_no_billing_pins(
         )
     )
     argv = _codex_argv(_child(outfile))
-    assert 'forced_login_method="chatgpt"' not in argv
-    assert 'model_provider="openai"' not in argv
-    assert 'service_tier="default"' not in argv
-    # The gateway provider selection itself is untouched.
-    assert 'model_provider = "orch_omniroute"' in argv
+    for key, value in (
+        ("forced_login_method", '"chatgpt"'),
+        ("model_provider", '"openai"'),
+        ("service_tier", '"default"'),
+    ):
+        flag = f"{key}={value}"
+        assert flag in argv, f"direct path is missing -c {flag}: {argv}"
+    assert 'model_provider = "orch_omniroute"' not in argv
+    child_env = _child(outfile)["env"]
+    assert isinstance(child_env, dict)
+    for key in (
+        "ORCH_GATEWAY_ENDPOINT",
+        "ORCH_GATEWAY_CONNECTION",
+        "ORCH_GATEWAY_AUTHORIZATION_ENV",
+        "ORCH_GATEWAY_PROVIDER_ID",
+    ):
+        assert key not in child_env, f"stale {key} reached the codex child"
 
 
 # ---------------------------------------------------------------------------

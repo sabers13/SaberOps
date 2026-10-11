@@ -309,10 +309,7 @@ AUTONOMOUS_RUNTIME_ENV_ALLOWLIST: tuple[str, ...] = (
 
 #: Bounded non-secret Orch execution identity/control variables the
 #: existing runtime requires inside the child: run/attempt association,
-#: the run database path, verified tool-contract metadata, the
-#: gateway pinning the gateway boundary injects for gateway dispatches
-#: (non-secret names/values only -- the real OmniRoute token is
-#: resolved at forwarding time, never from this mapping), the exact
+#: the run database path, verified tool-contract metadata, the exact
 #: Execution binding identity the canonical lifecycle resolved
 #: (binding/profile/pool/backend references only, never secrets), and
 #: the Copilot profile selector honoured by the Copilot adapter's
