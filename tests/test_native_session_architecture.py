@@ -230,25 +230,6 @@ def test_autonomous_observer_retains_per_invocation_transport(repo: Path, tmp_pa
     )
 
 
-def test_native_client_uses_current_checkout_without_terminal_pythonpath(tmp_path: Path) -> None:
-    import saberops.native_client
-
-    controls = SessionControls(tmp_path)
-    controls.register("sid", "run", live_identity(), "worker")
-    controls.finish("sid", "DONE")
-    descriptor = tmp_path / "client.native"
-    descriptor.write_text(json.dumps({"controls_root": str(tmp_path), "id": "sid"}))
-    client = subprocess.run(
-        [sys.executable, "-I", str(Path(saberops.native_client.__file__)), str(descriptor)],
-        cwd=tmp_path,
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    assert client.returncode == 1 and "no longer live" in client.stdout
-    assert "Traceback" not in client.stderr
-
-
 @pytest.fixture
 def bridge(tmp_path: Path) -> Any:
     controls = SessionControls(tmp_path / "controls")
@@ -704,42 +685,6 @@ def test_durable_outcome_overrides_stale_active_metadata_without_mutating_it(
     assert path.read_bytes() == before
 
 
-def test_closing_native_client_does_not_finish_or_take_over_execution(tmp_path: Path) -> None:
-    import saberops.native_client
-
-    controls = SessionControls(tmp_path)
-    controls.register("sid", "run", live_identity(), "worker")
-    journal = SessionJournal(tmp_path)
-    journal.register("sid", "run", "worker", "a1", live_identity())
-    binary = tmp_path / "exit-client"
-    binary.write_text(f"#!{sys.executable}\nraise SystemExit(0)\n")
-    binary.chmod(0o755)
-    descriptor = tmp_path / "sid.native"
-    descriptor.write_text(
-        json.dumps(
-            {
-                "id": "sid",
-                "controls_root": str(tmp_path),
-                "provider": "opencode",
-                "password": "test",
-                "binary": str(binary),
-                "url": "http://localhost",
-                "session": "ses_one",
-                "directory": str(tmp_path),
-            }
-        )
-    )
-    client = subprocess.run(
-        [sys.executable, "-I", str(Path(saberops.native_client.__file__)), str(descriptor)],
-        capture_output=True,
-        text=True,
-        timeout=5,
-    )
-    assert client.returncode == 0
-    assert controls.mode("sid") == "ACTIVE"
-    assert journal.view("sid")["outcome"] is None
-
-
 @pytest.mark.parametrize("path", ["/event", "/global/event"])
 def test_live_stream_gets_final_snapshot_without_replaying_old_busy(bridge: Any, path: str) -> None:
     runtime, _, _, _ = bridge
@@ -800,70 +745,6 @@ def test_live_stream_gets_final_snapshot_without_replaying_old_busy(bridge: Any,
     assert frames[-1]["properties"]["status"]["type"] == "idle"
     assert frames[-2]["properties"]["part"]["text"] == "All done"
     assert len(frames) == 3
-
-
-@pytest.mark.parametrize("status", ["SUCCESS", "FAILED", "TIMEOUT", "INTERRUPTED", "UNCERTAIN"])
-def test_native_client_stops_only_its_client_and_displays_durable_outcome(
-    tmp_path: Path, status: str
-) -> None:
-    import saberops.native_client
-
-    controls = SessionControls(tmp_path)
-    controls.register("sid", "run", live_identity(), "worker")
-    journal = SessionJournal(tmp_path)
-    journal.register("sid", "run", "worker", "a1", live_identity())
-    marker = tmp_path / "started"
-    binary = tmp_path / "fake-client"
-    binary.write_text(
-        f"#!{sys.executable}\nfrom pathlib import Path\nimport time\n"
-        f"Path({str(marker)!r}).touch()\ntime.sleep(60)\n"
-    )
-    binary.chmod(0o755)
-    descriptor = tmp_path / "sid.native"
-    descriptor.write_text(
-        json.dumps(
-            {
-                "id": "sid",
-                "controls_root": str(tmp_path),
-                "provider": "opencode",
-                "password": "test",
-                "binary": str(binary),
-                "url": "http://localhost",
-                "session": "ses_one",
-                "directory": str(tmp_path),
-            }
-        )
-    )
-    # This unrelated process represents the execution owner, which a client must never kill.
-    owner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
-    client = subprocess.Popen(
-        [sys.executable, "-I", str(Path(saberops.native_client.__file__)), str(descriptor)],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    try:
-        deadline = time.monotonic() + 5
-        while not marker.exists() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert marker.exists()
-        controls.finish("sid", "DONE")
-        time.sleep(0.3)
-        assert client.poll() is None  # DONE alone cannot fabricate successful completion.
-        journal.append("sid", "turn.completed", {"response": "Complete final report"})
-        journal.complete("sid", {"status": status, "quiescent": status != "UNCERTAIN"})
-        stdout, stderr = client.communicate(timeout=5)
-        assert client.returncode == (0 if status == "SUCCESS" else 1)
-        assert f"({status})" in stdout and "Complete final report" in stdout
-        assert "Traceback" not in stderr and owner.poll() is None
-        assert ("Provider execution has stopped" in stdout) == (status != "UNCERTAIN")
-    finally:
-        if client.poll() is None:
-            client.kill()
-        client.communicate()
-        owner.terminate()
-        owner.wait()
 
 
 def test_frozen_gate_contract_reaches_repairs_with_correct_prompt_metrics() -> None:

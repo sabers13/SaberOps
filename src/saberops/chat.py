@@ -837,83 +837,14 @@ class ChatCoordinator:
         return list(dict.fromkeys(roots))
 
     def shared_native_chat(self, chat_id: str) -> tuple[Any, dict[str, Any]] | None:
-        from saberops.native_shared_chat import NativeSharedChat
-        from saberops.session_control import SessionControls
-
-        found = []
-        for root in self.native_roots(chat_id):
-            controls = SessionControls(root)
-            if not controls.path.is_file():
-                continue
-            with controls.connect() as conn:
-                rows = conn.execute("SELECT id FROM controls WHERE chat_id=? "
-                                    "AND role='orchestrator'",
-                                    (chat_id,)).fetchall()
-            for row in rows:
-                bridge = NativeSharedChat(controls)
-                channel = bridge.channel(row["id"])
-                if channel:
-                    found.append((bridge, dict(channel, id=row["id"])))
-        if len(found) > 1:
-            raise ChatBusy("Multiple native orchestrators are open. "
-                           "Close the extra session before chatting.")
-        return found[0] if found else None
+        # Native shared channels were cut (L-A step 3): no channel can exist.
+        # Kept as a None stub until chat.py itself is removed so callers and
+        # monkeypatch-based tests keep working.
+        return None
 
     def _check_shared_replies(self) -> None:
-        from saberops.native_shared_chat import NativeSharedChat
-        from saberops.session_control import SessionControls
-
-        with self.store.connect() as conn:
-            chats = [row[0] for row in conn.execute("SELECT id FROM conversations")]
-        for chat_id in chats:
-            for root in self.native_roots(chat_id):
-                controls = SessionControls(root)
-                if not controls.path.is_file():
-                    continue
-                bridge = NativeSharedChat(controls)
-                bridge.recover()
-                for message in bridge.replies():
-                    control = controls.get(message["session_id"]) or {}
-                    if control.get("chat_id") != chat_id:
-                        continue
-                    controls.sync_chat(message, message["reply"])
-                    if (message["action"] == "respond"
-                            or self.store.turn_mode(chat_id, message["id"]) == "chat"):
-                        bridge.finish(message["id"])
-                        continue
-                    chat = self.store.get(chat_id)
-                    if not chat or chat["busy"]:
-                        continue
-                    if not bridge.claim_reply(message["id"]):
-                        continue
-                    token = None
-                    try:
-                        token = self.store.claim(chat_id, None, "shared-work:" + message["id"])
-                        if not token:
-                            bridge.finish(message["id"])
-                            continue
-                        # Bind work advice to the original owner request, not later queued messages.
-                        stop = next(i for i, m in enumerate(chat["messages"])
-                                    if m["request_id"] == "manual:" + message["id"] + ":user")
-                        chat["messages"] = chat["messages"][:stop + 1]
-                        chat["mode"] = self.store.turn_mode(chat_id, message["id"])
-                        reply, run_id = self._apply_reply(chat, message["reply"], "work")
-                        self.store.finish(chat_id, token, reply[len(message["reply"]):].strip(),
-                                          model="Native orchestrator · governed dispatch",
-                                          run_id=run_id)
-                        channel = bridge.channel(message["session_id"])
-                        if channel:
-                            bridge.notify(dict(channel, id=message["session_id"]),
-                                          "dispatch:" + message["id"], reply)
-                    except Exception as exc:
-                        reason = "I couldn't queue that work request. "
-                        reason += "It was not automatically retried. (" + type(exc).__name__ + ")"
-                        if token:
-                            self.store.finish(chat_id, token, reason)
-                        else:
-                            self.store.record_native_reply(chat_id, "work:" + message["id"],
-                                                           reason, role="orchestrator")
-                    bridge.finish(message["id"])
+        # Native shared channels were cut (L-A step 3): nothing to recover.
+        return
 
     def _context(self, chat: dict[str, Any]) -> dict[str, Any]:
         # Keep the original objective and recent turns; truncate explicitly.

@@ -531,11 +531,6 @@ def read_sessions(root: Path, owner: str) -> list[dict[str, Any]]:
             from saberops.native_access import capability, client_state, session_key
             value.update(capability(value))
             value["native_client"] = client_state(SessionControls(root), session_key(value))
-            from saberops.native_shared_chat import NativeSharedChat
-            channel = NativeSharedChat(SessionControls(root)).channel(value["id"])
-            value["shared_native_chat"] = {
-                "connected": bool(channel), "pending": channel["pending"] if channel else 0
-            }
             client_log = folder / (value["id"] + ".native.log")
             if client_log.is_file():
                 with client_log.open("rb") as log:

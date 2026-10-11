@@ -167,12 +167,6 @@ class SessionControls:
             self.sync_chat(message, error or "Session finished before delivery.")
 
     def submit(self, sid: str, message: str, request_id: str) -> None:
-        from saberops.native_shared_chat import NativeSharedChat
-
-        bridge = NativeSharedChat(self)
-        if bridge.channel(sid):
-            bridge.submit(sid, message, request_id, chat_id=(self.get(sid) or {})["chat_id"])
-            return
         self.require_no_native_client(sid)
         if not message.strip() or len(message) > 32000 or not request_id or len(request_id) > 128:
             raise ControlConflict("Enter a message of 1–32,000 characters.")

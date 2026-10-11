@@ -15,7 +15,6 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import threading
 import time
 from collections.abc import AsyncGenerator, Callable
@@ -2940,7 +2939,7 @@ def create_app(
         path = request.url.path
         chat_mutation = request.method == "POST" and (
             path == "/chats" or path.startswith("/chats/")
-            or "/sessions/" in path or path.endswith("/open-synchronized-cli")
+            or "/sessions/" in path
             or path.endswith("/conversation") or path.endswith("/try-worker")
             or (path.startswith("/runs/") and path.endswith("/continue"))
             or path == "/access/verify-model"
@@ -3711,45 +3710,6 @@ def create_app(
                              "chat_id": chat_id,
                              "takeover_reason": "Takeover is available for live supported provider sessions."})
 
-    @app.post("/runs/{run_id}/sessions/{session_id}/open-terminal")
-    def open_session_terminal(request: Request, run_id: str, session_id: str) -> Response:
-        # An explicit click opens a viewer only. No shell, provider execution,
-        # process signals, candidate mutation or arbitrary caller-supplied path.
-        from saberops.agent_sessions import owner_directory
-        projected = session_projection(run_id)
-        if projected is None:
-            return JSONResponse({"error": "Run not found"}, status_code=404)
-        sessions, root = projected
-        session = next((row for row in sessions if row["id"] == session_id), None)
-        if session is None:
-            return JSONResponse({"error": "Session not found"}, status_code=404)
-        terminal = shutil.which("gnome-terminal")
-        if not terminal or not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
-            return JSONResponse({"error": "No supported desktop terminal is available."}, status_code=409)
-        log = owner_directory(root, run_id) / (
-            f"{session_id}.log" if re.fullmatch(r"[0-9a-f]{32}", session_id) else "missing.log"
-        )
-        if not log.is_file() and re.fullmatch(r"[0-9a-f]{32}", session_id) and chat_store.for_run(run_id):
-            log = owner_directory(chat_store.path.parent / "agent-sessions", chat_store.for_run(run_id) or "") / f"{session_id}.log"
-        if not log.is_file():
-            folder = owner_directory(root, run_id)
-            folder.mkdir(parents=True, exist_ok=True, mode=0o700)
-            # Legacy snapshots get an opaque filename, never a URL path fragment.
-            log = folder / f"viewer-{hashlib.sha256(session_id.encode()).hexdigest()}.log"
-            log.write_text(str(session["output"]), encoding="utf-8")
-            log.chmod(0o600)
-        try:
-            result = subprocess.run(
-                [terminal, "--title=SaberOps · Read-only CLI output", "--", sys.executable,
-                 str(Path(__file__).with_name("native_console.py")), str(log)],
-                capture_output=True, timeout=5, check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            return JSONResponse({"error": "Could not open the desktop terminal. Use Pop out console."}, status_code=503)
-        if result.returncode != 0:
-            return JSONResponse({"error": "Desktop terminal refused to open. Use Pop out console."}, status_code=503)
-        return JSONResponse({"opened": True, "mode": "read-only transcript viewer"})
-
     def control_for_session(run_id: str, sid: str) -> tuple[Any, dict[str, Any]]:
         from saberops.session_control import ControlConflict, SessionControls
         projected = session_projection(run_id)
@@ -3778,100 +3738,6 @@ def create_app(
             return JSONResponse(SessionJournal(controls.path.parent).view(sid, after=max(0, after)))
         except ControlConflict as exc:
             return JSONResponse({"error": str(exc)}, status_code=404)
-
-    def launch_native_client(controls: Any, data: dict[str, Any], backend: str,
-                             repository: str | None = None, *, show_workspace: bool = True) -> Response:
-        from saberops.agent_sessions import owner_directory
-        from saberops.native_access import (
-            capability,
-            client_state,
-            fail_launch,
-            focus_tmux_client,
-            reserve,
-            saved_directory,
-            session_key,
-            show_tmux_workspace,
-            supports_shared_chat,
-            terminal_launch,
-        )
-        from saberops.session_control import ControlConflict
-        from saberops.session_journal import SessionJournal
-        folder = owner_directory(controls.path.parent, data["owner"])
-        metadata_path = folder / (data["id"] + ".json")
-        job: dict[str, Any] | None = None
-        try:
-            metadata = json.loads(metadata_path.read_text())
-            metadata["completion"] = SessionJournal(controls.path.parent).view(data["id"], limit=1)["outcome"]
-            metadata["control_mode"] = data["mode"]
-            access = capability(metadata)
-            existing = client_state(controls, session_key(metadata))
-            if backend == "tmux" and existing and existing["state"] in ("STARTING", "ACTIVE"):
-                if focus_tmux_client(data["role"] + "-" + existing["session_id"][:8]):
-                    workspace = show_tmux_workspace() if show_workspace else {}
-                    return JSONResponse({"opened": True, "mode": "existing", "backend": backend,
-                                         "workspace": workspace, "message": workspace.get("message", "Selected the existing tmux client.")})
-                raise ControlConflict("This session has an open desktop CLI. Close it before adding it to tmux.")
-            if not access["native_cli_available"]:
-                raise ControlConflict(access["native_cli_access_reason"])
-            descriptor = folder / (data["id"] + ".native")
-            if metadata.get("native_attach_ready") and data["mode"] in ("ACTIVE", "REQUESTED", "MANUAL") and descriptor.is_file():
-                args = [sys.executable, str(Path(__file__).with_name("native_client.py")), str(descriptor)]
-                terminal_launch(args, backend, data["role"] + "-" + data["id"][:8])
-                workspace = show_tmux_workspace() if backend == "tmux" and show_workspace else {}
-                return JSONResponse({"opened": True, "mode": "attach", "backend": backend,
-                                     "workspace": workspace, "message": workspace.get("message", "Opened the native CLI.")})
-            metadata["repository"] = repository
-            if metadata["completion"]:
-                metadata["read_only"] = True
-            token = reserve(controls, metadata)
-            job = dict(metadata, controls_root=str(controls.path.parent),
-                       key=session_key(metadata), token=token,
-                       access_mode=access["native_cli_mode"], log=str(folder / (data["id"] + ".native.log")))
-            job["shared_chat"] = (metadata.get("role") == "orchestrator"
-                                  and supports_shared_chat(str(metadata.get("provider", ""))))
-            if job["shared_chat"] and metadata.get("provider") == "codex":
-                job["shared_transport"] = "codex-server"
-            # Reserve before restoring the snapshot: competing launch requests
-            # must not extract or remove each other's inspection directory.
-            job["directory"] = str(saved_directory(metadata, folder))
-            if access["native_cli_mode"] == "handoff":
-                if data["mode"] == "ACTIVE":
-                    controls.takeover(data["id"], chat_path=Path(data["chat_path"]), chat_id=data["chat_id"])
-                elif data["mode"] not in ("REQUESTED", "MANUAL"):
-                    raise ControlConflict("This invocation cannot be handed off safely.")
-            # Descriptors contain references only; provider passwords remain in the guarded live attach descriptor.
-            descriptor = folder / (data["id"] + "-" + token + ".handoff")
-            descriptor.write_text(json.dumps(job), encoding="utf-8")
-            descriptor.chmod(0o600)
-            Path(job["log"]).touch(mode=0o600)
-            args = [sys.executable, str(Path(__file__).with_name("native_handoff.py")), str(descriptor)]
-            terminal_launch(args, backend, data["role"] + "-" + data["id"][:8])
-        except ControlConflict as exc:
-            if job:
-                fail_launch(controls, job, str(exc))
-            return JSONResponse({"error": str(exc)}, status_code=409)
-        except (OSError, ValueError, subprocess.SubprocessError) as exc:
-            if job:
-                fail_launch(controls, job, str(exc))
-            return JSONResponse({"error": "Could not open the native session: " + str(exc)[:400]}, status_code=503)
-        workspace = show_tmux_workspace() if backend == "tmux" and show_workspace else {}
-        return JSONResponse({"opened": True, "mode": job["access_mode"], "backend": backend,
-                             "workspace": workspace, "message": workspace.get("message", "Opened the exact provider session.")})
-
-    @app.post("/runs/{run_id}/sessions/{sid}/open-native-cli")
-    def open_native_session(run_id: str, sid: str, backend: str = "desktop", show_workspace: bool = True) -> Response:
-        from saberops.session_control import ControlConflict
-        try:
-            controls, data = control_for_session(run_id, sid)
-            controls.link_chat(sid, chat_path=chat_store.path, chat_id=linked_conversation(run_id),
-                               saved=data["mode"] not in ("ACTIVE", "REQUESTED", "MANUAL", "RESUMING"))
-            data = controls.get(sid) or data
-            runtime = runtime_for_run(run_id)
-            run = runtime.db.get_run(run_id) if runtime else None
-            return launch_native_client(controls, data, backend, str(assert_run_repository(run)) if run else None,
-                                        show_workspace=show_workspace)
-        except ControlConflict as exc:
-            return JSONResponse({"error": str(exc)}, status_code=409)
 
     def history_download(controls: Any, sid: str) -> Response:
         from saberops.session_journal import SessionJournal
@@ -3967,51 +3833,6 @@ def create_app(
         except ControlConflict as exc:
             return JSONResponse({"error": str(exc)}, status_code=409)
 
-    def launch_synced_cli(request: Request, *, chat_id: str | None = None,
-                          control: str | None = None) -> Response:
-        terminal = shutil.which("gnome-terminal")
-        if not terminal or not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
-            return JSONResponse({"error": "No local desktop terminal is available. Chat here instead."}, status_code=409)
-        # Host/Origin headers never choose where the local terminal sends data.
-        server = request.scope.get("server") or ("127.0.0.1", 8765)
-        port = int(server[1])
-        args = [terminal, "--title=SaberOps · Synchronized CLI", "--", sys.executable,
-                str(Path(__file__).with_name("synced_console.py")),
-                "--url", f"http://127.0.0.1:{port}"]
-        args.extend(["--chat", chat_id] if chat_id else ["--control", control or ""])
-        try:
-            result = subprocess.run(args, capture_output=True, timeout=5, check=False)
-        except (OSError, subprocess.TimeoutExpired):
-            return JSONResponse({"error": "Could not open synchronized CLI."}, status_code=503)
-        if result.returncode:
-            return JSONResponse({"error": "The desktop terminal refused to open."}, status_code=503)
-        return JSONResponse({"opened": True, "mode": "synchronized CLI"})
-
-    @app.post("/chats/{chat_id}/open-synchronized-cli")
-    def open_chat_cli(request: Request, chat_id: str) -> Response:
-        if chat_store.get(chat_id) is None:
-            return JSONResponse({"error": "Conversation not found"}, status_code=404)
-        return launch_synced_cli(request, chat_id=chat_id)
-
-    @app.post("/runs/{run_id}/open-synchronized-cli")
-    def open_run_chat_cli(request: Request, run_id: str) -> Response:
-        try:
-            chat_id = linked_conversation(run_id)
-        except ValueError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=404)
-        return launch_synced_cli(request, chat_id=chat_id)
-
-    @app.post("/runs/{run_id}/sessions/{sid}/open-synchronized-cli")
-    def open_control_cli(request: Request, run_id: str, sid: str) -> Response:
-        from saberops.session_control import ControlConflict
-        try:
-            _, data = control_for_session(run_id, sid)
-            if data["mode"] != "MANUAL":
-                raise ControlConflict("Take control and wait for the run to be held first.")
-        except ControlConflict as exc:
-            return JSONResponse({"error": str(exc)}, status_code=409)
-        return launch_synced_cli(request, control=f"/runs/{run_id}/sessions/{sid}/control")
-
     def chat_control_for_session(chat_id: str, sid: str) -> tuple[Any, dict[str, Any]]:
         from saberops.session_control import ControlConflict, SessionControls
         if chat_store.get(chat_id) is None:
@@ -4030,62 +3851,6 @@ def create_app(
             return JSONResponse(SessionControls.public(controls.get(sid, messages=True)))
         except ControlConflict as exc:
             return JSONResponse({"error": str(exc)}, status_code=409)
-
-    @app.post("/chats/{chat_id}/sessions/{sid}/open-native-cli")
-    def open_native_chat_session(chat_id: str, sid: str, backend: str = "desktop", show_workspace: bool = True) -> Response:
-        from saberops.session_control import ControlConflict
-        try:
-            controls, data = chat_control_for_session(chat_id, sid)
-            controls.link_chat(sid, chat_path=chat_store.path, chat_id=chat_id,
-                               saved=data["mode"] not in ("ACTIVE", "REQUESTED", "MANUAL", "RESUMING"))
-            return launch_native_client(controls, controls.get(sid) or data, backend, show_workspace=show_workspace)
-        except ControlConflict as exc:
-            return JSONResponse({"error": str(exc)}, status_code=409)
-
-    def open_shared_tmux(projected: Response, opener: Any, all_sessions: bool) -> Response:
-        from saberops.native_access import session_key, show_tmux_workspace
-        from saberops.session_control import ControlConflict
-        if projected.status_code != 200:
-            return projected
-        rows = json.loads(bytes(projected.body))["sessions"]
-        opened: list[str] = []
-        skipped: list[dict[str, str]] = []
-        seen: set[str] = set()
-        if all_sessions:
-            for row in rows:
-                label = str(row["role"]).capitalize() + " · " + str(row["provider"]) + " / " + str(row["model"])
-                if not row.get("native_cli_available"):
-                    skipped.append({"id": row["id"], "label": label, "reason": row.get("native_cli_access_reason") or "No saved native session is available."})
-                    continue
-                key = session_key(row)
-                if key in seen:
-                    continue
-                seen.add(key)
-                result = opener(row["id"])
-                if result.status_code == 200:
-                    opened.append(row["id"])
-                else:
-                    skipped.append({"id": row["id"], "label": label, "reason": json.loads(result.body).get("error", "Could not open this session.")})
-        try:
-            workspace = show_tmux_workspace() if all_sessions else show_tmux_workspace(force_window=True)
-        except (ControlConflict, OSError, subprocess.SubprocessError) as exc:
-            return JSONResponse({"error": str(exc), "opened_sessions": opened, "skipped": skipped}, status_code=503)
-        return JSONResponse({"opened": workspace["visible"], "workspace": workspace,
-                             "message": workspace["message"], "opened_sessions": opened, "skipped": skipped})
-
-    @app.post("/runs/{run_id}/sessions/open-tmux")
-    def open_run_tmux(run_id: str, all_sessions: bool = False) -> Response:
-        return open_shared_tmux(session_response(run_id),
-                                lambda sid: open_native_session(run_id, sid, "tmux", False), all_sessions)
-
-    @app.post("/chats/{chat_id}/sessions/open-tmux")
-    def open_chat_tmux(chat_id: str, all_sessions: bool = False) -> Response:
-        projected = chat_sessions(chat_id)
-        if projected.status_code != 200:
-            return projected
-        run_id = json.loads(bytes(projected.body)).get("run_id")
-        opener = (lambda sid: open_native_session(run_id, sid, "tmux", False)) if run_id else (lambda sid: open_native_chat_session(chat_id, sid, "tmux", False))
-        return open_shared_tmux(projected, opener, all_sessions)
 
     @app.get("/chats/{chat_id}/sessions/{sid}/history")
     def download_chat_session(chat_id: str, sid: str) -> Response:
@@ -4137,17 +3902,6 @@ def create_app(
             return JSONResponse({"requested": True}, status_code=202)
         except ControlConflict as exc:
             return JSONResponse({"error": str(exc)}, status_code=409)
-
-    @app.post("/chats/{chat_id}/sessions/{sid}/open-synchronized-cli")
-    def open_chat_control_cli(request: Request, chat_id: str, sid: str) -> Response:
-        from saberops.session_control import ControlConflict
-        try:
-            _, data = chat_control_for_session(chat_id, sid)
-            if data["mode"] != "MANUAL":
-                raise ControlConflict("Take control and wait for the session to be held first.")
-        except ControlConflict as exc:
-            return JSONResponse({"error": str(exc)}, status_code=409)
-        return launch_synced_cli(request, control=f"/chats/{chat_id}/sessions/{sid}/control")
 
     @app.get("/runs/{run_id}/git")
     def run_git(run_id: str) -> Response:

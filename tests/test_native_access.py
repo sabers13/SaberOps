@@ -13,7 +13,6 @@ from typing import Any
 import pytest
 
 from saberops.agent_sessions import _native_id
-from saberops.chat import ChatStore
 from saberops.native_access import (
     capability,
     claim_client,
@@ -30,10 +29,8 @@ from saberops.native_access import (
     terminal_launch,
     update_client,
 )
-from saberops.native_handoff import HistoryMirror
 from saberops.ownership import ProcessIdentity
 from saberops.session_control import ControlConflict, SessionControls
-from saberops.session_journal import SessionJournal
 
 
 def setup(temporary: Path) -> tuple[SessionControls, dict[str, Any]]:
@@ -271,77 +268,6 @@ def test_only_native_claude_orchestrator_gets_readable_chat_guidance(
     assert "--append-system-prompt" not in native_argv(data)
 
 
-@pytest.mark.skipif(os.name != "posix", reason="Native terminal access uses POSIX PTYs")
-def test_native_pty_has_size_at_startup_preserves_colors_input_and_resize(tmp_path: Path) -> None:
-    import fcntl
-    import signal
-    import struct
-    import termios
-    import time
-
-    import saberops.native_handoff
-
-    controls, data = setup(tmp_path / "controls")
-    controls.finish("sid", "DONE")
-    report = tmp_path / "dimensions.json"
-    resized = tmp_path / "resized.json"
-    binary = tmp_path / "codex"
-    binary.write_text(
-        f"#!{sys.executable}\n"
-        "import json, os, sys, signal\nfrom pathlib import Path\n"
-        f"report = {str(report)!r}\n"
-        f"resized = Path({str(resized)!r})\n"
-        "signal.signal(signal.SIGWINCH, lambda *_: "
-        "resized.write_text(json.dumps(list(os.get_terminal_size()))))\n"
-        "size = list(os.get_terminal_size())\n"
-        "with open(report, 'w') as f: json.dump({'initial': size, 'no_color': "
-        "os.environ.get('NO_COLOR')}, f)\n"
-        "print('\\x1b[32mNative UI ready\\x1b[0m', flush=True)\n"
-        "answer = sys.stdin.readline().strip()\n"
-        "with open(report, 'w') as f: json.dump({'initial': size, 'resized': "
-        "list(os.get_terminal_size()), 'input': answer}, f)\n"
-    )
-    binary.chmod(0o700)
-    data.update(controls_root=str(controls.path.parent), directory=str(tmp_path),
-                access_mode="reopen", key=session_key(data), token=reserve(controls, data),
-                log=str(tmp_path / "native.log"))
-    descriptor = tmp_path / "native.handoff"
-    descriptor.write_text(json.dumps(data))
-    master, slave = os.openpty()
-    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 44, 120, 0, 0))
-    proc = subprocess.Popen(
-        [sys.executable, "-I", str(Path(saberops.native_handoff.__file__)), str(descriptor)],
-        stdin=slave, stdout=slave, stderr=slave,
-        env=dict(os.environ, PATH=str(tmp_path) + ":" + os.environ["PATH"], NO_COLOR="1"),
-    )
-    try:
-        deadline = time.monotonic() + 10
-        while not report.is_file() and time.monotonic() < deadline and proc.poll() is None:
-            time.sleep(0.02)
-        assert report.is_file(), "The native CLI must start inside the PTY"
-        initial = json.loads(report.read_text())
-        assert initial == {"initial": [120, 44], "no_color": None}
-        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 37, 99, 0, 0))
-        os.kill(proc.pid, signal.SIGWINCH)
-        deadline = time.monotonic() + 5
-        while not resized.is_file() and time.monotonic() < deadline:
-            time.sleep(0.02)
-        assert resized.is_file(), "The native TUI must receive resize notifications"
-        assert json.loads(resized.read_text()) == [99, 37]
-        os.write(master, b"hello native CLI\n")
-        assert proc.wait(timeout=10) == 0
-        assert json.loads(report.read_text()) == {
-            "initial": [120, 44], "resized": [99, 37], "input": "hello native CLI"
-        }
-        assert b"\x1b[32mNative UI ready\x1b[0m" in Path(data["log"]).read_bytes()
-    finally:
-        if proc.poll() is None:
-            proc.terminate()
-            proc.wait(timeout=10)
-        os.close(master)
-        os.close(slave)
-
-
 def test_removed_review_worktree_uses_exact_recorded_git_tree(tmp_path: Path) -> None:
     repository = tmp_path / "repo"
     repository.mkdir()
@@ -370,73 +296,6 @@ def test_removed_review_worktree_uses_exact_recorded_git_tree(tmp_path: Path) ->
     assert (repository / "source.txt").read_text() == "later edits"
 
 
-def test_native_history_mirrors_only_new_provider_messages_once(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    controls, data = setup(tmp_path / "controls")
-    chat = ChatStore(tmp_path / "chat.db")
-    chat_id = chat.create(str(tmp_path), "Test")
-    controls.finish("sid", "DONE")
-    controls.link_chat("sid", chat_path=chat.path, chat_id=chat_id, saved=True)
-    data.update(provider="anthropic", token="token")
-    path = tmp_path / ".claude/projects/project/native_session123.jsonl"
-    path.parent.mkdir(parents=True)
-    path.write_text(json.dumps({"type": "user", "message": {"content": "old prompt"}}) + "\n")
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    mirror = HistoryMirror(data, controls)
-    with path.open("a") as stream:
-        for role, text in (("user", "new prompt"), ("assistant", "new response")):
-            stream.write(json.dumps({"type": role, "message": {"content": text}}) + "\n")
-    mirror.scan()
-    mirror.scan()
-    saved = chat.get(chat_id)
-    assert saved and [m["text"] for m in saved["messages"]] == ["new prompt", "new response"]
-
-
-@pytest.mark.parametrize("exit_code", [0, 7])
-def test_native_wrapper_records_client_finish_without_changing_agent_outcome(
-    tmp_path: Path,
-    exit_code: int,
-) -> None:
-    controls, data = setup(tmp_path / "controls")
-    controls.finish("sid", "DONE")
-    journal = SessionJournal(controls.path.parent)
-    journal.register("sid", "run", "worker", "a1", None)
-    journal.complete("sid", {"status": "SUCCESS", "quiescent": True, "source_tree": "original"})
-    before = journal.view("sid")["outcome"]
-    binary = tmp_path / "codex"
-    binary.write_text(f"#!/bin/sh\nprintf 'native test session\\n'\nexit {exit_code}\n")
-    binary.chmod(0o700)
-    data.update(
-        controls_root=str(controls.path.parent),
-        directory=str(tmp_path),
-        access_mode="reopen",
-        key=session_key(data),
-        token=reserve(controls, data),
-        log=str(tmp_path / "native.log"),
-    )
-    descriptor = tmp_path / "native.handoff"
-    descriptor.write_text(json.dumps(data))
-    import saberops.native_handoff
-
-    result = subprocess.run(
-        [sys.executable, "-I", str(Path(saberops.native_handoff.__file__)), str(descriptor)],
-        env=dict(os.environ, PATH=str(tmp_path) + ":" + os.environ["PATH"]),
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
-    assert result.returncode == exit_code, result.stderr
-    assert "native test session" in result.stdout
-    state = client_state(controls, data["key"])
-    assert state and state["state"] == ("DONE" if exit_code == 0 else "FAILED")
-    if exit_code:
-        assert str(exit_code) in state["error"]
-    assert journal.view("sid")["outcome"] == before
-    assert any(e["kind"] == "native.client.output" for e in journal.view("sid")["events"])
-
-
 @pytest.mark.parametrize(
     "provider,payload",
     [
@@ -448,163 +307,6 @@ def test_additional_provider_session_ids_are_captured(
     provider: str, payload: dict[str, str]
 ) -> None:
     assert _native_id(json.dumps(payload), provider) == "native_session123"
-
-
-def test_finished_reviewer_can_reopen_through_run_endpoint_without_changing_result(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from fastapi.testclient import TestClient
-
-    from saberops.agent_sessions import observe_invocation, owner_directory
-    from saberops.db import Database
-    from saberops.models import AttemptStatus, Run, RunStatus, Tier, WorkerRequest, WorkerResult
-    from saberops.web import create_app
-
-    for name in ("XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"):
-        monkeypatch.setenv(name, str(tmp_path / name))
-    for name in (
-        "SABEROPS_PROFILE",
-        "ORCH_BINDING_STORE",
-        "ORCH_ACCESS_STORE",
-        "ORCH_ACCESS_MODELS_STORE",
-    ):
-        monkeypatch.delenv(name, raising=False)
-    repository = tmp_path / "repo"
-    repository.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
-    subprocess.run(
-        [
-            "git",
-            "-c",
-            "user.name=Test",
-            "-c",
-            "user.email=test@local",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "base",
-        ],
-        cwd=repository,
-        check=True,
-    )
-    db = Database(tmp_path / "web.db")
-    db.create_run(
-        Run(
-            id="run",
-            task="test",
-            target_repo=str(repository),
-            base_commit="base",
-            tier=Tier.T1,
-            training_allowed=False,
-            gate_command="true",
-            status=RunStatus.COMPLETED,
-            created_at="2026-10-06T10:00:00+00:00",
-            project_id="test",
-            config_json="{}",
-        )
-    )
-    root = tmp_path / "agent-sessions"
-
-    def invoke(request: WorkerRequest) -> WorkerResult:
-        assert request.on_stdout
-        request.on_stdout('{"type":"system","session_id":"native_review123"}\n')
-        return WorkerResult(
-            "anthropic",
-            "selected",
-            AttemptStatus.SUCCESS,
-            "done",
-            "PASS",
-            "",
-            execution_quiescent=True,
-        )
-
-    observe_invocation(
-        invoke,
-        WorkerRequest("review", repository, "selected", read_only=True),
-        root=root,
-        owner="run",
-        role="reviewer",
-        provider="anthropic",
-        association="review",
-    )
-    launches: list[list[str]] = []
-    monkeypatch.setattr(
-        "saberops.native_access.terminal_launch", lambda args, *_: launches.append(args)
-    )
-    shown: list[bool] = []
-
-    def show_workspace(*, force_window: bool = False) -> dict[str, Any]:
-        shown.append(True)
-        return {"visible": True, "message": "Opened the shared workspace."}
-
-    monkeypatch.setattr("saberops.native_access.show_tmux_workspace", show_workspace)
-    monkeypatch.setattr("saberops.native_access.shutil.which", lambda name: "/bin/" + name)
-    client = TestClient(create_app(db_path=tmp_path / "web.db", seed_cwd_if_empty=False))
-    rows = client.get("/runs/run/sessions").json()["sessions"]
-    sid = rows[0]["id"]
-    before = SessionJournal(root).view(sid)["outcome"]
-    response = client.post(f"/runs/run/sessions/{sid}/open-native-cli?backend=tmux")
-    assert response.status_code == 200, response.text
-    assert response.json()["mode"] == "reopen"
-    assert launches and Path(launches[0][1]).name == "native_handoff.py"
-    descriptor = Path(launches[0][2])
-    assert descriptor.parent == owner_directory(root, "run")
-    saved = json.loads(descriptor.read_text())
-    assert saved["native_id"] == "native_review123" and saved["read_only"]
-    assert Path(saved["directory"]) != repository
-    assert client.post(f"/runs/run/sessions/{sid}/open-native-cli?backend=tmux").status_code == 409
-    assert db.get_run("run").status == RunStatus.COMPLETED  # type: ignore[union-attr]
-    assert SessionJournal(root).view(sid)["outcome"] == before
-    update_client(SessionControls(root), saved, "DONE")
-
-    def extra(request: WorkerRequest) -> WorkerResult:
-        assert request.on_stdout
-        request.on_stdout(
-            json.dumps({"type": "system", "session_id": request.native_resume_id}) + "\n"
-        )
-        return WorkerResult(
-            "anthropic",
-            "selected",
-            AttemptStatus.SUCCESS,
-            "done",
-            "done",
-            "",
-            execution_quiescent=True,
-        )
-
-    for role, native in (
-        ("worker", "native_worker123"),
-        ("orchestrator", "native_orch123"),
-        ("orchestrator", "native_orch123"),
-    ):
-        observe_invocation(
-            extra,
-            WorkerRequest(role, repository, "selected", native_resume_id=native, read_only=True),
-            root=root,
-            owner="run",
-            role=role,
-            provider="anthropic",
-            association=role,
-        )
-    launches.clear()
-    shown.clear()
-    bulk = client.post("/runs/run/sessions/open-tmux?all_sessions=true")
-    assert bulk.status_code == 200, bulk.text
-    assert len(bulk.json()["opened_sessions"]) == len(launches) == 3
-    assert shown == [True], "The desktop workspace opens once for the batch"
-    monkeypatch.setattr("saberops.native_access.focus_tmux_client", lambda _: True)
-    assert client.post("/runs/run/sessions/open-tmux?all_sessions=true").status_code == 200
-    assert len(launches) == 3, "Repeated open-all selects existing sessions"
-    assert client.post("/runs/run/sessions/open-tmux").status_code == 200
-    assert len(launches) == 3, "View tmux only opens the workspace terminal"
-    assert client.post("/runs/missing/sessions/open-tmux").status_code == 404
-    assert (
-        client.post(
-            "/runs/run/sessions/open-tmux", headers={"Origin": "https://foreign.example"}
-        ).status_code
-        == 403
-    )
 
 
 def test_tmux_workspace_opens_visible_terminal_and_reuses_attached_client(
