@@ -571,12 +571,15 @@ def test_j_web_parity(tmp_path: Path) -> None:
     assert 'id="candidate-state"' in after.text
     assert 'data-action="reject"' not in after.text
     assert 'disabled title="Accept is blocked by the checklist below"' in after.text
-    assert 'disabled title="Review unlocks once the run completes"' in after.text
+    # The review page-action is gone (review runs via `orch review`); only
+    # the accept/reject owner actions remain on the page.
+    assert 'data-action="review"' not in after.text
     assert (
         'data-action="review"><button type="submit" '
         'class="text-button primary-button">Request review' not in after.text
     )
-    assert "/runs/run-j/retry" in after.text
+    # Retry/retry links are gone with the run-ops routes (retry runs via
+    # `orch`); the rejected candidate SHA stays visible for inspection.
     assert candidate in after.text
 
     actions_after = client.get("/runs/run-j/actions").json()
@@ -688,7 +691,6 @@ def test_k_reads_alone_add_no_rejection_event(tmp_path: Path) -> None:
     client = TestClient(create_app(db_path=db_path))
     assert client.get("/runs/run-k").status_code == 200
     assert client.get("/runs/run-k/actions").status_code == 200
-    assert client.get("/runs/run-k/diff").status_code == 200
 
     fresh = Database(db_path)
     assert fresh.get_events_by_type("run-k", REJECTION_EVENT_TYPE) == []

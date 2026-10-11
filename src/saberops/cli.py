@@ -28,13 +28,6 @@ from saberops.authority import (
     set_authority_mode,
     set_host_access,
 )
-from saberops.authority_sync import (
-    DEFAULT_AGENT_PATH,
-    AgentSyncError,
-    default_allowed_directories,
-    default_orch_executable,
-    sync_agent_file,
-)
 from saberops.config import RunConfig, reconstruct_run_config
 from saberops.db import Database, get_default_db_path
 from saberops.dispatch import READINESS_AUTHORITY_UNAVAILABLE
@@ -1257,31 +1250,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     authority_host.add_argument("mode", choices=[mode.value for mode in HostAccessMode], type=str)
     authority_host.add_argument("--json", action="store_true", help="JSON output")
-
-    authority_sync = authority_sub.add_parser(
-        "sync-opencode",
-        help="Synchronize the managed authority regions of the SaberOps OpenCode agent.",
-    )
-    authority_sync.add_argument(
-        "--agent",
-        type=str,
-        default=DEFAULT_AGENT_PATH,
-        help=f"Path to the OpenCode agent file (default: {DEFAULT_AGENT_PATH}).",
-    )
-    authority_sync.add_argument(
-        "--orch-executable",
-        type=str,
-        default=None,
-        help="Exact `orch` executable the SaberOps agent may run (default: alongside this interpreter).",
-    )
-    authority_sync.add_argument(
-        "--allow-directory",
-        action="append",
-        default=None,
-        metavar="GLOB",
-        help="External-directory allow glob; repeatable. Replaces the derived default.",
-    )
-    authority_sync.add_argument("--json", action="store_true", help="JSON output")
 
     # orch project gate-scratch show|set
     #
@@ -2792,45 +2760,6 @@ def handle_authority_set_host_access(args: argparse.Namespace) -> int:
     return 0
 
 
-def handle_authority_sync_opencode(args: argparse.Namespace) -> int:
-    """Handle `orch authority sync-opencode`."""
-    try:
-        settings = load_authority_settings()
-    except AuthorityConfigError as exc:
-        print(f"[!] Authority config invalid: {exc}", file=sys.stderr)
-        return 1
-    agent_path = Path(str(args.agent)).expanduser()
-    raw_executable = getattr(args, "orch_executable", None)
-    executable = (
-        Path(str(raw_executable)).expanduser() if raw_executable else default_orch_executable()
-    )
-    raw_directories = getattr(args, "allow_directory", None)
-    directories = (
-        tuple(str(entry) for entry in raw_directories)
-        if raw_directories
-        else default_allowed_directories(executable)
-    )
-    try:
-        result = sync_agent_file(
-            agent_path,
-            settings.mode,
-            orch_executable=executable,
-            allowed_directories=directories,
-        )
-    except AgentSyncError as exc:
-        print(f"[!] {exc}", file=sys.stderr)
-        return 1
-    if getattr(args, "json", False):
-        print(json.dumps(result.as_dict(), indent=2))
-        return 0
-    if not result.changed:
-        print(f"Agent {result.path} already synchronized with '{result.mode.value}'.")
-        return 0
-    print(f"Agent {result.path} synchronized with '{result.mode.value}'.")
-    print(f"Backup: {result.backup_path}")
-    return 0
-
-
 def handle_quota_set(args: argparse.Namespace) -> int:
     """Handle `orch quota set` command."""
     service = OrchestratorService(db=Database(args.db))
@@ -3180,8 +3109,6 @@ def _dispatch(args: argparse.Namespace) -> int:
             return handle_authority_set(args)
         elif args.authority_command == "set-host-access":
             return handle_authority_set_host_access(args)
-        elif args.authority_command == "sync-opencode":
-            return handle_authority_sync_opencode(args)
     elif args.command == "project":
         if args.project_command == "gate-scratch":
             if args.project_gate_scratch_command == "show":

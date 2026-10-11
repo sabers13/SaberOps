@@ -17,7 +17,6 @@ from typing import Any
 import pytest
 
 from saberops.agent_sessions import observe_invocation, owner_directory, read_sessions
-from saberops.chat import ChatStore
 from saberops.config import RunConfig
 from saberops.control_plane.capabilities import Capability, capability_profile_for
 from saberops.models import AttemptStatus, ReasoningEffort, WorkerRequest, WorkerResult
@@ -230,33 +229,14 @@ def test_autonomous_observer_retains_per_invocation_transport(repo: Path, tmp_pa
     )
 
 
-def test_native_client_uses_current_checkout_without_terminal_pythonpath(tmp_path: Path) -> None:
-    import saberops.native_client
-
-    controls = SessionControls(tmp_path)
-    controls.register("sid", "run", live_identity(), "worker")
-    controls.finish("sid", "DONE")
-    descriptor = tmp_path / "client.native"
-    descriptor.write_text(json.dumps({"controls_root": str(tmp_path), "id": "sid"}))
-    client = subprocess.run(
-        [sys.executable, "-I", str(Path(saberops.native_client.__file__)), str(descriptor)],
-        cwd=tmp_path,
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    assert client.returncode == 1 and "no longer live" in client.stdout
-    assert "Traceback" not in client.stderr
-
-
 @pytest.fixture
 def bridge(tmp_path: Path) -> Any:
     controls = SessionControls(tmp_path / "controls")
     controls.register("sid", "run", live_identity(), "worker")
     controls.native_id("sid", "ses_native123456")
-    chat = ChatStore(tmp_path / "chat.db")
-    chat_id = chat.create(str(tmp_path), "Test")
-    controls.link_chat("sid", chat_path=chat.path, chat_id=chat_id)
+    chat_path = tmp_path / "chat.db"
+    chat_id = "chat-test"
+    controls.link_chat("sid", chat_path=chat_path, chat_id=chat_id)
     journal = SessionJournal(tmp_path / "controls")
     journal.register("sid", "run", "worker", "a1", live_identity())
     runtime = AgentSessionRuntime(tmp_path, "sid", controls, journal, lambda _: None)
@@ -264,7 +244,7 @@ def bridge(tmp_path: Path) -> Any:
     runtime.request = WorkerRequest("task", tmp_path, "provider/model")
     runtime._start_proxy("opencode")
     assert runtime.proxy
-    yield runtime, controls, chat, chat_id
+    yield runtime, controls
     assert runtime.close()
 
 
@@ -291,8 +271,8 @@ def http(
         return exc.code, json.load(exc)
 
 
-def test_native_prompt_holds_automation_joins_queue_and_syncs_chat(bridge: Any) -> None:
-    runtime, controls, chat, chat_id = bridge
+def test_native_prompt_holds_automation_joins_queue_and_records_reply(bridge: Any) -> None:
+    runtime, controls = bridge
     path = "/session/ses_native123456/prompt_async"
     body = {
         "messageID": "msg_human1234",
@@ -313,13 +293,17 @@ def test_native_prompt_holds_automation_joins_queue_and_syncs_chat(bridge: Any) 
     with pytest.raises(ControlConflict):
         controls.resume("sid")
     controls.reply(message, "Done")
-    assert [m["text"] for m in chat.get(chat_id)["messages"]] == ["Inspect current work", "Done"]
+    stored = controls.get("sid", messages=True)
+    assert stored
+    assert [(m["text"], m["response"]) for m in stored["messages"]] == [
+        ("Inspect current work", "Done")
+    ]
     controls.resume("sid")
     assert http(runtime, "POST", path, {"parts": [{"type": "text", "text": "Late"}]})[0] == 409
 
 
 def test_native_client_cannot_change_frozen_settings_or_access_another_session(bridge: Any) -> None:
-    runtime, controls, _, _ = bridge
+    runtime, controls = bridge
     assert http(runtime, "GET", "/session/ses_other1234/message")[0] == 403
     assert http(runtime, "PATCH", "/config", {"permission": "allow"})[0] == 403
     assert (
@@ -330,7 +314,7 @@ def test_native_client_cannot_change_frozen_settings_or_access_another_session(b
 
 
 def test_native_abort_requests_takeover_and_does_not_resume_automation(bridge: Any) -> None:
-    runtime, controls, _, _ = bridge
+    runtime, controls = bridge
     path = "/session/ses_native123456/abort"
     assert http(runtime, "POST", path, {})[0] == 200
     assert controls.mode("sid") == "REQUESTED" and controls.should_interrupt("sid")
@@ -704,45 +688,9 @@ def test_durable_outcome_overrides_stale_active_metadata_without_mutating_it(
     assert path.read_bytes() == before
 
 
-def test_closing_native_client_does_not_finish_or_take_over_execution(tmp_path: Path) -> None:
-    import saberops.native_client
-
-    controls = SessionControls(tmp_path)
-    controls.register("sid", "run", live_identity(), "worker")
-    journal = SessionJournal(tmp_path)
-    journal.register("sid", "run", "worker", "a1", live_identity())
-    binary = tmp_path / "exit-client"
-    binary.write_text(f"#!{sys.executable}\nraise SystemExit(0)\n")
-    binary.chmod(0o755)
-    descriptor = tmp_path / "sid.native"
-    descriptor.write_text(
-        json.dumps(
-            {
-                "id": "sid",
-                "controls_root": str(tmp_path),
-                "provider": "opencode",
-                "password": "test",
-                "binary": str(binary),
-                "url": "http://localhost",
-                "session": "ses_one",
-                "directory": str(tmp_path),
-            }
-        )
-    )
-    client = subprocess.run(
-        [sys.executable, "-I", str(Path(saberops.native_client.__file__)), str(descriptor)],
-        capture_output=True,
-        text=True,
-        timeout=5,
-    )
-    assert client.returncode == 0
-    assert controls.mode("sid") == "ACTIVE"
-    assert journal.view("sid")["outcome"] is None
-
-
 @pytest.mark.parametrize("path", ["/event", "/global/event"])
 def test_live_stream_gets_final_snapshot_without_replaying_old_busy(bridge: Any, path: str) -> None:
-    runtime, _, _, _ = bridge
+    runtime, _ = bridge
     runtime.journal.append(
         "sid",
         "provider.structured",
@@ -800,70 +748,6 @@ def test_live_stream_gets_final_snapshot_without_replaying_old_busy(bridge: Any,
     assert frames[-1]["properties"]["status"]["type"] == "idle"
     assert frames[-2]["properties"]["part"]["text"] == "All done"
     assert len(frames) == 3
-
-
-@pytest.mark.parametrize("status", ["SUCCESS", "FAILED", "TIMEOUT", "INTERRUPTED", "UNCERTAIN"])
-def test_native_client_stops_only_its_client_and_displays_durable_outcome(
-    tmp_path: Path, status: str
-) -> None:
-    import saberops.native_client
-
-    controls = SessionControls(tmp_path)
-    controls.register("sid", "run", live_identity(), "worker")
-    journal = SessionJournal(tmp_path)
-    journal.register("sid", "run", "worker", "a1", live_identity())
-    marker = tmp_path / "started"
-    binary = tmp_path / "fake-client"
-    binary.write_text(
-        f"#!{sys.executable}\nfrom pathlib import Path\nimport time\n"
-        f"Path({str(marker)!r}).touch()\ntime.sleep(60)\n"
-    )
-    binary.chmod(0o755)
-    descriptor = tmp_path / "sid.native"
-    descriptor.write_text(
-        json.dumps(
-            {
-                "id": "sid",
-                "controls_root": str(tmp_path),
-                "provider": "opencode",
-                "password": "test",
-                "binary": str(binary),
-                "url": "http://localhost",
-                "session": "ses_one",
-                "directory": str(tmp_path),
-            }
-        )
-    )
-    # This unrelated process represents the execution owner, which a client must never kill.
-    owner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
-    client = subprocess.Popen(
-        [sys.executable, "-I", str(Path(saberops.native_client.__file__)), str(descriptor)],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    try:
-        deadline = time.monotonic() + 5
-        while not marker.exists() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert marker.exists()
-        controls.finish("sid", "DONE")
-        time.sleep(0.3)
-        assert client.poll() is None  # DONE alone cannot fabricate successful completion.
-        journal.append("sid", "turn.completed", {"response": "Complete final report"})
-        journal.complete("sid", {"status": status, "quiescent": status != "UNCERTAIN"})
-        stdout, stderr = client.communicate(timeout=5)
-        assert client.returncode == (0 if status == "SUCCESS" else 1)
-        assert f"({status})" in stdout and "Complete final report" in stdout
-        assert "Traceback" not in stderr and owner.poll() is None
-        assert ("Provider execution has stopped" in stdout) == (status != "UNCERTAIN")
-    finally:
-        if client.poll() is None:
-            client.kill()
-        client.communicate()
-        owner.terminate()
-        owner.wait()
 
 
 def test_frozen_gate_contract_reaches_repairs_with_correct_prompt_metrics() -> None:

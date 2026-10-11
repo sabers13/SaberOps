@@ -10,7 +10,6 @@ import pytest
 from saberops import agent_sessions
 from saberops.agent_sessions import observe_invocation, owner_directory, read_sessions
 from saberops.models import AttemptStatus, WorkerRequest, WorkerResult
-from saberops.native_console import display
 
 
 def result() -> WorkerResult:
@@ -115,7 +114,3 @@ def test_stale_active_session_after_restart_is_not_shown_as_live(tmp_path: Path)
             'session_id': 1, 'process_group_id': 1})}))
     assert read_sessions(tmp_path, 'x')[0]['state'] == 'INTERRUPTED'
     assert json.loads((folder / f'{sid}.json').read_text())['state'] == 'ACTIVE'
-
-
-def test_desktop_viewer_strips_terminal_control_sequences() -> None:
-    assert display('normal\x1b]52;c;secret\x07\x1b[31mred\x1b[0m\n\t') == 'normalred\n\t'

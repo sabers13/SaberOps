@@ -124,9 +124,10 @@ PRESENTATION_DIRS = frozenset({"templates", "static"})
 # The exact node IDs run by scripts/gate-ui-fast.sh. Keep in sync with that script;
 # editing either one selects the FULL suite by rule 3 anyway.
 UI_NODE_IDS: tuple[str, ...] = (
-    "tests/test_c16c2_console.py::test_c16c2_dashboard_renders_approved_shell",
-    "tests/test_c16c2_console.py::test_c16c2_run_detail_renders_inspector_and_actions",
-    "tests/test_c16c2_console.py::test_c16c2_missing_run_keeps_shell",
+    "tests/test_c16c2_console.py::test_c16c2_dashboard_lists_runs_with_kept_tokens",
+    "tests/test_c16c2_console.py::test_c16c2_run_detail_renders_status_evidence_and_actions",
+    "tests/test_c16c2_console.py::test_c16c2_missing_run_keeps_minimal_page",
+    "tests/test_c16c2_console.py::test_c16c2_report_and_health_stay_json",
     "tests/test_c16c2_console.py::test_c16c2_console_assets_are_served",
 )
 

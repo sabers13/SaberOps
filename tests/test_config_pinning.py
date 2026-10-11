@@ -314,17 +314,6 @@ def test_model_check_without_prefix_keeps_previous_behaviour() -> None:
     assert "enabled_providers" not in seen["config"]
 
 
-def test_native_opencode_terminal_pins_session_provider() -> None:
-    from saberops.native_access import native_environment
-
-    env = native_environment(
-        {"provider": "opencode", "read_only": True, "model": "opencode-go/x"}
-    )
-    config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
-    assert config["enabled_providers"] == ["opencode-go"]
-    assert config["permission"]["*"] == "deny"
-
-
 # ---------------------------------------------------------------------------
 # env.py overlay projection
 # ---------------------------------------------------------------------------

@@ -39,7 +39,6 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
 
 import saberops.web as web_module
 from saberops.control_plane.policy import packaged_control_plane_policy
@@ -61,7 +60,6 @@ from saberops.model_access.readiness import (
     ReadinessEvidenceSource,
 )
 from saberops.models import ProviderReadiness, WorkerCandidate, WorkerRequest, WorkerResult
-from saberops.web import create_app
 from saberops.workers.base import WorkerAdapter
 
 
@@ -317,27 +315,41 @@ def test_r1a_web_probe_does_not_call_readiness_refresh() -> None:
     canonical store seam.  API connections keep the safe reachability
     probe (no ``refresh()`` for them: descriptor-less API connections
     must never become ``BACKEND_NOT_INSTALLED``).
+
+    L-A step 5 removed the access page; the startup seam
+    (``initialize_account_readiness``) keeps the single composed path.
     """
     source = inspect.getsource(web_module)
     assert "ReadinessService" in source
-    assert ".refresh(" in source
+    assert "refresh_accounts_on_startup" in source
     assert "probe_account_backend" not in source
 
 
 def test_r1a_web_probe_writes_no_readiness_evidence(
     isolated_xdg: Path, tmp_path: Path
 ) -> None:
-    """R1-B: POST /access/test persists readiness evidence for the connection.
+    """R1-B: verifying a connection persists readiness evidence for it.
 
     (This test supersedes its R1-A characterization name: the R1-A suite
     pinned that Verify wrote nothing; R1-B specifies that Verify must
     write readiness, so the test now pins the new contract -- persisted
-    sanitized state/reason/timestamp for the exact verified connection.)
+    sanitized state/reason/timestamp for the exact verified connection.
+    L-A step 5 drives the same engine seam the removed route used.)
     """
-    client = TestClient(create_app(db_path=tmp_path / "web.db"), raise_server_exceptions=False)
-    response = client.post("/access/test", data={"connection_id": "opencode-account"})
+    import shutil
+    import subprocess
 
-    assert response.status_code == 200
+    from saberops.model_access import ReadinessService
+    from saberops.web import _access_store, _readiness_store
+
+    registry = _access_store().load()
+    connection = registry.try_get("opencode-account")
+    assert connection is not None
+    service = ReadinessService(
+        registry, _readiness_store(), which=shutil.which, run=subprocess.run
+    )
+    service.refresh(connection)
+
     catalog = ReadinessStore(isolated_xdg).load()
     evidence = catalog.try_get("opencode-account")
     assert evidence is not None

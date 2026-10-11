@@ -27,12 +27,10 @@ from __future__ import annotations
 import json
 import subprocess
 from dataclasses import replace
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
-from fastapi.testclient import TestClient
 
 from saberops.control_plane import (
     BindingRole,
@@ -46,18 +44,10 @@ from saberops.control_plane import (
     select_reviewer_binding,
     upsert_owner_binding,
 )
-from saberops.control_plane.orch_binding import OrchBindingPolicy
 from saberops.db import Database
-from saberops.model_access import (
-    ProviderReadinessEvidence,
-    ReadinessEvidenceSource,
-    ReadinessStore,
-)
 from saberops.models import (
     Attempt,
     AttemptStatus,
-    OrchBindingMode,
-    ProviderReadiness,
     ReviewResult,
     ReviewVerdict,
     Run,
@@ -65,17 +55,8 @@ from saberops.models import (
     Tier,
     WorkerCandidate,
 )
-from saberops.projects import ProjectRegistry
 from saberops.review import ReviewEngine
-from saberops.routing_config import (
-    DynamicCandidate,
-    add_dynamic_candidate_to_chain,
-    format_candidate_id,
-    load_effective_routing_payload,
-    save_user_routing,
-)
 from saberops.service import OrchestratorService
-from saberops.web import create_app
 from saberops.workers.registry import AdapterRegistry
 
 _CREATED = "2026-09-25T00:00:00+00:00"
@@ -97,10 +78,6 @@ def isolated_xdg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("XDG_CACHE_HOME", str(cache))
     monkeypatch.delenv("ORCH_BINDING_STORE", raising=False)
     monkeypatch.delenv("SABEROPS_PROFILE", raising=False)
-
-
-def _client(tmp_path: Path) -> TestClient:
-    return TestClient(create_app(db_path=tmp_path / "web.db"))
 
 
 def _seed_three_role_bindings() -> tuple[str, str, str]:
@@ -252,73 +229,6 @@ def test_reviewer_selection_persists_across_reload(isolated_xdg: None) -> None:
     save_owner_bindings(replace(owner, reviewer_binding_id=reviewer_id))
     reloaded = load_owner_bindings()
     assert reloaded.reviewer_binding_id == reviewer_id
-
-
-# --- reviewer UI ----------------------------------------------------------
-
-
-def test_reviewer_page_lists_only_reviewer_bindings(
-    isolated_xdg: None, tmp_path: Path
-) -> None:
-    """Only REVIEWER-role bindings are selectable; role text never qualifies."""
-    worker_id, reviewer_id, orch_id = _seed_three_role_bindings()
-    page = _client(tmp_path).get("/reviewer")
-    assert page.status_code == 200
-    assert 'action="/reviewer/select"' in page.text
-    assert reviewer_id in page.text
-    assert worker_id not in page.text
-    assert orch_id not in page.text
-
-
-def test_select_reviewer_binding_persists(isolated_xdg: None, tmp_path: Path) -> None:
-    """POST /reviewer/select stores the exact REVIEWER binding id."""
-    _, reviewer_id, _ = _seed_three_role_bindings()
-    client = _client(tmp_path)
-    response = client.post(
-        "/reviewer/select", data={"binding_id": reviewer_id}, follow_redirects=False
-    )
-    assert response.status_code == 303
-    assert load_owner_bindings().reviewer_binding_id == reviewer_id
-    page = client.get("/reviewer")
-    assert page.status_code == 200
-    assert "currently selected" in page.text
-    assert reviewer_id in page.text
-
-
-def test_worker_binding_submitted_as_reviewer_is_rejected(
-    isolated_xdg: None, tmp_path: Path
-) -> None:
-    """A WORKER binding id is refused even though provider/model match."""
-    worker_id, _, _ = _seed_three_role_bindings()
-    client = _client(tmp_path)
-    response = client.post("/reviewer/select", data={"binding_id": worker_id})
-    assert response.status_code == 400
-    assert load_owner_bindings().reviewer_binding_id is None
-
-
-def test_orchestrator_binding_submitted_as_reviewer_is_rejected(
-    isolated_xdg: None, tmp_path: Path
-) -> None:
-    """An ORCHESTRATOR binding id is refused even though provider/model match."""
-    _, _, orch_id = _seed_three_role_bindings()
-    client = _client(tmp_path)
-    response = client.post("/reviewer/select", data={"binding_id": orch_id})
-    assert response.status_code == 400
-    assert load_owner_bindings().reviewer_binding_id is None
-
-
-def test_unknown_binding_submitted_as_reviewer_is_rejected(
-    isolated_xdg: None, tmp_path: Path
-) -> None:
-    """A binding id naming nothing in the registry is refused."""
-    _seed_three_role_bindings()
-    client = _client(tmp_path)
-    response = client.post(
-        "/reviewer/select",
-        data={"binding_id": "discovered-binding:reviewer:nope:missing"},
-    )
-    assert response.status_code == 400
-    assert load_owner_bindings().reviewer_binding_id is None
 
 
 # --- candidate conversion -------------------------------------------------
@@ -514,293 +424,3 @@ def test_configured_reviewer_cannot_silently_self_review(
     assert db.get_reviews_for_run("run_selfreview") == []
 
 
-# --- setup ----------------------------------------------------------------
-
-
-def _seed_routing_chain() -> None:
-    candidate_id = format_candidate_id(_PROVIDER, _MODEL)
-    approval = DynamicCandidate(
-        candidate_id=candidate_id,
-        provider=_PROVIDER,
-        model=_MODEL,
-        connection_id=_CONNECTION,
-        backend="opencode",
-        binding_id=f"discovered-binding:worker:{_CONNECTION}:{_MODEL}",
-        discovery_status="TRUE",
-        execution_support="SUPPORTED",
-        training_required="UNKNOWN",
-        capabilities=(),
-        approved_at=_CREATED,
-    )
-    save_user_routing(
-        add_dynamic_candidate_to_chain(
-            load_effective_routing_payload(),
-            top="T1",
-            sub="default",
-            candidate=approval,
-        )
-    )
-
-
-def _setup_client_with_project(tmp_path: Path) -> TestClient:
-    repo = _git_repo(tmp_path / "repo")
-    projects = ProjectRegistry(path=tmp_path / "projects.json")
-    client = TestClient(
-        create_app(projects=projects, db_path=tmp_path / "web.db")
-    )
-    selected = client.post(
-        "/projects/select", data={"path": str(repo)}, follow_redirects=False
-    )
-    assert selected.status_code == 303
-    return client
-
-
-def test_setup_incomplete_without_reviewer_selection(
-    isolated_xdg: None, tmp_path: Path
-) -> None:
-    """Worker + Orchestrator + project are not enough; reviewer gates READY."""
-    _, _, orch_id = _seed_three_role_bindings()
-    save_owner_bindings(
-        replace(
-            load_owner_bindings(),
-            policy=OrchBindingPolicy(
-                mode=OrchBindingMode.PINNED, pinned_binding_id=orch_id
-            ),
-        )
-    )
-    _seed_routing_chain()
-    setup = _setup_client_with_project(tmp_path).get("/setup")
-    assert setup.status_code == 200
-    assert "SETUP INCOMPLETE" in setup.text
-    assert "SETUP COMPLETE" not in setup.text
-
-
-def test_setup_becomes_reviewer_ready_after_valid_selection(
-    isolated_xdg: None, tmp_path: Path
-) -> None:
-    """A valid reviewer selection flips the reviewer step to ready."""
-    _, reviewer_id, orch_id = _seed_three_role_bindings()
-    save_owner_bindings(
-        replace(
-            load_owner_bindings(),
-            policy=OrchBindingPolicy(
-                mode=OrchBindingMode.PINNED, pinned_binding_id=orch_id
-            ),
-            reviewer_binding_id=reviewer_id,
-        )
-    )
-    _seed_routing_chain()
-    setup = _setup_client_with_project(tmp_path).get("/setup")
-    assert setup.status_code == 200
-    assert "RESOLVED" in setup.text
-    assert reviewer_id in setup.text
-
-
-def test_setup_ready_for_dogfood_requires_reviewer(
-    isolated_xdg: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The final checkpoint needs both role choices and provider evidence."""
-    _, reviewer_id, orch_id = _seed_three_role_bindings()
-    save_owner_bindings(
-        replace(
-            load_owner_bindings(),
-            policy=OrchBindingPolicy(
-                mode=OrchBindingMode.PINNED, pinned_binding_id=orch_id
-            ),
-            reviewer_binding_id=reviewer_id,
-        )
-    )
-    _seed_routing_chain()
-    readiness_path = tmp_path / "access-readiness.json"
-    monkeypatch.setenv("ORCH_READINESS_STORE", str(readiness_path))
-    client = _setup_client_with_project(tmp_path)
-    setup = client.get("/setup")
-    assert setup.status_code == 200
-    assert "SETUP INCOMPLETE" in setup.text
-    assert "SETUP COMPLETE" not in setup.text
-    ReadinessStore(readiness_path).replace(
-        ProviderReadinessEvidence(
-            connection_id=_CONNECTION,
-            provider=_PROVIDER,
-            backend="opencode",
-            state=ProviderReadiness.READY,
-            reason="READY",
-            observed_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-            source=ReadinessEvidenceSource.CONNECTION_TEST,
-        )
-    )
-    setup = client.get("/setup")
-    assert "SETUP COMPLETE" in setup.text
-
-
-# --- role separation ------------------------------------------------------
-
-
-def test_orchestrator_and_worker_selections_unchanged(
-    isolated_xdg: None, tmp_path: Path
-) -> None:
-    """Reviewer selection leaves Orchestrator policy and worker routing alone."""
-    worker_id, reviewer_id, orch_id = _seed_three_role_bindings()
-    save_owner_bindings(
-        replace(
-            load_owner_bindings(),
-            policy=OrchBindingPolicy(
-                mode=OrchBindingMode.PINNED, pinned_binding_id=orch_id
-            ),
-        )
-    )
-    _seed_routing_chain()
-    client = _client(tmp_path)
-    response = client.post(
-        "/reviewer/select", data={"binding_id": reviewer_id}, follow_redirects=False
-    )
-    assert response.status_code == 303
-    owner = load_owner_bindings()
-    assert owner.reviewer_binding_id == reviewer_id
-    assert owner.policy is not None
-    assert owner.policy.pinned_binding_id == orch_id
-    worker_binding = owner.registry.try_get(worker_id)
-    assert worker_binding is not None
-    assert worker_binding.binding_role is BindingRole.WORKER
-    orch_page = client.get("/orchestrator")
-    assert orch_page.status_code == 200
-    assert orch_id in orch_page.text
-    routing_page = client.get("/routing")
-    assert routing_page.status_code == 200
-    assert _MODEL in routing_page.text
-
-
-@pytest.mark.parametrize("role", ["reviewer", "orchestrator"])
-def test_unified_routing_saves_exact_role_and_returns_to_editor(
-    isolated_xdg: None, tmp_path: Path, role: str,
-) -> None:
-    _, reviewer_id, orch_id = _seed_three_role_bindings()
-    wanted = reviewer_id if role == "reviewer" else orch_id
-    client = _client(tmp_path)
-    page = client.get("/routing")
-    assert page.status_code == 200
-    assert page.text.count('name="routing-roles"') == 5
-    assert 'action="/routing/assign?view=routing"' in page.text
-    assert f'name="{role}_binding_id"' in page.text
-    response = client.post(
-        f"/{role}/select?view=routing", data={"binding_id": wanted},
-        follow_redirects=False,
-    )
-    assert response.status_code == 303
-    assert response.headers["location"] == f"/routing?role={role}&selected=1"
-    owner = load_owner_bindings()
-    if role == "reviewer":
-        assert owner.reviewer_binding_id == wanted
-    else:
-        assert owner.policy is not None
-        assert owner.policy.pinned_binding_id == wanted
-    saved = client.get(response.headers["location"])
-    assert saved.status_code == 200
-    assert f'id="routing-{role}" open' in saved.text
-    assert _MODEL in saved.text
-    assert f'data-context="{role}"' in saved.text
-    assert f'data-candidate-id="{wanted}"' in saved.text
-    assert f"{role.title()} model selection saved" in saved.text
-
-
-@pytest.mark.parametrize("role", ["reviewer", "orchestrator"])
-def test_unified_routing_refuses_worker_binding_without_leaving_editor(
-    isolated_xdg: None, tmp_path: Path, role: str,
-) -> None:
-    worker_id, _, _ = _seed_three_role_bindings()
-    before = load_owner_bindings()
-    response = _client(tmp_path).post(
-        f"/{role}/select?view=routing", data={"binding_id": worker_id},
-    )
-    assert response.status_code == 400
-    assert "not qualified" in response.text
-    assert response.text.count('name="routing-roles"') == 5
-    assert f'id="routing-{role}" open' in response.text
-    after = load_owner_bindings()
-    assert after.policy == before.policy
-    assert after.reviewer_binding_id == before.reviewer_binding_id
-
-
-def test_unified_routing_auto_uses_existing_policy(
-    isolated_xdg: None, tmp_path: Path,
-) -> None:
-    _seed_three_role_bindings()
-    client = _client(tmp_path)
-    response = client.post(
-        "/orchestrator/select?view=routing", data={"mode": "AUTO"},
-        follow_redirects=False,
-    )
-    assert response.status_code == 303
-    owner = load_owner_bindings()
-    assert owner.policy is not None
-    assert owner.policy.mode is OrchBindingMode.AUTO
-    page = client.get(response.headers["location"]).text
-    assert "No models selected" in page
-    assert "Use AUTO" not in page
-
-
-def test_role_return_view_cannot_redirect_to_arbitrary_destination(
-    isolated_xdg: None, tmp_path: Path,
-) -> None:
-    _, reviewer_id, _ = _seed_three_role_bindings()
-    response = _client(tmp_path).post(
-        "/reviewer/select?view=https://example.invalid",
-        data={"binding_id": reviewer_id}, follow_redirects=False,
-    )
-    assert response.status_code == 303
-    assert response.headers["location"] == "/reviewer?selected=1"
-
-
-def test_rejected_tier_add_keeps_target_editor_open(
-    isolated_xdg: None, tmp_path: Path,
-) -> None:
-    response = _client(tmp_path).post(
-        "/routing/add", data={"context": "T2.default", "model_id": "unknown"},
-    )
-    assert response.status_code == 404
-    assert 'id="routing-T2" open' in response.text
-    assert 'role="alert"' in response.text
-
-
-@pytest.mark.parametrize("role", ["orchestrator", "reviewer"])
-def test_shared_picker_selects_exact_target_role(
-    isolated_xdg: None, tmp_path: Path, role: str,
-) -> None:
-    worker_id, reviewer_id, orch_id = _seed_three_role_bindings()
-    client = _client(tmp_path)
-    response = client.post("/routing/assign?view=routing", data={
-        "target": role, "binding_id": worker_id,
-        "orchestrator_binding_id": orch_id, "reviewer_binding_id": reviewer_id,
-    }, follow_redirects=False)
-    assert response.status_code == 303
-    assert response.headers["location"] == f"/routing?role={role}&routing_model_added=1"
-    owner = load_owner_bindings()
-    if role == "reviewer":
-        assert owner.reviewer_binding_id == reviewer_id
-    else:
-        assert owner.role_binding_ids("orchestrator") == (orch_id,)
-
-
-def test_shared_picker_rejects_unknown_target_without_mutation(
-    isolated_xdg: None, tmp_path: Path,
-) -> None:
-    _seed_three_role_bindings()
-    before = load_owner_bindings()
-    response = _client(tmp_path).post("/routing/assign?view=routing", data={
-        "target": "T4", "binding_id": "invented",
-    })
-    assert response.status_code == 400
-    assert load_owner_bindings().policy == before.policy
-    assert load_owner_bindings().reviewer_binding_id == before.reviewer_binding_id
-
-
-def test_shared_picker_role_only_bindings_do_not_authorize_worker_enrollment(
-    isolated_xdg: None, tmp_path: Path,
-) -> None:
-    _seed_three_role_bindings()
-    page = _client(tmp_path).get("/routing")
-    assert page.status_code == 200
-    assert 'value="reviewer" data-binding-id=' in page.text
-    assert 'value="orchestrator" data-binding-id=' in page.text
-    assert 'value="T1" data-binding-id=' not in page.text
-    assert page.text.count('id="routing-model-picker"') == 1

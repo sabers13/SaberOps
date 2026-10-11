@@ -8,12 +8,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fastapi.testclient import TestClient
 
 from saberops.cli_usage import CliUsageService, _log_activity, parse_limits, read_limits
 from saberops.db import Database
 from saberops.models import DispatchStage, ModelCallUsage, Run, RunStatus, Tier
-from saberops.web import create_app
 
 
 def test_limit_shapes_preserve_unknown_and_unlimited() -> None:
@@ -193,6 +191,8 @@ def test_usage_refresh_fragment_and_manual_quota_authority(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from saberops.service import OrchestratorService
+
     for env in ("XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"):
         monkeypatch.setenv(env, str(tmp_path / env))
     monkeypatch.delenv("SABEROPS_PROFILE", raising=False)
@@ -209,17 +209,13 @@ def test_usage_refresh_fragment_and_manual_quota_authority(
             }
         ],
     )
-    monkeypatch.setattr("saberops.web.CliUsageService", lambda: service)
+    cards = service.snapshot(refresh=True, force=True)
+    codex = next(card for card in cards if card["provider"] == "codex")
+    assert codex["windows"][0]["remaining"] == 70
     db_path = tmp_path / "app.db"
-    client = TestClient(create_app(db_path=db_path))
-    client.post(
-        "/quota/set", data={"provider": "codex", "pool": "weekly", "remaining_percent": "10"}
+    OrchestratorService(db=Database(db_path)).set_quota(
+        provider="codex", pool="weekly", remaining_percent=10, reset_at=None
     )
-    result = client.post("/quota/refresh", data={"fragment": "1"})
-    assert result.status_code == 200
-    assert "70% remaining" in result.text
-    assert "<html" not in result.text
-    assert result.text.count("data-usage-provider=") == 5
     state = Database(db_path).list_quota()
     assert state[0].remaining_percent == 10
     assert state[0].routing_state.value == "BLOCKED"

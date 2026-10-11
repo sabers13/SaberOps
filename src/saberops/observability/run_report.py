@@ -1172,6 +1172,54 @@ def render_monitor_frame(report: dict[str, Any], *, now_iso: str | None = None) 
     return "\n".join(lines)
 
 
+def run_explanation(report: dict[str, Any]) -> str:
+    """One-paragraph human-readable summary of a canonical run report.
+
+    Moved from saberops.chat (L-A step 5): the console cut removed the chat
+    frontend, but the run-detail status page still renders this summary.
+    Pure report projection; never dispatches work.
+    """
+    termination = report["termination"]
+    team = report.get("team")
+    execution = team["execution"] if isinstance(team, dict) else report["execution"]
+    dispatched = sum(execution.get(key, 0) for key in (
+        "worker_dispatch_count", "retry_dispatch_count", "repair_dispatch_count",
+    ))
+    if isinstance(team, dict) and team["workers"]:
+        counts = team["gate"]
+        lines = [
+            f"The parallel run is {report['lifecycle']['status'].lower()}. "
+            f"The team recorded {dispatched} implementation dispatch(es) and "
+            f"{counts['check_passed']} passed, {counts['check_failed']} failed, "
+            f"{counts['check_skipped']} skipped gate checks.",
+        ]
+        for worker in team["workers"]:
+            failed = worker["last_failed_check"]
+            if failed:
+                output = failed["stderr"] or failed["stdout"]
+                lines.append(f"Task '{worker['title']}' failed its check "
+                             f"'{failed['command']}' (exit {failed['exit_code']}): "
+                             + output[:1000])
+            if worker["termination"].get("outcome") == "NO_ELIGIBLE_CANDIDATE":
+                lines.append("No additional worker could be selected for this task: "
+                             + str(worker["termination"].get("summary", ""))[:2000])
+        lines.append(team["evidence_note"])
+        lines.append(str(termination.get("summary", "")))
+        return "\n\n".join(lines)
+    if termination.get("outcome") == "NO_ELIGIBLE_CANDIDATE" and dispatched == 0:
+        skipped = termination.get("skipped_candidates", [])
+        names = ", ".join(str(row.get("model", "Unknown model")) for row in skipped)
+        return (
+            f"I couldn't start implementation. No worker was dispatched. The configured "
+            f"worker choices ({names}) didn't meet routing admission requirements. "
+            "Open Providers to verify their readiness, or choose a verified worker in Routing, "
+            "then ask me to try again.\n\n" + str(termination.get("summary", ""))
+        )
+    status = report["lifecycle"]["status"]
+    summary = termination.get("summary") or "No result summary was recorded."
+    return f"The run is {status.lower()}. {summary}"
+
+
 __all__ = [
     "REPORT_SCHEMA",
     "REPORT_SCHEMA_VERSION",
@@ -1181,5 +1229,6 @@ __all__ = [
     "is_terminal_report",
     "render_monitor_frame",
     "render_report_text",
+    "run_explanation",
     "saberops_version",
 ]

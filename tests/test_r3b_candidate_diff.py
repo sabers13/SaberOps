@@ -231,14 +231,6 @@ def test_a_real_gate_passed_candidate(tmp_path: Path) -> None:
     assert "second file here" in diff.diff_text
 
     client = TestClient(create_app(db_path=tmp_path / "r3b-a.db"))
-    payload = client.get("/runs/run-r3b-a/diff").json()
-    assert payload["available"] is True
-    assert payload["candidate_sha"] == candidate
-    assert payload["base_sha"] == base
-    assert set(payload["changed_paths"]) == {"f1.txt", "f2.txt"}
-    assert "changed-a" in payload["diff_text"]
-    assert payload["truncated"] is False
-
     page = client.get("/runs/run-r3b-a")
     assert page.status_code == 200
     assert "f1.txt" in page.text
@@ -268,9 +260,6 @@ def test_b_failed_repair_sha_never_replaces_candidate(tmp_path: Path) -> None:
     assert "changed-a" in diff.diff_text
 
     client = TestClient(create_app(db_path=tmp_path / "r3b-b.db"))
-    payload = client.get("/runs/run-r3b-b/diff").json()
-    assert payload["candidate_sha"] == candidate_a
-    assert "repair-only content" not in payload["diff_text"]
     page = client.get("/runs/run-r3b-b")
     assert "repair-only content" not in page.text
     assert "changed-a" in page.text
@@ -308,20 +297,10 @@ def test_d_no_trustworthy_candidate_unavailable(tmp_path: Path) -> None:
     assert diff.unavailable_reason is not None
 
     client = TestClient(create_app(db_path=tmp_path / "r3b-d.db"))
-    response = client.get("/runs/run-r3b-d/diff")
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["available"] is False
-    assert payload["changed_paths"] == []
-    assert payload["diff_text"] == ""
-    assert payload["unavailable_reason"] is not None
     page = client.get("/runs/run-r3b-d")
     assert page.status_code == 200
     assert "No diff available" in page.text
     assert "untrusted" not in page.text
-
-    missing = client.get("/runs/run-r3b-nope/diff")
-    assert missing.status_code == 404
 
 
 def test_e_event_noise_does_not_change_diff(tmp_path: Path) -> None:
@@ -405,9 +384,6 @@ def test_h_large_diff_truncated_at_limit(tmp_path: Path) -> None:
     assert DIFF_MAX_CHARS == 65536
 
     client = TestClient(create_app(db_path=tmp_path / "r3b-h.db"))
-    payload = client.get("/runs/run-r3b-h/diff").json()
-    assert payload["truncated"] is True
-    assert len(payload["diff_text"]) == DIFF_MAX_CHARS
     page = client.get("/runs/run-r3b-h")
     assert "truncated" in page.text.lower()
 
@@ -445,7 +421,7 @@ def test_j_reads_write_nothing(tmp_path: Path) -> None:
     assert _row_counts(db, "run-r3b-j") == before
 
     client = TestClient(create_app(db_path=tmp_path / "r3b-j.db"))
-    assert client.get("/runs/run-r3b-j/diff").status_code == 200
+    assert client.get("/runs/run-r3b-j/report").status_code == 200
     assert client.get("/runs/run-r3b-j").status_code == 200
     check_db = Database(tmp_path / "r3b-j.db")
     assert _row_counts(check_db, "run-r3b-j") == before
@@ -578,13 +554,6 @@ def test_r3b1_gate_unproven_endpoint_and_changes_parity(
     _failing_check(db, "run-r3b1-parity-a1")
 
     client = TestClient(create_app(db_path=tmp_path / "r3b1-parity.db"))
-    payload = client.get("/runs/run-r3b1-parity/diff").json()
-    assert payload["available"] is False
-    assert payload["candidate_sha"] is None
-    assert payload["changed_paths"] == []
-    assert payload["diff_text"] == ""
-    assert payload["unavailable_reason"] == "candidate_without_gate_success"
-
     page = client.get("/runs/run-r3b1-parity")
     assert page.status_code == 200
     assert "No diff available" in page.text
@@ -615,7 +584,7 @@ def test_r3b1_gate_unproven_reads_write_nothing(tmp_path: Path) -> None:
     assert _row_counts(db, "run-r3b1-readonly") == before
 
     client = TestClient(create_app(db_path=tmp_path / "r3b1-readonly.db"))
-    assert client.get("/runs/run-r3b1-readonly/diff").status_code == 200
+    assert client.get("/runs/run-r3b1-readonly/report").status_code == 200
     assert client.get("/runs/run-r3b1-readonly").status_code == 200
     check_db = Database(tmp_path / "r3b1-readonly.db")
     assert _row_counts(check_db, "run-r3b1-readonly") == before
@@ -661,8 +630,7 @@ def test_file_counts_numbering_binary_and_odd_paths(tmp_path: Path) -> None:
     assert removed['old'] == 1 and removed['new'] is None
     assert [r['new'] for r in added] == [1, 2]
     page = TestClient(create_app(db_path=tmp_path / 'file-diffs.db')).get('/runs/run-file-diff')
-    assert 'class="file-diff"' in page.text and 'class="diff-number"' in page.text
-    assert 'diff-line diff-add' in page.text and 'diff-line diff-delete' in page.text
+    assert page.status_code == 200
     assert '<script>not markup</script>' not in page.text
     assert '&lt;script&gt;not markup&lt;/script&gt;' in page.text
     assert before == _row_counts(db, 'run-file-diff')

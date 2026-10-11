@@ -136,7 +136,7 @@ def complete(db: Database, candidate: str, base: str) -> None:
 
 
 def result_region(html: str) -> str:
-    match = re.search(r'data-run-refresh="result".*?(?=data-run-refresh="plan")', html, re.S)
+    match = re.search(r'data-run-refresh="result".*?(?=data-run-refresh="actions")', html, re.S)
     assert match
     return match.group()
 
@@ -150,9 +150,16 @@ def test_running_to_completed_snapshot_exposes_all_evidence(
     running = client.get("/runs/run-live").text
     assert "Awaiting your acceptance" not in running
     for key in (
+        "result",
+        "actions",
+        "events-status",
+        "monitoring",
+    ):
+        assert f'data-run-refresh="{key}"' in running
+    # Removed console regions stay gone; the terminal panel is gone too.
+    for gone in (
         "chat-result",
         "chat-actions",
-        "result",
         "plan",
         "details",
         "checklist",
@@ -162,16 +169,12 @@ def test_running_to_completed_snapshot_exposes_all_evidence(
         "review",
         "routing",
         "usage",
-        "monitoring",
         "worker-filters",
         "worker-dock",
         "worker-footer",
     ):
-        assert f'data-run-refresh="{key}"' in running
-    # Unsaved owner input, acceptance confirmations, SSE and PTY stay outside
-    # these explicitly marked replacement regions.
-    assert 'id="runningTask"' in running
-    assert 'data-panel="terminal" data-run-refresh' not in running
+        assert f'data-run-refresh="{gone}"' not in running, gone
+    assert 'data-panel="terminal"' not in running
     assert 'data-panel="events" data-run-refresh' not in running
     complete(db, candidate, base)
     before = len(db.get_events("run-live"))
@@ -243,216 +246,17 @@ def test_live_controller_refresh_ordering_drafts_timer_and_recovery() -> None:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_agent_console_reads_are_bounded_readonly_and_run_scoped(
+def test_total_changes_uses_exact_counts_and_escaped_diff(
     state: tuple[Database, TestClient],
     tmp_path: Path,
 ) -> None:
-    db, client = state
-    _, base, candidate = seed_candidate(db, tmp_path)
-    complete(db, candidate, base)
-    before = len(db.get_events("run-live", limit=10000))
-    payload = client.get("/runs/run-live/sessions").json()
-    assert {row["role"] for row in payload["sessions"]} == {"worker", "reviewer"}
-    worker = next(row for row in payload["sessions"] if row["role"] == "worker")
-    assert "Built the task board" in worker["output"]
-    assert "Recorded result" in worker["source"]
-    assert "No verified native session" in worker["native_cli_reason"]
-    assert len(db.get_events("run-live", limit=10000)) == before
-    assert not (Path(db.db_path).parent / "agent-sessions").exists()
-    assert client.get("/runs/missing/sessions").status_code == 404
-    assert client.post("/runs/run-live/sessions/foreign/open-terminal").status_code == 404
-    assert (
-        client.post(
-            "/runs/run-live/sessions/attempt-a1/open-terminal",
-            headers={"Origin": "https://foreign.example"},
-        ).status_code
-        == 403
-    )
-
-
-def test_desktop_console_launch_uses_fixed_viewer_and_no_provider_command(
-    state: tuple[Database, TestClient],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from typing import Any
+    from saberops.candidate_diff import project_candidate_diff
 
     db, client = state
     _, base, candidate = seed_candidate(db, tmp_path)
     complete(db, candidate, base)
-    client.get("/runs/run-live/sessions")
-    launches: list[list[str]] = []
-
-    original_run = subprocess.run
-
-    def launch(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        if args[0] != "/usr/bin/gnome-terminal":
-            return original_run(args, **kwargs)
-        launches.append(args)
-        return subprocess.CompletedProcess(args, 0, "", "")
-
-    monkeypatch.setenv("DISPLAY", ":99")
-    monkeypatch.setattr("saberops.web.shutil.which", lambda _: "/usr/bin/gnome-terminal")
-    monkeypatch.setattr("saberops.web.subprocess.run", launch)
-    response = client.post("/runs/run-live/sessions/attempt-a1/open-terminal")
-    assert response.status_code == 200
-    assert len(launches) == 1
-    assert launches[0][0] == "/usr/bin/gnome-terminal"
-    assert launches[0][-2].endswith("/native_console.py")
-    assert "codex" not in launches[0] and "opencode" not in launches[0]
-    transcript = Path(launches[0][-1])
-    assert transcript.is_relative_to(Path(db.db_path).parent / "agent-sessions")
-    assert "Built the task board" in transcript.read_text()
-
-
-def test_synchronized_controls_are_scoped_and_messages_survive_restart(
-    state: tuple[Database, TestClient],
-    tmp_path: Path,
-) -> None:
-    import json
-    import os
-    from typing import cast
-
-    from fastapi import FastAPI
-
-    from saberops.agent_sessions import owner_directory
-    from saberops.ownership import ProcessIdentity
-    from saberops.session_control import SessionControls
-
-    db, client = state
-    repo, _, _ = seed_candidate(db, tmp_path)
-    store = cast(FastAPI, client.app).state.chats.store
-    chat_id = store.create(str(repo), "Talk")
-    other = store.create(str(repo), "Other")
-    root = store.path.parent / "agent-sessions"
-    controls = SessionControls(root)
-    sid = "a" * 32
-    identity = ProcessIdentity.for_pid(os.getpid())
-    assert identity
-    controls.register(sid, chat_id, json.dumps(identity.to_dict()), "orchestrator")
-    controls.native_id(sid, "native_12345678")
-    folder = owner_directory(root, chat_id)
-    folder.mkdir(parents=True)
-    (folder / f"{sid}.log").write_text("Native output")
-    (folder / f"{sid}.json").write_text(
-        json.dumps(
-            {
-                "id": sid,
-                "role": "orchestrator",
-                "state": "ACTIVE",
-                "provider": "codex",
-                "model": "m",
-                "created": 1,
-                "association": "turn",
-                "owner_identity": json.dumps(identity.to_dict()),
-            }
-        )
-    )
-    endpoint = f"/chats/{chat_id}/sessions/{sid}"
-    assert client.post(f"/chats/{other}/sessions/{sid}/takeover").status_code == 409
-    assert (
-        client.post(
-            endpoint + "/takeover", headers={"Origin": "https://external.invalid"}
-        ).status_code
-        == 403
-    )
-    assert controls.mode(sid) == "ACTIVE"
-    assert client.post(endpoint + "/takeover").status_code == 202
-    assert (
-        client.post(
-            endpoint + "/control/messages", data={"message": "early", "request_id": "e"}
-        ).status_code
-        == 409
-    )
-    controls.finish(sid, "MANUAL")
-    snapshot = client.get(f"/chats/{chat_id}/messages").json()
-    assert snapshot["manual_control"]["endpoint"] == endpoint + "/control"
-    assert (
-        client.post(
-            endpoint + "/control/messages", data={"message": "Hello", "request_id": "one"}
-        ).status_code
-        == 202
-    )
-    assert (
-        client.post(
-            endpoint + "/control/messages", data={"message": "Hello", "request_id": "one"}
-        ).status_code
-        == 202
-    )
-    assert client.post(endpoint + "/control/resume").status_code == 409
-    message = controls.next_message(sid)
-    assert message
-    controls.reply(message, "Hi from native CLI")
-    # A fresh store object reads the same messages; no provider is dispatched by reads.
-    from saberops.chat import ChatStore
-
-    restarted = ChatStore(store.path).get(chat_id)
-    assert restarted and len(restarted["messages"]) == 2
-    assert restarted["messages"][-1]["text"] == "Hi from native CLI"
-    assert client.post(endpoint + "/control/resume").status_code == 202
-    assert client.post("/runs/run-live/sessions/attempt-missing/takeover").status_code == 409
-
-
-def test_synchronized_terminal_uses_fixed_local_url_and_no_shell(
-    state: tuple[Database, TestClient],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from typing import Any, cast
-
-    from fastapi import FastAPI
-
-    db, client = state
-    repo, _, _ = seed_candidate(db, tmp_path)
-    store = cast(FastAPI, client.app).state.chats.store
-    chat_id = store.create(str(repo), "Test")
-    calls: list[list[str]] = []
-    monkeypatch.setenv("DISPLAY", ":0")
-    original_which = shutil.which
-    original_run = subprocess.run
-    monkeypatch.setattr(
-        "saberops.web.shutil.which",
-        lambda name: (
-            "/usr/bin/gnome-terminal" if name == "gnome-terminal" else original_which(name)
-        ),
-    )
-
-    def runner(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        if argv[0] != "/usr/bin/gnome-terminal":
-            return original_run(argv, **kwargs)
-        calls.append(argv)
-        assert "shell" not in kwargs and kwargs["timeout"] == 5
-        return subprocess.CompletedProcess(argv, 0, "", "")
-
-    monkeypatch.setattr("saberops.web.subprocess.run", runner)
-    response = client.post(
-        f"/chats/{chat_id}/open-synchronized-cli", headers={"Host": "evil.invalid"}
-    )
-    assert response.status_code == 200
-    assert len(calls) == 1
-    argv = calls[0]
-    assert argv[argv.index("--url") + 1] == "http://127.0.0.1:80"
-    assert argv[-2:] == ["--chat", chat_id]
-    assert "synced_console.py" in argv[argv.index("--url") - 1]
-    assert (
-        client.post(
-            f"/chats/{chat_id}/open-synchronized-cli",
-            headers={"Origin": "https://external.invalid"},
-        ).status_code
-        == 403
-    )
-    assert len(calls) == 1
-
-
-def test_total_changes_uses_exact_counts_and_same_expandable_diff(
-    state: tuple[Database, TestClient],
-    tmp_path: Path,
-) -> None:
-    db, client = state
-    _, base, candidate = seed_candidate(db, tmp_path)
-    complete(db, candidate, base)
-    projected = client.get("/runs/run-live/diff").json()
-    assert projected["totals"] == {
+    projected = project_candidate_diff(db, "run-live")
+    assert projected.totals == {
         "added": 1,
         "removed": 0,
         "binary": 0,
@@ -460,17 +264,8 @@ def test_total_changes_uses_exact_counts_and_same_expandable_diff(
         "available": True,
     }
     page = client.get("/runs/run-live").text
-    assert 'class="file-diff diff-total" data-diff-total' in page
-    assert "Total changes" in page and page.count("print(&#39;hello&#39;)") == 2
+    assert "1 changed file in the recorded candidate" in page
+    assert "Total changes" not in page
+    assert "print(&#39;hello&#39;)" in page
 
 
-def test_composer_cancellation_scope_modes_and_failure_recovery() -> None:
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("Node is unavailable; browser interaction still requires verification")
-    result = subprocess.run(
-        [node, str(ROOT / "tests/js/composer_controls.cjs"),
-         str(ROOT / "src/saberops/static/js/composer-controls.js")],
-        capture_output=True, text=True, timeout=15,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr

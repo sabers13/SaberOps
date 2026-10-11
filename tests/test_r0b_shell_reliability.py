@@ -22,7 +22,6 @@ from saberops.models import (
     RunStatus,
     Tier,
 )
-from saberops.projects import ProjectRegistry
 from saberops.web import create_app
 
 _CREATED = "2026-09-24T10:00:00+00:00"
@@ -171,85 +170,3 @@ def test_r0b_action_state_refreshes_after_lifecycle_change(
 
     missing = client.get("/runs/does-not-exist/actions")
     assert missing.status_code == 404
-
-
-def test_r0b_static_and_health_skip_project_validation(
-    isolated_xdg: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Neither /static/* nor /health triggers project Git validation."""
-    calls: list[str] = []
-    original = ProjectRegistry.validate_project
-
-    def counting(self: ProjectRegistry, path: Path | str):  # type: ignore[no-untyped-def]
-        calls.append(str(path))
-        return original(self, path)
-
-    monkeypatch.setattr(ProjectRegistry, "validate_project", counting)
-    client = _client(tmp_path)
-    calls.clear()
-
-    static = client.get("/static/js/console.js")
-    assert static.status_code == 200
-    assert calls == []
-
-    health = client.get("/health")
-    assert health.status_code == 200
-    assert calls == []
-
-
-def test_r0b_repeated_requests_do_not_revalidate_projects(
-    isolated_xdg: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The bounded cache absorbs repeated shell/dashboard validation."""
-    calls: list[str] = []
-    original = ProjectRegistry.validate_project
-
-    def counting(self: ProjectRegistry, path: Path | str):  # type: ignore[no-untyped-def]
-        calls.append(str(path))
-        return original(self, path)
-
-    monkeypatch.setattr(ProjectRegistry, "validate_project", counting)
-    client = _client(tmp_path)
-    calls.clear()
-
-    first = client.get("/")
-    assert first.status_code == 200
-    first_calls = len(calls)
-    assert first_calls > 0
-
-    second = client.get("/")
-    assert second.status_code == 200
-    assert len(calls) == first_calls
-
-
-def test_r0b_project_select_invalidates_cached_validation(
-    isolated_xdg: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Selecting a project invalidates the cached entry so render is live."""
-    repo_b, _, _ = _make_repo(tmp_path, "repo-select-b")
-    calls: list[str] = []
-    original = ProjectRegistry.validate_project
-
-    def counting(self: ProjectRegistry, path: Path | str):  # type: ignore[no-untyped-def]
-        calls.append(str(path))
-        return original(self, path)
-
-    monkeypatch.setattr(ProjectRegistry, "validate_project", counting)
-    client = TestClient(
-        create_app(db_path=tmp_path / "web.db"),
-        raise_server_exceptions=False,
-        follow_redirects=False,
-    )
-    calls.clear()
-
-    assert client.get("/").status_code == 200
-
-    select = client.post("/projects/select", data={"path": str(repo_b)})
-    assert select.status_code == 303
-    assert str(repo_b) in calls
-
-    calls_after_select = len(calls)
-    assert client.get("/").status_code == 200
-    # The dashboard/shell revalidated live after invalidation.
-    assert len(calls) > calls_after_select
-    assert str(repo_b) in calls[calls_after_select:]

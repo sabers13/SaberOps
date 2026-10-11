@@ -316,7 +316,7 @@ def build_owner_action_argv(
     the existing ``orch review`` / ``orch accept`` authority with the
     internal action identity and the expected candidate for fencing.
     """
-    from saberops.web import resolve_owner_argv_prefix
+    from saberops.cli_environment import resolve_owner_argv_prefix
 
     prefix = resolve_owner_argv_prefix()
     if kind is OwnerActionKind.REVIEW:

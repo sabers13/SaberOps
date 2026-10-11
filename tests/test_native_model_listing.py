@@ -110,28 +110,3 @@ def test_native_timeout_reaps_process(
     with pytest.raises(ModelListingError, match='timed out'):
         native_listing.list_native_models('fake', 'claude')
     assert spawned and spawned[0].returncode is not None
-
-
-def test_saved_api_connection_is_outside_collapsed_sections(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from fastapi.testclient import TestClient
-
-    from saberops.model_access import AccessStore, build_access_registry, preset_connection
-    from saberops.web import create_app
-
-    monkeypatch.setenv('XDG_STATE_HOME', str(tmp_path / 'state'))
-    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'config'))
-    monkeypatch.setenv('ORCH_ACCESS_STORE', str(tmp_path / 'access.json'))
-    connection = preset_connection('openrouter', connection_id='saved-router',
-                                   credential_ref='env:TEST_KEY')
-    AccessStore(tmp_path / 'access.json').save(build_access_registry((connection,)))
-    page = TestClient(create_app(db_path=tmp_path / 'web.db')).get('/access')
-    assert page.status_code == 200
-    section = page.text.split('<section aria-label="API connections">', 1)[1]
-    assert 'saved-router' in section
-    assert 'Experimental' not in section
-    # Only model evidence may be collapsed, never the connection itself.
-    assert '<details' not in section.split('saved-router', 1)[0]
-    assert 'API connections run directly' in section
-    assert 'subscription connections use their own CLIs' in section
