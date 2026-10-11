@@ -17,9 +17,11 @@ Posture selectors may additionally be ``backend:DIRECT_API``.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from datetime import date
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -466,3 +468,142 @@ def validate_plan_sections(
         postures=postures,
         reserves=tuple(reserves),
     )
+
+
+# ---------------------------------------------------------------------------
+# Packaged defaults and owner overlay (step D)
+# ---------------------------------------------------------------------------
+
+ACCOUNT_FIELDS: tuple[str, ...] = (
+    "vendor",
+    "plan",
+    "required_toggles",
+    "toggles_attested_on",
+    "notes",
+)
+POOL_FIELDS: tuple[str, ...] = (
+    "mode",
+    "red_line_pct",
+    "members",
+    "account",
+    "windows",
+    "overage_possible",
+    "max_concurrent",
+)
+POSTURE_FIELDS: tuple[str, ...] = (
+    "class",
+    "policy_urls",
+    "ttl_days",
+    "verified_on",
+    "account",
+    "note",
+)
+
+
+def packaged_plans_path() -> Path:
+    """Return the shipped default plan registry document."""
+    return Path(__file__).resolve().parent.parent / "defaults" / "plans.json"
+
+
+def load_packaged_plans_raw() -> dict[str, Any]:
+    """Read and strictly validate the packaged default (owner attestation absent)."""
+    path = packaged_plans_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Packaged plans at {path}: cannot read/parse") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"Packaged plans at {path}: top-level must be an object")
+    try:
+        validate_plan_sections(data, str(path), packaged=True)
+    except ValueError as exc:
+        raise ValueError(f"Packaged plans at {path}: {exc}") from exc
+    return data
+
+
+def overlay_plan_docs(
+    packaged: dict[str, Any], owner: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Merge the owner document over the packaged default, field by field.
+
+    The owner wins per field: a field present in the owner's entry for an
+    account/pool/posture replaces the packaged value, while absent fields
+    keep the packaged one.  ``reserves`` is wholesale: the owner's list
+    replaces the packaged list only when the owner document carries the
+    key.  Returns (merged_doc, sources) where sources marks every field
+    ``packaged`` or ``owner``.
+    """
+    merged: dict[str, Any] = {"version": 2}
+    sources: dict[str, Any] = {}
+
+    def _merge_section(
+        section: str, fields: tuple[str, ...]
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        packaged_section = packaged.get(section, {})
+        owner_section = owner.get(section, {})
+        if not isinstance(packaged_section, dict):
+            packaged_section = {}
+        if not isinstance(owner_section, dict):
+            owner_section = {}
+        merged_section: dict[str, Any] = {}
+        section_sources: dict[str, Any] = {}
+        for key in (*packaged_section, *[k for k in owner_section if k not in packaged_section]):
+            packaged_entry = packaged_section.get(key)
+            owner_entry = owner_section.get(key)
+            if not isinstance(owner_entry, dict):
+                merged_section[key] = packaged_entry
+                if isinstance(packaged_entry, dict):
+                    section_sources[key] = {
+                        item: "packaged" for item in fields if item in packaged_entry
+                    }
+                continue
+            if not isinstance(packaged_entry, dict):
+                merged_section[key] = dict(owner_entry)
+                section_sources[key] = {
+                    item: "owner" for item in fields if item in owner_entry
+                }
+                continue
+            entry: dict[str, Any] = {}
+            entry_sources: dict[str, Any] = {}
+            for item in fields:
+                if item in owner_entry:
+                    entry[item] = owner_entry[item]
+                    entry_sources[item] = "owner"
+                elif item in packaged_entry:
+                    entry[item] = packaged_entry[item]
+                    entry_sources[item] = "packaged"
+            merged_section[key] = entry
+            section_sources[key] = entry_sources
+        return merged_section, section_sources
+
+    merged["accounts"], sources["accounts"] = _merge_section("accounts", ACCOUNT_FIELDS)
+    merged["quota_pools"], sources["quota_pools"] = _merge_section(
+        "quota_pools", POOL_FIELDS
+    )
+    merged["postures"], sources["postures"] = _merge_section("postures", POSTURE_FIELDS)
+    if "reserves" in owner and isinstance(owner["reserves"], list):
+        merged["reserves"] = owner["reserves"]
+        sources["reserves"] = "owner"
+    else:
+        merged["reserves"] = packaged.get("reserves", [])
+        sources["reserves"] = "packaged"
+    return merged, sources
+
+
+def load_effective_plan_set() -> tuple[PlanSet, dict[str, Any]]:
+    """Return the effective (packaged overlaid by owner) plan set plus sources.
+
+    ``verified_on`` and ``toggles_attested_on`` can only come from the
+    owner document: a packaged non-null value is a validation error, and
+    the merge never takes those fields from the packaged side.
+    """
+    packaged = load_packaged_plans_raw()
+    from saberops.control_plane.policy import _read_raw_doc
+
+    owner = _read_raw_doc()
+    merged, sources = overlay_plan_docs(packaged, owner)
+    try:
+        plans = validate_plan_sections(merged, "effective plans")
+    except ValueError as exc:
+        raise ValueError(f"Effective plans: {exc}") from exc
+    return plans, sources

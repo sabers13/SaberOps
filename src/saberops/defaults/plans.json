@@ -1,0 +1,216 @@
+{
+  "version": 2,
+  "accounts": {
+    "chatgpt-plus": {
+      "vendor": "openai",
+      "plan": "ChatGPT Plus",
+      "required_toggles": ["usage_credits=OFF", "auto_reload=OFF", "apps_use_credits=OFF"],
+      "toggles_attested_on": null,
+      "notes": ""
+    },
+    "claude-pro": {
+      "vendor": "anthropic",
+      "plan": "Claude Pro",
+      "required_toggles": ["usage_credits=OFF"],
+      "toggles_attested_on": null,
+      "notes": ""
+    },
+    "opencode-go": {
+      "vendor": "opencode",
+      "plan": "OpenCode Go",
+      "required_toggles": ["use_balance=OFF"],
+      "toggles_attested_on": null,
+      "notes": ""
+    },
+    "opencode-zen": {
+      "vendor": "opencode",
+      "plan": "OpenCode Zen",
+      "required_toggles": ["balance=0", "auto_reload=OFF"],
+      "toggles_attested_on": null,
+      "notes": ""
+    },
+    "clinepass": {
+      "vendor": "cline",
+      "plan": "ClinePass",
+      "required_toggles": ["credit_balance=0"],
+      "toggles_attested_on": null,
+      "notes": ""
+    },
+    "google-ai-pro": {
+      "vendor": "google",
+      "plan": "Google AI Pro",
+      "required_toggles": ["ai_credit_overages=NEVER"],
+      "toggles_attested_on": null,
+      "notes": ""
+    }
+  },
+  "quota_pools": {
+    "chatgpt-plus": {
+      "mode": "STRICT",
+      "red_line_pct": 15.0,
+      "members": ["codex", "opencode/openai/*"],
+      "account": "chatgpt-plus",
+      "overage_possible": true,
+      "max_concurrent": 2,
+      "windows": [
+        {"id": "5h", "kind": "UNKNOWN", "duration_min": 300, "unit": "PERCENT"},
+        {"id": "weekly", "kind": "UNKNOWN", "duration_min": 10080, "unit": "PERCENT"}
+      ]
+    },
+    "chatgpt-app-opencode": {
+      "mode": "STRICT",
+      "red_line_pct": 15.0,
+      "members": ["opencode/openai/*"],
+      "account": "chatgpt-plus",
+      "overage_possible": true,
+      "max_concurrent": null,
+      "windows": [
+        {"id": "app-weekly", "kind": "UNKNOWN", "duration_min": 10080, "unit": "PERCENT"}
+      ]
+    },
+    "claude-pro": {
+      "mode": "STRICT",
+      "red_line_pct": 15.0,
+      "members": ["anthropic"],
+      "account": "claude-pro",
+      "overage_possible": true,
+      "max_concurrent": 1,
+      "windows": [
+        {"id": "5h", "kind": "ROLLING", "duration_min": 300, "unit": "PERCENT"},
+        {"id": "weekly", "kind": "UNKNOWN", "duration_min": 10080, "unit": "PERCENT"}
+      ]
+    },
+    "opencode-go": {
+      "mode": "STRICT",
+      "red_line_pct": 15.0,
+      "members": ["opencode/opencode-go/*"],
+      "account": "opencode-go",
+      "overage_possible": true,
+      "max_concurrent": 2,
+      "windows": [
+        {"id": "5h", "kind": "UNKNOWN", "duration_min": 300, "unit": "USD"},
+        {"id": "weekly", "kind": "UNKNOWN", "duration_min": 10080, "unit": "USD"},
+        {"id": "monthly", "kind": "UNKNOWN", "duration_min": 43200, "unit": "USD"}
+      ]
+    },
+    "opencode-zen": {
+      "mode": "STRICT",
+      "red_line_pct": 15.0,
+      "members": ["opencode/opencode/*"],
+      "account": "opencode-zen",
+      "overage_possible": false,
+      "max_concurrent": null,
+      "windows": [
+        {"id": "daily", "kind": "CALENDAR", "duration_min": 1440, "unit": "PERCENT"}
+      ]
+    },
+    "clinepass": {
+      "mode": "STRICT",
+      "red_line_pct": 15.0,
+      "members": ["cline/cline-pass/*"],
+      "account": "clinepass",
+      "overage_possible": true,
+      "max_concurrent": null,
+      "windows": [
+        {"id": "5h", "kind": "ROLLING", "duration_min": 300, "unit": "PERCENT"},
+        {"id": "weekly", "kind": "CALENDAR", "duration_min": 10080, "unit": "PERCENT"},
+        {"id": "monthly", "kind": "CALENDAR", "duration_min": 43200, "unit": "PERCENT"}
+      ]
+    },
+    "antigravity": {
+      "mode": "STRICT",
+      "red_line_pct": 15.0,
+      "members": ["antigravity"],
+      "account": "google-ai-pro",
+      "overage_possible": true,
+      "max_concurrent": null,
+      "windows": [
+        {"id": "5h", "kind": "UNKNOWN", "duration_min": 300, "unit": "PERCENT"},
+        {"id": "weekly", "kind": "UNKNOWN", "duration_min": 10080, "unit": "PERCENT"}
+      ]
+    }
+  },
+  "postures": {
+    "anthropic": {
+      "class": "A",
+      "policy_urls": [
+        "https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan",
+        "https://code.claude.com/docs/en/legal-and-compliance"
+      ],
+      "ttl_days": 14,
+      "verified_on": null,
+      "account": "claude-pro",
+      "note": ""
+    },
+    "codex": {
+      "class": "A",
+      "policy_urls": [
+        "https://learn.chatgpt.com/docs/pricing",
+        "https://learn.chatgpt.com/docs/auth"
+      ],
+      "ttl_days": 30,
+      "verified_on": null,
+      "account": "chatgpt-plus",
+      "note": ""
+    },
+    "opencode/openai/*": {
+      "class": "A",
+      "policy_urls": [
+        "https://help.openai.com/en/articles/20001542-using-your-chatgpt-plan-in-other-apps-and-sites"
+      ],
+      "ttl_days": 30,
+      "verified_on": null,
+      "account": "chatgpt-plus",
+      "note": ""
+    },
+    "opencode/opencode-go/*": {
+      "class": "A",
+      "policy_urls": ["https://opencode.ai/docs/go/"],
+      "ttl_days": 30,
+      "verified_on": null,
+      "account": "opencode-go",
+      "note": ""
+    },
+    "opencode/opencode/*": {
+      "class": "C",
+      "policy_urls": ["https://opencode.ai/docs/zen/"],
+      "ttl_days": 30,
+      "verified_on": null,
+      "account": "opencode-zen",
+      "note": ""
+    },
+    "cline/cline-pass/*": {
+      "class": "A",
+      "policy_urls": ["https://docs.cline.bot/getting-started/clinepass"],
+      "ttl_days": 30,
+      "verified_on": null,
+      "account": "clinepass",
+      "note": "terms for unattended use not yet checked by owner"
+    },
+    "antigravity": {
+      "class": "B",
+      "policy_urls": ["https://antigravity.google/terms/"],
+      "ttl_days": 30,
+      "verified_on": null,
+      "account": "google-ai-pro",
+      "note": ""
+    },
+    "backend:DIRECT_API": {
+      "class": "D",
+      "policy_urls": [],
+      "ttl_days": 30,
+      "verified_on": null,
+      "account": null,
+      "note": "OmniRoute/direct_api: prepaid API keys, auto-recharge OFF"
+    },
+    "copilot": {
+      "class": "X",
+      "policy_urls": [],
+      "ttl_days": null,
+      "verified_on": null,
+      "account": null,
+      "note": "removed (ADR-0001)"
+    }
+  },
+  "reserves": []
+}

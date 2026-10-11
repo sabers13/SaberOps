@@ -427,6 +427,102 @@ def test_members_accept_str_and_object_shapes() -> None:
 
 
 # ---------------------------------------------------------------------------
+# packaged defaults and field-level overlay (D)
+# ---------------------------------------------------------------------------
+
+
+def test_packaged_defaults_load_and_validate() -> None:
+    from saberops.control_plane import load_packaged_plans_raw
+
+    raw = load_packaged_plans_raw()
+    plans = validate_plan_sections(raw, "packaged", packaged=True)
+    assert set(plans.accounts) == {
+        "chatgpt-plus",
+        "claude-pro",
+        "opencode-go",
+        "opencode-zen",
+        "clinepass",
+        "google-ai-pro",
+    }
+    assert set(plans.pool_plans) == {
+        "chatgpt-plus",
+        "chatgpt-app-opencode",
+        "claude-pro",
+        "opencode-go",
+        "opencode-zen",
+        "clinepass",
+        "antigravity",
+    }
+    assert plans.pool_plans["opencode-zen"].overage_possible is False
+    assert plans.postures["anthropic"].ttl_days == 14
+    assert plans.postures["copilot"].posture_class == "X"
+    assert all(record.verified_on is None for record in plans.postures.values())
+
+
+def test_overlay_is_field_level_owner_wins_per_field() -> None:
+    from saberops.control_plane import load_packaged_plans_raw, overlay_plan_docs
+
+    packaged = load_packaged_plans_raw()
+    owner = {
+        "quota_pools": {"claude-pro": {"max_concurrent": 5}},
+        "postures": {"codex": {"verified_on": "2026-10-10"}},
+    }
+    merged, sources = overlay_plan_docs(packaged, owner)
+    assert merged["quota_pools"]["claude-pro"]["max_concurrent"] == 5
+    assert sources["quota_pools"]["claude-pro"]["max_concurrent"] == "owner"
+    # Untouched fields keep the packaged value and source.
+    assert merged["quota_pools"]["claude-pro"]["members"] == ["anthropic"]
+    assert sources["quota_pools"]["claude-pro"]["members"] == "packaged"
+    assert merged["postures"]["codex"]["verified_on"] == "2026-10-10"
+    assert sources["postures"]["codex"]["verified_on"] == "owner"
+    assert sources["postures"]["codex"]["class"] == "packaged"
+    plans = validate_plan_sections(merged, "effective")
+    assert plans.pool_plans["claude-pro"].max_concurrent == 5
+    assert plans.postures["codex"].verified_on == "2026-10-10"
+
+
+def test_overlay_reserves_wholesale() -> None:
+    from saberops.control_plane import overlay_plan_docs
+
+    packaged = {"reserves": [{"pool": "p", "window": "5h"}]}
+    merged, sources = overlay_plan_docs(packaged, {})
+    assert merged["reserves"] == [{"pool": "p", "window": "5h"}]
+    assert sources["reserves"] == "packaged"
+    merged, sources = overlay_plan_docs(packaged, {"reserves": []})
+    assert merged["reserves"] == []
+    assert sources["reserves"] == "owner"
+
+
+def test_effective_plan_set_without_owner_file(
+    isolated_config: Path,
+) -> None:
+    from saberops.control_plane import load_effective_plan_set
+
+    plans, sources = load_effective_plan_set()
+    assert "claude-pro" in plans.pool_plans
+    assert sources["quota_pools"]["claude-pro"]["members"] == "packaged"
+
+
+def test_effective_plan_set_with_owner_overlay(
+    isolated_config: Path,
+) -> None:
+    from saberops.control_plane import load_effective_plan_set
+
+    _write_owner(
+        {
+            "version": 2,
+            "providers": {},
+            "quota_pools": {},
+            "postures": {"codex": {"verified_on": "2026-10-10"}},
+        }
+    )
+    plans, sources = load_effective_plan_set()
+    assert plans.postures["codex"].verified_on == "2026-10-10"
+    assert sources["postures"]["codex"]["verified_on"] == "owner"
+    assert sources["postures"]["codex"]["class"] == "packaged"
+
+
+# ---------------------------------------------------------------------------
 # digest compatibility (F)
 # ---------------------------------------------------------------------------
 
