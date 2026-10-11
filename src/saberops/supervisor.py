@@ -1391,7 +1391,7 @@ class RunSupervisor:
         ``ORCH_EXECUTION_OWNER_*`` environment variables so the child can
         adopt the exact reservation the supervisor pre-claimed.
         """
-        from saberops.web import resolve_owner_argv_prefix
+        from saberops.cli_environment import resolve_owner_argv_prefix
 
         prefix = resolve_owner_argv_prefix()
         db_path = str(self.db.db_path)
@@ -1504,7 +1504,7 @@ class RunSupervisor:
         return True
 
     def _build_cli_args(self, run_id: str, config: RunConfig) -> list[str]:
-        from saberops.web import resolve_owner_argv_prefix
+        from saberops.cli_environment import resolve_owner_argv_prefix
 
         prefix = resolve_owner_argv_prefix()
         db_path = str(self.db.db_path)

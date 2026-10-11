@@ -665,33 +665,23 @@ def _effective_timeout_display(form: dict[str, Any]) -> dict[str, str]:
 def resolve_owner_argv_prefix() -> list[str]:
     """Resolve the argv prefix for a detached/supervised execution owner.
 
-    Single authority for execution-owner identity.  By default the
-    continuation re-executes the **same** Python environment/code identity
-    that launched it via ``[sys.executable, "-m", "saberops.cli"]`` -- this
-    covers an installed venv, an editable install, and a source/dev
-    execution whose checkout arrives via the inherited ``PYTHONPATH``
-    (see ``RunSupervisor._spawn_owner``).  No ``orch`` entry point is
-    discovered from ``$PATH`` on the default path, so a stale global
-    ``orch`` can never become the continuation authority.
-
-    ``ORCH_EXECUTABLE`` remains an explicit owner/developer override and,
-    when set, yields the single-element prefix ``[override]``.
+    Backward-compatible re-export of :func:`saberops.cli_environment.resolve_owner_argv_prefix`
+    (the single authority lives in cli_environment so engine modules need
+    not import the web console).
     """
-    override = os.environ.get("ORCH_EXECUTABLE", "").strip()
-    if override:
-        return [override]
-    return [sys.executable, "-m", "saberops.cli"]
+    from saberops.cli_environment import resolve_owner_argv_prefix as _resolve
+
+    return _resolve()
 
 
 def resolve_orch_executable() -> str:
     """Resolve the orchestrator executable identity for display/diagnostics.
 
-    Thin display wrapper over :func:`resolve_owner_argv_prefix` (the single
-    launch authority): the override when set, else the current interpreter
-    identity.  Never falls back to ``shutil.which("orch")`` or any other
-    ``$PATH`` discovery, so diagnostics cannot mask a stale global ``orch``.
+    Backward-compatible re-export of :func:`saberops.cli_environment.resolve_orch_executable`.
     """
-    return " ".join(resolve_owner_argv_prefix())
+    from saberops.cli_environment import resolve_orch_executable as _resolve
+
+    return _resolve()
 
 #: What each authority preset changes in SaberOps today. Policy fields that
 #: only the unwired autonomous project runner reads are not promised here.
