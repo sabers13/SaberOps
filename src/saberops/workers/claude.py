@@ -17,6 +17,11 @@ from saberops.models import AttemptStatus, DispatchOutcome, WorkerRequest, Worke
 from saberops.process import ProcessResult, launch_worker_process, run_process
 from saberops.workers.base import WorkerAdapter, streaming_process_kwargs
 from saberops.workers.env import hermetic_env
+from saberops.workers.exhaustion import (
+    ExhaustionVerdict,
+    classify_claude,
+    reset_to_iso,
+)
 
 # CLI configuration is invocation-local. Keep the native agent loop and system
 # prompt, but prevent project/user settings from selecting an API credential or
@@ -191,11 +196,29 @@ class ClaudeCodeAdapter(WorkerAdapter):
             status, outcome, error = (AttemptStatus.FAILED,
                                       DispatchOutcome.PROVIDER_OR_RUNTIME_FAILURE,
                                       "Claude Code did not report successful task completion")
+        interruption_reason = None
+        quota_reset_at = None
+        if status is not AttemptStatus.SUCCESS:
+            # Trap: a plan limit is subtype "success" with is_error true,
+            # handled inside classify_claude -- never treat it as success.
+            exhaustion = classify_claude(process.stdout, process.stderr)
+            if exhaustion.verdict is ExhaustionVerdict.QUOTA_EXHAUSTED:
+                # Continuation-after-quota path applies; RATE_LIMITED
+                # keeps today's retry behaviour (falls through).
+                from saberops.models import WorkerInterruptionReason
+                interruption_reason = WorkerInterruptionReason.QUOTA_EXHAUSTED
+                quota_reset_at = reset_to_iso(exhaustion.reset_at)
+                reset_note = quota_reset_at or "unknown reset time"
+                error = (
+                    "Claude plan quota exhausted "
+                    f"(retry after {reset_note}) [{exhaustion.rule} {exhaustion.confidence}]"
+                )
         return WorkerResult(
             provider=self.provider_name, model=request.model, status=status,
             summary=error or output.strip()[:300] or "Claude Code completed",
             stdout=output, stderr=process.stderr, changed_paths=changes, has_changes=bool(changes),
             error=error, outcome=outcome,
+            interruption_reason=interruption_reason, quota_reset_at=quota_reset_at,
             provider_exit_code=process.exit_code,
             execution_quiescent=not process.termination_incomplete,
             provider_terminal_status="SUCCESS" if completed else "FAILED",

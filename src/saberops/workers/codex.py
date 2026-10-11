@@ -18,6 +18,11 @@ from saberops.process import (
 from saberops.telemetry import parse_codex_jsonl
 from saberops.workers.base import WorkerAdapter, streaming_process_kwargs
 from saberops.workers.env import hermetic_env
+from saberops.workers.exhaustion import (
+    ExhaustionVerdict,
+    classify_codex,
+    reset_to_iso,
+)
 
 __all__ = ["CodexAdapter", "ORCH_PROMPT_ARG_LIMIT"]
 
@@ -229,6 +234,39 @@ class CodexAdapter(WorkerAdapter):
             out_strip = display_stdout.strip()
             summary = out_strip[:300] if out_strip else "Worker completed successfully"
         else:
+            exhaustion = classify_codex(res.stdout, res.stderr)
+            if exhaustion.verdict is ExhaustionVerdict.QUOTA_EXHAUSTED:
+                # Plan exhaustion: the orchestrator's existing
+                # continuation-after-quota path applies (provider is
+                # skipped for the rest of the cycle, work continues on
+                # the next eligible candidate).  RATE_LIMITED keeps
+                # today's retry behaviour and falls through below.
+                from saberops.models import WorkerInterruptionReason
+                reset_note = reset_to_iso(exhaustion.reset_at) or "unknown reset time"
+                quota_error = (
+                    "Codex plan quota exhausted "
+                    f"(retry after {reset_note}) [{exhaustion.rule} {exhaustion.confidence}]"
+                )
+                return WorkerResult(
+                    provider=self.provider_name,
+                    model=request.model,
+                    status=AttemptStatus.FAILED,
+                    summary=quota_error,
+                    stdout=display_stdout,
+                    stderr=res.stderr,
+                    changed_paths=changed_paths,
+                    has_changes=has_changes,
+                    error=quota_error,
+                    duration_seconds=res.duration_seconds,
+                    prompt_bytes=prompt_bytes,
+                    prompt_transport_used=transport_used,
+                    outcome=DispatchOutcome.PROVIDER_OR_RUNTIME_FAILURE,
+                    usage=usage,
+                    interruption_reason=WorkerInterruptionReason.QUOTA_EXHAUSTED,
+                    quota_reset_at=reset_to_iso(exhaustion.reset_at),
+                    provider_exit_code=res.exit_code,
+                    execution_quiescent=not res.termination_incomplete,
+                )
             status = AttemptStatus.FAILED
             outcome = DispatchOutcome.PROVIDER_OR_RUNTIME_FAILURE
             error = f"Worker exited with code {res.exit_code}"

@@ -435,6 +435,50 @@ def _bounded_output(raw: str, limit: int = 4000) -> str:
     return raw[:limit] + "\n...[truncated]...\n" + raw[-limit:]
 
 
+def _record_quota_exhaustion_evidence(
+    db: Database, *, run_id: str, provider: str, reset_iso: str | None
+) -> None:
+    """Persist plan-exhaustion quota evidence (T-004, best effort).
+
+    Records the raw observation (freshness FRESH, remaining 0) plus the
+    derived pool state via :func:`saberops.workers.exhaustion.record_exhaustion`
+    so later routing excludes the exhausted pool until reset.  The
+    evidence only ever excludes: it never synthesizes, enables, or
+    fails over to any other route (in particular never to an API-key /
+    METERED_KEY route such as OmniRoute or direct_api -- those dispatch
+    only when already present in the owner's routing chain).  Evidence
+    failure never breaks continuation: the in-memory blocked-provider
+    set already governs this cycle.
+    """
+    from saberops.workers.exhaustion import record_exhaustion
+
+    try:
+        reset_at = datetime.fromisoformat(reset_iso) if reset_iso else None
+    except ValueError:
+        reset_at = None
+    try:
+        state = record_exhaustion(db, provider=provider, run_id=run_id, reset_at=reset_at)
+        db.record_event(
+            run_id,
+            "quota_exhaustion_recorded",
+            payload={
+                "provider": provider,
+                "pool": state.pool,
+                "routing_state": state.routing_state.value,
+                "reset_at": state.reset_at,
+            },
+        )
+    except Exception:
+        try:
+            db.record_event(
+                run_id,
+                "quota_exhaustion_evidence_failed",
+                payload={"provider": provider},
+            )
+        except Exception:
+            pass
+
+
 def _is_genuine_capability_escalation(outcome: DispatchOutcome | None) -> bool:
     """Return True only for genuine capability-bearing tier escalation evidence.
 
@@ -4993,6 +5037,12 @@ class Orchestrator:
 
                     if interruption_reason == WorkerInterruptionReason.QUOTA_EXHAUSTED:
                         blocked_providers_in_cycle.add(candidate.provider)
+                        _record_quota_exhaustion_evidence(
+                            self.db,
+                            run_id=run_id,
+                            provider=candidate.provider,
+                            reset_iso=worker_res.quota_reset_at,
+                        )
 
                     if config.model_override is None:
                         stage_attempts = max(0, stage_attempts - 1)
@@ -6555,6 +6605,12 @@ class Orchestrator:
                                             == WorkerInterruptionReason.QUOTA_EXHAUSTED
                                         ):
                                             blocked_repair_providers.add(cand_provider)
+                                            _record_quota_exhaustion_evidence(
+                                                self.db,
+                                                run_id=run_id,
+                                                provider=cand_provider,
+                                                reset_iso=w_res.quota_reset_at,
+                                            )
 
                                         rep_continuation_attempt = rep_attempt
                                         attempts.append(rep_attempt)
