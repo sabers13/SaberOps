@@ -70,12 +70,6 @@ def observe_invocation(
     resume_id = request.native_resume_id
     if supported and role == "orchestrator" and not resume_id:
         previous = read_sessions(root, owner)
-        from saberops.native_access import BUSY
-        if any((row.get("native_client") or {}).get("state") in BUSY for row in previous):
-            return WorkerResult(
-                provider, request.model, AttemptStatus.FAILED,
-                "Close the orchestrator's native CLI before sending an app turn.", "", ""
-            )
         resume_id = next(
             (
                 str(row["native_id"])
@@ -120,7 +114,6 @@ def observe_invocation(
             "native_id": resume_id,
             "binding": binding,
             "read_only": request.read_only,
-            "native_handoff_allowed": allow_shared_runtime,
             "worktree": str(request.worktree_path),
             "selectors": {key: val for key, val in (request.env or {}).items()
                           if key in ("ORCH_EXECUTION_BINDING_ID", "ORCH_EXECUTION_PROFILE_ID",
@@ -272,15 +265,6 @@ def observe_invocation(
         previous_usage = []
         finished = False
         while not finished:
-            from saberops.native_access import BUSY, client_state, session_key
-            if current.native_resume_id and (
-                client_state(controls, session_key(metadata)) or {}
-            ).get("state") in BUSY:
-                result = WorkerResult(provider, request.model, AttemptStatus.FAILED,
-                                      "The native CLI owns this session. Close it before resuming.",
-                                      "", "", manual_control_stopped=True)
-                controls.finish(session_id, "FAILED", result.summary)
-                break
             result = turn(current, "automatic")
             previous_usage.extend(result.usage)
             if not supported or controls.complete_if_active(session_id):
@@ -429,9 +413,6 @@ def observe_invocation(
         return result
     finally:
         runtime_safe = runtime.close() if runtime else True
-        from saberops.native_access import wait_for_client_shutdown
-        if not wait_for_client_shutdown(controls, session_id):
-            runtime_safe = False
         quiescent = (
             False if not runtime_safe
             else runtime_safe if runtime and runtime.thread is not None
@@ -528,17 +509,6 @@ def read_sessions(root: Path, owner: str) -> list[dict[str, Any]]:
                 if not value.get("native_id"):
                     value["native_cli_reason"] += " The CLI did not report a resumable session."
             value.pop("owner_identity", None)
-            from saberops.native_access import capability, client_state, session_key
-            value.update(capability(value))
-            value["native_client"] = client_state(SessionControls(root), session_key(value))
-            client_log = folder / (value["id"] + ".native.log")
-            if client_log.is_file():
-                with client_log.open("rb") as log:
-                    length = log.seek(0, 2)
-                    log.seek(max(0, length - VIEW_MAX_BYTES))
-                    value["native_client_output"] = log.read(VIEW_MAX_BYTES).decode(
-                        "utf-8", errors="replace"
-                    )
             sessions.append(value)
         except (OSError, ValueError, TypeError, sqlite3.Error):
             continue

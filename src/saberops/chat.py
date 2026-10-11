@@ -665,7 +665,6 @@ class ChatCoordinator:
 
     def _history_is_live(self, chat_id: str | None, run_id: str | None) -> bool:
         from saberops.agent_sessions import read_sessions
-        from saberops.native_access import BUSY
 
         try:
             if chat_id and self.shared_native_chat(chat_id):
@@ -692,7 +691,6 @@ class ChatCoordinator:
             rows.extend(read_sessions(Path(runtime.db.db_path).parent / "agent-sessions", identity))
         return any(
             row.get("control_mode") in ("MANUAL", "REQUESTED", "RESUMING")
-            or (row.get("native_client") or {}).get("state") in BUSY
             for row in rows
         )
 
@@ -780,31 +778,6 @@ class ChatCoordinator:
                             )
                 raise ChatBusy(str(exc)) from exc
             return
-        from saberops.agent_sessions import read_sessions
-        from saberops.native_access import BUSY
-
-        sessions = read_sessions(self.store.path.parent / "agent-sessions", chat_id)
-        with self.store.connect() as conn:
-            links = conn.execute(
-                "SELECT run_id FROM chat_runs WHERE chat_id=?", (chat_id,)
-            ).fetchall()
-        for link in links:
-            runtime = self.runtimes.for_run(link[0])
-            if runtime:
-                sessions.extend(
-                    read_sessions(Path(runtime.db.db_path).parent / "agent-sessions", link[0])
-                )
-        if any(
-            row.get("role") == "orchestrator"
-            and (row.get("native_client") or {}).get("state") in BUSY
-            for row in sessions
-        ):
-            raise ChatBusy(
-                "This native CLI has no connected shared chat channel. "
-                "For Claude, reopen its orchestrator CLI to connect shared chat. "
-                "Otherwise close the native CLI and use Chat in terminal "
-                "for synchronized chat."
-            )
         if not self.capacity.acquire(blocking=False):
             raise ChatBusy("The orchestrator is busy with other conversations. Try again shortly.")
         try:

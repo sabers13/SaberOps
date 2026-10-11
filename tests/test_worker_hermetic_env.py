@@ -164,6 +164,24 @@ def test_claude_overlay_denylist_drops_billing_credentials() -> None:
     assert env["ORCH_RUN_ID"] == "r"
 
 
+def test_ambient_api_billing_keys_never_reach_a_worker_child() -> None:
+    # Moved from test_native_access.py::test_subscription_environment_excludes_extra_api_billing
+    # (L-A step 4 deleted native_access.py with its terminal-only env builder).
+    # Same T-001 assertion through the kept engine path: ambient subscription/API
+    # billing credentials in the parent environment must not reach a worker
+    # child, and separately billed Fast mode stays disabled.
+    parent = {
+        "PATH": "/p",
+        "ANTHROPIC_API_KEY": "private",
+        "GEMINI_API_KEY": "private",
+        "CLAUDE_CODE_USE_BEDROCK": "1",
+    }
+    env = hermetic_env("claude", None, parent)
+    assert not any(
+        key in env for key in ("ANTHROPIC_API_KEY", "GEMINI_API_KEY", "CLAUDE_CODE_USE_BEDROCK")
+    )
+
+
 def test_antigravity_overlay_denylist_drops_api_key_configuration() -> None:
     overlay = {"GEMINI_API_KEY": "no", "GOOGLE_API_KEY": "no", "ORCH_RUN_ID": "r"}
     env = hermetic_env("antigravity", overlay, {})

@@ -167,13 +167,11 @@ class SessionControls:
             self.sync_chat(message, error or "Session finished before delivery.")
 
     def submit(self, sid: str, message: str, request_id: str) -> None:
-        self.require_no_native_client(sid)
         if not message.strip() or len(message) > 32000 or not request_id or len(request_id) > 128:
             raise ControlConflict("Enter a message of 1–32,000 characters.")
         self._require_live(sid, ("MANUAL",))
         with self.connect(write=True) as conn:
             conn.execute("BEGIN IMMEDIATE")
-            self.require_no_native_client(sid)
             previous = conn.execute(
                 "SELECT * FROM control_messages WHERE id=?", (sid + ":" + request_id,)
             ).fetchone()
@@ -238,9 +236,6 @@ class SessionControls:
         self.sync_chat({"session_id": sid, "id": sid + ":" + request_id, "text": message.strip()})
 
     def next_message(self, sid: str) -> dict[str, Any] | None:
-        from saberops.native_access import is_busy
-        if is_busy(self, sid):
-            return None
         with self.connect(write=True) as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
@@ -301,11 +296,9 @@ class SessionControls:
             return bool(row and (row["mode"] == "REQUESTED" or row["interrupt_turn"]))
 
     def resume(self, sid: str) -> None:
-        self.require_no_native_client(sid)
         self._require_live(sid, ("MANUAL",))
         with self.connect(write=True) as conn:
             conn.execute("BEGIN IMMEDIATE")
-            self.require_no_native_client(sid)
             if conn.execute(
                 "SELECT COUNT(*) FROM control_messages WHERE session_id=? AND state IN (?,?)",
                 (sid, "QUEUED", "RUNNING"),
@@ -323,9 +316,3 @@ class SessionControls:
         if data is None:
             return None
         return {k: v for k, v in data.items() if k not in ("identity", "chat_path")}
-
-    def require_no_native_client(self, sid: str) -> None:
-        from saberops.native_access import is_busy
-        if is_busy(self, sid):
-            raise ControlConflict("Close the native provider CLI before sending an app turn "
-                                  "or returning to automation.")
