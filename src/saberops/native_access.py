@@ -438,17 +438,22 @@ def native_environment(data: dict[str, Any]) -> dict[str, str]:
                 "use the synchronized CLI until that profile is supported."
             )
     if provider == "opencode" and data.get("read_only"):
-        env["OPENCODE_CONFIG_CONTENT"] = json.dumps(
-            {
-                "permission": {
-                    "*": "deny",
-                    "read": "allow",
-                    "glob": "allow",
-                    "grep": "allow",
-                    "list": "allow",
-                }
+        read_only_config: dict[str, Any] = {
+            "permission": {
+                "*": "deny",
+                "read": "allow",
+                "glob": "allow",
+                "grep": "allow",
+                "list": "allow",
             }
-        )
+        }
+        # Pin billing to the session model's provider when it carries a
+        # provider prefix (inline config outranks project and global config
+        # files, which load with no trust gate for interactive terminals).
+        model_prefix, separator, _ = str(data.get("model", "")).partition("/")
+        if separator and model_prefix:
+            read_only_config["enabled_providers"] = [model_prefix]
+        env["OPENCODE_CONFIG_CONTENT"] = json.dumps(read_only_config)
     return interactive_environment(env)
 
 

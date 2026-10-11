@@ -43,6 +43,36 @@ class SessionRuntimeError(RuntimeError):
     pass
 
 
+def opencode_serve_config(model: str, permissions: dict[str, str]) -> dict[str, Any]:
+    """Return the pinned inline server config for one OpenCode assignment.
+
+    The config always starts from ``{}`` -- never from ``request.env`` or
+    the parent shell -- so ambient ``OPENCODE_CONFIG_CONTENT`` cannot change
+    provider selection.  ``enabled_providers`` allowlists exactly the
+    selected model's provider (inline config outranks project and global
+    config files), and the frozen permission/agent keys are preserved.
+    Raises :class:`SessionRuntimeError` when ``model`` has no
+    ``<provider>/<model>`` prefix, since billing cannot be pinned then.
+    """
+    provider, separator, identifier = model.partition("/")
+    if not separator or not provider or not identifier:
+        raise SessionRuntimeError("OpenCode requires a provider/model identity")
+    return {
+        "permission": permissions,
+        "model": model,
+        "default_agent": "saberops",
+        "agent": {
+            "saberops": {
+                "description": "Frozen SaberOps assignment",
+                "mode": "primary",
+                "model": model,
+                "permission": permissions,
+            }
+        },
+        "enabled_providers": [provider],
+    }
+
+
 class AgentSessionRuntime:
     def __init__(
         self,
@@ -115,24 +145,7 @@ class AgentSessionRuntime:
                 "grep": "allow",
                 "list": "allow",
             }
-        config = json.loads((request.env or {}).get("OPENCODE_CONFIG_CONTENT", "{}"))
-        if not isinstance(config, dict):
-            raise SessionRuntimeError("Selected OpenCode configuration must be an object")
-        config.update(
-            {
-                "permission": permissions,
-                "model": request.model,
-                "default_agent": "saberops",
-                "agent": {
-                    "saberops": {
-                        "description": "Frozen SaberOps assignment",
-                        "mode": "primary",
-                        "model": request.model,
-                        "permission": permissions,
-                    }
-                },
-            }
-        )
+        config = opencode_serve_config(request.model, permissions)
         env = dict(request.env or {})
         env.update(
             OPENCODE_SERVER_PASSWORD=self.password,
@@ -310,6 +323,25 @@ class AgentSessionRuntime:
 
     def run_opencode(self, request: WorkerRequest, binary: str) -> WorkerResult:
         started = time.monotonic()
+        provider, separator, identifier = request.model.partition("/")
+        if not separator or not provider or not identifier:
+            detail = (
+                "OpenCode requires a provider/model identity "
+                f"(got {request.model!r}); without a provider prefix SaberOps "
+                "cannot pin billing through enabled_providers"
+            )
+            return WorkerResult(
+                provider="opencode",
+                model=request.model,
+                status=AttemptStatus.FAILED,
+                summary=detail,
+                stdout="",
+                stderr=detail,
+                error=detail,
+                has_changes=False,
+                outcome=DispatchOutcome.ELIGIBILITY_SKIP,
+                duration_seconds=time.monotonic() - started,
+            )
         try:
             self.ensure_started(request, binary)
             with self.turn_lock:

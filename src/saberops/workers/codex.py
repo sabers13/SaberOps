@@ -39,6 +39,29 @@ _GATEWAY_PROVIDER_ENV = "ORCH_GATEWAY_PROVIDER_ID"
 # own ``Authorization`` header on the loopback hop.
 _BRIDGE_AUTH_SENTINEL_ENV = "_ORCH_BRIDGE_AUTH_SENTINEL"
 
+# Billing-relevant ``-c`` pins applied to the direct (non-gateway) Codex
+# path only.  Each key is confirmed to exist in the installed Codex CLI
+# (0.162.x; see the adapter docstring for evidence):
+# * ``forced_login_method="chatgpt"`` forces ChatGPT login so an API key
+#   can never switch the turn to API billing;
+# * ``model_provider="openai"`` pins the built-in OpenAI provider so a
+#   user config cannot redirect the turn to another provider;
+# * ``service_tier="default"`` pins the standard service tier so a user
+#   config cannot opt the turn into separately billed Fast mode.
+# ``-c`` overrides have the highest config precedence (above project and
+# user config files), and project ``.codex/`` layers cannot override
+# ``model_provider``/``model_providers`` at all.  The gateway path is
+# unchanged: it already passes its own ``-c model_provider=...`` override
+# selecting the gateway provider.
+_DIRECT_COVERRIDE_FLAGS: tuple[str, ...] = (
+    "-c",
+    'forced_login_method="chatgpt"',
+    "-c",
+    'model_provider="openai"',
+    "-c",
+    'service_tier="default"',
+)
+
 
 class CodexAdapter(WorkerAdapter):
     """Worker adapter dispatching tasks via Codex CLI.
@@ -49,6 +72,25 @@ class CodexAdapter(WorkerAdapter):
     adapter emits the per-process ``-c model_providers.<id>={...}`` and
     ``-c model_provider="<id>"`` overrides that the Codex CLI
     ``rust-v0.147.0`` accepts to dynamically select a custom provider.
+
+    The direct (non-gateway) path additionally pins billing-relevant
+    configuration per invocation via ``-c`` overrides (highest config
+    precedence, above user and project ``config.toml`` layers), so user
+    or project config files can never change the billing of a worker
+    turn.  Key evidence, all verified against the installed Codex CLI
+    0.162.0 plus the official configuration reference
+    (https://developers.openai.com/codex/config-reference):
+    ``forced_login_method`` accepts ``chatgpt | api`` ("Restrict Codex to
+    a specific authentication method"); ``model_provider`` is a string
+    ("Provider id from model_providers (default: openai)"); the
+    ``-c key=value`` flag "override[s] a configuration value that would
+    otherwise be loaded from ``~/.codex/config.toml``" (``codex exec
+    --help``); ``service_tier="default"`` selects standard speed (the
+    installed binary's own app-server JSON schema,
+    ``TurnStartParams.serviceTierForTurn``: 'Use "default" for standard
+    speed'); and project ``.codex/`` layers load "only when you trust
+    the project" and can never override ``model_provider`` /
+    ``model_providers``.
 
     When the loopback URL of the bounded gateway bridge is also present,
     the adapter uses the bridge as the ``base_url`` so the bridge can
@@ -163,6 +205,10 @@ class CodexAdapter(WorkerAdapter):
         gateway_overrides = self._build_gateway_overrides(base_env)
         if gateway_overrides is not None:
             cmd.extend(gateway_overrides)
+        else:
+            # Direct path: pin billing-relevant configuration for this
+            # invocation only.  No persistent Codex config mutation.
+            cmd.extend(_DIRECT_COVERRIDE_FLAGS)
         # Hermetic child environment: only the allowlist plus the explicit
         # request overlay reach the child.  The overlay carries the non-secret
         # gateway control vars and bridge sentinel the Codex adapter consumes;

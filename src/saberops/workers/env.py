@@ -78,9 +78,20 @@ HARNESS_ENV_ADDITIONS: Mapping[str, tuple[str, ...]] = {
 #: Exact SaberOps-owned overlay names safe to forward to a native child.
 #: ``CLAUDE_CODE_DISABLE_FAST_MODE`` is set by ``workers/claude.py`` so the
 #: separately billed Fast mode can never be enabled for the selected
-#: subscription connection.
+#: subscription connection.  The three ``OPENCODE_*`` names are the only
+#: OpenCode server values SaberOps itself sets (see
+#: ``session_runtime.py``): the server username/password plus the inline
+#: server configuration the adapters build.  Every other ``OPENCODE_*`` name
+#: (``OPENCODE_CONFIG``, ``OPENCODE_CONFIG_DIR``, ``OPENCODE_MODEL``, ...)
+#: is dropped so ambient shell configuration can never change the
+#: provider/billing of a worker child; the OpenCode adapters overwrite
+#: ``OPENCODE_CONFIG_CONTENT`` with their own pinned value after building
+#: the environment.
 SABEROPS_OWNED_ENV_ALLOWLIST: tuple[str, ...] = (
     "CLAUDE_CODE_DISABLE_FAST_MODE",
+    "OPENCODE_SERVER_PASSWORD",
+    "OPENCODE_SERVER_USERNAME",
+    "OPENCODE_CONFIG_CONTENT",
 )
 
 #: SaberOps-owned overlay prefixes safe to forward to a native child.  The
@@ -93,11 +104,13 @@ SABEROPS_OWNED_ENV_ALLOWLIST: tuple[str, ...] = (
 #:   (``workers/opencode.py``, ``workers/antigravity.py``, ``workers/cline.py``);
 #: * ``_ORCH_`` -- the loopback bridge authorization sentinel
 #:   (``gateway/boundary.py``) and the Copilot MiniMax sentinel
-#:   (``workers/copilot.py``);
-#: * ``OPENCODE_`` -- the OpenCode server password/username/config injected by
-#:   ``session_runtime.py`` (and the same config key written by
-#:   ``model_access/model_verification.py`` and ``native_access.py``).
-SABEROPS_OWNED_ENV_PREFIXES: tuple[str, ...] = ("ORCH_", "_ORCH_", "OPENCODE_")
+#:   (``workers/copilot.py``).
+#:
+#: There is deliberately no ``OPENCODE_`` prefix entry: only the three
+#: exact ``OPENCODE_*`` names in :data:`SABEROPS_OWNED_ENV_ALLOWLIST` are
+#: forwarded, so ambient shell configuration (custom config paths, model
+#: selectors, inline config) can never reach a worker child.
+SABEROPS_OWNED_ENV_PREFIXES: tuple[str, ...] = ("ORCH_", "_ORCH_")
 
 #: The loopback bridge authorization sentinel.  SaberOps writes a fixed
 #: non-secret value under this name for the Codex gateway path only

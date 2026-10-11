@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 from collections.abc import Callable
 from typing import Any
@@ -23,7 +24,23 @@ from saberops.workers.instruction_compat import (
     instruction_compatibility_for_opencode_model,
 )
 
-__all__ = ["ORCH_PROMPT_ARG_LIMIT", "OpenCodeAdapter"]
+__all__ = ["ORCH_PROMPT_ARG_LIMIT", "OpenCodeAdapter", "opencode_provider_id"]
+
+
+def opencode_provider_id(model: str) -> str | None:
+    """Return the provider id from a ``<provider>/<model>`` identity.
+
+    OpenCode addresses every model as ``provider/model`` (see
+    ``opencode run --help``: "--model: model to use in the format of
+    provider/model").  The provider id is the billing boundary SaberOps
+    pins through ``enabled_providers``; a model without a provider prefix
+    cannot be pinned and must be refused.  Return ``None`` when there is
+    no usable prefix.
+    """
+    provider, separator, identifier = model.partition("/")
+    if not separator or not provider or not identifier:
+        return None
+    return provider
 
 
 class OpenCodeAdapter(WorkerAdapter):
@@ -108,6 +125,26 @@ class OpenCodeAdapter(WorkerAdapter):
                 outcome=DispatchOutcome.PROVIDER_OR_RUNTIME_FAILURE,
             )
 
+        provider = opencode_provider_id(request.model)
+        if provider is None:
+            detail = (
+                "OpenCode requires a provider/model identity "
+                f"(got {request.model!r}); without a provider prefix SaberOps "
+                "cannot pin billing through enabled_providers"
+            )
+            return WorkerResult(
+                provider=self.provider_name,
+                model=request.model,
+                status=AttemptStatus.FAILED,
+                summary=detail,
+                stdout="",
+                stderr=detail,
+                changed_paths=[],
+                has_changes=False,
+                error=detail,
+                outcome=DispatchOutcome.ELIGIBILITY_SKIP,
+            )
+
         if request.session_runtime is not None and self.runner is run_process:
             return request.session_runtime.run_opencode(request, self.opencode_bin)
 
@@ -151,6 +188,15 @@ class OpenCodeAdapter(WorkerAdapter):
         # supplied them in the request overlay.
         kwargs["env"] = hermetic_env("opencode", request.env)
         kwargs["inherit_env"] = False
+        # Billing pinning: the inline config outranks project and global
+        # config files, and ``enabled_providers`` is an allowlist, so only
+        # the selected model provider can serve this turn.  This assignment
+        # runs after the hermetic projection, so a shell-provided
+        # OPENCODE_CONFIG_CONTENT (or OPENCODE_CONFIG path override, which
+        # never reaches the child at all) can never change billing.
+        kwargs["env"]["OPENCODE_CONFIG_CONTENT"] = json.dumps(
+            {"enabled_providers": [provider]}
+        )
         if use_stdin:
             kwargs["input_text"] = request.task
 

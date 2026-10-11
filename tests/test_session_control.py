@@ -356,7 +356,10 @@ def test_native_resume_keeps_readonly_permissions_and_frozen_environment(
     req = WorkerRequest(
         "Manual reply",
         tmp_path,
-        "m",
+        # The OpenCode adapter pins billing through ``enabled_providers``
+        # and requires a ``<provider>/<model>`` identity; the other
+        # adapters accept a bare model name.
+        "test/m" if provider == "opencode" else "m",
         env={"ORCH_EXECUTION_BINDING_ID": "same"},
         read_only=True,
         persist_native_session=True,

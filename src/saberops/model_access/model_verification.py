@@ -70,14 +70,24 @@ def verify_native_model(
         if backend == "opencode":
             agent = "saberops-access-check"
             # A dedicated agent overrides ambient build/plan permissions. Pure
-            # disables plugins. No user's config or credential file is read.
-            env["OPENCODE_CONFIG_CONTENT"] = json.dumps({
+            # disables plugins. The check runs in an empty temporary
+            # directory, so no project config loads; the inline config
+            # below outranks the user's global config file.
+            access_config: dict[str, Any] = {
                 "permission": "deny", "share": "disabled",
                 # steps=1 injects OpenCode's final-step summary instruction
                 # before the first response, overriding the challenge prompt.
                 "agent": {agent: {"mode": "primary", "steps": 2,
                                   "permission": "deny", "prompt": prompt}},
-            })
+            }
+            # Pin billing to the checked model's provider when the model
+            # carries a provider prefix (inline config outranks project and
+            # global config files).  Prefix-less models keep the previous
+            # behaviour: no allowlist is added.
+            provider, separator, _ = model.partition("/")
+            if separator and provider:
+                access_config["enabled_providers"] = [provider]
+            env["OPENCODE_CONFIG_CONTENT"] = json.dumps(access_config)
             argv = [executable, "run", prompt, "--model", model, "--dir", directory,
                     "--pure", "--agent", agent, "--format", "json"]
         else:

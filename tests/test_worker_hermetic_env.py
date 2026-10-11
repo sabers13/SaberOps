@@ -67,6 +67,13 @@ def _adapter_for(harness: str, binary: str) -> Any:
     raise AssertionError(harness)
 
 
+def _model_for(harness: str) -> str:
+    # The OpenCode adapter pins billing through ``enabled_providers`` and
+    # therefore requires a ``<provider>/<model>`` identity; every other
+    # harness accepts a bare model name.
+    return "opencode-go/test-model" if harness == "opencode" else "model"
+
+
 # ---------------------------------------------------------------------------
 # Unit tests for :func:`hermetic_env`.
 # ---------------------------------------------------------------------------
@@ -287,7 +294,7 @@ def test_non_codex_adapters_never_see_gateway_env(
     name = f"stub-{harness}"
     _write_stub(bindir, name, outfile)
     adapter = _adapter_for(harness, name)
-    adapter.run(WorkerRequest("task", tmp_path, "model", env=dict(GATEWAY_OVERLAY)))
+    adapter.run(WorkerRequest("task", tmp_path, _model_for(harness), env=dict(GATEWAY_OVERLAY)))
     child = _child_env(outfile)
     _assert_hermetic(child, home)
     for key in GATEWAY_OVERLAY:
@@ -318,7 +325,7 @@ def test_production_shaped_overlay_is_hermetic(
     # The overlay really does carry ambient canaries in production shape.
     assert any(canary in production_env for canary in CANARIES)
     adapter = _adapter_for(harness, name)
-    adapter.run(WorkerRequest("task", tmp_path, "model", env=production_env))
+    adapter.run(WorkerRequest("task", tmp_path, _model_for(harness), env=production_env))
     child = _child_env(outfile)
     _assert_hermetic(child, home)
     assert child["ORCH_RUN_ID"] == "run-1"
