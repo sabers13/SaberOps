@@ -24,7 +24,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from saberops.config import (
     DEFAULT_REVIEW_LIMIT,
@@ -101,8 +100,6 @@ class RunRequest:
     review_limit: int = DEFAULT_REVIEW_LIMIT
     publish_candidate: bool | None = None
     tool_refs: tuple[str, ...] = ()
-    gateway_frozen_config: dict[str, Any] | None = None
-    gateway_frozen_digest: str | None = None
     tier: Tier | str | None = None
 
 
@@ -375,8 +372,6 @@ def resolve_effective_run_config(request: RunRequest) -> RunConfig:
             review_policy_mode=review_policy_mode,
             publish_candidate=request.publish_candidate,
             tool_refs=request.tool_refs,
-            gateway_frozen_config=request.gateway_frozen_config,
-            gateway_frozen_digest=request.gateway_frozen_digest,
             tier=request.tier,
             gate_scratch_mode=gate_scratch_mode,
             accept_target_branch=target_branch,

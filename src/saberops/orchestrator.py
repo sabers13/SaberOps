@@ -76,18 +76,6 @@ from saberops.dispatch import (
 )
 from saberops.dispatch import control_plane_decision as control_plane_decision
 from saberops.execution_failover import FailoverEngine
-from saberops.gateway import (
-    AffinityHint,
-    ExecutionDisposition,
-    FrozenGatewayConfig,
-    GatewayExecutionOutcome,
-    GatewayLiveState,
-    GatewayLiveStateProvider,
-    GatewayTransport,
-    reconstruct_frozen_gateway_config,
-    run_worker_with_gateway_boundary,
-    serialize_dispatch_evidence,
-)
 from saberops.git import (
     CandidatePublication,
     CandidatePublicationError,
@@ -221,9 +209,9 @@ WORKER_ACTIVITY_TOUCH_MIN_INTERVAL_SECONDS: float = 5.0
 _WORKER_ENV_SECRET_KEYS = {"OMNIROUTE_API_KEY"}
 
 # Reserved gateway-control variables that must be stripped from the parent
-# environment before building every WorkerRequest. The DIRECT path must be
-# immune to stale/malicious values; only the gateway boundary may explicitly
-# add approved values for a genuine gateway dispatch.
+# environment before building every WorkerRequest. The gateway cut removed
+# the gateway boundary, so these names are never set anymore; stripping
+# them keeps the DIRECT path immune to stale/malicious values.
 _RESERVED_GATEWAY_ENV_VARS = frozenset(
     {
         "ORCH_GATEWAY_ENDPOINT",
@@ -275,36 +263,21 @@ class _ReadinessProvider(Protocol):
 def _filtered_worker_env(
     base: dict[str, str],
     *,
-    authorization_env_var: str | None = None,
     strip_gateway_vars: bool = True,
 ) -> dict[str, str]:
     """Return a copy of ``base`` with secret-bearing keys removed.
 
-    The real OmniRoute token is resolved by the loopback bridge at
-    forwarding time from the host environment, never from the worker's
-    persisted request. This helper ensures the token never enters
-    ``WorkerRequest.env`` or any durable evidence.
-
-    ``authorization_env_var`` is the configured non-secret env-var *name*
-    for this run (e.g. ``OMNIROUTE_API_KEY`` or a custom ``TEST_CUSTOM_…``).
-    The helper dynamically scrubs that exact name, not only the hardcoded
-    default.
+    Secret-bearing keys never enter ``WorkerRequest.env`` or durable
+    evidence.  ``OMNIROUTE_API_KEY`` stays scrubbed by default; the
+    direct-API execution path resolves its configured key outside the
+    persisted request.
     """
 
-    # Dynamically scrub the configured authorization env-var for this run
     secret_keys = set(_WORKER_ENV_SECRET_KEYS)
-    if authorization_env_var:
-        secret_keys.add(authorization_env_var.strip())
     filtered = {k: v for k, v in base.items() if k not in secret_keys}
     if strip_gateway_vars:
         filtered = {k: v for k, v in filtered.items() if k not in _RESERVED_GATEWAY_ENV_VARS}
     return filtered
-
-
-def _gateway_authorization_env_for(frozen_gateway: FrozenGatewayConfig | None) -> str | None:
-    if frozen_gateway is None or not frozen_gateway.enabled:
-        return None
-    return getattr(frozen_gateway, "authorization_env_var", None) or "OMNIROUTE_API_KEY"
 
 
 def _telemetry_total(records: list[dict[str, object]], key: str) -> int:
@@ -1011,8 +984,6 @@ class Orchestrator:
         default_worker: WorkerAdapter | None = None,
         worktree_base: Path | None = None,
         tool_registry: ToolRegistry | None = None,
-        gateway_transport: GatewayTransport | None = None,
-        gateway_live_state_provider: GatewayLiveStateProvider | None = None,
         readiness_service: _ReadinessProvider | None = None,
     ) -> None:
         self.db = db or Database()
@@ -1024,8 +995,6 @@ class Orchestrator:
             self.registry = AdapterRegistry.default()
         self.worktree_base = worktree_base
         self.tool_registry = tool_registry or ToolRegistry.from_environment()
-        self.gateway_transport = gateway_transport
-        self.gateway_live_state_provider = gateway_live_state_provider
         # ``None`` here is an explicit test/compatibility-only
         # disable of readiness admission (legacy hermetic unit scope).
         # Production construction never passes ``None``: the
@@ -2048,7 +2017,6 @@ class Orchestrator:
         routing_payload: dict[str, Any] | None = None
         frozen_control_plane: FrozenControlPlane
         frozen_tools: FrozenToolContract
-        frozen_gateway: FrozenGatewayConfig | None = None
         # The run's own authoritative base_commit, captured once the run
         # is resolved below; used only when ``is_adoption`` is True.
         adopted_base_commit: str = ""
@@ -2261,14 +2229,6 @@ class Orchestrator:
             else:
                 routing_snapshot = load_packaged_default()
                 routing_payload = snapshot_to_payload(routing_snapshot, adopted.created_at)
-            # Reconstruct the frozen gateway contract from the run row.
-            # Live infrastructure observations (health, quota) are NOT frozen
-            # here -- the dispatcher reads those at the per-dispatch boundary.
-            if adopted.gateway_snapshot_json is not None:
-                frozen_gateway = reconstruct_frozen_gateway_config(
-                    json.loads(adopted.gateway_snapshot_json),
-                    expected_digest=adopted.gateway_snapshot_digest,
-                )
         else:
             # New run: load effective routing once before creation (fail-closed)
             routing_snapshot = load_effective_routing()
@@ -2298,15 +2258,6 @@ class Orchestrator:
             effective_run_id = provenance.run_id
             routing_payload = snapshot_to_payload(routing_snapshot, created_at)
             frozen_tools = freeze_tool_contract(config.tool_refs, self.tool_registry)
-            # Freeze the optional gateway contract and persist it on
-            # the run row.  When ``RunConfig`` does not carry a frozen
-            # gateway, the dispatcher is DIRECT and no gateway evidence is
-            # recorded at the dispatch boundary.
-            if config.gateway_frozen_config is not None:
-                frozen_gateway = reconstruct_frozen_gateway_config(
-                    config.gateway_frozen_config,
-                    expected_digest=config.gateway_frozen_digest,
-                )
             run = Run(
                 id=effective_run_id,
                 task=task,
@@ -2326,12 +2277,6 @@ class Orchestrator:
                 project_id=provenance.project_id,
                 project_identity_json=provenance.identity.to_json(),
                 objective_id=provenance.objective_id,
-                gateway_snapshot_json=(
-                    frozen_gateway.as_json() if frozen_gateway is not None else None
-                ),
-                gateway_snapshot_digest=(
-                    frozen_gateway.digest if frozen_gateway is not None else None
-                ),
             )
             with measure_phase(
                 self.db,
@@ -3639,39 +3584,25 @@ class Orchestrator:
                         )
 
                 # An exact GATEWAY binding must never be allowed to reach
-                # the ordinary boundary fallback path.  Reject static
-                # gateway unsatisfiability before worktree/Attempt creation;
-                # live health and quota observations remain boundary-owned.
+                # the ordinary boundary fallback path.  The gateway cut
+                # removed the gateway boundary, so no GATEWAY binding can
+                # be satisfied anymore: reject it before worktree/Attempt
+                # creation with zero launch.
                 if supervisor is not None and auto_resolved is not None:
                     if auto_resolved.backend is BindingKind.GATEWAY:
-                        gateway_adapter = self.registry.get(candidate.provider)
-                        gateway_reason: str | None = None
-                        if frozen_gateway is None or not frozen_gateway.enabled:
-                            gateway_reason = "gateway_binding_without_enabled_gateway"
-                        elif not frozen_gateway.endpoint:
-                            gateway_reason = "gateway_binding_without_endpoint"
-                        elif not bool(
-                            getattr(
-                                gateway_adapter,
-                                "c10_gateway_transport_capabilities",
-                                frozenset(),
-                            )
-                        ):
-                            gateway_reason = "adapter_gateway_unsupported"
-                        if gateway_reason is not None:
-                            self.db.record_event(
-                                run_id,
-                                "autonomous_gateway_binding_unsatisfied",
-                                payload={
-                                    **auto_decision.as_dict(),
-                                    "reason": gateway_reason,
-                                },
-                            )
-                            return _autonomous_stop(
-                                "Autonomous GATEWAY binding cannot be satisfied "
-                                f"before launch ({gateway_reason}); zero launch.",
-                                SupervisorStopReason.NO_ELIGIBLE_BINDING.value,
-                            )
+                        self.db.record_event(
+                            run_id,
+                            "autonomous_gateway_binding_unsatisfied",
+                            payload={
+                                **auto_decision.as_dict(),
+                                "reason": "gateway_removed",
+                            },
+                        )
+                        return _autonomous_stop(
+                            "Autonomous GATEWAY binding cannot be satisfied "
+                            "(gateway removed); zero launch.",
+                            SupervisorStopReason.NO_ELIGIBLE_BINDING.value,
+                        )
 
                 # Assemble final prompt BEFORE creating attempt/worktree for eligibility preflight.
                 #
@@ -4629,7 +4560,6 @@ class Orchestrator:
                                 else {}
                             ),
                         },
-                        authorization_env_var=_gateway_authorization_env_for(frozen_gateway),
                     ),
                 )
                 # Evidence is authoritative only for an actual launch: this
@@ -4743,72 +4673,15 @@ class Orchestrator:
                         dispatch_evidence.time_to_resume_seconds = (
                             linked_dispatch.time_to_resume_seconds
                         )
-                # Consult the optional gateway before invoking
-                # the worker.  Live infrastructure observations (health,
-                # quota, pool, affinity) are read per dispatch via the
-                # injectable gateway-owned provider and are NOT frozen.
-                live_state = GatewayLiveState()
-                if frozen_gateway is not None and frozen_gateway.enabled:
-                    if self.gateway_live_state_provider is not None:
-                        try:
-                            live_state = self.gateway_live_state_provider.get_live_state(
-                                provider=candidate.provider,
-                                model=candidate.model,
-                                run_id=run_id,
-                            )
-                        except Exception:
-                            live_state = GatewayLiveState()
-                # The executed transport path must agree with the
-                # exact binding's backend.  DIRECT_CLI never traverses
-                # the gateway (pure DIRECT dispatch); GATEWAY executes
-                # only through the existing gateway boundary with direct
-                # fallback forbidden for this dispatch (a GATEWAY
-                # binding never silently degrades to DIRECT even when
-                # ordinary fallback would permit it) and with the
-                # binding's account pin supplied as the gateway affinity
-                # hint where one exists. DIRECT_API also stays on
-                # its exact direct connection. Ordinary dispatches keep the
-                # run-configured gateway behavior verbatim.
-                gateway_frozen = frozen_gateway
-                gateway_endpoint = frozen_gateway.endpoint if frozen_gateway is not None else None
-                gateway_accounts = frozen_gateway.accounts if frozen_gateway is not None else ()
-                gateway_supports = bool(
-                    getattr(adapter, "c10_gateway_transport_capabilities", frozenset())
-                )
-                gateway_hint = live_state.affinity_hint
-                # When True the boundary must not be invoked at all for
-                # this dispatch (GATEWAY binding with no enabled frozen
-                # gateway): the typed FAILED result below carries zero
-                # worker launch.
-                gateway_unsatisfied = False
-                if auto_resolved is not None and auto_resolved.backend in (
-                    BindingKind.DIRECT_CLI, BindingKind.DIRECT_API
-                ):
-                    gateway_frozen = None
-                    gateway_endpoint = None
-                    gateway_accounts = ()
-                    gateway_supports = False
-                elif auto_resolved is not None and (auto_resolved.backend is BindingKind.GATEWAY):
-                    if frozen_gateway is None or not frozen_gateway.enabled:
-                        gateway_unsatisfied = True
-                    else:
-                        gateway_frozen = _frozen_replace(
-                            frozen_gateway, direct_fallback_allowed=False
-                        )
-                        if auto_resolved.gateway_account_pin:
-                            gateway_hint = AffinityHint(
-                                run_id=run_id,
-                                provider=candidate.provider,
-                                model=candidate.model,
-                                account_id=auto_resolved.gateway_account_pin,
-                                created_at=current_iso_timestamp(),
-                            )
-                worker_res: WorkerResult | None = None
-                gateway_evidence = None
-                if gateway_unsatisfied:
+                # Direct dispatch only.  The gateway cut removed the
+                # gateway boundary: every binding executes through its
+                # exact adapter.  A GATEWAY-backend binding can no longer
+                # be satisfied and fails closed here with zero worker
+                # launch.
+                if auto_resolved is not None and auto_resolved.backend is BindingKind.GATEWAY:
                     assert auto_resolved is not None
                     unsatisfied_payload: dict[str, Any] = {
-                        "reason": "gateway_binding_without_enabled_gateway",
+                        "reason": "gateway_removed",
                         "binding_id": auto_resolved.binding_id,
                         "provider": candidate.provider,
                         "model": candidate.model,
@@ -4825,152 +4698,26 @@ class Orchestrator:
                         model=candidate.model,
                         status=AttemptStatus.FAILED,
                         summary=(
-                            "GATEWAY binding unsatisfiable: no enabled frozen gateway contract"
+                            "GATEWAY binding unsatisfiable: gateway removed"
                         ),
                         stdout="",
                         stderr="",
                         error=(
-                            "GATEWAY binding unsatisfiable: no enabled "
-                            "frozen gateway contract; zero worker launch"
+                            "GATEWAY binding unsatisfiable: gateway removed; "
+                            "zero worker launch"
                         ),
                         outcome=DispatchOutcome.PROVIDER_OR_RUNTIME_FAILURE,
                     )
-                    gateway_outcome = None
                 else:
-                    gateway_outcome = run_worker_with_gateway_boundary(
-                        frozen_gateway=gateway_frozen,
-                        endpoint=gateway_endpoint,
-                        base_request=worker_req,
-                        provider=candidate.provider,
-                        model=candidate.model,
-                        run_adapter=self._bound_adapter_run(
-                            adapter,
-                            autonomous=autonomous,
-                            attempt_id=attempt_id,
-                            run_id=run_id,
-                            repo_root=str(wt_path),
-                            provider=candidate.provider,
-                            model=candidate.model,
-                        ),
-                        adapter_supports_gateway=gateway_supports,
-                        accounts=gateway_accounts,
-                        health_state=live_state.health_state,
-                        affinity_hint=gateway_hint,
-                        quota_observations=live_state.quota_observations,
-                        pool_observations=live_state.pool_observations,
-                    )
-                    worker_req = gateway_outcome.worker_request
-                    worker_res = gateway_outcome.worker_result
-                    gateway_evidence = gateway_outcome.gateway_evidence
-                if (
-                    auto_resolved is not None
-                    and auto_resolved.backend is BindingKind.GATEWAY
-                    and gateway_outcome is not None
-                    and gateway_outcome.disposition
-                    in (
-                        ExecutionDisposition.DIRECT,
-                        ExecutionDisposition.SAFE_DIRECT_FALLBACK,
-                    )
-                ):
-                    # Defense in depth (unreachable while fallback is
-                    # forced off above): a GATEWAY binding that somehow
-                    # executed DIRECT is a backend violation, never a
-                    # success.  Terminalize the attempt as failed.
-                    violation_payload: dict[str, Any] = {
-                        "disposition": gateway_outcome.disposition.value,
-                        "binding_id": auto_resolved.binding_id,
-                        "provider": candidate.provider,
-                        "model": candidate.model,
-                    }
-                    if supervisor is not None:
-                        violation_payload.update(auto_decision.as_dict())
-                    self.db.record_event(
-                        run_id,
-                        "autonomous_binding_backend_violation",
-                        payload=violation_payload,
-                    )
-                    worker_res = WorkerResult(
-                        provider=candidate.provider,
-                        model=candidate.model,
-                        status=AttemptStatus.FAILED,
-                        summary="GATEWAY binding executed DIRECT",
-                        stdout=(
-                            gateway_outcome.worker_result.stdout
-                            if gateway_outcome.worker_result is not None
-                            else ""
-                        ),
-                        stderr=(
-                            gateway_outcome.worker_result.stderr
-                            if gateway_outcome.worker_result is not None
-                            else ""
-                        ),
-                        error=(
-                            "binding backend violation: GATEWAY binding "
-                            "executed outside the gateway boundary"
-                        ),
-                        outcome=DispatchOutcome.PROVIDER_OR_RUNTIME_FAILURE,
-                    )
-                    gateway_evidence = gateway_outcome.gateway_evidence
-                if gateway_evidence is not None:
-                    dispatch_evidence.gateway_evidence_json = serialize_dispatch_evidence(
-                        gateway_evidence
-                    )
-                if gateway_outcome is not None and (
-                    gateway_outcome.disposition == ExecutionDisposition.GATEWAY_BLOCKED
-                ):
-                    # The worker is not invoked when the gateway
-                    # blocks the dispatch. Synthesize a typed failed
-                    # WorkerResult so the downstream orchestrator code can
-                    # proceed uniformly. Preserve the actual failure reason
-                    # (adapter unsupported, endpoint missing, account
-                    # unavailable, quota, auth, mismatch, etc.) — do not
-                    # collapse every block into adapter_gateway_unsupported.
-                    actual_reason = "gateway_blocked"
-                    actual_error_kind = None
-                    if gateway_evidence is not None:
-                        if gateway_evidence.error is not None:
-                            actual_reason = gateway_evidence.error.message or actual_reason
-                            actual_error_kind = (
-                                gateway_evidence.error.kind.value
-                                if gateway_evidence.error.kind
-                                else None
-                            )
-                        else:
-                            actual_reason = (
-                                gateway_evidence.evidence.get("reason")
-                                or gateway_evidence.evidence.get("fallback_reason")
-                                or gateway_evidence.evidence.get("pre_launch_error")
-                                or actual_reason
-                            )
-                    # Fallback to outcome's evidence reason if still generic
-                    if actual_reason == "gateway_blocked" and gateway_evidence is not None:
-                        actual_reason = gateway_evidence.evidence.get("reason", actual_reason)
-                    worker_res = WorkerResult(
-                        provider=candidate.provider,
-                        model=candidate.model,
-                        status=AttemptStatus.FAILED,
-                        summary="Gateway blocked dispatch",
-                        stdout="",
-                        stderr="",
-                        error=(f"Gateway execution blocked: {actual_reason}"),
-                        outcome=DispatchOutcome.PROVIDER_OR_RUNTIME_FAILURE,
-                    )
-                    payload_gb: dict[str, Any] = {
-                        "provider": candidate.provider,
-                        "model": candidate.model,
-                        "disposition": gateway_outcome.disposition.value,
-                        "reason": actual_reason,
-                    }
-                    if actual_error_kind is not None:
-                        payload_gb["error_kind"] = actual_error_kind
-                    if gateway_evidence is not None:
-                        payload_gb["gateway_evidence"] = gateway_evidence.evidence
-                    self.db.record_event(
-                        run_id,
-                        "gateway_blocked",
+                    worker_res = self._bound_adapter_run(
+                        adapter,
+                        autonomous=autonomous,
                         attempt_id=attempt_id,
-                        payload=payload_gb,
-                    )
+                        run_id=run_id,
+                        repo_root=str(wt_path),
+                        provider=candidate.provider,
+                        model=candidate.model,
+                    )(worker_req)
                 assert worker_res is not None
                 if (
                     worker_res.status is AttemptStatus.SUCCESS
@@ -6339,9 +6086,6 @@ class Orchestrator:
                                                     else {}
                                                 ),
                                             },
-                                            authorization_env_var=_gateway_authorization_env_for(
-                                                frozen_gateway
-                                            ),
                                         ),
                                     )
                                     self.db.record_event(
@@ -6480,70 +6224,16 @@ class Orchestrator:
                                             repair_dispatch_evidence.time_to_resume_seconds = (
                                                 linked_dispatch.time_to_resume_seconds
                                             )
-                                    # Consult the optional gateway before
-                                    # invoking the repair worker. Live state
-                                    # is read per dispatch via the injectable
-                                    # provider and never frozen.
-                                    live_state_rep = GatewayLiveState()
-                                    if frozen_gateway is not None and frozen_gateway.enabled:
-                                        if self.gateway_live_state_provider is not None:
-                                            try:
-                                                live_state_rep = (
-                                                    self.gateway_live_state_provider.get_live_state(
-                                                        provider=cand_provider,
-                                                        model=cand_model,
-                                                        run_id=run_id,
-                                                    )
-                                                )
-                                            except Exception:
-                                                live_state_rep = GatewayLiveState()
-                                    repair_gateway = frozen_gateway
-                                    repair_gateway_endpoint = (
-                                        frozen_gateway.endpoint
-                                        if frozen_gateway is not None
-                                        else None
-                                    )
-                                    repair_gateway_accounts = (
-                                        frozen_gateway.accounts
-                                        if frozen_gateway is not None
-                                        else ()
-                                    )
-                                    repair_gateway_supports = bool(
-                                        getattr(
-                                            cur_adapter,
-                                            "c10_gateway_transport_capabilities",
-                                            frozenset(),
-                                        )
-                                    )
-                                    repair_gateway_hint = live_state_rep.affinity_hint
-                                    repair_gateway_unsatisfied = False
-                                    if repair_resolved is not None:
-                                        if repair_resolved.backend in (
-                                            BindingKind.DIRECT_CLI, BindingKind.DIRECT_API
-                                        ):
-                                            repair_gateway = None
-                                            repair_gateway_endpoint = None
-                                            repair_gateway_accounts = ()
-                                            repair_gateway_supports = False
-                                        elif repair_resolved.backend is BindingKind.GATEWAY:
-                                            if frozen_gateway is None or not frozen_gateway.enabled:
-                                                repair_gateway_unsatisfied = True
-                                            else:
-                                                repair_gateway = _frozen_replace(
-                                                    frozen_gateway,
-                                                    direct_fallback_allowed=False,
-                                                )
-                                                if repair_resolved.gateway_account_pin:
-                                                    repair_gateway_hint = AffinityHint(
-                                                        run_id=run_id,
-                                                        provider=cand_provider,
-                                                        model=cand_model,
-                                                        account_id=(
-                                                            repair_resolved.gateway_account_pin
-                                                        ),
-                                                        created_at=current_iso_timestamp(),
-                                                    )
-                                    if repair_gateway_unsatisfied:
+                                    # Direct dispatch only.  The gateway cut
+                                    # removed the gateway boundary: the
+                                    # repair worker runs through its exact
+                                    # adapter.  A GATEWAY-backend binding can
+                                    # no longer be satisfied and fails closed
+                                    # here with zero worker launch.
+                                    if (
+                                        repair_resolved is not None
+                                        and repair_resolved.backend is BindingKind.GATEWAY
+                                    ):
                                         self.db.record_event(
                                             run_id,
                                             "autonomous_gateway_binding_unsatisfied",
@@ -6554,105 +6244,36 @@ class Orchestrator:
                                                     if repair_resolved is not None
                                                     else None
                                                 ),
-                                                "reason": "gateway_binding_without_enabled_gateway",
+                                                "reason": "gateway_removed",
                                                 "role": DispatchRole.REPAIR.value,
                                             },
                                         )
-                                        rep_outcome = GatewayExecutionOutcome(
-                                            worker_request=w_req,
-                                            worker_result=WorkerResult(
-                                                provider=cand_provider,
-                                                model=cand_model,
-                                                status=AttemptStatus.FAILED,
-                                                summary=(
-                                                    "GATEWAY binding unsatisfiable: no enabled "
-                                                    "frozen gateway contract"
-                                                ),
-                                                stdout="",
-                                                stderr="",
-                                                error=(
-                                                    "GATEWAY binding unsatisfiable: no enabled "
-                                                    "frozen gateway contract; zero worker launch"
-                                                ),
-                                                outcome=DispatchOutcome.PROVIDER_OR_RUNTIME_FAILURE,
-                                            ),
-                                            gateway_evidence=None,
-                                            disposition=ExecutionDisposition.GATEWAY_BLOCKED,
-                                            worker_invoked=False,
-                                        )
-                                    else:
-                                        rep_outcome = run_worker_with_gateway_boundary(
-                                            frozen_gateway=repair_gateway,
-                                            endpoint=repair_gateway_endpoint,
-                                            base_request=w_req,
-                                            provider=cand_provider,
-                                            model=cand_model,
-                                            run_adapter=self._bound_adapter_run(
-                                                cur_adapter,
-                                                autonomous=autonomous,
-                                                attempt_id=local_attempt_id,
-                                                run_id=run_id,
-                                                repo_root=str(local_wt_path),
-                                                provider=cand_provider,
-                                                model=cand_model,
-                                            ),
-                                            adapter_supports_gateway=repair_gateway_supports,
-                                            accounts=repair_gateway_accounts,
-                                            health_state=live_state_rep.health_state,
-                                            affinity_hint=repair_gateway_hint,
-                                            quota_observations=live_state_rep.quota_observations,
-                                            pool_observations=live_state_rep.pool_observations,
-                                        )
-                                    w_req = rep_outcome.worker_request
-                                    gateway_evidence_rep = rep_outcome.gateway_evidence
-                                    if gateway_evidence_rep is not None:
-                                        repair_dispatch_evidence.gateway_evidence_json = (
-                                            serialize_dispatch_evidence(gateway_evidence_rep)
-                                        )
-                                    w_res: WorkerResult | None = rep_outcome.worker_result
-                                    if (
-                                        rep_outcome.disposition
-                                        == ExecutionDisposition.GATEWAY_BLOCKED
-                                    ):
-                                        actual_reason_rep = "gateway_blocked"
-                                        if gateway_evidence_rep is not None:
-                                            if gateway_evidence_rep.error is not None:
-                                                actual_reason_rep = (
-                                                    gateway_evidence_rep.error.message
-                                                    or actual_reason_rep
-                                                )
-                                            else:
-                                                actual_reason_rep = (
-                                                    gateway_evidence_rep.evidence.get("reason")
-                                                    or gateway_evidence_rep.evidence.get(
-                                                        "fallback_reason"
-                                                    )
-                                                    or actual_reason_rep
-                                                )
-                                        w_res = WorkerResult(
+                                        w_res: WorkerResult | None = WorkerResult(
                                             provider=cand_provider,
                                             model=cand_model,
                                             status=AttemptStatus.FAILED,
-                                            summary="Gateway blocked repair dispatch",
+                                            summary=(
+                                                "GATEWAY binding unsatisfiable: "
+                                                "gateway removed"
+                                            ),
                                             stdout="",
                                             stderr="",
                                             error=(
-                                                f"Gateway execution blocked: {actual_reason_rep}"  # noqa: E501
+                                                "GATEWAY binding unsatisfiable: "
+                                                "gateway removed; zero worker launch"
                                             ),
                                             outcome=DispatchOutcome.PROVIDER_OR_RUNTIME_FAILURE,
                                         )
-                                        # Record blocked event for repair as well
-                                        self.db.record_event(
-                                            run_id,
-                                            "gateway_blocked",
+                                    else:
+                                        w_res = self._bound_adapter_run(
+                                            cur_adapter,
+                                            autonomous=autonomous,
                                             attempt_id=local_attempt_id,
-                                            payload={
-                                                "provider": cand_provider,
-                                                "model": cand_model,
-                                                "disposition": rep_outcome.disposition.value,
-                                                "reason": actual_reason_rep,
-                                            },
-                                        )
+                                            run_id=run_id,
+                                            repo_root=str(local_wt_path),
+                                            provider=cand_provider,
+                                            model=cand_model,
+                                        )(w_req)
                                     assert w_res is not None
                                     if (
                                         w_res.status is AttemptStatus.SUCCESS

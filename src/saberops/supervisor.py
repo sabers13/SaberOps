@@ -196,9 +196,6 @@ class RunSupervisor:
             freeze_control_plane_policy,
             load_control_plane_policy,
         )
-        from saberops.gateway import (
-            reconstruct_frozen_gateway_config,
-        )
         from saberops.parallel_work import validate_team_child, validate_work_config
         from saberops.routing_config import (
             load_effective_routing,
@@ -269,18 +266,10 @@ class RunSupervisor:
                 host_access=load_authority_settings().host_access.value,
             )
             frozen_tools = freeze_tool_contract(config.tool_refs, self.tool_registry)
-        # Freeze the optional gateway contract.  When ``RunConfig`` does
-        # not carry a frozen config, the run uses the first-class DIRECT
-        # path and no gateway evidence is recorded.
-        gateway_snapshot_json: str | None = None
-        gateway_snapshot_digest: str | None = None
-        if config.gateway_frozen_config:
-            frozen_gateway = reconstruct_frozen_gateway_config(
-                config.gateway_frozen_config,
-                expected_digest=config.gateway_frozen_digest,
-            )
-            gateway_snapshot_json = frozen_gateway.as_json()
-            gateway_snapshot_digest = frozen_gateway.digest
+        # The gateway cut removed the frozen gateway contract: new runs
+        # never write a gateway snapshot, and continuations no longer
+        # inherit one.  Legacy rows that carry a snapshot stay readable
+        # in the database and in observability snapshots.
         run = Run(
             id=run_id,
             task=config.task,
@@ -300,8 +289,6 @@ class RunSupervisor:
             project_id=provenance.project_id,
             project_identity_json=provenance.identity.to_json(),
             objective_id=provenance.objective_id,
-            gateway_snapshot_json=gateway_snapshot_json,
-            gateway_snapshot_digest=gateway_snapshot_digest,
         )
         if frozen_source:
             parent = frozen_source
@@ -310,8 +297,6 @@ class RunSupervisor:
             run.control_plane_snapshot_digest = parent.control_plane_snapshot_digest
             run.tool_contract_json = parent.tool_contract_json
             run.tool_contract_digest = parent.tool_contract_digest
-            run.gateway_snapshot_json = parent.gateway_snapshot_json
-            run.gateway_snapshot_digest = parent.gateway_snapshot_digest
         try:
             self.db.create_run(run)
         except ContinuationExists as exc:

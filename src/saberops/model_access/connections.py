@@ -897,7 +897,12 @@ def default_account_connections(*, owner: str = "") -> tuple[ProviderConnection,
 #: OmniRoute's default local OpenAI-compatible base URL.
 OMNIROUTE_DEFAULT_ENDPOINT = "http://127.0.0.1:20128/v1"
 #: Presets whose endpoint may run without an API key (local servers).
-_NO_AUTH_PRESETS: frozenset[str] = frozenset({"local-openai-compatible", "omniroute"})
+#: OmniRoute is deliberately NOT in this set: it is a metered,
+#: API-key-billed route (METERED_KEY posture), so a connection without
+#: an explicit ``env:`` credential reference is unconfigured and must
+#: be refused at every execution boundary.  Only genuinely local
+#: servers may run keyless.
+_NO_AUTH_PRESETS: frozenset[str] = frozenset({"local-openai-compatible"})
 
 
 def is_virtual_route(provider: str, model_id: str) -> bool:
@@ -959,7 +964,10 @@ _PRESET_DEFAULTS: dict[str, dict[str, Any]] = {
         "endpoint": OMNIROUTE_DEFAULT_ENDPOINT,
         "model": "",
         "notes": (
-            "OmniRoute gateway over the generic OpenAI-compatible protocol. "
+            "OmniRoute route over the generic OpenAI-compatible protocol, "
+            "executed via workers/direct_api.py (never via saberops.gateway). "
+            "Metered API-key posture: an explicit env: credential reference "
+            "is required; keyless connections are unconfigured and refused. "
             "Virtual auto/* routes are listed but never routed: SaberOps "
             "needs the exact model.",
         ),

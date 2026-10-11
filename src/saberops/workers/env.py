@@ -99,12 +99,14 @@ SABEROPS_OWNED_ENV_ALLOWLIST: tuple[str, ...] = (
 #: * ``ORCH_`` -- orchestrator dispatch identity/tool keys
 #:   (``orchestrator.py``), executable-binding identity and profile selectors
 #:   (``control_plane/bindings.py``), the ``ORCH_MODEL_*`` / ``ORCH_BINDING_*``
-#:   reason vocabulary, gateway-control names (``gateway/dispatch.py``,
-#:   ``gateway/boundary.py``), and adapter profile selectors
+#:   reason vocabulary, and adapter profile selectors
 #:   (``workers/opencode.py``, ``workers/antigravity.py``, ``workers/cline.py``);
-#: * ``_ORCH_`` -- the loopback bridge authorization sentinel
-#:   (``gateway/boundary.py``) and the Copilot MiniMax sentinel
-#:   (``workers/copilot.py``).
+#: * ``_ORCH_`` -- the Copilot MiniMax sentinel (``workers/copilot.py``).
+#:
+#: The removed gateway seam formerly emitted ``ORCH_GATEWAY_*`` control
+#: names under the ``ORCH_`` prefix and a loopback bridge sentinel under
+#: ``_ORCH_``; those names are now denied for every harness (see
+#: :func:`_overlay_denied`), so stale values can never reach a child.
 #:
 #: There is deliberately no ``OPENCODE_`` prefix entry: only the three
 #: exact ``OPENCODE_*`` names in :data:`SABEROPS_OWNED_ENV_ALLOWLIST` are
@@ -112,16 +114,14 @@ SABEROPS_OWNED_ENV_ALLOWLIST: tuple[str, ...] = (
 #: selectors, inline config) can never reach a worker child.
 SABEROPS_OWNED_ENV_PREFIXES: tuple[str, ...] = ("ORCH_", "_ORCH_")
 
-#: The loopback bridge authorization sentinel.  SaberOps writes a fixed
-#: non-secret value under this name for the Codex gateway path only
-#: (``gateway/boundary.py``); the real OmniRoute token is injected by the
-#: bridge at forwarding time and never travels in the child environment.
+#: The removed loopback bridge's authorization sentinel.  Denied for every
+#: harness: the gateway cut removed the bridge, so this name must never
+#: travel in a child environment again.
 _BRIDGE_AUTH_SENTINEL_ENV = "_ORCH_BRIDGE_AUTH_SENTINEL"
 
-#: Gateway-control prefix.  Only the Codex adapter is gateway-capable, so these
-#: names are denied for every other native harness even when present in the
-#: overlay (this restores the pre-hermetic claude behaviour, where
-#: ``ORCH_GATEWAY_*`` was stripped from the child environment).
+#: Gateway-control prefix from the removed gateway seam.  Denied for every
+#: native harness even when present in the overlay: ``ORCH_GATEWAY_*`` is
+#: simply not allowed for any harness.
 _GATEWAY_ENV_PREFIX = "ORCH_GATEWAY_"
 
 #: Existing credential denylists applied to the ``request.env`` overlay as
@@ -152,8 +152,8 @@ def _overlay_allowed(harness: str, key: str) -> bool:
 def _overlay_denied(harness: str, key: str) -> bool:
     """Return True when ``key`` is denied for ``harness`` (deny wins)."""
     if key == _BRIDGE_AUTH_SENTINEL_ENV:
-        return harness != "codex"
-    if key.startswith(_GATEWAY_ENV_PREFIX) and harness != "codex":
+        return True
+    if key.startswith(_GATEWAY_ENV_PREFIX):
         return True
     if any(
         key.startswith(prefix)

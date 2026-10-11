@@ -32,13 +32,26 @@ def api_connections() -> tuple[ProviderConnection, ...]:
 
 
 def supports_connection(connection: ProviderConnection) -> bool:
-    return (
-        not connection.is_account_backed
-        and connection.enabled
-        and connection.is_configured
-        and connection.protocol is AccessProtocol.OPENAI_COMPATIBLE
-        and (not connection.credential_ref or connection.credential_ref.startswith("env:"))
-    )
+    if (
+        connection.is_account_backed
+        or not connection.enabled
+        or not connection.is_configured
+        or connection.protocol is not AccessProtocol.OPENAI_COMPATIBLE
+    ):
+        return False
+    # OmniRoute is a metered API-key route (METERED_KEY posture): it is
+    # executable only with an explicit ``env:`` API-key credential
+    # reference.  A keyless (LOCAL_NO_AUTH or empty-ref) OmniRoute
+    # connection -- including rows stored before the gateway cut -- is
+    # never executable, and CLI/subscription credentials are never a
+    # substitute: only the configured key is ever read or forwarded
+    # (see :func:`credential_value`).
+    if connection.provider == "omniroute":
+        return bool(
+            connection.credential_ref
+            and connection.credential_ref.startswith("env:")
+        )
+    return not connection.credential_ref or connection.credential_ref.startswith("env:")
 
 
 def connection_for(provider: str, profile_id: str) -> ProviderConnection | None:

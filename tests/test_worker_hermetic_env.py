@@ -172,7 +172,10 @@ def test_antigravity_overlay_denylist_drops_api_key_configuration() -> None:
     assert env["ORCH_RUN_ID"] == "r"
 
 
-GATEWAY_OVERLAY: dict[str, str] = {
+# The removed gateway seam formerly emitted these control names; after the
+# gateway cut ``ORCH_GATEWAY_*`` (plus the loopback bridge sentinel) is
+# simply not allowed for any harness, including codex.
+DISALLOWED_GATEWAY_OVERLAY: dict[str, str] = {
     "ORCH_GATEWAY_ENDPOINT": "http://gateway",
     "ORCH_GATEWAY_CONNECTION": "acct-1",
     "ORCH_GATEWAY_AUTHORIZATION_ENV": "OMNIROUTE_API_KEY",
@@ -182,15 +185,11 @@ GATEWAY_OVERLAY: dict[str, str] = {
 }
 
 
-def test_codex_gateway_overlay_and_bridge_sentinel_are_preserved() -> None:
-    assert hermetic_env("codex", GATEWAY_OVERLAY, {}) == GATEWAY_OVERLAY
-
-
-@pytest.mark.parametrize("harness", ["claude", "opencode", "antigravity", "cline"])
-def test_gateway_overlay_is_denied_for_non_codex_harnesses(harness: str) -> None:
-    overlay = {**GATEWAY_OVERLAY, "ORCH_RUN_ID": "r"}
+@pytest.mark.parametrize("harness", ["claude", "codex", "opencode", "antigravity", "cline"])
+def test_gateway_overlay_is_denied_for_every_harness(harness: str) -> None:
+    overlay = {**DISALLOWED_GATEWAY_OVERLAY, "ORCH_RUN_ID": "r"}
     env = hermetic_env(harness, overlay, {})
-    for key in GATEWAY_OVERLAY:
+    for key in DISALLOWED_GATEWAY_OVERLAY:
         assert key not in env, f"{key} reached {harness}"
     assert env["ORCH_RUN_ID"] == "r"
 
@@ -282,22 +281,24 @@ def test_codex_adapter_child_env_is_hermetic(
     )
     child = _child_env(outfile)
     _assert_hermetic(child, home)
-    assert child["ORCH_GATEWAY_ENDPOINT"] == "http://gateway"
-    assert child["_ORCH_BRIDGE_AUTH_SENTINEL"] == "loopback-sentinel-not-a-secret"
+    assert "ORCH_GATEWAY_ENDPOINT" not in child
+    assert "_ORCH_BRIDGE_AUTH_SENTINEL" not in child
 
 
-@pytest.mark.parametrize("harness", ["claude", "opencode", "antigravity", "cline"])
-def test_non_codex_adapters_never_see_gateway_env(
+@pytest.mark.parametrize("harness", ["claude", "codex", "opencode", "antigravity", "cline"])
+def test_no_adapter_child_sees_gateway_env(
     stub_worker_env: tuple[Path, Path, Path], tmp_path: Path, harness: str
 ) -> None:
     bindir, outfile, home = stub_worker_env
     name = f"stub-{harness}"
     _write_stub(bindir, name, outfile)
     adapter = _adapter_for(harness, name)
-    adapter.run(WorkerRequest("task", tmp_path, _model_for(harness), env=dict(GATEWAY_OVERLAY)))
+    adapter.run(
+        WorkerRequest("task", tmp_path, _model_for(harness), env=dict(DISALLOWED_GATEWAY_OVERLAY))
+    )
     child = _child_env(outfile)
     _assert_hermetic(child, home)
-    for key in GATEWAY_OVERLAY:
+    for key in DISALLOWED_GATEWAY_OVERLAY:
         assert key not in child, f"{key} reached {harness}"
 
 

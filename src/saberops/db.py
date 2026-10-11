@@ -147,11 +147,6 @@ def _optional_text(row: sqlite3.Row, name: str) -> str | None:
     return str(value) if value else None
 
 
-def _drop_gateway_evidence(evidence: DispatchEvidence) -> None:
-    """Clear the gateway field on legacy rows that lack the column."""
-    evidence.gateway_evidence_json = None
-
-
 def _drop_c11d_identity(evidence: DispatchEvidence) -> None:
     """Clear the runtime binding identity / effort fields on legacy rows."""
     evidence.binding_id = None
@@ -168,22 +163,6 @@ def _dispatch_values_c10(evidence: DispatchEvidence) -> tuple[object, ...]:
         return full[:-c11d_trailing]
     # Never serialize real runtime data into a legacy row.
     return full[:-c11d_trailing]
-
-
-def _dispatch_values_legacy(evidence: DispatchEvidence) -> tuple[object, ...]:
-    """Return dispatch values without the gateway column."""
-    full = _dispatch_values(evidence)
-    c11d_trailing = 4
-    gateway_idx = len(full) - c11d_trailing - 1
-    if (
-        full[gateway_idx] is None
-        and getattr(evidence, "gateway_evidence_json", None) is None
-        and all(v is None for v in full[-c11d_trailing:])
-    ):
-        return full[:gateway_idx]
-    # The field is at gateway_idx; never serialize real data into
-    # a legacy row.
-    return full[:gateway_idx]
 
 
 def _dispatch_values(evidence: DispatchEvidence) -> tuple[object, ...]:
@@ -235,7 +214,6 @@ def _dispatch_values(evidence: DispatchEvidence) -> tuple[object, ...]:
         evidence.tools_exposed_count,
         evidence.tools_actually_used_count,
         evidence.control_plane_digest,
-        getattr(evidence, "gateway_evidence_json", None),
         getattr(evidence, "binding_id", None),
         getattr(evidence, "profile_id", None),
         getattr(evidence, "quota_pool_id", None),
@@ -974,9 +952,8 @@ class Database:
                         routing_snapshot_json,
                         control_plane_snapshot_json, control_plane_snapshot_digest,
                         tool_contract_json, tool_contract_digest,
-                        project_id, project_identity_json, objective_id,
-                        gateway_snapshot_json, gateway_snapshot_digest
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        project_id, project_identity_json, objective_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         run.id,
@@ -1002,8 +979,6 @@ class Database:
                         run.project_id,
                         run.project_identity_json,
                         run.objective_id,
-                        getattr(run, "gateway_snapshot_json", None),
-                        getattr(run, "gateway_snapshot_digest", None),
                     ),
                 )
             except sqlite3.OperationalError as provenance_exc:
@@ -2874,12 +2849,12 @@ class Database:
                         replacement_attempt_id, time_to_resume_seconds, tool_schema_bytes,
                         tool_description_bytes, tool_discovery_bytes, tool_result_bytes,
                         tools_exposed_count, tools_actually_used_count, control_plane_digest,
-                        gateway_evidence_json, binding_id, profile_id, quota_pool_id,
+                        binding_id, profile_id, quota_pool_id,
                         reasoning_effort
                     ) VALUES (
                         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                     )
                     """,
                     _dispatch_values(evidence),
@@ -2888,59 +2863,10 @@ class Database:
                 msg = str(exc)
                 if "reasoning_effort" in msg or "binding_id" in msg:
                     # Legacy database missing the runtime binding/effort
-                    # columns.  Drop them and retry through the gateway path.
+                    # columns.  Drop them and retry.  The gateway column
+                    # is never referenced, so databases with or without
+                    # it both accept this statement.
                     _drop_c11d_identity(evidence)
-                    try:
-                        conn.execute(
-                            """
-                            INSERT INTO dispatch_evidence (
-                                id, run_id, association_id, attempt_id, review_id, stage, role, tier,
-                                dispatch_reason, requested_provider, requested_model, actual_provider,
-                                actual_model, package_id, plan_step_id, base_sha, candidate_sha,
-                                inherited_checkpoint_sha, context_mode, handoff_id, prompt_bytes,
-                                prompt_sha256, prompt_sections_json, raw_parent_included,
-                                validation_policy_occurrence_count, prompt_transport, tool_transport,
-                                authority_mode, routing_snapshot_digest, selected_candidate,
-                                prior_failure_refs_json, started_at, completed_at, dispatch_outcome,
-                                interruption_reason, interruption_timestamp, handoff_bytes,
-                                replacement_attempt_id, time_to_resume_seconds, tool_schema_bytes,
-                                tool_description_bytes, tool_discovery_bytes, tool_result_bytes,
-                                tools_exposed_count, tools_actually_used_count, control_plane_digest,
-                                gateway_evidence_json
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                                      ?, ?, ?, ?, ?, ?)
-                            """,
-                            _dispatch_values_c10(evidence),
-                        )
-                    except sqlite3.OperationalError as exc2:
-                        if "gateway_evidence_json" not in str(exc2):
-                            raise
-                        _drop_gateway_evidence(evidence)
-                        conn.execute(
-                            """
-                            INSERT INTO dispatch_evidence (
-                                id, run_id, association_id, attempt_id, review_id, stage, role, tier,
-                                dispatch_reason, requested_provider, requested_model, actual_provider,
-                                actual_model, package_id, plan_step_id, base_sha, candidate_sha,
-                                inherited_checkpoint_sha, context_mode, handoff_id, prompt_bytes,
-                                prompt_sha256, prompt_sections_json, raw_parent_included,
-                                validation_policy_occurrence_count, prompt_transport, tool_transport,
-                                authority_mode, routing_snapshot_digest, selected_candidate,
-                                prior_failure_refs_json, started_at, completed_at, dispatch_outcome,
-                                interruption_reason, interruption_timestamp, handoff_bytes,
-                                replacement_attempt_id, time_to_resume_seconds, tool_schema_bytes,
-                                tool_description_bytes, tool_discovery_bytes, tool_result_bytes,
-                                tools_exposed_count, tools_actually_used_count, control_plane_digest
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                                      ?, ?, ?, ?, ?)
-                            """,
-                            _dispatch_values_legacy(evidence),
-                        )
-                elif "gateway_evidence_json" in msg:
-                    # Legacy database missing the gateway column. Insert without it.
-                    _drop_gateway_evidence(evidence)
                     conn.execute(
                         """
                         INSERT INTO dispatch_evidence (
@@ -2955,12 +2881,12 @@ class Database:
                             interruption_reason, interruption_timestamp, handoff_bytes,
                             replacement_attempt_id, time_to_resume_seconds, tool_schema_bytes,
                             tool_description_bytes, tool_discovery_bytes, tool_result_bytes,
-                                tools_exposed_count, tools_actually_used_count, control_plane_digest
+                            tools_exposed_count, tools_actually_used_count, control_plane_digest
                         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                                   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                                   ?, ?, ?, ?, ?)
                         """,
-                        _dispatch_values_legacy(evidence),
+                        _dispatch_values_c10(evidence),
                     )
                 else:
                     raise
@@ -2978,8 +2904,7 @@ class Database:
                     interruption_timestamp = ?, handoff_bytes = ?,
                     replacement_attempt_id = ?, time_to_resume_seconds = ?,
                     tool_discovery_bytes = ?, tool_result_bytes = ?,
-                    tools_actually_used_count = ?,
-                    gateway_evidence_json = ?
+                    tools_actually_used_count = ?
                 WHERE id = ?
                 """,
                 (
@@ -2998,7 +2923,6 @@ class Database:
                     evidence.tool_discovery_bytes,
                     evidence.tool_result_bytes,
                     evidence.tools_actually_used_count,
-                    getattr(evidence, "gateway_evidence_json", None),
                     evidence.id,
                 ),
             )
