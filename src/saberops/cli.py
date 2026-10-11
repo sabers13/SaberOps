@@ -1251,6 +1251,145 @@ def build_parser() -> argparse.ArgumentParser:
     authority_host.add_argument("mode", choices=[mode.value for mode in HostAccessMode], type=str)
     authority_host.add_argument("--json", action="store_true", help="JSON output")
 
+    # orch reviewer show|select|clear
+    reviewer_parser = subparsers.add_parser(
+        "reviewer",
+        help="Manage the owner-selected exact reviewer binding (show/select/clear).",
+    )
+    reviewer_sub = reviewer_parser.add_subparsers(dest="reviewer_command", required=True)
+    reviewer_show = reviewer_sub.add_parser(
+        "show", help="Show the reviewer selection and the eligible bindings."
+    )
+    reviewer_show.add_argument("--json", action="store_true", help="JSON output")
+    reviewer_select = reviewer_sub.add_parser(
+        "select", help="Persist the owner's exact reviewer binding choice."
+    )
+    reviewer_select.add_argument(
+        "binding_id",
+        type=str,
+        help="Exact REVIEWER-role binding id from 'orch reviewer show'.",
+    )
+    reviewer_select.add_argument("--json", action="store_true", help="JSON output")
+    reviewer_clear = reviewer_sub.add_parser(
+        "clear", help="Remove the reviewer selection (legacy review ladder applies)."
+    )
+    reviewer_clear.add_argument("--json", action="store_true", help="JSON output")
+
+    # orch orchestrator show|select|clear
+    orch_parser = subparsers.add_parser(
+        "orchestrator",
+        help="Manage the owner-selected orchestrator binding (show/select/clear).",
+    )
+    orch_sub = orch_parser.add_subparsers(dest="orchestrator_command", required=True)
+    orch_show = orch_sub.add_parser(
+        "show", help="Show the orchestrator policy and the eligible bindings."
+    )
+    orch_show.add_argument("--json", action="store_true", help="JSON output")
+    orch_select = orch_sub.add_parser(
+        "select", help="Persist an orchestrator binding policy over exact binding identity."
+    )
+    orch_mode = orch_select.add_mutually_exclusive_group(required=True)
+    orch_mode.add_argument(
+        "--binding",
+        type=str,
+        default=None,
+        help="Exact ORCHESTRATOR-role binding id (PINNED mode).",
+    )
+    orch_mode.add_argument(
+        "--auto",
+        action="store_true",
+        help="Resolve through the existing routing authority (AUTO mode).",
+    )
+    orch_select.add_argument("--json", action="store_true", help="JSON output")
+    orch_clear = orch_sub.add_parser(
+        "clear", help="Remove the orchestrator policy (no pinned selection)."
+    )
+    orch_clear.add_argument("--json", action="store_true", help="JSON output")
+
+    # orch access list|show|add|test|discover|verify-model
+    access_parser = subparsers.add_parser(
+        "access",
+        help="Manage model-access connections (list/show/add/test/discover/verify-model).",
+    )
+    access_sub = access_parser.add_subparsers(dest="access_command", required=True)
+    access_list = access_sub.add_parser("list", help="List connections with readiness.")
+    access_list.add_argument("--json", action="store_true", help="JSON output")
+    access_show = access_sub.add_parser("show", help="Show one connection and its evidence.")
+    access_show.add_argument("connection_id", type=str, help="Connection id.")
+    access_show.add_argument("--json", action="store_true", help="JSON output")
+    access_add = access_sub.add_parser(
+        "add", help="Save a user-owned API connection (credential reference only, no secret)."
+    )
+    access_add.add_argument("--id", dest="connection_id", type=str, required=True)
+    access_add.add_argument(
+        "--preset",
+        type=str,
+        default="custom-openai-compatible",
+        help="Provider preset id (default: custom-openai-compatible).",
+    )
+    access_add.add_argument("--protocol", type=str, default="OPENAI_COMPATIBLE")
+    access_add.add_argument("--endpoint", type=str, default="")
+    access_add.add_argument(
+        "--credential-ref",
+        type=str,
+        default="",
+        help="Credential handle (env:/profile:/store:), never a secret value.",
+    )
+    access_add.add_argument("--auth-header-name", type=str, default="")
+    access_add.add_argument("--model", type=str, default="")
+    access_add.add_argument(
+        "--public-header",
+        dest="public_headers",
+        action="append",
+        default=[],
+        metavar="NAME: value",
+        help="Literal public metadata header; repeat for multiple headers.",
+    )
+    access_add.add_argument("--json", action="store_true", help="JSON output")
+    access_test = access_sub.add_parser(
+        "test", help="Verify one connection (non-inference status check only)."
+    )
+    access_test.add_argument("connection_id", type=str, help="Connection id.")
+    access_test.add_argument("--json", action="store_true", help="JSON output")
+    access_discover = access_sub.add_parser(
+        "discover", help="Discover the models one connection enumerates (evidence only)."
+    )
+    access_discover.add_argument("connection_id", type=str, help="Connection id.")
+    access_discover.add_argument("--json", action="store_true", help="JSON output")
+    access_verify = access_sub.add_parser(
+        "verify-model",
+        help="Explicit bounded model check for one account connection (owner-authorized).",
+    )
+    access_verify.add_argument("connection_id", type=str, help="Connection id.")
+    access_verify.add_argument(
+        "--model", type=str, required=True, help="Exact current catalog model id."
+    )
+    access_verify.add_argument("--json", action="store_true", help="JSON output")
+
+    # orch retry|continue|try-worker
+    retry_parser = subparsers.add_parser(
+        "retry", help="Start a fresh attempt of a run's frozen task and policy."
+    )
+    retry_parser.add_argument("run_id", type=str, help="Run identifier (e.g. run_abc123).")
+    retry_parser.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
+    retry_parser.add_argument("--json", action="store_true", help="JSON output")
+    continue_parser = subparsers.add_parser(
+        "continue", help="Continue a failed run from its immutable saved candidate."
+    )
+    continue_parser.add_argument("run_id", type=str, help="Run identifier (e.g. run_abc123).")
+    continue_parser.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
+    continue_parser.add_argument("--json", action="store_true", help="JSON output")
+    try_worker_parser = subparsers.add_parser(
+        "try-worker",
+        help="Explicitly retry a failed run with one blocked UNKNOWN worker.",
+    )
+    try_worker_parser.add_argument("run_id", type=str, help="Run identifier (e.g. run_abc123).")
+    try_worker_parser.add_argument(
+        "--binding", type=str, required=True, help="Exact blocked worker binding id."
+    )
+    try_worker_parser.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
+    try_worker_parser.add_argument("--json", action="store_true", help="JSON output")
+
     # orch project gate-scratch show|set
     #
     # ``--repo`` is registered ONLY on the leaf subparsers
@@ -1342,6 +1481,42 @@ def build_parser() -> argparse.ArgumentParser:
         help="Remove the explicit accept target branch (returns to unset).",
     )
     _add_repo_arg(project_clear_branch)
+
+    project_set_workflow = project_sub.add_parser(
+        "set-workflow",
+        help="Persist a workflow preset (quick|balanced|thorough|max) or custom settings.",
+    )
+    _add_repo_arg(project_set_workflow)
+    project_set_workflow.add_argument(
+        "preset",
+        type=str,
+        choices=["quick", "balanced", "thorough", "max", "custom"],
+        help="Workflow preset, or 'custom' to persist the explicit flags.",
+    )
+    project_set_workflow.add_argument(
+        "--gate-command",
+        type=str,
+        default=None,
+        help="Gate command to persist first (required for non-quick presets without a gate).",
+    )
+    gate_group = project_set_workflow.add_mutually_exclusive_group()
+    gate_group.add_argument(
+        "--gate-enabled", dest="gate_enabled", action="store_true", default=None
+    )
+    gate_group.add_argument(
+        "--gate-disabled", dest="gate_enabled", action="store_false", default=None
+    )
+    project_set_workflow.add_argument(
+        "--review",
+        type=str,
+        choices=["disabled", "risk-adaptive", "always-required"],
+        default=None,
+    )
+    project_set_workflow.add_argument(
+        "--mode", type=str, choices=["bounded", "max"], default=None
+    )
+    project_set_workflow.add_argument("--limit", type=int, default=None)
+    _add_json_arg(project_set_workflow)
     project_gate_scratch = project_sub.add_parser(
         "gate-scratch",
         help="Project gate temporary storage (DISK / RAM_PREFERRED / RAM_REQUIRED).",
@@ -2760,6 +2935,358 @@ def handle_authority_set_host_access(args: argparse.Namespace) -> int:
     return 0
 
 
+def _render_bindings_human(title: str, bindings: list[dict[str, Any]]) -> None:
+    """Print one eligible-binding row per line (human-readable selection help)."""
+    if not bindings:
+        print(f"{title}: (none eligible)")
+        return
+    print(f"{title}:")
+    for binding in bindings:
+        print(
+            f"  {binding.get('binding_id')} "
+            f"[{binding.get('provider')}/{binding.get('model')}] "
+            f"role={binding.get('binding_role')}"
+        )
+
+
+def handle_reviewer_show(args: argparse.Namespace) -> int:
+    """Handle `orch reviewer show`."""
+    from saberops.service import OwnerSelectionError
+
+    service = OrchestratorService()
+    try:
+        status = service.get_reviewer_status()
+    except OwnerSelectionError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(status, indent=2, sort_keys=True))
+        return 0
+    selected = status["selected_binding_id"] or "(none: legacy review ladder applies)"
+    print(f"Reviewer selection: {selected}")
+    print(f"Status            : {status['status']}")
+    if status["reason"]:
+        print(f"Reason            : {status['reason']}")
+    _render_bindings_human("Eligible REVIEWER bindings", status["eligible"])
+    return 0
+
+
+def handle_reviewer_select(args: argparse.Namespace) -> int:
+    """Handle `orch reviewer select <binding-id>`."""
+    from saberops.service import OwnerSelectionError
+
+    service = OrchestratorService()
+    try:
+        result = service.set_reviewer_binding(str(args.binding_id))
+    except (OwnerSelectionError, ValueError) as exc:
+        print(f"[!] Reviewer selection refused: {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    print(
+        f"Reviewer selection saved: {result['selected_binding_id']} "
+        f"[{result['provider']}/{result['model']}]"
+    )
+    return 0
+
+
+def handle_reviewer_clear(args: argparse.Namespace) -> int:
+    """Handle `orch reviewer clear`."""
+    from saberops.service import OwnerSelectionError
+
+    service = OrchestratorService()
+    try:
+        result = service.clear_reviewer_binding()
+    except (OwnerSelectionError, ValueError) as exc:
+        print(f"[!] Reviewer selection not cleared: {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    print("Reviewer selection cleared (legacy review ladder applies).")
+    return 0
+
+
+def handle_orchestrator_show(args: argparse.Namespace) -> int:
+    """Handle `orch orchestrator show`."""
+    from saberops.service import OwnerSelectionError
+
+    service = OrchestratorService()
+    try:
+        status = service.get_orchestrator_status()
+    except OwnerSelectionError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(status, indent=2, sort_keys=True))
+        return 0
+    policy = status["policy"]
+    print(f"Orchestrator policy: {policy['mode'] if policy else '(none)'}")
+    print(f"Status             : {status['status']}")
+    if status["reason"]:
+        print(f"Reason             : {status['reason']}")
+    resolved = status["resolved_binding"]
+    if resolved is not None:
+        print(f"Resolved           : {resolved['binding_id']} [{resolved['provider']}/{resolved['model']}]")
+    _render_bindings_human("Eligible ORCHESTRATOR bindings", status["eligible"])
+    return 0
+
+
+def handle_orchestrator_select(args: argparse.Namespace) -> int:
+    """Handle `orch orchestrator select --binding ID | --auto`."""
+    from saberops.service import OwnerSelectionError
+
+    service = OrchestratorService()
+    try:
+        if bool(getattr(args, "auto", False)):
+            result = service.set_orchestrator_binding(mode="auto")
+        else:
+            result = service.set_orchestrator_binding(str(args.binding), mode="pinned")
+    except (OwnerSelectionError, ValueError) as exc:
+        print(f"[!] Orchestrator selection refused: {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    print(
+        f"Orchestrator selection saved: mode={result['mode']} "
+        f"binding={result['selected_binding_id']}"
+    )
+    return 0
+
+
+def handle_orchestrator_clear(args: argparse.Namespace) -> int:
+    """Handle `orch orchestrator clear`."""
+    from saberops.service import OwnerSelectionError
+
+    service = OrchestratorService()
+    try:
+        result = service.clear_orchestrator_binding()
+    except (OwnerSelectionError, ValueError) as exc:
+        print(f"[!] Orchestrator policy not cleared: {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    print("Orchestrator policy cleared (no pinned selection).")
+    return 0
+
+
+def handle_access_list(args: argparse.Namespace) -> int:
+    """Handle `orch access list`."""
+    from saberops.access_ops import AccessOperationError, list_access_connections
+
+    try:
+        payload = list_access_connections()
+    except AccessOperationError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    rows = payload["connections"]
+    if not rows:
+        print("No model-access connections configured.")
+        return 0
+    header = f"{'CONNECTION':<28} {'PROVIDER':<12} {'BACKEND':<16} {'READINESS':<10} {'REASON'}"
+    print(header)
+    print("─" * len(header))
+    for row in rows:
+        print(
+            f"{row['connection_id']:<28} {row['provider']:<12} {row['backend']:<16} "
+            f"{row['readiness_state']:<10} {row['readiness_reason']}"
+        )
+    return 0
+
+
+def handle_access_show(args: argparse.Namespace) -> int:
+    """Handle `orch access show <connection-id>`."""
+    from saberops.access_ops import AccessOperationError, show_access_connection
+
+    try:
+        payload = show_access_connection(str(args.connection_id))
+    except AccessOperationError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"Connection  : {payload['connection_id']}")
+    print(f"Provider    : {payload['provider']} (backend {payload['backend']})")
+    print(f"Protocol    : {payload['protocol']} (auth {payload['auth_mode']})")
+    print(f"Credential  : {payload['credential_display'] or '(none)'}")
+    print(f"Readiness   : {payload['readiness_state']} ({payload['readiness_reason']})")
+    if payload["observed_at"]:
+        print(f"Observed at : {payload['observed_at']}")
+    print(f"Catalog     : {len(payload['catalog_models'])} model(s) last enumerated")
+    return 0
+
+
+def handle_access_add(args: argparse.Namespace) -> int:
+    """Handle `orch access add`."""
+    from saberops.access_ops import AccessOperationError, add_access_connection
+
+    try:
+        result = add_access_connection(
+            connection_id=str(args.connection_id),
+            preset=str(args.preset),
+            protocol=str(args.protocol),
+            endpoint=str(args.endpoint),
+            credential_ref=str(args.credential_ref),
+            auth_header_name=str(args.auth_header_name),
+            model=str(args.model),
+            public_headers="\n".join(str(item) for item in (args.public_headers or [])),
+        )
+    except AccessOperationError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    print(f"Connection saved: {result['connection_id']} (credential reference only; no secret stored).")
+    discovery = result["discovery"]
+    if discovery.get("attempted") and discovery.get("ok"):
+        print(f"Bounded discovery found {discovery['models_found']} model(s); nothing was placed into routing.")
+    elif discovery.get("attempted"):
+        print("Automatic discovery could not enumerate models; use 'orch access discover' to retry.")
+    return 0
+
+
+def handle_access_test(args: argparse.Namespace) -> int:
+    """Handle `orch access test <connection-id>`."""
+    from saberops.access_ops import AccessOperationError, test_access_connection
+
+    try:
+        probe = test_access_connection(str(args.connection_id))
+    except AccessOperationError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(probe, indent=2, sort_keys=True))
+        return 0
+    print(f"Connection: {probe['connection_id']}")
+    print(f"Reachable : {probe['ok']}")
+    print(f"Reason    : {probe['reason']}")
+    print(f"Detail    : {probe['detail']}")
+    return 0
+
+
+def handle_access_discover(args: argparse.Namespace) -> int:
+    """Handle `orch access discover <connection-id>`."""
+    from saberops.access_ops import AccessOperationError, discover_access_models
+
+    try:
+        result = discover_access_models(str(args.connection_id))
+    except AccessOperationError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    print(f"Connection: {result['connection_id']}")
+    print(f"Enumerated: {'yes' if result['ok'] else 'no'} ({result['reason']})")
+    print(f"Detail    : {result.get('detail', '')}")
+    print(f"Models    : {len(result.get('models', []))}")
+    return 0
+
+
+def handle_access_verify_model(args: argparse.Namespace) -> int:
+    """Handle `orch access verify-model <connection-id> --model <model>`."""
+    from saberops.access_ops import AccessOperationError, verify_access_model
+
+    try:
+        probe = verify_access_model(str(args.connection_id), str(args.model))
+    except AccessOperationError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(probe, indent=2, sort_keys=True))
+        return 0
+    print(f"Connection: {probe['connection_id']}")
+    print(f"Model     : {probe['model_id']}")
+    print(f"Access    : {probe['ok']}")
+    print(f"Reason    : {probe['reason']}")
+    print(f"Detail    : {probe['detail']}")
+    return 0
+
+
+def handle_project_set_workflow(args: argparse.Namespace) -> int:
+    """Handle `orch project set-workflow <preset> [--repo X]`."""
+    from saberops.service import RunOperationError
+
+    try:
+        repo = _resolve_repo_for_project_settings(args)
+    except SystemExit:
+        return 2
+    try:
+        service = OrchestratorService()
+        result = service.set_project_workflow(
+            repo,
+            str(args.preset),
+            gate_enabled=True if args.gate_enabled is None else bool(args.gate_enabled),
+            review=str(args.review) if args.review is not None else "risk-adaptive",
+            mode=str(args.mode) if args.mode is not None else "bounded",
+            limit=int(args.limit) if args.limit is not None else 3,
+            gate_command=str(args.gate_command) if args.gate_command is not None else None,
+        )
+    except RunOperationError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    print(f"Project workflow set to '{result['preset']}'")
+    print(f"  gate   : {'enabled' if result['gate_enabled'] else 'disabled'} "
+          f"({result['gate_effective'] or 'no gate'})")
+    print(f"  review : {'disabled' if result['review_disabled'] else result['review_mode'] + ' x' + str(result['review_limit'])}")
+    return 0
+
+
+def _handle_run_operation(
+    args: argparse.Namespace, operation: str, binding_id: str | None = None
+) -> int:
+    """Shared thin wrapper for `orch retry|continue|try-worker`."""
+    from saberops.service import RunOperationError
+
+    db = db_for_run(args, args.run_id)
+    service = OrchestratorService(db=db)
+    try:
+        if operation == "retry":
+            result = service.retry_run(str(args.run_id))
+        elif operation == "continue":
+            result = service.continue_run(str(args.run_id))
+        else:
+            result = service.try_worker(str(args.run_id), str(binding_id or ""))
+    except RunOperationError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    if result.get("already_continued"):
+        print(f"Run {args.run_id} already has a continuation: {result['run_id']}")
+        return 0
+    print(f"Started {operation}: {result['run_id']} (from {result['source_run_id']})")
+    print(f"    orch wait {result['run_id']} | orch status {result['run_id']}")
+    return 0
+
+
+def handle_retry(args: argparse.Namespace) -> int:
+    """Handle `orch retry <run-id>`."""
+    return _handle_run_operation(args, "retry")
+
+
+def handle_continue(args: argparse.Namespace) -> int:
+    """Handle `orch continue <run-id>`."""
+    return _handle_run_operation(args, "continue")
+
+
+def handle_try_worker(args: argparse.Namespace) -> int:
+    """Handle `orch try-worker <run-id> --binding <id>`."""
+    return _handle_run_operation(args, "try-worker", binding_id=str(args.binding))
+
+
 def handle_quota_set(args: argparse.Namespace) -> int:
     """Handle `orch quota set` command."""
     service = OrchestratorService(db=Database(args.db))
@@ -3093,6 +3620,39 @@ def _dispatch(args: argparse.Namespace) -> int:
             return handle_quota_list(args)
         elif args.quota_command == "enable":
             return handle_quota_enable(args)
+    elif args.command == "reviewer":
+        if args.reviewer_command == "show":
+            return handle_reviewer_show(args)
+        elif args.reviewer_command == "select":
+            return handle_reviewer_select(args)
+        elif args.reviewer_command == "clear":
+            return handle_reviewer_clear(args)
+    elif args.command == "orchestrator":
+        if args.orchestrator_command == "show":
+            return handle_orchestrator_show(args)
+        elif args.orchestrator_command == "select":
+            return handle_orchestrator_select(args)
+        elif args.orchestrator_command == "clear":
+            return handle_orchestrator_clear(args)
+    elif args.command == "access":
+        if args.access_command == "list":
+            return handle_access_list(args)
+        elif args.access_command == "show":
+            return handle_access_show(args)
+        elif args.access_command == "add":
+            return handle_access_add(args)
+        elif args.access_command == "test":
+            return handle_access_test(args)
+        elif args.access_command == "discover":
+            return handle_access_discover(args)
+        elif args.access_command == "verify-model":
+            return handle_access_verify_model(args)
+    elif args.command == "retry":
+        return handle_retry(args)
+    elif args.command == "continue":
+        return handle_continue(args)
+    elif args.command == "try-worker":
+        return handle_try_worker(args)
     elif args.command == "routing":
         if args.routing_command == "show":
             return handle_routing_show(args)
@@ -3129,6 +3689,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             return handle_project_set_target_branch(args)
         elif args.project_command == "clear-target-branch":
             return handle_project_clear_target_branch(args)
+        elif args.project_command == "set-workflow":
+            return handle_project_set_workflow(args)
 
     return 0
 

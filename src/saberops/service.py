@@ -16,11 +16,20 @@ from saberops.accept import AcceptEngine, AcceptResult
 from saberops.config import RunConfig, resolve_run_config
 from saberops.control_plane.binding_store import (
     BindingStoreError,
+    OwnerBindings,
     load_owner_bindings,
+    save_owner_bindings,
+)
+from saberops.control_plane.orch_binding import (
+    OrchBindingPolicy,
+    OrchSelectionStatus,
+    select_orch_binding,
 )
 from saberops.control_plane.reviewer_binding import (
     ReviewerSelectionError,
+    ReviewerSelectionStatus,
     reviewer_candidate_for_dispatch,
+    select_reviewer_binding,
 )
 from saberops.db import Database
 from saberops.dispatch import UnavailableReadinessService
@@ -49,6 +58,37 @@ from saberops.workers.registry import AdapterRegistry
 if TYPE_CHECKING:
     from saberops.candidate_lifecycle import CandidateProjection
     from saberops.supervisor import RunSupervisor
+
+
+class OwnerSelectionError(ValueError):
+    """Fail-closed refusal of an owner binding selection (reviewer/orchestrator)."""
+
+    def __init__(self, reason: str, detail: str) -> None:
+        super().__init__(f"{reason}: {detail}")
+        self.reason = reason
+        self.detail = detail
+
+
+class RunOperationError(ValueError):
+    """Fail-closed refusal of an owner run operation (retry/continue/try-worker)."""
+
+    def __init__(self, reason: str, detail: str) -> None:
+        super().__init__(f"{reason}: {detail}")
+        self.reason = reason
+        self.detail = detail
+
+
+def replace_owner_policy(
+    owner: OwnerBindings, policy: OrchBindingPolicy | None
+) -> OwnerBindings:
+    """Return ``owner`` with its orchestrator binding policy replaced.
+
+    Frozen-dataclass update so the service layer never mutates the
+    loaded document in place.
+    """
+    from dataclasses import replace
+
+    return replace(owner, policy=policy)
 
 
 class OrchestratorService:
@@ -390,3 +430,490 @@ class OrchestratorService:
     def enable_quota(self, provider: str, pool: str) -> QuotaState:
         """Re-enable normal routing state for a provider pool."""
         return self.db.enable_quota(provider=provider, pool=pool)
+
+    # ------------------------------------------------------------------
+    # Owner binding selection (reviewer / orchestrator).
+    #
+    # Single service-layer authority for the ``orch reviewer`` and
+    # ``orch orchestrator`` commands, mirroring the removed
+    # ``/reviewer/select`` and ``/orchestrator/select`` routes exactly:
+    # the persisted choice is a binding id (never free-floating
+    # provider/model text); only a role-qualified binding that exists
+    # in the canonical registry and resolves through the real binding
+    # resolver may be selected; nothing is persisted on refusal.
+    # ------------------------------------------------------------------
+
+    def _load_owner_for_selection(self, *, for_write: bool) -> Any:
+        """Load the owner binding document for a selection operation.
+
+        Reads degrade to an empty document (the read surface never
+        fails); mutations fail closed on an unreadable store so a
+        write can never be based on unread state.
+        """
+        from saberops.control_plane.binding_store import OwnerBindings
+
+        try:
+            return load_owner_bindings()
+        except BindingStoreError as exc:
+            if for_write:
+                raise OwnerSelectionError(
+                    "OWNER_STORE_UNREADABLE",
+                    f"owner binding state unreadable; refusing selection: {exc}",
+                ) from exc
+            return OwnerBindings()
+
+    def get_reviewer_status(self) -> dict[str, Any]:
+        """Return the owner's reviewer selection and the eligible bindings."""
+        from saberops.control_plane.bindings import BindingRole
+
+        owner = self._load_owner_for_selection(for_write=False)
+        selection = select_reviewer_binding(owner, adapter_registry=self.registry)
+        eligible = [
+            binding.to_dict()
+            for binding in owner.registry.list_bindings()
+            if binding.binding_role is BindingRole.REVIEWER
+        ]
+        return {
+            "selected_binding_id": owner.reviewer_binding_id,
+            "selected_binding_ids": list(owner.role_binding_ids("reviewer")),
+            "status": selection.status.value,
+            "reason": selection.reason,
+            "resolved_binding": (
+                None if selection.binding is None else selection.binding.to_dict()
+            ),
+            "eligible": eligible,
+        }
+
+    def set_reviewer_binding(self, binding_id: str) -> dict[str, Any]:
+        """Persist the owner's exact reviewer binding choice.
+
+        Only a ``REVIEWER``-role binding that exists in the canonical
+        registry and resolves through the real binding resolver with
+        the real adapter may be selected.  A ``WORKER``/``ORCHESTRATOR``
+        binding, an unknown id, or an unresolvable binding is refused;
+        nothing is persisted on refusal.
+        """
+        from dataclasses import replace
+
+        owner = self._load_owner_for_selection(for_write=True)
+        wanted = binding_id.strip()
+        candidate_owner = replace(owner, reviewer_binding_id=wanted or None)
+        selection = select_reviewer_binding(candidate_owner, adapter_registry=self.registry)
+        if selection.status is not ReviewerSelectionStatus.RESOLVED or selection.binding is None:
+            if not wanted or selection.reason == "REVIEWER_BINDING_NOT_FOUND":
+                raise OwnerSelectionError(
+                    "UNKNOWN_BINDING",
+                    f"No such canonical binding: {wanted or '(empty)'}",
+                )
+            if selection.reason == "REVIEWER_WRONG_ROLE":
+                role = (
+                    selection.binding.binding_role.value
+                    if selection.binding is not None
+                    else "?"
+                )
+                raise OwnerSelectionError(
+                    "WRONG_ROLE",
+                    "Binding is not qualified for the Reviewer slot: "
+                    f"role is {role!r}",
+                )
+            raise OwnerSelectionError(
+                "REVIEWER_UNRESOLVABLE",
+                "Reviewer selection refused: exact binding does not "
+                "resolve for this adapter",
+            )
+        new_owner = owner.with_role_order("reviewer", (wanted,))
+        save_owner_bindings(new_owner)
+        return {
+            "selected_binding_id": wanted,
+            "provider": selection.binding.provider,
+            "model": selection.binding.model,
+        }
+
+    def clear_reviewer_binding(self) -> dict[str, Any]:
+        """Remove the owner's reviewer selection (legacy ladder applies)."""
+        owner = self._load_owner_for_selection(for_write=True)
+        save_owner_bindings(owner.with_role_order("reviewer", ()))
+        return {"cleared": True}
+
+    def get_orchestrator_status(self) -> dict[str, Any]:
+        """Return the owner's orchestrator policy and its resolution."""
+        from saberops.control_plane.bindings import BindingRole
+
+        owner = self._load_owner_for_selection(for_write=False)
+        eligible = [
+            binding.to_dict()
+            for binding in owner.registry.list_bindings()
+            if binding.binding_role is BindingRole.ORCHESTRATOR
+        ]
+        if owner.policy is None:
+            return {
+                "policy": None,
+                "status": "NOT_CONFIGURED",
+                "reason": "ORCH_BINDING_AUTO_NONE",
+                "resolved_binding": None,
+                "eligible": eligible,
+            }
+        selection = select_orch_binding(owner.policy, owner.registry)
+        return {
+            "policy": owner.policy.to_dict(),
+            "status": selection.status.value,
+            "reason": selection.reason,
+            "resolved_binding": (
+                None if selection.binding is None else selection.binding.to_dict()
+            ),
+            "eligible": eligible,
+        }
+
+    def set_orchestrator_binding(
+        self, binding_id: str | None = None, *, mode: str = "pinned"
+    ) -> dict[str, Any]:
+        """Persist an orchestrator binding policy over exact binding identity.
+
+        ``PINNED`` is the primary mode (exact owner-selected eligible
+        binding, no silent substitution); ``AUTO`` resolves through the
+        existing selection authority.  A selection that cannot resolve
+        is refused; nothing is persisted on refusal.
+        """
+        from saberops.models import OrchBindingMode
+
+        owner = self._load_owner_for_selection(for_write=True)
+        try:
+            parsed_mode = OrchBindingMode(mode.strip().upper())
+        except ValueError as exc:
+            raise OwnerSelectionError(
+                "UNKNOWN_MODE", f"Unknown Orchestrator mode: {mode!r}"
+            ) from exc
+        if parsed_mode is OrchBindingMode.PREFERRED_WITH_FALLBACK:
+            raise OwnerSelectionError(
+                "MODE_UNAVAILABLE",
+                "PREFERRED_WITH_FALLBACK is not available in this view.",
+            )
+        if parsed_mode is OrchBindingMode.PINNED:
+            from saberops.control_plane.bindings import BindingRole
+
+            wanted = (binding_id or "").strip()
+            binding = owner.registry.try_get(wanted)
+            if binding is None:
+                raise OwnerSelectionError(
+                    "UNKNOWN_BINDING",
+                    f"No such canonical binding: {wanted or '(empty)'}",
+                )
+            if binding.binding_role is not BindingRole.ORCHESTRATOR:
+                raise OwnerSelectionError(
+                    "WRONG_ROLE",
+                    "Binding is not qualified for the Orchestrator slot: "
+                    f"role is {binding.binding_role.value!r}",
+                )
+            policy = OrchBindingPolicy(
+                mode=OrchBindingMode.PINNED, pinned_binding_id=wanted
+            )
+        else:
+            policy = OrchBindingPolicy(mode=OrchBindingMode.AUTO)
+        selection = select_orch_binding(policy, owner.registry)
+        if selection.status is not OrchSelectionStatus.RESOLVED:
+            raise OwnerSelectionError(
+                "ORCHESTRATOR_UNRESOLVABLE",
+                "Orchestrator selection refused: "
+                f"{selection.reason or 'no eligible binding'}",
+            )
+        new_owner = replace_owner_policy(owner, policy)
+        save_owner_bindings(new_owner)
+        resolved = selection.binding
+        return {
+            "mode": policy.mode.value,
+            "selected_binding_id": (
+                policy.pinned_binding_id
+                if policy.mode is OrchBindingMode.PINNED
+                else (resolved.binding_id if resolved is not None else None)
+            ),
+            "provider": resolved.provider if resolved is not None else None,
+            "model": resolved.model if resolved is not None else None,
+        }
+
+    def clear_orchestrator_binding(self) -> dict[str, Any]:
+        """Remove the owner's orchestrator policy (no pinned selection)."""
+        owner = self._load_owner_for_selection(for_write=True)
+        save_owner_bindings(replace_owner_policy(owner, None))
+        return {"cleared": True}
+
+    # ------------------------------------------------------------------
+    # Project workflow presets.
+    #
+    # Single service-layer authority for ``orch project set-workflow``,
+    # mirroring the removed ``POST /projects/settings/workflow`` route.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def get_project_workflow(repo_path: Path | str) -> dict[str, Any]:
+        """Return the effective workflow preset and review/gate settings."""
+        from saberops.run_creation import effective_policy_summary
+
+        summary = effective_policy_summary(repo_path)
+        if "error" in summary:
+            raise RunOperationError("PROJECT_SETTINGS_UNREADABLE", str(summary["error"]))
+        return dict(summary)
+
+    @staticmethod
+    def set_project_workflow(
+        repo_path: Path | str,
+        preset: str = "custom",
+        *,
+        gate_enabled: bool = True,
+        review: str = "risk-adaptive",
+        mode: str = "bounded",
+        limit: int = 3,
+        gate_command: str | None = None,
+    ) -> dict[str, Any]:
+        """Persist a workflow preset (or custom settings) for a project.
+
+        Named presets (``quick`` / ``balanced`` / ``thorough`` / ``max``)
+        freeze their canonical gate/review/mode/limit tuple; ``custom``
+        persists the explicit arguments.  A non-quick preset on a
+        project with no effective gate requires an explicit
+        ``gate_command`` (same refusal as the removed setup route);
+        ``quick`` disables the gate and needs none.
+        """
+        from saberops.project_settings import (
+            WORKFLOW_PRESETS,
+            ProjectSettingsError,
+            set_project_gate_command,
+            set_project_workflow,
+        )
+        from saberops.run_creation import effective_policy_summary
+
+        wanted = preset.strip().lower()
+        if wanted != "custom" and wanted not in WORKFLOW_PRESETS:
+            raise RunOperationError(
+                "UNKNOWN_PRESET",
+                f"Unknown workflow preset: {preset!r} "
+                f"(choose from {', '.join(sorted(WORKFLOW_PRESETS))} or 'custom')",
+            )
+        try:
+            if wanted != "quick":
+                summary = effective_policy_summary(repo_path)
+                if "error" in summary:
+                    raise ProjectSettingsError(str(summary["error"]))
+                if not summary.get("gate_effective"):
+                    if gate_command is None or not gate_command.strip():
+                        raise ProjectSettingsError(
+                            "Enter a gate command for this mode, or choose Quick to skip checks."
+                        )
+                    set_project_gate_command(repo_path, gate_command.strip())
+            elif gate_command is not None and gate_command.strip():
+                set_project_gate_command(repo_path, gate_command.strip())
+            if wanted == "custom":
+                set_project_workflow(
+                    repo_path,
+                    preset="custom",
+                    gate_enabled=gate_enabled,
+                    review=review,
+                    mode=mode,
+                    limit=limit,
+                )
+            else:
+                set_project_workflow(repo_path, preset=wanted)
+        except ProjectSettingsError as exc:
+            raise RunOperationError("WORKFLOW_NOT_SAVED", str(exc)) from exc
+        summary = effective_policy_summary(repo_path)
+        if "error" in summary:
+            raise RunOperationError("PROJECT_SETTINGS_UNREADABLE", str(summary["error"]))
+        return {
+            "preset": summary.get("workflow_preset"),
+            "gate_enabled": summary.get("gate_enabled"),
+            "review_disabled": summary.get("review_disabled"),
+            "review_mode": summary.get("review_mode"),
+            "review_limit": summary.get("review_limit"),
+            "gate_effective": summary.get("gate_effective"),
+        }
+
+    # ------------------------------------------------------------------
+    # Owner run operations (retry / continue / try-worker).
+    #
+    # Single service-layer authority for the ``orch retry``,
+    # ``orch continue`` and ``orch try-worker`` commands, mirroring the
+    # removed ``/runs/{id}/retry``, ``/continue`` and ``/try-worker``
+    # routes exactly: the retry/continuation target is the repository
+    # the run was created for (validated against its persisted project
+    # identity, never a current selection); frozen validation and
+    # acceptance policy are kept; try-worker admits only the exact
+    # blocked UNKNOWN worker still present in the routing chain.
+    # Launch goes through the durable supervisor, as for ``orch run``.
+    # ------------------------------------------------------------------
+
+    def retry_run(self, run_id: str) -> dict[str, Any]:
+        """Start a fresh attempt of a run's frozen task and policy."""
+        import json
+        from dataclasses import replace
+
+        from saberops.config import reconstruct_run_config
+        from saberops.provenance import assert_run_repository
+
+        run = self.db.get_run(run_id)
+        if run is None:
+            raise RunOperationError("RUN_NOT_FOUND", f"Run not found: {run_id}")
+        try:
+            target = assert_run_repository(run)
+            if run.config_json:
+                persisted = json.loads(run.config_json)
+                config = replace(
+                    reconstruct_run_config(persisted), target_repo=str(target)
+                )
+            else:
+                config = resolve_run_config(
+                    task=run.task,
+                    target_repo=target,
+                    routing_mode="manual",
+                    manual_tier=run.tier,
+                    training_allowed=run.training_allowed,
+                    gate_command=run.gate_command,
+                )
+            started = self._durable_supervisor().start_supervised_run(config=config)
+        except RunOperationError:
+            raise
+        except Exception as exc:
+            raise RunOperationError(
+                "RETRY_NOT_STARTED", f"Retry failed to start: {exc}"
+            ) from exc
+        return {
+            "operation": "retry",
+            "source_run_id": run_id,
+            "run_id": started.run_id,
+        }
+
+    def continue_run(self, run_id: str) -> dict[str, Any]:
+        """Continue a failed run from its immutable saved candidate.
+
+        When the run already has a continuation, its id is returned
+        without launching anything (idempotent, as the removed route).
+        """
+        from saberops.continuation import ContinuationError, prepare_continuation
+
+        run = self.db.get_run(run_id)
+        if run is None:
+            raise RunOperationError("RUN_NOT_FOUND", f"Run not found: {run_id}")
+        existing = self.db.get_continuation(run_id)
+        if existing:
+            return {
+                "operation": "continue",
+                "source_run_id": run_id,
+                "run_id": existing,
+                "already_continued": True,
+            }
+        try:
+            config = prepare_continuation(self.db, run_id)
+            started = self._durable_supervisor().start_supervised_run(config=config)
+        except (ContinuationError, RuntimeError) as exc:
+            raise RunOperationError(
+                "CONTINUE_REFUSED", f"Cannot continue: {exc}"
+            ) from exc
+        return {
+            "operation": "continue",
+            "source_run_id": run_id,
+            "run_id": started.run_id,
+            "already_continued": False,
+        }
+
+    def try_worker(self, run_id: str, binding_id: str) -> dict[str, Any]:
+        """Explicitly retry a failed run with one blocked UNKNOWN worker.
+
+        The binding must name the exact skipped UNKNOWN candidate from
+        the failed run's termination evidence and still be present in
+        the current routing chain with the same provider/model.  The
+        failed run's frozen validation and acceptance policy are kept.
+        """
+        import json
+        from dataclasses import replace
+
+        from saberops.config import reconstruct_run_config
+        from saberops.models import RunStatus
+        from saberops.observability.run_report import build_run_report
+        from saberops.provenance import assert_run_repository
+        from saberops.routing import resolve_candidate_chain
+        from saberops.routing_config import load_effective_routing
+
+        run = self.db.get_run(run_id)
+        if run is None:
+            raise RunOperationError("RUN_NOT_FOUND", f"Run not found: {run_id}")
+        if run.status != RunStatus.FAILED:
+            raise RunOperationError(
+                "RUN_NOT_FAILED", "Only a failed run can try a blocked worker."
+            )
+        wanted = binding_id.strip()
+        report = build_run_report(self.db, run_id)
+        termination = report.get("termination", {})
+        blocked = (
+            termination.get("skipped_candidates", [])
+            if isinstance(termination, dict)
+            else []
+        )
+        skipped = next(
+            (
+                row
+                for row in blocked
+                if isinstance(row, dict)
+                and row.get("binding_id") == wanted
+                and row.get("readiness_state") == "UNKNOWN"
+            ),
+            None,
+        )
+        try:
+            snapshot = load_effective_routing()
+            candidates = resolve_candidate_chain(tier=run.tier, snapshot=snapshot)
+        except ValueError as exc:
+            raise RunOperationError(
+                "ROUTING_UNAVAILABLE",
+                f"Worker routing is unavailable. Check Routing: {exc}",
+            ) from exc
+        candidate = next(
+            (entry for entry in candidates if entry.binding_id == wanted), None
+        )
+        if (
+            skipped is None
+            or candidate is None
+            or not wanted
+            or (
+                candidate.provider != skipped.get("provider")
+                or candidate.model != skipped.get("model")
+            )
+        ):
+            raise RunOperationError(
+                "WORKER_UNAVAILABLE",
+                "This exact worker is no longer in the chosen routing list.",
+            )
+        try:
+            target = assert_run_repository(run)
+            if not run.config_json:
+                raise ValueError("Run policy is unavailable")
+            config = replace(
+                reconstruct_run_config(json.loads(run.config_json)),
+                target_repo=str(target),
+                provider_override=candidate.provider,
+                model_override=candidate.model,
+                worker_binding_registry=None,
+            )
+            started = self._durable_supervisor().start_supervised_run(config=config)
+            self.db.record_event(
+                started.run_id,
+                "owner_worker_bootstrap_requested",
+                payload={
+                    "source_run_id": run_id,
+                    "binding_id": wanted,
+                    "provider": candidate.provider,
+                    "model": candidate.model,
+                },
+            )
+        except RunOperationError:
+            raise
+        except Exception as exc:
+            raise RunOperationError(
+                "WORKER_NOT_STARTED",
+                f"Could not start this worker. Check Routing and project policy: {exc}",
+            ) from exc
+        return {
+            "operation": "try-worker",
+            "source_run_id": run_id,
+            "run_id": started.run_id,
+            "binding_id": wanted,
+            "provider": candidate.provider,
+            "model": candidate.model,
+        }
