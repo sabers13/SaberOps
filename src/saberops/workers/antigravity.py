@@ -28,6 +28,11 @@ from saberops.process import (
 from saberops.workers.antigravity_events import parse_events
 from saberops.workers.base import WorkerAdapter, streaming_process_kwargs
 from saberops.workers.env import hermetic_env
+from saberops.workers.exhaustion import (
+    ExhaustionVerdict,
+    classify_antigravity,
+    reset_to_iso,
+)
 
 __all__ = ["AntigravityAdapter", "ORCH_PROMPT_ARG_LIMIT"]
 
@@ -191,6 +196,10 @@ class AntigravityAdapter(WorkerAdapter):
         changed_paths = GitManager.get_changed_paths(request.worktree_path)
         has_changes = len(changed_paths) > 0
 
+        from saberops.models import WorkerInterruptionReason as _InterruptionReason
+
+        interruption_reason: _InterruptionReason | None = None
+        quota_reset_at: str | None = None
         if res.timed_out:
             status = AttemptStatus.TIMEOUT
             outcome = DispatchOutcome.TIMEOUT
@@ -217,6 +226,19 @@ class AntigravityAdapter(WorkerAdapter):
                      "Antigravity did not report terminal SUCCESS" if res.passed else
                      f"Worker exited with code {res.exit_code}")
             summary = (res.stderr.strip() or res.stdout.strip())[:300]
+            # PROVISIONAL quota-text rule (see exhaustion.py): plan
+            # exhaustion interrupts for continuation-after-quota.
+            # RATE_LIMITED keeps today's retry behaviour (falls through).
+            exhaustion = classify_antigravity(res.stdout, res.stderr)
+            if exhaustion.verdict is ExhaustionVerdict.QUOTA_EXHAUSTED:
+                reset_note = reset_to_iso(exhaustion.reset_at) or "unknown reset time"
+                error = (
+                    "Antigravity plan quota exhausted "
+                    f"(retry after {reset_note}) [{exhaustion.rule} {exhaustion.confidence}]"
+                )
+                summary = error
+                interruption_reason = _InterruptionReason.QUOTA_EXHAUSTED
+                quota_reset_at = reset_to_iso(exhaustion.reset_at)
 
         return WorkerResult(
             provider=self.provider_name,
@@ -234,6 +256,8 @@ class AntigravityAdapter(WorkerAdapter):
             execution_quiescent=not res.termination_incomplete,
             provider_terminal_status=parsed.terminal_status,
             usage=parsed.usage,
+            interruption_reason=interruption_reason,
+            quota_reset_at=quota_reset_at,
             prompt_bytes=prompt_bytes,
             prompt_transport_used="stdin" if use_stdin else "argv",
         )

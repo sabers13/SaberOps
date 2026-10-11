@@ -40,6 +40,11 @@ from saberops.process import (
 from saberops.telemetry import ClineStructuredRun, parse_cline_jsonl
 from saberops.workers.base import WorkerAdapter, streaming_process_kwargs
 from saberops.workers.env import hermetic_env
+from saberops.workers.exhaustion import (
+    ExhaustionVerdict,
+    classify_cline,
+    reset_to_iso,
+)
 
 __all__ = ["CLINE_PASS_PROVIDER_ID", "ClineAdapter", "ORCH_PROMPT_ARG_LIMIT"]
 
@@ -246,6 +251,22 @@ class ClineAdapter(WorkerAdapter):
         interruption_reason: WorkerInterruptionReason | None = None
         if parsed.finish_reason == "context_exhausted":
             interruption_reason = WorkerInterruptionReason.CONTEXT_EXHAUSTED
+        quota_reset_at: str | None = None
+        if status is not AttemptStatus.SUCCESS and interruption_reason is None:
+            # PROVISIONAL text-only ClinePass rule (see exhaustion.py):
+            # exhaustion interrupts for continuation-after-quota instead
+            # of plain provider failure.  RATE_LIMITED keeps today's
+            # retry behaviour (falls through unchanged).
+            exhaustion = classify_cline(res.stdout, res.stderr)
+            if exhaustion.verdict is ExhaustionVerdict.QUOTA_EXHAUSTED:
+                interruption_reason = WorkerInterruptionReason.QUOTA_EXHAUSTED
+                quota_reset_at = reset_to_iso(exhaustion.reset_at)
+                reset_note = quota_reset_at or "unknown reset time"
+                error = (
+                    "Cline plan quota exhausted "
+                    f"(retry after {reset_note}) [{exhaustion.rule} {exhaustion.confidence}]"
+                )
+                summary = error
         return WorkerResult(
             provider=self.provider_name,
             model=request.model,
@@ -264,6 +285,7 @@ class ClineAdapter(WorkerAdapter):
             outcome=outcome,
             usage=parsed.usage,
             interruption_reason=interruption_reason,
+            quota_reset_at=quota_reset_at,
         )
 
     def _classify(

@@ -1223,6 +1223,12 @@ class WorkerResult:
     outcome: DispatchOutcome | None = None
     usage: list[ProviderUsage] = field(default_factory=list)
     interruption_reason: WorkerInterruptionReason | None = None
+    # Canonical UTC ISO-8601 reset clock for a QUOTA_EXHAUSTED
+    # interruption, populated by the classifying adapter from the
+    # provider signal (structured reset, else conservative prose
+    # parse, else None).  The orchestrator consumes it when recording
+    # quota evidence; it never selects a route.
+    quota_reset_at: str | None = None
     manual_control_stopped: bool = False
     provider_exit_code: int | None = None
     provider_terminal_status: str | None = None
