@@ -198,6 +198,9 @@ class ClaudeCodeAdapter(WorkerAdapter):
                                       "Claude Code did not report successful task completion")
         interruption_reason = None
         quota_reset_at = None
+        quota_window: str | None = None
+        quota_model_scope: str | None = None
+        quota_reset_confidence: str | None = None
         if status is not AttemptStatus.SUCCESS:
             # Trap: a plan limit is subtype "success" with is_error true,
             # handled inside classify_claude -- never treat it as success.
@@ -208,6 +211,9 @@ class ClaudeCodeAdapter(WorkerAdapter):
                 from saberops.models import WorkerInterruptionReason
                 interruption_reason = WorkerInterruptionReason.QUOTA_EXHAUSTED
                 quota_reset_at = reset_to_iso(exhaustion.reset_at)
+                quota_window = exhaustion.window
+                quota_model_scope = exhaustion.model_scope
+                quota_reset_confidence = exhaustion.reset_confidence
                 reset_note = quota_reset_at or "unknown reset time"
                 error = (
                     "Claude plan quota exhausted "
@@ -219,6 +225,8 @@ class ClaudeCodeAdapter(WorkerAdapter):
             stdout=output, stderr=process.stderr, changed_paths=changes, has_changes=bool(changes),
             error=error, outcome=outcome,
             interruption_reason=interruption_reason, quota_reset_at=quota_reset_at,
+            quota_window=quota_window, quota_model_scope=quota_model_scope,
+            quota_reset_confidence=quota_reset_confidence,
             provider_exit_code=process.exit_code,
             execution_quiescent=not process.termination_incomplete,
             provider_terminal_status="SUCCESS" if completed else "FAILED",

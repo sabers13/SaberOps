@@ -200,8 +200,16 @@ class UnavailableReadinessService:
 
 
 def _is_quota_blocked(quota_states: list[QuotaState], provider: str) -> bool:
+    """Legacy provider-wide block check (M2-1: pool exclusions never trigger it).
+
+    Synthesized exclusion states carry routing NORMAL, so they never turn
+    into a provider-wide block here; pool exclusions are decided per
+    candidate in ``quota_decision``.
+    """
     provider_norm = provider.strip().lower()
     for state in quota_states:
+        if getattr(state, "exclusion_id", None):
+            continue
         if state.provider != provider_norm or state.routing_state != RoutingState.BLOCKED:
             continue
         if state.provider == CODEX_PROVIDER and state.pool != CODEX_WEEKLY_POOL:
@@ -273,7 +281,17 @@ def evaluate_eligibility(
             if prompt_bytes and decision.missing_capabilities == ("large_prompt_stdin",)
             else decision.reason
         )
-    if decision.reason == "WEEKLY_QUOTA_RED_LINE":
+    if decision.reason in (
+        "WEEKLY_QUOTA_RED_LINE",
+        "RED_LINE_5H",
+        "RED_LINE_DAILY",
+        "RED_LINE_WEEKLY",
+        "RED_LINE_MONTHLY",
+        "RED_LINE",
+        "QUOTA_EXCLUDED_UNTIL_RESET",
+        "QUOTA_EVIDENCE_REQUIRED",
+        "POOL_OFF",
+    ):
         return SKIP_QUOTA_BLOCKED
     if decision.reason == PROVIDER_DISABLED:
         return PROVIDER_DISABLED

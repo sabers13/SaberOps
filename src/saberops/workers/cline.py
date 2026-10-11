@@ -252,6 +252,9 @@ class ClineAdapter(WorkerAdapter):
         if parsed.finish_reason == "context_exhausted":
             interruption_reason = WorkerInterruptionReason.CONTEXT_EXHAUSTED
         quota_reset_at: str | None = None
+        quota_window: str | None = None
+        quota_model_scope: str | None = None
+        quota_reset_confidence: str | None = None
         if status is not AttemptStatus.SUCCESS and interruption_reason is None:
             # PROVISIONAL text-only ClinePass rule (see exhaustion.py):
             # exhaustion interrupts for continuation-after-quota instead
@@ -261,6 +264,9 @@ class ClineAdapter(WorkerAdapter):
             if exhaustion.verdict is ExhaustionVerdict.QUOTA_EXHAUSTED:
                 interruption_reason = WorkerInterruptionReason.QUOTA_EXHAUSTED
                 quota_reset_at = reset_to_iso(exhaustion.reset_at)
+                quota_window = exhaustion.window
+                quota_model_scope = exhaustion.model_scope
+                quota_reset_confidence = exhaustion.reset_confidence
                 reset_note = quota_reset_at or "unknown reset time"
                 error = (
                     "Cline plan quota exhausted "
@@ -286,6 +292,9 @@ class ClineAdapter(WorkerAdapter):
             usage=parsed.usage,
             interruption_reason=interruption_reason,
             quota_reset_at=quota_reset_at,
+            quota_window=quota_window,
+            quota_model_scope=quota_model_scope,
+            quota_reset_confidence=quota_reset_confidence,
         )
 
     def _classify(

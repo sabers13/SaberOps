@@ -94,6 +94,8 @@ def parse_limits(provider: str, payload: Any) -> list[dict[str, Any]]:
 
 async def _native_limits(executable: str, provider: str, cwd: str) -> list[dict[str, Any]]:
     """Use each CLI's own auth via metadata-only stdio; no inference session."""
+    from saberops.workers.env import hermetic_env
+
     argv = [executable, "app-server", "--listen", "stdio://"]
     process = await asyncio.create_subprocess_exec(
         *argv,
@@ -102,6 +104,7 @@ async def _native_limits(executable: str, provider: str, cwd: str) -> list[dict[
         stderr=asyncio.subprocess.DEVNULL,
         cwd=cwd,
         limit=1_000_000,
+        env=hermetic_env("codex", None),
     )
     assert process.stdin is not None and process.stdout is not None
     stdin, stdout = process.stdin, process.stdout

@@ -394,7 +394,12 @@ class OrchestratorService:
 
     def list_models(self) -> dict[str, Any]:
         """Return the three model routing tiers and quota states."""
-        quota_states = self.db.list_quota()
+        try:
+            from saberops.capacity.snapshot import effective_quota_states
+
+            quota_states = effective_quota_states(self.db)
+        except Exception:
+            quota_states = self.db.list_quota()
         snap = load_effective_routing()
         return {
             "quota_states": quota_states,
@@ -428,8 +433,53 @@ class OrchestratorService:
         )
 
     def enable_quota(self, provider: str, pool: str) -> QuotaState:
-        """Re-enable normal routing state for a provider pool."""
-        return self.db.enable_quota(provider=provider, pool=pool)
+        """Re-enable normal routing state for a provider pool.
+
+        Also clears active exclusions for that provider's pools
+        (``cleared_by`` OWNER): ``Service.enable_quota`` is the function
+        behind ``orch quota enable``.
+        """
+        state = self.db.enable_quota(provider=provider, pool=pool)
+        try:
+            from saberops.capacity.store import clear_pool_exclusions
+
+            provider_norm = provider.strip().lower()
+            try:
+                from saberops.control_plane.policy import load_control_plane_policy
+
+                policies = dict(load_control_plane_policy().quota_pools)
+            except Exception:
+                policies = {}
+            cleared_any = False
+            for pool_id, policy in policies.items():
+                members = getattr(policy, "members", ()) or ()
+                hit = False
+                for member in members:
+                    sel = member.get("route") if isinstance(member, dict) else member
+                    if isinstance(sel, str) and (
+                        sel.strip().lower() == provider_norm
+                        or sel.strip().lower().startswith(provider_norm + "/")
+                    ):
+                        hit = True
+                        break
+                if hit:
+                    try:
+                        clear_pool_exclusions(self.db, pool_id, by="OWNER")
+                        cleared_any = True
+                    except Exception:
+                        pass
+            if not cleared_any:
+                try:
+                    clear_pool_exclusions(self.db, provider_norm, by="OWNER")
+                except Exception:
+                    pass
+                try:
+                    clear_pool_exclusions(self.db, pool.strip().lower(), by="OWNER")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return state
 
     # ------------------------------------------------------------------
     # Owner binding selection (reviewer / orchestrator).

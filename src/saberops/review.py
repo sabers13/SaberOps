@@ -160,6 +160,8 @@ def _is_provider_quota_blocked(quota_states: list[QuotaState], provider: str) ->
     """
     provider_norm = provider.strip().lower()
     for state in quota_states:
+        if getattr(state, "exclusion_id", None):
+            continue
         if state.provider != provider_norm or state.routing_state != RoutingState.BLOCKED:
             continue
         if state.provider == CODEX_PROVIDER and state.pool != CODEX_WEEKLY_POOL:
@@ -814,7 +816,12 @@ class ReviewEngine:
             launched_so_far = self.db.count_launched_reviews(run_id)
             limit = max(0, total_limit - launched_so_far)
         prompt_bytes = len(review_prompt.encode("utf-8"))
-        quota_states = self.db.list_quota()
+        try:
+            from saberops.capacity.snapshot import effective_quota_states
+
+            quota_states = effective_quota_states(self.db)
+        except Exception:
+            quota_states = self.db.list_quota()
         review_config = None
         if run.config_json:
             raw_config: object = None

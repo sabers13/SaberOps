@@ -200,6 +200,9 @@ class AntigravityAdapter(WorkerAdapter):
 
         interruption_reason: _InterruptionReason | None = None
         quota_reset_at: str | None = None
+        quota_window: str | None = None
+        quota_model_scope: str | None = None
+        quota_reset_confidence: str | None = None
         if res.timed_out:
             status = AttemptStatus.TIMEOUT
             outcome = DispatchOutcome.TIMEOUT
@@ -239,6 +242,9 @@ class AntigravityAdapter(WorkerAdapter):
                 summary = error
                 interruption_reason = _InterruptionReason.QUOTA_EXHAUSTED
                 quota_reset_at = reset_to_iso(exhaustion.reset_at)
+                quota_window = exhaustion.window
+                quota_model_scope = exhaustion.model_scope
+                quota_reset_confidence = exhaustion.reset_confidence
 
         return WorkerResult(
             provider=self.provider_name,
@@ -258,6 +264,9 @@ class AntigravityAdapter(WorkerAdapter):
             usage=parsed.usage,
             interruption_reason=interruption_reason,
             quota_reset_at=quota_reset_at,
+            quota_window=quota_window,
+            quota_model_scope=quota_model_scope,
+            quota_reset_confidence=quota_reset_confidence,
             prompt_bytes=prompt_bytes,
             prompt_transport_used="stdin" if use_stdin else "argv",
         )

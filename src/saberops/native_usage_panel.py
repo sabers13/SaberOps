@@ -114,6 +114,11 @@ def read_panel(executable: str, provider: str) -> list[dict[str, Any]]:
     master, slave = pty.openpty()
     process: subprocess.Popen[bytes] | None = None
     try:
+        from saberops.workers.env import hermetic_env
+
+        harness = "claude" if provider == "anthropic" else provider
+        panel_env = hermetic_env(harness, None)
+        panel_env["TERM"] = "xterm-256color"
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 80, 140, 0, 0))
         with tempfile.TemporaryDirectory(prefix="saberops-usage-panel-") as cwd:
             process = subprocess.Popen(
@@ -122,7 +127,7 @@ def read_panel(executable: str, provider: str) -> list[dict[str, Any]]:
                 stdout=slave,
                 stderr=slave,
                 cwd=cwd,
-                env={**os.environ, "TERM": "xterm-256color"},
+                env=panel_env,
                 start_new_session=True,
             )
             os.close(slave)
