@@ -1,4 +1,10 @@
-"""Antigravity (AGY) worker adapter for local CLI execution."""
+"""Antigravity (AGY) worker adapter for local CLI execution.
+
+Attended-only per ADR-0001 (Amendment 1, item 3): this adapter is
+never auto-included in the default registry nor in automatic routing
+chains.  It runs only when the owner explicitly overrides
+provider+model for a run.
+"""
 
 from __future__ import annotations
 
