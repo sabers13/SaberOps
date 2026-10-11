@@ -194,6 +194,44 @@ def test_codex_direct_path_carries_billing_pins(
         assert flag in argv, f"direct path is missing -c {flag}: {argv}"
 
 
+def test_codex_direct_path_ignores_user_config(
+    stub_bin: tuple[Path, Path], tmp_path: Path
+) -> None:
+    # ``--ignore-user-config`` drops $CODEX_HOME/config.toml (and with it
+    # the [projects.*] trust table gating project .codex/ layers) while
+    # ChatGPT auth still loads from CODEX_HOME (installed codex 0.162.0:
+    # "Do not load `$CODEX_HOME/config.toml`; auth still uses `CODEX_HOME`").
+    bindir, outfile = stub_bin
+    _write_recording_stub(bindir, "stub-codex", outfile)
+    adapter = CodexAdapter(codex_bin="stub-codex")
+    adapter.run(WorkerRequest("do the thing", tmp_path, "gpt-6.1-sol"))
+    argv = _codex_argv(_child(outfile))
+    assert "--ignore-user-config" in argv
+    assert argv.index("--ignore-user-config") < argv.index("--model")
+
+
+def test_codex_resume_path_ignores_user_config(
+    stub_bin: tuple[Path, Path], tmp_path: Path
+) -> None:
+    bindir, outfile = stub_bin
+    _write_recording_stub(bindir, "stub-codex", outfile)
+    adapter = CodexAdapter(codex_bin="stub-codex")
+    adapter.run(
+        WorkerRequest(
+            "follow up", tmp_path, "gpt-6.1-sol", native_resume_id="session-123"
+        )
+    )
+    argv = _codex_argv(_child(outfile))
+    assert "resume" in argv
+    assert "--ignore-user-config" in argv
+    for key, value in (
+        ("forced_login_method", '"chatgpt"'),
+        ("model_provider", '"openai"'),
+        ("service_tier", '"default"'),
+    ):
+        assert f"{key}={value}" in argv
+
+
 def test_codex_pins_apply_even_with_stale_gateway_env(
     stub_bin: tuple[Path, Path], tmp_path: Path
 ) -> None:

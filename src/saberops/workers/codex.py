@@ -34,6 +34,12 @@ __all__ = ["CodexAdapter", "ORCH_PROMPT_ARG_LIMIT"]
 # ``-c`` overrides have the highest config precedence (above project and
 # user config files), and project ``.codex/`` layers cannot override
 # ``model_provider``/``model_providers`` at all.
+# ``--ignore-user-config`` is passed on every invocation (see the adapter
+# docstring for evidence): it drops ``$CODEX_HOME/config.toml`` -- and
+# with it the ``[projects.*]`` trust table that gates project ``.codex/``
+# layers -- while ChatGPT auth still loads from ``CODEX_HOME``.
+_IGNORE_USER_CONFIG_FLAG: tuple[str, ...] = ("--ignore-user-config",)
+
 _DIRECT_COVERRIDE_FLAGS: tuple[str, ...] = (
     "-c",
     'forced_login_method="chatgpt"',
@@ -65,6 +71,22 @@ class CodexAdapter(WorkerAdapter):
     speed'); and project ``.codex/`` layers load "only when you trust
     the project" and can never override ``model_provider`` /
     ``model_providers``.
+
+    ``--ignore-user-config`` is passed on every invocation so project
+    trust can never sneak in through the user config: the installed
+    Codex CLI 0.162.0 documents it as "Do not load
+    ``$CODEX_HOME/config.toml``; auth still uses ``CODEX_HOME``"
+    (``codex exec --help``), which closes the project-config trust gap
+    (an unlisted worktree inherits no ``[projects.*]`` trust entry, and
+    with the user config ignored there is no trust table at all, so
+    project ``.codex/`` layers stay untrusted/unloaded).  Auth still
+    loads because the credential material lives outside ``config.toml``:
+    ``auth.json`` sits directly under ``CODEX_HOME`` (alongside, not
+    inside, ``config.toml``), the binary resolves the "auth.json path
+    (file backend/fallback)" plus keyring storage independently of the
+    config file, and this host's ``config.toml`` does not set
+    ``cli_auth_credentials_store`` (so the compiled-in default applies
+    with or without the user config).
     """
 
     capability_transport = "DIRECT_CLI"
@@ -128,6 +150,7 @@ class CodexAdapter(WorkerAdapter):
         cmd = [
             self.codex_bin,
             "exec",
+            *_IGNORE_USER_CONFIG_FLAG,
             prompt_arg,
             "--model",
             request.model,
@@ -141,8 +164,9 @@ class CodexAdapter(WorkerAdapter):
             cmd.append("--ephemeral")
         if request.native_resume_id:
             cmd = [self.codex_bin, "--cd", str(request.worktree_path),
-                   "--sandbox", sandbox_mode, "exec", "resume", request.native_resume_id,
-                   prompt_arg, "--model", request.model, "--json"]
+                    "--sandbox", sandbox_mode, "exec", "resume", request.native_resume_id,
+                    *_IGNORE_USER_CONFIG_FLAG,
+                    prompt_arg, "--model", request.model, "--json"]
         if request.read_only:
             cmd.append("--skip-git-repo-check")
         for image in request.input_images:
