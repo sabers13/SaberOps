@@ -6,7 +6,7 @@ import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from saberops.capacity.exclusions import is_excluding, model_scope_matches, parse_iso
+from saberops.capacity.exclusions import is_excluding, parse_iso
 from saberops.capacity.freshness import freshness
 from saberops.capacity.store import ensure_tables, list_active_exclusions
 
@@ -22,7 +22,7 @@ def _utcnow(now: datetime | None) -> datetime:
     return datetime.now(UTC)
 
 
-def _legacy_exclusion_from_row(row: Any, now: datetime) -> dict | None:
+def _legacy_exclusion_from_row(row: Any, now: datetime) -> dict[str, object] | None:
     """Read (not migrate) a remaining-0 quota_state row as an exclusion."""
     try:
         remaining = float(row.remaining_percent)
@@ -133,7 +133,8 @@ def effective_quota_states(
             reset = parse_iso(getattr(row, "reset_at", None))
             if (
                 reset is not None
-                and getattr(row, "routing_state", None) in (RoutingState.BLOCKED, RoutingState.DEMOTED)
+                and getattr(row, "routing_state", None)
+                in (RoutingState.BLOCKED, RoutingState.DEMOTED)
                 and moment >= reset
             ):
                 row.routing_state = RoutingState.NORMAL
@@ -161,7 +162,10 @@ def effective_quota_states(
                 continue
         except Exception:
             continue
-        until = exc.get("until")
+        raw_until = exc.get("until")
+        until = raw_until if isinstance(raw_until, str) else None
+        raw_scope = exc.get("model_scope")
+        scope = raw_scope if isinstance(raw_scope, str) else None
         out.append(
             QuotaState(
                 provider=str(exc.get("source") or "exclusion"),
@@ -176,7 +180,7 @@ def effective_quota_states(
                 exclusion_id=str(exc.get("id") or ""),
                 exclusion_until=until,
                 exclusion_confidence=str(exc.get("until_confidence") or "UNKNOWN"),
-                exclusion_model_scope=exc.get("model_scope"),
+                exclusion_model_scope=scope,
             )
         )
     return out

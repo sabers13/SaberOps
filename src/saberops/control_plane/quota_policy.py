@@ -15,7 +15,9 @@ class QuotaPoolMode(StrEnum):
     RESERVE = "RESERVE"
     UNENFORCED = "UNENFORCED"
     OFF = "OFF"
-    DISABLED = "DISABLED"
+    # Deprecated alias: attribute access resolves to UNENFORCED while the
+    # string "DISABLED" still parses via _missing_.
+    DISABLED = "UNENFORCED"
 
     @classmethod
     def _missing_(cls, value: object) -> QuotaPoolMode | None:
@@ -114,7 +116,9 @@ def _member_matches(member: str, candidate: WorkerCandidate) -> bool:
         prefix = text[:-2]
         if "/" not in prefix:
             return False
-        return route == prefix or route.startswith(prefix + "/") or provider == prefix.split("/")[0] and route.startswith(prefix)
+        if route == prefix or route.startswith(prefix + "/"):
+            return True
+        return provider == prefix.split("/")[0] and route.startswith(prefix)
     return text in (
         route,
         candidate.model.strip().lower(),
@@ -129,7 +133,7 @@ def _matches(state: QuotaState, candidate: WorkerCandidate, policy: QuotaPoolPol
     # Legacy provider/pool rows are provider-scoped. A configured shared pool
     # declares members explicitly, which is the only case where one row may
     # govern candidates from more than one provider.
-    members: tuple = tuple(policy.members or ())
+    members: tuple[str | dict[str, object], ...] = tuple(policy.members or ())
     # Synthesized exclusion states carry pool identity in pool_id; match them
     # through the same member grammar (provider-scoped default handled by pools_for).
     if members:
@@ -160,7 +164,9 @@ def pools_for(candidate: WorkerCandidate, policies: dict[str, QuotaPoolPolicy] |
         members = policy.members or ()
         hit = False
         for member in members:
-            sel = member.get("route") if isinstance(member, dict) else member  # type: ignore[union-attr]
+            sel = (
+                member.get("route") if isinstance(member, dict) else member
+            )
             if not isinstance(sel, str):
                 continue
             if _member_matches(sel, candidate):
@@ -281,7 +287,11 @@ def quota_decision(
         try:
             remaining: float | None = (
                 float(normalized) if normalized is not None
-                else (float(state.remaining_percent) if state.remaining_percent is not None else None)
+                else (
+                    float(state.remaining_percent)
+                    if state.remaining_percent is not None
+                    else None
+                )
             )
         except (TypeError, ValueError):
             remaining = None
@@ -338,7 +348,11 @@ def quota_decision(
     # No matching state: overage_possible True on any drawn pool denies.
     check_policies = drawn_policies or []
     if any(p.overage_possible for p in check_policies):
-        first = check_policies[0] if check_policies else QuotaPoolPolicy(pool_id=drawn[0] if drawn else "")
+        first = (
+            check_policies[0]
+            if check_policies
+            else QuotaPoolPolicy(pool_id=drawn[0] if drawn else "")
+        )
         return QuotaDecision(
             False, first.pool_id if check_policies else (drawn[0] if drawn else None),
             None, first.red_line_pct if check_policies else 15.0,

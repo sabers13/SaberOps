@@ -105,8 +105,7 @@ CODEX_SUCCESS_STDOUT = _line(
 
 
 def test_codex_quota_verbatim() -> None:
-    from datetime import timezone
-    result = classify_codex(CODEX_QUOTA_STDOUT, tz=timezone.utc)
+    result = classify_codex(CODEX_QUOTA_STDOUT, tz=UTC)
     assert result.verdict is ExhaustionVerdict.QUOTA_EXHAUSTED
     assert result.confidence == VERIFIED
     # M2-1: prose date without timezone is a HINT in host-local time.
@@ -253,9 +252,8 @@ CLAUDE_SUCCESS_STDOUT = _line(
 
 def test_claude_success_trap_session_limit() -> None:
     # The trap: subtype "success" must NOT read as success.
-    from datetime import timezone
     now = datetime(2026, 10, 11, 12, 0, tzinfo=UTC)
-    result = classify_claude(CLAUDE_SESSION_STDOUT, now=now, tz=timezone.utc)
+    result = classify_claude(CLAUDE_SESSION_STDOUT, now=now, tz=UTC)
     assert result.verdict is ExhaustionVerdict.QUOTA_EXHAUSTED
     assert result.confidence == VERIFIED
     # M2-1: bare clock prose is a HINT (next host-local occurrence).
@@ -809,3 +807,68 @@ def test_build_quota_observation_defaults() -> None:
     assert observation.freshness == "FRESH"
     assert observation.normalized_remaining_pct == 0.0
     assert observation.reset_at is None
+
+
+# ---------------------------------------------------------------------------
+# M2-1: window / model_scope / reset_confidence passthrough.
+# ---------------------------------------------------------------------------
+
+
+def test_m21_claude_window_and_scope() -> None:
+    from saberops.workers.exhaustion import classify_claude as _cc
+
+    out = _cc(CLAUDE_WEEKLY_STDOUT)
+    assert out.verdict is ExhaustionVerdict.QUOTA_EXHAUSTED
+    assert out.window == "weekly"
+    assert out.reset_confidence == "EXACT"
+
+
+def test_m21_claude_opus_scope() -> None:
+    from saberops.workers.exhaustion import classify_claude as _cc
+
+    stdout = _line(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": True,
+            "api_error_status": 429,
+            "result": "You've hit your Opus limit \u00b7 resets Oct 10, 2am (UTC)",
+        }
+    )
+    out = _cc(stdout, now=datetime(2026, 10, 1, 12, 0, tzinfo=UTC))
+    assert out.window == "weekly"
+    assert out.model_scope == "opus"
+    assert out.reset_confidence == "PARSED"
+
+
+def test_m21_opencode_window_and_parsed_reset() -> None:
+    out = classify_opencode(
+        OPENCODE_CLINEPASS_STDOUT, now=datetime(2026, 10, 11, 12, 0, tzinfo=UTC)
+    )
+    assert out.window == "weekly"
+    assert out.reset_confidence == "PARSED"
+    assert out.reset_at is not None
+
+
+def test_m21_codex_hint_confidence() -> None:
+
+    out = classify_codex(CODEX_QUOTA_STDOUT, tz=UTC)
+    assert out.reset_confidence == "HINT"
+    assert out.reset_at is not None
+
+
+def test_m21_record_exhaustion_writes_exclusion_not_quota_row(tmp_path: Path) -> None:
+    from saberops.capacity.store import list_active_exclusions
+
+    db = Database(tmp_path / "m21.db")
+    _seed_run(db, tmp_path, "run-1")
+    reset = datetime(2026, 10, 13, 9, 15, 45, tzinfo=UTC)
+    state = record_exhaustion(
+        db, provider="codex", model="gpt-5", window="weekly",
+        reset_at=reset, reset_confidence="EXACT", run_id="run-1",
+    )
+    assert db.list_quota() == []
+    active = list_active_exclusions(db, now=datetime(2026, 10, 11, 12, 0, tzinfo=UTC))
+    assert len(active) == 1
+    assert active[0]["window_id"] == "weekly"
+    assert state.exclusion_confidence == "EXACT"

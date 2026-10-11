@@ -60,7 +60,6 @@ def freshness(
     observed = _parse_observed(observed_at)
     if observed is None:
         return "STALE"
-    from datetime import timedelta
 
     age_min = (moment - observed).total_seconds() / 60.0
     if age_min < 0:

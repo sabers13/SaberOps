@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any
 from saberops.models import QuotaObservation, QuotaRawSemantics, QuotaState
 
 if TYPE_CHECKING:
+    from saberops.control_plane.quota_policy import QuotaPoolPolicy
     from saberops.db import Database
 else:  # pragma: no cover - typing only
     Database = Any  # type: ignore[assignment,misc]
@@ -139,7 +140,8 @@ _CODEX_RATE_RE = re.compile(
 _CODEX_OTHER_RE = re.compile(r"at capacity|exceeded retry limit.*429", re.IGNORECASE)
 _CODEX_RETRY_IN_RE = re.compile(r"please try again in ([\d.]+)s", re.IGNORECASE)
 _CODEX_TRY_AGAIN_AT_RE = re.compile(
-    r"try again at\s+(?P<date>[A-Z][a-z]{2,8}\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4}\s+\d{1,2}:\d{2}\s*(?:AM|PM))",
+    r"try again at\s+(?P<date>[A-Z][a-z]{2,8}\s+\d{1,2}"
+    r"(?:st|nd|rd|th)?,?\s+\d{4}\s+\d{1,2}:\d{2}\s*(?:AM|PM))",
     re.IGNORECASE,
 )
 
@@ -167,7 +169,8 @@ def _parse_codex_hint_date(
         except ValueError:
             return None
     try:
-        local_dt = naive.replace(tzinfo=local_tz)  # type: ignore[arg-type]
+        assert local_tz is not None
+        local_dt = naive.replace(tzinfo=local_tz)
         return local_dt.astimezone(UTC)
     except Exception:
         return None
@@ -286,7 +289,9 @@ def _parse_claude_zoned_reset(body: str, zone: str, now: datetime) -> datetime |
         return None
     month_token = month_match.group(0)
     month_num = _MONTH_NAME_TO_NUM[month_token[:3].lower()]
-    day = int(re.search(r"\d{1,2}", month_token[3:] or month_token).group(0))  # type: ignore[union-attr]
+    day_match = re.search(r"\d{1,2}", month_token[3:] or month_token)
+    assert day_match is not None
+    day = int(day_match.group(0))
     year_match = re.search(r"\d{4}", month_token)
     year = int(year_match.group(0)) if year_match else now.astimezone(tz).year
     hour = int(clock_match.group(1)) % 12
@@ -342,7 +347,8 @@ def _parse_claude_bare_clock_hint(
         return None
     try:
         local_tz = tz if tz is not None else datetime.now().astimezone().tzinfo
-        local_now = now.astimezone(local_tz)  # type: ignore[arg-type]
+        assert local_tz is not None
+        local_now = now.astimezone(local_tz)
     except Exception:
         return None
     hour = int(match.group(1)) % 12
@@ -957,7 +963,7 @@ def record_exhaustion(
     window: str | None = None,
     model_scope: str | None = None,
     reset_confidence: str = "UNKNOWN",
-    pool_policies: dict | None = None,
+    pool_policies: dict[str, QuotaPoolPolicy] | None = None,
     pools: list[str] | None = None,
 ) -> QuotaState:
     """Persist exhaustion evidence and upsert pool exclusions (M2-1 B).
@@ -1003,7 +1009,6 @@ def record_exhaustion(
     elif pool_policies is not None:
         try:
             from saberops.control_plane.quota_policy import pools_for as _pools_for
-
             from saberops.models import WorkerCandidate
 
             pool_ids = _pools_for(

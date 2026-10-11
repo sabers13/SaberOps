@@ -9,6 +9,7 @@ cleared_at, cleared_by``. All timestamps are ISO-8601 UTC strings.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 CONFIDENCE_RANK: dict[str, int] = {
     "UNKNOWN": 0,
@@ -57,12 +58,12 @@ def backoff_next_probe(
     return created_at + timedelta(minutes=delay_min)
 
 
-def exclusion_state(exc: dict, now: datetime) -> str:
+def exclusion_state(exc: dict[str, Any], now: datetime) -> str:
     """Return ACTIVE | EXPIRED | PROBE_DUE | CLEARED for one exclusion row."""
     if exc.get("cleared_at"):
         return "CLEARED"
     confidence = str(exc.get("until_confidence") or "UNKNOWN").upper()
-    until = parse_iso(exc.get("until"))  # type: ignore[arg-type]
+    until = parse_iso(exc.get("until"))
     now_utc = now.astimezone(UTC) if now.tzinfo else now.replace(tzinfo=UTC)
     if confidence in ("EXACT", "PARSED"):
         if until is None:
@@ -70,16 +71,16 @@ def exclusion_state(exc: dict, now: datetime) -> str:
         return "ACTIVE" if now_utc < until + SKEW else "EXPIRED"
     if confidence == "HINT":
         if until is None:
-            nxt = parse_iso(exc.get("next_probe_at"))  # type: ignore[arg-type]
+            nxt = parse_iso(exc.get("next_probe_at"))
             if nxt is not None and now_utc < nxt:
                 return "ACTIVE"
             return "PROBE_DUE"
         return "ACTIVE" if now_utc < until else "PROBE_DUE"
     # UNKNOWN
-    nxt = parse_iso(exc.get("next_probe_at"))  # type: ignore[arg-type]
+    nxt = parse_iso(exc.get("next_probe_at"))
     if nxt is not None:
         return "ACTIVE" if now_utc < nxt else "PROBE_DUE"
-    created = parse_iso(exc.get("created_at"))  # type: ignore[arg-type]
+    created = parse_iso(exc.get("created_at"))
     if created is None:
         return "PROBE_DUE"
     computed = backoff_next_probe(
@@ -88,12 +89,12 @@ def exclusion_state(exc: dict, now: datetime) -> str:
     return "ACTIVE" if now_utc < computed else "PROBE_DUE"
 
 
-def is_excluding(exc: dict, now: datetime) -> bool:
+def is_excluding(exc: dict[str, Any], now: datetime) -> bool:
     """True when the exclusion denies (ACTIVE or PROBE_DUE)."""
     return exclusion_state(exc, now) in ("ACTIVE", "PROBE_DUE")
 
 
-def merge_wins(old: dict, new: dict) -> bool:
+def merge_wins(old: dict[str, Any], new: dict[str, Any]) -> bool:
     """Return True when the new exclusion replaces the old one.
 
     Higher confidence wins (EXACT > PARSED > HINT > UNKNOWN); at equal
@@ -103,8 +104,8 @@ def merge_wins(old: dict, new: dict) -> bool:
     new_rank = CONFIDENCE_RANK.get(str(new.get("until_confidence") or "UNKNOWN").upper(), 0)
     if new_rank != old_rank:
         return new_rank > old_rank
-    old_until = parse_iso(old.get("until"))  # type: ignore[arg-type]
-    new_until = parse_iso(new.get("until"))  # type: ignore[arg-type]
+    old_until = parse_iso(old.get("until"))
+    new_until = parse_iso(new.get("until"))
     if old_until is None and new_until is None:
         # Later creation wins on full tie.
         return str(new.get("created_at") or "") >= str(old.get("created_at") or "")

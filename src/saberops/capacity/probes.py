@@ -67,10 +67,10 @@ def read_codex_windows(
     rows = read_limits(executable, "codex")
     out: list[tuple[str, float, datetime | None, str]] = []
     for row in rows:
-        try:
-            remaining = float(row.get("remaining"))
-        except (TypeError, ValueError):
+        raw_remaining = row.get("remaining")
+        if not isinstance(raw_remaining, (int, float)) or isinstance(raw_remaining, bool):
             continue
+        remaining = float(raw_remaining)
         window = duration_to_window(row.get("duration"))
         reset_raw = row.get("reset_at")
         reset = parse_iso(reset_raw) if isinstance(reset_raw, str) else None
@@ -88,10 +88,10 @@ def read_claude_windows(
     rows = read_panel(executable, "anthropic")
     out: list[tuple[str, float, datetime | None, str]] = []
     for row in rows:
-        try:
-            remaining = float(row.get("remaining"))
-        except (TypeError, ValueError):
+        raw_remaining = row.get("remaining")
+        if not isinstance(raw_remaining, (int, float)) or isinstance(raw_remaining, bool):
             continue
+        remaining = float(raw_remaining)
         label = str(row.get("label") or "")
         low = label.lower()
         if "session" in low:
@@ -121,7 +121,7 @@ def parse_claude_reset_text(
     import re
     from zoneinfo import ZoneInfo
 
-    from saberops.workers.exhaustion import _CLOCK_RE, _MONTH_RE, _MONTH_NAME_TO_NUM
+    from saberops.workers.exhaustion import _CLOCK_RE, _MONTH_NAME_TO_NUM, _MONTH_RE
 
     moment = _utcnow(now)
     zone_match = re.search(r"\((?P<zone>[A-Za-z_][A-Za-z0-9_+\-/]*)\)", text)
@@ -154,7 +154,8 @@ def parse_claude_reset_text(
         # HINT: next occurrence in host-local time (injectable tz).
         try:
             local_tz = tz if tz is not None else datetime.now().astimezone().tzinfo
-            local_now = moment.astimezone(local_tz)  # type: ignore[arg-type]
+            assert local_tz is not None
+            local_now = moment.astimezone(local_tz)
         except Exception:
             return None, "UNKNOWN"
         hour = int(clock_match.group(1)) % 12
@@ -183,10 +184,10 @@ def read_go_windows(
     rows = read_go_limits(executable)
     out: list[tuple[str, float, datetime | None, str]] = []
     for row in rows:
-        try:
-            remaining = float(row.get("remaining"))
-        except (TypeError, ValueError):
+        raw_remaining = row.get("remaining")
+        if not isinstance(raw_remaining, (int, float)) or isinstance(raw_remaining, bool):
             continue
+        remaining = float(raw_remaining)
         label = str(row.get("label") or "").lower()
         if "5 hour" in label:
             window = "5h"
@@ -391,7 +392,7 @@ def run_due_probes(
                 elif callable(custom):
                     windows = custom(moment)
                 else:
-                    windows = list(custom)  # type: ignore[arg-type]
+                    windows = list(custom)
                 handle_probe_result(
                     db, harness=harness, windows=list(windows),
                     now=moment, pool_policies=pool_policies,

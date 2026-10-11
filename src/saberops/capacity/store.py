@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterator
+from typing import TYPE_CHECKING, Any
 
 from saberops.capacity.exclusions import (
     backoff_next_probe,
@@ -112,7 +113,7 @@ def upsert_exclusion(
     evidence_ref: str | None = None,
     run_id: str | None = None,
     now: datetime | None = None,
-) -> dict:
+) -> dict[str, object]:
     """Merge-upsert one exclusion; at most one active per key.
 
     A re-exhaustion of the same pool within 24h of a clear continues the
@@ -173,7 +174,7 @@ def upsert_exclusion(
                         attempts = 0
             if confidence == "UNKNOWN":
                 next_probe_iso = _iso(backoff_next_probe(moment, attempts, window))
-        new_row: dict = {
+        new_row: dict[str, object] = {
             "id": f"exc_{uuid.uuid4().hex[:12]}",
             "pool_id": pool,
             "window_id": window,
@@ -226,7 +227,7 @@ def upsert_exclusion(
 
 def list_active_exclusions(
     db: Database, *, now: datetime | None = None
-) -> list[dict]:
+) -> list[dict[str, object]]:
     """Return active + PROBE_DUE exclusions, expiring EXACT/PARSED inline."""
     ensure_tables(db)
     moment = _utcnow(now)
@@ -235,7 +236,7 @@ def list_active_exclusions(
             "SELECT * FROM capacity_exclusions WHERE cleared_at IS NULL"
             " ORDER BY created_at ASC, id ASC"
         ).fetchall()
-        result: list[dict] = []
+        result: list[dict[str, object]] = []
         for row in rows:
             exc = dict(row)
             state = exclusion_state(exc, moment)
@@ -331,7 +332,7 @@ def record_probe_run(
         conn.commit()
 
 
-def last_probe_run(db: Database, harness: str) -> dict | None:
+def last_probe_run(db: Database, harness: str) -> dict[str, object] | None:
     """Return the most recent probe run for a harness, else None."""
     ensure_tables(db)
     with owner_connection(db) as conn:
@@ -355,7 +356,8 @@ def probe_allowed(
     last = last_probe_run(db, harness)
     if last is None:
         return True
-    started = parse_iso(last.get("started_at"))
+    raw_started = last.get("started_at")
+    started = parse_iso(raw_started if isinstance(raw_started, str) else None)
     if started is None:
         return True
     return (moment - started) >= timedelta(minutes=10)

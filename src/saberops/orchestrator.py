@@ -468,7 +468,7 @@ def _record_quota_exhaustion_evidence(
         try:
             from saberops.control_plane.policy import load_control_plane_policy
 
-            pool_policies: dict | None = dict(load_control_plane_policy().quota_pools)
+            pool_policies = dict(load_control_plane_policy().quota_pools)
         except Exception:
             pool_policies = None
         state = record_exhaustion(
@@ -479,7 +479,6 @@ def _record_quota_exhaustion_evidence(
         )
         try:
             from saberops.control_plane.quota_policy import pools_for as _pools_for
-
             from saberops.models import WorkerCandidate
 
             pool_ids = _pools_for(
@@ -5725,7 +5724,9 @@ class Orchestrator:
                                     is_explicit_rep = config.model_override is not None
                                     prompt_bytes_rep = len(prompt_task.encode("utf-8"))
                                     try:
-                                        from saberops.capacity.snapshot import effective_quota_states
+                                        from saberops.capacity.snapshot import (
+                                            effective_quota_states,
+                                        )
 
                                         quota_states_rep = effective_quota_states(self.db)
                                     except Exception:

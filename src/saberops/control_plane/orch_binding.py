@@ -545,9 +545,14 @@ def _orchestrator_reason(decision: ControlPlaneDecision) -> str:
         return ORCH_BINDING_PINNED_TRAINING
     if decision.reason == REQUIRED_CAPABILITY_UNSUPPORTED:
         return ORCH_BINDING_PINNED_CAPABILITY
-    # Quota policy emits ``WEEKLY_QUOTA_RED_LINE`` (or other ``*_QUOTA_*`` variants);
+    # Quota policy emits per-window RED_LINE_* reasons, QUOTA_EXCLUDED_UNTIL_RESET,
+    # QUOTA_EVIDENCE_REQUIRED, POOL_OFF (M2-1; legacy WEEKLY_QUOTA_RED_LINE alias);
     # any quota-typed reason maps to the orchestrator quota vocabulary.
-    if decision.reason and "QUOTA" in decision.reason:
+    if decision.reason and (
+        "QUOTA" in decision.reason
+        or "RED_LINE" in decision.reason
+        or decision.reason == "POOL_OFF"
+    ):
         return ORCH_BINDING_PINNED_QUOTA
     if decision.reason == PROVIDER_UNAVAILABLE:
         return ORCH_BINDING_PINNED_UNAVAILABLE
