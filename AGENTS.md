@@ -160,16 +160,28 @@ coverage map built once per commit (`python scripts/build_test_map.py`, full sui
 under coverage.py with `dynamic_context = test_function`, stored as sharded JSON
 under `$(git rev-parse --git-common-dir)/saberops-test-map/`, shared by all
 worktrees and never committed). Added/deleted lines select the tests of the nearest
-covered line in the same function (`ast` spans). A changed file that is new, has no
+covered line in the same function (`ast` spans); changed module-level lines
+(class bodies, field defaults, constants, decorators) resolve through their
+top-level symbol (`ast` Name/Attribute usages in `src/`/`tests/`, string
+references such as getattr names not tracked; deleted symbols resolve against
+the base tree) and fall back to direct importers only when the symbol cannot be
+resolved. A changed file that is new, has no
 covering context, or whose map predates the change (build commit not an ancestor of
 `HEAD`) falls back to direct importers only (depth 1) from the static `ast` graph
 over `src/**` and `tests/**` (imports plus dotted patch targets written as strings;
 `if TYPE_CHECKING:` imports are not edges because they never execute). With no map
-at all, or `--strategy static`, the legacy transitive closure applies. The wrapper
-prints the map commit/age, the base ref, the changed files and the reason for each
+at all, or `--strategy static`, the legacy transitive closure applies. Selected
+node IDs are resolved against the current tree (`pytest --collect-only`):
+map node IDs of deleted/renamed tests are dropped as ghosts, and the gate fails
+instead of passing when the selection was non-empty but nothing runs (also on
+pytest exit 5). The wrapper
+prints the map commit/age (in commits) plus the share of changed lines without
+coverage data ("map stale for this diff, consider rebuild" past 50%), the base ref, the changed files and the reason for each
 selected test first, so saved gate output is self-auditing. It keeps
 `ruff check .` and `mypy --strict src tests` over the whole repository (mypy is
-incremental and type changes ripple) and runs pytest on the selection only, with
+incremental and type changes ripple; its cache is shared across worktrees under
+`$(git rev-parse --git-common-dir)/saberops-mypy-cache/`, override with
+`MYPY_CACHE_DIR`) and runs pytest on the selection only, with
 `-n auto` (pytest-xdist) when more than ~50 tests are selected. A change
 that cannot be reasoned about safely (any conftest, `pyproject.toml` and other setup
 files, gate/table scripts, CI workflows, the top-level package init, a `.py` outside the

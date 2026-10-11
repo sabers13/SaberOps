@@ -11,7 +11,12 @@
 # forwarded to pytest, e.g.
 #   bash scripts/gate-affected.sh --base main -x
 # The selected tests and the reasons they were selected are printed first, so the
-# saved output is self-auditing. Exit 0 with pytest skipped means the diff touches
+# saved output is self-auditing. Selected node IDs are resolved against the
+# current tree (pytest --collect-only): IDs of deleted/renamed tests are ghosts
+# from a map built before the deletion and are dropped before running; when the
+# selection was non-empty but nothing resolvable remains -- or pytest collects
+# 0 tests -- the gate FAILS instead of passing with nothing run.
+# Exit 0 with pytest skipped means the diff touches
 # no test (docs-only or a presentation-free change).
 #
 # Coverage map: scripts/build_test_map.py runs the full suite once under
@@ -85,7 +90,7 @@ explain_file=$(mktemp "${TMPDIR:-/tmp}/saberops-gate-affected.XXXXXX")
 targets_file=$(mktemp "${TMPDIR:-/tmp}/saberops-gate-targets.XXXXXX")
 trap 'rm -f -- "$explain_file" "$targets_file"' EXIT
 
-selector_args=(--base "$base" --strategy "$strategy")
+selector_args=(--base "$base" --strategy "$strategy" --resolve)
 if [[ -n "$map_path" ]]; then
     selector_args+=(--map "$map_path")
 fi
@@ -93,6 +98,10 @@ if ! selection=$("$gate_python" scripts/select_tests.py "${selector_args[@]}" --
     echo "gate-affected: test selection failed" >&2
     cat -- "$explain_file" >&2
     exit 2
+fi
+if grep -q "^ghost IDs dropped" "$explain_file"; then
+    ghosts_line=$(grep "^ghost IDs dropped" "$explain_file" | head -1)
+    echo "($ghosts_line: map node IDs that no longer collect; dropped before running)"
 fi
 
 echo "=== affected-test gate (per task) ==="
@@ -162,13 +171,29 @@ echo "--- ruff check . ---"
 
 echo
 echo "--- mypy --strict src tests ---"
-"$gate_python" -m mypy --strict src tests
+# Shared mypy cache across worktrees (git-common-dir, never committed): the
+# cache is content-keyed, so a fresh worktree reuses another worktree's warm
+# entries (~0.3 s vs ~13 s cold, identical error sets). Override with
+# MYPY_CACHE_DIR to opt out (e.g. MYPY_CACHE_DIR=.mypy_cache).
+default_mypy_cache="$(git rev-parse --git-common-dir)/saberops-mypy-cache"
+mypy_cache_dir="${MYPY_CACHE_DIR:-$default_mypy_cache}"
+if ! mkdir -p "$mypy_cache_dir" 2>/dev/null; then
+    echo "(shared mypy cache unavailable; using default .mypy_cache)"
+    mypy_cache_dir=".mypy_cache"
+fi
+"$gate_python" -m mypy --strict --cache-dir "$mypy_cache_dir" src tests
 
 echo
 if [[ "$selection" == FULL* ]]; then
     echo "--- pytest -q (full suite required) ---"
     "$gate_python" -m pytest "${pytest_argv[@]}"
 elif [[ -z "$selection" ]]; then
+    if grep -q "^ghost IDs dropped" "$explain_file"; then
+        echo "gate-affected: FAIL: the selection was non-empty but every selected" >&2
+        echo "test no longer exists (all targets are ghosts); refusing to pass" >&2
+        echo "with 0 tests run. Rebuild the coverage map or check the diff." >&2
+        exit 1
+    fi
     echo "--- pytest skipped: no test is affected by this diff ---"
     exit 0
 else
@@ -178,6 +203,7 @@ else
     # kernel's single-argument limit (MAX_ARG_STRLEN). pytest.main is in-process,
     # so argv limits never apply; flags behave exactly as on the CLI.
     printf '%s\n' "${targets[@]}" >"$targets_file"
+    set +e
     "$gate_python" - "$targets_file" "${pytest_argv[@]}" <<'PYEOF'
 import sys
 from pathlib import Path
@@ -185,4 +211,13 @@ import pytest
 targets = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
 raise SystemExit(pytest.main([*sys.argv[2:], *targets]))
 PYEOF
+    pytest_rc=$?
+    set -e
+    if (( pytest_rc == 5 )); then
+        echo "gate-affected: FAIL: pytest collected 0 tests while the selection" >&2
+        echo "was non-empty (exit 5: no tests collected). A non-empty selection" >&2
+        echo "that runs nothing is a selector defect, never a pass." >&2
+        exit 5
+    fi
+    exit "$pytest_rc"
 fi
