@@ -1428,35 +1428,15 @@ class Orchestrator:
             )
 
         # Production publication authority: the run's durable frozen
-        # ``publish_candidate`` decision is the ONLY source of
-        # candidate-push authority.  It maps to an explicit
-        # ``CANDIDATE_BRANCH_PUSH`` grant; without it (unreachable here
-        # -- the flag check above returned -- but carried explicitly so
-        # the authority composition stays total) publication refuses.
-        # The worker half is the run's minimal implementation
-        # authority: candidate publication never implies merge / tag /
-        # deploy / governance power (see ``worker_can_publish``).
-        # No ephemeral allow flag exists on this path.
-        from saberops.publishing import (
-            DEFAULT_PUBLISHING_AUTHORITY,
-            DEFAULT_WORKER_AUTHORITY,
-            PublicationKind,
-            PublishingAuthority,
-            governed_publish_candidate,
-        )
-
-        if config.publish_candidate:
-            publishing_authority = PublishingAuthority(
-                granted=frozenset({PublicationKind.CANDIDATE_BRANCH_PUSH}),
-                worker_id=f"orchestrator:{run_id}",
-                reason="run frozen publish_candidate decision",
-            )
-        else:
-            publishing_authority = DEFAULT_PUBLISHING_AUTHORITY
+        # ``publish_candidate`` decision (checked at method entry) is the
+        # ONLY source of candidate-push authority.  The push itself goes
+        # through the engine primitive
+        # :meth:`saberops.git.GitManager.publish_candidate`, which pins
+        # the refspec to ``orch/<run_id>/a<n>``, refuses non-fast-forward
+        # updates, and verifies the remote SHA.  No ephemeral allow flag
+        # exists on this path.
         try:
-            publication = governed_publish_candidate(
-                DEFAULT_WORKER_AUTHORITY,
-                publishing_authority,
+            publication = GitManager.publish_candidate(
                 repo_path=repo,
                 candidate_sha=commit_sha,
                 candidate_branch=branch_name,
