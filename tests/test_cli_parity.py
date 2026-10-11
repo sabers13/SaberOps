@@ -194,6 +194,39 @@ def test_reviewer_select_leaves_other_roles_unchanged(
     assert after.registry.to_dict() == before.registry.to_dict()
 
 
+def test_reviewer_select_unresolvable_refused_without_mutation(
+    isolated: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A REVIEWER-role binding whose provider has no adapter can never
+    # execute: verified registration alone does not authorize review.
+    from saberops.control_plane import (
+        OwnerBindings as _OwnerBindings,
+    )
+    from saberops.control_plane import (
+        materialize_discovered_binding as _materialize,
+    )
+    from saberops.control_plane import (
+        save_owner_bindings as _save,
+    )
+    from saberops.control_plane import (
+        upsert_owner_binding as _upsert,
+    )
+    from saberops.control_plane.bindings import BindingRole as _BindingRole
+
+    ghost, profile, pool = _materialize(
+        connection_id="ghost-conn",
+        provider="ghost-provider",
+        model="ghost-model",
+        binding_role=_BindingRole.REVIEWER,
+    )
+    _save(_upsert(_OwnerBindings(), binding=ghost, profile=profile, pool=pool))
+    before = load_owner_bindings().to_dict()
+    code, _, err = _cli("reviewer", "select", ghost.binding_id, capsys=capsys)
+    assert code == 1
+    assert "does not resolve" in err
+    assert load_owner_bindings().to_dict() == before
+
+
 def test_reviewer_clear_restores_legacy_ladder(
     isolated: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -269,6 +302,44 @@ def test_orchestrator_select_auto_resolves(
     payload = json.loads(out)
     assert payload["mode"] == "AUTO"
     assert payload["selected_binding_id"] == orch_id
+
+
+def test_orchestrator_select_disabled_profile_refused_without_mutation(
+    isolated: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # PINNED proves policy-resolvability (role + enabled profile + quota),
+    # never live executability: a disabled profile fails closed here while
+    # a missing adapter is refused later at dispatch.  This mirrors the
+    # removed /orchestrator/select route exactly.
+    from dataclasses import replace as _replace
+
+    from saberops.control_plane import OwnerBindings as _OwnerBindings
+    from saberops.control_plane import materialize_discovered_binding as _materialize
+    from saberops.control_plane import save_owner_bindings as _save
+    from saberops.control_plane import upsert_owner_binding as _upsert
+    from saberops.control_plane.bindings import BindingRole as _BindingRole
+
+    orch, profile, pool = _materialize(
+        connection_id="off-conn",
+        provider="opencode",
+        model="off-model",
+        binding_role=_BindingRole.ORCHESTRATOR,
+    )
+    _save(
+        _upsert(
+            _OwnerBindings(),
+            binding=orch,
+            profile=_replace(profile, enabled=False),
+            pool=pool,
+        )
+    )
+    before = load_owner_bindings().to_dict()
+    code, _, err = _cli(
+        "orchestrator", "select", "--binding", orch.binding_id, capsys=capsys
+    )
+    assert code == 1
+    assert "refused" in err.lower()
+    assert load_owner_bindings().to_dict() == before
 
 
 def test_orchestrator_clear_removes_policy(
