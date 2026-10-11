@@ -1,0 +1,1 @@
+{"control_plane_digest":"c88658a620c03163eda7e69adb4742497ba702e236909b15a9235c14ca12b489","host_access":"governed","provider_policies":{"codex":{"state":"ALLOWED"},"opencode":{"state":"ALLOWED_WITH_WARNING","warning":"test"}},"quota_pools":{"weekly":{"members":["codex"],"mode":"STRICT","red_line_pct":15.0}},"required_capabilities":[],"reserve_override":false,"schema_version":1}
