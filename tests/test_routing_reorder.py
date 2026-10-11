@@ -1,4 +1,9 @@
-"""Drag reorder persists canonical order without admitting new candidates."""
+"""Drag reorder persists canonical order without admitting new candidates.
+
+L-A step 5: the routing page is gone (owner routing lives in the `orch`
+CLI + routing config file). These tests drive the same engine seam the
+route used (`reorder_candidate_chain` + `save_user_routing`).
+"""
 from __future__ import annotations
 
 import copy
@@ -7,51 +12,49 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fastapi.testclient import TestClient
 
-from saberops.routing_config import load_effective_routing_payload, save_user_routing
-from saberops.web import create_app
+from saberops.routing_config import (
+    RoutingConfigError,
+    load_effective_routing_payload,
+    reorder_candidate_chain,
+    save_user_routing,
+)
 
 
 @pytest.fixture()
-def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+def isolated_xdg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     for key in ("XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"):
         monkeypatch.setenv(key, str(tmp_path / key))
     for key in ("SABEROPS_PROFILE", "ORCH_ACCESS_STORE", "ORCH_ACCESS_MODELS_STORE",
                 "ORCH_BINDING_STORE"):
         monkeypatch.delenv(key, raising=False)
-    return TestClient(create_app(db_path=tmp_path / "web.db", seed_cwd_if_empty=False))
 
 
-def test_drag_order_persists_and_preserves_other_chains(client: TestClient) -> None:
+def _reorder(payload: dict[str, Any], order: Any) -> dict[str, Any]:
+    return reorder_candidate_chain(payload, top="T1", sub="default", order=order)
+
+
+def test_drag_order_persists_and_preserves_other_chains(isolated_xdg: None) -> None:
     before = load_effective_routing_payload()
     original = before["T1"]["default"]
     order = list(reversed(original))
-    response = client.post("/routing/reorder", data={
-        "context": "T1.default", "order": json.dumps(order),
-        "expected_order": json.dumps(original),
-    })
-    assert response.status_code == 200
-    assert response.json()["order"] == order
+    updated = _reorder(before, order)
+    save_user_routing(updated)
     expected = copy.deepcopy(before)
     expected["T1"]["default"] = order
     assert load_effective_routing_payload() == expected
-    assert client.get("/routing").text.index(order[0]) < client.get("/routing").text.index(order[1])
 
 
 @pytest.mark.parametrize(
     "kind",
-    ["unknown", "missing", "duplicate", "injected", "not-list", "malformed", "not-string"],
+    ["unknown", "missing", "duplicate", "injected", "not-list", "not-string"],
 )
-def test_invalid_drag_never_writes(client: TestClient, kind: str) -> None:
+def test_invalid_drag_never_writes(isolated_xdg: None, kind: str) -> None:
     before = load_effective_routing_payload()
     original = before["T1"]["default"]
     save_user_routing(before)
     proposed: Any = list(reversed(original))
-    context = "T1.default"
-    if kind == "unknown":
-        context = "T9.default"
-    elif kind == "missing":
+    if kind == "missing":
         proposed.pop()
     elif kind == "duplicate":
         proposed[0] = proposed[1]
@@ -61,35 +64,24 @@ def test_invalid_drag_never_writes(client: TestClient, kind: str) -> None:
         proposed = {"candidate": original[0]}
     elif kind == "not-string":
         proposed[0] = {"model": "unapproved"}
-    response = client.post("/routing/reorder", data={
-        "context": context, "order": "{" if kind == "malformed" else json.dumps(proposed),
-        "expected_order": json.dumps(original),
-    })
-    assert response.status_code == 400
-    assert "error" in response.json()
+    top, sub = ("T9", "default") if kind == "unknown" else ("T1", "default")
+    with pytest.raises(RoutingConfigError):
+        reorder_candidate_chain(before, top=top, sub=sub, order=proposed)
     assert load_effective_routing_payload() == before
 
 
-def test_stale_order_is_refused(client: TestClient) -> None:
+def test_malformed_order_payload_never_writes(isolated_xdg: None) -> None:
     before = load_effective_routing_payload()
-    original = before["T1"]["default"]
-    revised = copy.deepcopy(before)
-    revised["T1"]["default"] = list(reversed(original))
-    save_user_routing(revised)
-    response = client.post("/routing/reorder", data={
-        "context": "T1.default", "order": json.dumps(original[1:] + original[:1]),
-        "expected_order": json.dumps(original),
-    })
-    assert response.status_code == 409
-    assert load_effective_routing_payload() == revised
+    with pytest.raises((RoutingConfigError, ValueError, TypeError)):
+        reorder_candidate_chain(before, top="T1", sub="default",
+                                order=json.loads("{"))
+    assert load_effective_routing_payload() == before
 
 
-def test_empty_chain_can_remain_empty(client: TestClient) -> None:
+def test_empty_chain_can_remain_empty(isolated_xdg: None) -> None:
     before = load_effective_routing_payload()
     before["T1"]["default"] = []
     save_user_routing(before)
-    response = client.post("/routing/reorder", data={
-        "context": "T1.default", "order": "[]", "expected_order": "[]",
-    })
-    assert response.status_code == 200
+    updated = _reorder(before, [])
+    save_user_routing(updated)
     assert load_effective_routing_payload() == before

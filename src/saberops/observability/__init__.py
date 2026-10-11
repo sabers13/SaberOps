@@ -38,6 +38,7 @@ from saberops.observability.run_report import (
     is_terminal_report,
     render_monitor_frame,
     render_report_text,
+    run_explanation,
     saberops_version,
 )
 from saberops.observability.trace import (
@@ -75,6 +76,7 @@ __all__ = [
     "record_phase_observation",
     "render_monitor_frame",
     "render_report_text",
+    "run_explanation",
     "saberops_version",
     "summarise_observations",
     "update_dispatch_from_result",

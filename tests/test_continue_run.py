@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fastapi.testclient import TestClient
 
 from saberops.config import RunConfig, reconstruct_run_config
 from saberops.continuation import ContinuationError, prepare_continuation, validate_continuation
@@ -33,7 +32,6 @@ from saberops.review import ReviewEngine
 from saberops.session_journal import SessionJournal
 from saberops.slicing import ProposedPackage, TaskSizingAssessment
 from saberops.supervisor import RunSupervisor
-from saberops.web import create_app
 from saberops.workers.codex import CodexAdapter
 from saberops.workers.registry import AdapterRegistry
 
@@ -275,33 +273,6 @@ def test_unsafe_continuation_is_refused_before_launch(
     with pytest.raises((ContinuationError, RuntimeError)):
         supervisor.start_supervised_run(config)
     assert not launches and len(db.list_runs()) == 1
-
-
-def test_continue_ui_post_is_project_scoped_idempotent_and_csrf_guarded(
-    failed: tuple[Database, Path, str, AdapterRegistry], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    db, repo, parent_id, registry = failed
-    _, launches = launch_without_process(db, registry, monkeypatch)
-    app = create_app(db_path=db.db_path, repo_path=repo, registry=registry)
-    client = TestClient(app)
-    page = client.get(f"/runs/{parent_id}")
-    assert page.status_code == 200 and "Continue from saved work" in page.text
-    assert f'action="/runs/{parent_id}/continue"' in page.text
-    assert (
-        client.post(
-            f"/runs/{parent_id}/continue", headers={"Origin": "https://elsewhere.invalid"}
-        ).status_code
-        == 403
-    )
-    response = client.post(f"/runs/{parent_id}/continue", follow_redirects=False)
-    assert response.status_code == 303
-    child_id = launches[0]
-    assert child_id in response.headers["location"]
-    repeat = client.post(f"/runs/{parent_id}/continue", follow_redirects=False)
-    assert child_id in repeat.headers["location"] and len(launches) == 1
-    assert "Open continuation" in client.get(f"/runs/{parent_id}").text
-    assert "Continued from" in client.get(f"/runs/{child_id}").text
-    assert client.post("/runs/missing/continue").status_code == 404
 
 
 def test_continue_honors_explicit_review_disable_and_preserves_work_after_cleanup(

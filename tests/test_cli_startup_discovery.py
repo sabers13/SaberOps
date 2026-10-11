@@ -14,7 +14,6 @@ from typing import Any
 
 import pytest
 from fastapi import FastAPI
-from fastapi.testclient import TestClient
 
 from saberops.cli import handle_ui
 from saberops.cli_environment import prepare_cli_environment
@@ -22,12 +21,14 @@ from saberops.model_access import (
     AccessStore,
     ReadinessService,
     ReadinessStore,
+    apply_discovery_result,
     build_access_registry,
     default_account_connections,
 )
 from saberops.models import ProviderReadiness
 from saberops.paths import get_user_routing_path, owner_state_dir
-from saberops.web import _list_account_models, create_app, initialize_account_readiness
+from saberops.web import _list_account_models, initialize_account_readiness
+from saberops.workers.registry import AdapterRegistry
 
 
 @pytest.fixture()
@@ -146,11 +147,6 @@ def test_fresh_ui_launch_detects_and_verifies_without_model_calls(
         encoding="utf-8"
     )
     assert not (owner_state / AccessStore.FILENAME).exists()
-    page = TestClient(apps[0]).get("/access")
-    assert page.status_code == 200
-    assert 'data-od-id="provider-antigravity-google-account"' in page.text
-    assert "Its credential list shows configuration" in page.text
-    assert "successful run" in page.text
 
 
 @pytest.mark.parametrize("failure", ["timeout", "invalid-json", "nonzero"])
@@ -222,16 +218,14 @@ def test_antigravity_model_discovery_preserves_native_ids_without_verifying_logi
         "gemini-pro-high",
         "claude-low",
     ]
-    client = TestClient(create_app(db_path=tmp_path / "web.db", seed_cwd_if_empty=False))
-    response = client.post(
-        "/access/discover",
-        data={
-            "connection_id": "antigravity-google-account",
-        },
-    )
-    assert response.status_code == 200
-    assert "gemini-pro-high" in response.text
-    assert "claude-low" in response.text
+    from saberops.web import _discover_connection, _model_catalog_store
+
+    connection = registry.get("antigravity-google-account")
+    result = _discover_connection(connection, AdapterRegistry.default())
+    assert result.ok
+    assert [m.model_id for m in result.models] == ["gemini-pro-high", "claude-low"]
+    store = _model_catalog_store()
+    store.save(apply_discovery_result(store.load(), result))
     assert (
         ReadinessStore(owner_state / ReadinessStore.FILENAME)
         .load()

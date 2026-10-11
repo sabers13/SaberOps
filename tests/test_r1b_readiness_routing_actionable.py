@@ -29,7 +29,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fastapi.testclient import TestClient
 
 from saberops.control_plane import (
     BindingRole,
@@ -85,7 +84,6 @@ from saberops.routing_config import (
 )
 from saberops.service import OrchestratorService
 from saberops.slicing import ProposedPackage, TaskSizingAssessment
-from saberops.web import create_app
 from saberops.workers.base import WorkerAdapter
 from saberops.workers.registry import AdapterRegistry
 
@@ -196,26 +194,33 @@ def test_r1b_verify_success_persists_readiness(
     isolated_state: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Successful account verification persists READY + reason + timestamp."""
+    from saberops.web import _access_store, _readiness_store
+
     calls: list[list[str]] = []
     _fake_which(monkeypatch)
     _fake_status_run(monkeypatch, returncode=0, stdout=_CODEX_OK, calls=calls)
-    client = TestClient(create_app(db_path=tmp_path / "web.db"))
     calls.clear()
 
-    response = client.post("/access/test", data={"connection_id": "codex-chatgpt-account"})
+    registry = _access_store().load()
+    connection = registry.try_get("codex-chatgpt-account")
+    assert connection is not None
+    service = ReadinessService(
+        registry, _readiness_store(), which=shutil.which, run=subprocess.run
+    )
+    evidence = service.refresh(connection)
 
-    assert response.status_code == 200
+    assert evidence.state is ProviderReadiness.READY
     # The declared non-inference status command ran exactly once; every
     # other subprocess call is unrelated git plumbing, never a model call.
     assert calls.count(["codex", "doctor", "--json"]) == 1
     assert all(call[0] in ("codex", "git") for call in calls)
     # State/reason/timestamp survive reload through the canonical store.
     reloaded = ReadinessStore(isolated_state["readiness"]).load()
-    evidence = reloaded.try_get("codex-chatgpt-account")
-    assert evidence is not None
-    assert evidence.state is ProviderReadiness.READY
-    assert evidence.reason == "READY"
-    assert evidence.observed_at
+    persisted = reloaded.try_get("codex-chatgpt-account")
+    assert persisted is not None
+    assert persisted.state is ProviderReadiness.READY
+    assert persisted.reason == "READY"
+    assert persisted.observed_at
     # Subsequent automatic admission consumes the persisted evidence.
     service = ReadinessService(
         build_access_registry(default_account_connections()),
@@ -226,32 +231,33 @@ def test_r1b_verify_success_persists_readiness(
     assert admission.state is ProviderReadiness.READY
     assert admission.reason == "READY"
     assert admission.connection_id == "codex-chatgpt-account"
-    # Web renders the persisted truth.
-    page = client.get("/access")
-    assert page.status_code == 200
-    assert "READY" in page.text
-    assert evidence.observed_at in page.text
 
 
 def test_r1b_verify_missing_executable_is_not_ready(
     isolated_state: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A proven missing executable persists NOT_READY / BACKEND_NOT_INSTALLED."""
+    from saberops.web import _access_store, _readiness_store
+
     calls: list[list[str]] = []
     _fake_which(monkeypatch, present=())
     _fake_status_run(monkeypatch, returncode=0, stdout=_CODEX_OK, calls=calls)
-    client = TestClient(create_app(db_path=tmp_path / "web.db"))
     calls.clear()
 
-    response = client.post("/access/test", data={"connection_id": "codex-chatgpt-account"})
+    registry = _access_store().load()
+    connection = registry.try_get("codex-chatgpt-account")
+    assert connection is not None
+    service = ReadinessService(
+        registry, _readiness_store(), which=shutil.which, run=subprocess.run
+    )
+    evidence = service.refresh(connection)
 
-    assert response.status_code == 200
     assert [call for call in calls if call and call[0] == "codex"] == []
-    evidence = ReadinessStore(isolated_state["readiness"]).load().try_get(
+    persisted = ReadinessStore(isolated_state["readiness"]).load().try_get(
         "codex-chatgpt-account"
     )
-    assert evidence is not None
-    assert evidence.state is ProviderReadiness.NOT_READY
+    assert persisted is not None
+    assert persisted.state is ProviderReadiness.NOT_READY
     assert evidence.reason == "BACKEND_NOT_INSTALLED"
 
 
@@ -259,15 +265,21 @@ def test_r1b_verify_unauthenticated_is_not_ready(
     isolated_state: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A proven failed session persists NOT_READY / NOT_AUTHENTICATED."""
+    from saberops.web import _access_store, _readiness_store
+
     calls: list[list[str]] = []
     _fake_which(monkeypatch)
     _fake_status_run(monkeypatch, returncode=1, stdout=_CODEX_DENIED, calls=calls)
-    client = TestClient(create_app(db_path=tmp_path / "web.db"))
     calls.clear()
 
-    response = client.post("/access/test", data={"connection_id": "codex-chatgpt-account"})
+    registry = _access_store().load()
+    connection = registry.try_get("codex-chatgpt-account")
+    assert connection is not None
+    service = ReadinessService(
+        registry, _readiness_store(), which=shutil.which, run=subprocess.run
+    )
+    service.refresh(connection)
 
-    assert response.status_code == 200
     assert calls.count(["codex", "doctor", "--json"]) == 1
     evidence = ReadinessStore(isolated_state["readiness"]).load().try_get(
         "codex-chatgpt-account"
@@ -281,15 +293,20 @@ def test_r1b_verify_unprovable_stays_unknown(
     isolated_state: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Unparseable status output stays UNKNOWN: CLI presence is not READY."""
+    from saberops.web import _access_store, _readiness_store
+
     _fake_which(monkeypatch)
     _fake_status_run(
         monkeypatch, returncode=1, stdout="not-json{{{", calls=[]
     )
-    client = TestClient(create_app(db_path=tmp_path / "web.db"))
 
-    response = client.post("/access/test", data={"connection_id": "codex-chatgpt-account"})
-
-    assert response.status_code == 200
+    registry = _access_store().load()
+    connection = registry.try_get("codex-chatgpt-account")
+    assert connection is not None
+    service = ReadinessService(
+        registry, _readiness_store(), which=shutil.which, run=subprocess.run
+    )
+    service.refresh(connection)
     evidence = ReadinessStore(isolated_state["readiness"]).load().try_get(
         "codex-chatgpt-account"
     )
@@ -313,11 +330,15 @@ def test_r1b_verify_api_connection_not_falsely_not_ready(
     )
     store = AccessStore(owner_state_dir() / AccessStore.FILENAME)
     store.save(build_access_registry(tuple(default_account_connections()) + (api,)))
-    client = TestClient(create_app(db_path=tmp_path / "web.db"))
+    registry = store.load()
+    connection = registry.try_get("byok-r1b-api")
+    assert connection is not None
+    from saberops.web import _readiness_store
 
-    response = client.post("/access/test", data={"connection_id": "byok-r1b-api"})
-
-    assert response.status_code == 200
+    service = ReadinessService(
+        registry, _readiness_store(), which=shutil.which, run=subprocess.run
+    )
+    service.refresh(connection)
     catalog = ReadinessStore(isolated_state["readiness"]).load()
     evidence = catalog.try_get("byok-r1b-api")
     assert evidence is not None and evidence.reason == "CREDENTIAL_MISSING"
@@ -443,17 +464,18 @@ def test_r1b_empty_chain_validates_and_roundtrips(
 def test_r1b_remove_final_candidate_persists_empty_chain(
     isolated_state: dict[str, Path], tmp_path: Path
 ) -> None:
-    """Web removal of the last candidate persists successfully."""
-    _write_t1_chain("codex/gpt-5.6-terra")
-    client = TestClient(create_app(db_path=tmp_path / "web.db"))
+    """Removing the last candidate persists successfully."""
+    from saberops.routing_config import remove_candidate_from_chain
 
-    response = client.post(
-        "/routing/remove",
-        data={"context": "T1.default", "candidate_id": "codex/gpt-5.6-terra"},
-        follow_redirects=False,
+    _write_t1_chain("codex/gpt-5.6-terra")
+
+    payload = load_effective_routing_payload()
+    save_user_routing(
+        remove_candidate_from_chain(
+            payload, top="T1", sub="default", candidate_id="codex/gpt-5.6-terra"
+        )
     )
 
-    assert response.status_code == 303
     assert load_effective_routing_payload()["T1"]["default"] == []
 
 
@@ -557,6 +579,92 @@ def _materialize_worker(backend: str) -> str:
     return worker.binding_id
 
 
+def _add_routing_candidate(
+    *, connection_id: str, model_id: str, context: str, binding_id: str
+) -> None:
+    """Engine-seam mirror of the removed POST /routing/add guard chain.
+
+    Same order, same refusals (as RoutingConfigError instead of HTTP 400):
+    known connection, discovery-verified fresh catalog entry, exact
+    resolvable binding, WORKER role, submitted-binding match, valid
+    candidate id, known context, then append + save.
+    """
+    from saberops.routing_config import (
+        CONTEXT_KEYS,
+        DynamicCandidate,
+        RoutingConfigError,
+        add_dynamic_candidate_to_chain,
+        format_candidate_id,
+        normalize_routing_scope,
+    )
+    from saberops.web import (
+        _access_store,
+        _load_catalog_safely,
+        _load_owner_bindings_safely,
+        _resolve_exact_binding,
+    )
+
+    owner = _load_owner_bindings_safely()
+    access = _access_store().load()
+    connection = access.try_get(connection_id.strip())
+    if connection is None:
+        raise RoutingConfigError(f"Unknown connection: {connection_id.strip()}")
+    catalog = _load_catalog_safely()
+    entry = catalog.try_get(
+        connection_id=connection.connection_id,
+        provider=connection.provider,
+        backend=connection.backend,
+        model_id=model_id.strip(),
+    )
+    if entry is None or not entry.is_discovery_verified:
+        raise RoutingConfigError("Model is not a discovery-verified provider model.")
+    if entry.is_stale:
+        raise RoutingConfigError("Discovery evidence is stale; refresh models first.")
+    registry = AdapterRegistry.default()
+    exact_binding = _resolve_exact_binding(
+        owner, registry, provider=entry.provider, model=entry.model_id,
+        connection_id=connection.connection_id, role=BindingRole.WORKER,
+    )
+    if exact_binding is None:
+        raise RoutingConfigError("No exact executable binding resolves.")
+    if exact_binding.binding_role is not BindingRole.WORKER:
+        raise RoutingConfigError(
+            f"Exact binding role is {exact_binding.binding_role.value!r}, not WORKER."
+        )
+    if binding_id.strip() and binding_id.strip() != exact_binding.binding_id:
+        raise RoutingConfigError("Submitted binding identity does not match.")
+    candidate_id = format_candidate_id(entry.provider, entry.model_id)
+    top, _, sub = context.strip().partition(".")
+    top, sub = normalize_routing_scope(top, sub)
+    if not top or not sub or (top, sub) not in CONTEXT_KEYS:
+        raise RoutingConfigError(f"Unknown routing context: {context!r}")
+    payload = load_effective_routing_payload()
+    if candidate_id in ALLOWED_CANDIDATES:
+        static_training_required = (
+            "TRUE" if requires_training_permission(candidate_id) else "FALSE"
+        )
+        approval = DynamicCandidate(
+            candidate_id=candidate_id, provider=entry.provider, model=entry.model_id,
+            connection_id=connection.connection_id, backend=connection.backend,
+            binding_id=exact_binding.binding_id,
+            discovery_status=entry.discovery_status.value,
+            execution_support=entry.execution_support.value,
+            training_required=static_training_required,
+            capabilities=tuple((n, s.value) for n, s in entry.capabilities),
+        )
+    else:
+        approval = DynamicCandidate(
+            candidate_id=candidate_id, provider=entry.provider, model=entry.model_id,
+            connection_id=connection.connection_id, backend=connection.backend,
+            binding_id=exact_binding.binding_id,
+            discovery_status=entry.discovery_status.value,
+            execution_support=entry.execution_support.value,
+            training_required="UNKNOWN",
+            capabilities=tuple((n, s.value) for n, s in entry.capabilities),
+        )
+    save_user_routing(add_dynamic_candidate_to_chain(payload, top=top, sub=sub, candidate=approval))
+
+
 def test_r1b_static_add_preserves_exact_binding(
     isolated_state: dict[str, Path], tmp_path: Path
 ) -> None:
@@ -565,20 +673,11 @@ def test_r1b_static_add_preserves_exact_binding(
     assert not requires_training_permission(_STATIC_CID)
     backend = _seed_static_discovery()
     worker_binding_id = _materialize_worker(backend)
-    client = TestClient(create_app(db_path=tmp_path / "web.db"))
 
-    response = client.post(
-        "/routing/add",
-        data={
-            "connection_id": _STATIC_CONNECTION,
-            "model_id": _STATIC_MODEL,
-            "context": "T1.default",
-            "binding_id": worker_binding_id,
-        },
-        follow_redirects=False,
+    _add_routing_candidate(
+        connection_id=_STATIC_CONNECTION, model_id=_STATIC_MODEL,
+        context="T1.default", binding_id=worker_binding_id,
     )
-
-    assert response.status_code == 303
     payload = load_effective_routing_payload()
     assert _STATIC_CID in payload["T1"]["default"]
     approval = payload["approved_candidates"][_STATIC_CID]
@@ -641,22 +740,14 @@ def test_r1b_static_training_denied_semantics_preserved(
     """A static training-allowed candidate stays admissible in denied contexts."""
     backend = _seed_static_discovery()
     worker_binding_id = _materialize_worker(backend)
-    client = TestClient(create_app(db_path=tmp_path / "web.db"))
 
-    response = client.post(
-        "/routing/add",
-        data={
-            "connection_id": _STATIC_CONNECTION,
-            "model_id": _STATIC_MODEL,
-            "context": "T2.default",
-            "binding_id": worker_binding_id,
-        },
-        follow_redirects=False,
+    _add_routing_candidate(
+        connection_id=_STATIC_CONNECTION, model_id=_STATIC_MODEL,
+        context="T2.default", binding_id=worker_binding_id,
     )
 
     # training_required FALSE (not UNKNOWN) keeps the historical static
     # admissibility: UNKNOWN would have failed closed here.
-    assert response.status_code == 303
     payload = load_effective_routing_payload()
     assert _STATIC_CID in payload["T2"]["default"]
 
@@ -665,6 +756,8 @@ def test_r1b_orchestrator_binding_cannot_satisfy_worker_routing(
     isolated_state: dict[str, Path], tmp_path: Path
 ) -> None:
     """An ORCHESTRATOR-only binding is refused for WORKER routing."""
+    from saberops.routing_config import RoutingConfigError
+
     orch_model = "opencode-go/mimo-v2.5"
     connection = next(
         c for c in default_account_connections() if c.connection_id == _STATIC_CONNECTION
@@ -698,17 +791,11 @@ def test_r1b_orchestrator_binding_cannot_satisfy_worker_routing(
     owner = upsert_owner_binding(owner, binding=orch, profile=profile_row, pool=pool)
     save_owner_bindings(owner)
 
-    client = TestClient(create_app(db_path=tmp_path / "web.db"))
-    response = client.post(
-        "/routing/add",
-        data={
-            "connection_id": _STATIC_CONNECTION,
-            "model_id": orch_model,
-            "context": "T1.default",
-            "binding_id": orch.binding_id,
-        },
-    )
-    assert response.status_code == 400
+    with pytest.raises(RoutingConfigError):
+        _add_routing_candidate(
+            connection_id=_STATIC_CONNECTION, model_id=orch_model,
+            context="T1.default", binding_id=orch.binding_id,
+        )
 
     with pytest.raises(BindingResolutionError):
         resolve_worker_candidate_binding(

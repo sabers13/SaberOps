@@ -11,17 +11,17 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fastapi.testclient import TestClient
 
 from saberops.model_access.connections import (
     OMNIROUTE_DEFAULT_ENDPOINT,
     AccessStore,
     AuthMode,
+    build_access_registry,
     is_virtual_route,
     preset_connection,
 )
 from saberops.models import AttemptStatus, WorkerRequest
-from saberops.web import _discover_connection, create_app
+from saberops.web import _discover_connection
 from saberops.workers.direct_api import DirectAPIAdapter, supports_connection
 from saberops.workers.registry import AdapterRegistry
 
@@ -94,30 +94,34 @@ def test_virtual_routes_are_only_flagged_for_omniroute() -> None:
 
 
 def test_add_omniroute_discovers_exact_models_and_skips_auto(gateway: dict[str, Any]) -> None:
-    client = TestClient(create_app(db_path=gateway["tmp"] / "ui.db", seed_cwd_if_empty=False))
-    page = client.get("/access")
-    assert 'id="omniroute"' in page.text and "Add OmniRoute" in page.text
-    response = client.post(
-        "/access/connections",
-        data={"preset": "omniroute", "connection_id": "omniroute",
-              "endpoint": gateway["endpoint"], "credential_ref": ""},
-        follow_redirects=False,
+    from saberops.model_access import (
+        apply_discovery_result,
+        build_access_registry,
     )
-    assert response.status_code == 303
-    assert "auto_discovered=4" in response.headers["location"]
+    from saberops.web import _model_catalog_store
+
+    connection = preset_connection(
+        "omniroute", connection_id="omniroute",
+        endpoint=gateway["endpoint"], credential_ref="",
+    )
+    store = AccessStore(gateway["tmp"] / "access.json")
+    store.save(build_access_registry((connection,)))
     saved = AccessStore(gateway["tmp"] / "access.json").load().get("omniroute")
     assert saved.provider == "omniroute" and saved.auth_mode is AuthMode.LOCAL_NO_AUTH
     result = _discover_connection(saved, AdapterRegistry.default())
     supported = {m.model_id for m in result.models if m.is_execution_supported}
     assert supported == {"openai/gpt-5.5", "cc/claude-sonnet-5"}
+    assert len(result.models) == 4
+    catalog_store = _model_catalog_store()
+    catalog_store.save(apply_discovery_result(catalog_store.load(), result))
     assert all(call[2] is None for call in gateway["calls"] if call[0] == "GET")
-    assert 'id="omniroute"' not in client.get("/access").text
 
 
 def test_omniroute_model_runs_as_worker(gateway: dict[str, Any]) -> None:
-    client = TestClient(create_app(db_path=gateway["tmp"] / "ui.db", seed_cwd_if_empty=False))
-    client.post("/access/connections", data={"preset": "omniroute", "connection_id": "omniroute",
-                                             "endpoint": gateway["endpoint"]})
+    connection = preset_connection(
+        "omniroute", connection_id="omniroute", endpoint=gateway["endpoint"],
+    )
+    AccessStore(gateway["tmp"] / "access.json").save(build_access_registry((connection,)))
     request = WorkerRequest(
         "Say done", gateway["tmp"] / "worktree", "openai/gpt-5.5", timeout_seconds=5,
         env={

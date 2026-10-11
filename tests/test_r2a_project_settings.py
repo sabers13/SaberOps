@@ -28,7 +28,6 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
 
 from saberops.cli import _resolve_cli_run_config, build_parser
 from saberops.config import RunConfig, reconstruct_run_config
@@ -54,7 +53,6 @@ from saberops.run_creation import (
     RunRequest,
     resolve_effective_run_config,
 )
-from saberops.web import create_app
 
 
 @pytest.fixture()
@@ -541,41 +539,23 @@ def test_workflow_malformed_frozen_authorization_refused(
         reconstruct_run_config(payload)
 
 
-def test_workflow_web_presets_and_manual_controls(
+def test_workflow_presets_and_manual_controls(
     isolated_xdg: Path, tmp_path: Path,
 ) -> None:
-    from saberops.project_settings import load_project_settings
+    from saberops.project_settings import ProjectSettingsError, set_project_workflow
 
     repo = _make_repo(isolated_xdg, "web-workflow")
-    client = TestClient(create_app(db_path=tmp_path / "workflow.db", repo_path=repo))
-    response = client.post(
-        "/projects/settings/workflow", data={"preset": "quick"}, follow_redirects=False,
-    )
-    assert response.status_code == 303
+    set_project_workflow(repo, preset="quick")
     assert load_project_settings(repo).review_disabled
-    html = client.get("/").text
-    assert 'data-project-workflow' in html
-    assert 'value="quick"' in html and 'value="balanced"' in html
-    assert 'data-workflow-limit' in html
-    assert '<span class="badge" data-workflow-label>Quick</span>' in html
-    assert 'name="review_limit" value="1"' in html
-    assert 'value="disabled" selected' in html
-    assert 'composer-review' not in html
-    response = client.post(
-        "/projects/settings/workflow",
-        data={"preset": "custom", "gate_mode": "required",
-              "review_policy": "always-required", "review_mode": "bounded", "review_limit": 4},
-        follow_redirects=False,
+    set_project_workflow(
+        repo, preset="custom", gate_enabled=True,
+        review="always-required", mode="bounded", limit=4,
     )
-    assert response.status_code == 303
     settings = load_project_settings(repo)
     assert settings.gate_enabled and not settings.review_disabled
     assert settings.review_limit == 4
-    response = client.post(
-        "/projects/settings/workflow", data={"preset": "custom", "review_limit": 0},
-        follow_redirects=False,
-    )
-    assert response.status_code == 400
+    with pytest.raises(ProjectSettingsError):
+        set_project_workflow(repo, preset="custom", limit=0)
     assert load_project_settings(repo) == settings
 
 
@@ -583,64 +563,46 @@ def test_setup_workflow_pick_then_apply_advances_to_ready(
     isolated_xdg: Path, tmp_path: Path,
 ) -> None:
     repo = _make_repo(isolated_xdg, "setup-workflow")
-    client = TestClient(create_app(db_path=tmp_path / "setup.db", repo_path=repo))
-    html = client.get("/setup").text
-    assert 'data-setup-policy' in html
-    for preset in ("quick", "balanced", "thorough", "max"):
-        assert f'type="radio" name="preset" value="{preset}"' in html
-    assert "Apply and continue" in html
-    # Rendering/selecting does not persist a choice.
+    # Rendering/selecting persists nothing; the owner applies via the
+    # `orch project` CLI (set_project_workflow is its engine seam).
+    from saberops.project_settings import set_project_workflow
+
     assert not load_project_settings(repo).review_disabled
-    response = client.post(
-        "/projects/settings/workflow", data={"source": "setup", "preset": "quick"},
-        follow_redirects=False,
-    )
-    assert response.status_code == 303
-    assert response.headers["location"] == "/setup?policy_applied=1#setup-step-7"
+    set_project_workflow(repo, preset="quick")
     assert load_project_settings(repo).review_disabled
     assert not load_project_settings(repo).gate_enabled
-    html = client.get("/setup").text
-    assert 'name="preset" value="quick" checked' in html
-    assert "Gate: disabled" in html
 
 
 def test_setup_required_mode_requires_gate_before_saving(
     isolated_xdg: Path, tmp_path: Path,
 ) -> None:
+    from saberops.project_settings import set_project_workflow
+
     repo = _make_repo(isolated_xdg, "setup-required")
-    client = TestClient(create_app(db_path=tmp_path / "setup.db", repo_path=repo))
     before = load_project_settings(repo)
-    response = client.post(
-        "/projects/settings/workflow", data={"source": "setup", "preset": "thorough"},
-        follow_redirects=False,
-    )
-    assert response.status_code == 400
-    assert "Enter a gate command" in response.text
-    assert 'name="preset" value="thorough" checked' in response.text
-    assert load_project_settings(repo) == before
-    response = client.post(
-        "/projects/settings/workflow",
-        data={"source": "setup", "preset": "thorough", "gate_command": "make check"},
-        follow_redirects=False,
-    )
-    assert response.status_code == 303
+    # The removed setup flow refused thorough mode without a gate command;
+    # the engine seam persists the review policy while the gate stays empty,
+    # so the owner must set it separately (`orch project set-gate`).
+    set_project_workflow(repo, preset="thorough")
+    assert load_project_settings(repo).gate_command is None
+    assert load_project_settings(repo).review_limit == 5
+    set_project_gate_command(repo, "make check")
+    set_project_workflow(repo, preset="thorough")
     settings = load_project_settings(repo)
     assert settings.gate_enabled and not settings.review_disabled
     assert settings.gate_command == "make check"
     assert settings.review_limit == 5
     assert load_project_review_policy(repo) is ReviewPolicyMode.ALWAYS_REQUIRED
+    assert before.gate_command is None
 
 
 def test_setup_preset_preserves_existing_gate(
     isolated_xdg: Path, tmp_path: Path,
 ) -> None:
+    from saberops.project_settings import set_project_workflow
+
     repo = _make_repo(isolated_xdg, "setup-existing")
     set_project_gate_command(repo, "make verify")
-    client = TestClient(create_app(db_path=tmp_path / "setup.db", repo_path=repo))
-    response = client.post(
-        "/projects/settings/workflow", data={"source": "setup", "preset": "max"},
-        follow_redirects=False,
-    )
-    assert response.status_code == 303
+    set_project_workflow(repo, preset="max")
     assert load_project_settings(repo).gate_command == "make verify"
     assert load_project_settings(repo).review_mode == "max"

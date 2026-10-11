@@ -72,7 +72,7 @@ def test_r0a_manager_owner_navigation_gone(isolated_xdg: None, tmp_path: Path) -
     """No owner navigation points at the removed Manager/Ox capability."""
     client = _client(tmp_path)
     _seed_run(tmp_path)
-    for path in ("/", "/access", "/routing", "/orchestrator", "/quota", "/runs/run_r0a_probe"):
+    for path in ("/", "/runs/run_r0a_probe"):
         page = client.get(path)
         assert page.status_code == 200, path
         assert "/manager" not in page.text, path
@@ -124,33 +124,6 @@ def test_r0a_saberops_branding_present(isolated_xdg: None, tmp_path: Path) -> No
     assert "Orchestrator Dashboard" not in text
 
 
-def test_r0a_orchestrator_kept_as_technical_role(
-    isolated_xdg: None, tmp_path: Path
-) -> None:
-    """The Orchestrator technical role keeps its name with truthful copy."""
-    client = _client(tmp_path)
-    page = client.get("/orchestrator")
-    assert page.status_code == 200
-    assert "Orchestrator role" in page.text
-    assert "initial task guidance" in page.text
-    assert "decision role" not in page.text
-    assert "selection authority" not in page.text
-    assert "binding identity" not in page.text
-    assert "exact executable binding" not in page.text
-    access = client.get("/access").text
-    assert "decision role" not in access
-
-
-def test_r0a_api_connections_are_visible(isolated_xdg: None, tmp_path: Path) -> None:
-    """API connections remain visible while execution limits stay explicit."""
-    client = _client(tmp_path)
-    text = client.get("/access").text
-    assert "Experimental" not in text
-    assert '<section aria-label="API connections">' in text
-    assert "OpenAI-compatible APIs support worker, reviewer and orchestrator roles" in text
-    assert "subscription connections use their own CLIs" in text
-
-
 def test_r0a_health_reports_product_version_truthfully(
     isolated_xdg: None, tmp_path: Path
 ) -> None:
@@ -182,15 +155,13 @@ def test_r0a_health_unknown_outside_source_tree(
 
 
 def test_r0a_real_routes_still_render(isolated_xdg: None, tmp_path: Path) -> None:
-    """Surviving run/provider/routing routes still render after removals."""
+    """Surviving status routes still render after removals."""
     client = _client(tmp_path)
     _seed_run(tmp_path)
     assert client.get("/").status_code == 200
-    assert client.get("/access").status_code == 200
-    assert client.get("/routing").status_code == 200
-    assert client.get("/orchestrator").status_code == 200
-    assert client.get("/quota").status_code == 200
     assert client.get("/runs/run_r0a_probe").status_code == 200
+    assert client.get("/runs/run_r0a_probe/report").status_code == 200
+    assert client.get("/runs/run_r0a_probe/actions").status_code == 200
     assert client.get("/health").status_code == 200
 
 

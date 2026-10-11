@@ -447,92 +447,37 @@ def test_c16b2_admission_for_discovered_profile_reaches_store_evidence(
 def test_c16b2_routing_move_route_reorders_canonical_chain(
     isolated_xdg: None, tmp_path: Path
 ) -> None:
-    from fastapi.testclient import TestClient
-
-    from saberops.web import create_app
+    from saberops.routing_config import RoutingConfigError
 
     first, second = _seed_two_routing_candidates()
-    client = TestClient(create_app(db_path=tmp_path / "web.db"))
 
-    moved = client.post(
-        "/routing/move",
-        data={
-            "context": "T1.default",
-            "candidate_id": second,
-            "direction": "down",
-        },
-        follow_redirects=False,
-    )
-    assert moved.status_code == 303
+    def _move(candidate_id: str, direction: str) -> None:
+        payload = load_effective_routing_payload()
+        save_user_routing(
+            move_candidate_in_chain(
+                payload, top="T1", sub="default",
+                candidate_id=candidate_id, direction=direction,
+            )
+        )
+
+    _move(second, "down")
     chain = load_effective_routing_payload()["T1"]["default"]
     assert isinstance(chain, list)
     assert chain.index(first) < chain.index(second)
 
-    moved_up = client.post(
-        "/routing/move",
-        data={
-            "context": "T1.default",
-            "candidate_id": second,
-            "direction": "up",
-        },
-        follow_redirects=False,
-    )
-    assert moved_up.status_code == 303
+    _move(second, "up")
     chain = load_effective_routing_payload()["T1"]["default"]
     assert isinstance(chain, list)
     assert chain.index(second) < chain.index(first)
 
-    # The mutated canonical chain is rendered on the routing page.
-    page = client.get("/routing")
-    assert page.status_code == 200
-    assert second in page.text
+    with pytest.raises(RoutingConfigError):
+        move_candidate_in_chain(
+            load_effective_routing_payload(), top="T1", sub="default",
+            candidate_id=second, direction="sideways",
+        )
 
-    refused = client.post(
-        "/routing/move",
-        data={
-            "context": "T1.default",
-            "candidate_id": second,
-            "direction": "sideways",
-        },
-    )
-    assert refused.status_code == 400
-
-    refused_context = client.post(
-        "/routing/move",
-        data={
-            "context": "T9.nope",
-            "candidate_id": second,
-            "direction": "up",
-        },
-    )
-    assert refused_context.status_code == 400
-
-
-def test_c16b2_owner_pages_are_reachable_from_dashboard(
-    isolated_xdg: None, tmp_path: Path
-) -> None:
-    from fastapi.testclient import TestClient
-
-    from saberops.web import create_app
-
-    client = TestClient(create_app(db_path=tmp_path / "web.db"))
-    dashboard = client.get("/")
-    assert dashboard.status_code == 200
-    assert "/access" in dashboard.text
-    assert "/routing" in dashboard.text
-    # Role configuration now lives in the shared Routing page.
-
-    access = client.get("/access")
-    assert access.status_code == 200
-    assert "Refresh models" in access.text
-    assert "routing-eligible" in access.text or "Models" in access.text
-
-    routing = client.get("/routing")
-    assert routing.status_code == 200
-    assert "Orchestrator" in routing.text and "Reviewer" in routing.text
-    assert "data-routing-order" in routing.text
-    assert "Move up" not in routing.text
-
-    orch = client.get("/orchestrator")
-    assert orch.status_code == 200
-    assert "Available models" in orch.text
+    with pytest.raises(RoutingConfigError):
+        move_candidate_in_chain(
+            load_effective_routing_payload(), top="T9", sub="nope",
+            candidate_id=second, direction="up",
+        )

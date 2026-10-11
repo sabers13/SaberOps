@@ -15,7 +15,6 @@ from typing import Any
 import pytest
 
 from saberops.agent_sessions import observe_invocation, read_sessions
-from saberops.chat import ChatStore
 from saberops.models import AttemptStatus, WorkerInterruptionReason, WorkerRequest, WorkerResult
 from saberops.ownership import ProcessIdentity
 from saberops.process import ProcessResult, run_process
@@ -72,13 +71,13 @@ def result(*, interrupted: bool = False) -> WorkerResult:
     )
 
 
-def test_queue_is_idempotent_and_shared_with_chat_without_new_dispatch(tmp_path: Path) -> None:
-    store = ChatStore(tmp_path / "conversations.db")
-    chat_id = store.create(str(tmp_path), "Test")
+def test_queue_is_idempotent_without_new_dispatch(tmp_path: Path) -> None:
+    chat_path = tmp_path / "conversations.db"
+    chat_id = "chat-1"
     controls = SessionControls(tmp_path / "sessions")
     controls.register("sid", "run", live_identity(), "worker")
     controls.native_id("sid", "native_1234")
-    controls.takeover("sid", chat_path=store.path, chat_id=chat_id)
+    controls.takeover("sid", chat_path=chat_path, chat_id=chat_id)
     with pytest.raises(ControlConflict):
         controls.submit("sid", "Too early", "early")
     controls.finish("sid", "MANUAL")
@@ -91,17 +90,16 @@ def test_queue_is_idempotent_and_shared_with_chat_without_new_dispatch(tmp_path:
     message = controls.next_message("sid")
     assert message
     controls.reply(message, "Inspected")
-    chat = store.get(chat_id)
-    assert chat
-    assert [(m["role"], m["text"]) for m in chat["messages"]] == [
-        ("worker_user", "Inspect the file"),
-        ("worker", "Inspected"),
-    ]
+    stored = controls.get("sid", messages=True)
+    assert stored
+    first = next(m for m in stored["messages"] if m["id"] == "sid:request1")
+    assert (first["state"], first["response"]) == ("DONE", "Inspected")
     controls.submit("sid", "Never delivered", "request2")
     controls.interrupt("sid")
-    chat = store.get(chat_id)
-    assert chat
-    assert chat["messages"][-1]["text"] == "Interrupted before delivery."
+    stored = controls.get("sid", messages=True)
+    assert stored
+    interrupted = next(m for m in stored["messages"] if m["id"] == "sid:request2")
+    assert interrupted["response"] == "Interrupted before delivery."
     controls.resume("sid")
     assert controls.mode("sid") == "RESUMING"
 
@@ -123,8 +121,8 @@ def test_takeover_holds_caller_manual_turn_reuses_permissions_and_resume_revalid
     repo = repository(tmp_path)
     root = tmp_path / "sessions"
     controls = SessionControls(root)
-    store = ChatStore(tmp_path / "conversations.db")
-    chat = store.create(str(repo), "Original")
+    chat_path = tmp_path / "conversations.db"
+    chat = "chat-original"
     calls: list[WorkerRequest] = []
     returned: list[WorkerResult] = []
     failures: list[BaseException] = []
@@ -188,7 +186,7 @@ def test_takeover_holds_caller_manual_turn_reuses_permissions_and_resume_revalid
             lambda: read_sessions(root, "run") and read_sessions(root, "run")[0].get("can_takeover")
         )
         sid = read_sessions(root, "run")[0]["id"]
-        controls.takeover(sid, chat_path=store.path, chat_id=chat)
+        controls.takeover(sid, chat_path=chat_path, chat_id=chat)
         wait_for(lambda: controls.mode(sid) == "MANUAL")
         assert thread.is_alive() and not returned and len(calls) == 1
         controls.submit(sid, "Manual question", "human")
@@ -205,9 +203,8 @@ def test_takeover_holds_caller_manual_turn_reuses_permissions_and_resume_revalid
         thread.join(5)
         assert not thread.is_alive() and not failures
         assert returned[0].status == AttemptStatus.SUCCESS and controls.mode(sid) == "DONE"
-        chat_data = store.get(chat)
-        assert chat_data
-        assert chat_data["messages"][-1]["text"] == "Native reply"
+        journal_messages = (controls.get(sid, messages=True) or {})["messages"]
+        assert journal_messages[-1]["response"] == "Native reply"
     finally:
         if thread.is_alive():
             controls.finish(sid, "RESUMING")
@@ -222,8 +219,8 @@ def test_revision_changes_or_expired_deadline_never_resume_automation(
     repo = repository(tmp_path)
     root = tmp_path / "sessions"
     controls = SessionControls(root)
-    store = ChatStore(tmp_path / "chat.db")
-    chat = store.create(str(repo), "Test")
+    chat_path = tmp_path / "chat.db"
+    chat = "chat-test"
     calls: list[str] = []
     returned: list[WorkerResult] = []
 
@@ -254,7 +251,7 @@ def test_revision_changes_or_expired_deadline_never_resume_automation(
         lambda: read_sessions(root, "run") and read_sessions(root, "run")[0].get("can_takeover")
     )
     sid = read_sessions(root, "run")[0]["id"]
-    controls.takeover(sid, chat_path=store.path, chat_id=chat)
+    controls.takeover(sid, chat_path=chat_path, chat_id=chat)
     wait_for(lambda: controls.mode(sid) == "MANUAL")
     if change == "branch":
         git(repo, "checkout", "-b", "different")

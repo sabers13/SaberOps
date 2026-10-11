@@ -136,7 +136,7 @@ def complete(db: Database, candidate: str, base: str) -> None:
 
 
 def result_region(html: str) -> str:
-    match = re.search(r'data-run-refresh="result".*?(?=data-run-refresh="plan")', html, re.S)
+    match = re.search(r'data-run-refresh="result".*?(?=data-run-refresh="actions")', html, re.S)
     assert match
     return match.group()
 
@@ -150,9 +150,16 @@ def test_running_to_completed_snapshot_exposes_all_evidence(
     running = client.get("/runs/run-live").text
     assert "Awaiting your acceptance" not in running
     for key in (
+        "result",
+        "actions",
+        "events-status",
+        "monitoring",
+    ):
+        assert f'data-run-refresh="{key}"' in running
+    # Removed console regions stay gone; the terminal panel is gone too.
+    for gone in (
         "chat-result",
         "chat-actions",
-        "result",
         "plan",
         "details",
         "checklist",
@@ -162,16 +169,12 @@ def test_running_to_completed_snapshot_exposes_all_evidence(
         "review",
         "routing",
         "usage",
-        "monitoring",
         "worker-filters",
         "worker-dock",
         "worker-footer",
     ):
-        assert f'data-run-refresh="{key}"' in running
-    # Unsaved owner input, acceptance confirmations, SSE and PTY stay outside
-    # these explicitly marked replacement regions.
-    assert 'id="runningTask"' in running
-    assert 'data-panel="terminal" data-run-refresh' not in running
+        assert f'data-run-refresh="{gone}"' not in running, gone
+    assert 'data-panel="terminal"' not in running
     assert 'data-panel="events" data-run-refresh' not in running
     complete(db, candidate, base)
     before = len(db.get_events("run-live"))
@@ -243,15 +246,17 @@ def test_live_controller_refresh_ordering_drafts_timer_and_recovery() -> None:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_total_changes_uses_exact_counts_and_same_expandable_diff(
+def test_total_changes_uses_exact_counts_and_escaped_diff(
     state: tuple[Database, TestClient],
     tmp_path: Path,
 ) -> None:
+    from saberops.candidate_diff import project_candidate_diff
+
     db, client = state
     _, base, candidate = seed_candidate(db, tmp_path)
     complete(db, candidate, base)
-    projected = client.get("/runs/run-live/diff").json()
-    assert projected["totals"] == {
+    projected = project_candidate_diff(db, "run-live")
+    assert projected.totals == {
         "added": 1,
         "removed": 0,
         "binary": 0,
@@ -259,17 +264,8 @@ def test_total_changes_uses_exact_counts_and_same_expandable_diff(
         "available": True,
     }
     page = client.get("/runs/run-live").text
-    assert 'class="file-diff diff-total" data-diff-total' in page
-    assert "Total changes" in page and page.count("print(&#39;hello&#39;)") == 2
+    assert "1 changed file in the recorded candidate" in page
+    assert "Total changes" not in page
+    assert "print(&#39;hello&#39;)" in page
 
 
-def test_composer_cancellation_scope_modes_and_failure_recovery() -> None:
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("Node is unavailable; browser interaction still requires verification")
-    result = subprocess.run(
-        [node, str(ROOT / "tests/js/composer_controls.cjs"),
-         str(ROOT / "src/saberops/static/js/composer-controls.js")],
-        capture_output=True, text=True, timeout=15,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr

@@ -407,15 +407,14 @@ def test_missing_gate_is_reported_from_worker_even_after_routing_blocker(
 ) -> None:
     import shutil
 
-    from saberops.chat import run_explanation
     from saberops.models import PlanStepStatus
     from saberops.observability.run_report import (
         build_run_report,
         canonical_report_json,
         render_monitor_frame,
         render_report_text,
+        run_explanation,
     )
-    from saberops.web import create_app
 
     if not shutil.which("make"):
         pytest.skip("The real missing-Makefile reproduction requires make")
@@ -461,12 +460,6 @@ def test_missing_gate_is_reported_from_worker_even_after_routing_blocker(
     assert "Team (parent and linked workers)" in render_monitor_frame(report)
     assert "check_failed 1" in render_report_text(report)
     assert canonical_report_json(report) == canonical_report_json(build_run_report(db, run_id))
-    app = create_app(db_path=db.db_path, repo_path=repo, registry=registry)
-    chats = app.state.chats
-    chat_id = chats.store.create(str(repo), "Build with a shared contract", kind="work")
-    chats.store.link_run(chat_id, run_id)
-    context = chats._context(chats.store.get(chat_id))
-    assert context["runs"][0]["team"] == report["team"]
     assert GitManager.get_head_commit(repo) == base
     assert not (repo / "feature0.txt").exists()
 
@@ -683,7 +676,7 @@ def test_child_claim_refuses_parent_cancellation_atomically(
     assert db.get_execution_owner(child_id) is None
 
 
-def test_git_pane_and_sidebar_keep_workers_nested_under_one_work(
+def test_team_children_link_from_minimal_status_pages(
     team: tuple[Database, Path, RunConfig, AdapterRegistry, list[threading.Thread]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -702,21 +695,9 @@ def test_git_pane_and_sidebar_keep_workers_nested_under_one_work(
     monkeypatch.setattr(registry.get("codex"), "run", implement)
     run_id = run_team(team)
     children = team_children(db, run_id)
+    assert len(children) == 2
     app = create_app(db_path=db.db_path, repo_path=repo, registry=registry)
     with TestClient(app) as client:
-        response = client.get(f"/runs/{run_id}/git")
-        assert response.status_code == 200 and len(response.json()["threads"]) == 2
-        html = client.get(f"/runs/{run_id}").text
-        assert 'data-tab="git"' in html and 'data-run-refresh="git-work"' in html
-        assert 'id="agentSessionSelect"' in html
-        for child_id in children:
-            assert f'href="/runs/{child_id}?from=runs#work"' in html
-            assert f'href="/runs/{child_id}?from=runs#work" class="project-history-item' not in html
-        from saberops.navigation import project_folders
-
-        folders = project_folders(app.state.runtimes, app.state.chats.store, [str(repo)], str(repo))
-        entries = [item for folder in folders for item in folder["entries"]]
-        assert [item["id"] for item in entries if item["kind"] == "run"] == [run_id]
         assert client.get(f"/runs/{children[0]}").status_code == 200
         assert client.get("/").status_code == 200
         assert db.list_runs()[0].id == run_id and len(db.list_runs()) == 1

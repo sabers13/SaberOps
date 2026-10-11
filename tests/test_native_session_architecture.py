@@ -17,7 +17,6 @@ from typing import Any
 import pytest
 
 from saberops.agent_sessions import observe_invocation, owner_directory, read_sessions
-from saberops.chat import ChatStore
 from saberops.config import RunConfig
 from saberops.control_plane.capabilities import Capability, capability_profile_for
 from saberops.models import AttemptStatus, ReasoningEffort, WorkerRequest, WorkerResult
@@ -235,9 +234,9 @@ def bridge(tmp_path: Path) -> Any:
     controls = SessionControls(tmp_path / "controls")
     controls.register("sid", "run", live_identity(), "worker")
     controls.native_id("sid", "ses_native123456")
-    chat = ChatStore(tmp_path / "chat.db")
-    chat_id = chat.create(str(tmp_path), "Test")
-    controls.link_chat("sid", chat_path=chat.path, chat_id=chat_id)
+    chat_path = tmp_path / "chat.db"
+    chat_id = "chat-test"
+    controls.link_chat("sid", chat_path=chat_path, chat_id=chat_id)
     journal = SessionJournal(tmp_path / "controls")
     journal.register("sid", "run", "worker", "a1", live_identity())
     runtime = AgentSessionRuntime(tmp_path, "sid", controls, journal, lambda _: None)
@@ -245,7 +244,7 @@ def bridge(tmp_path: Path) -> Any:
     runtime.request = WorkerRequest("task", tmp_path, "provider/model")
     runtime._start_proxy("opencode")
     assert runtime.proxy
-    yield runtime, controls, chat, chat_id
+    yield runtime, controls
     assert runtime.close()
 
 
@@ -272,8 +271,8 @@ def http(
         return exc.code, json.load(exc)
 
 
-def test_native_prompt_holds_automation_joins_queue_and_syncs_chat(bridge: Any) -> None:
-    runtime, controls, chat, chat_id = bridge
+def test_native_prompt_holds_automation_joins_queue_and_records_reply(bridge: Any) -> None:
+    runtime, controls = bridge
     path = "/session/ses_native123456/prompt_async"
     body = {
         "messageID": "msg_human1234",
@@ -294,13 +293,17 @@ def test_native_prompt_holds_automation_joins_queue_and_syncs_chat(bridge: Any) 
     with pytest.raises(ControlConflict):
         controls.resume("sid")
     controls.reply(message, "Done")
-    assert [m["text"] for m in chat.get(chat_id)["messages"]] == ["Inspect current work", "Done"]
+    stored = controls.get("sid", messages=True)
+    assert stored
+    assert [(m["text"], m["response"]) for m in stored["messages"]] == [
+        ("Inspect current work", "Done")
+    ]
     controls.resume("sid")
     assert http(runtime, "POST", path, {"parts": [{"type": "text", "text": "Late"}]})[0] == 409
 
 
 def test_native_client_cannot_change_frozen_settings_or_access_another_session(bridge: Any) -> None:
-    runtime, controls, _, _ = bridge
+    runtime, controls = bridge
     assert http(runtime, "GET", "/session/ses_other1234/message")[0] == 403
     assert http(runtime, "PATCH", "/config", {"permission": "allow"})[0] == 403
     assert (
@@ -311,7 +314,7 @@ def test_native_client_cannot_change_frozen_settings_or_access_another_session(b
 
 
 def test_native_abort_requests_takeover_and_does_not_resume_automation(bridge: Any) -> None:
-    runtime, controls, _, _ = bridge
+    runtime, controls = bridge
     path = "/session/ses_native123456/abort"
     assert http(runtime, "POST", path, {})[0] == 200
     assert controls.mode("sid") == "REQUESTED" and controls.should_interrupt("sid")
@@ -687,7 +690,7 @@ def test_durable_outcome_overrides_stale_active_metadata_without_mutating_it(
 
 @pytest.mark.parametrize("path", ["/event", "/global/event"])
 def test_live_stream_gets_final_snapshot_without_replaying_old_busy(bridge: Any, path: str) -> None:
-    runtime, _, _, _ = bridge
+    runtime, _ = bridge
     runtime.journal.append(
         "sid",
         "provider.structured",

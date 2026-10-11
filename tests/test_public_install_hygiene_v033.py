@@ -32,8 +32,8 @@ from saberops.db import (
     get_db_schema_version,
     get_default_db_path,
 )
+from saberops.paths import get_projects_registry_path as get_default_projects_path
 from saberops.project import owner_state_dir, projects_state_root
-from saberops.projects import get_default_projects_path
 from saberops.routing_config import get_user_routing_path
 from saberops.tooling.registry import default_registry_path
 

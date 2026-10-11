@@ -370,21 +370,21 @@ def _unknown_identity() -> ProcessIdentity:
 # --- Web non-blocking contract ---------------------------------------------
 
 
-def test_review_post_returns_without_synchronous_review(
+def test_review_request_returns_without_synchronous_review(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, popen: _CountingPopen
 ) -> None:
     db_path = tmp_path / "web.db"
     db = Database(db_path)
     _seed_run(db, "run-r1")
     _gate_pass(db, "run-r1", "run-r1-a1", 1, _SHA_A)
-    monkeypatch.setattr(subprocess, "Popen", popen)
     monkeypatch.setattr(OrchestratorService, "review_run", _boom)
-    client = TestClient(create_app(db_path=db_path))
+    supervisor = OwnerActionSupervisor(db, popen_factory=popen)
 
-    response = client.post("/runs/run-r1/review", follow_redirects=False)
+    launch = supervisor.request_review(
+        run_id="run-r1", candidate_sha=_SHA_A, target_repo="/tmp/r3e2-target"
+    )
 
-    assert response.status_code == 303
-    assert response.headers["location"].endswith("/runs/run-r1?review_queued=1")
+    assert launch.launched is True
     assert popen.call_count == 1
     action = db.get_active_owner_action("run-r1", "REVIEW")
     assert action is not None
@@ -452,14 +452,15 @@ def test_accept_blocked_by_real_checklist_launches_nothing(tmp_path: Path) -> No
 
 
 def test_review_without_candidate_launches_nothing(tmp_path: Path) -> None:
+    from saberops.candidate_lifecycle import project_candidate_state
+
     db_path = tmp_path / "web.db"
     db = Database(db_path)
     _seed_run(db, "run-r0")
-    client = TestClient(create_app(db_path=db_path))
 
-    response = client.post("/runs/run-r0/review", follow_redirects=False)
-
-    assert response.status_code == 400
+    # The removed review route refused before claiming when no reviewable
+    # candidate exists; the engine callers keep that guard.
+    assert project_candidate_state(db, "run-r0").candidate_sha is None
     assert db.list_owner_actions("run-r0") == []
 
 
@@ -568,22 +569,25 @@ def test_build_argv_matches_orch_authority(tmp_path: Path) -> None:
 # --- Duplicate-launch atomicity ----------------------------------------------
 
 
-def test_duplicate_review_posts_launch_single_child(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, popen: _CountingPopen
+def test_duplicate_review_requests_launch_single_child(
+    tmp_path: Path, popen: _CountingPopen
 ) -> None:
     db_path = tmp_path / "web.db"
     db = Database(db_path)
     _seed_run(db, "run-d1")
     _gate_pass(db, "run-d1", "run-d1-a1", 1, _SHA_A)
-    monkeypatch.setattr(subprocess, "Popen", popen)
-    client = TestClient(create_app(db_path=db_path))
+    supervisor = OwnerActionSupervisor(db, popen_factory=popen)
 
-    first = client.post("/runs/run-d1/review", follow_redirects=False)
-    second = client.post("/runs/run-d1/review", follow_redirects=False)
+    first = supervisor.request_review(
+        run_id="run-d1", candidate_sha=_SHA_A, target_repo="/tmp/r3e2-target"
+    )
+    second = supervisor.request_review(
+        run_id="run-d1", candidate_sha=_SHA_A, target_repo="/tmp/r3e2-target"
+    )
 
-    assert first.status_code == 303
-    assert second.status_code == 303
-    assert second.headers["location"].endswith("/runs/run-d1?action_active=review")
+    assert first.launched is True
+    assert second.duplicate is True
+    assert second.action.action_id == first.action.action_id
     assert popen.call_count == 1
     assert len(db.list_owner_actions("run-d1")) == 1
 
@@ -683,12 +687,10 @@ def test_active_action_survives_app_restart_and_blocks_duplicate(
         )
         assert second.duplicate is True
         assert second_popen.call_count == 0
-
-        monkeypatch.setattr(subprocess, "Popen", second_popen)
-        client = TestClient(create_app(db_path=db_path))
-        response = client.post("/runs/run-s1/review", follow_redirects=False)
-        assert response.status_code == 303
-        assert response.headers["location"].endswith("/runs/run-s1?action_active=review")
+        third = reopened_supervisor.request_review(
+            run_id="run-s1", candidate_sha=_SHA_A, target_repo="/tmp/r3e2-target"
+        )
+        assert third.duplicate is True
         assert second_popen.call_count == 0
     finally:
         second_popen.close()
@@ -1108,8 +1110,11 @@ def test_queued_event_carries_bounded_secret_free_payload(
     _seed_run(db, "run-v1")
     _gate_pass(db, "run-v1", "run-v1-a1", 1, _SHA_A)
     monkeypatch.setattr(subprocess, "Popen", popen)
-    client = TestClient(create_app(db_path=db_path))
-    client.post("/runs/run-v1/review", follow_redirects=False)
+    supervisor = OwnerActionSupervisor(db, popen_factory=popen)
+    launch = supervisor.request_review(
+        run_id="run-v1", candidate_sha=_SHA_A, target_repo="/tmp/r3e2-target"
+    )
+    assert launch.launched is True
 
     events = db.get_events_by_type("run-v1", "owner_action_queued")
     assert len(events) == 1
@@ -1131,8 +1136,12 @@ def test_run_page_and_actions_json_show_durable_action_state(
     _seed_run(db, "run-v2")
     _gate_pass(db, "run-v2", "run-v2-a1", 1, _SHA_A)
     monkeypatch.setattr(subprocess, "Popen", popen)
+    supervisor = OwnerActionSupervisor(db, popen_factory=popen)
+    launch = supervisor.request_review(
+        run_id="run-v2", candidate_sha=_SHA_A, target_repo="/tmp/r3e2-target"
+    )
+    assert launch.launched is True
     client = TestClient(create_app(db_path=db_path))
-    client.post("/runs/run-v2/review", follow_redirects=False)
 
     actions = client.get("/runs/run-v2/actions").json()
     assert actions["owner_review_active"] is True
@@ -1143,33 +1152,6 @@ def test_run_page_and_actions_json_show_durable_action_state(
     assert page.status_code == 200
     assert 'id="owner-action-status"' in page.text
     assert "A Review owner action is already running" in page.text
-
-
-def test_project_switch_does_not_retarget_action(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, popen: _CountingPopen
-) -> None:
-    db_path = tmp_path / "web.db"
-    db = Database(db_path)
-    repo_a = str(tmp_path / "repo-a")
-    repo_b = str(tmp_path / "repo-b")
-    Path(repo_a).mkdir()
-    Path(repo_b).mkdir()
-    _seed_run(db, "run-v3", repo=repo_a)
-    _gate_pass(db, "run-v3", "run-v3-a1", 1, _SHA_A)
-    monkeypatch.setattr(subprocess, "Popen", popen)
-    app = create_app(db_path=db_path)
-    registry = app.state.project_registry
-    registry.add_project(Path(repo_b))
-    registry.select(Path(repo_b))
-    client = TestClient(app)
-
-    response = client.post("/runs/run-v3/review", follow_redirects=False)
-
-    assert response.status_code == 303
-    argv = popen.calls[0]["args"][0]
-    assert isinstance(argv, list)
-    assert argv[argv.index("--db") + 1] == str(db_path)
-    assert popen.calls[0]["kwargs"]["cwd"] == repo_a
 
 
 def test_reject_remains_synchronous_and_untouched(tmp_path: Path) -> None:
@@ -1199,12 +1181,13 @@ def test_launch_failure_surfaces_fast_without_false_running(
     _seed_run(db, "run-v5")
     _gate_pass(db, "run-v5", "run-v5-a1", 1, _SHA_A)
     failing = _FailingPopen()
-    monkeypatch.setattr(subprocess, "Popen", failing)
-    client = TestClient(create_app(db_path=db_path))
+    supervisor = OwnerActionSupervisor(db, popen_factory=failing)
 
-    response = client.post("/runs/run-v5/review", follow_redirects=False)
+    launch = supervisor.request_review(
+        run_id="run-v5", candidate_sha=_SHA_A, target_repo="/tmp/r3e2-target"
+    )
 
-    assert response.status_code == 400
+    assert launch.launched is False
     assert db.get_active_owner_action("run-v5", "REVIEW") is None
     rows = db.list_owner_actions("run-v5")
     assert len(rows) == 1

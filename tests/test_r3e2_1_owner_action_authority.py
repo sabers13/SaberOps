@@ -576,6 +576,8 @@ def test_completed_run_keeps_stream_contract_for_active_review(
     """
     import subprocess as _subprocess
 
+    from saberops.owner_actions import OwnerActionSupervisor
+
     db_path = tmp_path / "web.db"
     db = Database(db_path)
     _seed_run(db, "run-s1")
@@ -586,8 +588,10 @@ def test_completed_run_keeps_stream_contract_for_active_review(
     # No owner work yet: nothing streams for a terminal run.
     assert _owner_actions_stream_active(db, "run-s1") is False
 
-    response = client.post("/runs/run-s1/review", follow_redirects=False)
-    assert response.status_code == 303
+    launch = OwnerActionSupervisor(db, popen_factory=popen).request_review(
+        run_id="run-s1", candidate_sha=_SHA_A, target_repo="/tmp/r3e21-target"
+    )
+    assert launch.launched is True
 
     # The stream must now be usable for the terminal run.
     assert _owner_actions_stream_active(db, "run-s1") is True
@@ -624,13 +628,18 @@ def test_completed_run_failure_sequence_is_observable(
 ) -> None:
     import subprocess as _subprocess
 
+    from saberops.owner_actions import OwnerActionSupervisor
+
     db_path = tmp_path / "web.db"
     db = Database(db_path)
     _seed_run(db, "run-s2")
     _gate_pass(db, "run-s2", "run-s2-a1", 1, _SHA_A)
     monkeypatch.setattr(_subprocess, "Popen", popen)
     client = TestClient(create_app(db_path=db_path))
-    assert client.post("/runs/run-s2/review", follow_redirects=False).status_code == 303
+    launch = OwnerActionSupervisor(db, popen_factory=popen).request_review(
+        run_id="run-s2", candidate_sha=_SHA_A, target_repo="/tmp/r3e21-target"
+    )
+    assert launch.launched is True
     assert _owner_actions_stream_active(db, "run-s2") is True
 
     action = db.get_active_owner_action("run-s2", "REVIEW")

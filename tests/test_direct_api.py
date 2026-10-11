@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fastapi.testclient import TestClient
 
 from saberops.control_plane.bindings import BindingKind, resolve_execution_binding
 from saberops.model_access.api_verification import verify_api
@@ -24,7 +23,7 @@ from saberops.model_access.connections import (
     build_access_registry,
 )
 from saberops.models import AttemptStatus, WorkerRequest
-from saberops.web import _discover_connection, _load_owner_bindings_safely, create_app
+from saberops.web import _discover_connection, _load_owner_bindings_safely
 from saberops.workers.api_agent import completion_url, execute_tool
 from saberops.workers.direct_api import DirectAPIAdapter
 from saberops.workers.registry import AdapterRegistry
@@ -233,11 +232,16 @@ def test_discovery_materializes_api_roles_and_routing_without_selecting(
         )
         assert resolved.binding.backend is BindingKind.DIRECT_API
         assert isinstance(resolved.adapter, DirectAPIAdapter)
-    client = TestClient(create_app(db_path=api["tmp"] / "ui.db", seed_cwd_if_empty=False))
-    response = client.post("/access/test", data={"connection_id": "local-api"})
-    assert response.status_code == 200 and "API_ENDPOINT_READY" in response.text
-    assert "authentication/model entitlement not proven" in response.text
-    assert "test-key-never-log" not in response.text
+    from saberops.model_access import ReadinessService
+    from saberops.models import ProviderReadiness
+    from saberops.web import _access_store, _readiness_store
+
+    registry = _access_store().load()
+    service = ReadinessService(registry, _readiness_store())
+    evidence = service.refresh(registry.get("local-api"))
+    assert evidence.state is ProviderReadiness.READY
+    assert evidence.reason == "API_ENDPOINT_READY"
+    assert "test-key-never-log" not in json.dumps(evidence.to_dict())
     assert all(call[2] is None for call in api["calls"])
 
 
@@ -264,34 +268,68 @@ def test_completion_paths(endpoint: str, expected: str) -> None:
 
 @pytest.mark.parametrize("target", ["T1", "T2", "T3", "reviewer", "orchestrator"])
 def test_api_routing_assignment_uses_the_exact_role(api: dict[str, Any], target: str) -> None:
-    from saberops.routing_config import load_effective_routing_payload
-
-    client = TestClient(create_app(db_path=api["tmp"] / "route.db", seed_cwd_if_empty=False))
-    assert client.post("/access/discover", data={"connection_id": "local-api"}).status_code == 200
-    page = client.get("/routing")
-    assert "test-model" in page.text and "local-api" in page.text
-    base_id = "discovered-binding:"
-    response = client.post(
-        "/routing/assign",
-        data={
-            "target": target,
-            "connection_id": "local-api",
-            "model_id": "test-model",
-            "binding_id": base_id + "worker:local-api:test-model",
-            "reviewer_binding_id": base_id + "reviewer:local-api:test-model",
-            "orchestrator_binding_id": base_id + "orchestrator:local-api:test-model",
-        },
-        follow_redirects=False,
+    from saberops.control_plane.binding_store import save_owner_bindings as _save_owner_bindings
+    from saberops.control_plane.bindings import BindingRole
+    from saberops.model_access import apply_discovery_result
+    from saberops.routing_config import (
+        DynamicCandidate,
+        add_dynamic_candidate_to_chain,
+        format_candidate_id,
+        load_effective_routing_payload,
+        save_user_routing,
     )
-    assert response.status_code == 303
+    from saberops.web import (
+        _load_catalog_safely,
+        _model_catalog_store,
+        _resolve_exact_binding,
+    )
+
+    result = _discover_connection(api["connection"], AdapterRegistry.default())
+    assert result.ok
+    store = _model_catalog_store()
+    store.save(apply_discovery_result(store.load(), result))
+    entry = _load_catalog_safely().try_get(
+        connection_id="local-api", provider="testapi",
+        backend="openai-compatible-api", model_id="test-model",
+    )
+    assert entry is not None and entry.is_discovery_verified
+    base_id = "discovered-binding:"
     owner = _load_owner_bindings_safely()
+    registry = AdapterRegistry.default()
     if target.startswith("T"):
+        exact = _resolve_exact_binding(
+            owner, registry, provider="testapi", model="test-model",
+            connection_id="local-api", role=BindingRole.WORKER,
+        )
+        assert exact is not None and exact.binding_id == base_id + "worker:local-api:test-model"
+        candidate_id = format_candidate_id("testapi", "test-model")
+        approval = DynamicCandidate(
+            candidate_id=candidate_id, provider="testapi", model="test-model",
+            connection_id="local-api", backend="openai-compatible-api",
+            binding_id=exact.binding_id,
+            discovery_status=entry.discovery_status.value,
+            execution_support=entry.execution_support.value,
+            training_required="UNKNOWN",
+            capabilities=tuple((n, s.value) for n, s in entry.capabilities),
+        )
+        payload = load_effective_routing_payload()
+        save_user_routing(add_dynamic_candidate_to_chain(
+            payload, top=target, sub="default", candidate=approval,
+        ))
         assert "testapi/test-model" in load_effective_routing_payload()[target]["default"]
-    elif target == "reviewer":
-        assert owner.reviewer_binding_id == base_id + "reviewer:local-api:test-model"
     else:
-        assert owner.policy is not None
-        assert base_id + "orchestrator:local-api:test-model" in repr(owner.policy)
+        wanted = base_id + f"{target}:local-api:test-model"
+        binding = owner.registry.try_get(wanted)
+        assert binding is not None and binding.binding_role.value == target.upper()
+        order = owner.role_binding_ids(target)
+        assert wanted not in order
+        _save_owner_bindings(owner.with_role_order(target, (*order, wanted)))
+        owner = _load_owner_bindings_safely()
+        if target == "reviewer":
+            assert owner.reviewer_binding_id == wanted
+        else:
+            assert owner.policy is not None
+            assert wanted in repr(owner.policy)
     assert all(call[2] is None for call in api["calls"])
 
 
@@ -351,19 +389,30 @@ def test_model_cannot_read_credential_from_command_environment(api: dict[str, An
     assert tool_result["stdout"].strip() == "{}"
 
 
-def test_chat_picker_selects_exact_api_binding_without_inference(api: dict[str, Any]) -> None:
-    client = TestClient(create_app(db_path=api["tmp"] / "chat.db", seed_cwd_if_empty=False))
-    assert client.post("/access/discover", data={"connection_id": "local-api"}).status_code == 200
+def test_orchestrator_assign_selects_exact_api_binding_without_inference(
+    api: dict[str, Any],
+) -> None:
+    """Assigning the orchestrator slot keeps the exact API binding.
+
+    L-A step 5 removed the chat model picker; the orchestrator-slot
+    assignment it exercised now runs through the owner-bindings engine
+    seam directly.
+    """
+    from saberops.control_plane.binding_store import save_owner_bindings
+    from saberops.model_access import apply_discovery_result
+    from saberops.web import _load_owner_bindings_safely, _model_catalog_store
+
+    result = _discover_connection(api["connection"], AdapterRegistry.default())
+    assert result.ok
+    store = _model_catalog_store()
+    store.save(apply_discovery_result(store.load(), result))
     identity = "discovered-binding:orchestrator:local-api:test-model"
-    assert client.post("/routing/assign", data={
-        "target": "orchestrator", "orchestrator_binding_id": identity,
-    }, follow_redirects=False).status_code == 303
-    models = client.get("/chat/models").json()["bindings"]
-    assert any(row["binding_id"] == identity and row["backend"] == "DIRECT_API" for row in models)
-    assert client.post("/chat/model", data={"binding_id": identity}).json() == {
-        "selected_binding_id": identity
-    }
-    assert client.get("/chat/models").json()["selected_binding_id"] == identity
+    owner = _load_owner_bindings_safely()
+    binding = owner.registry.try_get(identity)
+    assert binding is not None and binding.binding_role.value == "ORCHESTRATOR"
+    order = owner.role_binding_ids("orchestrator")
+    save_owner_bindings(owner.with_role_order("orchestrator", (*order, identity)))
+    assert identity in _load_owner_bindings_safely().role_binding_ids("orchestrator")
     assert all(call[2] is None for call in api["calls"])
 
 

@@ -260,15 +260,10 @@ class SessionControls:
         self.sync_chat(message, response[:32000])
 
     def sync_chat(self, message: dict[str, Any], response: str | None = None) -> None:
-        data = self.get(message["session_id"])
-        if data is None or not data["chat_path"] or not data["chat_id"]:
-            return
-        # Import only when used, avoiding a chat/consumer/control import cycle.
-        from saberops.chat import ChatStore
-
-        store = ChatStore(Path(data["chat_path"]))
-        role = data["role"]
-        store.record_manual(data["chat_id"], message["id"], message["text"], response, role=role)
+        # The chat frontend was removed (L-A step 5): there is no conversation
+        # store to mirror manual messages into.  The session journal remains
+        # the durable record; this is a no-op so engine callers keep working.
+        return
 
     def interrupt(self, sid: str) -> None:
         self._require_live(sid, ("MANUAL",))
