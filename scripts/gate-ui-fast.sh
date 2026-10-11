@@ -40,8 +40,9 @@ unset ORCH_BINDING_STORE ORCH_READINESS_STORE
 
 # Extra arguments should be inspected, affected rendering tests by exact node ID.
 "$gate_python" -m pytest -q \
-    tests/test_c16c2_console.py::test_c16c2_dashboard_renders_approved_shell \
-    tests/test_c16c2_console.py::test_c16c2_run_detail_renders_inspector_and_actions \
-    tests/test_c16c2_console.py::test_c16c2_missing_run_keeps_shell \
+    tests/test_c16c2_console.py::test_c16c2_dashboard_lists_runs_with_kept_tokens \
+    tests/test_c16c2_console.py::test_c16c2_run_detail_renders_status_evidence_and_actions \
+    tests/test_c16c2_console.py::test_c16c2_missing_run_keeps_minimal_page \
+    tests/test_c16c2_console.py::test_c16c2_report_and_health_stay_json \
     tests/test_c16c2_console.py::test_c16c2_console_assets_are_served \
     "$@"

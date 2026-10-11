@@ -12,7 +12,13 @@ SaberOps lets AI models propose software changes while deterministic code contro
 > **Core principle: the LLM advises; deterministic software decides.**
 
 > [!IMPORTANT]
-> **v0.3.8 adds parallel Work with isolated worker branches and a Git & threads pane.** It also separates Chat from Work, keeps linked original chats, unifies project navigation, and improves native session controls and provider reporting. See the [release notes](docs/releases/0.3.8.md) and [parallel workflow guide](docs/parallel-work.md). This release is still **preview software**: not production-ready, stable, or complete.
+> **SaberOps is becoming a headless execution engine** (see
+> [ADR-0001](docs/decisions/0001-saberops-engine-mcp-first.md)): tasks in,
+> verified commits out, driven through vendors' official CLIs within plan
+> limits. The web console is cut to a **minimal status page** (run list, run
+> detail with status/attempts/gate/review/diff, report JSON, accept/reject,
+> health); owner configuration lives in the `orch` CLI. This is still
+> **preview software**: not production-ready, stable, or complete.
 
 ---
 
@@ -24,7 +30,7 @@ SaberOps separates **semantic work** from **execution authority**:
 
 | AI models | Deterministic SaberOps control plane |
 | --- | --- |
-| Orchestrator holds the owner conversation and proposes worker tasks | Validates exact provider/backend/model bindings |
+| Orchestrator proposes worker tasks | Validates exact provider/backend/model bindings |
 | Worker model proposes implementation changes | Enforces routing admission, readiness, quota, and policy |
 | Optional reviewer provides an independent read-only assessment | Owns Git worktrees, gates, provenance, durable state, and acceptance |
 | Models never decide whether their own result is accepted | Fails closed when required evidence is missing |
@@ -68,50 +74,6 @@ A normal run follows these boundaries:
 ### Exact execution identity
 
 SaberOps preserves provider, backend, and model identity from discovery through binding and dispatch. Same-named models from different upstreams remain distinct, and exact bindings prevent silent sibling-model or first-match substitution.
-
-### Conversational orchestration
-
-The workspace composer starts a persistent conversation with the selected
-Orchestrator. Questions and discussion receive replies without launching a
-worker. **Turn into work** keeps the original chat and creates a separate linked
-Work thread. Implementation requests in Work use the supervised worker flow under
-project policy; completed or failed runs are explained in that Work thread.
-Follow-ups retain the original objective and recent conversation context. Each
-implementation request creates a separate candidate run against the project's
-current base; previous unaccepted candidates are not integrated automatically.
-
-Conversations are stored separately from run evidence, with exact Orchestrator
-identity and invocation evidence. Page loads and message polling never invoke
-models. Interrupted replies remain visible and are not replayed automatically.
-The latest 20 messages, including the original objective, supply model context;
-the full transcript remains stored. Run screens can continue into a conversation.
-
-Result conversations receive the canonical candidate file list, matching worker
-handoff, persisted gate output and reviewer responses alongside the run report.
-These reads do not run project code or integrate changes. Long evidence is
-explicitly truncated, retaining log beginnings and final results within a shared
-budget. Worker prose remains advisory; gate/review records and acceptance evidence
-retain their existing authority. Fresh artifacts supersede earlier conversational
-claims about missing files or test output. A gate PASS does not prove browser
-verification, and a completed run remains separate from owner acceptance.
-
-A run blocked by UNKNOWN worker readiness exposes an explicit “Try” action for
-an exact worker still in the owner-picked routing chain. It launches a new run
-through the existing explicit-override authority and retains the failed run's
-frozen validation policy. It never marks installation as readiness; a successful
-execution records readiness for the exact connection. Automatic routing continues
-to refuse UNKNOWN readiness.
-
-A failed run with a saved candidate exposes **Continue from saved work**. This
-creates a linked repair run in a new worktree at that candidate; the failed run
-and the project's original checkout remain intact. It carries forward the task,
-frozen execution policy, gate errors, review findings, and any durable plan with
-completed prerequisites. Verification covers the full candidate against the
-original project base, with review enabled unless the owner explicitly disabled
-it. Acceptance remains a separate owner action. Repeated clicks open the same
-continuation. Changed or missing source work, unresolved execution effects, and
-live or uncertain previous workers block continuation. **Retry** starts fresh
-from the project base instead. Continue does not reopen a finished provider turn.
 
 ### Separate Orchestrator and worker roles
 
@@ -188,58 +150,36 @@ orch models
 orch authority show
 ```
 
-Start the local dashboard with an isolated first-run profile (binds to `127.0.0.1:8765` by default):
+Start the local status page with an isolated first-run profile (binds to `127.0.0.1:8765` by default):
 
 ```bash
 orch ui --profile first-run
 ```
 
+The page shows the run list and, per run, status, attempts, gate results,
+review verdict, diff, the canonical report, and the accept/reject owner
+actions. It never dispatches work. Owner configuration (worker routing,
+quota, authority, project policy) lives in the `orch` CLI:
+
+```bash
+orch routing show        # effective worker routing (configure via routing file)
+orch quota list          # quota state (set with `orch quota set`)
+orch authority show      # authority mode and host access
+orch project show        # project gate / data / review / branch policy
+orch models              # discovered models and readiness
+orch doctor --repo .     # local readiness checks
+```
+
 At launch, SaberOps detects CLIs on PATH and in common user installation folders
 (including OpenCode and nvm), then runs supported native login-status commands
-with a timeout. The same PATH is used to launch workers. Antigravity (`agy`) is
-included in Access, with native model discovery. Installation and model catalogs
-do not prove login. Copilot verifies its existing account through the native
-`auth.getStatus` control request, alongside Codex and Claude's status commands.
-Unsupported CLI versions truthfully remain unverified.
-Startup does not send model prompts, read CLI credentials or choose routing.
+with a timeout. The same PATH is used to launch workers. Startup does not send
+model prompts, read CLI credentials or choose routing.
 
-Before your first task, open Providers and refresh models. For OpenCode and
-Antigravity, choose an exact model and use **Verify model access**. This explicit
-action sends one small request using the CLI's existing account setup and consumes
-account allowance. It runs in a temporary directory with native tools denied,
-outside your project, with a 45-second deadline and process cleanup. A completed
-challenge response saves readiness and the tested model; installation, catalogs,
-empty output and exit zero alone never establish access. Checks are never
-started automatically. For sign-in, the page gives the provider's native login
-instructions. A failed test of another model retains earlier successful evidence.
-Readiness follows the existing connection-level 24-hour freshness policy; one
-model's success does not prove entitlement or remaining quota for every catalog
-model, particularly across OpenCode upstream providers.
-
-Access model refresh also supports Claude Code’s native initialize catalog and
-Copilot’s native `models.list` control request. These metadata-only calls use the
-installed CLI’s own account session, run in a temporary working directory, and
-never send an inference prompt. CLI/version failures retain stale evidence rather
-than manufacturing model names or authentication readiness.
-
-Saved API connections are visible directly in Access. OpenRouter discovery uses
-`https://openrouter.ai/api/v1/models`, including when a saved connection points at
-another OpenRouter API surface. Other OpenAI-compatible connections accept base,
-model-list, chat-completions, and responses URLs. OpenAI-compatible API models
-can execute directly in worker, reviewer and orchestrator roles after discovery
-and explicit selection in Routing. Subscription connections continue through
-their native CLI harnesses; an API connection never borrows subscription credentials.
-
-Configure an API connection with an `env:MY_API_KEY` reference, and make that
-variable available to the SaberOps process before starting it (including the
-service environment when launched as a service). Secret values are neither saved
-in connection/binding documents nor logged. `profile:`/`store:` references and
-other API protocols currently have no direct executor and remain unavailable.
-Verify API and Refresh models are metadata-only requests that may transmit the
-referenced API key to the configured endpoint. OpenRouter verification uses its
-read-only `/api/v1/key` endpoint. A generic `/models` success proves catalog
-reachability, not authentication or entitlement to every listed model. Missing
-credentials fail closed with `CREDENTIAL_MISSING`; discovery never selects a role.
+Provider readiness is recorded by explicit verification and consumed from
+durable evidence; installation and model catalogs alone never establish
+access. Readiness follows the connection-level 24-hour freshness policy.
+`orch doctor` reports what is verifiable locally; a failed check keeps prior
+evidence rather than manufacturing readiness.
 
 Direct API workers use a bounded tool loop with worktree file tools and command
 execution. Reviewers and orchestrators get read-only file tools. The existing
@@ -247,8 +187,8 @@ monitored process boundary handles stop/deadline controls and records actual
 response usage; autonomous containment requirements continue to apply. API models
 must support Chat Completions and function tools; unsupported responses fail
 explicitly. These calls consume the API account's billing, independently of CLI
-subscriptions. API verification and model discovery perform no inference; the
-separate native **Verify model access** action is an explicit inference check.
+subscriptions. Model access connections persist in the owner state directory;
+there is currently no `orch` command to add them (see Current limitations).
 
 Claude account execution launches the installed `claude` CLI and retains its
 native tools, agent loop, and system prompt. It checks the CLI’s subscription
@@ -261,17 +201,11 @@ Tasks consume the account’s normal usage allowance. Disable usage credits in y
 Claude account if you require no additional charges: native CLI use alone cannot
 guarantee subscription terms or zero additional provider billing.
 
-Then use **First-run setup** in the UI to discover providers/models, choose Worker/Reviewer/Orchestrator roles, select the target repository, and configure project policy.
-
-Project policy includes **Quick**, **Balanced** (default), **Thorough**, **Max**,
-and manual settings. Quick disables gate and independent review. Balanced
-requires a configured gate and uses risk-adaptive review with 3 reviewer calls;
-Thorough requires gate and review with 5 calls. Max requires both without an
-owner-set reviewer-call limit, while runtime and failure bounds still apply.
-Manual settings let you choose gate required/disabled, review disabled/adaptive/
-required, and bounded/Max review. Required gates need a configured command or a
-Makefile `gate:` target. Settings freeze at run creation, including acceptance;
-skipped checks are recorded as SKIPPED, never PASS.
+Configure each target repository before dispatch: `orch project set-gate`,
+`set-data-policy`, `set-review-policy`, `set-target-branch` (see
+`orch project --help`). For worker routing, `orch routing init` writes a user
+routing file; `orch routing validate` checks it. Settings freeze at run creation,
+including acceptance; skipped checks are recorded as SKIPPED, never PASS.
 
 ### Example provider-backed run
 
@@ -319,7 +253,7 @@ Run `orch <command> --help` for the full command and option reference. Runtime s
 
 - Provider authentication remains with the provider's normal mechanism. Credential references may be stored; secret values are not.
 - Do not put credentials in source, committed configuration, or task text.
-- The dashboard binds to localhost by default.
+- The status page binds to localhost by default.
 - Host access for workers is `governed` by default. `unrestricted` exists as an explicit owner choice (`orch authority set-host-access`); worktree isolation separates candidate changes, it is not a sandbox against a worker with unrestricted host access.
 - Missing required admission evidence causes a refusal rather than an inferred approval.
 - Tests and CI make no provider or model calls.
@@ -345,9 +279,9 @@ With the existing development environment and Node.js available,
 `bash scripts/gate-full.sh` preserves the complete checks above for UI FINALIZE.
 The wrappers use `.venv/bin/python` when present, otherwise the active `python`.
 Use the fast gate only within the documented UI scope and after inspecting the
-rendered result. The approved October reconstruction keeps the FastAPI/Jinja
-frontend, with shared primitives and responsive light/dark styles in
-`workspace.css`; no frontend build step is required.
+rendered result. The minimal status page keeps the FastAPI/Jinja
+frontend with the shared console-v2 tokens and light/dark styles; no frontend
+build step is required.
 
 ### Repository layout
 
@@ -365,6 +299,9 @@ THIRD_PARTY_NOTICES.md   shipped third-party notices
 ## Current limitations
 
 - Parallel Work supports two to six tasks with up to four concurrent workers. Conflicts stop integration; automatic mid-team recovery and automatic conflict repair are not implemented. See the [workflow guide](docs/parallel-work.md).
+- The status page is read-only apart from accept/reject. Run retry/continuation,
+  reviewer/orchestrator/model-access selection, and workflow presets have no
+  `orch` command yet; they are engine capabilities awaiting CLI parity (M3).
 - This is a preview release: interfaces and workflows may change.
 - SaberOps is not production-ready, stable, or feature-complete.
 
@@ -373,14 +310,12 @@ THIRD_PARTY_NOTICES.md   shipped third-party notices
 ## Further reading
 
 - [v0.3.8 release notes](docs/releases/0.3.8.md): changes, upgrade instructions and validation.
-- [Chat and Work guide](docs/chat-and-work.md): projects, separate conversations, attachments and linked Work.
-
+- [Engine direction](docs/decisions/0001-saberops-engine-mcp-first.md): SaberOps
+  as a plan-aware, verified execution engine.
 - [Parallel Work and Git tracking](docs/parallel-work.md): team planning, isolated
   worker branches, ordered integration, checks and owner acceptance.
-- [Operating notes](docs/operations.md): worker routing, CLI usage limits, the
-  chat and agent consoles, and fixed-source candidate verification.
-- [Session architecture](docs/session-architecture.md): native sessions,
-  take-over and the capability boundary per provider.
+- [Operating notes](docs/operations.md): worker routing, CLI usage limits, and
+  fixed-source candidate verification.
 - [UI design principles](docs/ui-design-principles.md).
 
 ---

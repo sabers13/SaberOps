@@ -1,19 +1,18 @@
 # Parallel Work and Git tracking
 
-In Work, select **Parallel team**, or choose it in **Turn into work / Review
-brief**. The brief dialog also selects a maximum of two, three, or four workers.
-Chat remains a discussion space; converting it keeps the original chat and
-creates a linked Work thread.
+A parallel team runs two to six coherent tasks with a maximum of two, three,
+or four workers. The team request carries the task brief; SaberOps keeps the
+original objective alongside the linked team run.
 
 The configured orchestrator proposes two to six coherent tasks. Each task has
 a goal, acceptance checks, file ownership and explicit dependencies. SaberOps
 validates that proposal before admitting workers. An invalid or inseparable
 proposal does not silently start a single worker or an invented team.
 
-Open **Git & threads** on a run to see each task's status, branch, commit,
-dependencies, owned files and worktree. **Inspect worker & console** opens that
-worker in the existing run inspector. The parent remains the single Work entry
-in the project sidebar; internal worker runs remain inspectable through the pane.
+Each task's status, branch, commit, dependencies, owned files and worktree are
+recorded in run evidence and visible on the run-detail status page and in
+`orch report`. The parent remains the single team entry; internal worker runs
+stay inspectable through their own run-detail pages and reports.
 
 Overview and the canonical run report include team totals and linked worker
 checks. Parent-only counts stay separate: a parent with no final attempt can
@@ -33,10 +32,11 @@ bytecode cache writes during immutable verification; test databases and scratch
 files must also live outside the repository, for example in temporary directories.
 The final integration tests must require the complete application.
 
-Gate changes affect future runs. **Retry** preserves the old run's frozen policy;
-after correcting project settings, request fresh Work using the corrected policy.
-An installed CLI alone is not verified model access: use **Connections → Verify
-model access** for the selected account model when its readiness is unknown.
+Gate changes affect future runs. A retry starts a new run under the failed run's
+frozen policy; after correcting project settings (`orch project ...`), start a
+fresh run using the corrected policy. An installed CLI alone is not verified
+model access: readiness is recorded by explicit model verification, `orch
+doctor` reports local readiness, and unknown readiness keeps refusing dispatch.
 
 ## Execution and Git
 
@@ -93,20 +93,22 @@ independent review and parent integration checks still apply to those copies.
 - A Git conflict aborts the merge, records the affected files and preserves
   worker branches. It does not ask a model to resolve conflicts automatically.
 - A combined gate/review failure preserves the combined candidate without
-  making it acceptable. If a failed parent has a committed final attempt, the
-  existing **Continue from saved work** repairs that candidate without rerunning
-  the completed team. **Retry** starts a new run.
-- Stop on the parent uses the existing fenced cancellation path for its active
-  workers before stopping the parent. Unknown ownership or unconfirmed worker
-  termination refuses cancellation rather than claiming that execution stopped.
+  making it acceptable. If a failed parent has a committed final attempt, engine
+  continuation can repair that candidate without rerunning the completed team.
+  A retry starts a new run instead.
+- Stop on the parent uses the existing fenced cancellation path (`orch cancel`)
+  for its active workers before stopping the parent. Unknown ownership or
+  unconfirmed worker termination refuses cancellation rather than claiming that
+  execution stopped.
 - Server refresh/restart does not relaunch durable owners. An interrupted team
   is preserved rather than automatically replayed or merged. A parent that dies
-  abruptly can leave detached workers finishing isolated branches; inspect and
-  stop those workers through their run controls before retrying. Automatic
-  mid-team recovery and manual conflict resolution are separate future work.
+  abruptly can leave detached workers finishing isolated branches; inspect those
+  workers through their run reports and stop them (`orch cancel`) before
+  retrying. Automatic mid-team recovery and manual conflict resolution are
+  separate future work.
 
-The pane is read-only Git tracking with links to established checks, review and
-acceptance controls. It does not force-push, reset the owner's checkout, delete
+The run-detail status page links the team's checks, review and acceptance
+evidence. The engine does not force-push, reset the owner's checkout, delete
 branches, or automatically accept work.
 
 ## Open-source references and attribution
@@ -134,8 +136,8 @@ not incorporation of their implementations or license transfer.
 `tests/test_parallel_work.py` uses real temporary Git repositories and controlled
 worker adapters. It verifies concurrency, merge order, dependencies, overlapping
 scopes, scope violations, combined checks/review, conflicts, policy inheritance,
-internal acceptance refusal and admission validation. Chat/rendering checks and
-the repository's normal lint/type/test gates cover the application integration.
+internal acceptance refusal and admission validation. The repository's normal
+lint/type/test gates cover the application integration.
 
 Validation on 2026-10-10 included controlled workers with real temporary Git
 repositories, cancellation, policy inheritance, conflict handling and acceptance.

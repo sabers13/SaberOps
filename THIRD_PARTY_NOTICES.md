@@ -4,36 +4,8 @@ SaberOps is distributed under the Apache License 2.0 (see `LICENSE`).
 The following third-party components are vendored in this repository under
 their own licenses.
 
-## xterm.js (vendored static assets)
-
-- Location: `src/saberops/static/vendor/xterm/`
-- Version: 5.3.0 (see `VERSION`)
-- Project: https://github.com/xtermjs/xterm.js
-- License: MIT (full text in `src/saberops/static/vendor/xterm/LICENSE`)
-
-Copyright (c) 2017-2019, The xterm.js authors
-Copyright (c) 2014-2016, SourceLair Private Company
-Copyright (c) 2012-2013, Christopher Jeffrey
-
-## Marked (vendored static asset)
-
-- Location: `src/saberops/static/vendor/chat/marked.js`
-- Version: 17.0.1
-- Project: https://github.com/markedjs/marked
-- License: MIT (full text in `src/saberops/static/vendor/chat/marked-LICENSE.md`)
-
-Copyright (c) 2018+, MarkedJS
-Copyright (c) 2011-2018, Christopher Jeffrey
-
-## DOMPurify (vendored static asset)
-
-- Location: `src/saberops/static/vendor/chat/purify.js`
-- Version: 3.3.1
-- Project: https://github.com/cure53/DOMPurify
-- License: Apache License 2.0 or Mozilla Public License 2.0, at your option
-  (full text in `src/saberops/static/vendor/chat/dompurify-LICENSE`)
-
-Copyright 2025 Dr.-Ing. Mario Heiderich, Cure53
+(L-A: the vendored xterm.js, Marked, and DOMPurify web assets were removed
+with the console cut; their notices went with them.)
 
 ## Manrope (font)
 
