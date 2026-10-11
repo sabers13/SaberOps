@@ -19,6 +19,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SELECTOR_SCRIPT = REPO_ROOT / "scripts" / "select_tests.py"
+BUILD_MAP_SCRIPT = REPO_ROOT / "scripts" / "build_test_map.py"
 GATE_UI_FAST = REPO_ROOT / "scripts" / "gate-ui-fast.sh"
 
 CORE = "src/fakepkg/core.py"
@@ -451,3 +452,261 @@ def test_ui_node_ids_match_gate_ui_fast(selector: ModuleType) -> None:
     declared = set(re.findall(r"tests/[\w./]+::\w+", text))
     assert declared
     assert set(selector.UI_NODE_IDS) == declared
+
+
+# ---------------------------------------------------------------------------
+# coverage strategy (synthetic map JSON; no coverage run inside unit tests)
+# ---------------------------------------------------------------------------
+
+DIRECT_NODE = "tests/test_direct.py::test_direct"
+TRANSITIVE_NODE = "tests/test_transitive.py::test_transitive"
+
+
+def write_map(
+    repo: Path,
+    files: dict[str, dict[str, list[str]]],
+    blind: tuple[str, ...] = (),
+    commit: str | None = None,
+) -> Path:
+    """Write a fresh (HEAD-built) sharded coverage map into the fake repo."""
+    if commit is None:
+        commit = git(repo, "rev-parse", "HEAD")
+    common = git(repo, "rev-parse", "--git-common-dir")
+    map_dir = repo / common / "saberops-test-map"
+    nodes = sorted({node for lines in files.values() for group in lines.values() for node in group})
+    index = {node: position for position, node in enumerate(nodes)}
+    by_test: dict[str, list[int]] = {}
+    for position, node in enumerate(nodes):
+        by_test.setdefault(node.split("::")[0], []).append(position)
+    shards = map_dir / "files"
+    for rel, lines in files.items():
+        shard = shards / f"{rel}.json"
+        shard.parent.mkdir(parents=True, exist_ok=True)
+        shard.write_text(
+            json.dumps(
+                {line: sorted(index[node] for node in group) for line, group in lines.items()}
+            ),
+            encoding="utf-8",
+        )
+    payload = {
+        "version": 2,
+        "commit": commit,
+        "built_at": "2026-01-01T00:00:00+00:00",
+        "test_count": 2,
+        "context_count": 2,
+        "unmatched_nodes": 0,
+        "coverage_version": "7.0.0",
+        "build_seconds": 1.0,
+        "pytest_exit": 0,
+        "subprocess_capture": False,
+        "nodes": nodes,
+        "by_test": by_test,
+        "blind": list(blind),
+    }
+    (map_dir / "meta.json").write_text(json.dumps(payload), encoding="utf-8")
+    return map_dir
+
+
+def cov_select(
+    repo: Path, selector: ModuleType, base: str = "HEAD", strategy: str = "coverage"
+) -> dict[str, str]:
+    reasons: dict[str, str] = {}
+    for item in selector.select(repo, base, strategy=strategy).tests:
+        reasons[item.target] = item.detail
+    return reasons
+
+
+def test_coverage_line_hit_selects_only_covering_tests(
+    repo: Path, selector: ModuleType
+) -> None:
+    """Executed-code reachability, not import reachability: only the covering node."""
+    write_map(repo, {CORE: {"1": [], "4": [], "5": [DIRECT_NODE]}})
+    write(repo, CORE, BASE_TREE[CORE].replace("return VALUE", "return VALUE + 1"))
+    reasons = cov_select(repo, selector)
+    assert reasons == {DIRECT_NODE: "line 5 executed by this test"}
+
+
+def test_coverage_is_the_default_when_a_fresh_map_exists(
+    repo: Path, selector: ModuleType
+) -> None:
+    write_map(repo, {CORE: {"1": [], "4": [], "5": [DIRECT_NODE]}})
+    write(repo, CORE, BASE_TREE[CORE].replace("return VALUE", "return VALUE + 1"))
+    selection = selector.select(repo, "HEAD")
+    assert selection.strategy == "coverage"
+    assert [item.target for item in selection.tests] == [DIRECT_NODE]
+
+
+def test_coverage_neighbour_in_function_for_added_lines(
+    repo: Path, selector: ModuleType
+) -> None:
+    """An added line selects the tests of the nearest covered line, same function."""
+    write_map(repo, {MID: {"1": [], "4": [TRANSITIVE_NODE]}})
+    write(
+        repo,
+        MID,
+        BASE_TREE[MID].replace(
+            "    return core_value()",
+            "    result = core_value()\n    return result",
+        ),
+    )
+    reasons = cov_select(repo, selector)
+    assert list(reasons) == [TRANSITIVE_NODE]
+    assert "nearest covered line in mid_value()" in reasons[TRANSITIVE_NODE]
+
+
+def test_coverage_new_uncovered_function_selects_nothing(
+    repo: Path, selector: ModuleType
+) -> None:
+    """Added code with no covered neighbour in its function affects no test."""
+    write_map(repo, {CORE: {"1": [], "4": [], "5": [DIRECT_NODE]}})
+    write(repo, CORE, BASE_TREE[CORE] + "\n\ndef helper() -> int:\n    return 0\n")
+    assert cov_select(repo, selector) == {}
+
+
+def test_coverage_comment_only_change_selects_nothing(
+    repo: Path, selector: ModuleType
+) -> None:
+    write_map(repo, {CORE: {"1": [], "4": [], "5": [DIRECT_NODE]}})
+    write(repo, CORE, BASE_TREE[CORE] + "# a comment\n")
+    assert cov_select(repo, selector) == {}
+
+
+def test_coverage_import_time_only_line_falls_back_to_static(
+    repo: Path, selector: ModuleType
+) -> None:
+    """Executable but unattributed (import-time) code selects direct importers."""
+    write_map(repo, {CORE: {"1": []}})
+    write(repo, CORE, BASE_TREE[CORE].replace("VALUE = 1", "VALUE = 2"))
+    reasons = cov_select(repo, selector)
+    # Depth 1: the importing test and the string patch-target test, nothing else.
+    assert set(reasons) == {"tests/test_direct.py", "tests/test_string_target.py"}
+    assert "no covering test" in reasons["tests/test_direct.py"]
+
+
+def test_coverage_new_file_falls_back_to_static_direct(
+    repo: Path, selector: ModuleType
+) -> None:
+    write_map(repo, {CORE: {"5": [DIRECT_NODE]}})
+    write(repo, "tests/test_extra.py", "from fakepkg.extra import VALUE\n")
+    commit(repo, "test for the new module")
+    write(repo, "src/fakepkg/extra.py", "from fakepkg.core import VALUE\n")
+    reasons = cov_select(repo, selector)
+    assert list(reasons) == ["tests/test_extra.py"]
+    assert "new or deleted file" in reasons["tests/test_extra.py"]
+
+
+def test_coverage_deleted_module_falls_back_to_static_direct(
+    repo: Path, selector: ModuleType
+) -> None:
+    write_map(repo, {CORE: {"5": [DIRECT_NODE]}, MID: {"5": [TRANSITIVE_NODE]}})
+    (repo / MID).unlink()
+    reasons = cov_select(repo, selector)
+    assert list(reasons) == ["tests/test_transitive.py"]
+    assert "new or deleted file" in reasons["tests/test_transitive.py"]
+
+
+def test_coverage_stale_map_falls_back_to_static_direct(
+    repo: Path, selector: ModuleType
+) -> None:
+    write_map(repo, {CORE: {"5": [DIRECT_NODE]}}, commit="f" * 40)
+    write(repo, CORE, BASE_TREE[CORE].replace("return VALUE", "return VALUE + 1"))
+    selection = selector.select(repo, "HEAD", strategy="coverage")
+    assert selection.strategy == "static"
+    assert selection.map_stale is True
+    reasons = {item.target: item.detail for item in selection.tests}
+    # Stale map: direct importers only (depth 1), not the transitive closure.
+    assert set(reasons) == {"tests/test_direct.py", "tests/test_string_target.py"}
+    assert "stale map" in reasons["tests/test_direct.py"]
+
+
+def test_coverage_blind_spot_falls_back_to_static_direct(
+    repo: Path, selector: ModuleType
+) -> None:
+    write(
+        repo,
+        "tests/test_orphan.py",
+        "from fakepkg.orphan import ORPHAN\n"
+        "\n"
+        "\n"
+        "def test_orphan() -> None:\n"
+        "    assert ORPHAN == 1\n",
+    )
+    commit(repo, "orphan test")
+    write_map(repo, {CORE: {"5": [DIRECT_NODE]}}, blind=(ORPHAN,))
+    write(repo, ORPHAN, "ORPHAN = 2\n")
+    reasons = cov_select(repo, selector)
+    assert list(reasons) == ["tests/test_orphan.py"]
+    assert "blind spot" in reasons["tests/test_orphan.py"]
+
+
+def test_coverage_changed_test_file_selects_its_node_ids(
+    repo: Path, selector: ModuleType
+) -> None:
+    write_map(repo, {CORE: {"5": [DIRECT_NODE]}})
+    write(repo, "tests/test_direct.py", BASE_TREE["tests/test_direct.py"] + "# note\n")
+    reasons = cov_select(repo, selector)
+    assert reasons == {DIRECT_NODE: "changed test file"}
+
+
+def test_coverage_version_mismatch_means_no_map(
+    repo: Path, selector: ModuleType
+) -> None:
+    map_dir = write_map(repo, {CORE: {"5": [DIRECT_NODE]}})
+    meta_path = map_dir / "meta.json"
+    payload = json.loads(meta_path.read_text(encoding="utf-8"))
+    payload["version"] = 999
+    meta_path.write_text(json.dumps(payload), encoding="utf-8")
+    write(repo, CORE, BASE_TREE[CORE].replace("return VALUE", "return VALUE + 1"))
+    selection = selector.select(repo, "HEAD", strategy="coverage")
+    assert selection.strategy == "static"
+    assert selection.map_missing is True
+    # Legacy static without a map is transitive: direct, mid, rel and string users.
+    assert {item.target for item in selection.tests} == {
+        "tests/test_direct.py",
+        "tests/test_transitive.py",
+        "tests/test_relative.py",
+        "tests/test_string_target.py",
+    }
+
+
+def test_cli_coverage_strategy_reports_node_ids(repo: Path) -> None:
+    write_map(repo, {CORE: {"5": [DIRECT_NODE]}})
+    write(repo, CORE, BASE_TREE[CORE].replace("return VALUE", "return VALUE + 1"))
+    completed = run_selector(repo, "--base", "HEAD", "--strategy", "coverage", "--explain")
+    assert completed.returncode == 0
+    assert completed.stdout.splitlines() == [DIRECT_NODE]
+    assert "strategy: coverage" in completed.stderr
+    assert "line 5 executed by this test" in completed.stderr
+
+
+def test_cli_static_strategy_keeps_transitive_selection(repo: Path) -> None:
+    write_map(repo, {CORE: {"5": [DIRECT_NODE]}})
+    write(repo, CORE, BASE_TREE[CORE].replace("return VALUE", "return VALUE + 1"))
+    completed = run_selector(repo, "--base", "HEAD", "--strategy", "static")
+    assert completed.returncode == 0
+    assert "tests/test_direct.py" in completed.stdout.splitlines()
+    assert "tests/test_transitive.py" in completed.stdout.splitlines()
+
+
+def test_builder_maps_node_ids_to_setup_plugin_labels() -> None:
+    """The setup-context plugin and the map share one label contract.
+
+    build_test_map writes pytest_runtest_setup labels as dotted
+    module.qualname (no parameters); context_labels_for must resolve node IDs
+    (with class scopes and parameters) back to exactly those labels.
+    """
+    spec = importlib.util.spec_from_file_location("saberops_build_test_map", BUILD_MAP_SCRIPT)
+    assert spec is not None and spec.loader is not None
+    builder = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = builder
+    spec.loader.exec_module(builder)
+    observed = {"test_m.TestC.test_p", "test_m.test_f", "pkg.test_m.test_f"}
+    assert builder.context_labels_for("tests/test_m.py::TestC::test_p[1]", observed) == [
+        "test_m.TestC.test_p"
+    ]
+    assert builder.context_labels_for("tests/test_m.py::test_f", observed) == [
+        "pkg.test_m.test_f",
+        "test_m.test_f",
+    ]
+    assert "pytest_runtest_setup" in builder.SETUP_CONTEXT_PLUGIN
+    assert "switch_context" in builder.SETUP_CONTEXT_PLUGIN

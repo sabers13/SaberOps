@@ -3,17 +3,34 @@
 
 `scripts/gate-full.sh` is the authoritative gate (ruff + mypy --strict + the whole
 pytest suite), but pytest is ~95% of its runtime. This script answers the narrower
-per-task question: *which test files does the current diff touch?*
+per-task question: *which tests does the current diff touch?*
 
-    python scripts/select_tests.py [--base REF] [--explain] [--json]
+    python scripts/select_tests.py [--base REF] [--strategy {auto,coverage,static}]
+        [--map PATH] [--explain] [--json]
+
+Two strategies pick graph-rule tests (every FULL/UI/docs/changed-test rule below
+applies to both):
+
+* ``coverage`` (default when a fresh map exists): executed-code reachability from
+  the sharded map built by ``scripts/build_test_map.py``. Changed lines covered
+  by a test select that test's node ID; added/deleted lines select the tests
+  covering the nearest covered line in the same function (``ast`` spans). A changed src file
+  that is new, has no covering context (blind spot), or whose map is stale (its
+  build commit is not an ancestor of HEAD) falls back to the static rule below.
+* ``static``: the legacy transitive import graph (stdlib-only ``ast`` scan).
+
+The static fallback inside coverage mode is deliberately narrower than the legacy
+rule: only tests that import the changed module *directly* (depth 1). A hub
+module that every test transitively imports would otherwise re-select the suite.
 
 Changed paths are the committed diff versus `--base REF` plus staged, unstaged and
 untracked files, so a working tree that has not been committed yet is selected
-correctly.
+correctly. Changed *lines* come from the same three diffs with `-U0`.
 
-stdout carries the selection only -- one test path or pytest node ID per line, or a
-single line `FULL` when the whole suite is required. Diagnostics (the `--explain`
-reasons, and always the FULL trigger) go to stderr, so stdout stays machine-readable:
+stdout carries the selection only -- one pytest node ID (coverage) or test path
+(static) per line, or a single line `FULL` when the whole suite is required.
+Diagnostics (the `--explain` reasons, and always the FULL trigger) go to stderr,
+so stdout stays machine-readable:
 
     selection=$(python scripts/select_tests.py --base "$base" --explain 2>reasons.txt)
 
@@ -102,6 +119,15 @@ RULE_NONE = "NONE"
 RULE_GRAPH = "GRAPH"
 RULE_PRESENTATION = "PRESENTATION"
 
+STRATEGY_AUTO = "auto"
+STRATEGY_COVERAGE = "coverage"
+STRATEGY_STATIC = "static"
+
+MAP_DIRNAME = "saberops-test-map"
+MAP_META = "meta.json"
+MAP_FILES = "files"
+MAP_VERSION = 2
+
 # Dotted path inside a string literal, e.g. a monkeypatch/importlib target.
 _DOTTED_TARGET = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+)\b")
 
@@ -151,6 +177,84 @@ class Selection:
     full: bool = False
     full_reason: str = ""
     ignored: list[str] = field(default_factory=list)
+    strategy: str = STRATEGY_STATIC
+    map_commit: str = ""
+    map_built_at: str = ""
+    map_stale: bool = False
+    map_missing: bool = False
+
+
+@dataclass(frozen=True)
+class CoverageMap:
+    """Executed-code reachability from scripts/build_test_map.py (sharded).
+
+    `nodes` is the shared node-ID table; each ``files/<src path>.json`` shard
+    maps a line number to node indices. A line present with an empty list
+    executed only outside any test (import/collection time): it is executable,
+    but no test context covers it. `blind` holds src modules with zero covering
+    contexts anywhere. Shards load lazily so a gate run only reads the files the
+    diff touches.
+    """
+
+    path: str
+    commit: str
+    built_at: str
+    test_count: int
+    coverage_version: str
+    nodes: tuple[str, ...]
+    by_test: dict[str, list[str]]
+    blind: frozenset[str]
+
+    @classmethod
+    def load(cls, path: Path) -> CoverageMap | None:
+        """Read a map directory (or its meta.json); None when unusable."""
+        meta_path = path / MAP_META if path.is_dir() else path
+        try:
+            payload = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(payload, dict) or payload.get("version") != MAP_VERSION:
+            return None
+        try:
+            nodes = tuple(map(str, payload["nodes"]))
+            by_test = {
+                str(test): [nodes[i] for i in indices]
+                for test, indices in payload["by_test"].items()
+            }
+            return cls(
+                path=str(path),
+                commit=str(payload.get("commit", "")),
+                built_at=str(payload.get("built_at", "")),
+                test_count=int(payload.get("test_count", 0)),
+                coverage_version=str(payload.get("coverage_version", "")),
+                nodes=nodes,
+                by_test=by_test,
+                blind=frozenset(map(str, payload.get("blind", []))),
+            )
+        except (AttributeError, TypeError, ValueError, IndexError, KeyError):
+            return None
+
+    def lines_for(self, rel: str) -> dict[int, list[str]] | None:
+        """Line -> covering node IDs for one src file; None when not in the map."""
+        cache = _SHARD_CACHE.get(self.path)
+        if cache is None:
+            cache = {}
+            _SHARD_CACHE[self.path] = cache
+        if rel not in cache:
+            base = Path(self.path)
+            shard_dir = base / MAP_FILES if base.is_dir() else base.parent / MAP_FILES
+            try:
+                payload = json.loads((shard_dir / f"{rel}.json").read_text(encoding="utf-8"))
+                cache[rel] = {
+                    int(line): [self.nodes[i] for i in indices]
+                    for line, indices in payload.items()
+                }
+            except (OSError, ValueError, IndexError, AttributeError):
+                cache[rel] = None
+        return cache[rel]
+
+
+_SHARD_CACHE: dict[str, dict[str, dict[int, list[str]] | None]] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +310,163 @@ def changed_paths(repo: Path, base: str) -> list[str]:
     paths.update(run_git(repo, "diff", "--name-only"))
     paths.update(run_git(repo, "ls-files", "--others", "--exclude-standard"))
     return sorted(paths)
+
+
+# ---------------------------------------------------------------------------
+# coverage map
+# ---------------------------------------------------------------------------
+
+
+def default_map_path(repo: Path) -> Path:
+    """Shared map directory: git-common-dir, so all worktrees see one map."""
+    lines = run_git(repo, "rev-parse", "--git-common-dir")
+    if not lines:
+        raise SelectorError("cannot locate the git common dir")
+    common = lines[0]
+    common_dir = (repo / common).resolve() if not Path(common).is_absolute() else Path(common)
+    return common_dir / MAP_DIRNAME
+
+
+def load_map(path: Path) -> CoverageMap | None:
+    """Read a map directory (or its meta.json); None when unusable."""
+    return CoverageMap.load(path)
+
+
+def map_is_fresh(repo: Path, covmap: CoverageMap) -> bool:
+    """True when the map's build commit is an ancestor of HEAD (or HEAD itself)."""
+    if not re.fullmatch(r"[0-9a-f]{4,64}", covmap.commit):
+        return False
+    completed = subprocess.run(
+        ("git", "merge-base", "--is-ancestor", covmap.commit, "HEAD"),
+        cwd=repo,
+        check=False,
+        capture_output=True,
+    )
+    return completed.returncode == 0
+
+
+# ---------------------------------------------------------------------------
+# changed lines (-U0 hunks from the committed, staged and unstaged diffs)
+# ---------------------------------------------------------------------------
+
+_HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+
+
+def _new_side_lines(diff_text: str, path: str) -> set[int]:
+    """New-side line numbers of `path` in one `git diff -U0` output."""
+    lines: set[int] = set()
+    current: str | None = None
+    for text in diff_text.splitlines():
+        if text.startswith("+++ "):
+            name = text[4:].strip()
+            if name.startswith('"') and name.endswith('"'):
+                name = name[1:-1]
+            if name.startswith("b/"):
+                name = name[2:]
+            current = None if name == "/dev/null" else name
+        elif text.startswith("@@ ") and current == path:
+            match = _HUNK.match(text)
+            if match is None:
+                continue
+            start = int(match.group(1))
+            count = int(match.group(2)) if match.group(2) is not None else 1
+            if count == 0:
+                # Pure deletion: anchor the line the removal happened at so the
+                # neighbour search below has a position to work from.
+                lines.add(max(start, 1))
+            else:
+                lines.update(range(start, start + count))
+    return lines
+
+
+def changed_lines(repo: Path, base: str) -> dict[str, set[int] | None]:
+    """Per changed path: new-side line numbers, or None for new/deleted files.
+
+    New files (added or untracked) and deleted files cannot be line-mapped, so
+    callers apply the static fallback to them. `--no-renames` keeps a rename a
+    delete plus an add, which is the safe reading.
+    """
+    run_git(repo, "rev-parse", "--verify", "--quiet", base)
+    untracked = set(run_git(repo, "ls-files", "--others", "--exclude-standard"))
+    diffs = [
+        run_git(repo, "diff", "-U0", "--no-renames", base, "HEAD"),
+        run_git(repo, "diff", "-U0", "--no-renames", "--cached"),
+        run_git(repo, "diff", "-U0", "--no-renames"),
+    ]
+    paths = changed_paths(repo, base)
+    result: dict[str, set[int] | None] = {}
+    for path in paths:
+        if path in untracked or not (repo / path).exists():
+            result[path] = None
+            continue
+        merged: set[int] = set()
+        for diff_text in diffs:
+            merged.update(_new_side_lines("\n".join(diff_text), path))
+        result[path] = merged
+    # A path added in any diff (committed, staged or unstaged) is new even when it
+    # exists on disk: its lines have no baseline, so fall back to static.
+    statuses = _change_status(repo, base)
+    for path, status in statuses.items():
+        if status == "A" and path in result and (repo / path).exists():
+            result[path] = None
+    return result
+
+
+def _change_status(repo: Path, base: str) -> dict[str, str]:
+    """Committed/staged/unstaged name statuses (A/M/D/...), renames disabled."""
+    statuses: dict[str, str] = {}
+    for args in (
+        ("diff", "--no-renames", "--name-status", base, "HEAD"),
+        ("diff", "--no-renames", "--name-status", "--cached"),
+        ("diff", "--no-renames", "--name-status"),
+    ):
+        for line in run_git(repo, *args):
+            parts = line.split("\t")
+            if len(parts) >= 2:
+                statuses[parts[1]] = parts[0][:1]
+    return statuses
+
+
+# ---------------------------------------------------------------------------
+# function spans and nearest-covered-line search
+# ---------------------------------------------------------------------------
+
+
+def function_spans(tree: ast.Module) -> list[tuple[int, int, str]]:
+    """(start, end, qualified name) for every function, nested included."""
+    spans: list[tuple[int, int, str]] = []
+
+    def visit(node: ast.AST, prefix: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                name = f"{prefix}{child.name}"
+                spans.append((child.lineno, child.end_lineno or child.lineno, name))
+                visit(child, prefix=f"{name}.")
+            elif isinstance(child, ast.ClassDef):
+                visit(child, prefix=f"{prefix}{child.name}.")
+            elif isinstance(child, (ast.Module, ast.If, ast.For, ast.While, ast.With,
+                                     ast.Try, ast.ExceptHandler)):
+                visit(child, prefix=prefix)
+
+    visit(tree, prefix="")
+    return spans
+
+
+def nearest_covered(
+    line: int, spans: list[tuple[int, int, str]], covered: set[int]
+) -> tuple[int, str] | None:
+    """Nearest covered line in the innermost function containing `line`."""
+    candidates = [span for span in spans if span[0] <= line <= span[1]]
+    if not candidates:
+        return None
+    start, end, name = min(candidates, key=lambda span: (span[1] - span[0], span[0]))
+    best: tuple[int, str] | None = None
+    for covered_line in sorted(covered):
+        if start <= covered_line <= end and covered_line != line:
+            distance = abs(covered_line - line)
+            if best is None or distance < abs(best[0] - line):
+                best = (covered_line, name)
+    return best
 
 
 # ---------------------------------------------------------------------------
@@ -476,10 +737,122 @@ def _referencing_tests(repo: Path, graph: ImportGraph, path: str) -> list[str]:
     return hits
 
 
-def select(repo: Path, base: str) -> Selection:
+def _direct_importing_tests(
+    graph: ImportGraph, module_name: str, changed_path: str, reason: str
+) -> dict[str, SelectedTest]:
+    """Tests with an import edge straight to `module_name` (depth 1, no hops)."""
+    targets: dict[str, SelectedTest] = {}
+    for node_name, node in graph.modules.items():
+        if not node.is_test:
+            continue
+        chain = shortest_chain(graph, node_name, module_name)
+        if len(chain) == 2:
+            targets[node.path] = SelectedTest(
+                target=node.path,
+                via=changed_path,
+                chain=chain,
+                detail=f"{reason}: direct importer",
+            )
+    return targets
+
+
+def _coverage_targets_for_file(
+    repo: Path,
+    path: str,
+    lines: set[int],
+    line_map: dict[int, list[str]],
+) -> tuple[dict[str, SelectedTest], bool]:
+    """Node IDs covering `lines` of `path`; second value = touched executable code.
+
+    A changed line covered by tests selects those tests. A changed line with no
+    direct cover (added line, deleted anchor, blank/comment shift) selects the
+    tests covering the nearest covered line in the same function. Lines outside
+    any function with no cover select nothing. The executable flag tells the
+    caller whether the change touched code that coverage can see at all: an
+    executable line with no covering test (import-time-only code) needs the
+    static fallback, while a comment-only change selects nothing.
+    """
+    covered = {line for line, nodes in line_map.items() if nodes}
+    tree = _parse(repo / path)
+    spans = function_spans(tree) if tree is not None else []
+    targets: dict[str, SelectedTest] = {}
+    touched_executable = False
+    for line in sorted(lines):
+        nodes = line_map.get(line)
+        if nodes:
+            touched_executable = True
+            for node_id in nodes:
+                targets.setdefault(
+                    node_id,
+                    SelectedTest(
+                        target=node_id,
+                        via=path,
+                        detail=f"line {line} executed by this test",
+                    ),
+                )
+            continue
+        if line in line_map:
+            # Executable, but only import/collection-time contexts: no test owns it.
+            touched_executable = True
+            continue
+        found = nearest_covered(line, spans, covered)
+        if found is not None:
+            near, func = found
+            for node_id in line_map[near]:
+                targets.setdefault(
+                    node_id,
+                    SelectedTest(
+                        target=node_id,
+                        via=path,
+                        detail=(f"line {near} executed by this test "
+                                f"(nearest covered line in {func}() "
+                                f"for changed line {line})"),
+                    ),
+                )
+    return targets, touched_executable
+
+
+def _changed_test_nodes(
+    path: str, covmap: CoverageMap | None
+) -> list[SelectedTest]:
+    """Changed test files are always selected; node IDs when the map knows them."""
+    if covmap is not None:
+        nodes = covmap.by_test.get(path, [])
+        if nodes:
+            return [
+                SelectedTest(target=node, via=path, detail="changed test file")
+                for node in sorted(nodes)
+            ]
+    return [SelectedTest(target=path, via=path, detail="changed test file")]
+
+
+def _resolve_strategy(
+    repo: Path, strategy: str, map_path: Path | str | None
+) -> tuple[str, CoverageMap | None, bool, bool]:
+    """Requested strategy -> (effective strategy, map or None, stale, missing)."""
+    if strategy not in (STRATEGY_AUTO, STRATEGY_COVERAGE, STRATEGY_STATIC):
+        raise SelectorError(f"unknown strategy {strategy!r}")
+    if strategy == STRATEGY_STATIC:
+        return STRATEGY_STATIC, None, False, False
+    resolved = default_map_path(repo) if map_path is None else Path(map_path)
+    covmap = load_map(resolved)
+    if covmap is None:
+        return STRATEGY_STATIC, None, False, True
+    if not map_is_fresh(repo, covmap):
+        return STRATEGY_STATIC, covmap, True, False
+    return STRATEGY_COVERAGE, covmap, False, False
+
+
+def select(
+    repo: Path,
+    base: str,
+    strategy: str = STRATEGY_AUTO,
+    map_path: Path | str | None = None,
+) -> Selection:
     """changed paths -> the tests that must run for this diff."""
     changed = changed_paths(repo, base)
     rules = {path: classify(path) for path in changed}
+    effective, covmap, stale, missing = _resolve_strategy(repo, strategy, map_path)
 
     full_paths = [path for path, rule in rules.items() if rule == RULE_FULL]
     if full_paths:
@@ -489,6 +862,11 @@ def select(repo: Path, base: str) -> Selection:
             tests=[],
             full=True,
             full_reason=full_paths[0],
+            strategy=effective,
+            map_commit=covmap.commit if covmap is not None else "",
+            map_built_at=covmap.built_at if covmap is not None else "",
+            map_stale=stale,
+            map_missing=missing,
         )
 
     ignored = [path for path, rule in rules.items() if rule == RULE_NONE]
@@ -510,27 +888,76 @@ def select(repo: Path, base: str) -> Selection:
     changed_tests = sorted(path for path in graph_paths if is_test_path(path))
 
     targets: dict[str, SelectedTest] = {}
-    for path in changed_tests:
-        targets[path] = SelectedTest(target=path, via=path, detail="changed test file")
-
-    for node_name, node in graph.modules.items():
-        if not node.is_test:
-            continue
-        best: SelectedTest | None = None
+    if effective == STRATEGY_COVERAGE:
+        assert covmap is not None
+        lines_by_path = changed_lines(repo, base)
+        for path in changed_tests:
+            for item in _changed_test_nodes(path, covmap):
+                targets.setdefault(item.target, item)
         for module_name, changed_path in sorted(changed_modules.items()):
-            chain = shortest_chain(graph, node_name, module_name)
-            if not chain:
+            if is_test_path(changed_path):
                 continue
-            candidate = SelectedTest(
-                target=node.path,
-                via=changed_path,
-                chain=chain,
-                detail=_chain_detail(chain, graph),
+            lines = lines_by_path.get(changed_path)
+            line_map = covmap.lines_for(changed_path)
+            if lines is None or changed_path in covmap.blind or line_map is None:
+                if lines is None:
+                    reason = "new or deleted file"
+                elif changed_path in covmap.blind:
+                    reason = "blind spot (no covering contexts)"
+                else:
+                    reason = "not in map"
+                detail = f"static fallback ({reason})"
+                for target, item in _direct_importing_tests(
+                    graph, module_name, changed_path, detail
+                ).items():
+                    targets.setdefault(target, item)
+                continue
+            file_targets, touched = _coverage_targets_for_file(
+                repo, changed_path, lines, line_map
             )
-            if best is None or len(candidate.chain) < len(best.chain):
-                best = candidate
-        if best is not None:
-            targets.setdefault(best.target, best)
+            for target, item in file_targets.items():
+                targets.setdefault(target, item)
+            if not file_targets and touched:
+                detail = "static fallback (executable code, no covering test)"
+                for target, item in _direct_importing_tests(
+                    graph, module_name, changed_path, detail
+                ).items():
+                    targets.setdefault(target, item)
+    else:
+        for path in changed_tests:
+            targets[path] = SelectedTest(target=path, via=path, detail="changed test file")
+
+        if stale and covmap is not None and strategy != STRATEGY_STATIC:
+            # Stale map: executed-code reachability is untrustworthy, but the
+            # current import graph is not, so every changed src module selects
+            # its direct importers (depth 1) rather than the legacy transitive
+            # closure. Missing map or explicit --strategy static keeps legacy.
+            for module_name, changed_path in sorted(changed_modules.items()):
+                if is_test_path(changed_path):
+                    continue
+                for target, item in _direct_importing_tests(
+                    graph, module_name, changed_path, "static fallback (stale map)"
+                ).items():
+                    targets.setdefault(target, item)
+        else:
+            for node_name, node in graph.modules.items():
+                if not node.is_test:
+                    continue
+                best: SelectedTest | None = None
+                for module_name, changed_path in sorted(changed_modules.items()):
+                    chain = shortest_chain(graph, node_name, module_name)
+                    if not chain:
+                        continue
+                    candidate = SelectedTest(
+                        target=node.path,
+                        via=changed_path,
+                        chain=chain,
+                        detail=_chain_detail(chain, graph),
+                    )
+                    if best is None or len(candidate.chain) < len(best.chain):
+                        best = candidate
+                if best is not None:
+                    targets.setdefault(best.target, best)
 
     for path in presentation_paths:
         for node_id in UI_NODE_IDS:
@@ -549,6 +976,11 @@ def select(repo: Path, base: str) -> Selection:
         changed=changed,
         tests=sorted(targets.values(), key=lambda item: item.target),
         ignored=ignored,
+        strategy=effective,
+        map_commit=covmap.commit if covmap is not None else "",
+        map_built_at=covmap.built_at if covmap is not None else "",
+        map_stale=stale,
+        map_missing=missing,
     )
 
 
@@ -569,6 +1001,16 @@ def _chain_detail(chain: tuple[str, ...], graph: ImportGraph) -> str:
 
 def format_explain(selection: Selection) -> str:
     lines = [f"base: {selection.base}"]
+    lines.append(f"strategy: {selection.strategy}")
+    if selection.strategy == STRATEGY_COVERAGE:
+        lines.append(f"map commit: {selection.map_commit} (built {selection.map_built_at})")
+    elif selection.map_stale:
+        lines.append(
+            f"map commit {selection.map_commit} is not an ancestor of HEAD: "
+            "stale map, static selection"
+        )
+    elif selection.map_missing:
+        lines.append("no coverage map: static selection")
     lines.append(f"changed files ({len(selection.changed)}):")
     lines.extend(f"  {path}" for path in selection.changed)
     if selection.full:
@@ -594,6 +1036,13 @@ def selection_json(selection: Selection) -> str:
             "full_reason": selection.full_reason,
             "changed": selection.changed,
             "ignored": selection.ignored,
+            "strategy": selection.strategy,
+            "map": {
+                "commit": selection.map_commit,
+                "built_at": selection.map_built_at,
+                "stale": selection.map_stale,
+                "missing": selection.map_missing,
+            },
             "tests": [
                 {
                     "target": item.target,
@@ -630,6 +1079,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="repository root (default: current directory)",
     )
     parser.add_argument(
+        "--strategy",
+        default=STRATEGY_AUTO,
+        choices=(STRATEGY_AUTO, STRATEGY_COVERAGE, STRATEGY_STATIC),
+        help="test selection strategy (default: coverage when a fresh map exists)",
+    )
+    parser.add_argument(
+        "--map",
+        default=None,
+        help="coverage map directory (default: git-common-dir/saberops-test-map)",
+    )
+    parser.add_argument(
         "--explain",
         action="store_true",
         help="print, per selected test, the changed path and import chain (stderr)",
@@ -643,7 +1103,7 @@ def main(argv: list[str] | None = None) -> int:
     repo = Path(args.repo).resolve()
     try:
         base = args.base or default_base(repo)
-        selection = select(repo, base)
+        selection = select(repo, base, strategy=args.strategy, map_path=args.map)
     except SelectorError as error:
         print(f"select_tests: {error}", file=sys.stderr)
         return 2

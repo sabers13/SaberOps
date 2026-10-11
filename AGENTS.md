@@ -150,20 +150,29 @@ For engineering (non-presentation) work there is a per-task gate that runs only 
 tests the diff affects:
 
 ```bash
-bash scripts/gate-affected.sh [--base REF]
+bash scripts/gate-affected.sh [--base REF] [--strategy {auto,coverage,static}]
 ```
 
 `scripts/select_tests.py` diffs against the base ref (default: merge-base with the
 branch upstream, else `HEAD~1`) plus staged, unstaged and untracked files, then
-selects every test file that imports a changed module directly or transitively. The
-graph is a static `ast` scan over `src/**` and `tests/**`, imports plus dotted patch
-targets written as strings; `if TYPE_CHECKING:` imports are not edges because they
-never execute. The wrapper prints the base ref, the changed files and the reason for
-each selected test first, so saved gate output is self-auditing. It keeps
+selects the tests that executed the changed lines. That reachability comes from a
+coverage map built once per commit (`python scripts/build_test_map.py`, full suite
+under coverage.py with `dynamic_context = test_function`, stored as sharded JSON
+under `$(git rev-parse --git-common-dir)/saberops-test-map/`, shared by all
+worktrees and never committed). Added/deleted lines select the tests of the nearest
+covered line in the same function (`ast` spans). A changed file that is new, has no
+covering context, or whose map predates the change (build commit not an ancestor of
+`HEAD`) falls back to direct importers only (depth 1) from the static `ast` graph
+over `src/**` and `tests/**` (imports plus dotted patch targets written as strings;
+`if TYPE_CHECKING:` imports are not edges because they never execute). With no map
+at all, or `--strategy static`, the legacy transitive closure applies. The wrapper
+prints the map commit/age, the base ref, the changed files and the reason for each
+selected test first, so saved gate output is self-auditing. It keeps
 `ruff check .` and `mypy --strict src tests` over the whole repository (mypy is
-incremental and type changes ripple) and runs pytest on the selection only. A change
+incremental and type changes ripple) and runs pytest on the selection only, with
+`-n auto` (pytest-xdist) when more than ~50 tests are selected. A change
 that cannot be reasoned about safely (any conftest, `pyproject.toml` and other setup
-files, gate scripts, CI workflows, the top-level package init, a `.py` outside the
+files, gate/table scripts, CI workflows, the top-level package init, a `.py` outside the
 scanned roots, any unknown file type) selects the FULL suite and the wrapper runs
 `pytest -q`; a docs-only or `.md`/`.orch` diff selects no test and pytest is skipped.
 
