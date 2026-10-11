@@ -22,6 +22,25 @@ def _utcnow(now: datetime | None) -> datetime:
     return datetime.now(UTC)
 
 
+_WINDOW_NAMES = frozenset({"5h", "daily", "weekly", "monthly", "all"})
+
+
+def _legacy_pool_and_window(row: Any) -> tuple[str, str]:
+    """Split a legacy (provider, pool) row into (pool_id, window_id).
+
+    Window-named pools (weekly, 5h, ...) stay provider-scoped with that
+    window; generated pool ids stay pool-scoped with window ALL.
+    """
+    pool_raw = str(getattr(row, "pool", "") or "ALL").strip().lower() or "ALL"
+    provider_raw = str(getattr(row, "provider", "") or "").strip().lower()
+    pool_id_attr = getattr(row, "pool_id", None)
+    if isinstance(pool_id_attr, str) and pool_id_attr.strip():
+        return pool_id_attr.strip(), pool_raw
+    if pool_raw in _WINDOW_NAMES:
+        return provider_raw or "unknown", pool_raw
+    return pool_raw or "unknown", "ALL"
+
+
 def _legacy_exclusion_from_row(row: Any, now: datetime) -> dict[str, object] | None:
     """Read (not migrate) a remaining-0 quota_state row as an exclusion."""
     try:
@@ -30,13 +49,14 @@ def _legacy_exclusion_from_row(row: Any, now: datetime) -> dict[str, object] | N
         return None
     if remaining != 0.0:
         return None
+    pool_id, window_id = _legacy_pool_and_window(row)
     reset_raw = getattr(row, "reset_at", None)
     reset = parse_iso(reset_raw) if isinstance(reset_raw, str) else None
     if reset is not None:
         return {
             "id": f"legacy:{row.provider}:{row.pool}",
-            "pool_id": str(row.provider or "").strip().lower() or "unknown",
-            "window_id": str(row.pool or "ALL").strip().lower() or "ALL",
+            "pool_id": pool_id,
+            "window_id": window_id,
             "model_scope": None,
             "reason": "LEGACY_ROW",
             "until": reset.isoformat(),
@@ -57,7 +77,6 @@ def _legacy_exclusion_from_row(row: Any, now: datetime) -> dict[str, object] | N
     anchor = updated or now
     from saberops.capacity.exclusions import backoff_next_probe
 
-    window_id = str(row.pool or "ALL").strip().lower() or "ALL"
     nxt = backoff_next_probe(anchor, 0, window_id)
     # Expired legacy UNKNOWN rows are dropped by the caller (no probe +
     # overage False clears at next_probe_at; overage True stays handled
@@ -67,7 +86,7 @@ def _legacy_exclusion_from_row(row: Any, now: datetime) -> dict[str, object] | N
         return None
     return {
         "id": f"legacy:{row.provider}:{row.pool}",
-        "pool_id": str(row.provider or "").strip().lower() or "unknown",
+        "pool_id": pool_id,
         "window_id": window_id,
         "model_scope": None,
         "reason": "LEGACY_ROW",

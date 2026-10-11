@@ -223,7 +223,11 @@ def quota_decision(
         if not exc_id:
             continue
         exc_pool = getattr(state, "pool_id", None) or state.pool
-        if exc_pool not in drawn:
+        # Binding-scoped callers only see their own pool's exclusions, so a
+        # sibling pool can neither block nor authorize the selected candidate.
+        if pool_id is not None and exc_pool != pool_id:
+            continue
+        if pool_id is None and exc_pool not in drawn:
             # Provider-scoped fallback: synthesized default pools are named
             # for the provider; also honor direct pool match.
             if not (exc_pool == candidate.provider.strip().lower() and exc_pool in drawn):
@@ -242,13 +246,14 @@ def quota_decision(
     if excluded:
         mode = QuotaPoolMode.UNENFORCED
         # Report the governing pool's mode when known (OFF stays OFF).
-        for pid in drawn:
+        scope_pools = [pool_id] if pool_id is not None else drawn
+        for pid in scope_pools:
             policy = policies.get(pid)
             if policy is not None and policy.mode == QuotaPoolMode.OFF:
                 mode = QuotaPoolMode.OFF
                 break
         return QuotaDecision(
-            False, drawn[0] if drawn else None, 0.0, 15.0, mode,
+            False, scope_pools[0] if scope_pools else None, 0.0, 15.0, mode,
             QUOTA_EXCLUDED_UNTIL_RESET, best_exclusion_until,
         )
 
