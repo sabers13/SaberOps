@@ -422,21 +422,13 @@ def native_environment(data: dict[str, Any]) -> dict[str, str]:
                     "Switch to account login before opening a subscription session."
                 )
     if provider == "copilot":
-        from saberops.models import WorkerRequest
-        from saberops.workers.copilot import _resolve_profile_from_request, build_attempt_env
-
-        req = WorkerRequest("", Path(data["directory"]), data["model"], env=data.get("selectors"))
-        terminal_metadata: dict[str, str] = {
-            k: env[k] for k in ("TERM", "COLORTERM") if k in env
-        }
-        env = build_attempt_env(_resolve_profile_from_request(req))
-        env.update(terminal_metadata)
-        # Do not silently turn a BYOK backend into a GitHub subscription turn.
-        if data.get("selectors", {}).get("ORCH_COPILOT_PROFILE_ID") == "copilot-minimax-byok":
-            raise ControlConflict(
-                "This Copilot BYOK profile needs its native backend configuration; "
-                "use the synchronized CLI until that profile is supported."
-            )
+        # L-B adapter cut lane: workers/copilot.py was deleted, so the
+        # hermetic Copilot env builder it provided no longer exists.
+        # Fail closed instead of importing a removed module.
+        raise ControlConflict(
+            "The Copilot adapter was removed; "
+            "native Copilot sessions are no longer supported."
+        )
     if provider == "opencode" and data.get("read_only"):
         read_only_config: dict[str, Any] = {
             "permission": {

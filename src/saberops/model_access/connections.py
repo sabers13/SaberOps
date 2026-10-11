@@ -788,7 +788,7 @@ class AccountBackend:
     ``auth_status_argv`` names a documented non-inference status command only
     when its successful result can provide authentication/readiness evidence.
     ``auth_status_protocol`` selects a native metadata-only login-status RPC,
-    without creating an inference session (Copilot's ``auth.getStatus``).
+    without creating an inference session.
     ``model_list_argv`` names the backend's own *supported*
     model-enumeration subcommand when one exists (e.g. ``codex debug models``);
     ``model_list_protocol`` selects a supported native control-protocol seam.
@@ -847,15 +847,6 @@ ACCOUNT_BACKENDS: tuple[AccountBackend, ...] = (
         model_list_protocol="claude",
     ),
     AccountBackend(
-        connection_id="copilot-github-account",
-        provider="copilot",
-        backend="copilot_cli",
-        executable="copilot",
-        auth_mode=AuthMode.ACCOUNT_SESSION,
-        auth_status_protocol="copilot",
-        model_list_protocol="copilot",
-    ),
-    AccountBackend(
         connection_id="opencode-account",
         provider="opencode",
         backend="opencode",
@@ -885,7 +876,7 @@ def default_account_connections(*, owner: str = "") -> tuple[ProviderConnection,
 
     Each declaration's ``provider`` is the canonical provider identity
     of the already-selected binding (``codex``, ``anthropic``,
-    ``copilot``, ``opencode``, ``antigravity``), never a vendor-brand alias:
+    ``opencode``, ``antigravity``), never a vendor-brand alias:
     :func:`resolve_access` compares providers for exact equality and
     this module owns no normalization, aliasing or routing.
     """

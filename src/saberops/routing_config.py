@@ -13,10 +13,14 @@ from saberops.models import WorkerCandidate
 
 SCHEMA_VERSION = 2
 
-# Closed registry of allowed canonical ids
+# Closed registry of allowed canonical ids.
+#
+# Antigravity is attended-only (ADR-0001 Amendment 1, item 3) and has
+# no automatic routing candidate: only an explicit owner
+# provider+model override may yield it, which never consults this
+# registry.
 ALLOWED_CANDIDATES: frozenset[str] = frozenset(
     {
-        "antigravity/gemini-3.7-flash",
         "opencode/opencode-go/mimo-v2.5",
         "opencode/opencode-go/deepseek-v4-flash",
         "opencode/opencode-go/deepseek-v4-pro",

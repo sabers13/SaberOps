@@ -2,7 +2,6 @@
   "schema_version": 2,
   "T1": {
     "default": [
-      "antigravity/gemini-3.7-flash",
       "opencode/opencode/nemotron-3.5-lightning-free",
       "opencode/opencode/mimo-v2.5-free",
       "opencode/opencode-go/mimo-v2.5",

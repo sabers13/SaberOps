@@ -102,11 +102,16 @@ def get_control_plane_config_path() -> Path:
 
 
 def _default() -> dict[str, object]:
+    # Automatic provider governance.  Antigravity is attended-only
+    # (ADR-0001 Amendment 1, item 3): it is not an automatic routing
+    # provider, so it carries no default policy entry (an explicit
+    # owner override still dispatches; unknown providers evaluate with
+    # a warning, never a silent allow).
     return {
         "version": 1,
         "providers": {
             provider: {"state": ProviderPolicyState.ALLOWED}
-            for provider in ("opencode", "codex", "cline", "antigravity")
+            for provider in ("opencode", "codex", "cline")
         },
         "quota_pools": {},
     }

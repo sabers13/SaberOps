@@ -29,7 +29,6 @@ from saberops.opencode_go_usage import GoUsageUnavailable, read_go_limits
 CLIS = (
     ("codex", "codex", "Codex"),
     ("anthropic", "claude", "Claude Code"),
-    ("copilot", "copilot", "GitHub Copilot"),
     ("opencode", "opencode", "OpenCode"),
     ("antigravity", "agy", "Antigravity"),
     ("cline", "cline", "Cline"),
@@ -38,7 +37,7 @@ CLIS = (
 MAX_LOG_BYTES = 32 * 1024 * 1024
 MAX_LOG_FILES = 300
 RPC_TIMEOUT = 10.0
-LIMIT_PROVIDERS = ("codex", "copilot", "anthropic", "antigravity", "opencode")
+LIMIT_PROVIDERS = ("codex", "anthropic", "antigravity", "opencode")
 
 
 def numeric(value: Any) -> float | None:
@@ -90,48 +89,12 @@ def parse_limits(provider: str, payload: Any) -> list[dict[str, Any]]:
                             "unlimited": False,
                         }
                     )
-    elif provider == "copilot":
-        buckets = payload.get("quotaSnapshots")
-        if not isinstance(buckets, dict):
-            return []
-        for name, window in buckets.items():
-            if not isinstance(window, dict):
-                continue
-            remaining = percent(window.get("remainingPercentage"))
-            unlimited = window.get("isUnlimitedEntitlement") is True
-            reset = window.get("resetDate")
-            # Some CLI versions return the query time as a fallback reset date.
-            # A date already in the past cannot be the next account reset.
-            if isinstance(reset, str):
-                try:
-                    parsed_reset = datetime.fromisoformat(reset.replace("Z", "+00:00"))
-                    if parsed_reset.tzinfo is None or parsed_reset <= datetime.now(UTC):
-                        reset = None
-                except ValueError:
-                    reset = None
-            if unlimited or remaining is not None:
-                rows.append(
-                    {
-                        "label": str(name).replace("_", " "),
-                        "remaining": None if unlimited else remaining,
-                        "duration": None,
-                        "reset_at": reset if isinstance(reset, str) else None,
-                        "unlimited": unlimited,
-                        "used_requests": numeric(window.get("usedRequests")),
-                        "entitlement_requests": numeric(window.get("entitlementRequests")),
-                    }
-                )
     return rows
 
 
 async def _native_limits(executable: str, provider: str, cwd: str) -> list[dict[str, Any]]:
     """Use each CLI's own auth via metadata-only stdio; no inference session."""
-    framed = provider == "copilot"
-    argv = (
-        [executable, "--headless", "--stdio", "--no-auto-update"]
-        if framed
-        else [executable, "app-server", "--listen", "stdio://"]
-    )
+    argv = [executable, "app-server", "--listen", "stdio://"]
     process = await asyncio.create_subprocess_exec(
         *argv,
         stdin=asyncio.subprocess.PIPE,
@@ -144,29 +107,16 @@ async def _native_limits(executable: str, provider: str, cwd: str) -> list[dict[
     stdin, stdout = process.stdin, process.stdout
 
     async def send(message: dict[str, Any]) -> None:
-        body = json.dumps(message).encode()
-        if framed:
-            body = f"Content-Length: {len(body)}\r\n\r\n".encode() + body
-        else:
-            body += b"\n"
+        body = json.dumps(message).encode() + b"\n"
         stdin.write(body)
         await stdin.drain()
 
     async def reply(wanted: int) -> Any:
         size = 0
         while size < 1_000_000:
-            if framed:
-                header = await stdout.readuntil(b"\r\n\r\n")
-                fields = dict(line.split(b":", 1) for line in header.strip().split(b"\r\n"))
-                length = int(fields[b"Content-Length"].strip())
-                if not 0 < length <= 1_000_000 - size:
-                    raise ValueError("CLI metadata exceeds size limit")
-                raw = await stdout.readexactly(length)
-                size += len(header)
-            else:
-                raw = await stdout.readline()
-                if not raw:
-                    raise ValueError("CLI metadata connection closed")
+            raw = await stdout.readline()
+            if not raw:
+                raise ValueError("CLI metadata connection closed")
             size += len(raw)
             data = json.loads(raw)
             if isinstance(data, dict) and data.get("id") == wanted:
@@ -176,21 +126,20 @@ async def _native_limits(executable: str, provider: str, cwd: str) -> list[dict[
         raise ValueError("CLI metadata exceeds size limit")
 
     try:
-        if not framed:
-            await send(
-                {
-                    "id": 1,
-                    "method": "initialize",
-                    "params": {"clientInfo": {"name": "saberops_usage", "version": "1.0"}},
-                }
-            )
-            await reply(1)
-            await send({"method": "initialized", "params": {}})
+        await send(
+            {
+                "id": 1,
+                "method": "initialize",
+                "params": {"clientInfo": {"name": "saberops_usage", "version": "1.0"}},
+            }
+        )
+        await reply(1)
+        await send({"method": "initialized", "params": {}})
         await send(
             {
                 "jsonrpc": "2.0",
                 "id": 2,
-                "method": "account.getQuota" if framed else "account/rateLimits/read",
+                "method": "account/rateLimits/read",
                 "params": {},
             }
         )
@@ -228,11 +177,6 @@ def _sql_activity(path: Path, provider: str) -> dict[str, Any] | None:
                 "SELECT count(*), sum(tokens_input), sum(tokens_output), "
                 "sum(tokens_cache_read) FROM session"
             ).fetchone()
-        elif provider == "copilot":
-            row = db.execute(
-                "SELECT count(*), sum(total_input_tokens), "
-                "sum(total_output_tokens), sum(total_cached_tokens) FROM sessions"
-            ).fetchone()
         else:
             # AggregateUsage already includes child agents; never sum both fields.
             row = db.execute(
@@ -251,66 +195,6 @@ def _sql_activity(path: Path, provider: str) -> dict[str, Any] | None:
         "cached_tokens": numeric(row[3]),
         "source": "Local CLI session database",
         "coverage": "Saved sessions on this computer",
-    }
-
-
-def _copilot_activity(root: Path) -> dict[str, Any] | None:
-    if not root.is_dir():
-        return None
-    files = sorted(root.glob("*/events.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
-    totals = [0.0, 0.0, 0.0]
-    sessions = 0
-    size = 0
-    partial = len(files) > MAX_LOG_FILES
-    cache_known = True
-    for path in files[:MAX_LOG_FILES]:
-        if size + path.stat().st_size > MAX_LOG_BYTES:
-            partial = True
-            continue
-        size += path.stat().st_size
-        last = None
-        with path.open(encoding="utf-8", errors="replace") as stream:
-            for line in stream:
-                try:
-                    event = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(event, dict) and event.get("type") == "session.shutdown":
-                    data = event.get("data")
-                    if isinstance(data, dict):
-                        metrics = data.get("modelMetrics")
-                        if isinstance(metrics, dict):
-                            last = metrics
-        if not last:
-            continue
-        session_values = [0.0, 0.0, 0.0]
-        found = False
-        for metric in last.values():
-            usage = metric.get("usage") if isinstance(metric, dict) else None
-            if not isinstance(usage, dict):
-                continue
-            values = [
-                numeric(usage.get(k)) for k in ("inputTokens", "outputTokens", "cacheReadTokens")
-            ]
-            if values[0] is not None and values[1] is not None:
-                found = True
-                if values[2] is None:
-                    cache_known = False
-                session_values = [a + (b or 0) for a, b in zip(session_values, values, strict=True)]
-        if found:
-            sessions += 1
-            totals = [a + b for a, b in zip(totals, session_values, strict=True)]
-    if not sessions:
-        return None
-    return {
-        "sessions": sessions,
-        "input_tokens": totals[0],
-        "output_tokens": totals[1],
-        "cached_tokens": totals[2] if cache_known else None,
-        "source": "Local CLI shutdown metrics",
-        "coverage": "Recent history sample (scan limit reached)"
-        if partial
-        else "Completed sessions with saved usage on this computer",
     }
 
 
@@ -431,13 +315,9 @@ class CliUsageService:
             paths = {
                 "opencode": Path(os.environ.get("XDG_DATA_HOME", str(self.home / ".local/share")))
                 / "opencode/opencode.db",
-                "copilot": self.home / ".copilot/data.db",
                 "cline": self.home / ".cline/data/db/sessions.db",
             }
-            activity = _sql_activity(paths[provider], provider) if provider in paths else None
-            if activity is None and provider == "copilot":
-                return _copilot_activity(self.home / ".copilot/session-state")
-            return activity
+            return _sql_activity(paths[provider], provider) if provider in paths else None
         except (OSError, sqlite3.Error, ValueError):
             return None
 

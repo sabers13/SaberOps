@@ -8,6 +8,10 @@ from typing import Any
 from saberops.models import Tier, WorkerCandidate
 
 # Canonical worker candidates
+#
+# Antigravity is attended-only (ADR-0001 Amendment 1, item 3): the
+# adapter class below is kept for explicit owner overrides, but the
+# automatic candidate below must never appear in an automatic chain.
 CANDIDATE_ANTIGRAVITY_FLASH = WorkerCandidate(provider="antigravity", model="gemini-3.7-flash")
 CANDIDATE_OPENCODE_MIMO_V2_5 = WorkerCandidate(provider="opencode", model="opencode-go/mimo-v2.5")
 CANDIDATE_OPENCODE_GO_DEEPSEEK_V4_FLASH = WorkerCandidate(
@@ -54,9 +58,9 @@ CANDIDATE_OPENCODE_DEEPSEEK_V4_PRO = WorkerCandidate(
     provider="opencode", model="opencode/deepseek-v4-pro"
 )
 
-# Tier candidate chains
+# Tier candidate chains (automatic routing only: no attended-only provider
+# may appear here)
 TIER_1_CHAIN: list[WorkerCandidate] = [
-    CANDIDATE_ANTIGRAVITY_FLASH,
     CANDIDATE_OPENCODE_MIMO_V2_5,
     CANDIDATE_OPENCODE_GO_DEEPSEEK_V4_FLASH,
 ]
@@ -91,6 +95,21 @@ TIER_3_PEAK_CHAIN: list[WorkerCandidate] = [
     CANDIDATE_OPENCODE_GO_DEEPSEEK_V4_PRO,
     CANDIDATE_CODEX_SOL,
 ]
+
+#: Providers restricted to attended, explicit-owner use (ADR-0001
+#: Amendment 1).  Automatic routing chains must never yield them, even
+#: when a frozen snapshot or owner document still lists them.
+ATTENDED_ONLY_PROVIDERS: frozenset[str] = frozenset({"antigravity"})
+
+#: Refusal for any non-explicit selection of an attended-only provider.
+#: It names the governing reason (ADR-0001 Amendment 1) and the one
+#: supported path (an explicit owner provider+model override).
+ATTENDED_ONLY_REFUSAL = (
+    "Antigravity is attended-only per ADR-0001 (Amendment 1, item 3): "
+    "Google's terms prohibit third-party automation of Antigravity, so "
+    "automatic routing cannot select provider 'antigravity'. Re-run with "
+    "an explicit owner provider+model override to run it attended."
+)
 
 
 def is_peak_hours(now: datetime | None = None) -> bool:
@@ -155,6 +174,12 @@ def resolve_candidate_chain(
 ) -> list[WorkerCandidate]:
     """Resolve ordered list of worker candidates to attempt based on tier only.
 
+    Attended-only providers (``ATTENDED_ONLY_PROVIDERS``) are excluded
+    from every automatic chain, even when configured; only an explicit
+    owner ``model_override`` (with or without ``provider_override``) may
+    yield them.  A provider-only override naming an attended-only
+    provider is refused with :data:`ATTENDED_ONLY_REFUSAL`.
+
     Each :class:`WorkerCandidate` carries the exact ``binding_id`` the
     owner-approved :class:`~saberops.routing_config.DynamicCandidate`
     records, when present.  Static (closed-registry) candidates leave
@@ -178,11 +203,17 @@ def resolve_candidate_chain(
         substitutes for it.
 
     Raises:
-        ValueError: If a provider override has no candidates in the selected tier.
+        ValueError: If a provider override has no candidates in the selected tier,
+            or if a provider-only override names an attended-only provider
+            (Antigravity requires an explicit owner provider+model override).
     """
     if model_override:
         candidate = parse_candidate_override(model_override, provider_override=provider_override)
         return [_with_frozen_evidence(candidate, snapshot)]
+
+    if provider_override is not None:
+        if provider_override.strip().lower() in ATTENDED_ONLY_PROVIDERS:
+            raise ValueError(ATTENDED_ONLY_REFUSAL)
 
     if snapshot is not None:
         chain = [
@@ -194,6 +225,12 @@ def resolve_candidate_chain(
         chain = list(TIER_3_OFF_PEAK_CHAIN)
     else:
         chain = list(TIER_1_CHAIN)
+
+    # Attended-only providers never dispatch automatically, even when a
+    # frozen snapshot or owner document still lists them.  An empty chain
+    # is a valid owner decision: dispatch terminates with structured
+    # no-eligible-candidate evidence, never a substituted default.
+    chain = [c for c in chain if c.provider not in ATTENDED_ONLY_PROVIDERS]
 
     if provider_override:
         provider_norm = provider_override.strip().lower()

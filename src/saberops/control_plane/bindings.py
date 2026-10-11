@@ -837,20 +837,16 @@ class ResolvedExecutionBinding:
         return self.pool.pool_id
 
 
-_COPILOT_FAMILY_PROVIDERS: frozenset[str] = frozenset({"copilot", "minimax"})
-
-#: Overlay keys owned by the exact executable-binding identity (plus the
-#: Copilot adapter's existing profile selector).  A generic profile hook
-#: may only return the executable selector keys above; anything else --
-#: including an attempt to overwrite these -- fails closed instead of
-#: executing.
+#: Overlay keys owned by the exact executable-binding identity.  A generic
+#: profile hook may only return the executable selector keys above; anything
+#: else -- including an attempt to overwrite these -- fails closed instead
+#: of executing.
 _RESERVED_PROFILE_OVERLAY_KEYS: frozenset[str] = frozenset(
     {
         ORCH_EXECUTION_BINDING_ENV,
         ORCH_EXECUTION_PROFILE_ENV,
         ORCH_EXECUTION_POOL_ENV,
         ORCH_EXECUTION_BACKEND_ENV,
-        "ORCH_COPILOT_PROFILE_ID",
     }
 )
 
@@ -867,31 +863,6 @@ EXECUTABLE_PROFILE_OVERLAY_KEYS: frozenset[str] = frozenset(
         ORCH_EXECUTION_PROFILE_BACKEND_ENV,
     }
 )
-
-
-def _copilot_overlay(
-    *,
-    provider: str,
-    profile: ExecutionProfile,
-) -> dict[str, str]:
-    """Return the Copilot request-env overlay for one resolved profile.
-
-    Known Copilot profile ids reuse the adapter's existing
-    ``ORCH_COPILOT_PROFILE_ID`` seam.  A copilot-family profile that
-    claims distinct account/backend behavior the adapter cannot
-    enforce (non-empty ``account_ref`` / ``backend_ref`` with an
-    unknown profile id) is unmappable and fails closed; a profile
-    with no distinct claims uses the proven ordinary adapter path
-    with no overlay.
-    """
-    from saberops.workers.copilot import copilot_overlay_for_binding
-
-    return copilot_overlay_for_binding(
-        provider=provider,
-        profile_id=profile.profile_id,
-        account_ref=profile.account_ref,
-        backend_ref=profile.backend_ref,
-    )
 
 
 def _direct_cli_profile_overlay(
@@ -988,8 +959,7 @@ def resolve_execution_binding(
     is missing/disabled, the pool is unknown, the backend has no
     verified runtime seam, no live adapter serves
     the binding's provider, the requested effort tier is outside the
-    binding's declared capabilities, a copilot-family profile
-    cannot be mapped onto the adapter's existing profile seam, a
+    binding's declared capabilities, a
     DIRECT_CLI profile claims a non-empty ``account_ref`` /
     ``backend_ref`` the adapter has no explicit executable mechanism
     for (no ``execution_profile_overlay`` hook, or a hook whose
@@ -1029,14 +999,7 @@ def resolve_execution_binding(
         ORCH_EXECUTION_POOL_ENV: pool.pool_id,
         ORCH_EXECUTION_BACKEND_ENV: binding.backend.value,
     }
-    if binding.provider in _COPILOT_FAMILY_PROVIDERS:
-        try:
-            overlay.update(
-                _copilot_overlay(provider=binding.provider, profile=profile)
-            )
-        except ValueError as exc:
-            raise BindingResolutionError("UNMAPPABLE_PROFILE") from exc
-    elif binding.backend is BindingKind.DIRECT_CLI:
+    if binding.backend is BindingKind.DIRECT_CLI:
         # Generic DIRECT_CLI profiles: non-empty account_ref /
         # backend_ref execute ONLY through the adapter's explicit
         # executable-profile hook (whose overlay rides the actual

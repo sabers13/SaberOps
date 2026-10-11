@@ -1,8 +1,7 @@
 """Bounded, metadata-only discovery through the providers' native CLI protocols.
 
 Wire contracts follow anthropics/claude-agent-sdk-python's initialize control
-request and github/copilot-sdk's Content-Length JSON-RPC models.list request.
-No user message, session.create, prompt or inference request is sent.
+request. No user message, session.create, prompt or inference request is sent.
 """
 from __future__ import annotations
 
@@ -38,22 +37,15 @@ def _ids(payload: Any, field: str) -> list[str]:
 
 
 async def _exchange(executable: str, protocol: str, cwd: str) -> list[str]:
-    if protocol == "claude":
-        argv = [executable, "--print", "--input-format", "stream-json",
-                "--output-format", "stream-json", "--verbose", "--tools", "",
-                "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
-                "--settings", '{"disableAllHooks":true}', "--no-session-persistence"]
-        message = {"type": "control_request", "request_id": "saberops-models",
-                   "request": {"subtype": "initialize", "hooks": None}}
-        wire = (json.dumps(message) + "\n").encode()
-    elif protocol == "copilot":
-        argv = [executable, "--headless", "--stdio", "--no-auto-update"]
-        message = {"jsonrpc": "2.0", "id": "saberops-models", "method": "models.list",
-                   "params": {}}
-        body = json.dumps(message).encode()
-        wire = f"Content-Length: {len(body)}\r\n\r\n".encode() + body
-    else:
+    if protocol != "claude":
         raise _unknown("unsupported native model-list protocol")
+    argv = [executable, "--print", "--input-format", "stream-json",
+            "--output-format", "stream-json", "--verbose", "--tools", "",
+            "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+            "--settings", '{"disableAllHooks":true}', "--no-session-persistence"]
+    message = {"type": "control_request", "request_id": "saberops-models",
+               "request": {"subtype": "initialize", "hooks": None}}
+    wire = (json.dumps(message) + "\n").encode()
     process = await asyncio.create_subprocess_exec(
         *argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL, cwd=cwd, limit=_MAX_BYTES,
@@ -64,27 +56,14 @@ async def _exchange(executable: str, protocol: str, cwd: str) -> list[str]:
         await process.stdin.drain()
         total = 0
         while total <= _MAX_BYTES:
-            if protocol == "copilot":
-                header = await process.stdout.readuntil(b"\r\n\r\n")
-                fields = dict(line.split(b":", 1) for line in header.strip().split(b"\r\n"))
-                length = int(fields[b"Content-Length"].strip())
-                if not 0 < length <= _MAX_BYTES - total:
-                    raise _unknown("native model catalog exceeds response size limit")
-                raw = await process.stdout.readexactly(length)
-                total += len(header)
-            else:
-                raw = await process.stdout.readline()
-                if not raw:
-                    raise _unknown("native CLI closed before returning a model catalog")
+            raw = await process.stdout.readline()
+            if not raw:
+                raise _unknown("native CLI closed before returning a model catalog")
             total += len(raw)
             reply = json.loads(raw)
             if not isinstance(reply, dict):
                 continue
-            if protocol == "copilot" and reply.get("id") == "saberops-models":
-                if "error" in reply:
-                    raise _unknown("native model-list request failed; check CLI login and version")
-                return _ids(reply.get("result"), "id")
-            if protocol == "claude" and reply.get("type") == "control_response":
+            if reply.get("type") == "control_response":
                 response = reply.get("response")
                 if (not isinstance(response, dict)
                         or response.get("request_id") != "saberops-models"):

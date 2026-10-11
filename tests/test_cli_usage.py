@@ -32,37 +32,6 @@ def test_limit_shapes_preserve_unknown_and_unlimited() -> None:
     assert "never-display" not in json.dumps(rows)
     assert parse_limits("codex", {"rateLimits": {"primary": {"usedPercent": 101}}}) == []
     assert parse_limits("codex", {"rateLimits": {"primary": {"usedPercent": False}}}) == []
-    unlimited = parse_limits(
-        "copilot",
-        {
-            "quotaSnapshots": {
-                "chat": {"isUnlimitedEntitlement": True, "remainingPercentage": -1},
-                "premium_interactions": {"remainingPercentage": 12.5},
-            }
-        },
-    )
-    assert unlimited[0]["unlimited"] and unlimited[0]["remaining"] is None
-    assert unlimited[1]["remaining"] == 12.5
-
-
-def test_copilot_request_counts_and_next_reset_only() -> None:
-    rows = parse_limits(
-        "copilot",
-        {
-            "quotaSnapshots": {
-                "premium_interactions": {
-                    "remainingPercentage": 75,
-                    "usedRequests": 50,
-                    "entitlementRequests": 200,
-                    "resetDate": "2100-01-01T00:00:00Z",
-                },
-                "chat": {"isUnlimitedEntitlement": True, "resetDate": "2000-01-01T00:00:00Z"},
-            }
-        },
-    )
-    assert rows[0]["used_requests"] == 50 and rows[0]["entitlement_requests"] == 200
-    assert rows[0]["reset_at"] == "2100-01-01T00:00:00Z"
-    assert rows[1]["reset_at"] is None
 
 
 def test_claude_stream_revisions_and_duplicate_forks_do_not_double_count(tmp_path: Path) -> None:
@@ -163,29 +132,11 @@ def test_usage_cache_retains_last_good_limit_with_error_timestamp(tmp_path: Path
     assert failed[0]["limits_error"]
 
 
-def test_read_only_databases_and_copilot_shutdown_fallback(tmp_path: Path) -> None:
-    base = tmp_path / ".copilot/session-state/session"
-    base.mkdir(parents=True)
-    (base / "events.jsonl").write_text(
-        json.dumps(
-            {
-                "type": "session.shutdown",
-                "data": {
-                    "modelMetrics": {
-                        "model": {
-                            "usage": {"inputTokens": 120, "outputTokens": 7, "cacheReadTokens": 30}
-                        }
-                    }
-                },
-            }
-        )
-    )
+def test_read_only_databases_without_mutation(tmp_path: Path) -> None:
     service = CliUsageService(home=tmp_path, which=lambda exe: exe)
     cards = service.snapshot()
-    copilot = next(c for c in cards if c["provider"] == "copilot")
-    assert copilot["activity"]["input_tokens"] == 120
     assert all(not c["windows"] for c in cards)
-    assert len(cards) == 7
+    assert len(cards) == 6
     path = tmp_path / ".cline/data/db/sessions.db"
     path.parent.mkdir(parents=True)
     with sqlite3.connect(path) as db:
@@ -211,33 +162,23 @@ def test_read_only_databases_and_copilot_shutdown_fallback(tmp_path: Path) -> No
     assert path.read_bytes() == before
 
 
-@pytest.mark.parametrize("provider", ["codex", "copilot"])
-def test_native_rpc_is_metadata_only_and_closes_process(tmp_path: Path, provider: str) -> None:
+def test_native_rpc_is_metadata_only_and_closes_process(tmp_path: Path) -> None:
+    provider = "codex"
     exe = tmp_path / "fake-cli"
     trace = tmp_path / "trace.jsonl"
     script = """#!/usr/bin/env python3
 import sys,json
-framed = '--headless' in sys.argv
 for _ in range(4):
- if framed:
-  h=sys.stdin.buffer.readline()
-  if not h:break
-  n=int(h.split(b':')[1]);sys.stdin.buffer.readline();raw=sys.stdin.buffer.read(n)
- else:
-  raw=sys.stdin.buffer.readline()
-  if not raw:break
+ raw=sys.stdin.buffer.readline()
+ if not raw:break
  d=json.loads(raw)
  with open(TRACE,'a') as f:f.write(json.dumps(d)+'\\n')
  if 'id' not in d:continue
  r={'id':d['id'],'result':{}}
  if d['id']==2:
-  if framed:
-   r['result']={'quotaSnapshots':{'premium_interactions':{'remainingPercentage':55}}}
-  else:
-   r['result']={'rateLimits':{'primary':{'usedPercent':45}}}
+  r['result']={'rateLimits':{'primary':{'usedPercent':45}}}
  body=json.dumps(r).encode()
- if framed:sys.stdout.buffer.write(('Content-Length: %s\\r\\n\\r\\n'%len(body)).encode()+body)
- else:sys.stdout.buffer.write(body+b'\\n')
+ sys.stdout.buffer.write(body+b'\\n')
  sys.stdout.buffer.flush()
 """
     exe.write_text(script.replace("TRACE", repr(str(trace))))
@@ -245,11 +186,7 @@ for _ in range(4):
     limits = read_limits(str(exe), provider)
     assert limits[0]["remaining"] == 55
     methods = [json.loads(line)["method"] for line in trace.read_text().splitlines()]
-    assert methods == (
-        ["account.getQuota"]
-        if provider == "copilot"
-        else ["initialize", "initialized", "account/rateLimits/read"]
-    )
+    assert methods == ["initialize", "initialized", "account/rateLimits/read"]
 
 
 def test_usage_refresh_fragment_and_manual_quota_authority(
@@ -282,7 +219,7 @@ def test_usage_refresh_fragment_and_manual_quota_authority(
     assert result.status_code == 200
     assert "70% remaining" in result.text
     assert "<html" not in result.text
-    assert result.text.count("data-usage-provider=") == 6
+    assert result.text.count("data-usage-provider=") == 5
     state = Database(db_path).list_quota()
     assert state[0].remaining_percent == 10
     assert state[0].routing_state.value == "BLOCKED"

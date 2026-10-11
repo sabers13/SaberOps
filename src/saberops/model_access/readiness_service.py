@@ -22,7 +22,6 @@ from saberops.model_access.connections import (
     TriState,
     resolve_access,
 )
-from saberops.model_access.native_auth import native_authentication
 from saberops.model_access.readiness import (
     ProviderReadinessEvidence,
     ReadinessEvidenceSource,
@@ -189,28 +188,22 @@ class ReadinessService:
         else:
             authenticated: bool | None = None
             try:
-                if descriptor.auth_status_protocol:
-                    authenticated = native_authentication(
-                        self.which(descriptor.executable) or descriptor.executable,
-                        descriptor.auth_status_protocol, timeout=AUTH_STATUS_TIMEOUT_SECONDS,
-                    )
-                else:
-                    result = self.run(
-                        [descriptor.executable, *descriptor.auth_status_argv],
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                        timeout=AUTH_STATUS_TIMEOUT_SECONDS,
-                    )
-                    # Nonzero never proves positive readiness; only an
-                    # explicit negative verdict can prove NOT_READY.
-                    parsed = _status_authentication(
-                        connection.backend, json.loads(result.stdout)
-                    )
-                    if result.returncode == 0:
-                        authenticated = parsed
-                    elif parsed is False:
-                        authenticated = False
+                result = self.run(
+                    [descriptor.executable, *descriptor.auth_status_argv],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=AUTH_STATUS_TIMEOUT_SECONDS,
+                )
+                # Nonzero never proves positive readiness; only an
+                # explicit negative verdict can prove NOT_READY.
+                parsed = _status_authentication(
+                    connection.backend, json.loads(result.stdout)
+                )
+                if result.returncode == 0:
+                    authenticated = parsed
+                elif parsed is False:
+                    authenticated = False
             except (OSError, ValueError, subprocess.SubprocessError):
                 authenticated = None
             state = TriState.UNKNOWN if authenticated is None else (
