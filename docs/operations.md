@@ -111,6 +111,58 @@ No inference runs or permanent plugin/configuration changes are made. Connect
 Go in OpenCode first; missing connections, rejected keys, and missing Go
 subscriptions are reported separately.
 
+## Plans and billing posture
+
+`orch plans show|validate` manages the plan registry; `orch posture
+show|verify` manages billing posture. Plan data records which accounts
+exist, which pools they hold, each pool's windows, whether exhausting a
+pool could turn into spending (`overage_possible`), how many runs may
+draw a pool at once (`max_concurrent`), and each route's billing
+posture class (A/B/C/D/X) with policy URLs, owner verification date
+and expiry TTL.
+
+File location and overlay: the owner document is the control-plane
+config (`$XDG_CONFIG_HOME/saberops/control_plane.json`); the packaged
+default (`defaults/plans.json`) ships the owner's billing-posture facts
+and is overlaid by the owner document field by field (the owner wins
+per field). `plans show` marks each field's source (`packaged` |
+`owner`). `verified_on` and `toggles_attested_on` come only from the
+owner document: a packaged non-null value for either is a validation
+error, because verification is the owner's attestation. `reserves` is
+wholesale: the owner's list replaces the packaged list only when the
+owner document carries the key. An owner document without plan
+sections (version 1) loads exactly as before; writes are always version
+2 and preserve every section.
+
+Selector grammar: `provider` (e.g. `codex`), `provider/model` (e.g.
+`codex/gpt-5.6-terra`), or `provider/<prefix>/*` with a trailing glob
+only (e.g. `opencode/opencode-go/*`). Posture selectors may also be
+`backend:DIRECT_API`. The most specific selector wins: exact
+`provider/model`, then the longest `provider/<prefix>/*`, then
+`provider`, then `backend:X`. Note: Claude Code's provider id is
+`anthropic` (not `claude`), and there is currently no `openai` model
+prefix in the static routing registry, so `opencode/openai/*` is a
+forward-looking selector for ChatGPT-login models served through
+OpenCode.
+
+How to verify: `orch posture verify SELECTOR [--url URL]...
+[--note TEXT] [--class A|B|C|D|X] [--date YYYY-MM-DD]` records the
+owner's re-verification (default date today, local). The selector must
+already exist in the effective postures unless `--class` is given (a
+new selector needs its class stated); changing an existing class
+requires an explicit `--class`. Verification writes only the owner
+document, atomically, and prints the resulting status
+(OK|EXPIRING|EXPIRED|UNVERIFIED|FORBIDDEN|ATTENDED_ONLY|METERED).
+
+What UNVERIFIED/EXPIRED mean: posture fails closed. A route with no
+record, no `verified_on`, or `verified_on + ttl_days` before today is
+never admitted unattended; once admission is wired (M2-4b), such
+routes stay unadmitted, so every route stays unadmitted until `orch
+posture verify` has been run for it. `expires_on` is inclusive: the
+record is valid through that day. Status `EXPIRING` warns 3 days
+before expiry. Class X is never admitted; B is attended-only; D
+(prepaid/metered keys) is never scheduled unattended.
+
 ## Fixed-source candidate verification
 
 Candidate gates and independent reviews run in separate detached verification

@@ -1366,6 +1366,58 @@ def build_parser() -> argparse.ArgumentParser:
     )
     access_verify.add_argument("--json", action="store_true", help="JSON output")
 
+    # orch plans show|validate + orch posture show|verify
+    plans_parser = subparsers.add_parser(
+        "plans",
+        help="Show or validate the plan registry (accounts, pools, postures).",
+    )
+    plans_sub = plans_parser.add_subparsers(dest="plans_command", required=True)
+    plans_show = plans_sub.add_parser("show", help="Show effective plans with sources.")
+    plans_show.add_argument("--json", action="store_true", help="JSON output")
+    plans_validate = plans_sub.add_parser("validate", help="Validate plans.")
+    plans_validate.add_argument(
+        "--file", type=str, default=None, help="Control-plane document to validate."
+    )
+    plans_validate.add_argument("--json", action="store_true", help="JSON output")
+
+    posture_parser = subparsers.add_parser(
+        "posture",
+        help="Show or verify billing posture (show/verify).",
+    )
+    posture_sub = posture_parser.add_subparsers(dest="posture_command", required=True)
+    posture_show = posture_sub.add_parser(
+        "show", help="Show per-selector posture state."
+    )
+    posture_show.add_argument("--json", action="store_true", help="JSON output")
+    posture_verify = posture_sub.add_parser(
+        "verify", help="Record the owner's re-verification of one selector."
+    )
+    posture_verify.add_argument("selector", type=str, help="Posture selector.")
+    posture_verify.add_argument(
+        "--url",
+        dest="urls",
+        action="append",
+        default=[],
+        metavar="URL",
+        help="Policy URL; repeat for multiple URLs.",
+    )
+    posture_verify.add_argument("--note", type=str, default=None, help="Owner note.")
+    posture_verify.add_argument(
+        "--class",
+        dest="posture_class",
+        type=str,
+        choices=["A", "B", "C", "D", "X"],
+        default=None,
+        help="Posture class (required for a new selector or a class change).",
+    )
+    posture_verify.add_argument(
+        "--date",
+        type=str,
+        default=None,
+        help="Verification date YYYY-MM-DD (default: today, local).",
+    )
+    posture_verify.add_argument("--json", action="store_true", help="JSON output")
+
     # orch retry|continue|try-worker
     retry_parser = subparsers.add_parser(
         "retry", help="Start a fresh attempt of a run's frozen task and policy."
@@ -3211,6 +3263,108 @@ def handle_access_verify_model(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_plans_show(args: argparse.Namespace) -> int:
+    """Handle `orch plans show`."""
+    from saberops.plans_ops import PlansOperationError, show_plans
+
+    try:
+        payload = show_plans()
+    except PlansOperationError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    for section in ("accounts", "quota_pools", "postures"):
+        print(f"[{section}]")
+        entries = payload[section]
+        if not entries:
+            print("  (none)")
+            continue
+        for key in sorted(entries):
+            entry = entries[key]
+            sources = entry.pop("sources", {})
+            for field in sorted(entry):
+                source = sources.get(field, "packaged")
+                print(f"  {key}.{field} = {entry[field]!r} ({source})")
+            entry["sources"] = sources
+    print(f"[reserves] ({payload['reserves_source']})")
+    for reserve in payload["reserves"]:
+        print(f"  {reserve}")
+    return 0
+
+
+def handle_plans_validate(args: argparse.Namespace) -> int:
+    """Handle `orch plans validate` (exit 2 on validation errors)."""
+    from pathlib import Path as _Path
+
+    from saberops.plans_ops import validate_plans
+
+    raw_file = getattr(args, "file", None)
+    result = validate_plans(_Path(str(raw_file)) if raw_file else None)
+    if getattr(args, "json", False):
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0 if result["ok"] else 2
+    if result["ok"]:
+        print(f"Plans valid ({result['path']}).")
+        return 0
+    for error in result["errors"]:
+        print(f"[!] {error}", file=sys.stderr)
+    return 2
+
+
+def handle_posture_show(args: argparse.Namespace) -> int:
+    """Handle `orch posture show`."""
+    from datetime import date as _date
+
+    from saberops.plans_ops import PlansOperationError, show_postures
+
+    try:
+        payload = show_postures(_date.today())
+    except PlansOperationError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    header = f"{'SELECTOR':<32} {'CLASS':<6} {'VERIFIED':<12} {'EXPIRES':<12} {'STATUS'}"
+    print(header)
+    print("─" * len(header))
+    for row in payload["postures"]:
+        print(
+            f"{row['selector']:<32} {row['class']:<6} "
+            f"{row['verified_on'] or '-':<12} {row['expires_on'] or '-':<12} "
+            f"{row['status']}"
+        )
+    return 0
+
+
+def handle_posture_verify(args: argparse.Namespace) -> int:
+    """Handle `orch posture verify SELECTOR ...`."""
+    from saberops.plans_ops import PlansOperationError, verify_posture
+
+    try:
+        result = verify_posture(
+            str(args.selector),
+            tuple(str(url) for url in (args.urls or [])),
+            str(args.note) if args.note is not None else None,
+            str(args.posture_class) if args.posture_class is not None else None,
+            str(args.date) if args.date is not None else None,
+        )
+    except PlansOperationError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    print(
+        f"Posture verified: {result['selector']} "
+        f"(class {result['class']}, verified {result['verified_on']}, "
+        f"expires {result['expires_on']}, status {result['status']})"
+    )
+    return 0
+
+
 def handle_project_set_workflow(args: argparse.Namespace) -> int:
     """Handle `orch project set-workflow <preset> [--repo X]`."""
     from saberops.service import RunOperationError
@@ -3647,6 +3801,16 @@ def _dispatch(args: argparse.Namespace) -> int:
             return handle_access_discover(args)
         elif args.access_command == "verify-model":
             return handle_access_verify_model(args)
+    elif args.command == "plans":
+        if args.plans_command == "show":
+            return handle_plans_show(args)
+        elif args.plans_command == "validate":
+            return handle_plans_validate(args)
+    elif args.command == "posture":
+        if args.posture_command == "show":
+            return handle_posture_show(args)
+        elif args.posture_command == "verify":
+            return handle_posture_verify(args)
     elif args.command == "retry":
         return handle_retry(args)
     elif args.command == "continue":

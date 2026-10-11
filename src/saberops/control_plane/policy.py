@@ -510,6 +510,20 @@ def _write_policy(policy: ControlPlanePolicy, raw: dict[str, object]) -> Path:
     return path
 
 
+def save_owner_control_plane(data: dict[str, object]) -> Path:
+    """Atomically persist a full owner control-plane document (validated).
+
+    This is the writer service layers (e.g. posture verification) use to
+    store owner attestations.  The document is validated after the write
+    and any failure raises; nothing is left half-written (atomic replace).
+    """
+    if not isinstance(data, dict):
+        raise ValueError("owner control-plane document must be an object")
+    path = _write(data)
+    load_control_plane_policy()
+    return path
+
+
 def set_provider_policy(provider: str, state: str, warning: str | None = None) -> Path:
     if state not in {
         ProviderPolicyState.ALLOWED,

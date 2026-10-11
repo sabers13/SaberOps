@@ -261,7 +261,8 @@ def _validate_members(raw: Any, path: str) -> tuple[PoolMember, ...]:
     return tuple(members)
 
 
-def _validate_iso_date(value: Any, path: str) -> str:
+def validate_iso_date(value: Any, path: str) -> str:
+    """Validate an ISO YYYY-MM-DD date that must not lie in the future."""
     if not isinstance(value, str) or not value:
         raise _fail(path, "date must be an ISO YYYY-MM-DD string")
     try:
@@ -271,6 +272,10 @@ def _validate_iso_date(value: Any, path: str) -> str:
     if parsed > date.today():
         raise _fail(path, f"date {value!r} must not be in the future")
     return value
+
+
+def _validate_iso_date(value: Any, path: str) -> str:
+    return validate_iso_date(value, path)
 
 
 def validate_plan_sections(
