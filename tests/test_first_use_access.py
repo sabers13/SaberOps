@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import re
 import shutil
-import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
