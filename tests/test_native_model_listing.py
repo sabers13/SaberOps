@@ -60,7 +60,7 @@ def test_probe_404_is_not_a_success(monkeypatch: pytest.MonkeyPatch) -> None:
     assert 'Authentication NOT VERIFIED' in result['detail']
 
 
-@pytest.mark.parametrize('protocol', ['claude', 'copilot'])
+@pytest.mark.parametrize('protocol', ['claude'])
 @pytest.mark.parametrize('malformed', [False, True])
 def test_native_protocol_only_requests_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, protocol: str, malformed: bool
@@ -69,19 +69,12 @@ def test_native_protocol_only_requests_metadata(
     log = tmp_path / 'request.json'
     script.write_text('''import json,sys
 protocol,log,malformed=sys.argv[1:4]
-if protocol=='copilot':
- header=sys.stdin.buffer.readline();sys.stdin.buffer.readline()
- request=json.loads(sys.stdin.buffer.read(int(header.split(b':')[1])))
- reply={'jsonrpc':'2.0','id':request['id'],'result':{'models':[{'id':'native-model'}]}}
-else:
- request=json.loads(sys.stdin.buffer.readline())
- reply={'type':'control_response','response':{'subtype':'success',
- 'request_id':request['request_id'],'response':{'models':[{'value':'native-model'}]}}}
+request=json.loads(sys.stdin.buffer.readline())
+reply={'type':'control_response','response':{'subtype':'success',
+'request_id':request['request_id'],'response':{'models':[{'value':'native-model'}]}}}
 open(log,'w').write(json.dumps(request))
 body=(b'not-json' if malformed=='True' else json.dumps(reply).encode())
-if protocol=='copilot':
- sys.stdout.buffer.write(('Content-Length: %s\\r\\n\\r\\n'%len(body)).encode()+body)
-else:sys.stdout.buffer.write(body+b'\\n')
+sys.stdout.buffer.write(body+b'\\n')
 sys.stdout.buffer.flush()
 sys.stdin.buffer.read()
 ''')
@@ -97,12 +90,8 @@ sys.stdin.buffer.read()
     else:
         assert native_listing.list_native_models('fake', protocol) == ['native-model']
     request = json.loads(log.read_text())
-    if protocol == 'copilot':
-        assert request['method'] == 'models.list'
-        assert request['params'] == {}
-    else:
-        assert request['type'] == 'control_request'
-        assert request['request'] == {'subtype': 'initialize', 'hooks': None}
+    assert request['type'] == 'control_request'
+    assert request['request'] == {'subtype': 'initialize', 'hooks': None}
 
 
 def test_native_timeout_reaps_process(

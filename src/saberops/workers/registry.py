@@ -7,7 +7,6 @@ from saberops.workers.base import WorkerAdapter
 from saberops.workers.claude import ClaudeCodeAdapter
 from saberops.workers.cline import ClineAdapter
 from saberops.workers.codex import CodexAdapter
-from saberops.workers.copilot import CopilotAdapter
 from saberops.workers.opencode import OpenCodeAdapter
 
 
@@ -57,10 +56,6 @@ class AdapterRegistry:
     @classmethod
     def default(cls) -> AdapterRegistry:
         """Create a default registry populated with standard provider adapters.
-
-        Copilot is included as a backend even when its executable is not
-        installed -- the registry simply reports ``is_available() == False``
-        for it; this keeps it structurally optional everywhere else.
         """
         return cls(
             adapters=[
@@ -68,7 +63,6 @@ class AdapterRegistry:
                 CodexAdapter(),
                 AntigravityAdapter(),
                 ClineAdapter(),
-                CopilotAdapter(),
                 ClaudeCodeAdapter(),
             ]
         )

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -24,47 +23,10 @@ from saberops.model_access import (
     default_account_connections,
 )
 from saberops.model_access.model_verification import verify_native_model
-from saberops.model_access.native_auth import native_authentication
 from saberops.model_access.readiness import ReadinessEvidenceSource
 from saberops.models import ProviderReadiness
 from saberops.process import ProcessResult
 from saberops.web import create_app
-
-
-@pytest.mark.parametrize("verdict", [True, False, None, "true", 1])
-def test_copilot_native_auth_uses_only_metadata_and_strict_boolean(
-    tmp_path: Path, verdict: Any,
-) -> None:
-    executable = tmp_path / "copilot"
-    executable.write_text(
-        f"#!{sys.executable}\nimport json,sys\n"
-        "assert sys.argv[1:] == ['--headless','--stdio','--no-auto-update']\n"
-        "headers={}\n"
-        "while True:\n"
-        " line=sys.stdin.buffer.readline()\n"
-        " if line == b'\\r\\n': break\n"
-        " key,value=line.split(b':',1); headers[key]=value.strip()\n"
-        "request=json.loads(sys.stdin.buffer.read(int(headers[b'Content-Length'])))\n"
-        "assert request['method'] == 'auth.getStatus' and request['params'] == {}\n"
-        f"payload={{'isAuthenticated': {verdict!r}, 'login': 'private-account', "
-        "'secret': 'never-save'}\n"
-        "body=json.dumps({'id': request['id'], 'result': payload}).encode()\n"
-        "sys.stdout.buffer.write(f'Content-Length: {len(body)}\\r\\n\\r\\n'.encode()+body)\n"
-        "sys.stdout.buffer.flush()\n"
-        "sys.stdin.buffer.read()\n",
-        encoding="utf-8",
-    )
-    executable.chmod(0o755)
-    actual = native_authentication(str(executable), "copilot")
-    assert actual is (verdict if isinstance(verdict, bool) else None)
-
-
-def test_copilot_timeout_and_unsupported_protocol_stay_unknown(tmp_path: Path) -> None:
-    executable = tmp_path / "hung-cli"
-    executable.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(5)\n")
-    executable.chmod(0o755)
-    assert native_authentication(str(executable), "copilot", timeout=0.05) is None
-    assert native_authentication(str(executable), "unsupported", timeout=0.05) is None
 
 
 @pytest.mark.parametrize("backend", ["opencode", "antigravity"])
@@ -175,7 +137,7 @@ def test_web_first_use_requires_exact_current_model_and_explicit_local_post(
     client = TestClient(app)
     page = client.get("/access")
     assert "Verify model access" in page.text and "Uses account allowance" in page.text
-    assert "Check login" in page.text and "copilot login" in page.text
+    assert "Check login" in page.text and "copilot login" not in page.text
     assert not calls and not paths["ORCH_READINESS_STORE"].exists()
     assert client.get("/access/verify-model").status_code == 405
     for model in ("", "invented/model", "other/model", "stale/model"):

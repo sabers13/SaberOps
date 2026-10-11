@@ -314,9 +314,8 @@ AUTONOMOUS_RUNTIME_ENV_ALLOWLIST: tuple[str, ...] = (
 #: (non-secret names/values only -- the real OmniRoute token is
 #: resolved at forwarding time, never from this mapping), the exact
 #: Execution binding identity the canonical lifecycle resolved
-#: (binding/profile/pool/backend references only, never secrets), and
-#: the Copilot profile selector honoured by the Copilot adapter's
-#: request-env overlay, and the runtime executable-profile selectors
+#: (binding/profile/pool/backend references only, never secrets),
+#: and the runtime executable-profile selectors
 #: (``ORCH_EXECUTION_PROFILE_ACCOUNT`` / ``ORCH_EXECUTION_PROFILE_BACKEND``):
 #: non-secret account/backend references the canonical lifecycle
 #: populated ONLY from a verified adapter ``execution_profile_overlay``
@@ -330,7 +329,6 @@ AUTONOMOUS_CONTROL_ENV_ALLOWLIST: frozenset[str] = frozenset(
         "ORCH_DB_PATH",
         "ORCH_TOOL_TELEMETRY_SINK",
         "ORCH_TOOL_CONTRACT_DIGEST",
-        "ORCH_COPILOT_PROFILE_ID",
         "ORCH_EXECUTION_BINDING_ID",
         "ORCH_EXECUTION_PROFILE_ID",
         "ORCH_EXECUTION_POOL_ID",
@@ -380,10 +378,7 @@ def project_autonomous_child_env(
     seam, and an ``env:`` ref naming a variable absent from
     ``request_env``, both fail closed with :class:`SandboxedProcessError`
     before any semantic child exists -- rather than copying broad
-    environment state.  Copilot's profile-specific
-    ``build_attempt_env`` semantics are preserved: this projection only
-    narrows the request overlay Copilot also reads and never adds a
-    credential Copilot would have dropped.
+    environment state.
     """
     source = dict(request_env) if request_env is not None else {}
     child: dict[str, str] = {}

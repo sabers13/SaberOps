@@ -246,6 +246,12 @@ def test_native_ui_ignores_headless_flags_but_preserves_terminal_and_provider_co
         monkeypatch.setenv(key, "1")
     monkeypatch.setenv("TERM", "tmux-256color")
     monkeypatch.setenv("COLORTERM", "truecolor")
+    if provider == "copilot":
+        # L-B adapter cut lane: the Copilot adapter was removed, so native
+        # Copilot session environments fail closed instead of building.
+        with pytest.raises(ControlConflict):
+            native_environment(data)
+        return
     env = native_environment(data)
     assert env["TERM"] == "tmux-256color" and env["COLORTERM"] == "truecolor"
     assert "NO_COLOR" not in env and "CI" not in env and "CLAUDE_CODE_SIMPLE" not in env
