@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -27,7 +28,7 @@ from saberops.control_plane.policy import _build
 from saberops.control_plane.quota_policy import QuotaPoolMode
 
 
-def _doc() -> dict:
+def _doc() -> dict[str, Any]:
     return {
         "version": 2,
         "providers": {"codex": {"state": "ALLOWED"}},
@@ -82,7 +83,7 @@ def _doc() -> dict:
     }
 
 
-def _expect_path(bad: dict, path: str) -> None:
+def _expect_path(bad: dict[str, Any], path: str) -> None:
     with pytest.raises(ValueError) as excinfo:
         validate_plan_sections(bad, "test")
     assert str(excinfo.value).startswith(path), str(excinfo.value)
@@ -160,7 +161,7 @@ def isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return config
 
 
-def _write_owner(doc: dict) -> Path:
+def _write_owner(doc: dict[str, Any]) -> Path:
     from saberops.paths import get_control_plane_config_path
 
     path = get_control_plane_config_path()
