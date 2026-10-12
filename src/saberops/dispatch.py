@@ -48,22 +48,17 @@ READINESS_SKIP_REASONS: frozenset[str] = frozenset(
 )
 
 
-def routing_context_for(
-    tier: str,
-    *,
-    training_allowed: bool = True,
-    is_peak: bool = False,
-) -> str:
-    """Return the canonical selected routing context key for a dispatch tier.
+def routing_context_for_role(role: Any) -> str:
+    """Return the canonical routing context for a dispatch role.
 
-    Mirrors the chain selection in
-    :func:`saberops.routing.resolve_candidate_chain` (snapshot path):
-    T1 always resolves ``T1.default``; T2 splits on training permission
-    then peak; T3 splits on peak only.  The value names the actual
-    selected context so empty-chain and exhaustion evidence can quote it.
+    The role value itself (``"WORKER"`` …) is the new ``routing_context``
+    in skip/exhaustion evidence.
     """
-    cleaned = tier.strip().upper()
-    return f"{cleaned if cleaned in ('T1', 'T2', 'T3') else 'T1'}.default"
+    from saberops.jobs.models import JobRole
+
+    if isinstance(role, JobRole):
+        return role.value
+    return str(role).strip().upper()
 
 
 def build_candidate_skip(
