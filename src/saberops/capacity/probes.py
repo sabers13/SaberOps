@@ -338,7 +338,7 @@ def handle_probe_result(
             min_reset_iso = min_reset.isoformat() if min_reset else None
             for pool_id in pools:
                 try:
-                    db.set_quota(provider, pool_id, min_remaining, min_reset_iso)
+                    db.set_quota(provider, pool_id, min_remaining, min_reset_iso, source="PROBE")
                 except Exception:
                     pass
         except Exception:
