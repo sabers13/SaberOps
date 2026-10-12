@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import dataclasses
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -144,3 +145,211 @@ def test_l12_probe_source(tmp_path: Path) -> None:
     assert row.remaining_percent == 50.0
     assert row.routing_state is RoutingState.NORMAL
     assert _obs_key(db) == ("codex-pool", "ALL", "PROBE")
+
+
+_T0 = datetime(2026, 10, 12, 12, 0, tzinfo=UTC)
+
+
+def _kinds(*pairs: tuple[str, str, str]) -> dict[tuple[str, str], str]:
+    return {(pool, window): kind for pool, window, kind in pairs}
+
+
+# L5: estimate arithmetic over reservations.
+def test_l5_estimate_arithmetic(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    t0, t1, t2, t3 = (_T0 + timedelta(minutes=m) for m in (0, 10, 20, 30))
+    # A reservation created before the observation never counts.
+    reserve(db, run_id="run-early", route="opencode/gpt-5",
+            draws=[PoolDraw("opencode", "5h")],
+            size_bucket=SizeBucket.S, now=t0)
+    record_owner_quota(db, "opencode", "5h", 60.0, None,
+                       source="OWNER", now=t1)
+    kinds = _kinds(("opencode", "5h", "UNKNOWN"))
+    assert estimate(db, "opencode", "5h", now=t1,
+                    window_kinds=kinds).remaining_est == 60.0
+    reserve(db, run_id="run-a", route="opencode/gpt-5",
+            draws=[PoolDraw("opencode", "5h", 1.0)],
+            size_bucket=SizeBucket.S, now=t2)
+    reserve(db, run_id="run-b", route="opencode/gpt-5",
+            draws=[PoolDraw("opencode", "5h", 2.0)],
+            size_bucket=SizeBucket.S, now=t2)
+    # Prior 5h/S = 3.0, spread 1.5: costs 3.0 and 6.0, spreads 1.5 and 3.0.
+    est = estimate(db, "opencode", "5h", now=t3, window_kinds=kinds)
+    assert est.remaining_est == 51.0
+    assert est.uncertainty == 4.5
+    assert est.observed_at == t1.isoformat()
+    assert est.source == "OWNER"
+    assert est.stale is False
+    assert est.excluded_until is None
+    # RELEASED rows never count.
+    assert release(db, "run-b", now=t3) == 1
+    est2 = estimate(db, "opencode", "5h", now=t3, window_kinds=kinds)
+    assert est2.remaining_est == 57.0
+    assert est2.uncertainty == 1.5
+
+
+def test_l5_clamp_at_zero(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    record_owner_quota(db, "opencode", "5h", 5.0, None,
+                       source="OWNER", now=_T0)
+    reserve(db, run_id="run-big", route="opencode/gpt-5",
+            draws=[PoolDraw("opencode", "5h", 4.0)],
+            size_bucket=SizeBucket.L, now=_T0 + timedelta(minutes=1))
+    # Prior 5h/L = 15.0 x 4 = 60 > 5 -> clamped.
+    est = estimate(db, "opencode", "5h", now=_T0 + timedelta(minutes=2),
+                   window_kinds=_kinds(("opencode", "5h", "UNKNOWN")))
+    assert est.remaining_est == 0.0
+
+
+# L6: window roll behaviour.
+def test_l6_window_roll(tmp_path: Path) -> None:
+    reset = _T0 + timedelta(hours=1)
+    after = reset + timedelta(minutes=5)
+    for kind, stale in [("CALENDAR", False), ("ROLLING", True), ("UNKNOWN", True)]:
+        db = Database(tmp_path / f"roll-{kind}.db")
+        record_owner_quota(db, "codex", "weekly", 12.0, reset.isoformat(),
+                           source="OWNER", now=_T0)
+        est = estimate(db, "codex", "weekly", now=after,
+                       window_kinds={( "codex", "weekly"): kind})
+        assert est.remaining_est == 100.0
+        assert est.stale is stale
+
+
+def test_l6_pre_reset_reservations_stop_counting(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    reset = _T0 + timedelta(hours=1)
+    after = reset + timedelta(minutes=5)
+    record_owner_quota(db, "codex", "weekly", 12.0, reset.isoformat(),
+                       source="OWNER", now=_T0)
+    reserve(db, run_id="run-old", route="codex/gpt-5",
+            draws=[PoolDraw("codex", "weekly")],
+            size_bucket=SizeBucket.M,
+            now=_T0 + timedelta(minutes=30))
+    est = estimate(db, "codex", "weekly", now=after,
+                   window_kinds={("codex", "weekly"): "CALENDAR"})
+    assert est.remaining_est == 100.0
+    assert est.stale is False
+
+
+# L7: active exclusions deny; expired ones do not.
+def test_l7_exclusion(tmp_path: Path) -> None:
+    from saberops.capacity.store import upsert_exclusion
+
+    db = _db(tmp_path)
+    record_owner_quota(db, "codex", "weekly", 80.0, None,
+                       source="OWNER", now=_T0)
+    until = _T0 + timedelta(hours=2)
+    upsert_exclusion(db, pool_id="codex", window_id="weekly",
+                     reason="QUOTA_EXHAUSTED", until=until,
+                     until_confidence="EXACT", source="test", now=_T0)
+    est = estimate(db, "codex", "weekly", now=_T0 + timedelta(minutes=1),
+                   window_kinds=_kinds(("codex", "weekly", "UNKNOWN")))
+    assert est.remaining_est == 0.0
+    assert est.source == "EXHAUSTION"
+    assert est.excluded_until == until.isoformat()
+    # ALL-window exclusion also denies the window.
+    db2 = Database(tmp_path / "exc-all.db")
+    record_owner_quota(db2, "codex", "weekly", 80.0, None,
+                       source="OWNER", now=_T0)
+    upsert_exclusion(db2, pool_id="codex", window_id="ALL",
+                     reason="QUOTA_EXHAUSTED", until=until,
+                     until_confidence="EXACT", source="test", now=_T0)
+    est_all = estimate(db2, "codex", "weekly", now=_T0 + timedelta(minutes=1),
+                       window_kinds=_kinds(("codex", "weekly", "UNKNOWN")))
+    assert est_all.remaining_est == 0.0
+    assert est_all.source == "EXHAUSTION"
+    # An expired exclusion does not deny.
+    db3 = Database(tmp_path / "exc-exp.db")
+    record_owner_quota(db3, "codex", "weekly", 80.0, None,
+                       source="OWNER", now=_T0)
+    upsert_exclusion(db3, pool_id="codex", window_id="weekly",
+                     reason="QUOTA_EXHAUSTED",
+                     until=_T0 - timedelta(hours=1),
+                     until_confidence="EXACT", source="test", now=_T0)
+    est_exp = estimate(db3, "codex", "weekly", now=_T0,
+                       window_kinds=_kinds(("codex", "weekly", "UNKNOWN")))
+    assert est_exp.remaining_est == 80.0
+    assert est_exp.source == "OWNER"
+
+
+# L8: per-pool ALL fallback; neither -> None + stale.
+def test_l8_fallback_to_all(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    record_owner_quota(db, "x", "my-pool", 44.0, None,
+                       source="OWNER", now=_T0)
+    kinds = _kinds(("my-pool", "5h", "UNKNOWN"))
+    est = estimate(db, "my-pool", "5h", now=_T0 + timedelta(minutes=1),
+                   window_kinds=kinds)
+    assert est.remaining_est == 44.0
+    assert est.source == "OWNER"
+    missing = estimate(db, "other-pool", "5h", now=_T0 + timedelta(minutes=1),
+                       window_kinds={("other-pool", "5h"): "UNKNOWN"})
+    assert missing.remaining_est is None
+    assert missing.stale is True
+    assert missing.source is None
+    assert missing.observed_at is None
+
+
+# L9: reservation lifecycle.
+def test_l9_reservations(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    first = reserve(db, run_id="run-1", route="codex/gpt-5",
+                    draws=[PoolDraw("codex", "weekly"),
+                           PoolDraw("codex", "daily", 2.0)],
+                    size_bucket=SizeBucket.M, now=_T0)
+    assert len(first) == 2
+    again = reserve(db, run_id="run-1", route="codex/gpt-5",
+                    draws=[PoolDraw("codex", "weekly"),
+                           PoolDraw("codex", "daily", 2.0)],
+                    size_bucket=SizeBucket.M, now=_T0)
+    assert [r.id for r in again] == [r.id for r in first]
+    assert settle(db, "run-1", total_tokens=500, now=_T0) == 2
+    assert settle(db, "run-1", total_tokens=500, now=_T0) == 0
+    assert settle(db, "nope", total_tokens=None, now=_T0) == 0
+    assert release(db, "nope", now=_T0) == 0
+    reserve(db, run_id="run-2", route="codex/gpt-5",
+            draws=[PoolDraw("codex", "weekly")],
+            size_bucket=SizeBucket.S, now=_T0)
+    assert release(db, "run-2", now=_T0) == 1
+    assert release(db, "run-2", now=_T0) == 0
+
+
+def test_l9_job_id_opaque_round_trip(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    rows = reserve(db, run_id="run-j1", job_id=None, route="codex/gpt-5",
+                   draws=[PoolDraw("codex", "weekly")],
+                   size_bucket=SizeBucket.S, now=_T0)
+    assert rows[0].job_id is None
+    rows2 = reserve(db, run_id="run-j2", job_id="job-abc-123::opaque",
+                    route="codex/gpt-5",
+                    draws=[PoolDraw("codex", "weekly")],
+                    size_bucket=SizeBucket.S, now=_T0)
+    assert rows2[0].job_id == "job-abc-123::opaque"
+
+
+# L11: snapshot shape and LedgerEstimate contract.
+def test_l11_snapshot(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    record_owner_quota(db, "codex", "weekly", 70.0, None,
+                       source="OWNER", now=_T0)
+    reserve(db, run_id="run-s", route="opencode/gpt-5",
+            draws=[PoolDraw("go-pool", "monthly")],
+            size_bucket=SizeBucket.S, now=_T0)
+    from saberops.capacity.store import upsert_exclusion
+
+    upsert_exclusion(db, pool_id="exc-pool", window_id="ALL",
+                     reason="QUOTA_EXHAUSTED",
+                     until=_T0 + timedelta(hours=1),
+                     until_confidence="EXACT", source="test", now=_T0)
+    got = {(e.pool_id, e.window_id) for e in snapshot(db, _T0)}
+    assert got == {("codex", "weekly"), ("go-pool", "monthly"),
+                   ("exc-pool", "ALL")}
+    fields = dataclasses.fields(snapshot(db, _T0)[0].__class__)
+    assert [f.name for f in fields] == [
+        "pool_id", "window_id", "remaining_est", "uncertainty",
+        "observed_at", "source", "stale", "excluded_until",
+    ]
+    assert [f.type for f in fields] == [
+        "str", "str", "float | None", "float",
+        "str | None", "str | None", "bool", "str | None",
+    ]
