@@ -466,9 +466,10 @@ def _record_quota_exhaustion_evidence(
         reset_at = None
     try:
         try:
+            from saberops.control_plane.plans import effective_quota_pools
             from saberops.control_plane.policy import load_control_plane_policy
 
-            pool_policies = dict(load_control_plane_policy().quota_pools)
+            pool_policies = effective_quota_pools(load_control_plane_policy())
         except Exception:
             pool_policies = None
         state = record_exhaustion(

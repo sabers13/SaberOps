@@ -445,9 +445,10 @@ class OrchestratorService:
 
             provider_norm = provider.strip().lower()
             try:
+                from saberops.control_plane.plans import effective_quota_pools
                 from saberops.control_plane.policy import load_control_plane_policy
 
-                policies = dict(load_control_plane_policy().quota_pools)
+                policies = effective_quota_pools(load_control_plane_policy())
             except Exception:
                 policies = {}
             cleared_any = False

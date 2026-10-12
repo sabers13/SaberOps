@@ -19,11 +19,17 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from saberops.control_plane.quota_policy import QuotaPoolMode, QuotaPoolPolicy
+
+if TYPE_CHECKING:
+    from saberops.control_plane.policy import ControlPlanePolicy
+
 
 WINDOW_IDS: frozenset[str] = frozenset(
     {"5h", "daily", "weekly", "monthly", "session", "app-weekly"}
@@ -612,3 +618,29 @@ def load_effective_plan_set() -> tuple[PlanSet, dict[str, Any]]:
     except ValueError as exc:
         raise ValueError(f"Effective plans: {exc}") from exc
     return plans, sources
+
+
+def effective_quota_pools(policy: ControlPlanePolicy) -> dict[str, QuotaPoolPolicy]:
+    """Resolve membership without changing the owner policy or frozen digests.
+
+    Owner quota entries win by id. Packaged plans supply otherwise missing
+    pools; owner plan data travels with the supplied policy, never a live read.
+    Overage evidence enforcement remains deferred to M2-4b.
+    """
+    plans = validate_plan_sections(load_packaged_plans_raw(), "packaged plans", packaged=True)
+    pool_plans = dict(plans.pool_plans)
+    pool_plans.update(policy.plans.pool_plans)
+    pools = {
+        pool_id: QuotaPoolPolicy(
+            pool_id=pool_id,
+            members=tuple(member.route for member in plan.members),
+            mode=QuotaPoolMode(plan.mode),
+            red_line_pct=plan.red_line_pct,
+        )
+        for pool_id, plan in pool_plans.items()
+    }
+    pools.update({
+        pool_id: replace(pool, overage_possible=False)
+        for pool_id, pool in policy.quota_pools.items()
+    })
+    return pools

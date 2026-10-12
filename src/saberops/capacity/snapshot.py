@@ -25,9 +25,10 @@ def _utcnow(now: datetime | None) -> datetime:
 def _load_pool_policies() -> dict[str, Any]:
     """Best-effort control-plane pool policies for the no-probe path."""
     try:
+        from saberops.control_plane.plans import effective_quota_pools
         from saberops.control_plane.policy import load_control_plane_policy
 
-        return dict(load_control_plane_policy().quota_pools)
+        return effective_quota_pools(load_control_plane_policy())
     except Exception:
         return {}
 

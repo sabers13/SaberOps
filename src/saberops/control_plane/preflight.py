@@ -12,6 +12,7 @@ from saberops.control_plane.capabilities import (
     capability_profile_for,
     normalize_required_capabilities,
 )
+from saberops.control_plane.plans import effective_quota_pools
 from saberops.control_plane.policy import (
     ControlPlanePolicy,
     ProviderPolicyState,
@@ -210,7 +211,7 @@ def evaluate_control_plane(
     quota = quota_decision(
         candidate,
         quota_states,
-        pool_policies=effective_policy.quota_pools,
+        pool_policies=effective_quota_pools(effective_policy),
         reserve_override=reserve_override,
         pool_id=binding_pool_id,
     )

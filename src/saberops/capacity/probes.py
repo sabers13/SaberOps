@@ -236,7 +236,16 @@ def pools_for_probe(
                 continue
             text = sel.strip().lower()
             prov = provider.lower()
-            if text == prov or text.startswith(prov + "/"):
+            if harness == "opencode-go":
+                # Go usage covers Go routes, not every OpenCode upstream.
+                prefix = prov + "/opencode-go"
+                hit = (
+                    text == prov or text == prefix or text == prefix + "/*"
+                    or text.startswith(prefix + "/")
+                )
+            else:
+                hit = text == prov or text.startswith(prov + "/")
+            if hit:
                 matched.append(pool_id)
                 break
     return matched or [provider]
@@ -244,9 +253,10 @@ def pools_for_probe(
 
 def _load_pool_policies() -> dict[str, Any]:
     try:
+        from saberops.control_plane.plans import effective_quota_pools
         from saberops.control_plane.policy import load_control_plane_policy
 
-        return dict(load_control_plane_policy().quota_pools)
+        return effective_quota_pools(load_control_plane_policy())
     except Exception:
         return {}
 
