@@ -169,3 +169,42 @@ def test_zero_creates_exclusion_positive_clears(tmp_path: Path) -> None:
     assert list_active_exclusions(db, now=now + timedelta(minutes=11)) == []
     # Probe observations + red-line rows are written.
     assert db.list_quota() != []
+
+
+def test_no_policies_claude_zero_denies_anthropic(tmp_path: Path) -> None:
+    """No policies: a Claude 0% probe must exclude provider anthropic."""
+    from saberops.capacity.snapshot import effective_quota_states
+    from saberops.control_plane.quota_policy import quota_decision
+    from saberops.models import WorkerCandidate
+
+    db = _db(tmp_path)
+    now = datetime(2026, 10, 11, 12, 0, tzinfo=UTC)
+    handle_probe_result(
+        db, harness="claude", windows=[("weekly", 0.0, now + timedelta(hours=1), "EXACT")],
+        now=now, pool_policies=None,
+    )
+    states = effective_quota_states(db, now=now, run_probes=False)
+    cand = WorkerCandidate(provider="anthropic", model="sonnet-4")
+    decision = quota_decision(cand, states)
+    assert decision.eligible is False
+    assert decision.reason == "QUOTA_EXCLUDED_UNTIL_RESET"
+
+
+def test_no_policies_go_zero_denies_opencode(tmp_path: Path) -> None:
+    """No policies: an opencode-go 0% probe must exclude provider opencode."""
+    from saberops.capacity.snapshot import effective_quota_states
+    from saberops.control_plane.quota_policy import quota_decision
+    from saberops.models import WorkerCandidate
+
+    db = _db(tmp_path)
+    now = datetime(2026, 10, 11, 12, 0, tzinfo=UTC)
+    handle_probe_result(
+        db, harness="opencode-go",
+        windows=[("weekly", 0.0, now + timedelta(hours=1), "EXACT")],
+        now=now, pool_policies=None,
+    )
+    states = effective_quota_states(db, now=now, run_probes=False)
+    cand = WorkerCandidate(provider="opencode", model="opencode-go/model-x")
+    decision = quota_decision(cand, states)
+    assert decision.eligible is False
+    assert decision.reason == "QUOTA_EXCLUDED_UNTIL_RESET"

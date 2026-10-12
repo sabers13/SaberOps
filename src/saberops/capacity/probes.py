@@ -213,10 +213,18 @@ _READERS = {
 def pools_for_probe(
     harness: str, pool_policies: dict[str, Any] | None
 ) -> list[str]:
-    """Pools whose members match the harness's routes, else [harness]."""
+    """Pools whose members match the harness's routes, else [provider].
+
+    The fallback is the harness's provider (``HARNESS_PROVIDER``), matching
+    :func:`saberops.control_plane.quota_policy.pools_for`, which resolves
+    candidates to ``[provider]`` when no policy matches. Falling back to the
+    raw harness id (e.g. ``claude``) would write exclusions no candidate ever
+    checks (candidates use provider names like ``anthropic``). The exclusion
+    ``source`` stays the harness id.
+    """
     provider = HARNESS_PROVIDER.get(harness, harness)
     if not pool_policies:
-        return [harness]
+        return [provider]
     matched: list[str] = []
     for pool_id, policy in pool_policies.items():
         members = getattr(policy, "members", ()) or ()
@@ -229,7 +237,7 @@ def pools_for_probe(
             if text == prov or text.startswith(prov + "/"):
                 matched.append(pool_id)
                 break
-    return matched or [harness]
+    return matched or [provider]
 
 
 def _load_pool_policies() -> dict[str, Any]:
