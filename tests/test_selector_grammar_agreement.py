@@ -107,22 +107,75 @@ def test_packaged_go_zero_probe_does_not_exclude_zen(
         ).eligible is eligible
 
 
-def test_clinepass_unknown_pool_kept_after_backoff(
+def test_clinepass_route_clears_after_backoff_until_m2_4b(
+    tmp_path: Path, packaged_policy: ControlPlanePolicy,
+) -> None:
+    # Interim behaviour while every effective pool has overage_possible=False;
+    # it flips to "kept" when M2-4b activates the evidence rule. (Orchestrator
+    # decision 2026-10-12: safe, because the Cline credit balance is $0 and
+    # ClinePass exhaustion is a hard stop.)
+    db = Database(tmp_path / "capacity.db")
+    pools = effective_quota_pools(packaged_policy)
+    now = datetime.now(UTC)
+    record_exhaustion(
+        db, provider="cline", model="cline-pass/test-model", pool_policies=pools
+    )
+    candidate = WorkerCandidate(provider="cline", model="cline-pass/test-model")
+    early = effective_quota_states(db, now=now, run_probes=False)
+    assert any(
+        state.exclusion_id and state.pool_id == "clinepass" for state in early
+    )
+    assert not quota_decision(
+        candidate, early, pool_policies=pools, now=now,
+    ).eligible
+    later = now + timedelta(days=2)
+    cleared = effective_quota_states(db, now=later, run_probes=False)
+    assert [
+        state for state in cleared if getattr(state, "exclusion_id", None)
+    ] == []
+    assert quota_decision(
+        candidate, cleared, pool_policies=pools, now=later,
+    ).eligible
+
+
+def test_packaged_codex_ten_pct_red_line_shared_pool(
     tmp_path: Path, packaged_policy: ControlPlanePolicy,
 ) -> None:
     db = Database(tmp_path / "capacity.db")
     pools = effective_quota_pools(packaged_policy)
     now = datetime.now(UTC)
-    # Provider-only exhaustion cannot resolve the ClinePass route selector:
-    # no known policy for the fallback "cline" pool, so it stays fail-closed.
-    record_exhaustion(db, provider="cline", pool_policies=pools)
-    later = now + timedelta(days=2)
-    states = effective_quota_states(db, now=later, run_probes=False)
-    assert any(state.exclusion_id and state.pool_id == "cline" for state in states)
-    assert not quota_decision(
-        WorkerCandidate(provider="cline", model="unknown-model"), states,
-        pool_policies=pools, now=later,
+    handle_probe_result(
+        db, harness="codex", windows=[("5h", 10.0, None, "UNKNOWN")],
+        now=now, pool_policies=pools,
+    )
+    states = effective_quota_states(db, now=now, run_probes=False)
+    denied = [
+        WorkerCandidate(provider="codex", model="gpt-x"),
+        WorkerCandidate(provider="opencode", model="openai/gpt-x"),
+    ]
+    for candidate in denied:
+        assert not quota_decision(
+            candidate, states, pool_policies=pools, now=now,
+        ).eligible
+    assert quota_decision(
+        WorkerCandidate(provider="opencode", model="opencode-go/deepseek-v4-pro"),
+        states, pool_policies=pools, now=now,
     ).eligible
+
+
+def test_probe_no_membership_writes_provider_labelled_row(
+    tmp_path: Path,
+) -> None:
+    db = Database(tmp_path / "capacity.db")
+    now = datetime.now(UTC)
+    handle_probe_result(
+        db, harness="claude", windows=[("weekly", 0.0, None, "UNKNOWN")],
+        now=now, pool_policies={},
+    )
+    rows = db.list_quota()
+    assert len(rows) == 1
+    assert rows[0].provider == "anthropic"
+    assert rows[0].pool == "anthropic"
 
 
 def test_owner_pool_overrides_plan_and_overage_is_deferred(
