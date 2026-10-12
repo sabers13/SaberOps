@@ -1,0 +1,75 @@
+"""Attribution against tiny local branches; fake tests are never executed."""
+
+from __future__ import annotations
+
+import importlib.util
+import subprocess
+import sys
+from pathlib import Path
+from types import ModuleType
+
+
+def load(name: str) -> ModuleType:
+    spec = importlib.util.spec_from_file_location(
+        name, Path(__file__).resolve().parents[1] / "scripts" / f"{name}.py"
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+load("select_tests")
+load("gate_tools")
+a = load("attribute_failures")
+
+
+def git(repo: Path, *args: str) -> str:
+    return subprocess.check_output(["git", *args], cwd=repo, text=True).strip()
+
+
+def test_branches_and_attribution(tmp_path: Path) -> None:
+    git(tmp_path, "init", "-q")
+    git(tmp_path, "config", "user.email", "test@example.invalid")
+    git(tmp_path, "config", "user.name", "Test")
+    (tmp_path / "src/fake").mkdir(parents=True)
+    (tmp_path / "src/fake/core.py").write_text("VALUE = 1\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests/test_core.py").write_text("from fake.core import VALUE\n")
+    (tmp_path / "tests/test_other.py").write_text("def test_other(): pass\n")
+    git(tmp_path, "add", ".")
+    git(tmp_path, "commit", "-qm", "base")
+    base = git(tmp_path, "rev-parse", "HEAD")
+    git(tmp_path, "checkout", "-qb", "lane-a")
+    (tmp_path / "src/fake/core.py").write_text("VALUE = 2\n")
+    git(tmp_path, "commit", "-qam", "core change")
+    git(tmp_path, "checkout", "-qb", "lane-b", base)
+    (tmp_path / "tests/test_core.py").write_text("from fake.core import VALUE\n# modified\n")
+    git(tmp_path, "commit", "-qam", "test change")
+    before = git(tmp_path, "rev-parse", "HEAD")
+    lanes = {
+        name: a.lane_evidence(tmp_path, base, branch)
+        for name, branch in [("A", "lane-a"), ("B", "lane-b")]
+    }
+    assert git(tmp_path, "rev-parse", "HEAD") == before
+    node = "tests/test_core.py::test_value"
+    error = {node: "src/fake/core.py:1: AssertionError"}
+    high = a.attribute([node], {"A": lanes["A"]}, error)
+    assert "A (high confidence)" in high and "selects, traceback" in high
+    interaction = a.attribute([node], lanes, error)
+    assert "interaction" in interaction and "owns-test" in interaction
+    low = a.attribute([node], {"B": lanes["B"]}, {})
+    assert "high confidence" in low and "owns-test" in low
+    unknown = a.attribute(["tests/test_other.py::test_other"], lanes, {})
+    assert "unattributed" in unknown
+    lint = a.attribute([], lanes, {}, "src/fake/core.py:1: error: incompatible type")
+    assert "## A" in lint and "incompatible type" in lint
+
+
+def test_single_signal_and_ruff_location() -> None:
+    node = "tests/test_a.py::test_a"
+    lanes = {"A": ({"src/pkg/a.py"}, {node}, False)}
+    text = a.attribute([node], lanes, {}, "F821 Undefined name `missing`\n  --> src/pkg/a.py:2:1")
+    assert "A (low confidence)" in text
+    assert "lint/type `src/pkg/a.py`" in text and "F821" in text
