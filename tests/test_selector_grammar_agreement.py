@@ -21,7 +21,7 @@ from saberops.control_plane.quota_policy import (
     quota_decision,
 )
 from saberops.db import Database
-from saberops.models import QuotaState, WorkerCandidate
+from saberops.models import QuotaState, RoutingState, WorkerCandidate
 from saberops.workers.exhaustion import record_exhaustion
 
 
@@ -39,7 +39,10 @@ from saberops.workers.exhaustion import record_exhaustion
 def test_selector_grammar_agreement(selector: str, candidate: WorkerCandidate) -> None:
     normalized = validate_selector(selector, "quota_pools.sample.members")
     policy = QuotaPoolPolicy(pool_id="sample", members=(normalized,))
-    state = QuotaState(provider="opencode", pool="sample", remaining_percent=50)
+    state = QuotaState(
+        provider="opencode", pool="sample", remaining_percent=50, reset_at=None,
+        routing_state=RoutingState.NORMAL, updated_at="2026-10-12T12:00:00+00:00",
+    )
     assert _matches(state, candidate, policy) == match_route_selector(
         normalized, candidate.provider, candidate.model
     )
@@ -130,7 +133,7 @@ def test_owner_pool_overrides_plan_and_overage_is_deferred(
         mode=QuotaPoolMode.RESERVE, red_line_pct=23, overage_possible=True,
     )
     policy = ControlPlanePolicy(
-        packaged_policy.providers, {owner.pool_id: owner},
+        packaged_policy.provider_policies, {owner.pool_id: owner},
         packaged_policy.content_hash, packaged_policy.plans,
     )
     pools = effective_quota_pools(policy)
