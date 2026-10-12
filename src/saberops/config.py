@@ -13,6 +13,7 @@ from saberops.control_plane.capabilities import (
     Capability,
     normalize_required_capabilities,
 )
+from saberops.jobs.models import JobRole
 from saberops.models import GateScratchMode, ReviewPolicyMode, Tier
 from saberops.tooling.contracts import validate_logical_ref
 
@@ -20,16 +21,16 @@ RoutingMode = Literal["auto", "manual"]
 ReviewMode = Literal["bounded", "max"]
 
 _TIER_ORDER: tuple[Tier, ...] = (Tier.T1, Tier.T2, Tier.T3)
-# Bounded default worker execution.  These tier defaults are the
+# Bounded default worker execution. These per-role defaults are the
 # hard absolute deadline applied to every worker dispatch unless the owner
 # explicitly supplies ``--worker-timeout`` (which remains authoritative).
-# They match the CLI ``--worker-timeout`` help contract (T1=600, T2=1200,
-# T3=1800) so runtime behavior and documented behavior share this one
-# table as their single source of truth.
-TIER_WORKER_TIMEOUTS: dict[Tier, float] = {
-    Tier.T1: 600.0,
-    Tier.T2: 1200.0,
-    Tier.T3: 1800.0,
+# WORKER/INTEGRATOR keep the old T2 default (1200s); SURGEON keeps the old
+# T3 default (1800s) so Surgeon output keeps today's top-tier review risk
+# budget (ADR-0002 §11).
+ROLE_WORKER_TIMEOUTS: dict[JobRole, float] = {
+    JobRole.WORKER: 1200.0,
+    JobRole.SURGEON: 1800.0,
+    JobRole.INTEGRATOR: 1200.0,
 }
 
 # Soft inactivity expectation (seconds of quiet provider output before the
@@ -46,36 +47,22 @@ DEFAULT_REVIEW_LIMIT: int = 3
 _REVIEW_MODES: tuple[str, ...] = ("bounded", "max")
 
 
-def tier_worker_timeout(tier: Tier) -> float:
-    """Return the default hard deadline for a concrete routing tier.
+def role_worker_timeout(role: JobRole | str) -> float:
+    """Return the default hard deadline for a concrete routing role.
 
     This IS a termination boundary: unless the owner supplied an
-    explicit ``--worker-timeout``, a worker dispatched at ``tier`` is
+    explicit ``--worker-timeout``, a worker dispatched on ``role`` is
     terminated through the fenced process-group mechanism once it exceeds
     this duration, and the attempt is classified TIMEOUT.  The soft
     inactivity expectation (``WORKER_INACTIVITY_TIMEOUT``) remains a
     monitoring/reporting signal only and never terminates a worker.
     """
-    return TIER_WORKER_TIMEOUTS[tier]
-
-
-def timeout_defaults() -> dict[str, float]:
-    """Return the canonical tier-aware timeout defaults as a flat mapping.
-
-    This is the single source of truth for the worker-tier ladder (T1/T2/T3)
-    plus the gate and review defaults. Both :func:`resolve_run_config` (via
-    :func:`tier_worker_timeout` and the module default constants) and the
-    dashboard's effective-timeout panel derive their numbers from this table,
-    so the values are never duplicated elsewhere.
-    """
-    return {
-        Tier.T1.value: TIER_WORKER_TIMEOUTS[Tier.T1],
-        Tier.T2.value: TIER_WORKER_TIMEOUTS[Tier.T2],
-        Tier.T3.value: TIER_WORKER_TIMEOUTS[Tier.T3],
-        "gate": DEFAULT_GATE_TIMEOUT,
-        "review": DEFAULT_REVIEW_TIMEOUT,
-        "worker_inactivity": WORKER_INACTIVITY_TIMEOUT,
-    }
+    key = role if isinstance(role, JobRole) else JobRole(str(role).strip().upper())
+    if key not in (JobRole.WORKER, JobRole.SURGEON, JobRole.INTEGRATOR):
+        raise ValueError(
+            f"no worker timeout for role {str(role)!r}: expected a routed role"
+        )
+    return ROLE_WORKER_TIMEOUTS[key]
 
 
 def cap_tier(tier: Tier, maximum: Tier) -> Tier:
@@ -180,11 +167,25 @@ class RunConfig:
         return cap_tier(classify_task_tier(self.task).tier, self.max_auto_tier)
 
     @property
+    def initial_role(self) -> JobRole:
+        """Return the routing role the run starts on (ADR-0002 §11).
+
+        SURGEON iff the run is manual with ``manual_tier == T3`` (the old
+        T3 chain is exactly the SURGEON chain), else WORKER. Manual runs
+        never escalate; auto runs start on WORKER and may escalate once
+        to SURGEON. No new persisted config field: this derives from the
+        frozen ``manual_tier``/``max_auto_tier`` back-compat fields.
+        """
+        if self.routing_mode == "manual" and self.manual_tier == Tier.T3:
+            return JobRole.SURGEON
+        return JobRole.WORKER
+
+    @property
     def has_worker_deadline(self) -> bool:
         """True when the owner explicitly supplied an absolute runtime budget.
 
         A tier-derived default is still a deadline (see
-        :meth:`worker_timeout_for`); this flag only reports whether the
+        :meth:`worker_timeout_for_role`); this flag only reports whether the
         owner overrode it explicitly.
         """
         return (
@@ -193,20 +194,20 @@ class RunConfig:
             and self.worker_timeout > 0
         )
 
-    def worker_timeout_for(self, tier: Tier) -> float:
-        """Return the effective hard deadline for a worker dispatched at ``tier``.
+    def worker_timeout_for_role(self, role: JobRole | str) -> float:
+        """Return the effective hard deadline for a worker dispatched on ``role``.
 
         When the owner supplied an explicit ``--worker-timeout``, that value
-        is authoritative regardless of tier.  Otherwise the tier default
-        from :data:`TIER_WORKER_TIMEOUTS` applies: normal runs are
+        is authoritative regardless of role.  Otherwise the role default
+        from :data:`ROLE_WORKER_TIMEOUTS` applies: normal runs are
         always bounded and never depend on the monitor lifecycle alone.
-        A degenerate non-positive explicit value falls back to the tier
+        A degenerate non-positive explicit value falls back to the role
         default rather than leaving the run unbounded.
         """
         if self.has_worker_deadline:
             assert self.worker_timeout is not None
             return self.worker_timeout
-        return tier_worker_timeout(tier)
+        return role_worker_timeout(role)
 
     def as_dict(self) -> dict[str, object]:
         """Serialize enums into JSON-compatible values for durable run events."""

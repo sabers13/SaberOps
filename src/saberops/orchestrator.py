@@ -72,7 +72,7 @@ from saberops.dispatch import (
     build_skip_payload,
     evaluate_eligibility,
     format_no_eligible_summary,
-    routing_context_for,
+    routing_context_for_role,
 )
 from saberops.dispatch import control_plane_decision as control_plane_decision
 from saberops.execution_failover import FailoverEngine
@@ -82,6 +82,7 @@ from saberops.git import (
     GitManager,
     assert_repository_at_revision,
 )
+from saberops.jobs.models import JobRole
 from saberops.models import (
     Attempt,
     AttemptStatus,
@@ -2070,6 +2071,7 @@ class Orchestrator:
         created_at = current_iso_timestamp()
 
         current_tier = config.initial_tier
+        current_role = config.initial_role
         routing_snapshot = None
         routing_payload: dict[str, Any] | None = None
         frozen_control_plane: FrozenControlPlane
@@ -2679,7 +2681,7 @@ class Orchestrator:
             except Exception:
                 quota_states = self.db.list_quota()
             base_candidates = resolve_candidate_chain(
-                tier=current_tier,
+                role=current_role,
                 training_allowed=config.training_allowed,
                 is_peak=is_peak,
                 model_override=config.model_override,
@@ -2721,16 +2723,15 @@ class Orchestrator:
             # attempts stay durable in ``attempts`` while the terminal
             # facts stay chain-local.
             chain_attempt_start: int = 0
-            selected_routing_context = routing_context_for(
-                current_tier.value,
-                training_allowed=config.training_allowed,
-                is_peak=bool(is_peak),
-            )
+            selected_routing_context = routing_context_for_role(current_role)
             self.db.record_event(
                 run_id,
                 "tier_candidates_resolved",
                 payload={
                     "tier": current_tier.value,
+                    "role": current_role.value
+                    if isinstance(current_role, JobRole)
+                    else str(current_role),
                     "routing_context": selected_routing_context,
                     "candidates": [
                         {"provider": c.provider, "model": c.model} for c in base_candidates
@@ -3065,11 +3066,16 @@ class Orchestrator:
                     and candidate_idx >= len(candidates)
                     and supervisor is None
                 ):
-                    tier_order = (Tier.T1, Tier.T2, Tier.T3)
+                    # Escalation is one step Worker → Surgeon (ADR-0002 §11):
+                    # allowed only on the WORKER chain, under today's
+                    # evidence rule (CAPABILITY_FAILURE only) and today's
+                    # autonomous-supervisor rule. A run on the SURGEON
+                    # chain never escalates further.
                     ceiling_allows_escalation = (
                         config.routing_mode == "auto"
                         and config.model_override is None
-                        and tier_order.index(current_tier) < tier_order.index(config.max_auto_tier)
+                        and current_role == JobRole.WORKER
+                        and config.max_auto_tier == Tier.T3
                     )
                     # Exhausting the attempt budget or candidate ladder is
                     # necessary but not sufficient to escalate: it must also
@@ -3155,7 +3161,9 @@ class Orchestrator:
                             )
                         break
                     prior_tier = current_tier
-                    current_tier = tier_order[tier_order.index(current_tier) + 1]
+                    prior_role = current_role
+                    current_role = JobRole.SURGEON
+                    current_tier = Tier.T3
                     self.db.update_run_tier(run_id, current_tier)
                     assert escalation_outcome is not None
                     assert escalation_stage is not None
@@ -3182,6 +3190,12 @@ class Orchestrator:
                         payload={
                             "from": prior_tier.value,
                             "to": current_tier.value,
+                            "from_role": prior_role.value
+                            if isinstance(prior_role, JobRole)
+                            else str(prior_role),
+                            "to_role": current_role.value
+                            if isinstance(current_role, JobRole)
+                            else str(current_role),
                             "stage": tier_decision.stage.value,
                             "package_id": tier_decision.package_id,
                             "escalation_reason": escalation_outcome.value,
@@ -3197,23 +3211,22 @@ class Orchestrator:
                     except Exception:
                         quota_states = self.db.list_quota()
                     base_candidates = resolve_candidate_chain(
-                        tier=current_tier,
+                        role=current_role,
                         training_allowed=config.training_allowed,
                         is_peak=is_peak,
                         provider_override=config.provider_override,
                         snapshot=routing_snapshot,
                     )
                     candidates = list(base_candidates)
-                    selected_routing_context = routing_context_for(
-                        current_tier.value,
-                        training_allowed=config.training_allowed,
-                        is_peak=bool(is_peak),
-                    )
+                    selected_routing_context = routing_context_for_role(current_role)
                     self.db.record_event(
                         run_id,
                         "tier_candidates_resolved",
                         payload={
                             "tier": current_tier.value,
+                            "role": current_role.value
+                            if isinstance(current_role, JobRole)
+                            else str(current_role),
                             "routing_context": selected_routing_context,
                             "candidates": [
                                 {"provider": c.provider, "model": c.model} for c in base_candidates
@@ -4516,9 +4529,9 @@ class Orchestrator:
                 assert adapter is not None
                 # Every worker dispatch is bounded.  The effective
                 # timeout is the explicit owner value when supplied, else
-                # the tier default -- a single source of truth
-                # (RunConfig.worker_timeout_for), never an unbounded sentinel.
-                worker_timeout_seconds = config.worker_timeout_for(current_tier)
+                # the role default -- a single source of truth
+                # (RunConfig.worker_timeout_for_role), never an unbounded sentinel.
+                worker_timeout_seconds = config.worker_timeout_for_role(current_role)
                 deadline_iso = (
                     datetime.now(UTC) + timedelta(seconds=worker_timeout_seconds)
                 ).isoformat()
@@ -5373,6 +5386,7 @@ class Orchestrator:
                                     package=next_package,
                                 )
                                 current_tier = tier_decision.effective_tier
+                                current_role = config.initial_role
                                 self.db.update_run_tier(run_id, current_tier)
                                 self.db.record_event(
                                     run_id,
@@ -5397,7 +5411,7 @@ class Orchestrator:
                                 except Exception:
                                     quota_states = self.db.list_quota()
                                 base_candidates = resolve_candidate_chain(
-                                    tier=current_tier,
+                                    role=current_role,
                                     training_allowed=config.training_allowed,
                                     is_peak=is_peak,
                                     model_override=config.model_override,
@@ -5405,16 +5419,15 @@ class Orchestrator:
                                     snapshot=routing_snapshot,
                                 )
                                 candidates = list(base_candidates)
-                                selected_routing_context = routing_context_for(
-                                    current_tier.value,
-                                    training_allowed=config.training_allowed,
-                                    is_peak=bool(is_peak),
-                                )
+                                selected_routing_context = routing_context_for_role(current_role)
                                 self.db.record_event(
                                     run_id,
                                     "tier_candidates_resolved",
                                     payload={
                                         "tier": current_tier.value,
+                                        "role": current_role.value
+                                        if isinstance(current_role, JobRole)
+                                        else str(current_role),
                                         "routing_context": selected_routing_context,
                                         "package_id": tier_decision.package_id,
                                         "candidates": [
@@ -5733,7 +5746,7 @@ class Orchestrator:
                                     except Exception:
                                         quota_states_rep = self.db.list_quota()
                                     base_repair_candidates = resolve_candidate_chain(
-                                        tier=cur_tier,
+                                        role=JobRole.WORKER,
                                         training_allowed=config.training_allowed,
                                         is_peak=is_peak,
                                         model_override=config.model_override,
@@ -6075,8 +6088,8 @@ class Orchestrator:
                                     # Repair dispatches share the same
                                     # bounded effective timeout as primary
                                     # dispatches (explicit owner value, else
-                                    # the tier default).
-                                    rep_timeout_sec = config.worker_timeout_for(cur_tier)
+                                    # the WORKER role default).
+                                    rep_timeout_sec = config.worker_timeout_for_role(JobRole.WORKER)
                                     rep_deadline = (
                                         datetime.now(UTC) + timedelta(seconds=rep_timeout_sec)
                                     ).isoformat()

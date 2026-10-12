@@ -393,7 +393,7 @@ class OrchestratorService:
         return self.orchestrator.cleanup_run(run_id=run_id)
 
     def list_models(self) -> dict[str, Any]:
-        """Return the three model routing tiers and quota states."""
+        """Return the role routing chains and quota states."""
         try:
             from saberops.capacity.snapshot import effective_quota_states
 
@@ -403,11 +403,31 @@ class OrchestratorService:
         snap = load_effective_routing()
         return {
             "quota_states": quota_states,
-            "tier_1_chain": snap.t1_default,
-            "tier_2_chain": snap.chain_for("T2", True, False),
-            "tier_3_chain": snap.chain_for("T3", True, False),
+            "role_chains": {
+                role: snap.chain_for_role(role) for role in ("WORKER", "SURGEON", "INTEGRATOR")
+            },
             "routing_snapshot": snap,
         }
+
+    def run_routing_role(self, run_id: str) -> str:
+        """Return the routing role of the newest ``tier_candidates_resolved`` event.
+
+        A run with no such role (all runs before R-002) reports
+        ``"LEGACY:<tier>"``. Read-only; no DB schema change.
+        """
+        run = self.db.get_run(run_id)
+        if run is None:
+            raise RunOperationError("RUN_NOT_FOUND", f"Run not found: {run_id}")
+        newest_role: str | None = None
+        for event in self.db.get_events_by_type(run_id, "tier_candidates_resolved"):
+            payload = event.payload
+            if isinstance(payload, dict):
+                role = payload.get("role")
+                if isinstance(role, str) and role.strip():
+                    newest_role = role.strip().upper()
+        if newest_role is not None:
+            return newest_role
+        return f"LEGACY:{run.tier.value}"
 
     def get_quota(self, provider: str, pool: str) -> QuotaState | None:
         """Fetch quota state for a provider pool."""
@@ -909,7 +929,16 @@ class OrchestratorService:
         )
         try:
             snapshot = load_effective_routing()
-            candidates = resolve_candidate_chain(tier=run.tier, snapshot=snapshot)
+            role = self.run_routing_role(run_id)
+            if role.startswith("LEGACY:"):
+                # A run from before R-002: the deprecated alias maps its
+                # tier label onto today's role chains (T3 → SURGEON).
+                from saberops.models import Tier as _Tier
+
+                tier = _Tier(role.split(":", 1)[1])
+                candidates = resolve_candidate_chain(tier=tier, snapshot=snapshot)
+            else:
+                candidates = resolve_candidate_chain(role=role, snapshot=snapshot)
         except ValueError as exc:
             raise RunOperationError(
                 "ROUTING_UNAVAILABLE",
