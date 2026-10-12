@@ -146,3 +146,51 @@ def test_log_without_ruff_mypy_sections_skips_lint_type() -> None:
     assert "- lint/type" not in text
     assert "## notes" in text
     assert "gate log has no ruff/mypy sections; lint/type attribution skipped" in text
+
+
+def test_fix_lane_with_fork(tmp_path: Path) -> None:
+    git(tmp_path, "init", "-q")
+    git(tmp_path, "config", "user.email", "test@example.invalid")
+    git(tmp_path, "config", "user.name", "Test")
+    (tmp_path / "src/fake").mkdir(parents=True)
+    (tmp_path / "src/fake/core.py").write_text("VALUE = 1\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests/test_core.py").write_text("def test_core(): pass\n")
+    git(tmp_path, "add", ".")
+    git(tmp_path, "commit", "-qm", "base")
+    base = git(tmp_path, "rev-parse", "HEAD")
+    git(tmp_path, "checkout", "-qb", "integration")
+    (tmp_path / "src/fake/core.py").write_text("VALUE = 2\n")
+    git(tmp_path, "commit", "-qam", "integration change")
+    fork = git(tmp_path, "rev-parse", "HEAD")
+    git(tmp_path, "checkout", "-qb", "fix-branch")
+    (tmp_path / "src/fake/fix.py").write_text("FIX = 1\n")
+    git(tmp_path, "add", ".")
+    git(tmp_path, "commit", "-qm", "fix change")
+    changed, _, _ = a.lane_evidence(tmp_path, base, "fix-branch", fork)
+    assert changed == {"src/fake/fix.py"}
+    changed_base, _, _ = a.lane_evidence(tmp_path, base, "fix-branch")
+    assert changed_base == {"src/fake/core.py", "src/fake/fix.py"}
+    git(tmp_path, "checkout", "-qb", "other", base)
+    (tmp_path / "src/fake/core.py").write_text("VALUE = 3\n")
+    git(tmp_path, "commit", "-qam", "other change")
+    script = Path(__file__).resolve().parents[1] / "scripts" / "attribute_failures.py"
+    failed = tmp_path / "failed.txt"
+    failed.write_text("")
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--base",
+            base,
+            "--lane",
+            "FIX=fix-branch@other",
+            "--failed",
+            str(failed),
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 2
+    assert "FIX" in proc.stderr

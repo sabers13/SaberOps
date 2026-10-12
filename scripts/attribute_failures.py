@@ -13,8 +13,11 @@ import select_tests
 from gate_tools import git, junit
 
 
-def lane_evidence(repo: Path, base: str, branch: str) -> tuple[set[str], set[str], bool]:
-    changed = set(git(repo, "diff", "--name-only", f"{base}..{branch}").splitlines())
+def lane_evidence(
+    repo: Path, base: str, branch: str, fork: str | None = None
+) -> tuple[set[str], set[str], bool]:
+    effective = fork if fork is not None else base
+    changed = set(git(repo, "diff", "--name-only", f"{effective}..{branch}").splitlines())
     # Selector reads HEAD and the working tree. A private shared clone gives it the
     # lane's exact tree/history without switching the integration checkout.
     with tempfile.TemporaryDirectory(prefix="saberops-attribution-") as directory:
@@ -32,7 +35,7 @@ def lane_evidence(repo: Path, base: str, branch: str) -> tuple[set[str], set[str
         )
         selection = select_tests.select(
             tree,
-            git(repo, "rev-parse", base),
+            git(repo, "rev-parse", effective),
             strategy="coverage",
             map_path=select_tests.default_map_path(repo),
         )
@@ -146,7 +149,19 @@ def main() -> int:
         name, separator, branch = value.partition("=")
         if not separator or not name or not branch:
             parser.error("--lane requires NAME=BRANCH")
-        lanes[name] = lane_evidence(repo, args.base, branch)
+        if "@" in branch:
+            branch, _, fork = branch.partition("@")
+            if not branch or not fork:
+                parser.error("--lane requires NAME=BRANCH")
+            ancestor = subprocess.run(
+                ["git", "merge-base", "--is-ancestor", fork, branch],
+                cwd=repo,
+            )
+            if ancestor.returncode != 0:
+                parser.error(f"--lane {name}: FORK {fork} is not an ancestor of {branch}")
+            lanes[name] = lane_evidence(repo, args.base, branch, fork)
+        else:
+            lanes[name] = lane_evidence(repo, args.base, branch)
     errors = junit(args.junit).failed if args.junit else {}
     text = attribute(
         args.failed.read_text().splitlines(),
