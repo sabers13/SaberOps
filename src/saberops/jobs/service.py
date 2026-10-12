@@ -402,7 +402,9 @@ def capacity(db: Any, now: datetime | None = None) -> CapacityView:
             stale=entry.stale,
             excluded_until=entry.excluded_until,
         )
-        for entry in sorted(snapshot(db, moment), key=lambda entry: (entry.pool_id, entry.window_id))
+        for entry in sorted(
+            snapshot(db, moment), key=lambda entry: (entry.pool_id, entry.window_id)
+        )
     )
     return CapacityView(generated_at=moment.isoformat(), ledger_wired=True, pools=pools)
 

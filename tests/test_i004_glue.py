@@ -43,7 +43,8 @@ def test_capacity_maps_ledger_entries(tmp_path: Path) -> None:
     assert view.generated_at == now.isoformat()
     assert view.ledger_wired is True
     assert [asdict(pool) for pool in view.pools] == [
-        asdict(entry) for entry in sorted(expected, key=lambda entry: (entry.pool_id, entry.window_id))
+        asdict(entry)
+        for entry in sorted(expected, key=lambda entry: (entry.pool_id, entry.window_id))
     ]
     assert [(pool.pool_id, pool.window_id) for pool in view.pools] == [
         ("aaa-excluded", "5h"), ("codex", "weekly"),
@@ -94,7 +95,7 @@ def test_shared_size_bucket_for_submitted_job(tmp_path: Path, bucket: SizeBucket
     assert job.requirements.size_hint is not None
     estimate = cost_model.cost_estimate(None, "5h", SizeBucket(job.requirements.size_hint))
     assert estimate == cost_model.cost_estimate(None, "5h", bucket)
-    assert estimate.cost_pct > 0
+    assert estimate.pct > 0
 
 
 @pytest.mark.parametrize("hint", ["XL", "s"])
