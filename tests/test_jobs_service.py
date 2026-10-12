@@ -67,16 +67,11 @@ def _snapshot() -> RoutingSnapshot:
 def _opencode_only_snapshot() -> RoutingSnapshot:
     only = [WorkerCandidate(provider="opencode", model="opencode-go/m")]
     return RoutingSnapshot(
-        schema_version=2,
+        schema_version=3,
         source="test",
         source_path=None,
         content_hash="test",
-        t1_default=list(only),
-        t2_training_allowed=[],
-        t2_training_denied_off_peak=[],
-        t2_training_denied_peak=[],
-        t3_off_peak=[],
-        t3_peak=[],
+        role_chains=(("WORKER", (tuple(only),)), ("SURGEON", ()), ("INTEGRATOR", ())),
     )
 
 

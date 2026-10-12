@@ -112,7 +112,7 @@ class _R3E1ScriptedAdapter(WorkerAdapter):
 def _patch_implementer_chain(monkeypatch: pytest.MonkeyPatch) -> None:
     """Pin worker routing to the single R3-E1.1 implementer candidate."""
 
-    def _resolve(*, tier: Tier, **_: Any) -> list[WorkerCandidate]:
+    def _resolve(**_: Any) -> list[WorkerCandidate]:
         return [WorkerCandidate(_R3E1_PROVIDER, _R3E1_WORKER_MODEL)]
 
     monkeypatch.setattr(

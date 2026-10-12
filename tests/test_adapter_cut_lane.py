@@ -40,20 +40,20 @@ def test_automatic_tier_chains_never_yield_antigravity(tier: Tier) -> None:
 
 def test_configured_snapshot_still_never_yields_antigravity() -> None:
     snapshot = load_packaged_default()
+    worker_groups = snapshot.groups_for("WORKER")
     injected = RoutingSnapshot(
         schema_version=snapshot.schema_version,
         source=snapshot.source,
         source_path=snapshot.source_path,
         content_hash=snapshot.content_hash,
-        t1_default=[CANDIDATE_ANTIGRAVITY_FLASH, *snapshot.t1_default],
-        t2_training_allowed=snapshot.t2_training_allowed,
-        t2_training_denied_off_peak=snapshot.t2_training_denied_off_peak,
-        t2_training_denied_peak=snapshot.t2_training_denied_peak,
-        t3_off_peak=snapshot.t3_off_peak,
-        t3_peak=snapshot.t3_peak,
+        role_chains=(
+            ("WORKER", ((CANDIDATE_ANTIGRAVITY_FLASH,),) + worker_groups),
+            ("SURGEON", snapshot.groups_for("SURGEON")),
+            ("INTEGRATOR", snapshot.groups_for("INTEGRATOR")),
+        ),
         approved_candidates=snapshot.approved_candidates,
     )
-    resolved = resolve_candidate_chain(tier=Tier.T1, snapshot=injected)
+    resolved = resolve_candidate_chain(role="WORKER", snapshot=injected)
     assert all(candidate.provider != "antigravity" for candidate in resolved)
 
 
@@ -128,15 +128,17 @@ def test_policy_defaults_exclude_cut_providers() -> None:
 
 
 def test_closed_registry_and_packaged_default_exclude_antigravity() -> None:
+    from saberops.jobs.models import JobRole
+
     assert "antigravity/gemini-3.7-flash" not in ALLOWED_CANDIDATES
     snapshot = load_packaged_default()
-    for tier in Tier:
+    for role in (JobRole.WORKER, JobRole.SURGEON, JobRole.INTEGRATOR):
         assert all(
             candidate.provider != "antigravity"
-            for candidate in snapshot.chain_for(tier.value, True, False)
+            for candidate in snapshot.chain_for_role(role)
         )
     # Automatic routing still has candidates after the cut.
-    assert snapshot.chain_for(Tier.T1.value, True, False)
+    assert snapshot.chain_for_role(JobRole.WORKER)
 
 
 def test_configured_antigravity_candidate_id_fails_closed() -> None:

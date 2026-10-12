@@ -66,32 +66,25 @@ def _approval(model: str, requirement: str) -> DynamicCandidate:
 
 
 def _snapshot(*approvals: DynamicCandidate) -> RoutingSnapshot:
-    """Frozen snapshot with every approval present in T1 and T3 chains."""
+    """Frozen snapshot with every approval present in WORKER and SURGEON chains."""
     from saberops.routing_config import _content_hash
 
     dyn = [WorkerCandidate(provider=a.provider, model=a.model) for a in approvals]
     static_pool = [STATIC_CLEAN, STATIC_TRAINING]
-    chains = {
-        "T1.default": [*static_pool, *dyn],
-        "T2.training_allowed": [*static_pool, *dyn],
-        "T2.training_denied_off_peak": [STATIC_CLEAN],
-        "T2.training_denied_peak": [STATIC_CLEAN],
-        "T3.off_peak": [*static_pool, *dyn],
-        "T3.peak": [*static_pool, *dyn],
-    }
-    validated = {key: [_cid(c) for c in members] for key, members in chains.items()}
+    members = [*static_pool, *dyn]
+    cids = [_cid(c) for c in members]
+    validated = {"WORKER": [cids], "SURGEON": [cids], "INTEGRATOR": []}
     approved = {a.candidate_id: a for a in approvals}
     return RoutingSnapshot(
-        schema_version=1,
+        schema_version=3,
         source="test",
         source_path=None,
-        content_hash=_content_hash(validated, 1, approved),
-        t1_default=chains["T1.default"],
-        t2_training_allowed=chains["T2.training_allowed"],
-        t2_training_denied_off_peak=chains["T2.training_denied_off_peak"],
-        t2_training_denied_peak=chains["T2.training_denied_peak"],
-        t3_off_peak=chains["T3.off_peak"],
-        t3_peak=chains["T3.peak"],
+        content_hash=_content_hash(validated, 3, approved),
+        role_chains=(
+            ("WORKER", (tuple(members),)),
+            ("SURGEON", (tuple(members),)),
+            ("INTEGRATOR", ()),
+        ),
         approved_candidates=tuple(approvals),
     )
 
@@ -441,15 +434,9 @@ def _static_snapshot(*approvals: DynamicCandidate) -> RoutingSnapshot:
     ``approved_candidates`` with their contradictory
     ``training_required``/``binding_id`` evidence so the tests genuinely
     exercise static training-policy authority.
-
-    A contradictory TRUE/UNKNOWN approval for the clean static candidate
-    cannot appear in a T2 training-denied chain under the existing
-    validator, so denied chains omit that candidate when necessary
-    (empty denied chains are already valid).
     """
-    from saberops.routing_config import _content_hash, requires_training_permission
+    from saberops.routing_config import _content_hash
 
-    approved_by_id = {a.candidate_id: a for a in approvals}
     # Deduplicate: static pool already contains both static identities.
     seen: set[str] = set()
     t1_members: list[WorkerCandidate] = []
@@ -461,38 +448,25 @@ def _static_snapshot(*approvals: DynamicCandidate) -> RoutingSnapshot:
             seen.add(cid)
             t1_members.append(cand)
 
-    def _denied_allowed(cand: WorkerCandidate) -> bool:
-        cid = _cid(cand)
-        entry = approved_by_id.get(cid)
-        if entry is not None:
-            return entry.training_required == "FALSE"
-        return not requires_training_permission(cid)
-
-    denied_members = [c for c in [STATIC_CLEAN] if _denied_allowed(c)]
-
     def _cids(members: list[WorkerCandidate]) -> list[str]:
         return [_cid(c) for c in members]
 
     validated = {
-        "T1.default": _cids(t1_members),
-        "T2.training_allowed": _cids(t1_members),
-        "T2.training_denied_off_peak": _cids(denied_members),
-        "T2.training_denied_peak": _cids(denied_members),
-        "T3.off_peak": _cids(t1_members),
-        "T3.peak": _cids(t1_members),
+        "WORKER": [_cids(t1_members)],
+        "SURGEON": [_cids(t1_members)],
+        "INTEGRATOR": [],
     }
     approved = {a.candidate_id: a for a in approvals}
     candidate = RoutingSnapshot(
-        schema_version=1,
+        schema_version=3,
         source="test",
         source_path=None,
-        content_hash=_content_hash(validated, 1, approved),
-        t1_default=list(t1_members),
-        t2_training_allowed=list(t1_members),
-        t2_training_denied_off_peak=list(denied_members),
-        t2_training_denied_peak=list(denied_members),
-        t3_off_peak=list(t1_members),
-        t3_peak=list(t1_members),
+        content_hash=_content_hash(validated, 3, approved),
+        role_chains=(
+            ("WORKER", (tuple(t1_members),)),
+            ("SURGEON", (tuple(t1_members),)),
+            ("INTEGRATOR", ()),
+        ),
         approved_candidates=tuple(approvals),
     )
     # Canonical invariant: the fixture must be a valid persisted snapshot.
@@ -502,10 +476,8 @@ def _static_snapshot(*approvals: DynamicCandidate) -> RoutingSnapshot:
     revived = payload_to_snapshot(json.loads(json.dumps(payload)), run_id="r2b1-canonical")
     # Each identity exactly once per chain in the revived canonical shape.
     for chain in (
-        revived.t1_default,
-        revived.t2_training_allowed,
-        revived.t3_off_peak,
-        revived.t3_peak,
+        revived.chain_for_role("WORKER"),
+        revived.chain_for_role("SURGEON"),
     ):
         ids = [_cid(c) for c in chain]
         assert len(ids) == len(set(ids)), f"duplicate identity in canonical chain {ids!r}"
@@ -545,7 +517,7 @@ def test_r2b1_static_fixtures_are_canonical_valid() -> None:
             assert by_approval[approval.candidate_id].binding_id == approval.binding_id
         # Explicit round-trip invariant through the canonical parser.
         revived = _assert_canonical_roundtrip(snapshot)
-        t1_ids = [_cid(c) for c in revived.t1_default]
+        t1_ids = [_cid(c) for c in revived.chain_for_role("WORKER")]
         assert len(t1_ids) == len(set(t1_ids))
         assert t1_ids.count(_MUSE_CID) == 1
         assert t1_ids.count(_CLEAN_CID) == 1

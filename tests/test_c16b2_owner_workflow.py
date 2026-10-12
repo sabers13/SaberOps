@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -48,7 +49,7 @@ from saberops.routing_config import (
     format_candidate_id,
     load_effective_routing,
     load_effective_routing_payload,
-    move_candidate_in_chain,
+    move_group_in_chain,
     save_user_routing,
 )
 from saberops.workers.registry import AdapterRegistry
@@ -193,11 +194,11 @@ def test_c16b2_owner_workflow_persists_across_restart(
     )
     payload = load_effective_routing_payload()
     updated = add_dynamic_candidate_to_chain(
-        payload, top="T1", sub="default", candidate=approval
+        payload, role="WORKER", candidate=approval
     )
     save_user_routing(updated)
     snapshot = load_effective_routing()
-    assert candidate_id in [f"{c.provider}/{c.model}" for c in snapshot.t1_default]
+    assert candidate_id in [f"{c.provider}/{c.model}" for c in snapshot.chain_for_role("WORKER")]
 
     # -- reorder keeps membership, changes order ----------------------------
     second_candidate = format_candidate_id(_PROVIDER, _ORCH_MODEL)
@@ -218,17 +219,27 @@ def test_c16b2_owner_workflow_persists_across_restart(
     )
     payload = load_effective_routing_payload()
     payload = add_dynamic_candidate_to_chain(
-        payload, top="T1", sub="default", candidate=second_approval
+        payload, role="WORKER", candidate=second_approval
     )
-    moved = move_candidate_in_chain(
+
+    def _group_of(payload: dict[str, Any], candidate_id: str) -> int:
+        for number, group in enumerate(payload["roles"]["WORKER"], start=1):
+            if candidate_id in group["routes"]:
+                return number
+        raise AssertionError(f"{candidate_id} missing from WORKER chain")
+
+    moved = move_group_in_chain(
         payload,
-        top="T1",
-        sub="default",
-        candidate_id=second_candidate,
+        role="WORKER",
+        group=_group_of(payload, second_candidate),
         direction="up",
     )
     save_user_routing(moved)
-    reordered = load_effective_routing_payload()["T1"]["default"]
+    reordered = [
+        cid
+        for group in load_effective_routing_payload()["roles"]["WORKER"]
+        for cid in group["routes"]
+    ]
     assert isinstance(reordered, list)
     assert reordered.index(second_candidate) < reordered.index(candidate_id)
 
@@ -262,7 +273,7 @@ def test_c16b2_owner_workflow_persists_across_restart(
     )
     assert entry is not None and not entry.is_stale
 
-    chain_ids = [f"{c.provider}/{c.model}" for c in reloaded_snapshot.t1_default]
+    chain_ids = [f"{c.provider}/{c.model}" for c in reloaded_snapshot.chain_for_role("WORKER")]
     assert candidate_id in chain_ids
 
     assert reloaded_owner.policy is not None
@@ -320,8 +331,7 @@ def _seed_two_routing_candidates() -> tuple[str, str]:
         save_user_routing(
             add_dynamic_candidate_to_chain(
                 load_effective_routing_payload(),
-                top="T1",
-                sub="default",
+                role="WORKER",
                 candidate=approval,
             )
         )
@@ -451,33 +461,47 @@ def test_c16b2_routing_move_route_reorders_canonical_chain(
 
     first, second = _seed_two_routing_candidates()
 
+    def _chain_ids() -> list[str]:
+        return [
+            cid
+            for group in load_effective_routing_payload()["roles"]["WORKER"]
+            for cid in group["routes"]
+        ]
+
+    def _group_of(candidate_id: str) -> int:
+        payload = load_effective_routing_payload()
+        for number, group in enumerate(payload["roles"]["WORKER"], start=1):
+            if candidate_id in group["routes"]:
+                return number
+        raise AssertionError(f"{candidate_id} missing from WORKER chain")
+
     def _move(candidate_id: str, direction: str) -> None:
         payload = load_effective_routing_payload()
         save_user_routing(
-            move_candidate_in_chain(
-                payload, top="T1", sub="default",
-                candidate_id=candidate_id, direction=direction,
+            move_group_in_chain(
+                payload, role="WORKER",
+                group=_group_of(candidate_id), direction=direction,
             )
         )
 
     _move(second, "down")
-    chain = load_effective_routing_payload()["T1"]["default"]
+    chain = _chain_ids()
     assert isinstance(chain, list)
     assert chain.index(first) < chain.index(second)
 
     _move(second, "up")
-    chain = load_effective_routing_payload()["T1"]["default"]
+    chain = _chain_ids()
     assert isinstance(chain, list)
     assert chain.index(second) < chain.index(first)
 
     with pytest.raises(RoutingConfigError):
-        move_candidate_in_chain(
-            load_effective_routing_payload(), top="T1", sub="default",
-            candidate_id=second, direction="sideways",
+        move_group_in_chain(
+            load_effective_routing_payload(), role="WORKER",
+            group=_group_of(second), direction="sideways",
         )
 
     with pytest.raises(RoutingConfigError):
-        move_candidate_in_chain(
-            load_effective_routing_payload(), top="T9", sub="nope",
-            candidate_id=second, direction="up",
+        move_group_in_chain(
+            load_effective_routing_payload(), role="T9",
+            group=1, direction="up",
         )
