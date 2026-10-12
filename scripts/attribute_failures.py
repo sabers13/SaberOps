@@ -42,6 +42,25 @@ def lane_evidence(
     return changed, {item.target for item in selection.tests}, selection.full
 
 
+def glue_evidence(
+    repo: Path, base: str, head: str, branches: list[str]
+) -> tuple[set[str], set[str], bool]:
+    """Changed files owned by integration glue commits; reads objects only."""
+    args = ["rev-list", f"{base}..{head}"]
+    if branches:
+        args += ["--not", *branches]
+    commits = [c for c in git(repo, *args).splitlines() if c.strip()]
+    changed: set[str] = set()
+    for commit in commits:
+        parents = git(repo, "rev-list", "--parents", "-n", "1", commit).split()
+        if len(parents) > 2:
+            files = git(repo, "diff-tree", "--cc", "-r", "--no-commit-id", "--name-only", commit)
+        else:
+            files = git(repo, "diff-tree", "-r", "--no-commit-id", "--name-only", commit)
+        changed.update(f for f in files.splitlines() if f.strip())
+    return changed, set(), False
+
+
 def _section_kind(command: str) -> str | None:
     if re.search(r"\bruff\b.*\bcheck\b", command):
         return "ruff"
@@ -64,7 +83,7 @@ def attribute(
         error = errors.get(node, "")
         for name, (changed, selected, _) in lanes.items():
             found = []
-            if node in selected or file in selected:
+            if name != "GLUE" and (node in selected or file in selected):
                 found.append("selects")
             if any(
                 re.search(r"(?<![\w/])" + re.escape(path) + r'(?=[:\s"\']|$)', error)
@@ -128,6 +147,10 @@ def attribute(
         buckets.setdefault("notes", []).append(
             "- gate log has no ruff/mypy sections; lint/type attribution skipped"
         )
+    if "GLUE" in lanes and lanes["GLUE"][0]:
+        buckets.setdefault("notes", []).append(
+            "- GLUE has no selects signal; only traceback and owns-test are computed"
+        )
     return (
         "\n\n".join(f"## {name}\n\n" + "\n".join(items) for name, items in sorted(buckets.items()))
         + "\n"
@@ -138,6 +161,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", required=True)
     parser.add_argument("--lane", action="append", required=True)
+    parser.add_argument("--head", default="HEAD")
+    parser.add_argument("--glue", action="store_true")
     parser.add_argument("--failed", type=Path, required=True)
     parser.add_argument("--junit", type=Path)
     parser.add_argument("--gate-log", type=Path)
@@ -145,6 +170,7 @@ def main() -> int:
     args = parser.parse_args()
     repo = Path.cwd()
     lanes = {}
+    branches: list[str] = []
     for value in args.lane:
         name, separator, branch = value.partition("=")
         if not separator or not name or not branch:
@@ -162,6 +188,9 @@ def main() -> int:
             lanes[name] = lane_evidence(repo, args.base, branch, fork)
         else:
             lanes[name] = lane_evidence(repo, args.base, branch)
+        branches.append(branch)
+    if args.glue:
+        lanes["GLUE"] = glue_evidence(repo, args.base, args.head, branches)
     errors = junit(args.junit).failed if args.junit else {}
     text = attribute(
         args.failed.read_text().splitlines(),
