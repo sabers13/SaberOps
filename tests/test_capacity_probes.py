@@ -192,11 +192,12 @@ def test_no_policies_claude_zero_denies_anthropic(tmp_path: Path) -> None:
 
     db = _db(tmp_path)
     now = datetime(2026, 10, 11, 12, 0, tzinfo=UTC)
+    # Explicit {}: None now loads the effective (packaged + owner) pools since I-003.
     handle_probe_result(
         db, harness="claude", windows=[("weekly", 0.0, now + timedelta(hours=1), "EXACT")],
-        now=now, pool_policies=None,
+        now=now, pool_policies={},
     )
-    states = effective_quota_states(db, now=now, run_probes=False)
+    states = effective_quota_states(db, now=now, run_probes=False, pool_policies={})
     cand = WorkerCandidate(provider="anthropic", model="sonnet-4")
     decision = quota_decision(cand, states)
     assert decision.eligible is False
@@ -210,12 +211,13 @@ def test_no_policies_go_zero_denies_opencode(tmp_path: Path) -> None:
 
     db = _db(tmp_path)
     now = datetime(2026, 10, 11, 12, 0, tzinfo=UTC)
+    # Explicit {}: None now loads the effective (packaged + owner) pools since I-003.
     handle_probe_result(
         db, harness="opencode-go",
         windows=[("weekly", 0.0, now + timedelta(hours=1), "EXACT")],
-        now=now, pool_policies=None,
+        now=now, pool_policies={},
     )
-    states = effective_quota_states(db, now=now, run_probes=False)
+    states = effective_quota_states(db, now=now, run_probes=False, pool_policies={})
     cand = WorkerCandidate(provider="opencode", model="opencode-go/model-x")
     decision = quota_decision(cand, states)
     assert decision.eligible is False

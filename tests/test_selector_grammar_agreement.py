@@ -178,6 +178,35 @@ def test_probe_no_membership_writes_provider_labelled_row(
     assert rows[0].pool == "anthropic"
 
 
+@pytest.mark.parametrize(
+    ("harness", "provider", "model", "expected_pool"),
+    [
+        ("claude", "anthropic", "sonnet-4", "claude-pro"),
+        ("opencode-go", "opencode", "opencode-go/model-x", "opencode-go"),
+    ],
+)
+def test_packaged_zero_probe_denies_plan_pool_members_with_exclusion_reason(
+    tmp_path: Path, packaged_policy: ControlPlanePolicy,
+    harness: str, provider: str, model: str, expected_pool: str,
+) -> None:
+    db = Database(tmp_path / "capacity.db")
+    pools = effective_quota_pools(packaged_policy)
+    now = datetime.now(UTC)
+    handle_probe_result(
+        db, harness=harness,
+        windows=[("weekly", 0.0, now + timedelta(hours=1), "EXACT")],
+        now=now, pool_policies=pools,
+    )
+    states = effective_quota_states(db, now=now, run_probes=False, pool_policies=pools)
+    decision = quota_decision(
+        WorkerCandidate(provider=provider, model=model), states,
+        pool_policies=pools, now=now,
+    )
+    assert decision.eligible is False
+    assert decision.reason == "QUOTA_EXCLUDED_UNTIL_RESET"
+    assert decision.pool_id == expected_pool
+
+
 def test_owner_pool_overrides_plan_and_overage_is_deferred(
     packaged_policy: ControlPlanePolicy,
 ) -> None:
