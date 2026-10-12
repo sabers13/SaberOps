@@ -13,8 +13,11 @@ import select_tests
 from gate_tools import git, junit
 
 
-def lane_evidence(repo: Path, base: str, branch: str) -> tuple[set[str], set[str], bool]:
-    changed = set(git(repo, "diff", "--name-only", f"{base}..{branch}").splitlines())
+def lane_evidence(
+    repo: Path, base: str, branch: str, fork: str | None = None
+) -> tuple[set[str], set[str], bool]:
+    effective = fork if fork is not None else base
+    changed = set(git(repo, "diff", "--name-only", f"{effective}..{branch}").splitlines())
     # Selector reads HEAD and the working tree. A private shared clone gives it the
     # lane's exact tree/history without switching the integration checkout.
     with tempfile.TemporaryDirectory(prefix="saberops-attribution-") as directory:
@@ -32,11 +35,38 @@ def lane_evidence(repo: Path, base: str, branch: str) -> tuple[set[str], set[str
         )
         selection = select_tests.select(
             tree,
-            git(repo, "rev-parse", base),
+            git(repo, "rev-parse", effective),
             strategy="coverage",
             map_path=select_tests.default_map_path(repo),
         )
     return changed, {item.target for item in selection.tests}, selection.full
+
+
+def glue_evidence(
+    repo: Path, base: str, head: str, branches: list[str]
+) -> tuple[set[str], set[str], bool]:
+    """Changed files owned by integration glue commits; reads objects only."""
+    args = ["rev-list", f"{base}..{head}"]
+    if branches:
+        args += ["--not", *branches]
+    commits = [c for c in git(repo, *args).splitlines() if c.strip()]
+    changed: set[str] = set()
+    for commit in commits:
+        parents = git(repo, "rev-list", "--parents", "-n", "1", commit).split()
+        if len(parents) > 2:
+            files = git(repo, "diff-tree", "--cc", "-r", "--no-commit-id", "--name-only", commit)
+        else:
+            files = git(repo, "diff-tree", "-r", "--no-commit-id", "--name-only", commit)
+        changed.update(f for f in files.splitlines() if f.strip())
+    return changed, set(), False
+
+
+def _section_kind(command: str) -> str | None:
+    if re.search(r"\bruff\b.*\bcheck\b", command):
+        return "ruff"
+    if re.search(r"\bmypy\b", command):
+        return "mypy"
+    return None
 
 
 def attribute(
@@ -53,7 +83,7 @@ def attribute(
         error = errors.get(node, "")
         for name, (changed, selected, _) in lanes.items():
             found = []
-            if node in selected or file in selected:
+            if name != "GLUE" and (node in selected or file in selected):
                 found.append("selects")
             if any(
                 re.search(r"(?<![\w/])" + re.escape(path) + r'(?=[:\s"\']|$)', error)
@@ -82,11 +112,25 @@ def attribute(
             summary = (summary or "no signals") + "; " + note + ", ".join(full_selection)
         buckets.setdefault(bucket, []).append(f"- `{node}` — {first}; {summary or 'no signals'}")
     diagnostic = "lint/type error"
+    kind: str | None = None
+    seen_ruff_or_mypy = False
     for line in gate_log.splitlines():
-        if re.match(r"^[A-Z]+[0-9]+ ", line):
-            diagnostic = line.strip()
-        match = re.match(r"([^\s:]+\.py):\d+(?::\d+)?:\s*(.+)", line)
-        location = re.match(r"\s*(?:-->|:::)\s+([^\s:]+\.py):\d+(?::\d+)?", line)
+        if line.startswith("+ "):
+            kind = _section_kind(line[2:])
+            if kind in ("ruff", "mypy"):
+                seen_ruff_or_mypy = True
+                diagnostic = "lint/type error"
+            continue
+        if kind == "mypy":
+            match = re.match(r"([^\s:]+\.py):\d+(?::\d+)?:\s*(error:\s*.+)", line)
+            location = None
+        elif kind == "ruff":
+            if re.match(r"^[A-Z]+[0-9]+ ", line):
+                diagnostic = line.strip()
+            match = re.match(r"([^\s:]+\.py):\d+(?::\d+)?:\s*(.+)", line)
+            location = re.match(r"\s*(?:-->|:::)\s+([^\s:]+\.py):\d+(?::\d+)?", line)
+        else:
+            continue
         if not match and not location:
             continue
         if match:
@@ -99,6 +143,14 @@ def attribute(
         buckets.setdefault(bucket, []).append(
             f"- lint/type `{path}` — {match[2] if match else diagnostic}; changed-file"
         )
+    if gate_log.strip() and not seen_ruff_or_mypy:
+        buckets.setdefault("notes", []).append(
+            "- gate log has no ruff/mypy sections; lint/type attribution skipped"
+        )
+    if "GLUE" in lanes and lanes["GLUE"][0]:
+        buckets.setdefault("notes", []).append(
+            "- GLUE has no selects signal; only traceback and owns-test are computed"
+        )
     return (
         "\n\n".join(f"## {name}\n\n" + "\n".join(items) for name, items in sorted(buckets.items()))
         + "\n"
@@ -109,6 +161,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", required=True)
     parser.add_argument("--lane", action="append", required=True)
+    parser.add_argument("--head", default="HEAD")
+    parser.add_argument("--glue", action="store_true")
     parser.add_argument("--failed", type=Path, required=True)
     parser.add_argument("--junit", type=Path)
     parser.add_argument("--gate-log", type=Path)
@@ -116,11 +170,27 @@ def main() -> int:
     args = parser.parse_args()
     repo = Path.cwd()
     lanes = {}
+    branches: list[str] = []
     for value in args.lane:
         name, separator, branch = value.partition("=")
         if not separator or not name or not branch:
             parser.error("--lane requires NAME=BRANCH")
-        lanes[name] = lane_evidence(repo, args.base, branch)
+        if "@" in branch:
+            branch, _, fork = branch.partition("@")
+            if not branch or not fork:
+                parser.error("--lane requires NAME=BRANCH")
+            ancestor = subprocess.run(
+                ["git", "merge-base", "--is-ancestor", fork, branch],
+                cwd=repo,
+            )
+            if ancestor.returncode != 0:
+                parser.error(f"--lane {name}: FORK {fork} is not an ancestor of {branch}")
+            lanes[name] = lane_evidence(repo, args.base, branch, fork)
+        else:
+            lanes[name] = lane_evidence(repo, args.base, branch)
+        branches.append(branch)
+    if args.glue:
+        lanes["GLUE"] = glue_evidence(repo, args.base, args.head, branches)
     errors = junit(args.junit).failed if args.junit else {}
     text = attribute(
         args.failed.read_text().splitlines(),

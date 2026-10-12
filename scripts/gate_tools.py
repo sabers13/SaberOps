@@ -128,30 +128,47 @@ def slot(
     wait: float = 3600,
     observe: bool = False,
     notify: Callable[[str], None] = print,
+    message: str = "waiting for full-gate slot: ",
+    acquire_all: bool = False,
+    slot_env: str = "SABEROPS_GATE_SLOTS",
 ) -> Iterator[None]:
-    """flock releases on death; lane observers reserve all slots until entry."""
+    """flock releases on death; lane observers reserve all slots until entry.
+
+    Acquisition order is always heavy -> light for the full gate, and a lane
+    never waits for the heavy slot while holding a light one. Holders only
+    wait for slots they do not hold, so there is no circular wait and no
+    deadlock: lanes queue on heavy before taking light, and the full gate
+    takes heavy before draining light.
+    """
     if count < 1:
-        raise ValueError("SABEROPS_GATE_SLOTS must be positive")
+        raise ValueError(f"{slot_env} must be positive")
     root.mkdir(parents=True, exist_ok=True)
     handles: list[TextIO] = [(root / f"{i}.lock").open("a+") for i in range(count)]
     acquired: list[TextIO] = []
     started = time.monotonic()
     next_notice = started
+    hold_all = acquire_all and not observe
     try:
         while True:
             for handle in handles:
                 try:
                     fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     acquired.append(handle)
-                    if not observe:
+                    if not observe and not hold_all:
                         break
                 except BlockingIOError:
                     pass
             if (observe and len(acquired) == count) or (not observe and acquired):
-                break
-            for handle in acquired:
-                fcntl.flock(handle, fcntl.LOCK_UN)
-            acquired.clear()
+                if not observe and hold_all and len(acquired) < count:
+                    for handle in acquired:
+                        fcntl.flock(handle, fcntl.LOCK_UN)
+                    acquired.clear()
+                else:
+                    break
+            else:
+                for handle in acquired:
+                    fcntl.flock(handle, fcntl.LOCK_UN)
+                acquired.clear()
             if time.monotonic() >= next_notice:
                 holders = []
                 for i in range(count):
@@ -161,19 +178,21 @@ def slot(
                             holders.append(meta.read_text())
                         except FileNotFoundError:
                             pass
-                notify("waiting for full-gate slot: " + "; ".join(holders))
+                notify(message + "; ".join(holders))
                 sys.stdout.flush()
                 next_notice = time.monotonic() + 60
             if time.monotonic() - started >= wait:
                 raise TimeoutError("SLOT_WAIT_TIMEOUT")
             time.sleep(min(0.1, max(0, wait - (time.monotonic() - started))))
         if not observe:
-            index = handles.index(acquired[0])
-            (root / f"{index}.json").write_text(json.dumps(record))
+            for handle in acquired:
+                index = handles.index(handle)
+                (root / f"{index}.json").write_text(json.dumps(record))
         yield
     finally:
         if acquired and not observe:
-            (root / f"{handles.index(acquired[0])}.json").unlink(missing_ok=True)
+            for handle in acquired:
+                (root / f"{handles.index(handle)}.json").unlink(missing_ok=True)
         for handle in handles:
             handle.close()
 
@@ -470,22 +489,53 @@ class Runner:
     def execute(self, base: str, also: list[str]) -> int:
         verdict: tuple[str, str, int, list[str], list[str]] = ("INFRA", "INTERRUPTED", 3, [], [])
         try:
-            minimum = float(
-                os.environ.get("SABEROPS_GATE_MIN_FREE_GB", "10" if self.kind == "full" else "5")
-            )
+            minimum = float(os.environ.get("SABEROPS_GATE_MIN_FREE_GB", "10"))
             if not disk_ok([self.root, self.repo], minimum):
                 return self.finish(("INFRA", "DISK_LOW", 3, [], []), 0)
+            heavy_root = self.common / "saberops-gate-slots"
+            light_root = self.common / "saberops-gate-light-slots"
+            heavy_count = int(os.environ.get("SABEROPS_GATE_SLOTS", "1"))
+            light_count = int(os.environ.get("SABEROPS_LANE_SLOTS", "2"))
+            wait = float(os.environ.get("SABEROPS_GATE_SLOT_WAIT", "3600"))
+            if self.kind == "full":
+                with slot(
+                    heavy_root,
+                    self.record,
+                    heavy_count,
+                    wait,
+                    observe=False,
+                    message="waiting for full-gate slot: ",
+                ):
+                    with slot(
+                        light_root,
+                        self.record,
+                        light_count,
+                        wait,
+                        acquire_all=True,
+                        message="waiting for running lane checks: ",
+                        slot_env="SABEROPS_LANE_SLOTS",
+                    ):
+                        return self.run_checks(base, also)
             with slot(
-                self.common / "saberops-gate-slots",
+                heavy_root,
                 self.record,
-                int(os.environ.get("SABEROPS_GATE_SLOTS", "1")),
-                float(os.environ.get("SABEROPS_GATE_SLOT_WAIT", "3600")),
-                observe=self.kind != "full",
+                heavy_count,
+                wait,
+                observe=True,
+                message="waiting for full-gate slot: ",
             ):
-                # Lane observer lock is released before lint/tests below.
-                if self.kind == "full":
-                    return self.run_checks(base, also)
-            return self.run_checks(base, also)
+                pass
+            # Lane observer lock is released before taking a light slot below.
+            with slot(
+                light_root,
+                self.record,
+                light_count,
+                wait,
+                observe=False,
+                message="waiting for lane slot: ",
+                slot_env="SABEROPS_LANE_SLOTS",
+            ):
+                return self.run_checks(base, also)
         except TimeoutError:
             verdict = ("INFRA", "SLOT_WAIT_TIMEOUT", 3, [], [])
         except Interrupted:
@@ -593,7 +643,7 @@ def scratch_cli() -> int:
         (runner.run / "owner.json").write_text(json.dumps(runner.record))
         manifest.write_text(str(runner.run))
         if not disk_ok(
-            [runner.root, runner.repo], float(os.environ.get("SABEROPS_GATE_MIN_FREE_GB", "5"))
+            [runner.root, runner.repo], float(os.environ.get("SABEROPS_GATE_MIN_FREE_GB", "10"))
         ):
             remove(runner.run)
             return 3
