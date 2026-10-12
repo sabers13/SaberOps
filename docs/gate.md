@@ -18,7 +18,8 @@ On failures, run:
 
 ```bash
 python scripts/attribute_failures.py --base REF \
-  --lane G-001=orch/G-001 --lane G-002=orch/G-002 \
+  --lane G-001=orch/G-001 --lane FIX=orch/I-003-fix-1@<fork> \
+  --head HEAD --glue \
   --failed /path/to/result/failed.txt --junit /path/to/result/full.xml \
   --gate-log /path/to/gate.txt --out /path/to/failures.md
 ```
@@ -27,8 +28,23 @@ Attribution imports the coverage selector with its static fallback, evaluates ea
 lane's exact tree in a private temporary clone, and never executes pytest. Signals
 are selection, a changed file in the traceback, and ownership of the test file.
 Two or more signals from one lane means high confidence; one means low confidence;
-multiple lanes means interaction; no signals means unattributed. Lint/type diagnostics
-are assigned by changed file. Route a single-lane failure to its existing worker
+multiple lanes means interaction; no signals means unattributed. A lane may be
+passed as `NAME=BRANCH@FORK`: changed files and test selection are then computed
+from `FORK..BRANCH` instead of `base..BRANCH`. `FORK` must be an ancestor of
+`BRANCH`, otherwise the command exits 2 naming the lane. `--head REF` (default
+`HEAD`) is the integration head being attributed. With `--glue`, a pseudo-lane
+named `GLUE` covers integration commits in `base..head` reachable from no lane tip
+(`git rev-list <base>..<head> --not <lane tips>`). Its changed files are the union
+of `git diff-tree` per commit (`--cc` for merges, so clean merges contribute only
+conflict resolutions). GLUE signals are traceback and owns-test only; it has no
+selects signal and no test selection is computed for it. GLUE buckets like any
+lane: alone it is `GLUE (high|low confidence)`, with another lane it is
+interaction. Lint/type diagnostics are parsed by gate-log sections: a section starts
+at a `+ ` command echo and only `ruff check` or `mypy` sections are scanned
+(`path.py:<line>: error:` for mypy; concise and `--> path.py:l:c` forms for ruff).
+Pytest traceback lines are never lint/type entries. A log with no ruff/mypy
+sections yields no lint/type entries plus a `## notes` line. Lint/type entries are
+assigned by changed file, with GLUE taking part as a lane. Route a single-lane failure to its existing worker
 session; interaction, unattributed, closed-session or second-attempt failures go to
 a Fixer. Infrastructure problems require environment repair, not product edits.
 
@@ -61,19 +77,29 @@ the default lives inside private scratch and is available in the copied evidence
 | Variable | Default | Effect |
 | --- | --- | --- |
 | SABEROPS_GATE_TMP | `${TMPDIR:-/tmp}/saberops-gate-$USER` | Owned scratch root |
-| SABEROPS_GATE_MIN_FREE_GB | 10 full / 5 lane | Minimum free GiB; 10% filesystem floor also applies |
+| SABEROPS_GATE_MIN_FREE_GB | 10 | Minimum free GiB; 10% filesystem floor also applies |
 | SABEROPS_GATE_KEEP_FAILED_GB | 2 | Total retained failed scratch cap in GiB |
 | SABEROPS_GATE_KEEP | unset | `1` bypasses exit cleanup |
 | SABEROPS_GATE_SLOTS | 1 | Concurrent full gates in this repository's git common directory |
+| SABEROPS_LANE_SLOTS | 2 | Concurrent lane/fix checks holding light slots |
 | SABEROPS_GATE_SLOT_WAIT | 3600 | Slot wait deadline in seconds |
 | SABEROPS_GATE_WORKERS | auto | xdist worker count in full parallel pass |
 | SABEROPS_LANE_TIMEOUT | 1200 | Whole lane pytest budget in seconds |
 | MYPY_CACHE_DIR | `<git-common-dir>/saberops-mypy-cache` | Shared incremental type cache |
 
-A slot uses an OS flock, automatically released when its owner dies. Waiting prints
-`waiting for full-gate slot:` with the holder's pid, worktree and start time immediately
-and once per minute. Lane checks wait for existing full gates but do not hold a slot
-while checking. More than 150 lane target arguments use four xdist workers.
+A slot uses an OS flock, automatically released when its owner dies. The heavy pool
+(`saberops-gate-slots`, `SABEROPS_GATE_SLOTS`, default 1) is exclusive: a full gate
+holds the heavy slot and then drains all light slots, holding them for the whole
+run. The light pool (`saberops-gate-light-slots`, `SABEROPS_LANE_SLOTS`, default 2,
+must be >= 1) is for lane checks (G1) and fix checks (G2). A lane first waits while
+a full gate holds the heavy slot, then acquires one light slot and holds it for the
+whole run (lint, types, tests). Waiting prints `waiting for full-gate slot:`,
+`waiting for lane slot:`, or `waiting for running lane checks:` with holder pid,
+worktree and start time immediately and once per minute; exceeding
+`SABEROPS_GATE_SLOT_WAIT` is `INFRA SLOT_WAIT_TIMEOUT`. Because the full gate
+always takes heavy before light and a lane never waits for heavy while holding
+light, new lanes queue behind a draining full gate and the order cannot deadlock.
+More than 150 lane target arguments use four xdist workers.
 
 Each run creates `<worktree>-<UTC timestamp>-<pid>/owner.json`, and each pytest pass
 owns a separate basetemp under it. Startup sweeps owned runs with dead pids or age over
