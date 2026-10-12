@@ -387,11 +387,24 @@ def cancel_job(
 
 
 def capacity(db: Any, now: datetime | None = None) -> CapacityView:
-    """C5 stub: the ledger is not wired in M2-3 (glue-1 wires it in I-004)."""
-    _ = db
-    return CapacityView(
-        generated_at=_utcnow_iso(now), ledger_wired=False, pools=()
+    """Return the ledger snapshot through the C5 capacity read model."""
+    from saberops.capacity.ledger import snapshot
+
+    moment = now if now is not None else datetime.now(UTC)
+    pools = tuple(
+        PoolCapacity(
+            pool_id=entry.pool_id,
+            window_id=entry.window_id,
+            remaining_est=entry.remaining_est,
+            uncertainty=entry.uncertainty,
+            observed_at=entry.observed_at,
+            source=entry.source,
+            stale=entry.stale,
+            excluded_until=entry.excluded_until,
+        )
+        for entry in sorted(snapshot(db, moment), key=lambda entry: (entry.pool_id, entry.window_id))
     )
+    return CapacityView(generated_at=moment.isoformat(), ledger_wired=True, pools=pools)
 
 
 def mark_dispatched(

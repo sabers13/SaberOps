@@ -348,7 +348,7 @@ def test_capacity_stub_shape(tmp_path: Path) -> None:
     db = Database(tmp_path / "jobs.db")
     view = capacity(db, now=_NOW)
     assert isinstance(view, CapacityView)
-    assert view.ledger_wired is False
+    assert view.ledger_wired is True
     assert view.pools == ()
     assert view.generated_at
     names = [f.name for f in dataclasses.fields(PoolCapacity)]
