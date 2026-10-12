@@ -23,6 +23,11 @@ from typing import Any, TextIO
 
 GB = 1024**3
 
+HISTORY_DIRNAME = "saberops-gate-history"
+HISTORY_FILENAME = "full.jsonl"
+GATE_LABEL_ENV = "SABEROPS_GATE_LABEL"
+DEFAULT_GATE_LABEL = "manual"
+
 
 def git(repo: Path, *args: str) -> str:
     return subprocess.check_output(["git", *args], cwd=repo, text=True).strip()
@@ -296,6 +301,280 @@ def evaluate(
     return ("FLAKY_PASS" if flaky else "PASS"), "", 0, final, flaky
 
 
+def history_path(common: Path) -> Path:
+    """Full-gate history file shared by all worktrees of one checkout.
+
+    Covers: ADR-0003 D5 (flaky tracking history format).
+    """
+    return common / HISTORY_DIRNAME / HISTORY_FILENAME
+
+
+def append_history(path: Path, entry: dict[str, Any]) -> None:
+    """Append one JSON line with an exclusive flock; warn, never raise.
+
+    Covers: prompt section A (history append is best-effort).
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            try:
+                handle.write(json.dumps(entry, sort_keys=True) + "\n")
+                handle.flush()
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+    except OSError as error:
+        print(f"warning: could not write gate history: {error}", flush=True)
+
+
+def load_history(path: Path) -> list[dict[str, Any]]:
+    """Read full.jsonl oldest-first; missing file or bad lines yield [].
+
+    Covers: prompt section B (flaky-report input).
+    """
+    if not path.exists():
+        return []
+    try:
+        text = path.read_text()
+    except OSError:
+        return []
+    entries: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            parsed = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(parsed, dict):
+            entries.append(parsed)
+    return entries
+
+
+def read_quarantine(repo: Path) -> set[str]:
+    """Exact quarantined node IDs from tests/quarantine.txt.
+
+    Covers: prompt section B (quarantine marking is display-only).
+    """
+    quarantine_file = repo / "tests/quarantine.txt"
+    if not quarantine_file.exists():
+        return set()
+    try:
+        text = quarantine_file.read_text()
+    except OSError:
+        return set()
+    return {
+        line.strip()
+        for line in text.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    }
+
+
+def flaky_stats(
+    entries: list[dict[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any] | None]:
+    """Per-test flaky streak/total/last-seen plus the newest nightly entry.
+
+    The streak counts consecutive non-INFRA full gates (newest first) in
+    which the test was flaky; INFRA entries neither break nor extend it.
+    Totals and last-seen likewise count non-INFRA gates only.
+
+    Covers: prompt section B (streak counting newest-first, INFRA skipped).
+    """
+    per_test: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        if entry.get("outcome") == "INFRA":
+            continue
+        flaky = entry.get("flaky", [])
+        if not isinstance(flaky, list):
+            continue
+        ts = str(entry.get("ts", ""))
+        for node in flaky:
+            if not isinstance(node, str):
+                continue
+            record = per_test.setdefault(node, {"total": 0, "last_seen": ""})
+            record["total"] = int(record["total"]) + 1
+            # Entries are oldest-first, so the newest flaky ts wins.
+            record["last_seen"] = ts
+    for node in per_test:
+        streak = 0
+        for entry in reversed(entries):
+            if entry.get("outcome") == "INFRA":
+                continue
+            flaky = entry.get("flaky", [])
+            if not isinstance(flaky, list):
+                break
+            if node in flaky:
+                streak += 1
+            else:
+                break
+        per_test[node]["streak"] = streak
+    newest_nightly: dict[str, Any] | None = None
+    for entry in reversed(entries):
+        if entry.get("label") == "nightly":
+            newest_nightly = entry
+            break
+    return per_test, newest_nightly
+
+
+def render_flaky_report(
+    history_file: Path,
+    entries: list[dict[str, Any]],
+    min_streak: int,
+    quarantine: set[str],
+    as_json: bool,
+) -> str:
+    """Render the human markdown report or the --json payload.
+
+    Covers: prompt section B (quarantine proposals + nightly failures).
+    """
+    per_test, newest_nightly = flaky_stats(entries)
+    proposals = sorted(
+        (node for node, info in per_test.items() if int(info.get("streak", 0)) >= min_streak)
+    )
+    nightly_failed: list[str] = []
+    if newest_nightly is not None:
+        failed = newest_nightly.get("failed", [])
+        if isinstance(failed, list):
+            nightly_failed = sorted(n for n in failed if isinstance(n, str))
+    if as_json:
+        payload = {
+            "history": str(history_file),
+            "entries": len(entries),
+            "min_streak": min_streak,
+            "proposals": [
+                {
+                    "id": node,
+                    "streak": int(per_test[node].get("streak", 0)),
+                    "total": int(per_test[node].get("total", 0)),
+                    "last_seen": str(per_test[node].get("last_seen", "")),
+                    "quarantined": node in quarantine,
+                }
+                for node in proposals
+            ],
+            "nightly_failures": nightly_failed,
+            "nightly": newest_nightly,
+        }
+        return json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    lines = ["# Flaky report", ""]
+    lines.append(f"history: {history_file} ({len(entries)} full gates)")
+    lines.append("")
+    lines.append(f"## quarantine proposals (streak >= {min_streak})")
+    if not proposals:
+        lines.append("(none)")
+    else:
+        for node in proposals:
+            info = per_test[node]
+            suffix = " [in quarantine]" if node in quarantine else ""
+            lines.append(
+                f"- {node} (streak={info.get('streak')}, "
+                f"total={info.get('total')}, last={info.get('last_seen')}){suffix}"
+            )
+    lines.append("")
+    lines.append("## nightly failures")
+    if newest_nightly is None:
+        lines.append("(no nightly run yet)")
+    elif not nightly_failed:
+        failed_ts = newest_nightly.get("ts", "")
+        failed_sha = newest_nightly.get("head_sha", "")
+        lines.append(f"(none; newest nightly {failed_ts} {failed_sha})")
+    else:
+        lines.append(f"newest nightly {newest_nightly.get('ts', '')} "
+                     f"{newest_nightly.get('head_sha', '')}:")
+        for node in nightly_failed:
+            lines.append(f"- {node}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def flaky_report_cli(argv: list[str]) -> int:
+    """Entry point for `gate_tools.py flaky-report [--min-streak N] [--json]`.
+
+    Covers: prompt section B (flaky-report CLI).
+    """
+    parser = argparse.ArgumentParser(prog="gate_tools.py flaky-report")
+    parser.add_argument("--min-streak", type=int, default=3)
+    parser.add_argument("--json", action="store_true")
+    parsed = parser.parse_args(argv)
+    if parsed.min_streak < 1:
+        parser.error("--min-streak must be >= 1")
+    repo = Path.cwd()
+    try:
+        common = (repo / git(repo, "rev-parse", "--git-common-dir")).resolve()
+        history_file = history_path(common)
+    except subprocess.CalledProcessError:
+        history_file = Path.cwd() / HISTORY_DIRNAME / HISTORY_FILENAME
+    entries = load_history(history_file)
+    quarantine = read_quarantine(repo)
+    report = render_flaky_report(history_file, entries, parsed.min_streak, quarantine, parsed.json)
+    print(report, end="")
+    return 0
+
+
+def exclusive_cli(argv: list[str]) -> int:
+    """Run CMD while holding the heavy slot and all light slots.
+
+    Uses exactly the full gate's acquisition order, waits, messages and
+    SABEROPS_GATE_SLOT_WAIT timeout via slot(); no second implementation.
+
+    Covers: prompt section C (exclusive map-rebuild slot).
+    """
+    cmd: list[str] = list(argv[1:]) if argv[:1] == ["--"] else list(argv)
+    if not cmd or cmd == ["--"]:
+        print("usage: gate_tools.py exclusive -- CMD [ARGS...]", file=sys.stderr)
+        return 2
+    if cmd and cmd[0] == "--":
+        cmd = cmd[1:]
+    if not cmd:
+        print("usage: gate_tools.py exclusive -- CMD [ARGS...]", file=sys.stderr)
+        return 2
+    repo = Path.cwd()
+    try:
+        common = (repo / git(repo, "rev-parse", "--git-common-dir")).resolve()
+    except subprocess.CalledProcessError:
+        print("INFRA SLOT_WAIT_TIMEOUT (not a git repository)", flush=True)
+        return 3
+    heavy_root = common / "saberops-gate-slots"
+    light_root = common / "saberops-gate-light-slots"
+    try:
+        heavy_count = int(os.environ.get("SABEROPS_GATE_SLOTS", "1"))
+        light_count = int(os.environ.get("SABEROPS_LANE_SLOTS", "2"))
+        wait = float(os.environ.get("SABEROPS_GATE_SLOT_WAIT", "3600"))
+    except ValueError as error:
+        print(f"INFRA SLOT_WAIT_TIMEOUT ({error})", flush=True)
+        return 3
+    record: dict[str, Any] = {
+        "pid": os.getpid(),
+        "worktree": str(repo),
+        "started_at": datetime.now(UTC).isoformat(),
+        "kind": "exclusive",
+    }
+    try:
+        with slot(
+            heavy_root,
+            record,
+            heavy_count,
+            wait,
+            observe=False,
+            message="waiting for full-gate slot: ",
+        ):
+            with slot(
+                light_root,
+                record,
+                light_count,
+                wait,
+                acquire_all=True,
+                message="waiting for running lane checks: ",
+                slot_env="SABEROPS_LANE_SLOTS",
+            ):
+                completed = subprocess.run(cmd, check=False)
+                return completed.returncode
+    except TimeoutError:
+        print("INFRA SLOT_WAIT_TIMEOUT", flush=True)
+        return 3
+
+
 class Interrupted(Exception):
     """A gate signal, after the child process group is stopped."""
 
@@ -457,6 +736,21 @@ class Runner:
             "heavy_dirs": self.heavy,
         }
         (self.result / "outcome.json").write_text(json.dumps(payload, indent=2) + "\n")
+        if self.kind == "full":
+            entry: dict[str, Any] = {
+                "ts": datetime.now(UTC).isoformat(timespec="seconds"),
+                "head_sha": payload["head_sha"],
+                "worktree": str(self.repo),
+                "label": os.environ.get(GATE_LABEL_ENV, DEFAULT_GATE_LABEL),
+                "outcome": outcome,
+                "reason": reason,
+                "tests": count,
+                "failed": sorted(failed),
+                "flaky": sorted(flaky),
+                "wall_time": wall,
+                "peak_bytes": self.peak,
+            }
+            append_history(history_path(self.common), entry)
         if not (self.result / "full.xml").exists():
             ET.ElementTree(ET.Element("testsuites")).write(self.result / "full.xml")
         # Publish evidence before cleaning the private scratch directory.
@@ -677,6 +971,10 @@ def scratch_cli() -> int:
 
 
 def main() -> int:
+    if len(sys.argv) > 1 and sys.argv[1] == "flaky-report":
+        return flaky_report_cli(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "exclusive":
+        return exclusive_cli(sys.argv[2:])
     parser = argparse.ArgumentParser()
     parser.add_argument("kind", choices=["full", "lane"])
     parser.add_argument("--base")
