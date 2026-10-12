@@ -240,3 +240,36 @@ def test_hard_rule_no_metered_candidate(tmp_path: Path) -> None:
     metered = WorkerCandidate(provider="omniroute", model="auto")
     assert metered not in chain
     assert all(c.provider in {"codex", "anthropic"} for c in survivors)
+
+
+def test_legacy_unknown_row_follows_no_probe_rule(tmp_path: Path) -> None:
+    """A legacy UNKNOWN row past its first backoff: overage True keeps, False clears."""
+    import sqlite3
+
+    from saberops.control_plane.quota_policy import QuotaPoolPolicy
+
+    now = datetime(2026, 10, 11, 12, 0, tzinfo=UTC)
+    old_updated = (now - timedelta(hours=2)).isoformat()
+
+    def _seed(overage: bool) -> tuple[Database, dict[str, QuotaPoolPolicy]]:
+        db = Database(tmp_path / f"legacy-{overage}.db")
+        db.set_quota("codex", "weekly", 0.0, None)
+        with sqlite3.connect(str(db.owner_db.db_path), timeout=10.0) as conn:
+            conn.execute(
+                "UPDATE quota_state SET updated_at = ? WHERE provider = ? AND pool = ?",
+                (old_updated, "codex", "weekly"),
+            )
+            conn.commit()
+        policies = {
+            "codex": QuotaPoolPolicy(
+                pool_id="codex", members=("codex",), overage_possible=overage
+            )
+        }
+        return db, policies
+
+    db, policies = _seed(True)
+    states = effective_quota_states(db, now=now, run_probes=False, pool_policies=policies)
+    assert len([s for s in states if getattr(s, "exclusion_id", None)]) == 1
+    db, policies = _seed(False)
+    states = effective_quota_states(db, now=now, run_probes=False, pool_policies=policies)
+    assert [s for s in states if getattr(s, "exclusion_id", None)] == []

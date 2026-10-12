@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import time
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
-from saberops.capacity.exclusions import parse_iso
+from saberops.capacity.exclusions import exclusion_state, parse_iso
 
 HARNESS_PROVIDER: dict[str, str] = {
     "codex": "codex",
@@ -344,17 +346,22 @@ def run_due_probes(
     probes: dict[str, Any] | None = None,
     pool_policies: dict[str, Any] | None = None,
     deadline: float | None = None,
+    force_harnesses: Iterable[str] = (),
 ) -> dict[str, str]:
-    """Run due probes for registered harnesses; never raises.
+    """Run probes only for harnesses with a PROBE_DUE exclusion; never raises.
 
-    Returns {harness: outcome} with outcomes ran|rate-limited|failed|no-executable.
-    A failing probe never clears anything and never raises out of the seam.
+    A harness is considered only when at least one exclusion is PROBE_DUE now
+    and maps to it (``source == harness`` or its pool is in
+    ``pools_for_probe``); otherwise no executable is looked up and the outcome
+    is ``not-due``. ``force_harnesses`` runs named harnesses regardless (for
+    future callers; unused now). Under pytest without an injected probe for
+    the harness, no real executable is ever resolved or launched
+    (``disabled-under-test``): tests must never depend on owner logins.
+    Returns {harness: outcome}; a failing probe never clears and never raises.
     """
-    from saberops.capacity.exclusions import exclusion_state
     from saberops.capacity.store import (
         ensure_tables,
         list_active_exclusions,
-        owner_connection,
         probe_allowed,
         record_probe_run,
     )
@@ -365,34 +372,56 @@ def run_due_probes(
         active = list_active_exclusions(db, now=moment)
     except Exception:
         active = []
-    # HINT due bypasses the 10-min rate limit.
+    try:
+        policies = pool_policies if pool_policies is not None else _load_pool_policies()
+    except Exception:
+        policies = {}
+    due_harness: set[str] = set()
     hint_due_harness: set[str] = set()
     try:
         for exc in active:
-            if str(exc.get("until_confidence") or "").upper() != "HINT":
+            if exclusion_state(exc, moment) != "PROBE_DUE":
                 continue
-            until = parse_iso(exc.get("until"))  # type: ignore[arg-type]
-            if until is not None and moment >= until:
-                src = str(exc.get("source") or "")
-                if src:
-                    hint_due_harness.add(src)
+            for harness in REGISTERED_HARNESSES:
+                if _exclusion_maps_to_harness(exc, harness, policies):
+                    due_harness.add(harness)
+            if str(exc.get("until_confidence") or "").upper() == "HINT":
+                until = exc.get("until")
+                parsed = until if isinstance(until, datetime) else parse_iso(
+                    until if isinstance(until, str) else None
+                )
+                if parsed is not None and moment >= parsed:
+                    for harness in REGISTERED_HARNESSES:
+                        if _exclusion_maps_to_harness(exc, harness, policies):
+                            hint_due_harness.add(harness)
     except Exception:
         pass
+    forced = {h.strip() for h in force_harnesses if isinstance(h, str) and h.strip()}
+    under_test = os.environ.get("PYTEST_CURRENT_TEST") is not None
     outcomes: dict[str, str] = {}
     for harness in REGISTERED_HARNESSES:
         if deadline is not None and time.monotonic() >= deadline:
             break
-        try:
-            allowed = probe_allowed(
-                db, harness, now=moment, hint_due=(harness in hint_due_harness)
-            )
-        except Exception:
-            allowed = True
-        if not allowed:
-            outcomes[harness] = "rate-limited"
+        if harness not in forced and harness not in due_harness:
+            outcomes[harness] = "not-due"
             continue
+        if harness not in forced:
+            try:
+                allowed = probe_allowed(
+                    db, harness, now=moment, hint_due=(harness in hint_due_harness)
+                )
+            except Exception:
+                allowed = True
+            if not allowed:
+                outcomes[harness] = "rate-limited"
+                continue
         # Custom injected probe (tests) takes precedence.
         custom = (probes or {}).get(harness) if probes else None
+        if custom is None and under_test:
+            # Under pytest, real CLIs must never launch: tests would depend
+            # on owner logins and account state.
+            outcomes[harness] = "disabled-under-test"
+            continue
         try:
             if custom is not None:
                 if callable(getattr(custom, "read", None)):
@@ -401,39 +430,25 @@ def run_due_probes(
                     windows = custom(moment)
                 else:
                     windows = list(custom)
-                handle_probe_result(
-                    db, harness=harness, windows=list(windows),
-                    now=moment, pool_policies=pool_policies,
-                )
-                try:
-                    record_probe_run(db, harness=harness, ok=True, now=moment)
-                except Exception:
-                    pass
-                outcomes[harness] = "ran"
-                continue
-        except Exception:
-            try:
-                record_probe_run(
-                    db, harness=harness, ok=False, error_code="PROBE_FAILED", now=moment
-                )
-            except Exception:
-                pass
-            outcomes[harness] = "failed"
-            continue
-        # Default: real executables; missing binary is not a failure.
-        exe_name = {"codex": "codex", "claude": "claude", "opencode-go": "opencode"}[harness]
-        executable = shutil.which(exe_name)
-        if not executable:
-            outcomes[harness] = "no-executable"
-            continue
-        try:
-            reader = _READERS[harness]
-            windows = reader(executable, now=moment)
+            else:
+                # Default: real executables; missing binary is not a failure.
+                exe_name = {
+                    "codex": "codex", "claude": "claude", "opencode-go": "opencode",
+                }[harness]
+                executable = shutil.which(exe_name)
+                if not executable:
+                    outcomes[harness] = "no-executable"
+                    continue
+                reader = _READERS[harness]
+                windows = reader(executable, now=moment)
             handle_probe_result(
                 db, harness=harness, windows=list(windows),
                 now=moment, pool_policies=pool_policies,
             )
-            record_probe_run(db, harness=harness, ok=True, now=moment)
+            try:
+                record_probe_run(db, harness=harness, ok=True, now=moment)
+            except Exception:
+                pass
             outcomes[harness] = "ran"
         except Exception:
             try:
@@ -443,11 +458,58 @@ def run_due_probes(
             except Exception:
                 pass
             outcomes[harness] = "failed"
-    # Expire UNKNOWN backoff bookkeeping: bump attempts for PROBE_DUE
-    # UNKNOWN exclusions with no probe? No: resolution happens in
-    # quota_decision/snapshot; keep runs only.
-    _ = (exclusion_state, owner_connection)
     return outcomes
+
+
+def _exclusion_maps_to_harness(
+    exc: dict[str, Any], harness: str, policies: dict[str, Any] | None
+) -> bool:
+    """True when an exclusion is probed by ``harness`` (source or pool)."""
+    if str(exc.get("source") or "") == harness:
+        return True
+    pool_id = exc.get("pool_id")
+    if isinstance(pool_id, str) and pool_id:
+        try:
+            return pool_id in pools_for_probe(harness, policies)
+        except Exception:
+            return False
+    return False
+
+
+def probe_available_for(
+    exc: dict[str, Any],
+    *,
+    policies: dict[str, Any] | None,
+    probes: dict[str, Any] | None,
+    now: datetime | None = None,
+) -> bool:
+    """True when some registered harness could probe ``exc`` (no launch).
+
+    Used by the seam for the no-probe path: an injected probe counts; outside
+    pytest a present executable counts; under pytest without an injected probe
+    nothing counts. Never launches anything.
+    """
+    _ = now
+    under_test = os.environ.get("PYTEST_CURRENT_TEST") is not None
+    for harness in REGISTERED_HARNESSES:
+        try:
+            if not _exclusion_maps_to_harness(exc, harness, policies):
+                continue
+        except Exception:
+            continue
+        if probes and harness in probes:
+            return True
+        if under_test:
+            continue
+        exe_name = {
+            "codex": "codex", "claude": "claude", "opencode-go": "opencode",
+        }[harness]
+        try:
+            if shutil.which(exe_name):
+                return True
+        except Exception:
+            continue
+    return False
 
 
 __all__ = [
@@ -460,6 +522,7 @@ __all__ = [
     "read_go_windows",
     "parse_claude_reset_text",
     "pools_for_probe",
+    "probe_available_for",
     "handle_probe_result",
     "run_due_probes",
 ]

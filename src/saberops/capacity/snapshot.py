@@ -22,6 +22,16 @@ def _utcnow(now: datetime | None) -> datetime:
     return datetime.now(UTC)
 
 
+def _load_pool_policies() -> dict[str, Any]:
+    """Best-effort control-plane pool policies for the no-probe path."""
+    try:
+        from saberops.control_plane.policy import load_control_plane_policy
+
+        return dict(load_control_plane_policy().quota_pools)
+    except Exception:
+        return {}
+
+
 _WINDOW_NAMES = frozenset({"5h", "daily", "weekly", "monthly", "all"})
 
 
@@ -71,19 +81,15 @@ def _legacy_exclusion_from_row(row: Any, now: datetime) -> dict[str, object] | N
             "cleared_by": None,
             "_legacy": True,
         }
-    # No tz-aware reset: UNKNOWN anchored at updated_at.
+    # No tz-aware reset: UNKNOWN anchored at updated_at. The seam's no-probe
+    # path decides clear vs keep from the pool policy, so the row is always
+    # returned here; past-backoff rows are PROBE_DUE, never silently dropped.
     updated_raw = getattr(row, "updated_at", None)
     updated = parse_iso(updated_raw) if isinstance(updated_raw, str) else None
     anchor = updated or now
     from saberops.capacity.exclusions import backoff_next_probe
 
     nxt = backoff_next_probe(anchor, 0, window_id)
-    # Expired legacy UNKNOWN rows are dropped by the caller (no probe +
-    # overage False clears at next_probe_at; overage True stays handled
-    # by quota_decision's evidence rule via the synthesized state? No:
-    # expired legacy rows simply stop excluding).
-    if now >= nxt:
-        return None
     return {
         "id": f"legacy:{row.provider}:{row.pool}",
         "pool_id": pool_id,
@@ -110,16 +116,25 @@ def effective_quota_states(
     now: datetime | None = None,
     run_probes: bool = True,
     probes: Any | None = None,
+    pool_policies: dict[str, Any] | None = None,
 ) -> list[Any]:
     """Seam replacing every routing-path ``db.list_quota()`` read.
 
-    1. runs due probes (bounded to <= 45s total);
+    1. runs due probes (bounded to <= 45s total; only harnesses with a
+       PROBE_DUE exclusion);
     2. reads ``db.list_quota()`` and sets ``freshness`` per row; a
        BLOCKED/DEMOTED row whose tz-aware ``reset_at`` is in the past
        comes back as NORMAL with STALE;
-    3. appends one synthesized ``QuotaState`` per active/PROBE_DUE
+    3. resolves the no-probe path in the seam: a PROBE_DUE exclusion no
+       registered harness can probe clears when its pool policy has
+       ``overage_possible`` False (``EXPIRED_NO_PROBE``) and is kept
+       otherwise (unknown pools keep: fail closed);
+    4. appends one synthesized ``QuotaState`` per active/PROBE_DUE
        exclusion with routing NORMAL (so ``_is_quota_blocked`` never
        turns a pool exclusion into a provider-wide block).
+
+    ``pool_policies`` defaults to the control-plane policy (best effort);
+    tests pass it explicitly.
     """
     from saberops.models import RoutingState
 
@@ -130,9 +145,19 @@ def effective_quota_states(
             from saberops.capacity import probes as _probes
 
             deadline = time.monotonic() + 45.0
-            _probes.run_due_probes(db, now=moment, probes=probes, deadline=deadline)
+            _probes.run_due_probes(
+                db, now=moment, probes=probes, deadline=deadline,
+                pool_policies=pool_policies,
+            )
         except Exception:
             pass
+    try:
+        policies: dict[str, Any] = (
+            dict(pool_policies) if pool_policies is not None
+            else _load_pool_policies()
+        )
+    except Exception:
+        policies = {}
     rows = db.list_quota()
     out: list[Any] = []
     for row in rows:
@@ -181,6 +206,43 @@ def effective_quota_states(
                 continue
         except Exception:
             continue
+        # No-probe path (in the seam, not dependent on a probe having run):
+        # a PROBE_DUE exclusion no registered harness can probe clears when
+        # its pool policy says overage is impossible, and is kept otherwise.
+        try:
+            from saberops.capacity.exclusions import exclusion_state
+            from saberops.capacity.probes import probe_available_for
+
+            due = exclusion_state(exc, moment) == "PROBE_DUE"
+        except Exception:
+            due = False
+        if due:
+            try:
+                available = probe_available_for(
+                    exc, policies=policies, probes=probes, now=moment
+                )
+            except Exception:
+                available = True
+            if not available:
+                # Fail closed: pools without a known policy keep excluding.
+                pool_id = exc.get("pool_id")
+                policy = policies.get(pool_id) if isinstance(pool_id, str) else None
+                clearable = policy is not None and not bool(
+                    getattr(policy, "overage_possible", False)
+                )
+                if clearable:
+                    if not exc.get("_legacy"):
+                        try:
+                            from saberops.capacity.store import clear_exclusion
+
+                            exc_id = exc.get("id")
+                            if isinstance(exc_id, str) and exc_id:
+                                clear_exclusion(
+                                    db, exc_id, by="EXPIRED_NO_PROBE", now=moment
+                                )
+                        except Exception:
+                            pass
+                    continue
         raw_until = exc.get("until")
         until = raw_until if isinstance(raw_until, str) else None
         raw_scope = exc.get("model_scope")
