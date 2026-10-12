@@ -1090,7 +1090,8 @@ def test_deprecated_tier_flags_warn_and_supervisor_forwards_selectively(
     isolated: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Covers: --tier/--max-tier deprecation lines and detached forwarding."""
-    from saberops.config import Tier, resolve_run_config
+    from saberops.config import resolve_run_config
+    from saberops.models import Tier
 
     repo = _git_repo(isolated / "dep-flags")
     db_path = isolated / "dep.db"
