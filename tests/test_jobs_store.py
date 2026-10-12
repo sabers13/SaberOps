@@ -192,15 +192,24 @@ def test_terminal_states_immutable(tmp_path: Path) -> None:
         before = store.get_job(db, job_id)
         assert before is not None
         n_events = len(store.list_events(db, job_id))
-        for op in (
-            lambda j=job_id: store.mark_dispatched(db, j, "run_x"),
-            lambda j=job_id: store.set_waiting(db, j, WaitingReason.NO_CAPACITY),
-            lambda j=job_id: store.requeue(db, j, WaitingReason.PREEMPTED),
-            lambda j=job_id: store.cancel_transition(db, j),
-            lambda j=job_id: store.reconcile_transition(db, j, to=JobState.SUCCEEDED),
+        for op_name in (
+            "mark_dispatched",
+            "set_waiting",
+            "requeue",
+            "cancel",
+            "reconcile",
         ):
             with pytest.raises(store.JobTransitionError):
-                op()
+                if op_name == "mark_dispatched":
+                    store.mark_dispatched(db, job_id, "run_x")
+                elif op_name == "set_waiting":
+                    store.set_waiting(db, job_id, WaitingReason.NO_CAPACITY)
+                elif op_name == "requeue":
+                    store.requeue(db, job_id, WaitingReason.PREEMPTED)
+                elif op_name == "cancel":
+                    store.cancel_transition(db, job_id)
+                else:
+                    store.reconcile_transition(db, job_id, to=JobState.SUCCEEDED)
         after = store.get_job(db, job_id)
         assert after == before
         assert len(store.list_events(db, job_id)) == n_events

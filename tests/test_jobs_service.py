@@ -315,9 +315,12 @@ def test_cancel_running_true_and_false(tmp_path: Path) -> None:
     assert refused.cancelled is False
     assert refused.job.state == JobState.RUNNING
     calls: list[str] = []
-    done = cancel_job(
-        db, job.job_id, run_canceller=lambda run: calls.append(run) or True
-    )
+
+    def _record(run: str) -> bool:
+        calls.append(run)
+        return True
+
+    done = cancel_job(db, job.job_id, run_canceller=_record)
     assert done.cancelled is True
     assert calls == ["run_1"]
     assert done.job.state == JobState.CANCELLED
@@ -404,8 +407,9 @@ def test_reconcile_status_mapping(tmp_path: Path) -> None:
     assert by_job[missing].to_state == JobState.FAILED
     assert by_job[missing].failure_reason == RUN_MISSING
     for untouched in (pending, running, orphaned):
-        assert get_job(db, untouched) is not None
-        assert get_job(db, untouched).state == JobState.RUNNING
+        current = get_job(db, untouched)
+        assert current is not None
+        assert current.state == JobState.RUNNING
     # No event for untouched RUNNING jobs: still exactly 2 events each.
     for untouched in (pending, running, orphaned):
         assert len(store.list_events(db, untouched)) == 2
