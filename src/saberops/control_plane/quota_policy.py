@@ -116,9 +116,10 @@ def _member_matches(member: str, candidate: WorkerCandidate) -> bool:
         prefix = text[:-2]
         if "/" not in prefix:
             return False
-        if route == prefix or route.startswith(prefix + "/"):
-            return True
-        return provider == prefix.split("/")[0] and route.startswith(prefix)
+        # Trailing glob matches only at a slash boundary (fix-up 2: the old
+        # prefix-without-slash fallback wrongly matched e.g.
+        # `opencode/opencode-go/*` against `opencode/opencode-go-extra/m`).
+        return route == prefix or route.startswith(prefix + "/")
     return text in (
         route,
         candidate.model.strip().lower(),

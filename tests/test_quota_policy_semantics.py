@@ -188,3 +188,19 @@ def test_trailing_glob_and_pools_for() -> None:
     assert pools_for(cand, policies) == ["shared"]
     other = WorkerCandidate(provider="opencode", model="opencode-go/x")
     assert pools_for(other, policies) == ["opencode"]
+
+
+def test_trailing_glob_respects_slash_boundary() -> None:
+    """Fix-up 2: `opencode/opencode-go/*` matches only within opencode-go/."""
+    from saberops.control_plane.quota_policy import _member_matches
+
+    member = "opencode/opencode-go/*"
+    assert _member_matches(
+        member, WorkerCandidate(provider="opencode", model="opencode-go/deepseek-v4-pro")
+    ) is True
+    assert _member_matches(
+        member, WorkerCandidate(provider="opencode", model="opencode-go-extra/model")
+    ) is False
+    assert _member_matches(
+        member, WorkerCandidate(provider="opencode", model="opencode/big-pickle")
+    ) is False
