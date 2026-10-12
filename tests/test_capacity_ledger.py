@@ -353,3 +353,101 @@ def test_l11_snapshot(tmp_path: Path) -> None:
         "str", "str", "float | None", "float",
         "str | None", "str | None", "bool", "str | None",
     ]
+
+
+def _cost_rows(db: Database) -> dict[tuple[str, str, str, str], tuple[int, float | None]]:
+    owner = db.owner_db
+    with owner._get_connection() as conn:
+        rows = conn.execute(
+            "SELECT route, pool_id, window_id, size_bucket, samples, ewma_pct"
+            " FROM capacity_cost_model"
+        ).fetchall()
+        return {
+            (str(r["route"]), str(r["pool_id"]), str(r["window_id"]),
+             str(r["size_bucket"])): (int(r["samples"]),
+                                     float(r["ewma_pct"]) if r["ewma_pct"] is not None else None)
+            for r in rows
+        }
+
+
+# L10: probe-to-probe deltas train per-route cost states.
+def test_l10_learning_token_split(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    t0, t1, t2, t3 = (_T0 + timedelta(minutes=m) for m in (0, 10, 20, 30))
+    record_owner_quota(db, "opencode", "5h", 70.0, None,
+                       source="PROBE", now=t0)
+    reserve(db, run_id="run-a", route="route-a/model",
+            draws=[PoolDraw("opencode", "5h")],
+            size_bucket=SizeBucket.S, now=t1)
+    reserve(db, run_id="run-b", route="route-b/model",
+            draws=[PoolDraw("opencode", "5h")],
+            size_bucket=SizeBucket.S, now=t1)
+    assert settle(db, "run-a", total_tokens=3000, now=t2) == 1
+    assert settle(db, "run-b", total_tokens=1000, now=t2) == 1
+    record_owner_quota(db, "opencode", "5h", 58.0, None,
+                       source="PROBE", now=t3)
+    rows = _cost_rows(db)
+    assert rows[("route-a/model", "opencode", "5h", "S")] == (1, 9.0)
+    assert rows[("route-b/model", "opencode", "5h", "S")] == (1, 3.0)
+
+
+def test_l10_learning_equal_split_and_no_sample_cases(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    t0, t1, t2 = (_T0 + timedelta(minutes=m) for m in (0, 10, 20))
+    record_owner_quota(db, "opencode", "5h", 58.0, None,
+                       source="PROBE", now=t0)
+    reserve(db, run_id="run-c", route="route-c/model",
+            draws=[PoolDraw("opencode", "5h")],
+            size_bucket=SizeBucket.S, now=t1)
+    reserve(db, run_id="run-d", route="route-d/model",
+            draws=[PoolDraw("opencode", "5h")],
+            size_bucket=SizeBucket.S, now=t1)
+    assert settle(db, "run-c", total_tokens=None, now=t1) == 1
+    assert settle(db, "run-d", total_tokens=200, now=t1) == 1
+    # Delta 8 split equally: a missing token count forces equal shares.
+    record_owner_quota(db, "opencode", "5h", 50.0, None,
+                       source="PROBE", now=t2)
+    rows = _cost_rows(db)
+    assert rows[("route-c/model", "opencode", "5h", "S")] == (1, 4.0)
+    assert rows[("route-d/model", "opencode", "5h", "S")] == (1, 4.0)
+    # No sample when the delta is not positive.
+    t3 = t2 + timedelta(minutes=10)
+    record_owner_quota(db, "opencode", "5h", 55.0, None,
+                       source="PROBE", now=t3)
+    assert _cost_rows(db) == rows
+    # No sample when a reset lies between the two observations.
+    t4 = t3 + timedelta(minutes=10)
+    t5 = t4 + timedelta(minutes=10)
+    reserve(db, run_id="run-e", route="route-e/model",
+            draws=[PoolDraw("opencode", "5h")],
+            size_bucket=SizeBucket.S, now=t4)
+    assert settle(db, "run-e", total_tokens=100, now=t4) == 1
+    record_owner_quota(db, "opencode", "5h", 40.0, t4.isoformat(),
+                       source="PROBE", now=t5)
+    assert ("route-e/model", "opencode", "5h", "S") not in _cost_rows(db)
+
+
+def test_l10_no_samples_for_all_keys_or_owner(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    t0, t1, t2 = (_T0 + timedelta(minutes=m) for m in (0, 10, 20))
+    # ALL-keyed PROBE observations never produce samples.
+    record_owner_quota(db, "x", "my-pool", 70.0, None,
+                       source="PROBE", now=t0)
+    reserve(db, run_id="run-all", route="route-a/model",
+            draws=[PoolDraw("my-pool", "ALL")],
+            size_bucket=SizeBucket.S, now=t1)
+    assert settle(db, "run-all", total_tokens=100, now=t1) == 1
+    record_owner_quota(db, "x", "my-pool", 58.0, None,
+                       source="PROBE", now=t2)
+    assert _cost_rows(db) == {}
+    # OWNER observations never produce samples either.
+    db2 = Database(tmp_path / "owner-src.db")
+    record_owner_quota(db2, "opencode", "5h", 70.0, None,
+                       source="OWNER", now=t0)
+    reserve(db2, run_id="run-o", route="route-a/model",
+            draws=[PoolDraw("opencode", "5h")],
+            size_bucket=SizeBucket.S, now=t1)
+    assert settle(db2, "run-o", total_tokens=100, now=t1) == 1
+    record_owner_quota(db2, "opencode", "5h", 58.0, None,
+                       source="OWNER", now=t2)
+    assert _cost_rows(db2) == {}
