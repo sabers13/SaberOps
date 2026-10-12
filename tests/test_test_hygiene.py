@@ -153,6 +153,7 @@ def write_map(
     commit_sha: str,
     nodes: list[str],
     shards: dict[str, dict[str, list[int]]],
+    unmatched: int = 0,
 ) -> Path:
     map_dir = root / "map"
     files_dir = map_dir / "files"
@@ -166,7 +167,6 @@ def write_map(
         "built_at": "2026-10-12T00:00:00+00:00",
         "test_count": len(nodes),
         "context_count": len(nodes),
-        "unmatched_nodes": 0,
         "coverage_version": "test",
         "build_seconds": 1.0,
         "pytest_exit": 0,
@@ -174,6 +174,7 @@ def write_map(
         "nodes": nodes,
         "by_test": by_test,
         "blind": [],
+        "unmatched_nodes": unmatched,
     }
     (map_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
     for rel, lines in shards.items():
@@ -264,7 +265,16 @@ def test_b_lists_uncovered_and_marks_script_tests(tmp_path: Path) -> None:
         nodes=nodes,
         shards={"src/saberops/alpha.py": {"5": [0]}},
     )
-    completed = run_hygiene(tmp_path, "--repo", str(repo), "--map", str(map_dir))
+    junit_path = write_junit(
+        tmp_path,
+        [
+            ("tests.test_alpha", "test_only", 1.0),
+            ("tests.test_beta", "test_other", 2.0),
+        ],
+    )
+    completed = run_hygiene(
+        tmp_path, "--repo", str(repo), "--map", str(map_dir), "--junit", str(junit_path)
+    )
     assert completed.returncode == 0, completed.stderr
     markdown, data = read_outputs(tmp_path)
     section_b = data["b"]
@@ -273,6 +283,86 @@ def test_b_lists_uncovered_and_marks_script_tests(tmp_path: Path) -> None:
     assert section_b["tests/test_beta.py"]["nodes"] == ["tests/test_beta.py::test_other"]
     assert section_b["tests/test_beta.py"]["script_test"] is True
     assert "tests/test_beta.py (script test):" in markdown
+
+
+def test_b_lists_junit_id_absent_from_map(tmp_path: Path) -> None:
+    """Covers: G-004 fix-up 1 section B (junit population beyond the map)."""
+    repo = seed_repo(tmp_path, BASE_FILES)
+    head = git(repo, "rev-parse", "HEAD")
+    nodes = ["tests/test_alpha.py::test_only"]
+    map_dir = write_map(
+        tmp_path,
+        commit_sha=head,
+        nodes=nodes,
+        shards={"src/saberops/alpha.py": {"6": [0]}},
+    )
+    junit_path = write_junit(
+        tmp_path,
+        [
+            ("tests.test_alpha", "test_only", 1.0),
+            ("tests.test_ghost", "test_ghost", 2.0),
+        ],
+    )
+    completed = run_hygiene(
+        tmp_path, "--repo", str(repo), "--map", str(map_dir), "--junit", str(junit_path)
+    )
+    assert completed.returncode == 0, completed.stderr
+    markdown, data = read_outputs(tmp_path)
+    section_b = data["b"]
+    assert isinstance(section_b, dict)
+    assert "tests/test_alpha.py" not in section_b
+    assert section_b["tests/test_ghost.py"]["nodes"] == ["tests/test_ghost.py::test_ghost"]
+    assert section_b["tests/test_ghost.py"]["script_test"] is False
+    assert "- tests/test_ghost.py::test_ghost" in markdown
+    assert "- id mismatch: map-only 0, junit-only 1" in markdown
+
+
+def test_b_param_and_class_ids_match_map(tmp_path: Path) -> None:
+    """Covers: G-004 fix-up 1 section B (parametrised and class ids match)."""
+    repo = seed_repo(tmp_path, BASE_FILES)
+    head = git(repo, "rev-parse", "HEAD")
+    nodes = ["tests/test_p.py::test_m[a]", "tests/test_c.py::TestC::test_m"]
+    map_dir = write_map(
+        tmp_path,
+        commit_sha=head,
+        nodes=nodes,
+        shards={"src/saberops/alpha.py": {"6": [0, 1]}},
+    )
+    junit_path = write_junit(
+        tmp_path,
+        [("tests.test_p", "test_m[a]", 1.0), ("tests.test_c.TestC", "test_m", 2.0)],
+    )
+    completed = run_hygiene(
+        tmp_path, "--repo", str(repo), "--map", str(map_dir), "--junit", str(junit_path)
+    )
+    assert completed.returncode == 0, completed.stderr
+    markdown, data = read_outputs(tmp_path)
+    assert data["b"] == {}
+    assert "- none found." in markdown.split("## B.")[1].split("## C.")[0]
+    assert "- id mismatch: map-only 0, junit-only 0" in markdown
+
+
+def test_b_without_junit_prints_needs_line(tmp_path: Path) -> None:
+    """Covers: G-004 fix-up 1 section B (needs-junit line with unmatched count)."""
+    repo = seed_repo(tmp_path, BASE_FILES)
+    head = git(repo, "rev-parse", "HEAD")
+    map_dir = write_map(
+        tmp_path,
+        commit_sha=head,
+        nodes=["tests/test_alpha.py::test_only"],
+        shards={"src/saberops/alpha.py": {"6": [0]}},
+        unmatched=7,
+    )
+    completed = run_hygiene(tmp_path, "--repo", str(repo), "--map", str(map_dir))
+    assert completed.returncode == 0, completed.stderr
+    markdown, data = read_outputs(tmp_path)
+    expected = (
+        "B needs --junit: the map lists only tests that executed src code "
+        "(7 tests not in the map)."
+    )
+    assert f"- {expected}" in markdown
+    assert data["b"] == {"needs_junit": expected}
+    assert "## E." not in markdown
 
 
 def test_c_groups_identical_coverage_across_files(tmp_path: Path) -> None:

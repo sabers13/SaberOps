@@ -143,8 +143,10 @@ When the map's build commit is not the `--repo` HEAD, the header says
 no map) and the coverage-based sections B and C are skipped; the others still
 run. The report lists candidates only, never deletions: (A) top-level
 `def`/`class` symbols in `src/saberops/**` referenced only from tests (with a
-dynamic-dispatch false-positive caveat), (B) tests covering no `src` lines
-grouped by file (`script test` marks files loading `scripts/` modules), (C)
+dynamic-dispatch false-positive caveat), (B) `--junit` node ids covering no
+`src` lines, grouped by file (`script test` marks files loading `scripts/`
+modules; the map table holds only tests that executed `src` code, so without
+`--junit` B prints a needs-junit line with the unmatched count instead), (C)
 identical-coverage groups spanning at least two test files (same-file
 parametrizations counted, not listed), (D) task-named test files
 (`TASK_NAMED_RE` in the script), (E) the slowest 20 tests from `--junit`

@@ -107,6 +107,32 @@ def _refs_in_tree(tree: ast.Module) -> dict[str, list[int]]:
     return refs
 
 
+def _normalize_node_id(node_id: str) -> str:
+    """Common key for map (pytest) and junit-derived node ids.
+
+    Both sides already use `path::qualname[param]` form (gate_tools.junit
+    mirrors it, including class segments); this canonicalises only path
+    separators and `./` prefixes so parametrized ids and class segments
+    compare literally on both sides.
+    """
+    file_part, sep, rest = node_id.partition("::")
+    file_part = file_part.replace("\\", "/")
+    while "//" in file_part:
+        file_part = file_part.replace("//", "/")
+    if file_part.startswith("./"):
+        file_part = file_part[2:]
+    return file_part + ("::" + rest if sep else "")
+
+
+def _read_meta(map_dir: Path) -> dict[str, Any]:
+    """Raw meta.json payload (for test_count/unmatched_nodes); {} when unusable."""
+    try:
+        payload = json.loads((map_dir / META_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 def _dunder(name: str) -> bool:
     return name.startswith("__") and name.endswith("__")
 
@@ -265,22 +291,45 @@ def read_shards(map_dir: Path) -> dict[str, dict[int, list[int]]]:
     return shards
 
 
+def _id_mismatch(
+    nodes: list[str], junit_ids: list[str]
+) -> tuple[int, int]:
+    """(map-only, junit-only) counts under the common normalisation."""
+    map_norm = {_normalize_node_id(node) for node in nodes}
+    junit_norm = {_normalize_node_id(node_id) for node_id in junit_ids}
+    return len(map_norm - junit_norm), len(junit_norm - map_norm)
+
+
 def section_b(
-    nodes: list[str], shards: dict[str, dict[int, list[int]]]
-) -> dict[str, dict[str, Any]]:
-    """Node ids covering no src line, grouped by file."""
-    covered: set[int] = set()
-    for lines in shards.values():
-        for indices in lines.values():
-            covered.update(indices)
+    nodes: list[str],
+    junit_ids: list[str],
+    shards: dict[str, dict[int, list[int]]],
+) -> tuple[dict[str, dict[str, Any]], int, int]:
+    """Junit node ids covering no src line, grouped by file, plus mismatches.
+
+    The map node table holds only tests that executed src code, so the
+    population is the complete junit set: an id is uncovered when its
+    normalised form covers no line in any shard (absent from the table, or
+    present with no lines). Map-only/junit-only counts expose naming drift
+    between the two id sources.
+    """
+    covered: dict[str, set[tuple[str, int]]] = {}
+    for rel, lines in shards.items():
+        for line, indices in lines.items():
+            for index in indices:
+                if 0 <= index < len(nodes):
+                    key = _normalize_node_id(nodes[index])
+                    covered.setdefault(key, set()).add((rel, line))
+    map_only, junit_only = _id_mismatch(nodes, junit_ids)
     grouped: dict[str, list[str]] = {}
-    for position, node_id in enumerate(nodes):
-        if position not in covered:
+    for node_id in junit_ids:
+        if not covered.get(_normalize_node_id(node_id)):
             grouped.setdefault(node_id.split("::")[0], []).append(node_id)
-    return {
+    files = {
         rel: {"nodes": sorted(ids), "script_test": False}
         for rel, ids in sorted(grouped.items())
     }
+    return files, map_only, junit_only
 
 
 def section_c(
@@ -364,8 +413,8 @@ def _junit_times(junit_path: Path) -> tuple[list[tuple[str, float]], float]:
 
 def section_e(
     gate_tools: Any, junit_path: Path
-) -> tuple[list[dict[str, Any]], float, int]:
-    """Slowest 20 tests by junit time; total time; case count."""
+) -> tuple[list[dict[str, Any]], float, int, list[str]]:
+    """Slowest 20 tests by junit time; total time; case count; deduped ids."""
     evidence = gate_tools.junit(junit_path)
     canonical: list[str] = list(evidence.cases)
     rows, total = _junit_times(junit_path)
@@ -382,6 +431,7 @@ def section_e(
         [{"node": node, "time": elapsed} for node, elapsed in slowest[:SLOWEST_COUNT]],
         total,
         len(canonical),
+        sorted(set(canonical)),
     )
 
 
@@ -521,9 +571,10 @@ def main(argv: list[str] | None = None) -> int:
     slowest: list[dict[str, Any]] | None = None
     junit_total = 0.0
     junit_cases = 0
+    junit_ids: list[str] | None = None
     if junit_path is not None:
         try:
-            slowest, junit_total, junit_cases = section_e(gate_tools, junit_path)
+            slowest, junit_total, junit_cases, junit_ids = section_e(gate_tools, junit_path)
         except ET.ParseError as error:
             print(f"error: cannot parse --junit {args.junit}: {error}", file=sys.stderr)
             return 2
@@ -552,19 +603,40 @@ def main(argv: list[str] | None = None) -> int:
     test_files = _count_test_files(repo)
     task_named = task_named_files(repo)
 
-    # Coverage-based sections need a fresh map.
+    # Coverage-based sections need a fresh map. B's population is the
+    # complete junit set (the map table holds only tests that executed src
+    # code); without --junit there is nothing to list.
+    meta = _read_meta(map_dir) if covmap is not None else {}
+    meta_tests = meta.get("test_count", "?")
+    meta_unmatched = meta.get("unmatched_nodes", "?")
     shards: dict[str, dict[int, list[int]]] = {}
     if fresh:
         shards = read_shards(map_dir)
-    rows_b: dict[str, dict[str, Any]] | None = None
+    rows_b: dict[str, Any] | None = None
+    map_only = 0
+    junit_only = 0
+    mismatch_known = False
+    if junit_ids is not None and covmap is not None:
+        map_only, junit_only = _id_mismatch(nodes, junit_ids)
+        mismatch_known = True
     groups_c: list[dict[str, Any]] | None = None
     same_file_c = 0
     if fresh:
-        rows_b = section_b(nodes, shards)
-        if rows_b:
-            marks = _script_test_marks(repo, sorted(rows_b))
-            for rel, is_script in marks.items():
-                rows_b[rel]["script_test"] = is_script
+        if junit_ids is not None:
+            files_b, map_only, junit_only = section_b(nodes, junit_ids, shards)
+            mismatch_known = True
+            if files_b:
+                marks = _script_test_marks(repo, sorted(files_b))
+                for rel, is_script in marks.items():
+                    files_b[rel]["script_test"] = is_script
+            rows_b = files_b
+        else:
+            rows_b = {
+                "needs_junit": (
+                    "B needs --junit: the map lists only tests that executed src code "
+                    f"({meta_unmatched} tests not in the map)."
+                )
+            }
         groups_c, same_file_c = section_c(nodes, shards)
 
     rows_a = section_a(repo)
@@ -594,11 +666,19 @@ def main(argv: list[str] | None = None) -> int:
     if covmap is None:
         lines.append("- Map: none (no coverage map; sections B and C skipped)")
     elif fresh:
-        lines.append(f"- Map: {map_commit} (fresh)")
+        lines.append(
+            f"- Map: {map_commit} (fresh), test_count {meta_tests}, "
+            f"unmatched_nodes {meta_unmatched}"
+        )
     else:
-        lines.append(f"- Map: map is stale ({map_commit} vs {head}); sections B and C skipped")
+        lines.append(
+            f"- Map: map is stale ({map_commit} vs {head}); sections B and C skipped, "
+            f"test_count {meta_tests}, unmatched_nodes {meta_unmatched}"
+        )
     lines.append(f"- Test node ids: {node_count} (from {node_source})")
     lines.append(f"- Test files: {test_files} ({len(task_named)} task-named)")
+    if mismatch_known:
+        lines.append(f"- id mismatch: map-only {map_only}, junit-only {junit_only}")
     if junit_path is not None:
         lines.append(f"- JUnit total time: {junit_total:.1f}s over {junit_cases} cases")
 
@@ -624,7 +704,9 @@ def main(argv: list[str] | None = None) -> int:
         lines.append("")
         lines.append("## B. Tests covering no src lines")
         lines.append("")
-        if rows_b:
+        if "needs_junit" in rows_b:
+            lines.append(f"- {rows_b['needs_junit']}")
+        elif rows_b:
             for rel, group in rows_b.items():
                 marker = " (script test)" if group["script_test"] else ""
                 lines.append(f"- {rel}{marker}:")
@@ -693,6 +775,10 @@ def main(argv: list[str] | None = None) -> int:
             "task_named_count": len(task_named),
             "junit_total_time": junit_total if junit_path is not None else None,
             "junit_cases": junit_cases if junit_path is not None else None,
+            "map_test_count": meta_tests if covmap is not None else None,
+            "map_unmatched_nodes": meta_unmatched if covmap is not None else None,
+            "id_mismatch_map_only": map_only if mismatch_known else None,
+            "id_mismatch_junit_only": junit_only if mismatch_known else None,
         },
         "a": rows_a,
         "b": rows_b,
