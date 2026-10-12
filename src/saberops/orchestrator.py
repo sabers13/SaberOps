@@ -436,34 +436,66 @@ def _bounded_output(raw: str, limit: int = 4000) -> str:
 
 
 def _record_quota_exhaustion_evidence(
-    db: Database, *, run_id: str, provider: str, reset_iso: str | None
+    db: Database,
+    *,
+    run_id: str,
+    provider: str,
+    model: str | None = None,
+    reset_iso: str | None = None,
+    window: str | None = None,
+    model_scope: str | None = None,
+    reset_confidence: str | None = None,
 ) -> None:
-    """Persist plan-exhaustion quota evidence (T-004, best effort).
+    """Persist plan-exhaustion quota evidence (M2-1: window/pool/model-aware).
 
-    Records the raw observation (freshness FRESH, remaining 0) plus the
-    derived pool state via :func:`saberops.workers.exhaustion.record_exhaustion`
-    so later routing excludes the exhausted pool until reset.  The
-    evidence only ever excludes: it never synthesizes, enables, or
-    fails over to any other route (in particular never to an API-key /
-    METERED_KEY route such as OmniRoute or direct_api -- those dispatch
-    only when already present in the owner's routing chain).  Evidence
-    failure never breaks continuation: the in-memory blocked-provider
-    set already governs this cycle.
+    Records the raw observation (freshness FRESH, remaining 0) plus one
+    exclusion per pool the candidate draws via
+    :func:`saberops.workers.exhaustion.record_exhaustion`.  The evidence
+    only ever excludes: it never synthesizes, enables, or fails over to
+    any other route (in particular never to an API-key / METERED_KEY route
+    such as OmniRoute or direct_api -- those dispatch only when already
+    present in the owner's routing chain).  Evidence failure never breaks
+    continuation: the in-memory blocked-provider set already governs this
+    cycle.
     """
-    from saberops.workers.exhaustion import record_exhaustion
+    from saberops.workers.exhaustion import record_exhaustion, reset_to_iso
 
     try:
         reset_at = datetime.fromisoformat(reset_iso) if reset_iso else None
     except ValueError:
         reset_at = None
     try:
-        state = record_exhaustion(db, provider=provider, run_id=run_id, reset_at=reset_at)
+        try:
+            from saberops.control_plane.policy import load_control_plane_policy
+
+            pool_policies = dict(load_control_plane_policy().quota_pools)
+        except Exception:
+            pool_policies = None
+        state = record_exhaustion(
+            db, provider=provider, run_id=run_id, reset_at=reset_at,
+            model=model, window=window, model_scope=model_scope,
+            reset_confidence=reset_confidence or "UNKNOWN",
+            pool_policies=pool_policies,
+        )
+        try:
+            from saberops.control_plane.quota_policy import pools_for as _pools_for
+            from saberops.models import WorkerCandidate
+
+            pool_ids = _pools_for(
+                WorkerCandidate(provider=provider, model=model or ""), pool_policies
+            )
+        except Exception:
+            pool_ids = [provider]
         db.record_event(
             run_id,
             "quota_exhaustion_recorded",
             payload={
                 "provider": provider,
                 "pool": state.pool,
+                "pool_ids": pool_ids,
+                "window_id": window,
+                "until": state.reset_at or reset_to_iso(reset_at),
+                "until_confidence": reset_confidence or "UNKNOWN",
                 "routing_state": state.routing_state.value,
                 "reset_at": state.reset_at,
             },
@@ -2639,7 +2671,12 @@ class Orchestrator:
             # cycle begins.  Used to select SURGEON context semantics for
             # the next dispatch only.
             surgeon_active: bool = False
-            quota_states = self.db.list_quota()
+            try:
+                from saberops.capacity.snapshot import effective_quota_states
+
+                quota_states = effective_quota_states(self.db)
+            except Exception:
+                quota_states = self.db.list_quota()
             base_candidates = resolve_candidate_chain(
                 tier=current_tier,
                 training_allowed=config.training_allowed,
@@ -3152,7 +3189,12 @@ class Orchestrator:
                     self.db.record_event(
                         run_id, "tier_decision", payload=tier_decision.as_payload()
                     )
-                    quota_states = self.db.list_quota()
+                    try:
+                        from saberops.capacity.snapshot import effective_quota_states
+
+                        quota_states = effective_quota_states(self.db)
+                    except Exception:
+                        quota_states = self.db.list_quota()
                     base_candidates = resolve_candidate_chain(
                         tier=current_tier,
                         training_allowed=config.training_allowed,
@@ -5041,7 +5083,13 @@ class Orchestrator:
                             self.db,
                             run_id=run_id,
                             provider=candidate.provider,
+                            model=candidate.model,
                             reset_iso=worker_res.quota_reset_at,
+                            window=getattr(worker_res, "quota_window", None),
+                            model_scope=getattr(worker_res, "quota_model_scope", None),
+                            reset_confidence=getattr(
+                                worker_res, "quota_reset_confidence", None
+                            ),
                         )
 
                     if config.model_override is None:
@@ -5341,7 +5389,12 @@ class Orchestrator:
                                             "signals": list(tier_decision.signals),
                                         },
                                     )
-                                quota_states = self.db.list_quota()
+                                try:
+                                    from saberops.capacity.snapshot import effective_quota_states
+
+                                    quota_states = effective_quota_states(self.db)
+                                except Exception:
+                                    quota_states = self.db.list_quota()
                                 base_candidates = resolve_candidate_chain(
                                     tier=current_tier,
                                     training_allowed=config.training_allowed,
@@ -5670,7 +5723,14 @@ class Orchestrator:
                                     )
                                     is_explicit_rep = config.model_override is not None
                                     prompt_bytes_rep = len(prompt_task.encode("utf-8"))
-                                    quota_states_rep = self.db.list_quota()
+                                    try:
+                                        from saberops.capacity.snapshot import (
+                                            effective_quota_states,
+                                        )
+
+                                        quota_states_rep = effective_quota_states(self.db)
+                                    except Exception:
+                                        quota_states_rep = self.db.list_quota()
                                     base_repair_candidates = resolve_candidate_chain(
                                         tier=cur_tier,
                                         training_allowed=config.training_allowed,
@@ -6609,7 +6669,15 @@ class Orchestrator:
                                                 self.db,
                                                 run_id=run_id,
                                                 provider=cand_provider,
+                                                model=cand_model,
                                                 reset_iso=w_res.quota_reset_at,
+                                                window=getattr(w_res, "quota_window", None),
+                                                model_scope=getattr(
+                                                    w_res, "quota_model_scope", None
+                                                ),
+                                                reset_confidence=getattr(
+                                                    w_res, "quota_reset_confidence", None
+                                                ),
                                             )
 
                                         rep_continuation_attempt = rep_attempt

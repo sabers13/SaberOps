@@ -30,8 +30,9 @@ def derive_routing_state(
     other provider below the threshold is DEMOTED (moved behind NORMAL
     providers).
 
-    At or above the threshold, providers return to NORMAL except a sticky
-    Codex ``weekly`` BLOCK, which persists until an explicit owner ``enable``.
+    At or above the threshold, providers return to NORMAL (M2-1: the former
+    sticky Codex ``weekly`` BLOCK is removed and becomes an ordinary
+    exclusion with the vendor reset).
     """
     if provider == CODEX_PROVIDER and pool != CODEX_WEEKLY_POOL:
         return RoutingState.NORMAL
@@ -41,8 +42,6 @@ def derive_routing_state(
             return RoutingState.BLOCKED
         return RoutingState.DEMOTED
 
-    if current_state == RoutingState.BLOCKED:
-        return RoutingState.BLOCKED
     return RoutingState.NORMAL
 
 

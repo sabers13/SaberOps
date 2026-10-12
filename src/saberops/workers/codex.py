@@ -264,6 +264,9 @@ class CodexAdapter(WorkerAdapter):
                     usage=usage,
                     interruption_reason=WorkerInterruptionReason.QUOTA_EXHAUSTED,
                     quota_reset_at=reset_to_iso(exhaustion.reset_at),
+                    quota_window=exhaustion.window,
+                    quota_model_scope=exhaustion.model_scope,
+                    quota_reset_confidence=exhaustion.reset_confidence,
                     provider_exit_code=res.exit_code,
                     execution_quiescent=not res.termination_incomplete,
                 )

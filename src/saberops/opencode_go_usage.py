@@ -62,11 +62,14 @@ def parse_go_limits(payload: Any) -> list[dict[str, Any]]:
 
 
 def read_go_limits(executable: str) -> list[dict[str, Any]]:
+    from saberops.workers.env import hermetic_env
+
     plugin = Path(__file__).parent / "defaults/opencode_go_usage.mjs"
     with tempfile.TemporaryDirectory(prefix="saberops-go-usage-") as cwd:
         output = Path(cwd) / "usage.json"
+        child_base = hermetic_env("opencode-go", None)
         env = {
-            **os.environ,
+            **child_base,
             "SABEROPS_GO_USAGE_OUTPUT": str(output),
             "OPENCODE_CONFIG_CONTENT": json.dumps(
                 {

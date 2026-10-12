@@ -105,11 +105,14 @@ CODEX_SUCCESS_STDOUT = _line(
 
 
 def test_codex_quota_verbatim() -> None:
-    result = classify_codex(CODEX_QUOTA_STDOUT)
+    result = classify_codex(CODEX_QUOTA_STDOUT, tz=UTC)
     assert result.verdict is ExhaustionVerdict.QUOTA_EXHAUSTED
     assert result.confidence == VERIFIED
-    # Prose reset date ships without a timezone: conservatively None.
-    assert result.reset_at is None
+    # M2-1: prose date without timezone is a HINT in host-local time.
+    assert result.reset_confidence == "HINT"
+    assert result.reset_at == datetime(2026, 10, 3, 23, 58, tzinfo=UTC)
+    assert result.window is None
+    assert result.model_scope is None
 
 
 def test_codex_rate_limit_verbatim() -> None:
@@ -249,11 +252,15 @@ CLAUDE_SUCCESS_STDOUT = _line(
 
 def test_claude_success_trap_session_limit() -> None:
     # The trap: subtype "success" must NOT read as success.
-    result = classify_claude(CLAUDE_SESSION_STDOUT)
+    now = datetime(2026, 10, 11, 12, 0, tzinfo=UTC)
+    result = classify_claude(CLAUDE_SESSION_STDOUT, now=now, tz=UTC)
     assert result.verdict is ExhaustionVerdict.QUOTA_EXHAUSTED
     assert result.confidence == VERIFIED
-    # Clock-only prose ("resets 10:20pm") is ambiguous: reset None.
-    assert result.reset_at is None
+    # M2-1: bare clock prose is a HINT (next host-local occurrence).
+    assert result.reset_confidence == "HINT"
+    assert result.reset_at == datetime(2026, 10, 11, 22, 20, tzinfo=UTC)
+    assert result.window == "5h"
+    assert result.model_scope is None
 
 
 def test_claude_structured_epoch_reset() -> None:
@@ -562,8 +569,9 @@ def test_codex_adapter_maps_quota_to_interruption(worktree: Path) -> None:
 
     result = CodexAdapter(runner=runner).run(WorkerRequest("Do work", worktree, "gpt-5"))
     _require_quota_interruption(result, "codex")
-    # Prose reset without timezone: no reset clock claimed.
-    assert result.quota_reset_at is None
+    # M2-1: prose reset without timezone is a HINT clock.
+    assert result.quota_reset_at is not None
+    assert result.quota_reset_confidence == "HINT"
 
 
 def test_codex_adapter_rate_limit_keeps_retry_behaviour(worktree: Path) -> None:
@@ -727,8 +735,11 @@ def test_record_exhaustion_writes_fresh_zero_evidence(tmp_path: Path) -> None:
     state = record_exhaustion(db, provider="codex", run_id="run-1", reset_at=reset)
     assert state.provider == "codex"
     assert state.remaining_percent == 0.0
-    assert state.routing_state is RoutingState.BLOCKED
+    # M2-1: no sticky BLOCK; exclusion via the seam (routing NORMAL).
+    assert state.routing_state is RoutingState.NORMAL
     assert state.reset_at == reset_to_iso(reset)
+    assert state.exclusion_id
+    assert db.list_quota() == []
     observations = db.get_quota_observations_for_run("run-1")
     assert len(observations) == 1
     observation = observations[0]
@@ -750,10 +761,10 @@ def test_exhaustion_evidence_only_excludes_never_enables(tmp_path: Path) -> None
         record_exhaustion(db, provider="codex", run_id="run-1"),
         record_exhaustion(db, provider="opencode", run_id="run-1"),
     ]
-    # Legacy routing: BLOCKED codex is removed; DEMOTED opencode sinks
-    # behind NORMAL providers; nothing outside the chain ever appears.
+    # M2-1: legacy apply_quota_policy sees NORMAL (sticky block removed);
+    # exclusion denies via quota_decision through the seam instead.
     filtered = apply_quota_policy(chain, states)
-    assert [c.provider for c in filtered] == ["anthropic", "opencode"]
+    assert [c.provider for c in filtered] == ["codex", "opencode", "anthropic"]
     # Canonical control-plane admission: exhausted pools are ineligible.
     assert quota_decision(chain[0], states).eligible is False
     assert quota_decision(chain[1], states).eligible is False
@@ -796,3 +807,68 @@ def test_build_quota_observation_defaults() -> None:
     assert observation.freshness == "FRESH"
     assert observation.normalized_remaining_pct == 0.0
     assert observation.reset_at is None
+
+
+# ---------------------------------------------------------------------------
+# M2-1: window / model_scope / reset_confidence passthrough.
+# ---------------------------------------------------------------------------
+
+
+def test_m21_claude_window_and_scope() -> None:
+    from saberops.workers.exhaustion import classify_claude as _cc
+
+    out = _cc(CLAUDE_WEEKLY_STDOUT)
+    assert out.verdict is ExhaustionVerdict.QUOTA_EXHAUSTED
+    assert out.window == "weekly"
+    assert out.reset_confidence == "EXACT"
+
+
+def test_m21_claude_opus_scope() -> None:
+    from saberops.workers.exhaustion import classify_claude as _cc
+
+    stdout = _line(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": True,
+            "api_error_status": 429,
+            "result": "You've hit your Opus limit \u00b7 resets Oct 10, 2am (UTC)",
+        }
+    )
+    out = _cc(stdout, now=datetime(2026, 10, 1, 12, 0, tzinfo=UTC))
+    assert out.window == "weekly"
+    assert out.model_scope == "opus"
+    assert out.reset_confidence == "PARSED"
+
+
+def test_m21_opencode_window_and_parsed_reset() -> None:
+    out = classify_opencode(
+        OPENCODE_CLINEPASS_STDOUT, now=datetime(2026, 10, 11, 12, 0, tzinfo=UTC)
+    )
+    assert out.window == "weekly"
+    assert out.reset_confidence == "PARSED"
+    assert out.reset_at is not None
+
+
+def test_m21_codex_hint_confidence() -> None:
+
+    out = classify_codex(CODEX_QUOTA_STDOUT, tz=UTC)
+    assert out.reset_confidence == "HINT"
+    assert out.reset_at is not None
+
+
+def test_m21_record_exhaustion_writes_exclusion_not_quota_row(tmp_path: Path) -> None:
+    from saberops.capacity.store import list_active_exclusions
+
+    db = Database(tmp_path / "m21.db")
+    _seed_run(db, tmp_path, "run-1")
+    reset = datetime(2026, 10, 13, 9, 15, 45, tzinfo=UTC)
+    state = record_exhaustion(
+        db, provider="codex", model="gpt-5", window="weekly",
+        reset_at=reset, reset_confidence="EXACT", run_id="run-1",
+    )
+    assert db.list_quota() == []
+    active = list_active_exclusions(db, now=datetime(2026, 10, 11, 12, 0, tzinfo=UTC))
+    assert len(active) == 1
+    assert active[0]["window_id"] == "weekly"
+    assert state.exclusion_confidence == "EXACT"

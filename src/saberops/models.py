@@ -1013,6 +1013,11 @@ class QuotaState:
     mode: str | None = None
     red_line_pct: float | None = None
     members: tuple[str, ...] = ()
+    # M2-1 synthesized exclusion evidence (additive; None for raw rows).
+    exclusion_id: str | None = None
+    exclusion_until: str | None = None
+    exclusion_confidence: str | None = None
+    exclusion_model_scope: str | None = None
 
 
 class ReviewVerdict(StrEnum):
@@ -1229,6 +1234,10 @@ class WorkerResult:
     # parse, else None).  The orchestrator consumes it when recording
     # quota evidence; it never selects a route.
     quota_reset_at: str | None = None
+    # M2-1 window/model/confidence passthrough (additive; None unknown).
+    quota_window: str | None = None
+    quota_model_scope: str | None = None
+    quota_reset_confidence: str | None = None
     manual_control_stopped: bool = False
     provider_exit_code: int | None = None
     provider_terminal_status: str | None = None
