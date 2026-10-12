@@ -8,6 +8,9 @@ if [[ -x .venv/bin/python ]]; then
     gate_python=.venv/bin/python
 fi
 
+source scripts/gate_lib.sh
+gate_scratch_start
+
 command -v node >/dev/null
 
 "$gate_python" - <<'PY'
@@ -30,8 +33,7 @@ for asset in src/saberops/static/js/*.js; do
 done
 
 # Keep inherited dogfood paths/profiles out of these in-process rendering checks.
-ui_gate_scratch=$(mktemp -d "${TMPDIR:-/tmp}/saberops-ui-fast.XXXXXX")
-trap 'rm -rf -- "$ui_gate_scratch"' EXIT
+ui_gate_scratch="$gate_scratch"
 export XDG_STATE_HOME="$ui_gate_scratch/state"
 export XDG_CONFIG_HOME="$ui_gate_scratch/config"
 export XDG_CACHE_HOME="$ui_gate_scratch/cache"
@@ -39,7 +41,7 @@ unset SABEROPS_PROFILE ORCH_ACCESS_STORE ORCH_ACCESS_MODELS_STORE
 unset ORCH_BINDING_STORE ORCH_READINESS_STORE
 
 # Extra arguments should be inspected, affected rendering tests by exact node ID.
-"$gate_python" -m pytest -q \
+gate_pytest -q \
     tests/test_c16c2_console.py::test_c16c2_dashboard_lists_runs_with_kept_tokens \
     tests/test_c16c2_console.py::test_c16c2_run_detail_renders_status_evidence_and_actions \
     tests/test_c16c2_console.py::test_c16c2_missing_run_keeps_minimal_page \

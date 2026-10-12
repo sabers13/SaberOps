@@ -125,9 +125,39 @@ def test_junit_and_rerun(tmp_path: Path) -> None:
     assert list(first.failed) == [node]
     first.codes = [1]
     assert g.evaluate(first)[0] == "FAIL"
-    rerun = g.Evidence(codes=[0], count=1)
+    rerun = g.Evidence(codes=[0], count=1, passed={node})
     assert g.evaluate(first, rerun, {node})[0] == "FLAKY_PASS"
     assert g.evaluate(first, rerun)[0] == "FAIL"
     first.failed[node] = "Failed: Timeout (>180.0s)"
     assert g.evaluate(first)[0] == "TIMEOUT"
     assert g.evaluate(g.Evidence(codes=[5]), selected=True)[2] == 5
+
+
+def test_skipped_rerun_is_not_flaky_pass() -> None:
+    first = g.Evidence(codes=[1], count=1, failed={"tests/test_a.py::test_a": "broken"})
+    rerun = g.Evidence(codes=[0], count=1)
+    assert g.evaluate(first, rerun, {"tests/test_a.py::test_a"})[0] == "FAIL"
+
+
+def test_keep_only_newest_failure_per_worktree(tmp_path: Path) -> None:
+    old = owned(tmp_path, "old", os.getpid(), True)
+    new = owned(tmp_path, "new", os.getpid(), True)
+    record = json.loads((old / "owner.json").read_text())
+    record["worktree"] = "new"
+    (old / "owner.json").write_text(json.dumps(record))
+    os.utime(old, (1, 1))
+    g.keep_failed(tmp_path, "new", g.GB)
+    assert not old.exists() and new.exists()
+
+
+def test_collection_junit_keeps_file(tmp_path: Path) -> None:
+    xml = tmp_path / "collection.xml"
+    xml.write_text(
+        '<testsuites><testsuite><testcase classname="" '
+        'name="tests/test_broken.py"><error>ImportError: broken</error>'
+        "</testcase></testsuite></testsuites>"
+    )
+    evidence = g.junit(xml)
+    evidence.codes = [2]
+    assert list(evidence.failed) == ["tests/test_broken.py"]
+    assert g.evaluate(evidence)[0] == "FAIL"
