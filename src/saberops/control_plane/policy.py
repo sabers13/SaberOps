@@ -53,6 +53,23 @@ class ControlPlanePolicy:
         )
 
 
+def _quota_pool_entry(pool: QuotaPoolPolicy) -> dict[str, object]:
+    """Shared pool serialisation for digests (v1-compatible, no drift).
+
+    Explicit 54878ce field set (mode, red_line_pct, members) plus
+    ``overage_possible`` only when True, so a value that matters is
+    covered by the digest once M2-4b activates it.
+    """
+    entry: dict[str, object] = {
+        "mode": pool.mode.value,
+        "red_line_pct": pool.red_line_pct,
+        "members": list(pool.members),
+    }
+    if pool.overage_possible:
+        entry["overage_possible"] = True
+    return entry
+
+
 @dataclass(frozen=True)
 class FrozenControlPlane:
     """Immutable, non-secret control-plane contract captured for one run."""
@@ -80,11 +97,7 @@ class FrozenControlPlane:
                 for name, provider in sorted(self.policy.provider_policies.items())
             },
             "quota_pools": {
-                name: {
-                    "mode": pool.mode.value,
-                    "red_line_pct": pool.red_line_pct,
-                    "members": list(pool.members),
-                }
+                name: _quota_pool_entry(pool)
                 for name, pool in sorted(self.policy.quota_pools.items())
             },
             "required_capabilities": list(self.required_capabilities),
@@ -216,7 +229,10 @@ def _policy_payload(policy: ControlPlanePolicy) -> dict[str, object]:
     """
     payload: dict[str, object] = {
         "providers": {k: vars(v) for k, v in sorted(policy.provider_policies.items())},
-        "quota_pools": {k: vars(v) for k, v in sorted(policy.quota_pools.items())},
+        "quota_pools": {
+            k: {"pool_id": v.pool_id, **_quota_pool_entry(v)}
+            for k, v in sorted(policy.quota_pools.items())
+        },
     }
     payload.update(_plans_digest_payload(policy.plans))
     return payload

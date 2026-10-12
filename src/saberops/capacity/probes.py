@@ -306,14 +306,6 @@ def handle_probe_result(
                 pass
         except Exception:
             pass
-        # Red-line path visibility.
-        try:
-            db.set_quota(
-                provider, window_id, float(remaining),
-                reset.isoformat() if reset else None,
-            )
-        except Exception:
-            pass
         if remaining <= 0:
             for pool_id in pools:
                 try:
@@ -335,6 +327,22 @@ def handle_probe_result(
                     )
                 except Exception:
                     pass
+    # Red-line path visibility: one legacy row per pool with the minimum
+    # remaining across the probed windows (pool-scoped, not provider+window).
+    # Per-window detail lives only in the quota observations above.
+    if windows:
+        try:
+            min_window = min(windows, key=lambda w: float(w[1]))
+            min_remaining = float(min_window[1])
+            min_reset = min_window[2]
+            min_reset_iso = min_reset.isoformat() if min_reset else None
+            for pool_id in pools:
+                try:
+                    db.set_quota(provider, pool_id, min_remaining, min_reset_iso)
+                except Exception:
+                    pass
+        except Exception:
+            pass
     # ALL-window exclusions clear only when every probed window is > 0.
     try:
         if windows and all(w[1] > 0 for w in windows):
