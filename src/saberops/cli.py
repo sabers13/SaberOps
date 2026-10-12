@@ -14,6 +14,7 @@ import sys
 import time
 import tomllib
 from dataclasses import dataclass
+from datetime import UTC
 from pathlib import Path
 from typing import Any
 
@@ -162,15 +163,17 @@ def _resolve_cli_run_config(args: argparse.Namespace, repo: Path | str) -> RunCo
     (fail-closed, before any worker/model execution) when the project
     has no usable gate or the policy is invalid.
     """
+    tier_raw = getattr(args, "tier", "auto")
+    max_tier_raw = getattr(args, "max_tier", "T3")
     full = RunRequest(
         task=str(args.task),
         repo_path=repo,
         gate_command=getattr(args, "gate", None),
         training_allowed=getattr(args, "training_allowed", None),
         review_policy=_cli_explicit_review_policy(args),
-        routing_mode="auto" if args.tier == "auto" else "manual",
-        manual_tier=None if args.tier == "auto" else args.tier,
-        max_auto_tier=args.max_tier,
+        routing_mode="auto" if tier_raw == "auto" else "manual",
+        manual_tier=None if tier_raw == "auto" else tier_raw,
+        max_auto_tier=max_tier_raw,
         provider_override=args.provider,
         model_override=args.model,
         reserve_override=args.reserve_override,
@@ -187,6 +190,24 @@ def _resolve_cli_run_config(args: argparse.Namespace, repo: Path | str) -> RunCo
     )
     config: RunConfig = resolve_effective_run_config(full)
     return config
+
+
+def _warn_deprecated_routing_flags(args: argparse.Namespace) -> None:
+    """Print one deprecation line per explicitly given routing flag (ADR-0002 §11)."""
+    if hasattr(args, "tier"):
+        print(
+            "[!] --tier is deprecated (ADR-0002 §11): "
+            "--tier T1|T2 runs the WORKER chain without escalation, "
+            "--tier T3 starts on the SURGEON chain.",
+            file=sys.stderr,
+        )
+    if hasattr(args, "max_tier"):
+        print(
+            "[!] --max-tier is deprecated (ADR-0002 §11): "
+            "--max-tier T1|T2 disables escalation to SURGEON, "
+            "--max-tier T3 (default) allows it.",
+            file=sys.stderr,
+        )
 
 
 def _orch_project_root() -> Path:
@@ -697,14 +718,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--tier",
         type=str,
         choices=["auto", "T1", "T2", "T3"],
-        default="auto",
-        help="Routing mode: auto (default) or a manual tier override.",
+        default=argparse.SUPPRESS,
+        help="Deprecated (ADR-0002 §11): routing mode auto (default) or a manual tier override.",
     )
     run_parser.add_argument(
         "--max-tier",
         choices=["T1", "T2", "T3"],
-        default="T3",
-        help="Maximum automatic routing tier (default: T3).",
+        default=argparse.SUPPRESS,
+        help="Deprecated (ADR-0002 §11): maximum automatic routing tier (default: T3).",
     )
     run_parser.add_argument(
         "--provider",
@@ -808,7 +829,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--worker-timeout",
         type=float,
         default=None,
-        help="Worker timeout (default: tier-aware T1=600, T2=1200, T3=1800 seconds).",
+        help="Worker timeout in seconds (default: role default WORKER/INTEGRATOR=1200, SURGEON=1800).",
     )
     run_parser.add_argument(
         "--gate-timeout",
@@ -1208,10 +1229,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to SQLite database.",
     )
 
-    # orch routing show|validate|init
+    # orch routing show|validate|init|migrate|add|remove|move|reorder
     routing_parser = subparsers.add_parser(
         "routing",
-        help="Manage routing configuration (show/validate/init).",
+        help="Manage routing configuration (show/validate/init/migrate/add/remove/move/reorder).",
     )
     routing_sub = routing_parser.add_subparsers(dest="routing_command", required=True)
     routing_show = routing_sub.add_parser("show", help="Show effective routing.")
@@ -1219,6 +1240,32 @@ def build_parser() -> argparse.ArgumentParser:
     routing_sub.add_parser("validate", help="Validate routing config.")
     routing_init = routing_sub.add_parser("init", help="Initialize user routing config.")
     routing_init.add_argument("--force", action="store_true", help="Overwrite existing file.")
+    routing_migrate = routing_sub.add_parser(
+        "migrate", help="Migrate a schema-1/2 user routing file to schema 3."
+    )
+    routing_migrate.add_argument(
+        "--write", action="store_true", help="Write the migrated schema-3 file (with backup)."
+    )
+    routing_add = routing_sub.add_parser("add", help="Add a candidate to a role chain.")
+    routing_add.add_argument("role", type=str, help="Role: worker | surgeon | integrator.")
+    routing_add.add_argument("candidate_id", type=str, help="Candidate id (provider/model).")
+    routing_add.add_argument(
+        "--group", type=int, default=None, help="1-based group to append into."
+    )
+    routing_remove = routing_sub.add_parser(
+        "remove", help="Remove a candidate from a role chain."
+    )
+    routing_remove.add_argument("role", type=str, help="Role: worker | surgeon | integrator.")
+    routing_remove.add_argument("candidate_id", type=str, help="Candidate id (provider/model).")
+    routing_move = routing_sub.add_parser("move", help="Move a fallback group one place.")
+    routing_move.add_argument("role", type=str, help="Role: worker | surgeon | integrator.")
+    routing_move.add_argument("group", type=int, help="1-based group number.")
+    routing_move.add_argument("direction", type=str, choices=["up", "down"])
+    routing_reorder = routing_sub.add_parser(
+        "reorder", help="Reorder a role's fallback groups (a permutation)."
+    )
+    routing_reorder.add_argument("role", type=str, help="Role: worker | surgeon | integrator.")
+    routing_reorder.add_argument("order", type=int, nargs="+", help="1-based group numbers.")
 
     # orch authority show|list|set|sync-opencode
     authority_parser = subparsers.add_parser(
@@ -1728,6 +1775,7 @@ def db_for_run(args: argparse.Namespace, run_id: str) -> Database:
 
 def handle_run(args: argparse.Namespace) -> int:
     """Handle `orch run` command."""
+    _warn_deprecated_routing_flags(args)
     # Adoption path: --run-id adopts an EXISTING PENDING run atomically.
     run_id_arg = getattr(args, "run_id", None)
     if run_id_arg is not None:
@@ -2361,6 +2409,7 @@ def handle_status(args: argparse.Namespace) -> int:
     print(f"Target Repo      : {run.target_repo}")
     print(f"Base Commit      : {run.base_commit}")
     print(f"Tier             : {run.tier.value}")
+    print(f"Role             : {service.run_routing_role(run.id)}")
     print(f"Training Allowed : {run.training_allowed}")
     print(f"Gate Command     : {run.gate_command}")
     print(f"Status           : {run.status.value}")
@@ -2666,13 +2715,13 @@ def handle_list(args: argparse.Namespace) -> int:
         print(f"No runs found in database {service.db.db_path}.")
         return 0
 
-    header = f"{'RUN ID':<16} {'STATUS':<12} {'TIER':<6} {'CREATED AT':<24} {'TASK'}"
+    header = f"{'RUN ID':<16} {'STATUS':<12} {'ROLE':<10} {'CREATED AT':<24} {'TASK'}"
     print(header)
     print("─" * len(header))
     for r in runs:
         task_snippet = (r.task[:40] + "...") if len(r.task) > 40 else r.task
         print(
-            f"{r.id:<16} {r.status.value:<12} {r.tier.value:<6} "
+            f"{r.id:<16} {r.status.value:<12} {service.run_routing_role(r.id):<10} "
             f"{r.created_at[:19]:<24} {task_snippet}"
         )
     return 0
@@ -2725,14 +2774,15 @@ def handle_models(
     except RoutingConfigError as exc:
         print(f"[!] Routing config invalid: {exc}", file=sys.stderr)
         return 1
-    print("Configured Multi-Provider Execution Tiers & Routing Chains:\n")
+    print("Configured Multi-Provider Execution Roles & Routing Chains:\n")
     print(f"Routing Source: {snap.source} {snap.source_path or '(packaged default)'}")
     print(f"Content Hash: {snap.content_hash}\n")
-    for tier in ("T1", "T2", "T3"):
-        print(f"{tier}:")
-        for c in snap.chain_for(tier, True, False):
-            avail = "✓ available" if registry.is_available(c.provider) else "✗ unavailable"
-            print(f"  → [{c.provider}] {c.model} ({avail})")
+    for role in ("WORKER", "SURGEON", "INTEGRATOR"):
+        print(f"{role}:")
+        for number, group in enumerate(snap.groups_for(role), start=1):
+            for c in group:
+                avail = "✓ available" if registry.is_available(c.provider) else "✗ unavailable"
+                print(f"  {number}. → [{c.provider}] {c.model} ({avail})")
 
     print("\nLocal Provider Status:")
     quota_rows = service.list_quota()
@@ -2755,9 +2805,17 @@ def handle_routing_show(args: argparse.Namespace) -> int:
             "source_path": snap.source_path,
             "content_hash": snap.content_hash,
             "schema_version": snap.schema_version,
-            "chains": {
-                tier: [f"{c.provider}/{c.model}" for c in snap.chain_for(tier, True, False)]
-                for tier in ("T1", "T2", "T3")
+            "migrated_from": snap.migrated_from,
+            "roles": {
+                role: [
+                    [f"{c.provider}/{c.model}" for c in group]
+                    for group in snap.groups_for(role)
+                ]
+                for role in ("WORKER", "SURGEON", "INTEGRATOR")
+            },
+            "managed_elsewhere": {
+                "ORCHESTRATOR": "orch orchestrator show",
+                "REVIEWER": "orch reviewer show",
             },
         }
         print(json.dumps(payload, indent=2))
@@ -2765,8 +2823,17 @@ def handle_routing_show(args: argparse.Namespace) -> int:
     print(f"Source: {snap.source} {snap.source_path or '(packaged default)'}")
     print(f"Hash: {snap.content_hash}")
     print(f"Schema: {snap.schema_version}")
-    for tier in ("T1", "T2", "T3"):
-        print(f"{tier}:", [f"{c.provider}/{c.model}" for c in snap.chain_for(tier, True, False)])
+    if snap.migrated_from is not None:
+        print(
+            f"Note: migrated in memory from schema {snap.migrated_from}; "
+            "run `orch routing migrate --write` to persist"
+        )
+    for role in ("WORKER", "SURGEON", "INTEGRATOR"):
+        print(f"{role}:")
+        for number, group in enumerate(snap.groups_for(role), start=1):
+            print(f"  {number}.", [f"{c.provider}/{c.model}" for c in group])
+    print("ORCHESTRATOR: see 'orch orchestrator show'")
+    print("REVIEWER: see 'orch reviewer show'")
     return 0
 
 
@@ -2798,6 +2865,184 @@ def handle_routing_init(args: argparse.Namespace) -> int:
     except RoutingConfigError as exc:
         print(f"[!] {exc}", file=sys.stderr)
         return 1
+
+
+def _routing_role_or_refuse(role_raw: str) -> str | None:
+    """Return the normalized routed role, or print a pointer and return None."""
+    cleaned = str(role_raw).strip().upper()
+    if cleaned in ("ORCHESTRATOR", "REVIEWER"):
+        pointer = "orch orchestrator show" if cleaned == "ORCHESTRATOR" else "orch reviewer show"
+        print(f"[!] Role {cleaned!r} is managed elsewhere; see '{pointer}'", file=sys.stderr)
+        return None
+    if cleaned not in ("WORKER", "SURGEON", "INTEGRATOR"):
+        print(f"[!] Unknown routing role {role_raw!r}: expected worker, surgeon or integrator",
+              file=sys.stderr)
+        return None
+    return cleaned
+
+
+def _read_raw_user_routing() -> tuple[Path | None, dict[str, Any] | None, str | None]:
+    """Return (path, raw document, error) for the user routing file.
+
+    The third element is an error string when the file exists but cannot
+    be read as a JSON object; the document is None when no user file exists.
+    """
+    from saberops.routing_config import get_user_routing_path as _user_path
+
+    user_path = _user_path()
+    if not user_path.is_file():
+        return None, None, None
+    try:
+        raw_text = user_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return user_path, None, f"Routing config at {user_path}: cannot read: {exc}"
+    try:
+        data = json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        return user_path, None, f"Routing config at {user_path}: invalid JSON: {exc}"
+    if not isinstance(data, dict):
+        return user_path, None, f"Routing config at {user_path}: top-level must be JSON object"
+    return user_path, data, None
+
+
+def handle_routing_migrate(args: argparse.Namespace) -> int:
+    from saberops.routing_config import canonical_routing_payload, save_user_routing
+
+    user_path, data, error = _read_raw_user_routing()
+    if error is not None:
+        print(f"[!] {error}", file=sys.stderr)
+        return 1
+    if data is None:
+        print("Packaged default is schema 3; no user routing file to migrate.")
+        return 0
+    raw_version = data.get("schema_version")
+    if raw_version == 3:
+        print(f"User routing config at {user_path} is already schema 3; nothing to do.")
+        return 0
+    if raw_version not in (1, 2):
+        print(f"[!] Routing config at {user_path}: unsupported schema_version {raw_version!r}",
+              file=sys.stderr)
+        return 1
+    try:
+        migrated = canonical_routing_payload(data)
+    except RoutingConfigError as exc:
+        print(f"[!] Routing config invalid: {exc}", file=sys.stderr)
+        return 1
+    print(f"User routing config at {user_path} is schema {raw_version}; migrated preview:")
+    for tier in ("T1", "T2", "T3"):
+        section = data.get(tier)
+        if isinstance(section, dict):
+            for sub, chain in section.items():
+                print(f"  old {tier}.{sub}:", list(chain) if isinstance(chain, list) else chain)
+    for role, groups in migrated["roles"].items():
+        print(f"  new {role}:")
+        for number, group in enumerate(groups, start=1):
+            print(f"    {number}.", list(group["routes"]))
+    if not bool(getattr(args, "write", False)):
+        print("Dry run: nothing written. Re-run with --write to persist (with backup).")
+        return 0
+    from datetime import datetime
+
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    assert user_path is not None
+    backup = user_path.with_name(f"{user_path.name}.bak-{stamp}")
+    counter = 0
+    while backup.exists():
+        counter += 1
+        backup = user_path.with_name(f"{user_path.name}.bak-{stamp}.{counter}")
+    try:
+        backup.write_bytes(user_path.read_bytes())
+    except OSError as exc:
+        print(f"[!] Cannot back up {user_path}: {exc}", file=sys.stderr)
+        return 1
+    try:
+        dest = save_user_routing(migrated)
+    except RoutingConfigError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    print(f"Backed up {user_path} to {backup}")
+    print(f"Wrote schema-3 routing config to {dest}")
+    return 0
+
+
+def _edit_role_chain(args: argparse.Namespace, op: str) -> int:
+    from saberops.routing_config import (
+        add_candidate_to_chain,
+        canonical_routing_payload,
+        load_effective_routing_payload,
+        move_group_in_chain,
+        remove_candidate_from_chain,
+        reorder_chain_groups,
+        save_user_routing,
+    )
+
+    role = _routing_role_or_refuse(str(getattr(args, "role", "")))
+    if role is None:
+        return 1
+    user_path, data, error = _read_raw_user_routing()
+    if error is not None:
+        print(f"[!] {error}", file=sys.stderr)
+        return 1
+    if data is not None and data.get("schema_version") in (1, 2):
+        print("[!] User routing file is schema 1/2; run `orch routing migrate` first",
+              file=sys.stderr)
+        return 1
+    try:
+        payload = load_effective_routing_payload()
+        if op == "add":
+            payload = add_candidate_to_chain(
+                payload,
+                role=role,
+                candidate_id=str(getattr(args, "candidate_id", "")),
+                group=getattr(args, "group", None),
+            )
+        elif op == "remove":
+            payload = remove_candidate_from_chain(
+                payload,
+                role=role,
+                candidate_id=str(getattr(args, "candidate_id", "")),
+            )
+        elif op == "move":
+            payload = move_group_in_chain(
+                payload,
+                role=role,
+                group=int(args.group),
+                direction=str(getattr(args, "direction", "")),
+            )
+        elif op == "reorder":
+            payload = reorder_chain_groups(
+                payload,
+                role=role,
+                order=[int(entry) for entry in args.order],
+            )
+        else:
+            print(f"[!] Unknown routing edit {op!r}", file=sys.stderr)
+            return 1
+        canonical_routing_payload(payload)
+        dest = save_user_routing(payload)
+    except RoutingConfigError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    print(f"Updated {role} chain in {dest}:")
+    for number, group in enumerate(payload["roles"][role], start=1):
+        print(f"  {number}.", list(group["routes"]))
+    return 0
+
+
+def handle_routing_add(args: argparse.Namespace) -> int:
+    return _edit_role_chain(args, "add")
+
+
+def handle_routing_remove(args: argparse.Namespace) -> int:
+    return _edit_role_chain(args, "remove")
+
+
+def handle_routing_move(args: argparse.Namespace) -> int:
+    return _edit_role_chain(args, "move")
+
+
+def handle_routing_reorder(args: argparse.Namespace) -> int:
+    return _edit_role_chain(args, "reorder")
 
 
 def _resolve_repo_for_project_settings(args: argparse.Namespace) -> Path:
@@ -4054,6 +4299,16 @@ def _dispatch(args: argparse.Namespace) -> int:
             return handle_routing_validate(args)
         elif args.routing_command == "init":
             return handle_routing_init(args)
+        elif args.routing_command == "migrate":
+            return handle_routing_migrate(args)
+        elif args.routing_command == "add":
+            return handle_routing_add(args)
+        elif args.routing_command == "remove":
+            return handle_routing_remove(args)
+        elif args.routing_command == "move":
+            return handle_routing_move(args)
+        elif args.routing_command == "reorder":
+            return handle_routing_reorder(args)
     elif args.command == "authority":
         if args.authority_command == "show":
             return handle_authority_show(args)

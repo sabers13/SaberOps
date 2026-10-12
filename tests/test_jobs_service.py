@@ -506,3 +506,22 @@ def test_job_dispatch_spec_no_acceptance_no_frozen_policy(tmp_path: Path) -> Non
     assert not hasattr(spec, "run_config")
     assert not hasattr(spec, "control_plane_digest")
     assert not hasattr(spec.request, "control_plane_digest")
+
+
+def test_surgeon_only_capability_is_not_feasible_at_submit() -> None:
+    """Covers: feasibility reads the WORKER chain, not the union."""
+    snapshot = RoutingSnapshot(
+        schema_version=3,
+        source="test",
+        source_path=None,
+        content_hash="test",
+        role_chains=(
+            ("WORKER", ((WorkerCandidate(provider="opencode", model="opencode/hy3-free"),),)),
+            ("SURGEON", ((WorkerCandidate(provider="codex", model="gpt-5.6-terra"),),)),
+            ("INTEGRATOR", ()),
+        ),
+    )
+    req = JobRequirements(read_only=True)
+    ok, reason = feasible(req, snapshot)
+    assert ok is False
+    assert reason == NO_ROUTE_FOR_REQUIREMENTS
