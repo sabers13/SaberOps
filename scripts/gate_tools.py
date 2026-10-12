@@ -378,11 +378,14 @@ def flaky_stats(
 
     The streak counts consecutive non-INFRA full gates (newest first) in
     which the test was flaky; INFRA entries neither break nor extend it.
+    Totals and last-seen likewise count non-INFRA gates only.
 
     Covers: prompt section B (streak counting newest-first, INFRA skipped).
     """
     per_test: dict[str, dict[str, Any]] = {}
     for entry in entries:
+        if entry.get("outcome") == "INFRA":
+            continue
         flaky = entry.get("flaky", [])
         if not isinstance(flaky, list):
             continue

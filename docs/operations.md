@@ -224,12 +224,17 @@ all light slots held) new lane checks and G3 wait. No other command uses
 `exclusive`.
 
 Output: `~/.cache/saberops-gate/nightly/<YYYY-MM-DD>-<shortsha>/` holds
-`gate.txt`, `result/` (outcome.json, JUnit), `map.txt` (PASS only),
+`gate.txt`, `result/` (outcome.json, JUnit), `map.txt` (PASS or
+quarantined-only FLAKY_PASS; never on FAIL, TIMEOUT or INFRA),
 `flaky.md`, and `summary.md`. The summary is copied to
 `$SABEROPS_ORCH_DIR/nightly/latest.md` (default
 `/home/saber/Projects/SaberOps-dogfood-0.3.7/.orch/nightly/latest.md`); that
 file is how the orchestrator reads the night. Output dirs older than 30 days
-are deleted; nothing else is. Skip rule: when `main` is unchanged since the
+are deleted, and only from a cache dir with a `nightly` path component
+(anything else is refused with a warning and skipped); nothing else is.
+The script gates a detached `_nightly` worktree of the repository and refuses
+to touch MAIN's checkout, any attached worktree, or any other path (exit 2).
+Skip rule: when `main` is unchanged since the
 last green nightly entry the run logs `main unchanged since last green
 nightly` and skips (no gate, no map); `SABEROPS_NIGHTLY_REPEAT=1` forces the
 repeat for flaky statistics. FAIL/INFRA never skip.
@@ -241,7 +246,8 @@ peak_bytes` (`SABEROPS_GATE_LABEL`, default `manual`; the nightly script sets
 `nightly`; lane runs never write; write failures warn only). `python
 scripts/gate_tools.py flaky-report [--min-streak N] [--json]` (default N=3)
 lists streaks of consecutive non-INFRA full gates per test under `##
-quarantine proposals` (ids already in `tests/quarantine.txt` marked) and the
+quarantine proposals` (per-test totals likewise count non-INFRA gates only;
+ids already in `tests/quarantine.txt` marked) and the
 newest nightly's failures under `## nightly failures`. Quarantine stays
 owner-approved: the report only proposes, never edits the file.
 
