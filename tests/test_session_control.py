@@ -21,6 +21,8 @@ from saberops.process import ProcessResult, run_process
 from saberops.session_control import ControlConflict, SessionControls
 from saberops.workers import ClaudeCodeAdapter, CodexAdapter, OpenCodeAdapter
 
+# ADR-0003 §2: contention flakes pass when run serially.
+pytestmark = pytest.mark.serial
 
 def live_identity() -> str:
     identity = ProcessIdentity.for_pid(os.getpid())

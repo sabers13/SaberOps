@@ -23,7 +23,8 @@ orch = "saberops.cli:main"
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0.0",
-    "pytest-xdist>=3.0.0",
+    "pytest-xdist>=3.2",
+    "pytest-timeout>=2.3",
     "coverage>=7.0.0",
     "ruff>=0.4.0",
     "mypy>=1.10.0",
@@ -75,3 +76,11 @@ check_untyped_defs = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+timeout = 180
+addopts = "--strict-markers"
+markers = [
+    "serial: timing or process-control sensitive; run without xdist",
+    "slow: deliberately long-running test",
+]
+tmp_path_retention_policy = "failed"
+tmp_path_retention_count = 1

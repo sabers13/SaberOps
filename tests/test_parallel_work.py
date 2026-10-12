@@ -32,6 +32,8 @@ from saberops.supervisor import RunSupervisor
 from saberops.workers.codex import CodexAdapter
 from saberops.workers.registry import AdapterRegistry
 
+# ADR-0003 §2: contention flakes pass when run serially.
+pytestmark = pytest.mark.serial
 
 def git(repo: Path, *args: str) -> str:
     return subprocess.run(
