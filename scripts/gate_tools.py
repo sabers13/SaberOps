@@ -374,7 +374,7 @@ def read_quarantine(repo: Path) -> set[str]:
 def flaky_stats(
     entries: list[dict[str, Any]],
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any] | None]:
-    """Per-test flaky streak/total/last-seen plus the newest nightly entry.
+    """Per-test flaky streak/total/last-seen plus the newest main-gate entry.
 
     The streak counts consecutive non-INFRA full gates (newest first) in
     which the test was flaky; INFRA entries neither break nor extend it.
@@ -410,12 +410,12 @@ def flaky_stats(
             else:
                 break
         per_test[node]["streak"] = streak
-    newest_nightly: dict[str, Any] | None = None
+    newest_main_gate: dict[str, Any] | None = None
     for entry in reversed(entries):
-        if entry.get("label") == "nightly":
-            newest_nightly = entry
+        if entry.get("label") in ("main-gate", "nightly"):
+            newest_main_gate = entry
             break
-    return per_test, newest_nightly
+    return per_test, newest_main_gate
 
 
 def render_flaky_report(
@@ -427,17 +427,17 @@ def render_flaky_report(
 ) -> str:
     """Render the human markdown report or the --json payload.
 
-    Covers: prompt section B (quarantine proposals + nightly failures).
+    Covers: prompt section B (quarantine proposals + main-gate failures).
     """
-    per_test, newest_nightly = flaky_stats(entries)
+    per_test, newest_main_gate = flaky_stats(entries)
     proposals = sorted(
         (node for node, info in per_test.items() if int(info.get("streak", 0)) >= min_streak)
     )
-    nightly_failed: list[str] = []
-    if newest_nightly is not None:
-        failed = newest_nightly.get("failed", [])
+    main_gate_failed: list[str] = []
+    if newest_main_gate is not None:
+        failed = newest_main_gate.get("failed", [])
         if isinstance(failed, list):
-            nightly_failed = sorted(n for n in failed if isinstance(n, str))
+            main_gate_failed = sorted(n for n in failed if isinstance(n, str))
     if as_json:
         payload = {
             "history": str(history_file),
@@ -453,8 +453,8 @@ def render_flaky_report(
                 }
                 for node in proposals
             ],
-            "nightly_failures": nightly_failed,
-            "nightly": newest_nightly,
+            "main_gate_failures": main_gate_failed,
+            "main_gate": newest_main_gate,
         }
         return json.dumps(payload, indent=2, sort_keys=True) + "\n"
     lines = ["# Flaky report", ""]
@@ -472,17 +472,17 @@ def render_flaky_report(
                 f"total={info.get('total')}, last={info.get('last_seen')}){suffix}"
             )
     lines.append("")
-    lines.append("## nightly failures")
-    if newest_nightly is None:
-        lines.append("(no nightly run yet)")
-    elif not nightly_failed:
-        failed_ts = newest_nightly.get("ts", "")
-        failed_sha = newest_nightly.get("head_sha", "")
-        lines.append(f"(none; newest nightly {failed_ts} {failed_sha})")
+    lines.append("## main-gate failures")
+    if newest_main_gate is None:
+        lines.append("(no main-gate run yet)")
+    elif not main_gate_failed:
+        failed_ts = newest_main_gate.get("ts", "")
+        failed_sha = newest_main_gate.get("head_sha", "")
+        lines.append(f"(none; newest main gate {failed_ts} {failed_sha})")
     else:
-        lines.append(f"newest nightly {newest_nightly.get('ts', '')} "
-                     f"{newest_nightly.get('head_sha', '')}:")
-        for node in nightly_failed:
+        lines.append(f"newest main gate {newest_main_gate.get('ts', '')} "
+                     f"{newest_main_gate.get('head_sha', '')}:")
+        for node in main_gate_failed:
             lines.append(f"- {node}")
     lines.append("")
     return "\n".join(lines)

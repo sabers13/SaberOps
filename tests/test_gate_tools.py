@@ -403,13 +403,13 @@ def test_history_label_from_env_and_infra_recorded(
     repo = tmp_path / "repo"
     repo.mkdir()
     _init_main_repo(repo)
-    monkeypatch.setenv("SABEROPS_GATE_LABEL", "nightly")
+    monkeypatch.setenv("SABEROPS_GATE_LABEL", "main-gate")
     runner = _make_runner(repo, "full", tmp_path, monkeypatch)
     code = runner.finish(("INFRA", "DISK_LOW", 3, [], []), 0)  # type: ignore[attr-defined]
     assert code == 3
     history = g.history_path(runner.common)  # type: ignore[attr-defined]
     entry = json.loads(history.read_text().splitlines()[-1])
-    assert entry["label"] == "nightly"
+    assert entry["label"] == "main-gate"
     assert entry["outcome"] == "INFRA"
     assert entry["reason"] == "DISK_LOW"
 
@@ -523,10 +523,10 @@ def test_flaky_report_threshold_and_quarantine_mark(tmp_path: Path) -> None:
     assert payload["min_streak"] == 2
 
 
-def test_flaky_report_missing_and_nightly_failures(
+def test_flaky_report_missing_and_main_gate_failures(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: prompt section B (missing file empty, nightly failures listed)."""
+    """Covers: prompt section B (missing file empty, main-gate failures listed)."""
     import subprocess
 
     repo = tmp_path / "repo"
@@ -536,7 +536,7 @@ def test_flaky_report_missing_and_nightly_failures(
     # Missing history file -> empty report, exit 0.
     code = g.flaky_report_cli([])
     assert code == 0
-    # Now write a nightly run with failures.
+    # Now write a main-gate run with failures.
     common = (repo / subprocess.check_output(
         ["git", "rev-parse", "--git-common-dir"], cwd=repo, text=True
     ).strip()).resolve()
@@ -544,13 +544,13 @@ def test_flaky_report_missing_and_nightly_failures(
     _write_history(
         history,
         [
-            _entry("2026-10-06T00:00:00+00:00", "FAIL", [], ["n-fail-1"], label="nightly"),
+            _entry("2026-10-06T00:00:00+00:00", "FAIL", [], ["n-fail-1"], label="main-gate"),
         ],
     )
     assert g.flaky_report_cli([]) == 0
     entries = g.load_history(history)
     text = g.render_flaky_report(history, entries, 3, set(), False)
-    assert "## nightly failures" in text
+    assert "## main-gate failures" in text
     assert "n-fail-1" in text
 
 
@@ -657,8 +657,8 @@ def test_exclusive_orders_after_heavy_and_blocks_lane(
     assert got is not None
 
 
-def _setup_nightly_main(path: Path) -> Path:
-    """Covers: prompt section D (temp MAIN with gate_tools for nightly tests)."""
+def _setup_main_gate_repo(path: Path) -> Path:
+    """Covers: prompt section D (temp MAIN with gate_tools for main-gate tests)."""
     import shutil
     import subprocess
 
@@ -678,10 +678,10 @@ def _setup_nightly_main(path: Path) -> Path:
     return path
 
 
-def _run_nightly(
+def _run_main_gate(
     env: dict[str, str], script: Path, timeout_s: int = 120
 ) -> tuple[int, str]:
-    """Covers: test helper (run nightly-gate.sh with stub env)."""
+    """Covers: test helper (run main-gate.sh with stub env)."""
     import subprocess
 
     completed = subprocess.run(
@@ -694,18 +694,18 @@ def _run_nightly(
     return completed.returncode, completed.stdout + completed.stderr
 
 
-def test_nightly_creates_worktree_gate_pass_and_summary(
+def test_main_gate_creates_worktree_gate_pass_and_summary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Covers: prompt section D (worktree, PASS map rebuild, summary/latest)."""
     import os
     import subprocess
 
-    main = _setup_nightly_main(tmp_path / "main")
-    wt = tmp_path / "_nightly"
+    main = _setup_main_gate_repo(tmp_path / "main")
+    wt = tmp_path / "_main-gate"
     cache = tmp_path / "cache"
     orch = tmp_path / "orch"
-    script = Path(__file__).resolve().parents[1] / "scripts/nightly-gate.sh"
+    script = Path(__file__).resolve().parents[1] / "scripts/main-gate.sh"
     gate_stub = (
         'mkdir -p "$OUT_DIR/result" && '
         "printf '{\"outcome\":\"PASS\",\"reason\":\"\",\"counts\":{\"tests\":4,\"failed\":0,"
@@ -716,17 +716,17 @@ def test_nightly_creates_worktree_gate_pass_and_summary(
     env = dict(os.environ)
     env.update(
         {
-            "SABEROPS_NIGHTLY_MAIN": str(main),
-            "SABEROPS_NIGHTLY_WT": str(wt),
+            "SABEROPS_MAIN_GATE_REPO": str(main),
+            "SABEROPS_MAIN_GATE_WT": str(wt),
             "SABEROPS_ORCH_DIR": str(orch),
-            "SABEROPS_NIGHTLY_CACHE": str(cache),
-            "SABEROPS_NIGHTLY_SKIP_VENV": "1",
-            "SABEROPS_NIGHTLY_GATE_CMD": gate_stub,
-            "SABEROPS_NIGHTLY_MAP_CMD": map_stub,
-            "SABEROPS_GATE_LABEL": "nightly",
+            "SABEROPS_MAIN_GATE_CACHE": str(cache),
+            "SABEROPS_MAIN_GATE_SKIP_VENV": "1",
+            "SABEROPS_MAIN_GATE_GATE_CMD": gate_stub,
+            "SABEROPS_MAIN_GATE_MAP_CMD": map_stub,
+            "SABEROPS_GATE_LABEL": "main-gate",
         }
     )
-    code, output = _run_nightly(env, script)
+    code, output = _run_main_gate(env, script)
     assert code == 0, output
     assert wt.is_dir()
     # Detached worktree at main.
@@ -743,22 +743,22 @@ def test_nightly_creates_worktree_gate_pass_and_summary(
     assert "fake map build" in (out_dir / "map.txt").read_text()
     assert (out_dir / "flaky.md").exists()
     assert (out_dir / "summary.md").exists()
-    latest = orch / "nightly" / "latest.md"
+    latest = orch / "main-gate" / "latest.md"
     assert latest.exists()
     assert "PASS" in latest.read_text()
 
 
-def test_nightly_skip_rule_and_fail_skips_map(tmp_path: Path) -> None:
+def test_main_gate_skip_rule_and_fail_skips_map(tmp_path: Path) -> None:
     """Covers: prompt section D (skip unless REPEAT, FAIL never rebuilds map)."""
     import json
     import os
     import subprocess
 
-    main = _setup_nightly_main(tmp_path / "main")
-    wt = tmp_path / "_nightly"
+    main = _setup_main_gate_repo(tmp_path / "main")
+    wt = tmp_path / "_main-gate"
     cache = tmp_path / "cache"
     orch = tmp_path / "orch"
-    script = Path(__file__).resolve().parents[1] / "scripts/nightly-gate.sh"
+    script = Path(__file__).resolve().parents[1] / "scripts/main-gate.sh"
     main_sha = subprocess.check_output(
         ["git", "-C", str(main), "rev-parse", "main"], text=True
     ).strip()
@@ -770,31 +770,33 @@ def test_nightly_skip_rule_and_fail_skips_map(tmp_path: Path) -> None:
     history.parent.mkdir(parents=True, exist_ok=True)
     with history.open("w") as handle:
         handle.write(
-            json.dumps(_entry("2026-10-11T00:00:00+00:00", "PASS", [], [], "nightly", main_sha))
+            json.dumps(_entry("2026-10-11T00:00:00+00:00", "PASS", [], [], "main-gate", main_sha))
             + "\n"
         )
     base_env = dict(os.environ)
     gate_skip_stub = 'mkdir -p "$OUT_DIR/result" && echo GATE_RAN > "$OUT_DIR/gate-marker"'
     base_env.update(
         {
-            "SABEROPS_NIGHTLY_MAIN": str(main),
-            "SABEROPS_NIGHTLY_WT": str(wt),
+            "SABEROPS_MAIN_GATE_REPO": str(main),
+            "SABEROPS_MAIN_GATE_WT": str(wt),
             "SABEROPS_ORCH_DIR": str(orch),
-            "SABEROPS_NIGHTLY_CACHE": str(cache),
-            "SABEROPS_NIGHTLY_SKIP_VENV": "1",
-            "SABEROPS_NIGHTLY_GATE_CMD": gate_skip_stub,
+            "SABEROPS_MAIN_GATE_CACHE": str(cache),
+            "SABEROPS_MAIN_GATE_SKIP_VENV": "1",
+            "SABEROPS_MAIN_GATE_GATE_CMD": gate_skip_stub,
         }
     )
     # Unchanged + PASS without REPEAT -> skip.
-    code, output = _run_nightly(base_env, script)
+    code, output = _run_main_gate(base_env, script)
     assert code == 0, output
-    assert "main unchanged since last green nightly" in output
+    assert "main unchanged since last green main gate" in output
     # FAIL history never causes a skip: overwrite with FAIL and rerun.
     with history.open("w") as handle:
-        fail_entry = _entry("2026-10-11T00:00:00+00:00", "FAIL", [], ["t::x"], "nightly", main_sha)
+        fail_entry = _entry(
+            "2026-10-11T00:00:00+00:00", "FAIL", [], ["t::x"], "main-gate", main_sha
+        )
         handle.write(json.dumps(fail_entry) + "\n")
     fail_env = dict(base_env)
-    fail_env["SABEROPS_NIGHTLY_GATE_CMD"] = (
+    fail_env["SABEROPS_MAIN_GATE_GATE_CMD"] = (
         'mkdir -p "$OUT_DIR/result" && '
         "printf '{\"outcome\":\"FAIL\",\"reason\":\"\",\"counts\":{\"tests\":2,\"failed\":1,"
         "\"flaky\":0},\"wall_time\":0.5,\"head_sha\":\"x\",\"peak_bytes\":1}' "
@@ -804,60 +806,60 @@ def test_nightly_skip_rule_and_fail_skips_map(tmp_path: Path) -> None:
     import shutil
 
     shutil.rmtree(cache, ignore_errors=True)
-    code, output = _run_nightly(fail_env, script)
+    code, output = _run_main_gate(fail_env, script)
     assert code != 0, output
     out_dirs = [p for p in cache.iterdir() if p.is_dir()]
     assert len(out_dirs) == 1
     assert not (out_dirs[0] / "map.txt").exists()
-    assert (orch / "nightly" / "latest.md").exists()
+    assert (orch / "main-gate" / "latest.md").exists()
 
 
-def test_nightly_retention_removes_only_old_nightly_dirs(tmp_path: Path) -> None:
-    """Covers: prompt section D (retention removes only >30-day nightly dirs)."""
+def test_main_gate_retention_removes_only_old_main_gate_dirs(tmp_path: Path) -> None:
+    """Covers: prompt section D (retention removes only >30-day main-gate dirs)."""
     import os
     import time
 
-    main = _setup_nightly_main(tmp_path / "main")
-    wt = tmp_path / "_nightly"
-    cache = tmp_path / "cache" / "nightly"
+    main = _setup_main_gate_repo(tmp_path / "main")
+    wt = tmp_path / "_main-gate"
+    cache = tmp_path / "cache" / "main-gate"
     cache.mkdir(parents=True)
     orch = tmp_path / "orch"
-    old_nightly = cache / "2025-01-01-abc1234"
-    old_nightly.mkdir()
-    (old_nightly / "x.txt").write_text("old")
+    old_main_gate = cache / "2025-01-01-abc1234"
+    old_main_gate.mkdir()
+    (old_main_gate / "x.txt").write_text("old")
     old_epoch = time.time() - 40 * 86400
-    os.utime(old_nightly, (old_epoch, old_epoch))
-    keep_other = cache / "not-a-nightly-dir"
+    os.utime(old_main_gate, (old_epoch, old_epoch))
+    keep_other = cache / "not-a-main-gate-dir"
     keep_other.mkdir()
     os.utime(keep_other, (old_epoch, old_epoch))
     recent = cache / "2026-10-12-abc1234"
     recent.mkdir()
-    script = Path(__file__).resolve().parents[1] / "scripts/nightly-gate.sh"
+    script = Path(__file__).resolve().parents[1] / "scripts/main-gate.sh"
     env = dict(os.environ)
     env.update(
         {
-            "SABEROPS_NIGHTLY_MAIN": str(main),
-            "SABEROPS_NIGHTLY_WT": str(wt),
+            "SABEROPS_MAIN_GATE_REPO": str(main),
+            "SABEROPS_MAIN_GATE_WT": str(wt),
             "SABEROPS_ORCH_DIR": str(orch),
-            "SABEROPS_NIGHTLY_CACHE": str(cache),
-            "SABEROPS_NIGHTLY_SKIP_VENV": "1",
-            "SABEROPS_NIGHTLY_GATE_CMD": (
+            "SABEROPS_MAIN_GATE_CACHE": str(cache),
+            "SABEROPS_MAIN_GATE_SKIP_VENV": "1",
+            "SABEROPS_MAIN_GATE_GATE_CMD": (
                 'mkdir -p "$OUT_DIR/result" && '
                 "printf '{\"outcome\":\"PASS\",\"reason\":\"\",\"counts\":{\"tests\":1,"
                 "\"failed\":0,\"flaky\":0},\"wall_time\":0.1,\"head_sha\":\"y\",\"peak_bytes\":1}' "
                 '> "$OUT_DIR/result/outcome.json"'
             ),
-            "SABEROPS_NIGHTLY_MAP_CMD": "echo map",
+            "SABEROPS_MAIN_GATE_MAP_CMD": "echo map",
         }
     )
-    code, output = _run_nightly(env, script)
+    code, output = _run_main_gate(env, script)
     assert code == 0, output
-    assert not old_nightly.exists()
+    assert not old_main_gate.exists()
     assert keep_other.exists()
     assert recent.exists()
 
 
-def _nightly_env(
+def _main_gate_env(
     main: Path,
     wt: Path,
     cache: Path,
@@ -865,18 +867,18 @@ def _nightly_env(
     gate_stub: str,
     extra: dict[str, str] | None = None,
 ) -> dict[str, str]:
-    """Covers: test helper (stub env for nightly-gate.sh under the new contract)."""
+    """Covers: test helper (stub env for main-gate.sh under the new contract)."""
     import os
 
     env = dict(os.environ)
     env.update(
         {
-            "SABEROPS_NIGHTLY_MAIN": str(main),
-            "SABEROPS_NIGHTLY_WT": str(wt),
+            "SABEROPS_MAIN_GATE_REPO": str(main),
+            "SABEROPS_MAIN_GATE_WT": str(wt),
             "SABEROPS_ORCH_DIR": str(orch),
-            "SABEROPS_NIGHTLY_CACHE": str(cache),
-            "SABEROPS_NIGHTLY_SKIP_VENV": "1",
-            "SABEROPS_NIGHTLY_GATE_CMD": gate_stub,
+            "SABEROPS_MAIN_GATE_CACHE": str(cache),
+            "SABEROPS_MAIN_GATE_SKIP_VENV": "1",
+            "SABEROPS_MAIN_GATE_GATE_CMD": gate_stub,
         }
     )
     if extra:
@@ -910,18 +912,18 @@ def _snapshot_tree(path: Path) -> tuple[str, str, str]:
     return head, branch, status
 
 
-def test_nightly_guard_refuses_unsafe_worktrees(tmp_path: Path) -> None:
+def test_main_gate_guard_refuses_unsafe_worktrees(tmp_path: Path) -> None:
     """Covers: fixup-1 item 1 (guard refuses attached/MAIN/unregistered/basename)."""
     import subprocess
 
-    script = Path(__file__).resolve().parents[1] / "scripts/nightly-gate.sh"
-    main = _setup_nightly_main(tmp_path / "main")
-    cache = tmp_path / "cache" / "nightly"
+    script = Path(__file__).resolve().parents[1] / "scripts/main-gate.sh"
+    main = _setup_main_gate_repo(tmp_path / "main")
+    cache = tmp_path / "cache" / "main-gate"
     orch = tmp_path / "orch"
     gate_stub = _pass_gate_stub("PASS")
 
     def run_against(target: Path) -> tuple[int, str]:
-        return _run_nightly(_nightly_env(main, target, cache, orch, gate_stub), script)
+        return _run_main_gate(_main_gate_env(main, target, cache, orch, gate_stub), script)
 
     # (a) an attached lane-style worktree with an uncommitted change.
     lane = tmp_path / "lane"
@@ -958,29 +960,29 @@ def test_nightly_guard_refuses_unsafe_worktrees(tmp_path: Path) -> None:
     other_before = _snapshot_tree(other)
     code, output = run_against(other)
     assert code == 2, output
-    assert "basename is not _nightly" in output
+    assert "basename is not _main-gate" in output
     assert _snapshot_tree(other) == other_before
 
 
-def test_nightly_guard_accepts_detached_nightly_and_hatch(tmp_path: Path) -> None:
-    """Covers: fixup-1 item 1 (existing _nightly and hatch paths proceed)."""
+def test_main_gate_guard_accepts_detached_main_gate_and_hatch(tmp_path: Path) -> None:
+    """Covers: fixup-1 item 1 (existing _main-gate and hatch paths proceed)."""
     import subprocess
 
-    script = Path(__file__).resolve().parents[1] / "scripts/nightly-gate.sh"
-    main = _setup_nightly_main(tmp_path / "main")
+    script = Path(__file__).resolve().parents[1] / "scripts/main-gate.sh"
+    main = _setup_main_gate_repo(tmp_path / "main")
     orch = tmp_path / "orch"
     gate_stub = _pass_gate_stub("PASS")
     map_stub = 'echo "fake map build"'
 
-    # (e) an existing detached `_nightly` worktree is refreshed and gated.
-    existing = tmp_path / "_nightly"
+    # (e) an existing detached `_main-gate` worktree is refreshed and gated.
+    existing = tmp_path / "_main-gate"
     subprocess.check_output(
         ["git", "-C", str(main), "worktree", "add", "--detach", str(existing), "main"]
     )
-    cache_e = tmp_path / "cache-e" / "nightly"
-    code, output = _run_nightly(
-        _nightly_env(
-            main, existing, cache_e, orch, gate_stub, {"SABEROPS_NIGHTLY_MAP_CMD": map_stub}
+    cache_e = tmp_path / "cache-e" / "main-gate"
+    code, output = _run_main_gate(
+        _main_gate_env(
+            main, existing, cache_e, orch, gate_stub, {"SABEROPS_MAIN_GATE_MAP_CMD": map_stub}
         ),
         script,
     )
@@ -995,15 +997,15 @@ def test_nightly_guard_accepts_detached_nightly_and_hatch(tmp_path: Path) -> Non
     subprocess.check_output(
         ["git", "-C", str(main), "worktree", "add", "--detach", str(other), "main"]
     )
-    cache_o = tmp_path / "cache-o" / "nightly"
-    code, output = _run_nightly(
-        _nightly_env(
+    cache_o = tmp_path / "cache-o" / "main-gate"
+    code, output = _run_main_gate(
+        _main_gate_env(
             main,
             other,
             cache_o,
             orch,
             gate_stub,
-            {"SABEROPS_NIGHTLY_MAP_CMD": map_stub, "SABEROPS_NIGHTLY_ALLOW_PATH": "1"},
+            {"SABEROPS_MAIN_GATE_MAP_CMD": map_stub, "SABEROPS_MAIN_GATE_ALLOW_PATH": "1"},
         ),
         script,
     )
@@ -1011,7 +1013,7 @@ def test_nightly_guard_accepts_detached_nightly_and_hatch(tmp_path: Path) -> Non
     out_dirs = [p for p in cache_o.iterdir() if p.is_dir()]
     assert len(out_dirs) == 1
     assert "fake map build" in (out_dirs[0] / "map.txt").read_text()
-    assert (orch / "nightly" / "latest.md").exists()
+    assert (orch / "main-gate" / "latest.md").exists()
 
 
 @pytest.mark.parametrize(
@@ -1024,41 +1026,41 @@ def test_nightly_guard_accepts_detached_nightly_and_hatch(tmp_path: Path) -> Non
         ("INFRA", 3, False),
     ],
 )
-def test_nightly_map_rebuild_on_satisfied_gate(
+def test_main_gate_map_rebuild_on_satisfied_gate(
     tmp_path: Path, outcome: str, gate_exit: int, expect_map: bool
 ) -> None:
     """Covers: fixup-1 item 2 (map rebuild on PASS/FLAKY_PASS only)."""
-    script = Path(__file__).resolve().parents[1] / "scripts/nightly-gate.sh"
-    main = _setup_nightly_main(tmp_path / "main")
-    wt = tmp_path / "_nightly"
-    cache = tmp_path / "cache" / "nightly"
+    script = Path(__file__).resolve().parents[1] / "scripts/main-gate.sh"
+    main = _setup_main_gate_repo(tmp_path / "main")
+    wt = tmp_path / "_main-gate"
+    cache = tmp_path / "cache" / "main-gate"
     orch = tmp_path / "orch"
-    env = _nightly_env(
+    env = _main_gate_env(
         main,
         wt,
         cache,
         orch,
         _pass_gate_stub(outcome, gate_exit),
-        {"SABEROPS_NIGHTLY_MAP_CMD": "echo map"},
+        {"SABEROPS_MAIN_GATE_MAP_CMD": "echo map"},
     )
-    code, output = _run_nightly(env, script)
+    code, output = _run_main_gate(env, script)
     assert code == gate_exit, output
     out_dirs = [p for p in cache.iterdir() if p.is_dir()]
     assert len(out_dirs) == 1
     assert (out_dirs[0] / "map.txt").exists() == expect_map
-    assert (orch / "nightly" / "latest.md").exists()
+    assert (orch / "main-gate" / "latest.md").exists()
 
 
-def test_nightly_retention_refuses_unsafe_cache(
+def test_main_gate_retention_refuses_unsafe_cache(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: fixup-1 item 4 (retention refuses $HOME-like, non-nightly dirs)."""
+    """Covers: fixup-1 item 4 (retention refuses $HOME-like, non-main-gate dirs)."""
     import os
     import time
 
-    script = Path(__file__).resolve().parents[1] / "scripts/nightly-gate.sh"
-    main = _setup_nightly_main(tmp_path / "main")
-    wt = tmp_path / "_nightly"
+    script = Path(__file__).resolve().parents[1] / "scripts/main-gate.sh"
+    main = _setup_main_gate_repo(tmp_path / "main")
+    wt = tmp_path / "_main-gate"
     orch = tmp_path / "orch"
     gate_stub = _pass_gate_stub("PASS")
     old_epoch = time.time() - 40 * 86400
@@ -1071,19 +1073,19 @@ def test_nightly_retention_refuses_unsafe_cache(
     home_old.mkdir()
     (home_old / "x.txt").write_text("old")
     os.utime(home_old, (old_epoch, old_epoch))
-    code, output = _run_nightly(_nightly_env(main, wt, fake_home, orch, gate_stub), script)
+    code, output = _run_main_gate(_main_gate_env(main, wt, fake_home, orch, gate_stub), script)
     assert code == 0, output
     assert "refusing retention" in output
     assert home_old.exists()
 
-    # A path with no `nightly` component.
+    # A path with no `main-gate` component.
     other = tmp_path / "other-cache"
     other.mkdir()
     other_old = other / "2025-01-01-abc1234"
     other_old.mkdir()
     (other_old / "x.txt").write_text("old")
     os.utime(other_old, (old_epoch, old_epoch))
-    code, output = _run_nightly(_nightly_env(main, wt, other, orch, gate_stub), script)
+    code, output = _run_main_gate(_main_gate_env(main, wt, other, orch, gate_stub), script)
     assert code == 0, output
     assert "refusing retention" in output
     assert other_old.exists()
@@ -1105,4 +1107,49 @@ def test_flaky_total_ignores_infra(tmp_path: Path) -> None:
     assert per_test["a"]["streak"] == 2
     assert per_test["a"]["last_seen"] == "2026-10-03T00:00:00+00:00"
     assert "only-infra" not in per_test
+
+
+def test_flaky_stats_legacy_nightly_label_is_newest_main_gate(tmp_path: Path) -> None:
+    """Covers: G-006 K1 (a legacy `nightly` line counts as the newest main gate)."""
+    history = tmp_path / "full.jsonl"
+    _write_history(
+        history,
+        [
+            _entry("2026-10-05T00:00:00+00:00", "FAIL", [], ["old-fail"], label="nightly"),
+            _entry("2026-10-06T00:00:00+00:00", "FAIL", [], ["new-fail"], label="main-gate"),
+        ],
+    )
+    entries = g.load_history(history)
+    text = g.render_flaky_report(history, entries, 3, set(), False)
+    assert "## main-gate failures" in text
+    assert "new-fail" in text and "old-fail" not in text
+    payload = json.loads(g.render_flaky_report(history, entries, 3, set(), True))
+    assert payload["main_gate_failures"] == ["new-fail"]
+    # A lone legacy `nightly` line is still used as the newest main gate.
+    _write_history(
+        history,
+        [_entry("2026-10-07T00:00:00+00:00", "FAIL", [], ["only-fail"], label="nightly")],
+    )
+    entries = g.load_history(history)
+    text = g.render_flaky_report(history, entries, 3, set(), False)
+    assert "only-fail" in text
+
+
+def test_name_map_has_no_nightly_in_renamed_files() -> None:
+    """Covers: G-006 name map (only K1's legacy label keeps `nightly`)."""
+    root = Path(__file__).resolve().parents[1]
+    files = [
+        root / "scripts/main-gate.sh",
+        root / "scripts/systemd/saberops-main-gate.service",
+        root / "scripts/systemd/saberops-main-gate.timer",
+        root / "scripts/gate_tools.py",
+    ]
+    for path in files:
+        assert path.exists(), path
+        text = path.read_text()
+        if path.name == "gate_tools.py":
+            # K1 keeps exactly one legacy label occurrence; drop it before the check.
+            text = text.replace('"nightly"', "", 1)
+        assert "nightly" not in text.lower(), f"{path} still names the old gate"
+
 
