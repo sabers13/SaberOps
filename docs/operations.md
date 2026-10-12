@@ -163,8 +163,54 @@ record is valid through that day. Status `EXPIRING` warns 3 days
 before expiry. Class X is never admitted; B is attended-only; D
 (prepaid/metered keys) is never scheduled unattended.
 
-## Fixed-source candidate verification
+## Jobs
 
+A **job** is what a caller submits (requirements, not providers); a
+**run** is one execution of it. A job has 1..n runs (preemption,
+retry). Jobs wait in the owner DB until capacity allows: nothing
+dispatches jobs until the scheduler (M2-4b) lands, so submitted jobs
+stay QUEUED for now.
+
+States: QUEUED → RUNNING → SUCCEEDED | FAILED | CANCELLED, and
+RUNNING → QUEUED on preemption. QUEUED carries a waiting reason: NEW |
+NO_CAPACITY | PROBE_PENDING | PREEMPTED | CONCURRENCY. Requirements no
+route could ever satisfy, even with full capacity, store FAILED with
+`NO_ROUTE_FOR_REQUIREMENTS` at submit, so jobs never park forever.
+
+Requirements state what the work needs: `role` (ORCHESTRATOR, WORKER,
+INTEGRATOR, SURGEON, REVIEWER; only WORKER is dispatchable until R-002
+wires the role chains), optional `effort` (low | medium | high, a
+reasoning-budget hint that never selects a chain), required factual
+capabilities (plus `--read-only`), model-family allow/deny lists
+(validated and stored; enforced at admission), and a `size_hint`
+(S | M | L, shared with the capacity cost buckets). Callers never name
+a provider, model, tier or billing route.
+
+Idempotency: pass `--idempotency-key KEY` with a stable `caller_id`
+(`owner` for now). The same key with the same request returns the
+existing job (`created: false`, exit 0, no new row or event); the same
+key with a different request is refused (exit 1, nothing written); no
+key always creates a new job.
+
+- `orch job submit --repo PATH --goal TEXT [--acceptance TEXT]
+  [--base-ref REF] [--role ROLE] [--effort low|medium|high]
+  [--capability NAME]... [--read-only] [--family-include F]...
+  [--family-exclude F]... [--size S|M|L]
+  [--priority URGENT|NORMAL|BACKGROUND] [--deadline ISO]
+  [--not-before ISO] [--idempotency-key KEY] [--json]`, e.g.
+  `orch job submit --repo ~/projects/foo --goal "Fix the login retry"
+  --acceptance "gate passes" --size M --idempotency-key foo-1`.
+  Exit 3 means stored but FAILED at submit
+  (`NO_ROUTE_FOR_REQUIREMENTS`); the job is printed.
+- `orch job get JOB_ID [--json]`, e.g. `orch job get <job-id> --json`.
+- `orch job list [--state STATE] [--limit N] [--json]`, e.g.
+  `orch job list --state QUEUED --limit 20 --json`, ordered URGENT,
+  NORMAL, BACKGROUND, then oldest first.
+- `orch job cancel JOB_ID [--json]`, e.g. `orch job cancel <job-id>`.
+  QUEUED cancels at once; RUNNING first cancels the live run through
+  the supervisor and only then marks the job CANCELLED.
+
+## Fixed-source candidate verification
 Candidate gates and independent reviews run in separate detached verification
 worktrees at the exact candidate commit. Their tree hash is recorded in evidence.
 Uncommitted candidate changes block snapshot creation; changes to the snapshot

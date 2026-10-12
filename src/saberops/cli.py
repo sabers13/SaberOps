@@ -1418,6 +1418,86 @@ def build_parser() -> argparse.ArgumentParser:
     )
     posture_verify.add_argument("--json", action="store_true", help="JSON output")
 
+    # orch job submit|get|list|cancel (M2-3 job queue; each command calls
+    # exactly one service function in saberops.jobs.service).
+    job_parser = subparsers.add_parser(
+        "job",
+        help="Submit and inspect durable jobs (queue until the scheduler lands).",
+    )
+    job_sub = job_parser.add_subparsers(dest="job_command", required=True)
+    job_submit = job_sub.add_parser("submit", help="Submit one job.")
+    job_submit.add_argument("--repo", type=str, required=True, help="Path to git work tree.")
+    job_submit.add_argument("--goal", type=str, required=True, help="Work to be done.")
+    job_submit.add_argument("--acceptance", type=str, default=None, help="Acceptance text.")
+    job_submit.add_argument(
+        "--base-ref", type=str, default="HEAD", help="Base ref resolved to a commit."
+    )
+    job_submit.add_argument(
+        "--role",
+        type=str,
+        default="WORKER",
+        choices=["ORCHESTRATOR", "WORKER", "INTEGRATOR", "SURGEON", "REVIEWER"],
+        help="Job role (only WORKER is dispatchable until R-002).",
+    )
+    job_submit.add_argument(
+        "--effort", type=str, default=None, choices=["low", "medium", "high"]
+    )
+    job_submit.add_argument(
+        "--capability",
+        dest="capabilities",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="Required capability; repeat for multiple.",
+    )
+    job_submit.add_argument("--read-only", action="store_true", help="Require read-only.")
+    job_submit.add_argument(
+        "--family-include",
+        dest="family_include",
+        action="append",
+        default=[],
+        metavar="F",
+        help="Model family allowlist entry; repeat for multiple.",
+    )
+    job_submit.add_argument(
+        "--family-exclude",
+        dest="family_exclude",
+        action="append",
+        default=[],
+        metavar="F",
+        help="Model family denylist entry; repeat for multiple.",
+    )
+    job_submit.add_argument("--size", type=str, default=None, choices=["S", "M", "L"])
+    job_submit.add_argument(
+        "--priority",
+        type=str,
+        default="NORMAL",
+        choices=["URGENT", "NORMAL", "BACKGROUND"],
+    )
+    job_submit.add_argument("--deadline", type=str, default=None, help="Aware ISO-8601.")
+    job_submit.add_argument("--not-before", type=str, default=None, help="Aware ISO-8601.")
+    job_submit.add_argument("--idempotency-key", type=str, default=None)
+    job_submit.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
+    job_submit.add_argument("--json", action="store_true", help="JSON output")
+    job_get = job_sub.add_parser("get", help="Show one job.")
+    job_get.add_argument("job_id", type=str, help="Job identifier.")
+    job_get.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
+    job_get.add_argument("--json", action="store_true", help="JSON output")
+    job_list = job_sub.add_parser("list", help="List jobs in queue order.")
+    job_list.add_argument(
+        "--state",
+        type=str,
+        default=None,
+        choices=["QUEUED", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"],
+    )
+    job_list.add_argument("--limit", type=int, default=50, help="Max jobs (default: 50).")
+    job_list.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
+    job_list.add_argument("--json", action="store_true", help="JSON output")
+    job_cancel = job_sub.add_parser("cancel", help="Cancel one job.")
+    job_cancel.add_argument("job_id", type=str, help="Job identifier.")
+    job_cancel.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
+    job_cancel.add_argument("--json", action="store_true", help="JSON output")
+
     # orch retry|continue|try-worker
     retry_parser = subparsers.add_parser(
         "retry", help="Start a fresh attempt of a run's frozen task and policy."
@@ -3365,6 +3445,147 @@ def handle_posture_verify(args: argparse.Namespace) -> int:
     return 0
 
 
+def _job_payload(job: object) -> dict[str, Any]:
+    from saberops.jobs.models import Job as _Job
+
+    assert isinstance(job, _Job)
+    return job.to_dict()
+
+
+def handle_job_submit(args: argparse.Namespace) -> int:
+    """Handle `orch job submit` (exit 3 when stored FAILED at submit)."""
+    from saberops.db import Database as _Database
+    from saberops.jobs.models import Effort as _Effort
+    from saberops.jobs.models import JobRequirements as _Requirements
+    from saberops.jobs.models import JobRole as _JobRole
+    from saberops.jobs.models import Priority as _Priority
+    from saberops.jobs.service import (
+        IdempotencyConflictError as _IdempotencyConflict,
+    )
+    from saberops.jobs.service import (
+        submit_job as _submit,
+    )
+
+    try:
+        requirements = _Requirements(
+            role=_JobRole(str(args.role)),
+            effort=_Effort(str(args.effort).lower()) if args.effort else None,
+            required_capabilities=tuple(args.capabilities or ()),
+            read_only=bool(args.read_only),
+            model_family_include=tuple(args.family_include or ()),
+            model_family_exclude=tuple(args.family_exclude or ()),
+            size_hint=args.size,
+        )
+    except ValueError as exc:
+        print(f"[!] Invalid job requirements: {exc}", file=sys.stderr)
+        return 2
+    try:
+        result = _submit(
+            _Database(args.db),
+            repo=str(args.repo),
+            goal=str(args.goal),
+            acceptance=args.acceptance,
+            base_ref=str(args.base_ref),
+            requirements=requirements,
+            priority=_Priority(str(args.priority)),
+            deadline=args.deadline,
+            not_before=args.not_before,
+            idempotency_key=args.idempotency_key,
+            routing=None,
+        )
+    except ValueError as exc:
+        print(f"[!] Invalid job: {exc}", file=sys.stderr)
+        return 2
+    except _IdempotencyConflict as exc:
+        print(f"[!] Idempotency conflict: {exc}", file=sys.stderr)
+        return 1
+    payload = {"job": _job_payload(result.job), "created": result.created}
+    failed = result.job.state.value == "FAILED"
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 3 if failed else 0
+    print(f"Job        : {result.job.job_id}")
+    print(f"State      : {result.job.state.value}")
+    print(f"Created    : {'yes' if result.created else 'no (idempotent replay)'}")
+    if failed:
+        print(f"Reason     : {result.job.failure_reason}")
+        return 3
+    return 0
+
+
+def handle_job_get(args: argparse.Namespace) -> int:
+    """Handle `orch job get`."""
+    from saberops.db import Database as _Database
+    from saberops.jobs.service import get_job as _get
+
+    try:
+        job = _get(_Database(args.db), str(args.job_id))
+    except ValueError as exc:
+        print(f"[!] Invalid job get: {exc}", file=sys.stderr)
+        return 2
+    if job is None:
+        print(f"Error: unknown job: {args.job_id}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(_job_payload(job), indent=2, sort_keys=True))
+        return 0
+    print(f"Job        : {job.job_id}")
+    print(f"State      : {job.state.value}")
+    print(f"Goal       : {job.goal}")
+    print(f"Repo       : {job.repo} @ {job.base_ref} ({job.base_sha})")
+    return 0
+
+
+def handle_job_list(args: argparse.Namespace) -> int:
+    """Handle `orch job list`."""
+    from saberops.db import Database as _Database
+    from saberops.jobs.service import list_jobs as _list
+
+    try:
+        jobs = _list(_Database(args.db), state=args.state, limit=int(args.limit))
+    except ValueError as exc:
+        print(f"[!] Invalid job list: {exc}", file=sys.stderr)
+        return 2
+    if getattr(args, "json", False):
+        print(json.dumps({"jobs": [_job_payload(job) for job in jobs]}, indent=2))
+        return 0
+    if not jobs:
+        print("No jobs.")
+        return 0
+    for job in jobs:
+        print(f"{job.job_id} {job.state.value:<9} {job.priority.value:<10} {job.goal}")
+    return 0
+
+
+def handle_job_cancel(args: argparse.Namespace) -> int:
+    """Handle `orch job cancel` (RUNNING cancels the live run first)."""
+    from saberops.db import Database as _Database
+    from saberops.jobs.service import JobNotFoundError as _NotFound
+    from saberops.jobs.service import cancel_job as _cancel
+
+    def _run_canceller(run_id: str) -> bool:
+        return RunSupervisor(db=db_for_run(args, run_id)).cancel(run_id)
+
+    try:
+        result = _cancel(
+            _Database(args.db), str(args.job_id), run_canceller=_run_canceller
+        )
+    except _NotFound:
+        print(f"Error: unknown job: {args.job_id}", file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        print(f"[!] Invalid job cancel: {exc}", file=sys.stderr)
+        return 2
+    payload = {"job": _job_payload(result.job), "cancelled": result.cancelled}
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"Job        : {result.job.job_id}")
+    print(f"State      : {result.job.state.value}")
+    print(f"Cancelled  : {'yes' if result.cancelled else 'no'}")
+    return 0
+
+
 def handle_project_set_workflow(args: argparse.Namespace) -> int:
     """Handle `orch project set-workflow <preset> [--repo X]`."""
     from saberops.service import RunOperationError
@@ -3811,6 +4032,15 @@ def _dispatch(args: argparse.Namespace) -> int:
             return handle_posture_show(args)
         elif args.posture_command == "verify":
             return handle_posture_verify(args)
+    elif args.command == "job":
+        if args.job_command == "submit":
+            return handle_job_submit(args)
+        elif args.job_command == "get":
+            return handle_job_get(args)
+        elif args.job_command == "list":
+            return handle_job_list(args)
+        elif args.job_command == "cancel":
+            return handle_job_cancel(args)
     elif args.command == "retry":
         return handle_retry(args)
     elif args.command == "continue":
