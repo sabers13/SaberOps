@@ -1,0 +1,2 @@
+# Exact pytest node IDs, one per line. Entries require explicit owner approval.
+# Initially empty; passing a serial rerun alone does not authorize quarantine.
