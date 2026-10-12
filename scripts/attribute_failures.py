@@ -46,13 +46,14 @@ def attribute(
     gate_log: str = "",
 ) -> str:
     buckets: dict[str, list[str]] = {}
+    full_selection = sorted(name for name, (_, _, full) in lanes.items() if full)
     for node in failures:
         signals: dict[str, list[str]] = {}
         file = node.split("::")[0]
         error = errors.get(node, "")
-        for name, (changed, selected, full) in lanes.items():
+        for name, (changed, selected, _) in lanes.items():
             found = []
-            if full or node in selected or file in selected:
+            if node in selected or file in selected:
                 found.append("selects")
             if any(
                 re.search(r"(?<![\w/])" + re.escape(path) + r'(?=[:\s"\']|$)', error)
@@ -76,6 +77,9 @@ def attribute(
             lines[0] if lines else "no traceback supplied",
         )
         summary = "; ".join(f"{name}: {', '.join(found)}" for name, found in signals.items())
+        if full_selection:
+            note = ("weak: " if not signals else "") + "full-selection by "
+            summary = (summary or "no signals") + "; " + note + ", ".join(full_selection)
         buckets.setdefault(bucket, []).append(f"- `{node}` — {first}; {summary or 'no signals'}")
     diagnostic = "lint/type error"
     for line in gate_log.splitlines():

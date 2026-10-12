@@ -73,3 +73,28 @@ def test_single_signal_and_ruff_location() -> None:
     text = a.attribute([node], lanes, {}, "F821 Undefined name `missing`\n  --> src/pkg/a.py:2:1")
     assert "A (low confidence)" in text
     assert "lint/type `src/pkg/a.py`" in text and "F821" in text
+
+
+def test_full_selection_does_not_create_interaction() -> None:
+    node = "tests/test_a.py::test_a"
+    lanes = {
+        "A": ({"src/pkg/a.py"}, {node}, False),
+        "B": ({"src/pkg/defaults/plans.json"}, set(), True),
+    }
+    text = a.attribute([node], lanes, {})
+    assert "## A (low confidence)" in text
+    assert "A: selects" in text
+    assert "full-selection by B" in text
+    assert "interaction" not in text and "B: selects" not in text
+
+
+def test_full_selection_only_is_weak_unattributed_candidate() -> None:
+    node = "tests/test_unknown.py::test_unknown"
+    lanes = {
+        "A": ({"src/pkg/a.py"}, {"tests/test_a.py"}, False),
+        "B": ({"src/pkg/defaults/plans.json"}, set(), True),
+    }
+    text = a.attribute([node], lanes, {})
+    assert "## unattributed" in text
+    assert "weak: full-selection by B" in text
+    assert "interaction" not in text and "B: selects" not in text
