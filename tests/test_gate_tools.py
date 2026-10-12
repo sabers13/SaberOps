@@ -73,6 +73,185 @@ def test_slot_waits(tmp_path: Path) -> None:
         pass
 
 
+def test_light_slots_third_waits(tmp_path: Path) -> None:
+    import threading
+
+    light = tmp_path / "light"
+    entered = threading.Event()
+    release = threading.Event()
+
+    def holder() -> None:
+        with g.slot(
+            light,
+            {"pid": os.getpid()},
+            count=2,
+            wait=5,
+            message="waiting for lane slot: ",
+            slot_env="SABEROPS_LANE_SLOTS",
+        ):
+            entered.set()
+            assert release.wait(timeout=5)
+
+    threads = [threading.Thread(target=holder) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    assert entered.wait(timeout=5)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if (light / "0.json").exists() and (light / "1.json").exists():
+            break
+        time.sleep(0.05)
+    assert (light / "0.json").exists() and (light / "1.json").exists()
+    notices: list[str] = []
+    with pytest.raises(TimeoutError):
+        with g.slot(
+            light,
+            {},
+            count=2,
+            wait=0.3,
+            message="waiting for lane slot: ",
+            slot_env="SABEROPS_LANE_SLOTS",
+            notify=notices.append,
+        ):
+            pytest.fail("third light slot acquired")
+    assert notices and "waiting for lane slot:" in notices[0]
+    release.set()
+    for thread in threads:
+        thread.join(timeout=5)
+    with g.slot(
+        light,
+        {},
+        count=2,
+        wait=1,
+        message="waiting for lane slot: ",
+        slot_env="SABEROPS_LANE_SLOTS",
+    ):
+        pass
+    with pytest.raises(ValueError):
+        with g.slot(light, {}, count=0, slot_env="SABEROPS_LANE_SLOTS"):
+            pass
+
+
+def test_lane_waits_while_heavy_held(tmp_path: Path) -> None:
+    heavy = tmp_path / "heavy"
+    notices: list[str] = []
+    with g.slot(heavy, {"pid": os.getpid()}, count=1, wait=5):
+        with pytest.raises(TimeoutError):
+            with g.slot(
+                heavy, {}, count=1, wait=0.3, observe=True, notify=notices.append
+            ):
+                pass
+    assert notices and "waiting for full-gate slot:" in notices[0]
+
+
+def test_full_gate_drains_light_slots(tmp_path: Path) -> None:
+    import threading
+
+    heavy = tmp_path / "heavy"
+    light = tmp_path / "light"
+    release = threading.Event()
+    light_held = threading.Event()
+
+    def lane_holder() -> None:
+        with g.slot(
+            light,
+            {"pid": os.getpid()},
+            count=2,
+            wait=5,
+            message="waiting for lane slot: ",
+            slot_env="SABEROPS_LANE_SLOTS",
+        ):
+            light_held.set()
+            assert release.wait(timeout=5)
+
+    thread = threading.Thread(target=lane_holder)
+    thread.start()
+    assert light_held.wait(timeout=5)
+    time.sleep(0.2)
+    notices: list[str] = []
+    with g.slot(heavy, {"pid": os.getpid()}, count=1, wait=5):
+        with pytest.raises(TimeoutError):
+            with g.slot(
+                light,
+                {"pid": os.getpid()},
+                count=2,
+                wait=0.3,
+                acquire_all=True,
+                message="waiting for running lane checks: ",
+                slot_env="SABEROPS_LANE_SLOTS",
+                notify=notices.append,
+            ):
+                pytest.fail("drain acquired while lane holds light")
+        assert notices and "waiting for running lane checks:" in notices[0]
+        release.set()
+        thread.join(timeout=5)
+        with g.slot(
+            light,
+            {"pid": os.getpid()},
+            count=2,
+            wait=5,
+            acquire_all=True,
+            message="waiting for running lane checks: ",
+            slot_env="SABEROPS_LANE_SLOTS",
+        ):
+            assert (light / "0.json").exists() and (light / "1.json").exists()
+            blocked: list[str] = []
+            with pytest.raises(TimeoutError):
+                with g.slot(
+                    light,
+                    {},
+                    count=2,
+                    wait=0.3,
+                    message="waiting for lane slot: ",
+                    slot_env="SABEROPS_LANE_SLOTS",
+                    notify=blocked.append,
+                ):
+                    pass
+            assert blocked and "waiting for lane slot:" in blocked[0]
+    assert not (light / "0.json").exists() and not (light / "1.json").exists()
+
+
+def test_lane_queues_behind_draining_full_gate(tmp_path: Path) -> None:
+    heavy = tmp_path / "heavy"
+    with g.slot(heavy, {"pid": os.getpid()}, count=1, wait=5):
+        notices: list[str] = []
+        with pytest.raises(TimeoutError):
+            with g.slot(
+                heavy, {}, count=1, wait=0.3, observe=True, notify=notices.append
+            ):
+                pytest.fail("lane passed heavy while full gate holds it")
+        assert notices and "waiting for full-gate slot:" in notices[0]
+
+
+def test_lane_floor_default_is_10(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import subprocess
+
+    monkeypatch.delenv("SABEROPS_GATE_MIN_FREE_GB", raising=False)
+    subprocess.check_output(["git", "init", "-q"], cwd=tmp_path)
+    subprocess.check_output(["git", "config", "user.email", "t@example.invalid"], cwd=tmp_path)
+    subprocess.check_output(["git", "config", "user.name", "T"], cwd=tmp_path)
+    subprocess.check_output(
+        ["git", "commit", "-q", "--allow-empty", "-m", "init"], cwd=tmp_path
+    )
+    seen: dict[str, float] = {}
+    real_disk_ok = g.disk_ok
+
+    def capture(paths: list[Path], minimum_gb: float) -> bool:
+        seen["minimum"] = minimum_gb
+        return False
+
+    monkeypatch.setattr(g, "disk_ok", capture)
+    runner = g.Runner(tmp_path, "lane")
+    try:
+        code = runner.execute("HEAD", [])
+    finally:
+        runner.stop_monitor.set()
+        runner.monitor.join(timeout=5)
+    assert code == 3
+    assert seen.get("minimum") == 10.0
+    assert real_disk_ok is not None
+
+
 def test_lane_targets(tmp_path: Path) -> None:
     (tmp_path / "tests").mkdir()
     for name in ("test_new.py", "test_modified.py", "test_core.py"):
