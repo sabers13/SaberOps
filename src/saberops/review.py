@@ -40,7 +40,6 @@ from saberops.models import (
     ReviewFinding,
     ReviewResult,
     ReviewVerdict,
-    RoutingState,
     Run,
     RunStatus,
     Tier,
@@ -52,7 +51,6 @@ from saberops.observability import new_dispatch_evidence, update_dispatch_from_r
 from saberops.observability.phase_telemetry import measure_phase
 from saberops.process import run_process
 from saberops.provenance import ProvenanceError, assert_run_repository
-from saberops.quota import CODEX_PROVIDER, CODEX_WEEKLY_POOL
 from saberops.review_policy import (
     FINDING_LABELS,
     FINDINGS_PROMPT,
@@ -149,25 +147,6 @@ def _format_infra_details(notes: list[dict[str, str | None]]) -> str:
         if stdout_tail:
             lines.append(f"  stdout tail: {stdout_tail}")
     return "\n".join(lines)
-
-
-def _is_provider_quota_blocked(quota_states: list[QuotaState], provider: str) -> bool:
-    """Return True when a provider is quota-blocked for review dispatch.
-
-    Mirrors :func:`saberops.quota.apply_quota_policy`: only a BLOCKED
-    state blocks a provider, and a Codex row for a non-``weekly`` pool never
-    blocks Codex.
-    """
-    provider_norm = provider.strip().lower()
-    for state in quota_states:
-        if getattr(state, "exclusion_id", None):
-            continue
-        if state.provider != provider_norm or state.routing_state != RoutingState.BLOCKED:
-            continue
-        if state.provider == CODEX_PROVIDER and state.pool != CODEX_WEEKLY_POOL:
-            continue
-        return True
-    return False
 
 
 def _pre_dispatch_skip_reason(

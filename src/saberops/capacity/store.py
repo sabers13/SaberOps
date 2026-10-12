@@ -84,6 +84,74 @@ def ensure_tables(db: Database) -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS capacity_observations (
+                id TEXT PRIMARY KEY,
+                pool_id TEXT NOT NULL,
+                window_id TEXT NOT NULL,
+                remaining_pct REAL NOT NULL,
+                reset_at TEXT,
+                observed_at TEXT NOT NULL,
+                source TEXT NOT NULL,
+                legacy_provider TEXT,
+                legacy_pool TEXT,
+                evidence_ref TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS capacity_reservations (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                job_id TEXT,
+                route TEXT NOT NULL,
+                pool_id TEXT NOT NULL,
+                window_id TEXT NOT NULL,
+                multiplier REAL NOT NULL DEFAULT 1.0,
+                size_bucket TEXT NOT NULL,
+                cost_pct REAL NOT NULL,
+                spread_pct REAL NOT NULL,
+                state TEXT NOT NULL,
+                total_tokens INTEGER,
+                created_at TEXT NOT NULL,
+                settled_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS capacity_cost_model (
+                route TEXT NOT NULL,
+                pool_id TEXT NOT NULL,
+                window_id TEXT NOT NULL,
+                size_bucket TEXT NOT NULL,
+                samples INTEGER NOT NULL DEFAULT 0,
+                ewma_pct REAL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (route, pool_id, window_id, size_bucket)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_capacity_obs_pool_window
+                ON capacity_observations (pool_id, window_id, observed_at)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_capacity_res_run
+                ON capacity_reservations (run_id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_capacity_res_pool_window
+                ON capacity_reservations (pool_id, window_id, state)
+            """
+        )
         conn.commit()
 
 

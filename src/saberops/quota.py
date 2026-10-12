@@ -1,8 +1,10 @@
-"""Deterministic quota-aware routing policy.
+"""Owner quota observation vocabulary.
 
-Quota state is owner-supplied and persisted in SQLite. It is applied only to
-automatically resolved candidate chains, after the ordinary deterministic chain
-has been resolved. Explicit model overrides bypass quota policy entirely.
+Normalization only: one raw observation becomes a remaining percentage.
+Routing policy lives in ``control_plane/quota_policy.py`` and
+``capacity/``. The legacy provider-keyed NORMAL/DEMOTED/BLOCKED policy
+(25 % threshold) was deleted in M2-4a; ``orch quota set|list|enable``
+are owner commands mapped onto the capacity ledger.
 """
 
 from __future__ import annotations
@@ -10,71 +12,7 @@ from __future__ import annotations
 import math
 from typing import Any, cast
 
-from saberops.models import QuotaRawSemantics, QuotaState, RoutingState, WorkerCandidate
-
-QUOTA_THRESHOLD_PERCENT = 25.0
-CODEX_PROVIDER = "codex"
-CODEX_WEEKLY_POOL = "weekly"
-
-
-def derive_routing_state(
-    provider: str,
-    pool: str,
-    remaining_percent: float,
-    current_state: RoutingState | None,
-) -> RoutingState:
-    """Derive the routing state for a quota update.
-
-    Only a Codex ``weekly`` pool below the 25% threshold produces BLOCKED
-    routing. A low Codex row for any other pool does not block Codex, and any
-    other provider below the threshold is DEMOTED (moved behind NORMAL
-    providers).
-
-    At or above the threshold, providers return to NORMAL (M2-1: the former
-    sticky Codex ``weekly`` BLOCK is removed and becomes an ordinary
-    exclusion with the vendor reset).
-    """
-    if provider == CODEX_PROVIDER and pool != CODEX_WEEKLY_POOL:
-        return RoutingState.NORMAL
-
-    if remaining_percent < QUOTA_THRESHOLD_PERCENT:
-        if provider == CODEX_PROVIDER:
-            return RoutingState.BLOCKED
-        return RoutingState.DEMOTED
-
-    return RoutingState.NORMAL
-
-
-def apply_quota_policy(
-    candidates: list[WorkerCandidate],
-    quota_states: list[QuotaState],
-) -> list[WorkerCandidate]:
-    """Apply quota state to an ordered candidate chain.
-
-    BLOCKED providers are removed entirely. DEMOTED providers keep their
-    candidates but move them behind candidates from NORMAL providers while
-    preserving relative order within each group.
-    """
-    blocked: set[str] = set()
-    demoted: set[str] = set()
-    for state in quota_states:
-        if state.routing_state == RoutingState.BLOCKED:
-            if state.provider == CODEX_PROVIDER and state.pool != CODEX_WEEKLY_POOL:
-                continue
-            blocked.add(state.provider)
-        elif state.routing_state == RoutingState.DEMOTED:
-            demoted.add(state.provider)
-
-    normal: list[WorkerCandidate] = []
-    lowered: list[WorkerCandidate] = []
-    for candidate in candidates:
-        if candidate.provider in blocked:
-            continue
-        if candidate.provider in demoted:
-            lowered.append(candidate)
-        else:
-            normal.append(candidate)
-    return normal + lowered
+from saberops.models import QuotaRawSemantics
 
 
 def normalize_quota_observation(

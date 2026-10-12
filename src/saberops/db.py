@@ -38,7 +38,6 @@ from saberops.models import (
     ReviewFinding,
     ReviewResult,
     ReviewVerdict,
-    RoutingState,
     Run,
     RunPlan,
     RunStatus,
@@ -69,7 +68,7 @@ from saberops.ownership import (
     ProcessIdentity,
     probe_liveness,
 )
-from saberops.quota import derive_routing_state, normalize_quota_observation
+from saberops.quota import normalize_quota_observation
 from saberops.run_titles import clean_title, fallback_title, unique_title
 from saberops.wake import notify_run
 
@@ -4004,11 +4003,15 @@ class Database:
         pool: str,
         remaining_percent: float,
         reset_at: str | None = None,
+        *,
+        source: str = "OWNER",
     ) -> QuotaState:
         """Upsert quota state for a provider pool.
 
-        Derives routing state from the remaining percentage and any existing
-        state, preserving a sticky Codex BLOCK until an explicit enable.
+        Delegates to the capacity ledger (:func:`record_owner_quota`):
+        the observation is appended to ``capacity_observations`` and the
+        ``quota_state`` row is upserted with ``routing_state = NORMAL``.
+        The legacy 25 % BLOCK/DEMOTE policy is deleted (M2-4a).
 
         Quota is owner-wide configuration, so a project-local database
         delegates to the single global owner store.
@@ -4019,114 +4022,51 @@ class Database:
                 pool=pool,
                 remaining_percent=remaining_percent,
                 reset_at=reset_at,
+                source=source,
             )
-        provider_norm = provider.strip().lower()
-        pool_norm = pool.strip().lower()
-        if not 0.0 <= remaining_percent <= 100.0:
-            raise ValueError("remaining_percent must be between 0 and 100")
+        from saberops.capacity.ledger import record_owner_quota
 
-        current = self.get_quota(provider_norm, pool_norm)
-        routing_state = derive_routing_state(
-            provider_norm,
-            pool_norm,
+        return record_owner_quota(
+            self,
+            provider,
+            pool,
             remaining_percent,
-            current.routing_state if current is not None else None,
-        )
-        now = current_iso_timestamp()
-        with self._get_connection() as conn:
-            conn.execute(
-                """
-                INSERT INTO quota_state (
-                    provider, pool, remaining_percent, reset_at, routing_state, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(provider, pool) DO UPDATE SET
-                    remaining_percent = excluded.remaining_percent,
-                    reset_at = excluded.reset_at,
-                    routing_state = excluded.routing_state,
-                    updated_at = excluded.updated_at
-                """,
-                (provider_norm, pool_norm, remaining_percent, reset_at, routing_state.value, now),
-            )
-            conn.commit()
-        return QuotaState(
-            provider=provider_norm,
-            pool=pool_norm,
-            remaining_percent=remaining_percent,
-            reset_at=reset_at,
-            routing_state=routing_state,
-            updated_at=now,
+            reset_at,
+            source=source,
         )
 
     def enable_quota(self, provider: str, pool: str) -> QuotaState:
         """Explicitly re-enable automatic routing for a provider pool.
 
-        Sets routing state to NORMAL. A subsequent quota update below the
-        threshold will re-derive BLOCKED/DEMOTED as appropriate.
+        Delegates to the ledger; same semantics as before (row →
+        NORMAL, remaining kept, a 100 % row created if absent).
         """
         if self._owner_db is not None:
             return self._owner_db.enable_quota(provider=provider, pool=pool)
-        provider_norm = provider.strip().lower()
-        pool_norm = pool.strip().lower()
-        now = current_iso_timestamp()
-        with self._get_connection() as conn:
-            row = conn.execute(
-                "SELECT remaining_percent, reset_at FROM quota_state "
-                "WHERE provider = ? AND pool = ?",
-                (provider_norm, pool_norm),
-            ).fetchone()
-            remaining = float(row["remaining_percent"]) if row is not None else 100.0
-            reset_at = str(row["reset_at"]) if row is not None and row["reset_at"] else None
-            conn.execute(
-                """
-                INSERT INTO quota_state (
-                    provider, pool, remaining_percent, reset_at, routing_state, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(provider, pool) DO UPDATE SET
-                    routing_state = excluded.routing_state,
-                    updated_at = excluded.updated_at
-                """,
-                (provider_norm, pool_norm, remaining, reset_at, RoutingState.NORMAL.value, now),
-            )
-            conn.commit()
-        return QuotaState(
-            provider=provider_norm,
-            pool=pool_norm,
-            remaining_percent=remaining,
-            reset_at=reset_at,
-            routing_state=RoutingState.NORMAL,
-            updated_at=now,
-        )
+        from saberops.capacity.ledger import enable_owner_quota
+
+        return enable_owner_quota(self, provider, pool)
 
     def get_quota(self, provider: str, pool: str) -> QuotaState | None:
         """Fetch quota state for a provider pool, or None if absent."""
         if self._owner_db is not None:
             return self._owner_db.get_quota(provider=provider, pool=pool)
-        with self._get_connection() as conn:
-            row = conn.execute(
-                "SELECT * FROM quota_state WHERE provider = ? AND pool = ?",
-                (provider.strip().lower(), pool.strip().lower()),
-            ).fetchone()
-            return self._row_to_quota(row) if row is not None else None
+        from saberops.capacity.ledger import get_owner_quota
+
+        return get_owner_quota(self, provider, pool)
 
     def list_quota(self) -> list[QuotaState]:
         """List all quota state rows ordered by provider then pool."""
         if self._owner_db is not None:
             return self._owner_db.list_quota()
-        with self._get_connection() as conn:
-            rows = conn.execute(
-                "SELECT * FROM quota_state ORDER BY provider ASC, pool ASC"
-            ).fetchall()
-            return [self._row_to_quota(row) for row in rows]
+        from saberops.capacity.ledger import list_owner_quota
+
+        return list_owner_quota(self)
 
     def _row_to_quota(self, row: sqlite3.Row) -> QuotaState:
-        return QuotaState(
-            provider=str(row["provider"]),
-            pool=str(row["pool"]),
-            remaining_percent=float(row["remaining_percent"]),
-            reset_at=str(row["reset_at"]) if row["reset_at"] else None,
-            routing_state=RoutingState(str(row["routing_state"])),
-            updated_at=str(row["updated_at"]),
-        )
+        from saberops.capacity.ledger import _row_to_quota as _ledger_row_to_quota
+
+        return _ledger_row_to_quota(row)
 
     @staticmethod
     def _json_strings(raw: object) -> tuple[str, ...]:
