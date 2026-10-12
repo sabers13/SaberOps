@@ -8,9 +8,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
+from saberops.capacity.cost_model import SizeBucket
 from saberops.capacity.ledger import (
     PoolDraw,
-    SizeBucket,
     estimate,
     get_owner_quota,
     list_owner_quota,
