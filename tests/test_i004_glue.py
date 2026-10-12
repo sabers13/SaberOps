@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import subprocess
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
-from saberops.capacity import ledger
+from saberops.capacity import cost_model, ledger
 from saberops.capacity.cost_model import SizeBucket
 from saberops.capacity.store import upsert_exclusion
 from saberops.db import Database
-from saberops.jobs.service import capacity
+from saberops.jobs.models import SIZE_HINTS, JobRequirements
+from saberops.jobs.service import capacity, submit_job
+from saberops.routing_config import load_packaged_default
 
 
 @pytest.fixture(autouse=True)
@@ -68,3 +71,33 @@ def test_capacity_default_now_is_utc_datetime(
     assert view.generated_at == moments[0].isoformat()
     assert view.ledger_wired is True
     assert view.pools == ()
+
+
+@pytest.mark.parametrize("bucket", list(SizeBucket))
+def test_shared_size_bucket_for_submitted_job(tmp_path: Path, bucket: SizeBucket) -> None:
+    assert SIZE_HINTS == ("S", "M", "L") == tuple(b.value for b in SizeBucket)
+    requirements = JobRequirements(size_hint=bucket.value)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for args in (
+        ["init", "-b", "main"],
+        ["-c", "user.name=Glue", "-c", "user.email=glue@example.com",
+         "commit", "--allow-empty", "-m", "initial"],
+    ):
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+    job = submit_job(
+        Database(tmp_path / "jobs.db"), repo=repo, goal="verify size contract",
+        requirements=requirements, routing=load_packaged_default(),
+        now=datetime(2026, 10, 12, 12, tzinfo=UTC),
+    ).job
+    assert job.requirements.size_hint == bucket.value
+    assert job.requirements.size_hint is not None
+    estimate = cost_model.cost_estimate(None, "5h", SizeBucket(job.requirements.size_hint))
+    assert estimate == cost_model.cost_estimate(None, "5h", bucket)
+    assert estimate.cost_pct > 0
+
+
+@pytest.mark.parametrize("hint", ["XL", "s"])
+def test_shared_size_bucket_rejects_invalid_hint(hint: str) -> None:
+    with pytest.raises(ValueError, match="size_hint must be one of"):
+        JobRequirements(size_hint=hint)

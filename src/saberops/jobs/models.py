@@ -3,8 +3,8 @@
 Cross-lane contracts (identical text in the M2-3 and M2-4a prompts):
 
 * C1: ``size_hint`` literal values are exactly ``"S"``, ``"M"``,
-  ``"L"``. This module owns ``SIZE_HINTS``; M2-4a owns
-  ``SizeBucket`` and glue-2 switches jobs to it.
+  ``"L"``. This module derives ``SIZE_HINTS`` from the shared
+  ``saberops.capacity.cost_model.SizeBucket`` enum.
 * C3: one role vocabulary lives here (``JobRole``); only
   ``DISPATCHABLE_ROLES = {WORKER}`` is dispatchable until R-002.
 """
@@ -14,6 +14,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
+
+from saberops.capacity.cost_model import SizeBucket
 
 
 class JobRole(StrEnum):
@@ -28,7 +30,7 @@ class JobRole(StrEnum):
 
 DISPATCHABLE_ROLES: frozenset[JobRole] = frozenset({JobRole.WORKER})
 
-SIZE_HINTS: tuple[str, ...] = ("S", "M", "L")
+SIZE_HINTS: tuple[str, ...] = tuple(b.value for b in SizeBucket)
 
 
 class JobState(StrEnum):
