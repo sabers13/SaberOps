@@ -32,10 +32,12 @@ from saberops.jobs.service import (
     cancel_job,
     capacity,
     get_job,
+    job_dispatch_spec,
     list_jobs,
+    reconcile_jobs,
     submit_job,
 )
-from saberops.models import WorkerCandidate
+from saberops.models import RunStatus, WorkerCandidate
 from saberops.routing_config import RoutingSnapshot, load_packaged_default
 
 _NOW = datetime(2026, 10, 12, 12, 0, 0, tzinfo=UTC)
@@ -356,3 +358,147 @@ def test_capacity_stub_shape(tmp_path: Path) -> None:
         "str", "str", "float | None", "float",
         "str | None", "str | None", "bool", "str | None",
     ]
+
+
+# ---------------------------------------------------------------------------
+# reconciliation (section G)
+# ---------------------------------------------------------------------------
+
+
+def _submit_running(
+    db: Database, repo: Path, goal: str, run_id: str = "run_1"
+) -> str:
+    job = submit_job(db, repo=repo, goal=goal, routing=_snapshot(), now=_NOW).job
+    store.mark_dispatched(db, job.job_id, run_id, now=_NOW)
+    return job.job_id
+
+
+def test_reconcile_status_mapping(tmp_path: Path) -> None:
+    from saberops.jobs.models import RUN_FAILED, RUN_MISSING
+
+    db = Database(tmp_path / "jobs.db")
+    repo = _git_repo(tmp_path / "repo")
+    completed = _submit_running(db, repo, "g1", "run_completed")
+    failed = _submit_running(db, repo, "g2", "run_failed")
+    missing = _submit_running(db, repo, "g3", "run_missing")
+    pending = _submit_running(db, repo, "g4", "run_pending")
+    running = _submit_running(db, repo, "g5", "run_running")
+    orphaned = _submit_running(db, repo, "g6", "run_orphaned")
+
+    def status(run_id: str) -> RunStatus | None:
+        return {
+            "run_completed": RunStatus.COMPLETED,
+            "run_failed": RunStatus.FAILED,
+            "run_pending": RunStatus.PENDING,
+            "run_running": RunStatus.RUNNING,
+            "run_orphaned": RunStatus.ORPHANED,
+        }.get(run_id)
+
+    changes = reconcile_jobs(db, run_status=status, now=_NOW)
+    by_job = {c.job_id: c for c in changes}
+    assert set(by_job) == {completed, failed, missing}
+    assert by_job[completed].to_state == JobState.SUCCEEDED
+    assert by_job[completed].failure_reason is None
+    assert by_job[failed].to_state == JobState.FAILED
+    assert by_job[failed].failure_reason == RUN_FAILED
+    assert by_job[missing].to_state == JobState.FAILED
+    assert by_job[missing].failure_reason == RUN_MISSING
+    for untouched in (pending, running, orphaned):
+        assert get_job(db, untouched) is not None
+        assert get_job(db, untouched).state == JobState.RUNNING
+    # No event for untouched RUNNING jobs: still exactly 2 events each.
+    for untouched in (pending, running, orphaned):
+        assert len(store.list_events(db, untouched)) == 2
+    # Idempotent second call changes nothing.
+    assert reconcile_jobs(db, run_status=status, now=_NOW) == []
+
+
+def test_reconcile_cancel_race_one_terminal_state_one_event(tmp_path: Path) -> None:
+    db = Database(tmp_path / "jobs.db")
+    repo = _git_repo(tmp_path / "repo")
+    # Cancel wins first: reconcile then finds no RUNNING job.
+    job_id = _submit_running(db, repo, "race-cancel", "run_race_1")
+    cancel_job(db, job_id, run_canceller=lambda _run: True)
+    changes = reconcile_jobs(
+        db, run_status=lambda _run: RunStatus.COMPLETED, now=_NOW
+    )
+    assert changes == []
+    final = get_job(db, job_id)
+    assert final is not None and final.state == JobState.CANCELLED
+    terminal = [e for e in store.list_events(db, job_id) if e["to_state"] == "CANCELLED"]
+    assert len(terminal) == 1
+    # Reconcile wins first: cancel then refuses.
+    job_id2 = _submit_running(db, repo, "race-reconcile", "run_race_2")
+    changes2 = reconcile_jobs(
+        db, run_status=lambda _run: RunStatus.COMPLETED, now=_NOW
+    )
+    assert [c.job_id for c in changes2] == [job_id2]
+    refused = cancel_job(db, job_id2, run_canceller=lambda _run: True)
+    assert refused.cancelled is False
+    assert refused.job.state == JobState.SUCCEEDED
+    terminal2 = [
+        e for e in store.list_events(db, job_id2) if e["to_state"] == "SUCCEEDED"
+    ]
+    assert len(terminal2) == 1
+
+
+def test_reconcile_tolerates_cancel_between_list_and_cas(tmp_path: Path) -> None:
+    db = Database(tmp_path / "jobs.db")
+    repo = _git_repo(tmp_path / "repo")
+    job_id = _submit_running(db, repo, "race-mid", "run_mid")
+
+    def status(run_id: str) -> RunStatus | None:
+        # Simulate a concurrent cancel winning mid-reconcile.
+        cancel_job(db, job_id, run_canceller=lambda _run: True)
+        assert run_id == "run_mid"
+        return RunStatus.COMPLETED
+
+    assert reconcile_jobs(db, run_status=status, now=_NOW) == []
+    final = get_job(db, job_id)
+    assert final is not None and final.state == JobState.CANCELLED
+
+
+# ---------------------------------------------------------------------------
+# job -> run mapping (section H)
+# ---------------------------------------------------------------------------
+
+
+def test_job_dispatch_spec_fields(tmp_path: Path) -> None:
+    from saberops.jobs.models import Effort
+
+    db = Database(tmp_path / "jobs.db")
+    repo = _git_repo(tmp_path / "repo")
+    job = submit_job(
+        db, repo=repo, goal="implement X", acceptance="gate passes",
+        requirements=JobRequirements(effort=Effort.medium, read_only=True,
+                                     size_hint="M"),
+        routing=_snapshot(), now=_NOW,
+    ).job
+    spec = job_dispatch_spec(job)
+    assert spec.job_id == job.job_id
+    assert spec.request.task == "implement X\n\nAcceptance:\n" + "gate passes"
+    assert spec.request.repo_path == job.repo
+    assert spec.request.routing_mode == "auto"
+    assert "read_only" in tuple(spec.request.required_capabilities)
+    assert spec.request.provider_override is None
+    assert spec.request.model_override is None
+    assert spec.request.manual_tier is None
+    assert spec.request.max_auto_tier is None
+    assert spec.base_ref == "HEAD"
+    assert spec.base_sha == _head(repo)
+    assert spec.effort == Effort.medium
+    assert spec.size_hint == "M"
+    assert spec.resume_from is None
+
+
+def test_job_dispatch_spec_no_acceptance_no_frozen_policy(tmp_path: Path) -> None:
+    db = Database(tmp_path / "jobs.db")
+    repo = _git_repo(tmp_path / "repo")
+    job = submit_job(db, repo=repo, goal="plain", routing=_snapshot(), now=_NOW).job
+    spec = job_dispatch_spec(job)
+    assert spec.request.task == "plain"
+    assert spec.request.required_capabilities == ()
+    # No frozen policy travels in the spec.
+    assert not hasattr(spec, "run_config")
+    assert not hasattr(spec, "control_plane_digest")
+    assert not hasattr(spec.request, "control_plane_digest")

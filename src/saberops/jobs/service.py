@@ -22,6 +22,9 @@ from saberops.jobs.feasibility import feasible
 from saberops.jobs.ids import new_job_id
 from saberops.jobs.models import (
     NO_ROUTE_FOR_REQUIREMENTS,
+    RUN_FAILED,
+    RUN_MISSING,
+    Effort,
     Job,
     JobRequirements,
     JobState,
@@ -33,22 +36,29 @@ from saberops.jobs.store import (
     IdempotencyConflictError,
     JobConflictError,
     JobNotFoundError,
+    JobTransitionError,
 )
+from saberops.models import RunStatus
 from saberops.routing_config import RoutingSnapshot, load_effective_routing
+from saberops.run_creation import RunRequest
 
 __all__ = [
     "CancelResult",
     "CapacityView",
     "IdempotencyConflictError",
     "JobConflictError",
+    "JobDispatchSpec",
     "JobNotFoundError",
     "PoolCapacity",
+    "ReconcileChange",
     "SubmitResult",
     "cancel_job",
     "capacity",
     "get_job",
+    "job_dispatch_spec",
     "list_jobs",
     "mark_dispatched",
+    "reconcile_jobs",
     "requeue",
     "set_waiting",
     "submit_job",
@@ -65,6 +75,35 @@ class SubmitResult:
 class CancelResult:
     job: Job
     cancelled: bool
+
+
+@dataclass(frozen=True)
+class ReconcileChange:
+    job_id: str
+    run_id: str
+    to_state: JobState
+    failure_reason: str | None
+    job: Job
+
+
+@dataclass(frozen=True)
+class JobDispatchSpec:
+    """Frozen job -> run mapping (section H).
+
+    The ``request`` carries no frozen policy: freezing happens when
+    M2-4b calls ``resolve_effective_run_config`` at dispatch, so a job
+    that waits for days gets the policy of the day it runs.
+    ``base_ref``/``base_sha``/``effort``/``size_hint`` travel beside the
+    request because ``RunRequest`` has no field for them today.
+    """
+
+    job_id: str
+    request: RunRequest
+    base_ref: str
+    base_sha: str
+    effort: Effort | None
+    size_hint: str | None
+    resume_from: ResumeFrom | None
 
 
 @dataclass(frozen=True)
@@ -394,4 +433,84 @@ def requeue(
     )
     return store.requeue(
         db, job_id, reason, resume_from=resume_from, not_before=clean_not_before, now=now
+    )
+
+
+def reconcile_jobs(
+    db: Any,
+    *,
+    run_status: Callable[[str], RunStatus | None],
+    now: datetime | None = None,
+) -> list[ReconcileChange]:
+    """Fix RUNNING jobs from their run's terminal status (section G).
+
+    Called by whoever owns the loop (M2-4b scheduler start and tick).
+    ``COMPLETED`` -> SUCCEEDED; ``FAILED`` -> FAILED ``RUN_FAILED``;
+    ``None`` (run not found) -> FAILED ``RUN_MISSING``; ``PENDING``,
+    ``RUNNING`` and ``ORPHANED`` stay (run recovery belongs to the
+    supervisor) with no event. Idempotent: a second call changes
+    nothing. A concurrent ``cancel_job`` wins or loses cleanly per job
+    via the same compare-and-set (the loser is skipped).
+    """
+    changes: list[ReconcileChange] = []
+    for job in store.list_jobs_raw(db, state=JobState.RUNNING, limit=100_000):
+        run_id = job.current_run_id
+        if run_id is None:  # pragma: no cover - invariant: RUNNING holds a run
+            continue
+        status = run_status(run_id)
+        if status is None:
+            to_state, failure = JobState.FAILED, RUN_MISSING
+        elif status == RunStatus.COMPLETED:
+            to_state, failure = JobState.SUCCEEDED, None
+        elif status == RunStatus.FAILED:
+            to_state, failure = JobState.FAILED, RUN_FAILED
+        else:  # PENDING, RUNNING, ORPHANED: supervisor's recovery, not ours
+            continue
+        try:
+            updated = store.reconcile_transition(
+                db, job.job_id, to=to_state, failure_reason=failure, now=now
+            )
+        except (JobConflictError, JobTransitionError):
+            # A concurrent cancel moved the job first; it wins cleanly.
+            continue
+        changes.append(
+            ReconcileChange(
+                job_id=job.job_id,
+                run_id=run_id,
+                to_state=to_state,
+                failure_reason=failure,
+                job=updated,
+            )
+        )
+    return changes
+
+
+def job_dispatch_spec(job: Job) -> JobDispatchSpec:
+    """Build the frozen job -> run mapping (section H, pure).
+
+    This function does not call ``resolve_effective_run_config``:
+    freezing happens when M2-4b calls it at dispatch.
+    """
+    from saberops.control_plane.capabilities import Capability
+
+    task = job.goal
+    if job.acceptance:
+        task = task + "\n\nAcceptance:\n" + job.acceptance
+    caps = set(job.requirements.required_capabilities)
+    if job.requirements.read_only:
+        caps.add(Capability.READ_ONLY.value)
+    request = RunRequest(
+        task=task,
+        repo_path=job.repo,
+        routing_mode="auto",
+        required_capabilities=tuple(sorted(caps)),
+    )
+    return JobDispatchSpec(
+        job_id=job.job_id,
+        request=request,
+        base_ref=job.base_ref,
+        base_sha=job.base_sha,
+        effort=job.requirements.effort,
+        size_hint=job.requirements.size_hint,
+        resume_from=job.resume_from,
     )
