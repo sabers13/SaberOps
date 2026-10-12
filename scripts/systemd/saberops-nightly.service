@@ -1,0 +1,9 @@
+[Unit]
+Description=SaberOps nightly full gate on main
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/saber/Projects/SaberOps-dogfood-0.3.7
+ExecStart=/home/saber/Projects/SaberOps-dogfood-0.3.7/scripts/nightly-gate.sh
+Nice=10
+IOSchedulingClass=idle
