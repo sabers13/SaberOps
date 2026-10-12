@@ -39,6 +39,14 @@ def lane_evidence(repo: Path, base: str, branch: str) -> tuple[set[str], set[str
     return changed, {item.target for item in selection.tests}, selection.full
 
 
+def _section_kind(command: str) -> str | None:
+    if re.search(r"\bruff\b.*\bcheck\b", command):
+        return "ruff"
+    if re.search(r"\bmypy\b", command):
+        return "mypy"
+    return None
+
+
 def attribute(
     failures: list[str],
     lanes: dict[str, tuple[set[str], set[str], bool]],
@@ -82,11 +90,25 @@ def attribute(
             summary = (summary or "no signals") + "; " + note + ", ".join(full_selection)
         buckets.setdefault(bucket, []).append(f"- `{node}` — {first}; {summary or 'no signals'}")
     diagnostic = "lint/type error"
+    kind: str | None = None
+    seen_ruff_or_mypy = False
     for line in gate_log.splitlines():
-        if re.match(r"^[A-Z]+[0-9]+ ", line):
-            diagnostic = line.strip()
-        match = re.match(r"([^\s:]+\.py):\d+(?::\d+)?:\s*(.+)", line)
-        location = re.match(r"\s*(?:-->|:::)\s+([^\s:]+\.py):\d+(?::\d+)?", line)
+        if line.startswith("+ "):
+            kind = _section_kind(line[2:])
+            if kind in ("ruff", "mypy"):
+                seen_ruff_or_mypy = True
+                diagnostic = "lint/type error"
+            continue
+        if kind == "mypy":
+            match = re.match(r"([^\s:]+\.py):\d+(?::\d+)?:\s*(error:\s*.+)", line)
+            location = None
+        elif kind == "ruff":
+            if re.match(r"^[A-Z]+[0-9]+ ", line):
+                diagnostic = line.strip()
+            match = re.match(r"([^\s:]+\.py):\d+(?::\d+)?:\s*(.+)", line)
+            location = re.match(r"\s*(?:-->|:::)\s+([^\s:]+\.py):\d+(?::\d+)?", line)
+        else:
+            continue
         if not match and not location:
             continue
         if match:
@@ -98,6 +120,10 @@ def attribute(
         bucket = names[0] if len(names) == 1 else "interaction" if names else "unattributed"
         buckets.setdefault(bucket, []).append(
             f"- lint/type `{path}` — {match[2] if match else diagnostic}; changed-file"
+        )
+    if gate_log.strip() and not seen_ruff_or_mypy:
+        buckets.setdefault("notes", []).append(
+            "- gate log has no ruff/mypy sections; lint/type attribution skipped"
         )
     return (
         "\n\n".join(f"## {name}\n\n" + "\n".join(items) for name, items in sorted(buckets.items()))

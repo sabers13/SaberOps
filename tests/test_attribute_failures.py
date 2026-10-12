@@ -63,14 +63,27 @@ def test_branches_and_attribution(tmp_path: Path) -> None:
     assert "high confidence" in low and "owns-test" in low
     unknown = a.attribute(["tests/test_other.py::test_other"], lanes, {})
     assert "unattributed" in unknown
-    lint = a.attribute([], lanes, {}, "src/fake/core.py:1: error: incompatible type")
+    lint = a.attribute(
+        [],
+        lanes,
+        {},
+        "+ .venv/bin/python -m mypy --strict src tests\n"
+        "src/fake/core.py:1: error: incompatible type",
+    )
     assert "## A" in lint and "incompatible type" in lint
 
 
 def test_single_signal_and_ruff_location() -> None:
     node = "tests/test_a.py::test_a"
     lanes = {"A": ({"src/pkg/a.py"}, {node}, False)}
-    text = a.attribute([node], lanes, {}, "F821 Undefined name `missing`\n  --> src/pkg/a.py:2:1")
+    text = a.attribute(
+        [node],
+        lanes,
+        {},
+        "+ .venv/bin/python -m ruff check .\n"
+        "F821 Undefined name `missing`\n"
+        "  --> src/pkg/a.py:2:1",
+    )
     assert "A (low confidence)" in text
     assert "lint/type `src/pkg/a.py`" in text and "F821" in text
 
@@ -98,3 +111,38 @@ def test_full_selection_only_is_weak_unattributed_candidate() -> None:
     assert "## unattributed" in text
     assert "weak: full-selection by B" in text
     assert "interaction" not in text and "B: selects" not in text
+
+
+def test_traceback_lines_are_not_lint_type() -> None:
+    lanes: dict[str, tuple[set[str], set[str], bool]] = {"A": ({"src/fake/core.py"}, set(), False)}
+    log = (
+        "+ .venv/bin/python -m ruff check .\n"
+        "All checks passed!\n"
+        "+ .venv/bin/python -m mypy --strict src tests\n"
+        "src/fake/core.py:3: error: incompatible type [assignment]\n"
+        "src/fake/core.py:4: note: see definition\n"
+        "Found 1 error in 1 file (checked 10 source files)\n"
+        "+ .venv/bin/python -m pytest -q tests/test_x.py\n"
+        "tests/test_x.py:12: AssertionError\n"
+        "src/fake/core.py:3: in f\n"
+        "E AssertionError: broken\n"
+    )
+    text = a.attribute([], lanes, {}, log)
+    assert text.count("- lint/type") == 1
+    assert "lint/type `src/fake/core.py`" in text
+    assert "incompatible type" in text
+    assert "AssertionError" not in text
+    assert "## notes" not in text
+
+
+def test_log_without_ruff_mypy_sections_skips_lint_type() -> None:
+    lanes: dict[str, tuple[set[str], set[str], bool]] = {"A": ({"src/fake/core.py"}, set(), False)}
+    log = (
+        "+ .venv/bin/python -m pytest -q tests/test_x.py\n"
+        "tests/test_x.py:12: AssertionError\n"
+        "src/fake/core.py:3: in f\n"
+    )
+    text = a.attribute([], lanes, {}, log)
+    assert "- lint/type" not in text
+    assert "## notes" in text
+    assert "gate log has no ruff/mypy sections; lint/type attribution skipped" in text
