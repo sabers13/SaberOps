@@ -127,6 +127,31 @@ are ignored. The initial file is empty. Only owner-approved entries belong there
 A serially passing unquarantined flake still fails the full gate and is listed in
 `flaky.txt` and the reason. Do not auto-add flakes or weaken tests to make a gate pass.
 
+## Test hygiene report
+
+After every G3 PASS and map rebuild, the Integrator runs the read-only
+`python scripts/test_hygiene.py [--repo PATH] [--map DIR] [--junit PATH]
+[--base REF] [--out PATH] [--json PATH]`, which executes no tests and imports
+no `src` module (AST and file reads only), writing only `--out`/`--json`
+(markdown to stdout when `--out` is absent). Exit 0 means a report was
+produced (candidates are not errors); exit 2 means unusable input (a path
+that was given but is unreadable). By hand, point `--junit` at a full-gate
+`result/full.xml` and `--base` at the previous wave base.
+
+When the map's build commit is not the `--repo` HEAD, the header says
+`map is stale (<map sha> vs <head sha>)` (or `no coverage map` when there is
+no map) and the coverage-based sections B and C are skipped; the others still
+run. The report lists candidates only, never deletions: (A) top-level
+`def`/`class` symbols in `src/saberops/**` referenced only from tests (with a
+dynamic-dispatch false-positive caveat), (B) tests covering no `src` lines
+grouped by file (`script test` marks files loading `scripts/` modules), (C)
+identical-coverage groups spanning at least two test files (same-file
+parametrizations counted, not listed), (D) task-named test files
+(`TASK_NAMED_RE` in the script), (E) the slowest 20 tests from `--junit`
+times, and (F) with `--base`, new tests whose docstring has no `Covers:` line.
+The footer records that retirement happens only through a prompt's "Tests
+retired / rewritten" table.
+
 ## Local trial measurement (2026-10-12)
 
 On this eight-core machine, the exact `54878ce` snapshot's old gate took 496.37 s
