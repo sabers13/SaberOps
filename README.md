@@ -162,7 +162,7 @@ actions. It never dispatches work. Owner configuration (worker routing,
 quota, authority, project policy) lives in the `orch` CLI:
 
 ```bash
-orch routing show        # effective worker routing (configure via routing file)
+orch routing show        # effective role routing: WORKER/SURGEON/INTEGRATOR chains
 orch quota list          # quota state (set with `orch quota set`)
 orch authority show      # authority mode and host access
 orch project show        # project gate / data / review / branch policy
@@ -204,7 +204,9 @@ guarantee subscription terms or zero additional provider billing.
 Configure each target repository before dispatch: `orch project set-gate`,
 `set-data-policy`, `set-review-policy`, `set-target-branch` (see
 `orch project --help`). For worker routing, `orch routing init` writes a user
-routing file; `orch routing validate` checks it. Settings freeze at run creation,
+routing file; `orch routing validate` checks it; `orch routing migrate`
+previews (or with `--write` persists) the schema-1/2 to role-chain migration;
+`orch routing add|remove|move|reorder` edits the role chains. Settings freeze at run creation,
 including acceptance; skipped checks are recorded as SKIPPED, never PASS.
 
 ### Example provider-backed run
