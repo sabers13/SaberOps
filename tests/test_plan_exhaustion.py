@@ -33,7 +33,6 @@ from saberops.models import (
     WorkerResult,
 )
 from saberops.process import ProcessResult
-from saberops.quota import apply_quota_policy
 from saberops.workers.exhaustion import (
     PROVISIONAL,
     VERIFIED,
@@ -761,10 +760,6 @@ def test_exhaustion_evidence_only_excludes_never_enables(tmp_path: Path) -> None
         record_exhaustion(db, provider="codex", run_id="run-1"),
         record_exhaustion(db, provider="opencode", run_id="run-1"),
     ]
-    # M2-1: legacy apply_quota_policy sees NORMAL (sticky block removed);
-    # exclusion denies via quota_decision through the seam instead.
-    filtered = apply_quota_policy(chain, states)
-    assert [c.provider for c in filtered] == ["codex", "opencode", "anthropic"]
     # Canonical control-plane admission: exhausted pools are ineligible.
     assert quota_decision(chain[0], states).eligible is False
     assert quota_decision(chain[1], states).eligible is False

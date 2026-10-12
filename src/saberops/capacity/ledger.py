@@ -1,8 +1,8 @@
 """Capacity ledger (M2-4a C): owner observations, reservations, estimates.
 
 Storage lives in the owner DB (see :mod:`saberops.capacity.store`); every
-writer here creates its tables idempotently first. ``saberops.jobs`` is
-never imported (cross-lane contract C2): ``job_id`` is opaque.
+writer here creates its tables idempotently first. The job queue package
+is never imported (cross-lane contract C2): ``job_id`` is opaque.
 
 Ledger keys are ``(pool_id, window_id)`` pairs derived with
 :func:`saberops.capacity.snapshot._legacy_pool_and_window`, so the ledger
@@ -17,19 +17,21 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Iterator
+from typing import TYPE_CHECKING, Any, cast
 
 from saberops.capacity.cost_model import (
     CostState,
     SizeBucket,
     cost_estimate,
-    update as _cost_update,
     validate_route,
+)
+from saberops.capacity.cost_model import (
+    update as _cost_update,
 )
 from saberops.capacity.exclusions import is_excluding, parse_iso
 from saberops.capacity.freshness import freshness
@@ -288,7 +290,7 @@ def _learn_from_probe(
         if previous is None and candidate.get("observed_at") == new_observed_iso:
             # Ambiguous with the new row: disambiguate by id order is
             # unreliable, so compare remaining/reset identity instead.
-            if float(candidate.get("remaining_pct")) == new_pct and (
+            if float(cast(float, candidate.get("remaining_pct"))) == new_pct and (
                 (candidate.get("reset_at") or None) == (new_reset or None)
             ):
                 continue
@@ -300,7 +302,7 @@ def _learn_from_probe(
         previous.get("observed_at"), str) else None)
     if prev_observed is None:
         return
-    prev_pct = float(previous.get("remaining_pct"))
+    prev_pct = float(cast(float, previous.get("remaining_pct")))
     delta = prev_pct - new_pct
     if delta <= 0:
         return
@@ -336,7 +338,7 @@ def _learn_from_probe(
         else:
             shares = [delta * int(t) / total for t in tokens if t is not None]
     updated_iso = moment.isoformat()
-    for res, share in zip(reservations, shares):
+    for res, share in zip(reservations, shares, strict=True):
         route = str(res.get("route") or "")
         bucket = _coerce_bucket(str(res.get("size_bucket") or "M"))
         old = _load_cost_state(conn, route, pool_id, window_id, bucket)
@@ -638,7 +640,7 @@ def estimate(
         )
     spent = sum(float(r.get("cost_pct") or 0.0) for r in counted)
     spread = sum(float(r.get("spread_pct") or 0.0) for r in counted)
-    remaining = max(0.0, min(100.0, float(obs.get("remaining_pct")) - spent))
+    remaining = max(0.0, min(100.0, float(cast(float, obs.get("remaining_pct"))) - spent))
     obs_source = str(obs.get("source") or "")
     uncertainty = spread + (1.0 if obs_source == "PROBE" else 0.0)
     obs_at_raw = obs.get("observed_at")
@@ -673,7 +675,12 @@ def snapshot(db: Database, now: datetime) -> list[LedgerEstimate]:
             pool_raw = exc.get("pool_id")
             window_raw = exc.get("window_id")
             if isinstance(pool_raw, str) and pool_raw:
-                keys.add((pool_raw, window_raw if isinstance(window_raw, str) and window_raw else "ALL"))
+                window_key = (
+                    window_raw
+                    if isinstance(window_raw, str) and window_raw
+                    else "ALL"
+                )
+                keys.add((pool_raw, window_key))
     except Exception:
         pass
     out = [estimate(db, pool, window, now=moment) for pool, window in sorted(keys)]

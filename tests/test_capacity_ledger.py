@@ -451,3 +451,14 @@ def test_l10_no_samples_for_all_keys_or_owner(tmp_path: Path) -> None:
     record_owner_quota(db2, "opencode", "5h", 58.0, None,
                        source="OWNER", now=t2)
     assert _cost_rows(db2) == {}
+
+
+# L13: the legacy policy surface is gone; the vocabulary stays.
+def test_l13_legacy_policy_deleted() -> None:
+    import saberops.quota as quota
+
+    for name in ("apply_quota_policy", "derive_routing_state",
+                 "QUOTA_THRESHOLD_PERCENT", "CODEX_PROVIDER",
+                 "CODEX_WEEKLY_POOL"):
+        assert not hasattr(quota, name), name
+    assert callable(quota.normalize_quota_observation)

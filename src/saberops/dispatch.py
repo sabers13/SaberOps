@@ -26,11 +26,9 @@ from saberops.models import (
     DispatchStage,
     ProviderReadiness,
     QuotaState,
-    RoutingState,
     WorkerCandidate,
     role_for_stage,
 )
-from saberops.quota import CODEX_PROVIDER, CODEX_WEEKLY_POOL
 from saberops.workers.base import WorkerAdapter
 
 # Reusable skip reason constants (same strings as review)
@@ -197,25 +195,6 @@ class UnavailableReadinessService:
 
     def record_success(self, connection_id: str) -> None:
         return None
-
-
-def _is_quota_blocked(quota_states: list[QuotaState], provider: str) -> bool:
-    """Legacy provider-wide block check (M2-1: pool exclusions never trigger it).
-
-    Synthesized exclusion states carry routing NORMAL, so they never turn
-    into a provider-wide block here; pool exclusions are decided per
-    candidate in ``quota_decision``.
-    """
-    provider_norm = provider.strip().lower()
-    for state in quota_states:
-        if getattr(state, "exclusion_id", None):
-            continue
-        if state.provider != provider_norm or state.routing_state != RoutingState.BLOCKED:
-            continue
-        if state.provider == CODEX_PROVIDER and state.pool != CODEX_WEEKLY_POOL:
-            continue
-        return True
-    return False
 
 
 def evaluate_eligibility(

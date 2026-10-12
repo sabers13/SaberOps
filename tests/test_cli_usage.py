@@ -218,7 +218,7 @@ def test_usage_refresh_fragment_and_manual_quota_authority(
     )
     state = Database(db_path).list_quota()
     assert state[0].remaining_percent == 10
-    assert state[0].routing_state.value == "BLOCKED"
+    assert state[0].routing_state.value == "NORMAL"
 
 
 def test_recorded_provider_totals_keep_missing_tokens_unknown(tmp_path: Path) -> None:

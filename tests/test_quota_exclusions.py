@@ -184,18 +184,6 @@ def test_model_scope_opus_does_not_block_sonnet() -> None:
     assert quota_decision(sonnet, [exc], pool_policies=policies).eligible is True
 
 
-def test_codex_weekly_not_sticky(tmp_path: Path) -> None:
-    _db(tmp_path)
-    # Legacy threshold path returns NORMAL at/above threshold even after BLOCK.
-    from saberops.quota import derive_routing_state
-
-    assert derive_routing_state("codex", "weekly", 0.0, None) is RoutingState.BLOCKED
-    assert (
-        derive_routing_state("codex", "weekly", 50.0, RoutingState.BLOCKED)
-        is RoutingState.NORMAL
-    )
-
-
 def test_record_exhaustion_shared_pool(tmp_path: Path) -> None:
     db = _db(tmp_path)
     _seed_run(db, tmp_path)
