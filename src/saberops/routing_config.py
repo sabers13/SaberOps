@@ -237,7 +237,7 @@ def _validate_legacy_structure(
     sv = data["schema_version"]
     if type(sv) is not int or sv not in (1, 2):
         raise RoutingConfigError(
-            f"Routing config at {source_label}: schema_version must be integer 2, got {sv!r}"
+            f"Routing config at {source_label}: schema_version must be integer 1 or 2, got {sv!r}"
         )
     if approved is None:
         approved = _parse_approved_candidates(data, source_label)

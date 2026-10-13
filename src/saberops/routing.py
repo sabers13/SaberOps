@@ -1,4 +1,4 @@
-"""Tier-only routing and multi-provider candidate resolution."""
+"""Role-chain routing and multi-provider candidate resolution."""
 
 from __future__ import annotations
 
