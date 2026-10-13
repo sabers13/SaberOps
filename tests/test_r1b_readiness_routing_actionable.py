@@ -1233,11 +1233,26 @@ def test_r1b2_package_transition_resets_skip_evidence_and_routing_context(
     assert "next_package_started" in by_type
 
     # Package 1 really did skip terra before succeeding on the next candidate.
+    # Skip evidence is scoped per package: package 1 contributed exactly its
+    # own terra skip; package 2 walked the shared chain again and contributed
+    # exactly its own terra+sol skips -- never a leaked duplicate.
+    packages = db.get_work_packages(result.run_id)
+    assert len(packages) == 2
+    pkg1_id, pkg2_id = packages[0].id, packages[1].id
     skips = [e for e in events if e.event_type == "worker_candidate_skipped"]
-    assert {_payload(e).get("model") for e in skips} == {
-        "gpt-5.6-terra",
-        "gpt-5.6-sol",
-    }
+    pkg1_skip_models = [
+        str(_payload(e).get("model"))
+        for e in skips
+        if _payload(e).get("package_id") == pkg1_id
+    ]
+    pkg2_skip_models = [
+        str(_payload(e).get("model"))
+        for e in skips
+        if _payload(e).get("package_id") == pkg2_id
+    ]
+    assert pkg1_skip_models == ["gpt-5.6-terra"]
+    assert pkg2_skip_models == ["gpt-5.6-terra", "gpt-5.6-sol"]
+    assert len(skips) == 3
 
     resolved = [e for e in events if e.event_type == "tier_candidates_resolved"]
     assert len(resolved) >= 2
@@ -1251,30 +1266,32 @@ def test_r1b2_package_transition_resets_skip_evidence_and_routing_context(
     assert terminal["tier"] == "T2"
     assert terminal["routing_context"] == "WORKER"
     assert terminal["routing_context"] == pkg2_resolved["routing_context"]
-    terminal_models = {str(e.get("model")) for e in terminal["skipped_candidates"]}
-    # Package 2's own walk skipped terra and sol; flash launched (failed),
-    # so it is an attempt, never a skip.
-    assert terminal_models == {"gpt-5.6-terra", "gpt-5.6-sol"}
-    assert "gpt-5.6-terra" in terminal_models
+    terminal_models = [str(e.get("model")) for e in terminal["skipped_candidates"]]
+    # Package 2's own walk skipped terra and sol, in that order; flash
+    # launched (failed), so it is an attempt, never a skip.
+    assert terminal_models == ["gpt-5.6-terra", "gpt-5.6-sol"]
+    assert len(terminal["skipped_candidates"]) == 2
     assert "deepseek-v4-flash" not in str(terminal["skipped_candidates"])
 
     run_failed = _payload(
         [e for e in events if e.event_type == "run_failed"][-1]
     )
     assert run_failed["routing_context"] == "WORKER"
-    run_failed_models = {
+    run_failed_models = [
         str(e.get("model")) for e in run_failed["skipped_candidates"]
-    }
-    assert run_failed_models == {"gpt-5.6-terra", "gpt-5.6-sol"}
+    ]
+    assert run_failed_models == ["gpt-5.6-terra", "gpt-5.6-sol"]
+    assert len(run_failed["skipped_candidates"]) == 2
 
     report = build_run_report(db, result.run_id)
     termination = report["termination"]
     assert isinstance(termination, dict)
     assert termination["routing_context"] == "WORKER"
-    termination_models = {
+    termination_models = [
         str(e.get("model")) for e in termination["skipped_candidates"]
-    }
-    assert termination_models == {"gpt-5.6-terra", "gpt-5.6-sol"}
+    ]
+    assert termination_models == ["gpt-5.6-terra", "gpt-5.6-sol"]
+    assert len(termination["skipped_candidates"]) == 2
 
     # R1-B.3: terminal attempt facts are scoped to the CURRENT (package-2)
     # walk. Package 2 launched flash once and failed its gate, so the
@@ -1418,6 +1435,7 @@ def test_r1b3_mixed_current_chain_after_prior_success_is_truthful(
     assert terminal["routing_context"] == "WORKER"
     terminal_models = {str(e.get("model")) for e in terminal["skipped_candidates"]}
     assert terminal_models == {"gpt-5.6-sol"}
+    assert len(terminal["skipped_candidates"]) == 1
 
     run_failed = _payload(
         [e for e in events if e.event_type == "run_failed"][-1]
@@ -1972,10 +1990,13 @@ def test_r1b4_package_recovery_excludes_prior_package_attempts(
     assert run_failed["attempts_count"] == len(historical)
     assert run_failed["chain_attempts_count"] == 1
     assert run_failed["routing_context"] == "WORKER"
-    run_failed_models = {
+    # Package 2's own walk, in order: terra (resumed chain head) then sol;
+    # package 1's terra skip must never leak into this evidence.
+    run_failed_models = [
         str(e.get("model")) for e in run_failed["skipped_candidates"]
-    }
-    assert run_failed_models == {"gpt-5.6-terra", "gpt-5.6-sol"}
+    ]
+    assert run_failed_models == ["gpt-5.6-terra", "gpt-5.6-sol"]
+    assert len(run_failed["skipped_candidates"]) == 2
     assert "deepseek-v4-flash" not in str(run_failed["skipped_candidates"])
 
     report = build_run_report(db2, run_id)
@@ -1983,9 +2004,11 @@ def test_r1b4_package_recovery_excludes_prior_package_attempts(
     assert isinstance(termination, dict)
     assert termination["summary"] == result.summary
     assert termination["routing_context"] == "WORKER"
-    assert {
+    termination_models = [
         str(e.get("model")) for e in termination["skipped_candidates"]
-    } == {"gpt-5.6-terra", "gpt-5.6-sol"}
+    ]
+    assert termination_models == ["gpt-5.6-terra", "gpt-5.6-sol"]
+    assert len(termination["skipped_candidates"]) == 2
 
 
 def test_r1b4_tier_boundary_reconstructs_from_durable_evidence(
