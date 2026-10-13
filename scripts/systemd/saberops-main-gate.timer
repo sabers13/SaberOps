@@ -1,5 +1,5 @@
 [Unit]
-Description=Run SaberOps nightly full gate
+Description=Scheduled SaberOps main gate (optional)
 
 [Timer]
 OnCalendar=*-*-* 03:30

@@ -210,12 +210,17 @@ key always creates a new job.
   QUEUED cancels at once; RUNNING first cancels the live run through
   the supervisor and only then marks the job CANCELLED.
 
-## Nightly full gate
+## Main gate
 
-`scripts/nightly-gate.sh` runs the full gate on `main` while the machine is
-idle (ADR-0003 Q6), rebuilds the coverage map, and keeps flaky statistics.
-It is deterministic, runs no model, and is idempotent. The systemd timer
-runs it daily at 03:30 (`Persistent=true`, `RandomizedDelaySec=10m`).
+`scripts/main-gate.sh` runs the full gate on `main` — by hand, before a wave, or
+from the optional systemd timer — so it can run at any time and is not tied to
+the night (ADR-0003 Q6). It also rebuilds the coverage map and keeps flaky
+statistics. It is deterministic, runs no model, and is idempotent. Run it by
+hand with `bash scripts/main-gate.sh` from the checkout. The timer is just one
+optional way to run it: it fires daily at 03:30 (`Persistent=true`,
+`RandomizedDelaySec=10m`); change the schedule in
+`scripts/systemd/saberops-main-gate.timer` (`OnCalendar`) or remove it by
+uninstalling the timer (below).
 
 Slot behaviour: the gate itself runs `scripts/gate-full.sh`, which takes the
 heavy slot then drains the light slots, so it waits for running lane checks
@@ -223,48 +228,50 @@ and G3; while the map rebuild runs under `gate_tools.py exclusive` (heavy +
 all light slots held) new lane checks and G3 wait. No other command uses
 `exclusive`.
 
-Output: `~/.cache/saberops-gate/nightly/<YYYY-MM-DD>-<shortsha>/` holds
+Output: `~/.cache/saberops-gate/main-gate/<YYYY-MM-DD>-<shortsha>/` holds
 `gate.txt`, `result/` (outcome.json, JUnit), `map.txt` (PASS or
 quarantined-only FLAKY_PASS; never on FAIL, TIMEOUT or INFRA),
 `flaky.md`, and `summary.md`. The summary is copied to
-`$SABEROPS_ORCH_DIR/nightly/latest.md` (default
-`/home/saber/Projects/SaberOps-dogfood-0.3.7/.orch/nightly/latest.md`); that
-file is how the orchestrator reads the night. Output dirs older than 30 days
-are deleted, and only from a cache dir with a `nightly` path component
+`$SABEROPS_ORCH_DIR/main-gate/latest.md` (default
+`/home/saber/Projects/SaberOps-dogfood-0.3.7/.orch/main-gate/latest.md`); that
+file is how the orchestrator reads the latest main gate. Output dirs older than
+30 days are deleted, and only from a cache dir with a `main-gate` path component
 (anything else is refused with a warning and skipped); nothing else is.
-The script gates a detached `_nightly` worktree of the repository and refuses
+The script gates a detached `_main-gate` worktree of the repository and refuses
 to touch MAIN's checkout, any attached worktree, or any other path (exit 2).
 Skip rule: when `main` is unchanged since the
-last green nightly entry the run logs `main unchanged since last green
-nightly` and skips (no gate, no map); `SABEROPS_NIGHTLY_REPEAT=1` forces the
+last green main gate entry the run logs `main unchanged since last green main
+gate` and skips (no gate, no map); `SABEROPS_MAIN_GATE_REPEAT=1` forces the
 repeat for flaky statistics. FAIL/INFRA never skip.
 
 History and flaky report: every `full` gate appends one JSON line to
 `<git common dir>/saberops-gate-history/full.jsonl` with `ts, head_sha,
 worktree, label, outcome, reason, tests, failed, flaky, wall_time,
-peak_bytes` (`SABEROPS_GATE_LABEL`, default `manual`; the nightly script sets
-`nightly`; lane runs never write; write failures warn only). `python
+peak_bytes` (`SABEROPS_GATE_LABEL`, default `manual`; the main-gate script sets
+`main-gate`; lane runs never write; write failures warn only). `python
 scripts/gate_tools.py flaky-report [--min-streak N] [--json]` (default N=3)
 lists streaks of consecutive non-INFRA full gates per test under `##
 quarantine proposals` (per-test totals likewise count non-INFRA gates only;
 ids already in `tests/quarantine.txt` marked) and the
-newest nightly's failures under `## nightly failures`. Quarantine stays
+newest main gate's failures under `## main-gate failures`. For compatibility a
+history line labelled `nightly` (written by a timer installed before this
+rename) is read exactly like a `main-gate` line. Quarantine stays
 owner-approved: the report only proposes, never edits the file.
 
 Install (Saber runs these; the lane never installs the timer):
 
 ```bash
 mkdir -p ~/.config/systemd/user
-cp scripts/systemd/saberops-nightly.service scripts/systemd/saberops-nightly.timer ~/.config/systemd/user/
+cp scripts/systemd/saberops-main-gate.service scripts/systemd/saberops-main-gate.timer ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now saberops-nightly.timer
+systemctl --user enable --now saberops-main-gate.timer
 loginctl enable-linger  # so the timer runs while logged out
 ```
 
-Uninstall: `systemctl --user disable --now saberops-nightly.timer`, then
+Uninstall: `systemctl --user disable --now saberops-main-gate.timer`, then
 remove the two unit files and `systemctl --user daemon-reload`.
 
-Run once by hand: `bash scripts/nightly-gate.sh` from the checkout.
+Run once by hand: `bash scripts/main-gate.sh` from the checkout.
 
 ## Fixed-source candidate verification
 Candidate gates and independent reviews run in separate detached verification
