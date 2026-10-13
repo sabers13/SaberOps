@@ -202,13 +202,14 @@ def _success_with_file(provider: str, model: str, rel_path: str, content: str) -
     return _action
 
 
-def _tier_keyed_chain(
-    t1: list[WorkerCandidate], t2: list[WorkerCandidate]
+def _role_keyed_chain(
+    worker: list[WorkerCandidate], surgeon: list[WorkerCandidate]
 ) -> Any:
-    """Return a resolve_candidate_chain replacement keyed on the tier."""
+    """Return a resolve_candidate_chain replacement keyed on the role."""
 
-    def _resolve(*, tier: Tier, **_: Any) -> list[WorkerCandidate]:
-        return t1 if tier is Tier.T1 else t2
+    def _resolve(*, role: Any | None = None, **_: Any) -> list[WorkerCandidate]:
+        key = getattr(role, "value", role)
+        return list(surgeon) if str(key) == "SURGEON" else list(worker)
 
     return _resolve
 
@@ -240,7 +241,7 @@ def test_h3_a_unlaunchable_gate_is_not_capability_evidence(
     t2 = [WorkerCandidate("h3", "t2a")]
     monkeypatch.setattr(
         "saberops.orchestrator.resolve_candidate_chain",
-        _tier_keyed_chain(t1, t2),
+        _role_keyed_chain(t1, t2),
     )
     db = Database(tmp_path / "orch.db")
     orch = Orchestrator(
@@ -252,7 +253,6 @@ def test_h3_a_unlaunchable_gate_is_not_capability_evidence(
         task="hello",
         target_repo=repo,
         gate_command="/nonexistent/path/h3_gate_binary",
-        max_auto_tier="T2",
         publish_candidate=False,
     )
     result = orch.run(config=config, is_peak=False)
@@ -309,7 +309,7 @@ def test_h3_b_misconfigured_gate_target_does_not_escalate(
     t2 = [WorkerCandidate("h3", "t2a")]
     monkeypatch.setattr(
         "saberops.orchestrator.resolve_candidate_chain",
-        _tier_keyed_chain(t1, t2),
+        _role_keyed_chain(t1, t2),
     )
     db = Database(tmp_path / "orch.db")
     orch = Orchestrator(
@@ -321,7 +321,6 @@ def test_h3_b_misconfigured_gate_target_does_not_escalate(
         task="hello",
         target_repo=repo,
         gate_command="make definitely_missing_target",
-        max_auto_tier="T2",
         publish_candidate=False,
     )
     result = orch.run(config=config, is_peak=False)
@@ -391,7 +390,7 @@ def test_h3_c_real_validation_failure_keeps_truth_without_escalation(
     t2 = [WorkerCandidate("h3", "t2a")]
     monkeypatch.setattr(
         "saberops.orchestrator.resolve_candidate_chain",
-        _tier_keyed_chain(t1, t2),
+        _role_keyed_chain(t1, t2),
     )
     db = Database(tmp_path / "orch.db")
     orch = Orchestrator(
@@ -408,7 +407,6 @@ def test_h3_c_real_validation_failure_keeps_truth_without_escalation(
         task="hello",
         target_repo=repo,
         gate_command=gate,
-        max_auto_tier="T2",
         publish_candidate=False,
     )
     result = orch.run(config=config, is_peak=False)
@@ -503,7 +501,7 @@ def test_h3_1_d_explicit_capability_failure_escalates(
     t2 = [WorkerCandidate("h3", "t2a")]
     monkeypatch.setattr(
         "saberops.orchestrator.resolve_candidate_chain",
-        _tier_keyed_chain(t1, t2),
+        _role_keyed_chain(t1, t2),
     )
     db = Database(tmp_path / "orch.db")
     orch = Orchestrator(
@@ -519,7 +517,6 @@ def test_h3_1_d_explicit_capability_failure_escalates(
         task="hello",
         target_repo=repo,
         gate_command=gate,
-        max_auto_tier="T2",
         publish_candidate=False,
     )
     result = orch.run(config=config, is_peak=False)
@@ -537,8 +534,9 @@ def test_h3_1_d_explicit_capability_failure_escalates(
     tier_escalated = _events_by_type(events, "tier_escalated")
     assert tier_escalated, "explicit capability evidence must escalate"
     assert tier_escalated[0].payload is not None
-    assert tier_escalated[0].payload["from"] == Tier.T1.value
-    assert tier_escalated[0].payload["to"] == Tier.T2.value
+    assert tier_escalated[0].payload["from_role"] == "WORKER"
+    assert tier_escalated[0].payload["to_role"] == "SURGEON"
+    assert tier_escalated[0].payload["to"] == Tier.T3.value
     # A stronger-tier worker actually launched and completed the run.
     assert "t2a" in impl_log, impl_log
 
@@ -590,7 +588,7 @@ def test_h3_1_e_same_tier_repair_inherits_failed_candidate(
     t2 = [WorkerCandidate("h3", "t2a")]
     monkeypatch.setattr(
         "saberops.orchestrator.resolve_candidate_chain",
-        _tier_keyed_chain(t1, t2),
+        _role_keyed_chain(t1, t2),
     )
     db = Database(tmp_path / "orch.db")
     orch = Orchestrator(
@@ -606,7 +604,6 @@ def test_h3_1_e_same_tier_repair_inherits_failed_candidate(
         task="hello",
         target_repo=repo,
         gate_command=gate,
-        max_auto_tier="T2",
         publish_candidate=False,
     )
     result = orch.run(config=config, is_peak=False)

@@ -1,8 +1,8 @@
 """C16-C0: provider stall boundedness.
 
 Proves that normal worker execution is always bounded by a hard deadline
-(explicit owner ``--worker-timeout`` when supplied, else the tier default
-T1=600 / T2=1200 / T3=1800), that a hanging worker is terminated through
+(explicit owner ``--worker-timeout`` when supplied, else the role default
+WORKER/INTEGRATOR=1200 / SURGEON=1800), that a hanging worker is terminated through
 the existing fenced process-group mechanism and classified TIMEOUT (never
 a model-correctness failure, never a fabricated provider error), and that
 a timeout preserves evidence while permitting routing failover.
@@ -25,15 +25,15 @@ from typing import Any
 import pytest
 
 from saberops.config import (
-    TIER_WORKER_TIMEOUTS,
+    ROLE_WORKER_TIMEOUTS,
     RunConfig,
     reconstruct_run_config,
     resolve_run_config,
-    tier_worker_timeout,
-    timeout_defaults,
+    role_worker_timeout,
 )
 from saberops.db import Database, current_iso_timestamp
 from saberops.execution_failover import FailoverAction, FailoverEngine
+from saberops.jobs.models import JobRole
 from saberops.models import (
     Attempt,
     AttemptStatus,
@@ -72,46 +72,35 @@ def _base_config(**overrides: Any) -> RunConfig:
 
 
 # ---------------------------------------------------------------------------
-# 1-3. Tier defaults match the documented contract.
+# 1-3. Role defaults match the documented contract.
 # ---------------------------------------------------------------------------
 
 
-def test_t1_default_is_600(isolated_xdg: Path) -> None:
+def test_role_defaults_match_contract(isolated_xdg: Path) -> None:
     config = _base_config()
-    assert tier_worker_timeout(Tier.T1) == 600.0
-    assert TIER_WORKER_TIMEOUTS[Tier.T1] == 600.0
-    assert timeout_defaults()["T1"] == 600.0
-    assert config.worker_timeout_for(Tier.T1) == 600.0
-
-
-def test_t2_default_is_1200(isolated_xdg: Path) -> None:
-    config = _base_config()
-    assert tier_worker_timeout(Tier.T2) == 1200.0
-    assert TIER_WORKER_TIMEOUTS[Tier.T2] == 1200.0
-    assert timeout_defaults()["T2"] == 1200.0
-    assert config.worker_timeout_for(Tier.T2) == 1200.0
-
-
-def test_t3_default_is_1800(isolated_xdg: Path) -> None:
-    config = _base_config()
-    assert tier_worker_timeout(Tier.T3) == 1800.0
-    assert TIER_WORKER_TIMEOUTS[Tier.T3] == 1800.0
-    assert timeout_defaults()["T3"] == 1800.0
-    assert config.worker_timeout_for(Tier.T3) == 1800.0
+    assert role_worker_timeout(JobRole.WORKER) == 1200.0
+    assert role_worker_timeout(JobRole.SURGEON) == 1800.0
+    assert role_worker_timeout(JobRole.INTEGRATOR) == 1200.0
+    assert ROLE_WORKER_TIMEOUTS[JobRole.WORKER] == 1200.0
+    assert ROLE_WORKER_TIMEOUTS[JobRole.SURGEON] == 1800.0
+    assert ROLE_WORKER_TIMEOUTS[JobRole.INTEGRATOR] == 1200.0
+    assert config.worker_timeout_for_role(JobRole.WORKER) == 1200.0
+    assert config.worker_timeout_for_role(JobRole.SURGEON) == 1800.0
+    assert config.worker_timeout_for_role(JobRole.INTEGRATOR) == 1200.0
 
 
 # ---------------------------------------------------------------------------
-# 4. Explicit owner timeout remains authoritative across tiers.
+# 4. Explicit owner timeout remains authoritative across roles.
 # ---------------------------------------------------------------------------
 
 
-def test_explicit_worker_timeout_overrides_tier_default(isolated_xdg: Path) -> None:
+def test_explicit_worker_timeout_overrides_role_default(isolated_xdg: Path) -> None:
     config = _base_config(worker_timeout=45.0)
     assert config.worker_timeout_explicit is True
     assert config.has_worker_deadline is True
-    assert config.worker_timeout_for(Tier.T1) == 45.0
-    assert config.worker_timeout_for(Tier.T2) == 45.0
-    assert config.worker_timeout_for(Tier.T3) == 45.0
+    assert config.worker_timeout_for_role(JobRole.WORKER) == 45.0
+    assert config.worker_timeout_for_role(JobRole.SURGEON) == 45.0
+    assert config.worker_timeout_for_role(JobRole.INTEGRATOR) == 45.0
 
 
 # ---------------------------------------------------------------------------
@@ -125,21 +114,21 @@ def test_effective_timeout_survives_detached_reconstruction(isolated_xdg: Path) 
         payload = json.loads(json.dumps(original.as_dict()))
         rebuilt = reconstruct_run_config(payload)
         assert rebuilt.worker_timeout_explicit == original.worker_timeout_explicit
-        for tier in (Tier.T1, Tier.T2, Tier.T3):
-            assert rebuilt.worker_timeout_for(tier) == original.worker_timeout_for(tier)
+        for role in (JobRole.WORKER, JobRole.SURGEON, JobRole.INTEGRATOR):
+            assert rebuilt.worker_timeout_for_role(role) == original.worker_timeout_for_role(role)
     # The default ladder itself survives the round trip (no silent unbounded).
     rebuilt_default = reconstruct_run_config(
         json.loads(json.dumps(_base_config().as_dict()))
     )
-    assert rebuilt_default.worker_timeout_for(Tier.T1) == 600.0
-    assert rebuilt_default.worker_timeout_for(Tier.T2) == 1200.0
-    assert rebuilt_default.worker_timeout_for(Tier.T3) == 1800.0
+    assert rebuilt_default.worker_timeout_for_role(JobRole.WORKER) == 1200.0
+    assert rebuilt_default.worker_timeout_for_role(JobRole.SURGEON) == 1800.0
+    assert rebuilt_default.worker_timeout_for_role(JobRole.INTEGRATOR) == 1200.0
 
 
 def test_supervisor_forwards_timeout_only_when_explicit(
     isolated_xdg: Path, tmp_path: Path
 ) -> None:
-    """Detached relaunch must not promote a tier default into an explicit flag."""
+    """Detached relaunch must not promote a role default into an explicit flag."""
     db = Database(tmp_path / "sup.sqlite")
     supervisor = RunSupervisor(db=db)
     default_config = _base_config()
@@ -152,8 +141,8 @@ def test_supervisor_forwards_timeout_only_when_explicit(
     # Either way the reconstructed detached owner computes the same bound.
     for config in (default_config, explicit_config):
         rebuilt = reconstruct_run_config(json.loads(json.dumps(config.as_dict())))
-        for tier in (Tier.T1, Tier.T2, Tier.T3):
-            assert rebuilt.worker_timeout_for(tier) == config.worker_timeout_for(tier)
+        for role in (JobRole.WORKER, JobRole.SURGEON, JobRole.INTEGRATOR):
+            assert rebuilt.worker_timeout_for_role(role) == config.worker_timeout_for_role(role)
 
 
 # ---------------------------------------------------------------------------
@@ -358,10 +347,10 @@ def _quick_runner(argv: list[str], **kwargs: Any) -> ProcessResult:
 
 def test_successful_worker_unaffected(isolated_xdg: Path, tmp_path: Path) -> None:
     adapter = OpenCodeAdapter(runner=_quick_runner)
-    # The default tier bound is finite yet far above a healthy dispatch.
+    # The default role bound is finite yet far above a healthy dispatch.
     config = _base_config()
-    bound = config.worker_timeout_for(Tier.T1)
-    assert math.isfinite(bound) and bound == 600.0
+    bound = config.worker_timeout_for_role(JobRole.WORKER)
+    assert math.isfinite(bound) and bound == 1200.0
     result = adapter.run(
         WorkerRequest(
             task="healthy task",

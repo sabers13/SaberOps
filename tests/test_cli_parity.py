@@ -909,3 +909,244 @@ def test_try_worker_starts_exact_blocked_worker_and_keeps_policy(
     assert len(bootstrap) == 1
     assert bootstrap[0].payload is not None
     assert bootstrap[0].payload["source_run_id"] == "run_tryw_ok"
+
+
+# ---------------------------------------------------------------------------
+# R-002: role chains, routing editors, ROLE column, deprecated flags
+# ---------------------------------------------------------------------------
+
+
+def test_routing_show_text_and_json(
+    isolated: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Covers: orch routing show (roles with numbered groups, JSON contract)."""
+    code, out, _ = _cli("routing", "show", capsys=capsys)
+    assert code == 0
+    assert "Schema: 3" in out
+    assert "WORKER:" in out
+    assert "SURGEON:" in out
+    assert "INTEGRATOR:" in out
+    assert "orch orchestrator show" in out
+    assert "orch reviewer show" in out
+    code, out, _ = _cli("routing", "show", "--json", capsys=capsys)
+    assert code == 0
+    payload = json.loads(out)
+    assert payload["schema_version"] == 3
+    assert set(payload["roles"]) == {"WORKER", "SURGEON", "INTEGRATOR"}
+    assert payload["roles"]["INTEGRATOR"] == [
+        ["opencode/opencode/muse-spark-1.2-contributor-free"]
+    ]
+    assert payload["roles"]["WORKER"][0] == ["opencode/opencode/muse-spark-1.2-contributor-free"]
+    assert payload["managed_elsewhere"] == {
+        "ORCHESTRATOR": "orch orchestrator show",
+        "REVIEWER": "orch reviewer show",
+    }
+
+
+def test_routing_migrate_dry_run_writes_nothing(
+    isolated: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Covers: orch routing migrate (dry run previews, writes nothing)."""
+    from saberops.routing_config import get_user_routing_path
+
+    user_path = get_user_routing_path()
+    user_path.parent.mkdir(parents=True, exist_ok=True)
+    original = json.dumps(
+        {
+            "schema_version": 2,
+            "T1": {"default": ["codex/gpt-5.6-luna"]},
+            "T2": {"default": ["codex/gpt-5.6-terra", "codex/gpt-5.6-luna"]},
+            "T3": {"default": ["codex/gpt-5.6-sol"]},
+        }
+    )
+    user_path.write_text(original)
+    code, out, _ = _cli("routing", "migrate", capsys=capsys)
+    assert code == 0
+    assert "WORKER" in out and "SURGEON" in out
+    assert user_path.read_text() == original
+    assert list(user_path.parent.glob("routing.json.bak-*")) == []
+
+
+def test_routing_migrate_write_backs_up_and_persists_schema3(
+    isolated: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Covers: orch routing migrate --write (backup + schema-3 file)."""
+    from saberops.routing_config import get_user_routing_path
+
+    user_path = get_user_routing_path()
+    user_path.parent.mkdir(parents=True, exist_ok=True)
+    user_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "T1": {"default": ["codex/gpt-5.6-luna"]},
+                "T2": {"default": ["codex/gpt-5.6-terra", "codex/gpt-5.6-luna"]},
+                "T3": {"default": ["codex/gpt-5.6-sol"]},
+            }
+        )
+    )
+    code, _, _ = _cli("routing", "migrate", "--write", capsys=capsys)
+    assert code == 0
+    backups = list(user_path.parent.glob("routing.json.bak-*"))
+    assert len(backups) == 1
+    persisted = json.loads(user_path.read_text())
+    assert persisted["schema_version"] == 3
+    assert [group["routes"][0] for group in persisted["roles"]["WORKER"]] == [
+        "codex/gpt-5.6-terra",
+        "codex/gpt-5.6-luna",
+        "codex/gpt-5.6-sol",
+    ]
+    assert persisted["roles"]["SURGEON"] == [{"routes": ["codex/gpt-5.6-sol"]}]
+    code, out, _ = _cli("routing", "migrate", capsys=capsys)
+    assert code == 0
+    assert "already schema 3" in out
+
+
+def test_routing_editors_and_legacy_refusal(
+    isolated: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Covers: orch routing editors (exit codes, legacy refusal, no write on error)."""
+    from saberops.routing_config import get_user_routing_path
+
+    user_path = get_user_routing_path()
+    user_path.parent.mkdir(parents=True, exist_ok=True)
+    user_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "T1": {"default": ["codex/gpt-5.6-luna"]},
+                "T2": {"default": ["codex/gpt-5.6-terra"]},
+                "T3": {"default": ["codex/gpt-5.6-sol"]},
+            }
+        )
+    )
+    before = user_path.read_bytes()
+    code, _, err = _cli("routing", "add", "worker", "codex/gpt-5.6-terra", capsys=capsys)
+    assert code == 1
+    assert "migrate" in err
+    assert user_path.read_bytes() == before
+    code, _, _ = _cli("routing", "migrate", "--write", capsys=capsys)
+    assert code == 0
+    # Role names are case-insensitive; adding present id is a no-op exit 0.
+    code, _, _ = _cli("routing", "add", "WORKER", "codex/gpt-5.6-terra", capsys=capsys)
+    assert code == 0
+    code, _, err = _cli(
+        "routing", "add", "orchestrator", "codex/gpt-5.6-terra", capsys=capsys
+    )
+    assert code == 1
+    assert "orch orchestrator show" in err
+    code, _, err = _cli("routing", "add", "worker", "nope/unknown-model", capsys=capsys)
+    assert code == 1
+    # Removing the last route of a chain leaves a valid empty chain.
+    code, _, _ = _cli("routing", "remove", "integrator", "codex/gpt-5.6-terra", capsys=capsys)
+    assert code == 0
+    assert json.loads(user_path.read_text())["roles"]["INTEGRATOR"] == []
+    # Non-permutation reorder fails without writing.
+    before = user_path.read_bytes()
+    code, _, err = _cli("routing", "reorder", "worker", "1", "1", capsys=capsys)
+    assert code == 1
+    assert user_path.read_bytes() == before
+    code, _, _ = _cli("routing", "move", "worker", "1", "down", capsys=capsys)
+    assert code == 0
+
+
+def test_list_shows_role_and_status_shows_role_line(
+    isolated: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Covers: orch list ROLE column and orch status Role line."""
+    repo = _git_repo(isolated / "role-list")
+    db_path = isolated / "roles.db"
+    db = Database(db_path)
+    _seed_run(db, repo, "run_role_new", RunStatus.FAILED)
+    db.record_event(
+        "run_role_new",
+        "tier_candidates_resolved",
+        payload={
+            "tier": "T1",
+            "role": "WORKER",
+            "routing_context": "WORKER",
+            "candidates": [],
+            "effective_candidates": [],
+        },
+    )
+    _seed_run(db, repo, "run_role_old", RunStatus.FAILED)
+    old = db.get_run("run_role_old")
+    assert old is not None
+    code, out, _ = _cli("list", "--db", str(db_path), capsys=capsys)
+    assert code == 0
+    assert "ROLE" in out.splitlines()[0]
+    assert "TIER" not in out.splitlines()[0]
+    new_line = next(line for line in out.splitlines() if "run_role_new" in line)
+    old_line = next(line for line in out.splitlines() if "run_role_old" in line)
+    assert "WORKER" in new_line
+    assert "LEGACY:T1" in old_line
+    code, out, _ = _cli("status", "run_role_new", "--db", str(db_path), capsys=capsys)
+    assert code == 0
+    assert "Tier             : T1" in out
+    assert "Role             : WORKER" in out
+
+
+def test_deprecated_tier_flags_warn_and_supervisor_forwards_selectively(
+    isolated: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: --tier/--max-tier deprecation lines and detached forwarding."""
+    from saberops.config import resolve_run_config
+    from saberops.models import Tier
+
+    repo = _git_repo(isolated / "dep-flags")
+    db_path = isolated / "dep.db"
+    launches = _stub_launch(monkeypatch)
+    code, _, err = _cli(
+        "run",
+        "--repo",
+        str(repo),
+        "--task",
+        "fix typo in readme",
+        "--tier",
+        "T1",
+        "--max-tier",
+        "T2",
+        "--detach",
+        "--db",
+        str(db_path),
+        capsys=capsys,
+    )
+    # The stubbed launcher never claims an owner, so the exit code reflects
+    # that; what matters here is the run was created/launched and warned.
+    assert launches
+    assert "ADR-0002" in err
+    assert "--tier is deprecated" in err
+    assert "--max-tier is deprecated" in err
+    # Default runs forward neither flag (no deprecation noise in detached logs).
+    db = Database(db_path)
+    supervisor = RunSupervisor(db=db)
+    default = resolve_run_config(
+        task="fix typo in readme",
+        target_repo=repo,
+        gate_command="true",
+        publish_candidate=False,
+    )
+    default_args = supervisor._build_cli_args("run_default", default)
+    assert "--tier" not in default_args
+    assert "--max-tier" not in default_args
+    manual = resolve_run_config(
+        task="fix typo in readme",
+        target_repo=repo,
+        routing_mode="manual",
+        manual_tier=Tier.T1,
+        gate_command="true",
+        publish_candidate=False,
+    )
+    manual_args = supervisor._build_cli_args("run_manual", manual)
+    assert manual_args[manual_args.index("--tier") + 1] == "T1"
+    assert "--max-tier" not in manual_args
+    capped = resolve_run_config(
+        task="fix typo in readme",
+        target_repo=repo,
+        max_auto_tier=Tier.T2,
+        gate_command="true",
+        publish_candidate=False,
+    )
+    capped_args = supervisor._build_cli_args("run_capped", capped)
+    assert "--tier" not in capped_args
+    assert capped_args[capped_args.index("--max-tier") + 1] == "T2"

@@ -42,6 +42,7 @@ from saberops.models import (
     RunStatus,
     StartRunResult,
     SupervisionRecord,
+    Tier,
     WorkerActivationState,
 )
 from saberops.ownership import (
@@ -215,7 +216,7 @@ class RunSupervisor:
                     if frozen_source and frozen_source.routing_snapshot_json
                     else load_effective_routing())
         resolve_candidate_chain(
-            tier=config.initial_tier,
+            role=config.initial_role,
             model_override=config.model_override,
             provider_override=config.provider_override,
             training_allowed=config.training_allowed,
@@ -1493,9 +1494,6 @@ class RunSupervisor:
 
         prefix = resolve_owner_argv_prefix()
         db_path = str(self.db.db_path)
-        tier_arg = "auto"
-        if config.routing_mode == "manual" and config.manual_tier is not None:
-            tier_arg = config.manual_tier.value
         args: list[str] = [
             *prefix,
             "run",
@@ -1505,35 +1503,45 @@ class RunSupervisor:
             config.task,
             "--gate",
             config.gate_command,
-            "--tier",
-            tier_arg,
-            "--max-tier",
-            config.max_auto_tier.value,
-            "--max-attempts",
-            str(config.max_attempts),
-            "--gate-timeout",
-            str(config.gate_timeout),
-            "--review-timeout",
-            str(config.review_timeout),
-            "--review-mode",
-            config.review_mode,
-            "--review-limit",
-            str(config.review_limit),
-            "--review-policy",
-            # Project-scoped risk-adaptive review policy mode is
-            # frozen at Run creation; the supervisor-launched owner must
-            # forward the same value so a fresh CLI process does not
-            # silently re-derive it from (possibly changed) live policy.
-            config.review_policy_mode.value.lower().replace("_", "-"),
-            # The candidate-publication decision was frozen when the run was
-            # created; relay it so the detached owner never re-derives it from
-            # (possibly changed) live authority policy.
-            "--publish-candidate" if config.publish_candidate else "--no-publish-candidate",
-            "--db",
-            db_path,
-            "--run-id",
-            run_id,
         ]
+        # Deprecated routing flags are forwarded only when non-default, so
+        # default runs leave no deprecation noise in detached logs.
+        if config.routing_mode == "manual" and config.manual_tier is not None:
+            args.extend(["--tier", config.manual_tier.value])
+        if config.max_auto_tier != Tier.T3:
+            args.extend(["--max-tier", config.max_auto_tier.value])
+        args.extend(
+            [
+                "--max-attempts",
+                str(config.max_attempts),
+                "--gate-timeout",
+                str(config.gate_timeout),
+                "--review-timeout",
+                str(config.review_timeout),
+                "--review-mode",
+                config.review_mode,
+                "--review-limit",
+                str(config.review_limit),
+            ]
+        )
+        args.extend(
+            [
+                "--review-policy",
+                # Project-scoped risk-adaptive review policy mode is
+                # frozen at Run creation; the supervisor-launched owner must
+                # forward the same value so a fresh CLI process does not
+                # silently re-derive it from (possibly changed) live policy.
+                config.review_policy_mode.value.lower().replace("_", "-"),
+                # The candidate-publication decision was frozen when the run was
+                # created; relay it so the detached owner never re-derives it from
+                # (possibly changed) live authority policy.
+                "--publish-candidate" if config.publish_candidate else "--no-publish-candidate",
+                "--db",
+                db_path,
+                "--run-id",
+                run_id,
+            ]
+        )
         if config.provider_override:
             args.extend(["--provider", config.provider_override])
         if config.model_override:
@@ -1550,8 +1558,8 @@ class RunSupervisor:
         # The effective timeout always survives detached execution because
         # the detached owner adopts the persisted RunConfig
         # (reconstruct_run_config) and recomputes the same effective value
-        # via RunConfig.worker_timeout_for (explicit value, else the
-        # deterministic tier default).  Forwarding a computed tier default
+        # via RunConfig.worker_timeout_for_role (explicit value, else the
+        # deterministic role default).  Forwarding a computed role default
         # here would corrupt the explicit flag and mislabel the deadline.
         if config.worker_timeout_explicit:
             args.extend(["--worker-timeout", str(config.worker_timeout)])

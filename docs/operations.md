@@ -71,14 +71,36 @@ run id is printed with `orch wait` / `orch status` hints.
 
 ## Worker routing policy
 
-Worker selection uses one ordered chain per tier: T1, T2 and T3. Training
-classifications and peak-hour scheduling no longer restrict workers or reviewers.
-Existing training flags are accepted for compatibility and do not change admission.
-Provider readiness, quota, capabilities, exact bindings and owner model enrollment
-still apply. Schema 2 routing files contain `T1.default`, `T2.default` and
-`T3.default`. Legacy schema 1 chains merge by stable union: retain primary order
-and append unique models from the other scopes. Historical run snapshots keep
-their original serialized provenance and hash checks.
+Worker selection uses one ordered chain per role: WORKER, SURGEON and
+INTEGRATOR. Each chain is a list of fallback groups; until pacing lands,
+resolution flattens groups in order (one route per group is today's
+ordered fallback). The classifier still labels the run tier (a
+risk/telemetry label), but it no longer selects routes. Provider
+readiness, quota, capabilities, exact bindings and owner model enrollment
+still apply. Schema 3 routing files hold `roles` with `WORKER`,
+`SURGEON` and `INTEGRATOR` groups of `{"routes": [...]}`. ORCHESTRATOR
+and REVIEWER keep their existing ordered lists: see `orch orchestrator
+show` and `orch reviewer show` (`orch routing show` points there too).
+
+Migration: schema 1 merges exactly as before, then migrates 2 → 3 with
+WORKER as the stable union of T2, T1 and T3 (T2 order first), SURGEON as
+the T3 order, and INTEGRATOR as the head of T2. A schema-1/2 user file
+loads as schema 3 in memory and is never rewritten by a load; review the
+migration once with `orch routing migrate` (dry run by default,
+`--write` persists with a timestamped backup). Role editors
+(`orch routing add|remove|move|reorder ROLE ...`, roles case-insensitive)
+refuse schema-1/2 files until migrated. `orch run --tier T1|T2` runs the
+WORKER chain without escalation and `--tier T3` starts on the SURGEON
+chain; `--max-tier T1|T2` disables escalation (default T3 allows it).
+Each explicit flag prints one deprecation line (ADR-0002 §11).
+
+Escalation is one step Worker → Surgeon, only on explicit typed
+`CAPABILITY_FAILURE` evidence (gate failure never escalates), only on the
+WORKER chain with `max_auto_tier T3`, auto routing and no model override.
+On escalation the run's tier label becomes T3. Per-role worker timeouts:
+WORKER/INTEGRATOR 1200s, SURGEON 1800s (explicit `--worker-timeout`
+wins). Frozen snapshots of runs from before R-002 keep their tier
+provenance and verify their stored digest exactly as before.
 
 ## Usage and account limits
 

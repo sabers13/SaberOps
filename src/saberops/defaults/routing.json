@@ -1,45 +1,141 @@
 {
-  "schema_version": 2,
-  "T1": {
-    "default": [
-      "opencode/opencode/nemotron-3.5-lightning-free",
-      "opencode/opencode/mimo-v2.5-free",
-      "opencode/opencode-go/mimo-v2.5",
-      "opencode/opencode-go/deepseek-v4-flash",
-      "opencode/opencode/minimax-m3",
-      "opencode/opencode/qwen3.7-plus",
-      "codex/gpt-5.6-luna"
+  "roles": {
+    "INTEGRATOR": [
+      {
+        "routes": [
+          "opencode/opencode/muse-spark-1.2-contributor-free"
+        ]
+      }
+    ],
+    "SURGEON": [
+      {
+        "routes": [
+          "opencode/opencode-go/deepseek-v4-pro"
+        ]
+      },
+      {
+        "routes": [
+          "codex/gpt-5.6-terra"
+        ]
+      },
+      {
+        "routes": [
+          "codex/gpt-5.6-sol"
+        ]
+      },
+      {
+        "routes": [
+          "opencode/opencode/deepseek-v4-flash"
+        ]
+      },
+      {
+        "routes": [
+          "opencode/opencode/minimax-m3"
+        ]
+      },
+      {
+        "routes": [
+          "opencode/opencode/qwen3.7-plus"
+        ]
+      },
+      {
+        "routes": [
+          "opencode/opencode/deepseek-v4-pro"
+        ]
+      },
+      {
+        "routes": [
+          "codex/gpt-5.6-luna"
+        ]
+      }
+    ],
+    "WORKER": [
+      {
+        "routes": [
+          "opencode/opencode/muse-spark-1.2-contributor-free"
+        ]
+      },
+      {
+        "routes": [
+          "opencode/opencode/hy3-free"
+        ]
+      },
+      {
+        "routes": [
+          "opencode/opencode-go/muse-spark-1.2-contributor"
+        ]
+      },
+      {
+        "routes": [
+          "opencode/opencode-go/deepseek-v4-pro"
+        ]
+      },
+      {
+        "routes": [
+          "opencode/opencode/nemotron-3-ultra-free"
+        ]
+      },
+      {
+        "routes": [
+          "codex/gpt-5.6-terra"
+        ]
+      },
+      {
+        "routes": [
+          "opencode/opencode-go/deepseek-v4-flash"
+        ]
+      },
+      {
+        "routes": [
+          "opencode/opencode/mimo-v2.5-free"
+        ]
+      },
+      {
+        "routes": [
+          "opencode/opencode/nemotron-3.5-lightning-free"
+        ]
+      },
+      {
+        "routes": [
+          "opencode/opencode/big-pickle"
+        ]
+      },
+      {
+        "routes": [
+          "opencode/opencode/minimax-m3"
+        ]
+      },
+      {
+        "routes": [
+          "opencode/opencode/qwen3.7-plus"
+        ]
+      },
+      {
+        "routes": [
+          "codex/gpt-5.6-luna"
+        ]
+      },
+      {
+        "routes": [
+          "opencode/opencode/deepseek-v4-flash"
+        ]
+      },
+      {
+        "routes": [
+          "opencode/opencode/deepseek-v4-pro"
+        ]
+      },
+      {
+        "routes": [
+          "opencode/opencode-go/mimo-v2.5"
+        ]
+      },
+      {
+        "routes": [
+          "codex/gpt-5.6-sol"
+        ]
+      }
     ]
   },
-  "T2": {
-    "default": [
-      "opencode/opencode/muse-spark-1.2-contributor-free",
-      "opencode/opencode/hy3-free",
-      "opencode/opencode-go/muse-spark-1.2-contributor",
-      "opencode/opencode-go/deepseek-v4-pro",
-      "opencode/opencode/nemotron-3-ultra-free",
-      "codex/gpt-5.6-terra",
-      "opencode/opencode-go/deepseek-v4-flash",
-      "opencode/opencode/mimo-v2.5-free",
-      "opencode/opencode/nemotron-3.5-lightning-free",
-      "opencode/opencode/big-pickle",
-      "opencode/opencode/minimax-m3",
-      "opencode/opencode/qwen3.7-plus",
-      "codex/gpt-5.6-luna",
-      "opencode/opencode/deepseek-v4-flash",
-      "opencode/opencode/deepseek-v4-pro"
-    ]
-  },
-  "T3": {
-    "default": [
-      "opencode/opencode-go/deepseek-v4-pro",
-      "codex/gpt-5.6-terra",
-      "codex/gpt-5.6-sol",
-      "opencode/opencode/deepseek-v4-flash",
-      "opencode/opencode/minimax-m3",
-      "opencode/opencode/qwen3.7-plus",
-      "opencode/opencode/deepseek-v4-pro",
-      "codex/gpt-5.6-luna"
-    ]
-  }
+  "schema_version": 3
 }

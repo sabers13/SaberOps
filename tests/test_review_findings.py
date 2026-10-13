@@ -23,7 +23,6 @@ from saberops.db import Database
 from saberops.models import (
     AttemptStatus,
     ReviewVerdict,
-    Tier,
     WorkerCandidate,
     WorkerRequest,
     WorkerResult,
@@ -154,7 +153,7 @@ def test_review_run_persists_findings_and_run_page_shows_them(
     subprocess.run(["git", "add", "."], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-m", "i"], cwd=repo, check=True, capture_output=True)
 
-    def _chain(*, tier: Tier, **_: Any) -> list[WorkerCandidate]:
+    def _chain(**_: Any) -> list[WorkerCandidate]:
         return [WorkerCandidate(PROVIDER, "worker-model")]
 
     monkeypatch.setattr("saberops.orchestrator.resolve_candidate_chain", _chain)

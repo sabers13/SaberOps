@@ -1,4 +1,4 @@
-"""Tier-only routing and multi-provider candidate resolution."""
+"""Role-chain routing and multi-provider candidate resolution."""
 
 from __future__ import annotations
 
@@ -58,43 +58,9 @@ CANDIDATE_OPENCODE_DEEPSEEK_V4_PRO = WorkerCandidate(
     provider="opencode", model="opencode/deepseek-v4-pro"
 )
 
-# Tier candidate chains (automatic routing only: no attended-only provider
-# may appear here)
-TIER_1_CHAIN: list[WorkerCandidate] = [
-    CANDIDATE_OPENCODE_MIMO_V2_5,
-    CANDIDATE_OPENCODE_GO_DEEPSEEK_V4_FLASH,
-]
-
-TIER_2_TRAINING_ALLOWED_CHAIN: list[WorkerCandidate] = [
-    CANDIDATE_OPENCODE_MUSE_SPARK,
-    CANDIDATE_OPENCODE_GO_DEEPSEEK_V4_PRO,
-    CANDIDATE_CODEX_TERRA,
-    CANDIDATE_OPENCODE_GO_DEEPSEEK_V4_FLASH,
-]
-
-TIER_2_OFF_PEAK_CHAIN: list[WorkerCandidate] = [
-    CANDIDATE_OPENCODE_GO_DEEPSEEK_V4_PRO,
-    CANDIDATE_CODEX_TERRA,
-    CANDIDATE_OPENCODE_GO_DEEPSEEK_V4_FLASH,
-]
-
-TIER_2_PEAK_CHAIN: list[WorkerCandidate] = [
-    CANDIDATE_CODEX_TERRA,
-    CANDIDATE_OPENCODE_GO_DEEPSEEK_V4_PRO,
-    CANDIDATE_OPENCODE_GO_DEEPSEEK_V4_FLASH,
-]
-
-TIER_3_OFF_PEAK_CHAIN: list[WorkerCandidate] = [
-    CANDIDATE_OPENCODE_GO_DEEPSEEK_V4_PRO,
-    CANDIDATE_CODEX_TERRA,
-    CANDIDATE_CODEX_SOL,
-]
-
-TIER_3_PEAK_CHAIN: list[WorkerCandidate] = [
-    CANDIDATE_CODEX_TERRA,
-    CANDIDATE_OPENCODE_GO_DEEPSEEK_V4_PRO,
-    CANDIDATE_CODEX_SOL,
-]
+# Tier candidate chains were removed in R-002 (routing schema 3): chains
+# now live per role in the routing configuration. The candidate constants
+# above stay: review.py imports several of them.
 
 #: Providers restricted to attended, explicit-owner use (ADR-0001
 #: Amendment 1).  Automatic routing chains must never yield them, even
@@ -164,15 +130,37 @@ def parse_candidate_override(
     return WorkerCandidate(provider="opencode", model=model_clean)
 
 
+def _normalize_role(role: Any) -> str:
+    from saberops.jobs.models import JobRole
+
+    if isinstance(role, JobRole):
+        return role.value
+    return str(role).strip().upper()
+
+
+def _role_for_tier_alias(tier: Any | None) -> str:
+    if tier is None:
+        return "WORKER"
+    if isinstance(tier, Tier):
+        return "SURGEON" if tier == Tier.T3 else "WORKER"
+    try:
+        normalized = Tier(str(tier).strip().upper())
+    except ValueError:
+        return "WORKER"
+    return "SURGEON" if normalized == Tier.T3 else "WORKER"
+
+
 def resolve_candidate_chain(
-    tier: Tier = Tier.T1,
+    role: Any | None = None,
+    *,
+    tier: Any | None = None,
     training_allowed: bool = True,
     is_peak: bool | None = None,
     model_override: str | None = None,
     provider_override: str | None = None,
     snapshot: Any | None = None,
 ) -> list[WorkerCandidate]:
-    """Resolve ordered list of worker candidates to attempt based on tier only.
+    """Resolve ordered list of worker candidates for one role chain.
 
     Attended-only providers (``ATTENDED_ONLY_PROVIDERS``) are excluded
     from every automatic chain, even when configured; only an explicit
@@ -188,7 +176,10 @@ def resolve_candidate_chain(
     behavior.
 
     Args:
-        tier: Execution tier (T1, T2, T3).
+        role: Routing role (WORKER, SURGEON, INTEGRATOR).
+        tier: Deprecated alias (ADR-0002 §11): ``None`` selects WORKER,
+            ``T3`` selects SURGEON, anything else selects WORKER.
+            Passing both ``role`` and ``tier`` raises ``ValueError``.
         training_allowed: Ignored legacy compatibility argument.
         is_peak: Ignored legacy compatibility argument.
         model_override: Explicit model specified by user.
@@ -203,10 +194,14 @@ def resolve_candidate_chain(
         substitutes for it.
 
     Raises:
-        ValueError: If a provider override has no candidates in the selected tier,
+        ValueError: If both ``role`` and ``tier`` are given, or if a
+            provider override has no candidates in the selected chain,
             or if a provider-only override names an attended-only provider
             (Antigravity requires an explicit owner provider+model override).
     """
+    if role is not None and tier is not None:
+        raise ValueError("resolve_candidate_chain: pass 'role' or 'tier', not both")
+    selected_role = _normalize_role(role) if role is not None else _role_for_tier_alias(tier)
     if model_override:
         candidate = parse_candidate_override(model_override, provider_override=provider_override)
         return [_with_frozen_evidence(candidate, snapshot)]
@@ -215,16 +210,13 @@ def resolve_candidate_chain(
         if provider_override.strip().lower() in ATTENDED_ONLY_PROVIDERS:
             raise ValueError(ATTENDED_ONLY_REFUSAL)
 
-    if snapshot is not None:
-        chain = [
-            _with_frozen_evidence(c, snapshot) for c in snapshot.chain_for(tier.value, True, False)
-        ]
-    elif tier == Tier.T2:
-        chain = list(TIER_2_TRAINING_ALLOWED_CHAIN)
-    elif tier == Tier.T3:
-        chain = list(TIER_3_OFF_PEAK_CHAIN)
-    else:
-        chain = list(TIER_1_CHAIN)
+    if snapshot is None:
+        from saberops.routing_config import load_packaged_default
+
+        snapshot = load_packaged_default()
+    chain = [
+        _with_frozen_evidence(c, snapshot) for c in snapshot.chain_for_role(selected_role)
+    ]
 
     # Attended-only providers never dispatch automatically, even when a
     # frozen snapshot or owner document still lists them.  An empty chain
@@ -238,7 +230,7 @@ def resolve_candidate_chain(
         if not chain:
             raise ValueError(
                 f"Provider override '{provider_override}' has no eligible candidates "
-                "in the resolved chain for this tier."
+                "in the resolved chain for this role."
             )
 
     return chain

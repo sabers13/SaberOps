@@ -314,9 +314,14 @@ def test_api_routing_assignment_uses_the_exact_role(api: dict[str, Any], target:
         )
         payload = load_effective_routing_payload()
         save_user_routing(add_dynamic_candidate_to_chain(
-            payload, top=target, sub="default", candidate=approval,
+            payload, role="WORKER", candidate=approval,
         ))
-        assert "testapi/test-model" in load_effective_routing_payload()[target]["default"]
+        worker_ids = [
+            cid
+            for group in load_effective_routing_payload()["roles"]["WORKER"]
+            for cid in group["routes"]
+        ]
+        assert "testapi/test-model" in worker_ids
     else:
         wanted = base_id + f"{target}:local-api:test-model"
         binding = owner.registry.try_get(wanted)

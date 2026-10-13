@@ -401,7 +401,7 @@ def test_ported_reviewer_selection_uses_injected_registry(
 
 
 def _patch_implementer_chain(monkeypatch: pytest.MonkeyPatch) -> None:
-    def _resolve(*, tier: Tier, **_: Any) -> list[WorkerCandidate]:
+    def _resolve(**_: Any) -> list[WorkerCandidate]:
         return [WorkerCandidate(_R3E1_PROVIDER, _R3E1_WORKER_MODEL)]
 
     monkeypatch.setattr("saberops.orchestrator.resolve_candidate_chain", _resolve)
