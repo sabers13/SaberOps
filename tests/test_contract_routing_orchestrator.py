@@ -562,3 +562,100 @@ def test_schema2_frozen_snapshot_continuation_keeps_bytes_and_worker_chain(
         "codex/gpt-5.6-sol",
     ]
     assert derived.legacy_chains is not None
+
+
+def test_escalation_is_per_package_and_worker_chain_returns_next_package(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """Covers: R-002 decision 4 (per-package escalation)."""
+    import saberops.orchestrator as orchestrator_module
+    from saberops.slicing import ProposedPackage, TaskSizingAssessment
+
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    log: list[str] = []
+    calls: list[str] = []
+    m1_calls = {"n": 0}
+
+    def _m1_first_call_fails(request: WorkerRequest) -> WorkerResult:
+        m1_calls["n"] += 1
+        if m1_calls["n"] == 1:
+            result = _capability_failure("h3", "m1")(request)
+        else:
+            result = _success_with_file("h3", "m1", "ok.txt", "ok\n")(request)
+        assert isinstance(result, WorkerResult)
+        return result
+
+    script = {
+        "m1": _m1_first_call_fails,
+        "s1": _success_with_file("h3", "s1", "ok.txt", "ok\n"),
+    }
+    worker = ScriptedWorker("h3", script, log)
+    worker_chain = [WorkerCandidate("h3", "m1")]
+    surgeon_chain = [WorkerCandidate("h3", "s1")]
+    monkeypatch.setattr(
+        "saberops.orchestrator.resolve_candidate_chain",
+        _role_keyed_chain(worker_chain, surgeon_chain, calls),
+    )
+    assessment = TaskSizingAssessment(
+        score=8,
+        signals=("r-002:per-package-escalation",),
+        requirement_count=3,
+        should_slice=True,
+    )
+    proposals = [
+        ProposedPackage(
+            title="Package one",
+            goal="First package",
+            acceptance_criteria=("First done.",),
+            dependency_indexes=(),
+        ),
+        ProposedPackage(
+            title="Package two",
+            goal="Second package",
+            acceptance_criteria=("Second done.",),
+            dependency_indexes=(0,),
+        ),
+    ]
+
+    def _fake_resolve_work_packages(
+        task: str, planner: object | None = None
+    ) -> tuple[TaskSizingAssessment, list[ProposedPackage]]:
+        assert task
+        assert planner is None
+        return assessment, list(proposals)
+
+    monkeypatch.setattr(
+        orchestrator_module, "resolve_work_packages", _fake_resolve_work_packages
+    )
+    db = Database(tmp_path / "orch.db")
+    orch = Orchestrator(db=db, registry=AdapterRegistry([worker]), worktree_base=tmp_path / "wt")
+    config = resolve_run_config(
+        task="two-package escalation probe",
+        target_repo=repo,
+        gate_command=_ok_gate(),
+        review_disabled=True,
+        publish_candidate=False,
+    )
+    result = orch.run(config=config, is_peak=False)
+    assert result.status == RunStatus.COMPLETED
+    impl_log = [e for e in log if not e.startswith("review:")]
+    # Package 1: WORKER m1 capability failure, one escalation, SURGEON s1
+    # success. Package 2 restarts on WORKER m1 (no latch) and succeeds.
+    assert impl_log == ["m1", "s1", "m1"], impl_log
+
+    events = db.get_events(result.run_id)
+    escalated = _events_by_type(events, "tier_escalated")
+    assert len(escalated) == 1
+    assert escalated[0].payload is not None
+    assert escalated[0].payload["from_role"] == "WORKER"
+    assert escalated[0].payload["to_role"] == "SURGEON"
+    resolved = _events_by_type(events, "tier_candidates_resolved")
+    # The second package resolves the WORKER chain again: escalation is per
+    # package, not latched for the run.
+    assert [r.payload["role"] for r in resolved if r.payload is not None] == [
+        "WORKER",
+        "SURGEON",
+        "WORKER",
+    ]
+
