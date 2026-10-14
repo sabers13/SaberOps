@@ -1,0 +1,651 @@
+"""Comprehensive tests for canonical admission and scoring policy (ADR-0002 D7).
+
+All tests carry docstring `Covers: ...` and run purely in-process without I/O or network.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+
+import pytest
+
+from saberops.capacity.admission import (
+    admit,
+    matches_model_family,
+    reserve_pct,
+    score,
+)
+from saberops.control_plane.plans import (
+    PlanSet,
+    PoolMember,
+    PoolPlan,
+    PostureRecord,
+    Reserve,
+    Window,
+)
+from saberops.control_plane.policy import (
+    ControlPlanePolicy,
+    ProviderPolicy,
+    ProviderPolicyState,
+)
+from saberops.control_plane.quota_policy import (
+    POOL_OFF,
+    QUOTA_EVIDENCE_REQUIRED,
+    QUOTA_EXCLUDED_UNTIL_RESET,
+)
+from saberops.jobs.models import JobRequirements, JobRole
+from saberops.models import QuotaState, RoutingState, WorkerCandidate
+
+
+def _make_candidate(
+    provider: str = "codex",
+    model: str = "gpt-5.6-sol",
+    role: str | None = None,
+) -> WorkerCandidate:
+    c = WorkerCandidate(provider=provider, model=model)
+    if role is not None:
+        object.__setattr__(c, "role", role)
+    return c
+
+
+def _make_policy(
+    *,
+    postures: dict[str, PostureRecord] | None = None,
+    pool_plans: dict[str, PoolPlan] | None = None,
+    reserves: tuple[Reserve, ...] = (),
+    provider_policies: dict[str, ProviderPolicy] | None = None,
+) -> ControlPlanePolicy:
+    plan_set = PlanSet(
+        accounts={},
+        pool_plans=pool_plans or {},
+        postures=postures or {},
+        reserves=reserves,
+    )
+    provs = provider_policies or {
+        "codex": ProviderPolicy("codex", ProviderPolicyState.ALLOWED),
+        "opencode": ProviderPolicy("opencode", ProviderPolicyState.ALLOWED),
+        "anthropic": ProviderPolicy("anthropic", ProviderPolicyState.ALLOWED),
+        "cline": ProviderPolicy("cline", ProviderPolicyState.ALLOWED),
+    }
+    return ControlPlanePolicy(
+        provider_policies=provs,
+        quota_pools={},
+        content_hash="test-policy-hash",
+        plans=plan_set,
+    )
+
+
+def test_admit_purity_and_determinism() -> None:
+    """Covers: ADR-0002 D7 purity and determinism."""
+    now = datetime(2026, 10, 14, 12, 0, tzinfo=UTC)
+    candidate = _make_candidate()
+    today_str = (now.date() - timedelta(days=5)).isoformat()
+    postures = {
+        "codex": PostureRecord(
+            selector="codex",
+            posture_class="A",
+            ttl_days=30,
+            verified_on=today_str,
+        )
+    }
+    pool_plans = {
+        "chatgpt-plus": PoolPlan(
+            pool_id="chatgpt-plus",
+            members=(PoolMember(route="codex", multiplier=1.0),),
+            windows=(Window(id="5h"),),
+            mode="STRICT",
+            red_line_pct=15.0,
+            overage_possible=False,
+        )
+    }
+    policy = _make_policy(postures=postures, pool_plans=pool_plans)
+    states = [
+        QuotaState(
+            provider="codex",
+            pool="chatgpt-plus",
+            remaining_percent=80.0,
+            reset_at=(now + timedelta(hours=3)).isoformat(),
+            routing_state=RoutingState.NORMAL,
+            updated_at=now.isoformat(),
+        )
+    ]
+
+    decisions = [
+        admit(candidate, now=now, policy=policy, quota_states=states)
+        for _ in range(5)
+    ]
+    first = decisions[0]
+    assert first.admitted is True
+    assert first.score is not None
+    assert first.binding_window == "5h"
+    for other in decisions[1:]:
+        assert other == first
+
+
+def test_admit_monotonicity_lower_capacity_never_admits_more() -> None:
+    """Covers: ADR-0002 D7 parametric monotonicity."""
+    now = datetime(2026, 10, 14, 12, 0, tzinfo=UTC)
+    candidate = _make_candidate()
+    postures = {
+        "codex": PostureRecord(
+            selector="codex",
+            posture_class="A",
+            ttl_days=30,
+            verified_on="2026-10-01",
+        )
+    }
+    pool_plans = {
+        "chatgpt-plus": PoolPlan(
+            pool_id="chatgpt-plus",
+            members=(PoolMember(route="codex", multiplier=1.0),),
+            windows=(Window(id="5h"),),
+            mode="STRICT",
+            red_line_pct=15.0,
+            overage_possible=False,
+        )
+    }
+    policy = _make_policy(postures=postures, pool_plans=pool_plans)
+
+    capacities = [90.0, 50.0, 25.0, 20.0, 15.0, 10.0, 0.0]
+    results: list[bool] = []
+    for cap in capacities:
+        states = [
+            QuotaState(
+                provider="codex",
+                pool="chatgpt-plus",
+                remaining_percent=cap,
+                reset_at=(now + timedelta(hours=2)).isoformat(),
+                routing_state=RoutingState.NORMAL,
+                updated_at=now.isoformat(),
+            )
+        ]
+        decision = admit(candidate, now=now, policy=policy, quota_states=states)
+        results.append(decision.admitted)
+
+    false_seen = False
+    for res in results:
+        if not res:
+            false_seen = True
+        if false_seen:
+            assert res is False
+
+
+def test_score_calculation_and_invalid_inputs_fail_closed() -> None:
+    """Covers: ADR-0002 D7 score formula and fail closed."""
+    res = score(
+        remaining_pct=50.0,
+        red_line_pct=15.0,
+        reserve_pct=5.0,
+        cost_estimate_pct=10.0,
+        hours_to_reset=2.0,
+    )
+    assert res == pytest.approx(10.0)
+
+    res_imminent = score(
+        remaining_pct=50.0,
+        red_line_pct=15.0,
+        reserve_pct=5.0,
+        cost_estimate_pct=10.0,
+        hours_to_reset=0.1,
+    )
+    assert res_imminent == pytest.approx(80.0)
+
+    with pytest.raises(ValueError, match="finite and non-NaN"):
+        score(float("nan"), 15.0, 0.0, 5.0, 2.0)
+    with pytest.raises(ValueError, match="finite and non-NaN"):
+        score(50.0, 15.0, 0.0, 5.0, float("inf"))
+    with pytest.raises(ValueError, match="non-negative"):
+        score(50.0, 15.0, 0.0, 5.0, -1.0)
+
+
+def test_admit_posture_fail_closed() -> None:
+    """Covers: ADR-0002 D2 billing posture fail closed."""
+    now = datetime(2026, 10, 14, 12, 0, tzinfo=UTC)
+    cand = _make_candidate()
+    fresh_state = QuotaState(
+        provider="codex",
+        pool="chatgpt-plus",
+        remaining_percent=80.0,
+        reset_at=(now + timedelta(hours=3)).isoformat(),
+        routing_state=RoutingState.NORMAL,
+        updated_at=now.isoformat(),
+    )
+    object.__setattr__(fresh_state, "freshness", "FRESH")
+    states = [fresh_state]
+
+    # Case 1: Posture A with valid TTL -> admitted unattended
+    p_a = _make_policy(
+        postures={
+            "codex": PostureRecord("codex", "A", ttl_days=30, verified_on="2026-10-01")
+        }
+    )
+    d_a = admit(cand, now=now, policy=p_a, quota_states=states)
+    assert d_a.admitted is True
+
+    # Case 2: Posture B (ATTENDED_ONLY) -> denied unattended, admitted with explicit_override
+    p_b = _make_policy(
+        postures={
+            "codex": PostureRecord("codex", "B", ttl_days=30, verified_on="2026-10-01")
+        }
+    )
+    d_b_unattended = admit(cand, now=now, policy=p_b, quota_states=states, explicit_override=False)
+    assert d_b_unattended.admitted is False
+    assert d_b_unattended.reason == "POSTURE_ATTENDED_ONLY"
+    d_b_attended = admit(cand, now=now, policy=p_b, quota_states=states, explicit_override=True)
+    assert d_b_attended.admitted is True
+
+    # Case 3: Posture D (METERED) -> denied unattended, admitted with explicit_override
+    p_d = _make_policy(
+        postures={
+            "codex": PostureRecord("codex", "D", ttl_days=30, verified_on="2026-10-01")
+        }
+    )
+    d_d_unattended = admit(cand, now=now, policy=p_d, quota_states=states, explicit_override=False)
+    assert d_d_unattended.admitted is False
+    assert d_d_unattended.reason == "POSTURE_METERED"
+    d_d_attended = admit(cand, now=now, policy=p_d, quota_states=states, explicit_override=True)
+    assert d_d_attended.admitted is True
+
+    # Case 4: Posture X (FORBIDDEN) -> denied unattended AND denied with explicit_override
+    p_x = _make_policy(
+        postures={
+            "codex": PostureRecord("codex", "X", ttl_days=30, verified_on="2026-10-01")
+        }
+    )
+    res_x_1 = admit(cand, now=now, policy=p_x, quota_states=states, explicit_override=False).reason
+    res_x_2 = admit(cand, now=now, policy=p_x, quota_states=states, explicit_override=True).reason
+    assert res_x_1 == "POSTURE_FORBIDDEN"
+    assert res_x_2 == "POSTURE_FORBIDDEN"
+
+    # Case 5: Posture UNVERIFIED -> denied unattended AND with explicit_override
+    p_unverified = _make_policy(
+        postures={
+            "codex": PostureRecord("codex", "A", ttl_days=30, verified_on=None)
+        }
+    )
+    res_unv_1 = admit(
+        cand, now=now, policy=p_unverified, quota_states=states, explicit_override=False
+    ).reason
+    res_unv_2 = admit(
+        cand, now=now, policy=p_unverified, quota_states=states, explicit_override=True
+    ).reason
+    assert res_unv_1 == "POSTURE_UNVERIFIED"
+    assert res_unv_2 == "POSTURE_UNVERIFIED"
+
+    # Case 6: Posture EXPIRED -> denied unattended AND with explicit_override
+    p_expired = _make_policy(
+        postures={
+            "codex": PostureRecord("codex", "A", ttl_days=10, verified_on="2026-09-01")
+        }
+    )
+    res_exp_1 = admit(
+        cand, now=now, policy=p_expired, quota_states=states, explicit_override=False
+    ).reason
+    res_exp_2 = admit(
+        cand, now=now, policy=p_expired, quota_states=states, explicit_override=True
+    ).reason
+    assert res_exp_1 == "POSTURE_EXPIRED"
+    assert res_exp_2 == "POSTURE_EXPIRED"
+
+
+def test_admit_requirements_role_and_capabilities() -> None:
+    """Covers: ADR-0002 D7 requirements check."""
+    now = datetime(2026, 10, 14, 12, 0, tzinfo=UTC)
+    policy = _make_policy(
+        postures={"codex": PostureRecord("codex", "A", ttl_days=30, verified_on="2026-10-01")}
+    )
+
+    # Role mismatch
+    cand_worker = _make_candidate(role="WORKER")
+    req_surgeon = JobRequirements(role=JobRole.SURGEON)
+    d_role = admit(cand_worker, now=now, policy=policy, requirements=req_surgeon)
+    assert d_role.admitted is False
+    assert d_role.reason == "ROLE_MISMATCH"
+
+    # Required capabilities satisfied / unsatisfied
+    # Codex lacks Capability.RESUME
+    cand = _make_candidate()
+    req_resume = JobRequirements(
+        role=JobRole.WORKER,
+        required_capabilities=("resume",),
+    )
+    d_cap = admit(cand, now=now, policy=policy, requirements=req_resume)
+    assert d_cap.admitted is False
+    assert d_cap.reason == "REQUIRED_CAPABILITY_UNSUPPORTED"
+
+
+def test_admit_model_family_include_and_exclude() -> None:
+    """Covers: ADR-0002 D7 model family include and exclude."""
+    now = datetime(2026, 10, 14, 12, 0, tzinfo=UTC)
+    policy = _make_policy(
+        postures={
+            "codex": PostureRecord("codex", "A", ttl_days=30, verified_on="2026-10-01"),
+            "opencode": PostureRecord("opencode", "A", ttl_days=30, verified_on="2026-10-01"),
+        }
+    )
+
+    cand_codex = _make_candidate(provider="codex", model="gpt-5.6-sol")
+    cand_opencode = _make_candidate(provider="opencode", model="opencode-go/deepseek-v4-pro")
+
+    assert matches_model_family(cand_codex, "gpt") is True
+    assert matches_model_family(cand_codex, "codex") is True
+    assert matches_model_family(cand_codex, "deepseek") is False
+    assert matches_model_family(cand_opencode, "deepseek") is True
+
+    # Quota states for both
+    s_codex = QuotaState(
+        provider="codex",
+        pool="chatgpt-plus",
+        remaining_percent=80.0,
+        reset_at=(now + timedelta(hours=3)).isoformat(),
+        routing_state=RoutingState.NORMAL,
+        updated_at=now.isoformat(),
+    )
+    object.__setattr__(s_codex, "freshness", "FRESH")
+    s_opencode = QuotaState(
+        provider="opencode",
+        pool="opencode-go",
+        remaining_percent=80.0,
+        reset_at=(now + timedelta(hours=3)).isoformat(),
+        routing_state=RoutingState.NORMAL,
+        updated_at=now.isoformat(),
+    )
+    object.__setattr__(s_opencode, "freshness", "FRESH")
+    states = [s_codex, s_opencode]
+
+    # model_family_include
+    req_include = JobRequirements(role=JobRole.WORKER, model_family_include=("deepseek",))
+    res_codex = admit(
+        cand_codex, now=now, policy=policy, quota_states=states, requirements=req_include
+    ).reason
+    assert res_codex == "MODEL_FAMILY_NOT_INCLUDED"
+    assert admit(
+        cand_opencode, now=now, policy=policy, quota_states=states, requirements=req_include
+    ).admitted is True
+
+    # model_family_exclude
+    req_exclude = JobRequirements(role=JobRole.WORKER, model_family_exclude=("gpt",))
+    res_exclude = admit(
+        cand_codex, now=now, policy=policy, quota_states=states, requirements=req_exclude
+    ).reason
+    assert res_exclude == "MODEL_FAMILY_EXCLUDED"
+    assert admit(
+        cand_opencode, now=now, policy=policy, quota_states=states, requirements=req_exclude
+    ).admitted is True
+
+
+def test_admit_pool_mode_off() -> None:
+    """Covers: ADR-0002 D4 pool mode off."""
+    now = datetime(2026, 10, 14, 12, 0, tzinfo=UTC)
+    cand = _make_candidate()
+    policy = _make_policy(
+        postures={"codex": PostureRecord("codex", "A", ttl_days=30, verified_on="2026-10-01")},
+        pool_plans={
+            "chatgpt-plus": PoolPlan(
+                pool_id="chatgpt-plus",
+                members=(PoolMember(route="codex", multiplier=1.0),),
+                mode="OFF",
+            )
+        },
+    )
+    decision = admit(cand, now=now, policy=policy)
+    assert decision.admitted is False
+    assert decision.reason == POOL_OFF
+
+
+def test_admit_active_exclusion() -> None:
+    """Covers: ADR-0002 D4 active exclusions."""
+    now = datetime(2026, 10, 14, 12, 0, tzinfo=UTC)
+    cand = _make_candidate()
+    policy = _make_policy(
+        postures={"codex": PostureRecord("codex", "A", ttl_days=30, verified_on="2026-10-01")},
+        pool_plans={
+            "chatgpt-plus": PoolPlan(
+                pool_id="chatgpt-plus",
+                members=(PoolMember(route="codex", multiplier=1.0),),
+                mode="STRICT",
+            )
+        },
+    )
+    reset_iso = (now + timedelta(hours=4)).isoformat()
+    exclusion = QuotaState(
+        provider="codex",
+        pool="chatgpt-plus",
+        remaining_percent=0.0,
+        reset_at=reset_iso,
+        routing_state=RoutingState.NORMAL,
+        updated_at=now.isoformat(),
+    )
+    object.__setattr__(exclusion, "exclusion_id", "exc-123")
+    object.__setattr__(exclusion, "exclusion_until", reset_iso)
+    object.__setattr__(exclusion, "until_confidence", "EXACT")
+
+    decision = admit(cand, now=now, policy=policy, quota_states=[exclusion])
+    assert decision.admitted is False
+    assert decision.reason == QUOTA_EXCLUDED_UNTIL_RESET
+    assert decision.reset_at == reset_iso
+    assert decision.wait_confidence == "EXACT"
+
+
+def test_admit_overage_possible_requires_fresh_evidence() -> None:
+    """Covers: ADR-0002 D4 overage evidence rule."""
+    now = datetime(2026, 10, 14, 12, 0, tzinfo=UTC)
+    cand = _make_candidate()
+    policy = _make_policy(
+        postures={"codex": PostureRecord("codex", "A", ttl_days=30, verified_on="2026-10-01")},
+        pool_plans={
+            "chatgpt-plus": PoolPlan(
+                pool_id="chatgpt-plus",
+                members=(PoolMember(route="codex", multiplier=1.0),),
+                overage_possible=True,
+                windows=(Window(id="5h"),),
+            )
+        },
+    )
+
+    # 1. No evidence on overage_possible pool -> QUOTA_EVIDENCE_REQUIRED + needs_probe=True
+    d_no_evidence = admit(cand, now=now, policy=policy, quota_states=[], activate_overage=True)
+    assert d_no_evidence.admitted is False
+    assert d_no_evidence.reason == QUOTA_EVIDENCE_REQUIRED
+    assert d_no_evidence.needs_probe is True
+    assert d_no_evidence.probe_harness == "codex"
+
+    # 2. STALE evidence -> QUOTA_EVIDENCE_REQUIRED + needs_probe=True
+    stale_state = QuotaState(
+        provider="codex",
+        pool="chatgpt-plus",
+        remaining_percent=90.0,
+        reset_at=(now + timedelta(hours=1)).isoformat(),
+        routing_state=RoutingState.NORMAL,
+        updated_at=(now - timedelta(hours=2)).isoformat(),
+    )
+    object.__setattr__(stale_state, "freshness", "STALE")
+    d_stale = admit(
+        cand, now=now, policy=policy, quota_states=[stale_state], activate_overage=True
+    )
+    assert d_stale.admitted is False
+    assert d_stale.reason == QUOTA_EVIDENCE_REQUIRED
+    assert d_stale.needs_probe is True
+
+    # 3. FRESH evidence -> Admitted!
+    fresh_state = QuotaState(
+        provider="codex",
+        pool="chatgpt-plus",
+        remaining_percent=90.0,
+        reset_at=(now + timedelta(hours=1)).isoformat(),
+        routing_state=RoutingState.NORMAL,
+        updated_at=now.isoformat(),
+    )
+    object.__setattr__(fresh_state, "freshness", "FRESH")
+    d_fresh = admit(
+        cand, now=now, policy=policy, quota_states=[fresh_state], activate_overage=True
+    )
+    assert d_fresh.admitted is True
+
+
+def test_admit_red_line_and_projected_cost() -> None:
+    """Covers: ADR-0002 D4 red line and cost multiplier."""
+    now = datetime(2026, 10, 14, 12, 0, tzinfo=UTC)
+    cand = _make_candidate()
+    policy = _make_policy(
+        postures={"codex": PostureRecord("codex", "A", ttl_days=30, verified_on="2026-10-01")},
+        pool_plans={
+            "chatgpt-plus": PoolPlan(
+                pool_id="chatgpt-plus",
+                members=(PoolMember(route="codex", multiplier=2.0),),
+                windows=(Window(id="5h"),),
+                red_line_pct=15.0,
+                overage_possible=False,
+            )
+        },
+    )
+    states = [
+        QuotaState(
+            provider="codex",
+            pool="chatgpt-plus",
+            remaining_percent=30.0,
+            reset_at=(now + timedelta(hours=3)).isoformat(),
+            routing_state=RoutingState.NORMAL,
+            updated_at=now.isoformat(),
+        )
+    ]
+    d_denied = admit(cand, now=now, policy=policy, quota_states=states)
+    assert d_denied.admitted is False
+    assert d_denied.reason == "RED_LINE_5H"
+    assert d_denied.cost_estimate == pytest.approx(16.0)
+    assert d_denied.multiplier == pytest.approx(2.0)
+
+    states[0] = QuotaState(
+        provider="codex",
+        pool="chatgpt-plus",
+        remaining_percent=40.0,
+        reset_at=(now + timedelta(hours=3)).isoformat(),
+        routing_state=RoutingState.NORMAL,
+        updated_at=now.isoformat(),
+    )
+    d_admitted = admit(cand, now=now, policy=policy, quota_states=states)
+    assert d_admitted.admitted is True
+
+
+def test_admit_reserves_time_of_day_and_tz() -> None:
+    """Covers: ADR-0002 D5 time-of-day reserves."""
+    now_in_reserve = datetime(2026, 10, 14, 14, 0, tzinfo=UTC)
+    now_outside_reserve = datetime(2026, 10, 14, 20, 0, tzinfo=UTC)
+
+    reserves = (
+        Reserve(
+            pool="chatgpt-plus",
+            window="5h",
+            pct=10.0,
+            hours="09:00-17:00",
+            days=("Mon", "Tue", "Wed", "Thu", "Fri"),
+            tz="UTC",
+        ),
+    )
+    policy = _make_policy(
+        postures={"codex": PostureRecord("codex", "A", ttl_days=30, verified_on="2026-10-01")},
+        pool_plans={
+            "chatgpt-plus": PoolPlan(
+                pool_id="chatgpt-plus",
+                members=(PoolMember(route="codex", multiplier=1.0),),
+                windows=(Window(id="5h"),),
+                red_line_pct=15.0,
+                overage_possible=False,
+            )
+        },
+        reserves=reserves,
+    )
+    assert reserve_pct("chatgpt-plus", "5h", now_in_reserve, policy) == 10.0
+    assert reserve_pct("chatgpt-plus", "5h", now_outside_reserve, policy) == 0.0
+
+    cand = _make_candidate()
+    states = [
+        QuotaState(
+            provider="codex",
+            pool="chatgpt-plus",
+            remaining_percent=30.0,
+            reset_at=(now_in_reserve + timedelta(hours=2)).isoformat(),
+            routing_state=RoutingState.NORMAL,
+            updated_at=now_in_reserve.isoformat(),
+        )
+    ]
+    d_in = admit(cand, now=now_in_reserve, policy=policy, quota_states=states)
+    assert d_in.admitted is False
+    assert d_in.reason == "RED_LINE_5H"
+
+    d_out = admit(cand, now=now_outside_reserve, policy=policy, quota_states=states)
+    assert d_out.admitted is True
+
+
+def test_admit_concurrency_limits() -> None:
+    """Covers: ADR-0002 D4 concurrency limits."""
+    now = datetime(2026, 10, 14, 12, 0, tzinfo=UTC)
+    cand = _make_candidate()
+    policy = _make_policy(
+        postures={"codex": PostureRecord("codex", "A", ttl_days=30, verified_on="2026-10-01")},
+        pool_plans={
+            "chatgpt-plus": PoolPlan(
+                pool_id="chatgpt-plus",
+                members=(PoolMember(route="codex", multiplier=1.0),),
+                max_concurrent=2,
+            )
+        },
+    )
+
+    d1 = admit(cand, now=now, policy=policy, running_counts={"chatgpt-plus": 1})
+    assert d1.admitted is True
+
+    d2 = admit(cand, now=now, policy=policy, running_counts={"chatgpt-plus": 2})
+    assert d2.admitted is False
+    assert d2.reason == "CONCURRENCY_LIMIT"
+
+    d_global = admit(cand, now=now, policy=policy, global_running=5, max_global_concurrent=5)
+    assert d_global.admitted is False
+    assert d_global.reason == "GLOBAL_CONCURRENCY_LIMIT"
+
+
+def test_admit_multiple_windows_binds_at_minimum_pace() -> None:
+    """Covers: ADR-0002 D7 multi-window binding pace."""
+    now = datetime(2026, 10, 14, 12, 0, tzinfo=UTC)
+    cand = _make_candidate()
+    policy = _make_policy(
+        postures={"codex": PostureRecord("codex", "A", ttl_days=30, verified_on="2026-10-01")},
+        pool_plans={
+            "chatgpt-plus": PoolPlan(
+                pool_id="chatgpt-plus",
+                members=(PoolMember(route="codex", multiplier=1.0),),
+                windows=(
+                    Window(id="5h"),
+                    Window(id="weekly"),
+                ),
+                red_line_pct=15.0,
+                overage_possible=False,
+            )
+        },
+    )
+
+    states = [
+        QuotaState(
+            provider="codex",
+            pool="chatgpt-plus",
+            remaining_percent=80.0,
+            reset_at=(now + timedelta(hours=3)).isoformat(),
+            routing_state=RoutingState.NORMAL,
+            updated_at=now.isoformat(),
+        ),
+        QuotaState(
+            provider="codex",
+            pool="chatgpt-plus",
+            remaining_percent=20.0,
+            reset_at=(now + timedelta(hours=50)).isoformat(),
+            routing_state=RoutingState.NORMAL,
+            updated_at=now.isoformat(),
+        ),
+    ]
+    object.__setattr__(states[0], "window_id", "5h")
+    object.__setattr__(states[1], "window_id", "weekly")
+
+    decision = admit(cand, now=now, policy=policy, quota_states=states)
+    assert decision.admitted is True
+    assert decision.binding_window == "weekly"
+    assert decision.score == pytest.approx(0.05)
