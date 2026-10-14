@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from saberops.capacity.cost_model import CostState, SizeBucket, cost_estimate
 from saberops.capacity.exclusions import model_scope_matches, parse_iso
+from saberops.capacity.ledger import PoolDraw
 from saberops.control_plane import (
     GOVERNED_INSTRUCTIONS_UNSUPPORTED,
     PROVIDER_DISABLED,
@@ -121,6 +122,8 @@ class AdmissionDecision:
     red_line_pct: float | None = None
     reserve_pct: float | None = None
     multiplier: float = 1.0
+    drawn_pools: tuple[str, ...] = ()
+    draws: tuple[PoolDraw, ...] = ()
     details: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -343,6 +346,7 @@ def admit(
     running_counts: Mapping[str, int] | None = None,
     global_running: int = 0,
     max_global_concurrent: int | None = None,
+    reservations: Mapping[tuple[str, str], float] | None = None,
     explicit_override: bool = False,
     reserve_override: bool = False,
     binding_pool_id: str | None = None,
@@ -708,6 +712,15 @@ def admit(
             if remaining is None:
                 remaining = 100.0
 
+            # Subtract outstanding charges (reservations / settled) since observation (F2)
+            prior_charges = 0.0
+            if reservations is not None:
+                prior_charges = float(reservations.get((pool_id, win.id), 0.0))
+                if (pool_id, win.id) not in reservations and (pool_id, "ALL") in reservations:
+                    prior_charges = float(reservations.get((pool_id, "ALL"), 0.0))
+
+            remaining = max(0.0, remaining - prior_charges)
+
             # Cost estimate
             cost_pct = _get_cost_estimate(candidate, pool_id, win.id, size_bucket, cost_states)
             projected_cost = cost_pct * multiplier
@@ -757,6 +770,27 @@ def admit(
                 multiplier,
             ))
 
+    # Build draws for all drawn pools (F2)
+    all_draws: list[PoolDraw] = []
+    for pid in drawn_pools:
+        mult_val = 1.0
+        pp_plan = (
+            effective_policy.plans.pool_plans.get(pid)
+            if effective_policy and effective_policy.plans
+            else None
+        )
+        if pp_plan and pp_plan.members:
+            for member in pp_plan.members:
+                if _member_matches(member.route, candidate):
+                    mult_val = float(member.multiplier)
+                    break
+        pp_windows = pp_plan.windows if pp_plan and pp_plan.windows else ()
+        if not pp_windows:
+            all_draws.append(PoolDraw(pool_id=pid, window_id="ALL", multiplier=mult_val))
+        else:
+            for w in pp_windows:
+                all_draws.append(PoolDraw(pool_id=pid, window_id=w.id, multiplier=mult_val))
+
     # All pools and windows admitted! Score is the minimum pace across all windows
     if not window_scores:
         return AdmissionDecision(
@@ -768,6 +802,8 @@ def admit(
             reserve_pct=0.0,
             cost_estimate=5.0,
             multiplier=1.0,
+            drawn_pools=tuple(drawn_pools),
+            draws=tuple(all_draws),
         )
 
     # Minimum pace binds
@@ -794,6 +830,8 @@ def admit(
         reserve_pct=bind_res,
         cost_estimate=bind_cost,
         multiplier=bind_mult,
+        drawn_pools=tuple(drawn_pools),
+        draws=tuple(all_draws),
     )
 
 
@@ -807,6 +845,10 @@ def order_candidates_for_role(
     quota_states: Iterable[QuotaState] = (),
     requirements: JobRequirements | None = None,
     db: Any | None = None,
+    running_counts: Mapping[str, int] | None = None,
+    global_running: int = 0,
+    max_global_concurrent: int | None = None,
+    reservations: Mapping[tuple[str, str], float] | None = None,
 ) -> list[WorkerCandidate]:
     """Order candidates within fallback groups by D7 intra-group pacing score.
 
@@ -845,6 +887,10 @@ def order_candidates_for_role(
                 quota_states=quota_states,
                 requirements=requirements,
                 db=db,
+                running_counts=running_counts,
+                global_running=global_running,
+                max_global_concurrent=max_global_concurrent,
+                reservations=reservations,
             )
             for cand in group_cands
         ]

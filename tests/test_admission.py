@@ -717,3 +717,103 @@ def test_posture_first_prevents_unconfigured_fail_open() -> None:
     assert dec_ver.admitted is True
     assert dec_ver.reason == "unconfigured"
 
+
+def test_admit_subtracts_reservations_before_redline() -> None:
+    """Covers: ADR-0002 D5/D7/F2 admit subtracts outstanding reservations before red-line check."""
+    now = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
+    cand = _make_candidate()
+    policy = _make_policy(
+        postures={"codex": PostureRecord("codex", "A", ttl_days=30, verified_on="2026-10-14")},
+        pool_plans={
+            "chatgpt-plus": PoolPlan(
+                pool_id="chatgpt-plus",
+                members=(PoolMember(route="codex", multiplier=1.0),),
+                windows=(Window(id="5h"),),
+                red_line_pct=20.0,
+                overage_possible=False,
+            )
+        },
+    )
+    # Observation says 50% remaining
+    state = QuotaState(
+        provider="codex",
+        pool="chatgpt-plus",
+        remaining_percent=50.0,
+        reset_at=(now + timedelta(hours=3)).isoformat(),
+        routing_state=RoutingState.NORMAL,
+        updated_at=now.isoformat(),
+    )
+    object.__setattr__(state, "window_id", "5h")
+
+    # Without reservations, 50% remaining - 5% cost = 45% >= 20% red-line: ADMITS
+    dec_no_res = admit(cand, now=now, policy=policy, quota_states=[state])
+    assert dec_no_res.admitted is True
+
+    # With 30% prior reservations: effective remaining is 50 - 30 = 20%.
+    # 20% - 5% cost = 15% < 20% red-line: DENIED with red-line reason!
+    dec_with_res = admit(
+        cand,
+        now=now,
+        policy=policy,
+        quota_states=[state],
+        reservations={("chatgpt-plus", "5h"): 30.0},
+    )
+    assert dec_with_res.admitted is False
+    assert dec_with_res.reason == "RED_LINE_5H"
+
+
+def test_admit_computes_draws_for_all_drawn_pools() -> None:
+    """Covers: ADR-0002 D1/D7/F2 route drawing multiple pools records draws for all pools."""
+    now = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
+    cand = _make_candidate("opencode", "gpt-5")
+    policy = _make_policy(
+        postures={
+            "opencode": PostureRecord("opencode", "A", ttl_days=30, verified_on="2026-10-14")
+        },
+        pool_plans={
+            "chatgpt-plus": PoolPlan(
+                pool_id="chatgpt-plus",
+                members=(PoolMember(route="opencode", multiplier=1.0),),
+                windows=(Window(id="5h"),),
+                red_line_pct=10.0,
+                overage_possible=False,
+            ),
+            "opencode-go": PoolPlan(
+                pool_id="opencode-go",
+                members=(PoolMember(route="opencode", multiplier=2.0),),
+                windows=(Window(id="daily"),),
+                red_line_pct=10.0,
+                overage_possible=False,
+            ),
+        },
+    )
+    states = [
+        QuotaState(
+            "opencode",
+            "chatgpt-plus",
+            80.0,
+            (now + timedelta(hours=3)).isoformat(),
+            RoutingState.NORMAL,
+            now.isoformat(),
+        ),
+        QuotaState(
+            "opencode",
+            "opencode-go",
+            90.0,
+            (now + timedelta(hours=20)).isoformat(),
+            RoutingState.NORMAL,
+            now.isoformat(),
+        ),
+    ]
+    object.__setattr__(states[0], "window_id", "5h")
+    object.__setattr__(states[1], "window_id", "daily")
+
+    dec = admit(cand, now=now, policy=policy, quota_states=states)
+    assert dec.admitted is True
+    assert set(dec.drawn_pools) == {"chatgpt-plus", "opencode-go"}
+    assert len(dec.draws) == 2
+    draw_map = {(d.pool_id, d.window_id): d.multiplier for d in dec.draws}
+    assert draw_map[("chatgpt-plus", "5h")] == 1.0
+    assert draw_map[("opencode-go", "daily")] == 2.0
+
+

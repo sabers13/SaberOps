@@ -589,3 +589,61 @@ def test_scheduler_monotonicity_lower_capacity_never_admits_more() -> None:
     for i in range(len(dispatched_counts) - 1):
         assert dispatched_counts[i] >= dispatched_counts[i + 1]
 
+
+def test_schedule_simulates_reservations_across_batch() -> None:
+    """Covers: ADR-0002 D5/D7/F2 batch simulated reservations prevent over-admitting."""
+    c1 = _cand("codex", "gpt-5.6-sol")
+    snapshot = _make_snapshot(((c1,),))
+    pool = _make_pool_plan("chatgpt-plus", [("codex", 1.0)], red_line_pct=15.0)
+    policy = _make_policy({"chatgpt-plus": pool})
+    reset = (_NOW + timedelta(hours=2)).isoformat()
+
+    # Remaining is 35%. Red line is 15%. Cost per job is 8.0%.
+    # Job 0: 35 - 8 = 27 >= 15 -> dispatches.
+    # Job 1: Simulated remaining becomes 35 - 8 = 27. 27 - 8 = 19 >= 15 -> dispatches.
+    # Job 2: Simulated remaining becomes 35 - 16 = 19. 19 - 8 = 11 < 15 -> must WAIT!
+    q = _make_quota_state(
+        provider="codex", pool="chatgpt-plus", remaining_percent=35.0, reset_at=reset
+    )
+    jobs = [_job(f"j{i}", created_at=_NOW - timedelta(minutes=10 - i)) for i in range(3)]
+
+    decisions = schedule(
+        now=_NOW,
+        queued=jobs,
+        routing_snapshot=snapshot,
+        policy=policy,
+        quota_states=[q],
+    )
+    assert len(decisions) == 3
+    assert isinstance(decisions[0], DispatchDecision)
+    assert isinstance(decisions[1], DispatchDecision)
+    assert isinstance(decisions[2], WaitDecision)
+    assert decisions[2].reason == WaitingReason.NO_CAPACITY.value
+
+
+def test_schedule_respects_running_counts() -> None:
+    """Covers: ADR-0002 D7/F3 running counts per pool enforce max_concurrent."""
+    c1 = _cand("codex", "gpt-5.6-sol")
+    snapshot = _make_snapshot(((c1,),))
+    pool = _make_pool_plan("chatgpt-plus", [("codex", 1.0)], max_concurrent=1)
+    policy = _make_policy({"chatgpt-plus": pool})
+    reset = (_NOW + timedelta(hours=2)).isoformat()
+    q = _make_quota_state(
+        provider="codex", pool="chatgpt-plus", remaining_percent=100.0, reset_at=reset
+    )
+    job = _job("j1")
+
+    # When 1 job is already running on chatgpt-plus, slot is full
+    decisions = schedule(
+        now=_NOW,
+        queued=[job],
+        routing_snapshot=snapshot,
+        policy=policy,
+        quota_states=[q],
+        running_counts={"chatgpt-plus": 1},
+    )
+    assert len(decisions) == 1
+    assert isinstance(decisions[0], WaitDecision)
+    assert decisions[0].reason == WaitingReason.CONCURRENCY.value
+
+

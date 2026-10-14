@@ -24,6 +24,7 @@ from saberops.capacity.cost_model import CostState
 from saberops.capacity.exclusions import parse_iso
 from saberops.capacity.ledger import (
     PoolDraw,
+    post_observation_charges,
     release,
     reserve,
     settle,
@@ -386,6 +387,25 @@ def scheduler_tick(
     effective_pol = policy or load_control_plane_policy()
     quotas = effective_quota_states(db, now=moment)
     cost_states = _load_all_cost_states(db)
+    charges = post_observation_charges(db, now=moment)
+
+    # Derive real running counts per pool from running jobs (F3)
+    running_counts: dict[str, int] = {}
+    for rj in running_jobs:
+        if rj.current_run_id:
+            try:
+                owner = getattr(db, "owner_db", db)
+                with owner._get_connection() as conn:
+                    rows = conn.execute(
+                        "SELECT DISTINCT pool_id FROM capacity_reservations"
+                        " WHERE run_id = ? AND state = 'RESERVED'",
+                        (rj.current_run_id,),
+                    ).fetchall()
+                    for r in rows:
+                        p = str(r["pool_id"])
+                        running_counts[p] = running_counts.get(p, 0) + 1
+            except Exception:
+                pass
 
     # 3. Pure deterministic schedule evaluation
     decisions = schedule(
@@ -396,6 +416,8 @@ def scheduler_tick(
         policy=effective_pol,
         quota_states=quotas,
         cost_states=cost_states,
+        running_counts=running_counts,
+        reservations=charges,
         global_slot_limit=global_slot_limit,
         background_min_pace=background_min_pace,
     )
@@ -452,20 +474,25 @@ def scheduler_tick(
             except (JobConflictError, JobTransitionError, JobNotFoundError):
                 continue
 
-            # Step B: Idempotent reservation in ledger
-            draws: list[PoolDraw] = []
-            target_pool_ids: list[str] = [dec.pool_id] if dec.pool_id else []
-            mult = float(dec.multiplier or 1.0)
-            for pid in target_pool_ids:
-                pp = pool_policies.get(pid)
-                windows = pp.windows if pp else ()
-                if not windows:
-                    draws.append(PoolDraw(pool_id=pid, window_id="ALL", multiplier=mult))
-                else:
-                    for w in windows:
-                        draws.append(
-                            PoolDraw(pool_id=pid, window_id=w.id, multiplier=mult)
-                        )
+            # Step B: Idempotent reservation in ledger across ALL drawn pools (F2)
+            draws: list[PoolDraw] = list(dec.draws) if dec.draws else []
+            if not draws:
+                target_pool_ids = (
+                    list(dec.drawn_pools)
+                    if dec.drawn_pools
+                    else ([dec.pool_id] if dec.pool_id else [])
+                )
+                mult = float(dec.multiplier or 1.0)
+                for pid in target_pool_ids:
+                    pp = pool_policies.get(pid)
+                    windows = pp.windows if pp else ()
+                    if not windows:
+                        draws.append(PoolDraw(pool_id=pid, window_id="ALL", multiplier=mult))
+                    else:
+                        for w in windows:
+                            draws.append(
+                                PoolDraw(pool_id=pid, window_id=w.id, multiplier=mult)
+                            )
 
             route_str = f"{dec.candidate.provider}/{dec.candidate.model}"
             bucket = dec.job.requirements.size_hint or "M"

@@ -729,6 +729,50 @@ def snapshot(db: Database, now: datetime) -> list[LedgerEstimate]:
     return out
 
 
+def post_observation_charges(
+    db: Database, now: datetime
+) -> dict[tuple[str, str], float]:
+    """Return map of (pool_id, window_id) -> total cost_pct of counted reservations/settled rows."""
+    moment = _utcnow(now)
+    charges: dict[tuple[str, str], float] = {}
+    try:
+        with _read_connection(db) as conn:
+            keys: set[tuple[str, str]] = set()
+            for row in conn.execute(
+                "SELECT DISTINCT pool_id, window_id FROM capacity_observations"
+            ).fetchall():
+                keys.add((str(row["pool_id"]), str(row["window_id"])))
+            for row in conn.execute(
+                "SELECT DISTINCT pool_id, window_id FROM capacity_reservations"
+                " WHERE state IN ('RESERVED', 'SETTLED')"
+            ).fetchall():
+                keys.add((str(row["pool_id"]), str(row["window_id"])))
+
+            for pool, window in keys:
+                obs = _latest_observation(conn, pool, window)
+                if obs is None and window != "ALL":
+                    obs = _latest_observation(conn, pool, "ALL")
+                if obs is not None:
+                    obs_reset_raw = obs.get("reset_at")
+                    obs_reset = (
+                        parse_iso(obs_reset_raw)
+                        if isinstance(obs_reset_raw, str)
+                        else None
+                    )
+                    if obs_reset is not None and moment >= obs_reset:
+                        cutoff = obs_reset.isoformat()
+                    else:
+                        cutoff = str(obs.get("observed_at") or "")
+                else:
+                    cutoff = ""
+                counted = _counted_reservations(conn, pool, window, cutoff)
+                spent = sum(float(r.get("cost_pct") or 0.0) for r in counted)
+                charges[(pool, window)] = spent
+    except sqlite3.OperationalError:
+        pass
+    return charges
+
+
 __all__ = [
     "LedgerEstimate",
     "PoolDraw",
@@ -743,4 +787,5 @@ __all__ = [
     "release",
     "estimate",
     "snapshot",
+    "post_observation_charges",
 ]

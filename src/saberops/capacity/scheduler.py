@@ -14,9 +14,14 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from saberops.capacity.admission import AdmissionDecision, admit
+from saberops.capacity.admission import (
+    AdmissionDecision,
+    _get_cost_estimate,
+    admit,
+)
 from saberops.capacity.cost_model import CostState, SizeBucket
 from saberops.capacity.exclusions import parse_iso
+from saberops.capacity.ledger import PoolDraw
 from saberops.control_plane.policy import ControlPlanePolicy
 from saberops.jobs.models import (
     DISPATCHABLE_ROLES,
@@ -50,6 +55,8 @@ class DispatchDecision:
     score: float
     cost_estimate: float
     multiplier: float = 1.0
+    drawn_pools: tuple[str, ...] = ()
+    draws: tuple[PoolDraw, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -111,6 +118,8 @@ def schedule(
     policy: ControlPlanePolicy | None = None,
     quota_states: Iterable[QuotaState] = (),
     cost_states: Mapping[tuple[str, str, str, str], CostState] | None = None,
+    running_counts: Mapping[str, int] | None = None,
+    reservations: Mapping[tuple[str, str], float] | None = None,
     global_slot_limit: int | None = None,
     background_min_pace: float = 4.0,
 ) -> list[SchedulerDecision]:
@@ -128,8 +137,9 @@ def schedule(
     decisions: list[SchedulerDecision] = []
     probes_needed: dict[str, ProbeDecision] = {}
 
-    # Track simulated concurrency across the scheduling batch
-    running_counts: dict[str, int] = {}
+    # Track simulated concurrency and reservations across the scheduling batch (F2 & F3)
+    simulated_running: dict[str, int] = dict(running_counts or {})
+    simulated_reservations: dict[tuple[str, str], float] = dict(reservations or {})
     global_running = len(running)
 
     # Sort queued jobs according to D7 deterministic priority order
@@ -200,9 +210,10 @@ def schedule(
                     requirements=job.requirements,
                     size_bucket=size_bucket,
                     cost_states=cost_states,
-                    running_counts=running_counts,
+                    running_counts=simulated_running,
                     global_running=global_running,
                     max_global_concurrent=global_slot_limit,
+                    reservations=simulated_reservations,
                 )
                 for cand in group
             ]
@@ -247,6 +258,23 @@ def schedule(
                         -(d.cost_estimate or 0.0),
                     ),
                 )
+
+                # Increment simulated running count for ALL drawn pools (F3)
+                all_drawn = best.drawn_pools or ((best.pool_id,) if best.pool_id else ())
+                for pid in all_drawn:
+                    simulated_running[pid] = simulated_running.get(pid, 0) + 1
+                global_running += 1
+
+                # Decrement budget across ALL drawn pools and windows (F2)
+                for draw in best.draws:
+                    cost = _get_cost_estimate(
+                        best.candidate, draw.pool_id, draw.window_id, size_bucket, cost_states
+                    ) * float(draw.multiplier)
+                    p_key = (draw.pool_id, draw.window_id)
+                    simulated_reservations[p_key] = (
+                        simulated_reservations.get(p_key, 0.0) + cost
+                    )
+
                 decisions.append(
                     DispatchDecision(
                         job=job,
@@ -256,11 +284,10 @@ def schedule(
                         score=best.score or 0.0,
                         cost_estimate=best.cost_estimate or 0.0,
                         multiplier=best.multiplier,
+                        drawn_pools=best.drawn_pools,
+                        draws=best.draws,
                     )
                 )
-                if best.pool_id:
-                    running_counts[best.pool_id] = running_counts.get(best.pool_id, 0) + 1
-                global_running += 1
                 job_dispatched = True
                 break
 
