@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+{# SaberOps first-run UI assets (Step 019 early slice, UI-1).
+   Reusable, route-ready Jinja2 template. Renders with ZERO context today:
+   every dynamic region below is a static empty/loading/blocked state, and
+   every action that would need the authoritative backend is rendered
+   disabled and labelled preview-only (data-preview-action). Only local
+   demo navigation (data-nav) is enabled, and first_run.js changes nothing
+   but this page's own visibility. No credential fields, no network calls. #}
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>First run · SaberOps</title>
+  <link rel="stylesheet" href="/static/css/console-v2.css">
+  <link rel="stylesheet" href="/static/css/first_run.css">
+  <script>
+    // Restore appearance before paint; mirrors dashboard.html. Reads only
+    // the theme key; never credentials or provider state.
+    try {
+      var soTheme = window.localStorage.getItem("saberops-theme");
+      if (soTheme === "dark" || soTheme === "light") {
+        document.documentElement.setAttribute("data-theme", soTheme);
+      } else if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) {
+        document.documentElement.setAttribute("data-theme", "dark");
+      }
+    } catch (_soErr) { /* Browser storage may be unavailable. */ }
+  </script>
+</head>
+<body>
+  <a class="skip-link" href="#fr-main">Skip to content</a>
+  <div class="fr-preview-banner" role="banner">
+    <span class="fr-preview-tag">PREVIEW ONLY</span>
+    <span>First-run walkthrough assets — not connected to a backend. No jobs run, no credentials accepted, nothing is stored or transmitted.</span>
+  </div>
+  <div class="fr-wrap">
+    <header class="fr-head">
+      <div>
+        <p class="eyebrow muted">SaberOps · first run</p>
+        <h1>First-run setup</h1>
+        <p class="muted">Work through each step in order. A step that is red
+        blocks <strong>Continue</strong> and names the exact fix; nothing
+        proceeds silently. Steps marked <strong>OWNER</strong> need the owner
+        at this machine — never a chat, message, or remote approval.</p>
+      </div>
+    </header>
+    <nav class="fr-steps" aria-label="First-run steps" id="fr-stepnav">
+      <ol>
+        <li><a href="#fr-step-1" data-step-link="1">1 · Install</a></li>
+        <li><a href="#fr-step-2" data-step-link="2">2 · Providers</a></li>
+        <li><a href="#fr-step-3" data-step-link="3">3 · Models</a></li>
+        <li><a href="#fr-step-4" data-step-link="4">4 · Posture</a></li>
+        <li><a href="#fr-step-5" data-step-link="5">5 · Routing</a></li>
+        <li><a href="#fr-step-6" data-step-link="6">6 · Project</a></li>
+        <li><a href="#fr-step-7" data-step-link="7">7 · Plan</a></li>
+        <li><a href="#fr-step-8" data-step-link="8">8 · Readiness</a></li>
+        <li><a href="#fr-step-9" data-step-link="9">9 · Monitor</a></li>
+        <li><a href="#fr-step-10" data-step-link="10">10 · Accept</a></li>
+      </ol>
+    </nav>
+    <p class="fr-status" role="status" id="fr-status" aria-live="polite">Preview ready. Step 1 of 10. No live backend.</p>
+    <main id="fr-main" class="fr-main">
+
+      <!-- 1 · Install & first launch -->
+      <section class="fr-card" id="fr-step-1" data-fr-step="1" aria-labelledby="fr-h1" tabindex="-1">
+        <h2 id="fr-h1">1 · Install &amp; first launch</h2>
+        <p>Fresh installs land here. Diagnostics are local-only; nothing here contacts the network.</p>
+        <table class="fr-table">
+          <caption class="sr-only">Readiness diagnostics (empty state)</caption>
+          <thead><tr><th scope="col">Check</th><th scope="col">State</th></tr></thead>
+          <tbody>
+            <tr><td>App launch + local page</td><td><span class="fr-pill" data-state="empty">EMPTY · awaiting first check</span></td></tr>
+            <tr><td>Official provider CLI presence</td><td><span class="fr-pill" data-state="loading" role="status">LOADING · probing locally…</span></td></tr>
+            <tr><td>Disk floor (10 GB and 10%)</td><td><span class="fr-pill" data-state="empty">EMPTY · awaiting first check</span></td></tr>
+          </tbody>
+        </table>
+        <div class="fr-blocked" role="note">
+          <strong>Blocked until green (fail-closed):</strong> Continue stays
+          disabled until every diagnostic passes. The fix hint names the
+          command to run in your own terminal (for example,
+          <code>orch doctor</code>); this page never auto-skips a red check.
+        </div>
+        <details class="fr-details"><summary>No runs yet (empty state)</summary>
+          <p class="muted">The dashboard list reads “No runs yet” until the first job is submitted.</p>
+        </details>
+        <p class="fr-actions">
+          <button type="button" data-nav="2">Continue to providers</button>
+          <span class="fr-preview-note">Local navigation only — no backend call.</span>
+        </p>
+      </section>
+
+      <!-- 2 · Connect providers -->
+      <section class="fr-card" id="fr-step-2" data-fr-step="2" aria-labelledby="fr-h2" tabindex="-1" hidden>
+        <h2 id="fr-h2">2 · Connect providers <span class="fr-pill" data-state="info">external handoff</span></h2>
+        <p>Vendor logins always happen on the vendor’s own site or in your own
+        terminal. This page has no password, token, or secret field and never
+        asks for one — a connection without a verified login stays
+        <strong>NOT_AUTHENTICATED</strong> and is excluded from routing.</p>
+        <table class="fr-table">
+          <caption class="sr-only">Provider connections (empty state)</caption>
+          <thead><tr><th scope="col">Connection</th><th scope="col">State</th><th scope="col">Action</th></tr></thead>
+          <tbody>
+            <tr><td colspan="3" class="muted">No providers connected yet. Add one with the vendor’s official login in your terminal, then recheck.</td></tr>
+          </tbody>
+        </table>
+        <template id="fr-connection-row-example">
+          <!-- Fictitious row shape for future backend wiring. NOT a real
+               connection; never rendered until the authoritative service
+               supplies one. -->
+          <tr data-fictitious="true">
+            <td><span data-field="name">Example provider (illustrative — not a real connection)</span></td>
+            <td><span class="fr-pill" data-state="blocked">NOT_AUTHENTICATED · excluded from routing</span></td>
+            <td><span class="muted">Run the vendor’s official login in your terminal, then Recheck.</span></td>
+          </tr>
+        </template>
+        <div class="fr-blocked" role="note">
+          <strong>Handoff, not capture:</strong> the login act is yours, on the
+          vendor’s surface, attended. Pasting a secret here is impossible by
+          construction — there is no field for it.
+        </div>
+        <p class="fr-actions">
+          <button type="button" data-preview-action disabled aria-disabled="true" aria-describedby="fr-prev-note">Recheck connections (preview only — disabled)</button>
+          <button type="button" data-nav="1">Back</button>
+          <button type="button" data-nav="3">Continue to models</button>
+        </p>
+      </section>
+
+      <!-- 3 · Discover models -->
+      <section class="fr-card" id="fr-step-3" data-fr-step="3" aria-labelledby="fr-h3" tabindex="-1" hidden>
+        <h2 id="fr-h3">3 · Discover models: listed vs executable</h2>
+        <p><strong>Listed</strong> means the vendor enumerates the model.
+        <strong>Executable</strong> (<span class="fr-pill" data-state="ok">SUPPORTED</span>)
+        means an exact binding resolved — only those may enter automatic
+        routing. <span class="fr-pill" data-state="warn">UNKNOWN</span> stays
+        out of auto-routing; unparseable output yields no IDs, never invented ones.</p>
+        <table class="fr-table">
+          <caption class="sr-only">Model catalog (empty state)</caption>
+          <thead><tr><th scope="col">Model</th><th scope="col">Source</th><th scope="col">Execution</th></tr></thead>
+          <tbody>
+            <tr><td colspan="3" class="muted">No catalog yet — connect a provider first, then refresh. A failed refresh keeps the last catalog and marks it stale; it never erases saved connections.</td></tr>
+          </tbody>
+        </table>
+        <template id="fr-model-row-example">
+          <tr data-fictitious="true">
+            <td><span data-field="model">example-model (illustrative — not a real model)</span></td>
+            <td><span data-field="source">DISCOVERED</span></td>
+            <td><span class="fr-pill" data-state="warn">UNKNOWN — kept out of auto-routing</span></td>
+          </tr>
+        </template>
+        <p class="fr-actions">
+          <button type="button" data-preview-action disabled aria-disabled="true" aria-describedby="fr-prev-note">Refresh catalog (preview only — disabled)</button>
+          <button type="button" data-nav="2">Back</button>
+          <button type="button" data-nav="4">Continue to posture</button>
+        </p>
+      </section>
+
+      <!-- 4 · Posture attestation -->
+      <section class="fr-card" id="fr-step-4" data-fr-step="4" aria-labelledby="fr-h4" tabindex="-1" hidden>
+        <h2 id="fr-h4">4 · Posture attestation <span class="fr-pill" data-state="owner">OWNER</span></h2>
+        <p>Billing class per route. Missing or expired verification blocks the
+        route everywhere — there is no override.</p>
+        <div class="fr-blocked" role="alert">
+          <strong>POSTURE_UNVERIFIED — blocking:</strong> no route is verified
+          yet, so every routing picker on step 5 is disabled. Verify with
+          <code>orch posture verify</code> or the local approve control once
+          the backend is wired.
+        </div>
+        <table class="fr-table">
+          <caption class="sr-only">Billing posture (empty state)</caption>
+          <thead><tr><th scope="col">Route</th><th scope="col">Class</th><th scope="col">Verified</th></tr></thead>
+          <tbody>
+            <tr><td colspan="3" class="muted">No routes yet. Verified routes list their class and verification date here.</td></tr>
+          </tbody>
+        </table>
+        <p>
+          <label class="fr-check" for="fr-attest">
+            <input type="checkbox" id="fr-attest">
+            I (owner) attest I checked the vendor policy page for the routes above.
+          </label>
+        </p>
+        <p class="fr-actions">
+          <button type="button" class="primary" data-preview-action disabled aria-disabled="true" aria-describedby="fr-prev-note">Attest (preview only — disabled, OWNER)</button>
+          <button type="button" data-nav="3">Back</button>
+          <button type="button" data-nav="5">Continue to routing</button>
+        </p>
+      </section>
+
+      <!-- 5 · Role routing + explicit Orchestrator -->
+      <section class="fr-card" id="fr-step-5" data-fr-step="5" aria-labelledby="fr-h5" tabindex="-1" hidden>
+        <h2 id="fr-h5">5 · Role routing + explicit Orchestrator <span class="fr-pill" data-state="owner">OWNER</span></h2>
+        <div class="fr-grid">
+          <div>
+            <label class="fr-field" for="fr-worker">Worker primary
+              <select id="fr-worker" disabled aria-describedby="fr-prev-note">
+                <option>No verified routes yet — connect, discover, verify first</option>
+              </select>
+            </label>
+            <label class="fr-field" for="fr-reviewer">Reviewer
+              <select id="fr-reviewer" disabled aria-describedby="fr-prev-note">
+                <option>No verified routes yet</option>
+              </select>
+            </label>
+          </div>
+          <div>
+            <label class="fr-field" for="fr-integrator">Integrator
+              <select id="fr-integrator" disabled aria-describedby="fr-prev-note">
+                <option>No verified routes yet</option>
+              </select>
+            </label>
+            <label class="fr-field" for="fr-surgeon">Surgeon
+              <select id="fr-surgeon" disabled aria-describedby="fr-prev-note">
+                <option>No verified routes yet</option>
+              </select>
+            </label>
+          </div>
+        </div>
+        <fieldset class="fr-fieldset">
+          <legend><strong>Orchestrator — explicit choice required (no default)</strong></legend>
+          <p class="muted">The planner is never engine-dispatched. Pick one explicitly; the plan cannot start until you do.</p>
+          <label class="fr-check" for="fr-orch-a">
+            <input type="radio" id="fr-orch-a" name="fr-orchestrator" value="external-chat">
+            (A) External chat Orchestrator — plans from a chat session; the engine never launches it.
+          </label>
+          <label class="fr-check" for="fr-orch-b">
+            <input type="radio" id="fr-orch-b" name="fr-orchestrator" value="engine-session">
+            (B) Engine-launched session bound to the ORCHESTRATOR role — no worktree, hermetic environment, no policy powers.
+          </label>
+        </fieldset>
+        <p class="fr-actions">
+          <button type="button" class="primary" data-preview-action disabled aria-disabled="true" aria-describedby="fr-prev-note">Save routing (preview only — disabled, OWNER)</button>
+          <button type="button" data-nav="4">Back</button>
+          <button type="button" data-nav="6">Continue to project</button>
+        </p>
+      </section>
+
+      <!-- 6 · Project setup -->
+      <section class="fr-card" id="fr-step-6" data-fr-step="6" aria-labelledby="fr-h6" tabindex="-1" hidden>
+        <h2 id="fr-h6">6 · Project setup</h2>
+        <label class="fr-field" for="fr-project">Project
+          <select id="fr-project" disabled aria-describedby="fr-prev-note">
+            <option>No projects registered yet</option>
+          </select>
+        </label>
+        <details class="fr-details"><summary>Plan registration rule</summary>
+          <p class="muted">One active plan per project. A repo changed outside
+          SaberOps forces re-verification before any wave starts; until then
+          only single-job submit is offered, never a wave.</p>
+        </details>
+        <p class="fr-actions">
+          <button type="button" data-preview-action disabled aria-disabled="true" aria-describedby="fr-prev-note">Register project (preview only — disabled)</button>
+          <button type="button" data-nav="5">Back</button>
+          <button type="button" data-nav="7">Continue to plan</button>
+        </p>
+      </section>
+
+      <!-- 7 · Plan propose → owner approve -->
+      <section class="fr-card" id="fr-step-7" data-fr-step="7" aria-labelledby="fr-h7" tabindex="-1" hidden>
+        <h2 id="fr-h7">7 · Plan proposal → owner approval <span class="fr-pill" data-state="owner">OWNER</span></h2>
+        <details class="fr-details" open><summary>What a proposal contains</summary>
+          <ul>
+            <li>Goal, constraints, and acceptance criteria</li>
+            <li>Ordered waves with lanes, each lane’s <strong>Touches</strong> list, and disjointness</li>
+            <li>Test-retirement table (kept or rewritten, with reason)</li>
+          </ul>
+        </details>
+        <div class="fr-blocked" role="note">
+          <strong>Unapproved plans are read-only.</strong> Proposals expire
+          after 24 hours and must be re-proposed, never auto-extended.
+          Approval happens here or via the CLI — never via chat or message.
+        </div>
+        <p>
+          <label class="fr-check" for="fr-planok">
+            <input type="checkbox" id="fr-planok">
+            I (owner) approve this plan, including its test-retirement table.
+          </label>
+        </p>
+        <p class="fr-actions">
+          <button type="button" class="primary" data-preview-action disabled aria-disabled="true" aria-describedby="fr-prev-note">Approve plan (preview only — disabled, OWNER)</button>
+          <button type="button" data-nav="6">Back</button>
+          <button type="button" data-nav="8">Continue to readiness</button>
+        </p>
+      </section>
+
+      <!-- 8 · Readiness → Start -->
+      <section class="fr-card" id="fr-step-8" data-fr-step="8" aria-labelledby="fr-h8" tabindex="-1" hidden>
+        <h2 id="fr-h8">8 · Readiness → Start <span class="fr-pill" data-state="owner">OWNER</span></h2>
+        <table class="fr-table">
+          <caption class="sr-only">Preflight checklist (empty state)</caption>
+          <thead><tr><th scope="col">Preflight</th><th scope="col">State</th></tr></thead>
+          <tbody>
+            <tr><td>Base matches main; lease free; base green</td><td><span class="fr-pill" data-state="empty">EMPTY · not checked</span></td></tr>
+            <tr><td>Posture TTL covers ETA; logins fresh</td><td><span class="fr-pill" data-state="empty">EMPTY · not checked</span></td></tr>
+            <tr><td>Plan lint + standing-permission decision sheet</td><td><span class="fr-pill" data-state="empty">EMPTY · not checked</span></td></tr>
+          </tbody>
+        </table>
+        <div class="fr-blocked" role="note">
+          <strong>Fail-closed:</strong> any red preflight item prevents Start.
+          Never-delegable items (move main, push, posture/billing/config,
+          deletes) stay at this machine.
+        </div>
+        <p class="fr-actions">
+          <button type="button" class="primary" data-preview-action disabled aria-disabled="true" aria-describedby="fr-prev-note">Start run (preview only — disabled, OWNER)</button>
+          <button type="button" data-nav="7">Back</button>
+          <button type="button" data-nav="9">Continue to monitor</button>
+        </p>
+      </section>
+
+      <!-- 9 · Run monitor · questions · evidence -->
+      <section class="fr-card" id="fr-step-9" data-fr-step="9" aria-labelledby="fr-h9" tabindex="-1" hidden>
+        <h2 id="fr-h9">9 · Run monitor · questions · evidence</h2>
+        <p>Live progress, the owner-question queue, and gate/review evidence
+        appear here once a run exists.</p>
+        <div class="fr-progress" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100" aria-label="Run progress (preview — no run)">
+          <div class="fr-progress-bar" id="fr-bar" style="width:0%"></div>
+        </div>
+        <details class="fr-details"><summary>Owner-question queue (empty state)</summary>
+          <p class="muted">No questions waiting. Owner-class questions are
+          answered here at this machine; a blocked wave parks with a report
+          instead of stalling silently.</p>
+        </details>
+        <details class="fr-details"><summary>Gate &amp; review evidence (empty state)</summary>
+          <p class="muted">No evidence yet. Evidence is stamped
+          <code>producer: engine</code>; model self-checks are never evidence.
+          Infrastructure failures are never shown as green.</p>
+        </details>
+        <p class="fr-actions">
+          <button type="button" data-demo-tick>Preview: tick progress bar (local only)</button>
+          <button type="button" data-nav="8">Back</button>
+          <button type="button" data-nav="10">Continue to acceptance</button>
+        </p>
+      </section>
+
+      <!-- 10 · Accept -->
+      <section class="fr-card" id="fr-step-10" data-fr-step="10" aria-labelledby="fr-h10" tabindex="-1" hidden>
+        <h2 id="fr-h10">10 · Accept <span class="fr-pill" data-state="owner">OWNER</span></h2>
+        <ul class="fr-checklist">
+          <li>Gate green — <span class="muted">no run yet</span></li>
+          <li>Independent review accepted — <span class="muted">no run yet</span></li>
+          <li>Main untouched mid-plan — <span class="muted">no run yet</span></li>
+        </ul>
+        <p class="muted">Accept stays disabled until every check passes; main
+        moves only by an explicit owner fast-forward, never mid-plan.</p>
+        <p>
+          <label class="fr-check" for="fr-accok">
+            <input type="checkbox" id="fr-accok">
+            I (owner) accept this candidate and its evidence.
+          </label>
+        </p>
+        <p class="fr-actions">
+          <button type="button" class="primary" data-preview-action disabled aria-disabled="true" aria-describedby="fr-prev-note">Accept candidate (preview only — disabled, OWNER)</button>
+          <button type="button" data-nav="9">Back</button>
+        </p>
+      </section>
+
+    </main>
+    <p class="muted" id="fr-prev-note">Preview-only controls stay disabled until
+    the authoritative backend wires them. They perform no action and transmit nothing.</p>
+    <footer class="fr-foot muted">Standalone assets · no imports beyond the
+    existing console styles · no network requests · no fictitious live data.
+    Design follows <code>docs/ui-design-principles.md</code> (existing palette,
+    native controls, progressive disclosure, fail-closed states).</footer>
+  </div>
+  <script src="/static/js/first_run.js" defer></script>
+</body>
+</html>
