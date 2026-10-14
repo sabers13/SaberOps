@@ -3877,25 +3877,30 @@ def handle_scheduler_run(args: argparse.Namespace) -> int:
     interval = float(getattr(args, "interval_seconds", 60.0) or 60.0)
 
     try:
-        decisions = run_scheduler_loop(
+        result = run_scheduler_loop(
             db,
             tick_interval=interval,
             once=run_once,
         )
         if getattr(args, "json", False):
-            payload = []
-            for d in decisions:
-                entry: dict[str, Any] = {
-                    "type": type(d).__name__,
-                    "job_id": d.job.job_id,
-                }
-                cand = getattr(d, "candidate", None)
-                if cand is not None:
-                    entry["candidate"] = f"{cand.provider}/{cand.model}"
-                reason = getattr(d, "reason", None)
-                if reason is not None:
-                    entry["reason"] = str(reason)
-                payload.append(entry)
+            payload: list[dict[str, Any]] = []
+            if result is not None:
+                for d in result.decisions:
+                    job = getattr(d, "job", None)
+                    entry: dict[str, Any] = {
+                        "type": type(d).__name__,
+                        "job_id": job.job_id if job is not None else None,
+                    }
+                    pool_id = getattr(d, "pool_id", None)
+                    if pool_id is not None:
+                        entry["pool_id"] = str(pool_id)
+                    cand = getattr(d, "candidate", None)
+                    if cand is not None:
+                        entry["candidate"] = f"{cand.provider}/{cand.model}"
+                    reason = getattr(d, "reason", None)
+                    if reason is not None:
+                        entry["reason"] = str(reason)
+                    payload.append(entry)
             print(json.dumps(payload, indent=2))
         return 0
     except Exception as exc:
