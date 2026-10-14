@@ -592,7 +592,7 @@ def admit(
                     rem_raw = getattr(matched_state, "normalized_remaining_pct", None)
                     if rem_raw is None:
                         rem_raw = getattr(matched_state, "remaining_percent", None)
-                    if freshness_status in {"STALE", "UNKNOWN"} or rem_raw is None:
+                    if freshness_status != "FRESH" or rem_raw is None:
                         is_stale_or_missing = True
 
                 if is_stale_or_missing:

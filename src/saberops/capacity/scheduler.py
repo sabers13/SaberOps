@@ -1,0 +1,354 @@
+"""Pure deterministic pacing scheduler (ADR-0002 D7, pure).
+
+Evaluates queued jobs against routing configuration, billing posture,
+quota pools/windows, and current reservations/running counts.
+
+Produces typed DispatchDecision, WaitDecision, and ProbeDecision objects.
+Contains no I/O, no DB operations, no subprocess execution, and no wall-clock reads.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+from saberops.capacity.admission import AdmissionDecision, admit
+from saberops.capacity.cost_model import CostState, SizeBucket
+from saberops.capacity.exclusions import parse_iso
+from saberops.control_plane.policy import ControlPlanePolicy
+from saberops.jobs.models import (
+    DISPATCHABLE_ROLES,
+    NO_ROUTE_FOR_REQUIREMENTS,
+    Job,
+    JobRole,
+    Priority,
+    WaitingReason,
+)
+from saberops.models import QuotaState, WorkerCandidate
+from saberops.routing_config import RoutingSnapshot
+
+# Priority rank: URGENT (0) > NORMAL (1) > BACKGROUND (2)
+_PRIORITY_RANK: dict[Priority, int] = {
+    Priority.URGENT: 0,
+    Priority.NORMAL: 1,
+    Priority.BACKGROUND: 2,
+}
+
+_FAR_FUTURE: datetime = datetime.max.replace(tzinfo=UTC)
+
+
+@dataclass(frozen=True)
+class DispatchDecision:
+    """Decision to dispatch a queued job to an admitted candidate route."""
+
+    job: Job
+    candidate: WorkerCandidate
+    pool_id: str | None
+    binding_window: str | None
+    score: float
+    cost_estimate: float
+    multiplier: float = 1.0
+
+
+@dataclass(frozen=True)
+class WaitDecision:
+    """Decision that a queued job must wait for capacity, concurrency, or time."""
+
+    job: Job
+    reason: str
+    eta: datetime | None = None
+    confidence: str | None = None
+    candidate: WorkerCandidate | None = None
+    pool_id: str | None = None
+    binding_window: str | None = None
+    details: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ProbeDecision:
+    """Decision that a zero-inference probe is required to refresh stale evidence."""
+
+    pool_id: str
+    harness: str
+    reason: str = "QUOTA_EVIDENCE_REQUIRED"
+
+
+SchedulerDecision = DispatchDecision | WaitDecision | ProbeDecision
+
+
+def _utcnow(now: datetime | None) -> datetime:
+    if now is not None:
+        return now.astimezone(UTC) if now.tzinfo else now.replace(tzinfo=UTC)
+    return datetime.now(UTC)
+
+
+def _job_sort_key(job: Job) -> tuple[int, int, datetime, str, str]:
+    """Sort key for queued jobs:
+
+    1. Priority class: URGENT > NORMAL > BACKGROUND
+    2. Deadline presence: jobs with deadlines beat jobs without
+    3. Deadline timestamp: earliest deadline first
+    4. FIFO: earliest created_at timestamp
+    5. Deterministic tie-break: job_id
+    """
+    pri_rank = _PRIORITY_RANK.get(job.priority, 1)
+    has_deadline = 0 if job.deadline else 1
+    dl_dt = parse_iso(job.deadline) if job.deadline else _FAR_FUTURE
+    if dl_dt is None:
+        dl_dt = _FAR_FUTURE
+    created = job.created_at or ""
+    return (pri_rank, has_deadline, dl_dt, created, job.job_id)
+
+
+def schedule(
+    *,
+    now: datetime,
+    queued: Sequence[Job],
+    running: Sequence[Job] = (),
+    routing_snapshot: RoutingSnapshot,
+    policy: ControlPlanePolicy | None = None,
+    quota_states: Iterable[QuotaState] = (),
+    cost_states: Mapping[tuple[str, str, str, str], CostState] | None = None,
+    global_slot_limit: int | None = None,
+    background_min_pace: float = 4.0,
+) -> list[SchedulerDecision]:
+    """Pure deterministic pacing scheduler (ADR-0002 D7).
+
+    Evaluates queued jobs in strict D7 order:
+    - URGENT > NORMAL > BACKGROUND
+    - Within class: earliest deadline first, then FIFO by created_at
+    - Evaluates role fallback groups: best score ONLY within the first group
+      with admitted candidates.
+    - BACKGROUND jobs require binding pace >= background_min_pace.
+    - Honors prefer_wait_minutes on fallback groups when exact/parsed ETA matches.
+    """
+    moment = _utcnow(now)
+    decisions: list[SchedulerDecision] = []
+    probes_needed: dict[str, ProbeDecision] = {}
+
+    # Track simulated concurrency across the scheduling batch
+    running_counts: dict[str, int] = {}
+    global_running = len(running)
+
+    # Sort queued jobs according to D7 deterministic priority order
+    sorted_jobs = sorted(queued, key=_job_sort_key)
+
+    for job in sorted_jobs:
+        # Check not_before delay
+        if job.not_before:
+            nb_dt = parse_iso(job.not_before)
+            if nb_dt and moment < nb_dt:
+                decisions.append(
+                    WaitDecision(
+                        job=job,
+                        reason=WaitingReason.NEW.value,
+                        eta=nb_dt,
+                        confidence="EXACT",
+                        details={"not_before": job.not_before},
+                    )
+                )
+                continue
+
+        # Check role dispatchability
+        role = job.requirements.role
+        if role not in DISPATCHABLE_ROLES:
+            role_val = role.value if isinstance(role, JobRole) else str(role)
+            decisions.append(
+                WaitDecision(
+                    job=job,
+                    reason=NO_ROUTE_FOR_REQUIREMENTS,
+                    details={"unsupported_role": role_val},
+                )
+            )
+            continue
+
+        try:
+            groups = routing_snapshot.groups_for(role)
+        except Exception:
+            decisions.append(
+                WaitDecision(
+                    job=job,
+                    reason=NO_ROUTE_FOR_REQUIREMENTS,
+                )
+            )
+            continue
+
+        if not groups:
+            decisions.append(
+                WaitDecision(
+                    job=job,
+                    reason=NO_ROUTE_FOR_REQUIREMENTS,
+                )
+            )
+            continue
+
+        pacing_meta = routing_snapshot.prefer_wait_minutes_for(role)
+        size_bucket = job.requirements.size_hint or SizeBucket.M
+        all_group_decisions: list[list[AdmissionDecision]] = []
+        job_dispatched = False
+
+        for g_idx, group in enumerate(groups):
+            # Evaluate admission for every candidate in this group
+            decisions_for_group: list[AdmissionDecision] = [
+                admit(
+                    candidate=cand,
+                    now=moment,
+                    policy=policy,
+                    quota_states=quota_states,
+                    requirements=job.requirements,
+                    size_bucket=size_bucket,
+                    cost_states=cost_states,
+                    running_counts=running_counts,
+                    global_running=global_running,
+                    max_global_concurrent=global_slot_limit,
+                )
+                for cand in group
+            ]
+            all_group_decisions.append(decisions_for_group)
+            admitted_in_group = [d for d in decisions_for_group if d.admitted]
+
+            if admitted_in_group:
+                # First group with ANY admitted candidate wins!
+                if job.priority == Priority.BACKGROUND:
+                    bg_candidates = [
+                        d for d in admitted_in_group
+                        if (d.score or 0.0) >= background_min_pace
+                    ]
+                    if not bg_candidates:
+                        # Pacing below threshold for background job: wait
+                        best_below = max(admitted_in_group, key=lambda d: d.score or 0.0)
+                        decisions.append(
+                            WaitDecision(
+                                job=job,
+                                reason=WaitingReason.NO_CAPACITY.value,
+                                eta=best_below.eta,
+                                confidence=best_below.wait_confidence,
+                                candidate=best_below.candidate,
+                                pool_id=best_below.pool_id,
+                                binding_window=best_below.binding_window,
+                                details={
+                                    "score": best_below.score,
+                                    "min_pace": background_min_pace,
+                                },
+                            )
+                        )
+                        job_dispatched = True
+                        break
+                    admitted_in_group = bg_candidates
+
+                # Pick candidate with highest score; tie-break: group index, then lower cost
+                best = max(
+                    admitted_in_group,
+                    key=lambda d: (
+                        d.score or 0.0,
+                        -group.index(d.candidate),
+                        -(d.cost_estimate or 0.0),
+                    ),
+                )
+                decisions.append(
+                    DispatchDecision(
+                        job=job,
+                        candidate=best.candidate,
+                        pool_id=best.pool_id,
+                        binding_window=best.binding_window,
+                        score=best.score or 0.0,
+                        cost_estimate=best.cost_estimate or 0.0,
+                        multiplier=best.multiplier,
+                    )
+                )
+                if best.pool_id:
+                    running_counts[best.pool_id] = running_counts.get(best.pool_id, 0) + 1
+                global_running += 1
+                job_dispatched = True
+                break
+
+            # No candidates in this group admitted. Check prefer_wait_minutes
+            prefer_wait = pacing_meta[g_idx] if g_idx < len(pacing_meta) else 0
+            if prefer_wait > 0:
+                wait_candidates = [
+                    d
+                    for d in decisions_for_group
+                    if d.eta is not None
+                    and d.wait_confidence in ("EXACT", "PARSED")
+                    and d.eta <= moment + timedelta(minutes=prefer_wait)
+                ]
+                if wait_candidates:
+                    # Prefer waiting for this group rather than falling back to lower groups
+                    best_wait = min(
+                        wait_candidates,
+                        key=lambda d: d.eta or _FAR_FUTURE,
+                    )
+                    decisions.append(
+                        WaitDecision(
+                            job=job,
+                            reason=WaitingReason.NO_CAPACITY.value,
+                            eta=best_wait.eta,
+                            confidence=best_wait.wait_confidence,
+                            candidate=best_wait.candidate,
+                            pool_id=best_wait.pool_id,
+                            binding_window=best_wait.binding_window,
+                            details={"prefer_wait_minutes": prefer_wait},
+                        )
+                    )
+                    job_dispatched = True
+                    break
+
+        if not job_dispatched:
+            # All groups exhausted without dispatch or prefer_wait
+            # Check for needed probes across denied candidates
+            for g_dec in all_group_decisions:
+                for d in g_dec:
+                    if d.needs_probe and d.probe_harness and d.pool_id:
+                        if d.probe_harness not in probes_needed:
+                            probes_needed[d.probe_harness] = ProbeDecision(
+                                pool_id=d.pool_id,
+                                harness=d.probe_harness,
+                            )
+
+            first_dec = (
+                all_group_decisions[0][0]
+                if all_group_decisions and all_group_decisions[0]
+                else None
+            )
+            has_probe = bool(probes_needed)
+            is_concurrency = any(
+                d.reason in ("CONCURRENCY_LIMIT", "GLOBAL_CONCURRENCY_LIMIT")
+                for g in all_group_decisions
+                for d in g
+            )
+            wait_reason = (
+                WaitingReason.PROBE_PENDING.value
+                if has_probe
+                else (
+                    WaitingReason.CONCURRENCY.value
+                    if is_concurrency
+                    else WaitingReason.NO_CAPACITY.value
+                )
+            )
+            eta = first_dec.eta if first_dec else None
+            confidence = first_dec.wait_confidence if first_dec else None
+            decisions.append(
+                WaitDecision(
+                    job=job,
+                    reason=wait_reason,
+                    eta=eta,
+                    confidence=confidence,
+                    candidate=first_dec.candidate if first_dec else None,
+                    pool_id=first_dec.pool_id if first_dec else None,
+                    binding_window=first_dec.binding_window if first_dec else None,
+                )
+            )
+
+    # Return probe decisions followed by job decisions
+    return list(probes_needed.values()) + decisions
+
+
+__all__ = [
+    "DispatchDecision",
+    "ProbeDecision",
+    "SchedulerDecision",
+    "WaitDecision",
+    "schedule",
+]

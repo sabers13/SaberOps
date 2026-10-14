@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -295,6 +295,7 @@ def _validate_role_groups(
     role: str,
     source_label: str,
     approved: Mapping[str, DynamicCandidate] | None = None,
+    out_pacing: list[int] | None = None,
 ) -> list[list[str]]:
     if not isinstance(chain, list):
         raise RoutingConfigError(
@@ -304,10 +305,23 @@ def _validate_role_groups(
     seen: set[str] = set()
     for index, group in enumerate(chain):
         ctx_key = f"{role}[{index + 1}]"
-        if not isinstance(group, dict) or set(group.keys()) != {"routes"}:
+        if not isinstance(group, dict):
             raise RoutingConfigError(
                 f"Routing config at {source_label}: role {role} group {index + 1} must be an object with exactly the key 'routes'"  # noqa: E501
             )
+        allowed_keys = {"routes", "prefer_wait_minutes"}
+        unknown = set(group.keys()) - allowed_keys
+        if unknown or "routes" not in group:
+            raise RoutingConfigError(
+                f"Routing config at {source_label}: role {role} group {index + 1} must be an object with exactly the key 'routes'"  # noqa: E501
+            )
+        pwm = group.get("prefer_wait_minutes", 0)
+        if not isinstance(pwm, int) or isinstance(pwm, bool) or pwm < 0:
+            raise RoutingConfigError(
+                f"Routing config at {source_label}: role {role} group {index + 1} 'prefer_wait_minutes' must be a non-negative integer"  # noqa: E501
+            )
+        if out_pacing is not None:
+            out_pacing.append(pwm)
         routes = group["routes"]
         if not isinstance(routes, list) or not routes:
             raise RoutingConfigError(
@@ -332,7 +346,11 @@ def _validate_role_groups(
 
 
 def _validate_v3_structure(
-    data: Any, source_label: str, *, approved: Mapping[str, DynamicCandidate] | None = None
+    data: Any,
+    source_label: str,
+    *,
+    approved: Mapping[str, DynamicCandidate] | None = None,
+    out_pacing: dict[str, list[int]] | None = None,
 ) -> dict[str, list[list[str]]]:
     if not isinstance(data, dict):
         raise RoutingConfigError(f"Routing config at {source_label}: top-level must be JSON object")
@@ -369,7 +387,17 @@ def _validate_v3_structure(
         approved = _parse_approved_candidates(data, source_label)
     result: dict[str, list[list[str]]] = {}
     for role in _ROUTED_ROLE_VALUES:
-        result[role] = _validate_role_groups(roles_obj[role], role, source_label, approved=approved)
+        role_pacing: list[int] = [] if out_pacing is not None else []
+        pacing_arg = role_pacing if out_pacing is not None else None
+        result[role] = _validate_role_groups(
+            roles_obj[role],
+            role,
+            source_label,
+            approved=approved,
+            out_pacing=pacing_arg,
+        )
+        if out_pacing is not None:
+            out_pacing[role] = role_pacing
     return result
 
 
@@ -391,11 +419,24 @@ def canonical_routing_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         )
     if sv == 3:
         approved = _parse_approved_candidates(data, "packaged default")
-        validated = _validate_v3_structure(data, "packaged default", approved=approved)
+        pacing: dict[str, list[int]] = {}
+        validated = _validate_v3_structure(
+            data, "packaged default", approved=approved, out_pacing=pacing
+        )
         result: dict[str, Any] = {
             "schema_version": 3,
             "roles": {
-                role: [{"routes": list(group)} for group in groups]
+                role: [
+                    {
+                        "routes": list(group),
+                        **(
+                            {"prefer_wait_minutes": pacing[role][idx]}
+                            if role in pacing and idx < len(pacing[role]) and pacing[role][idx] > 0
+                            else {}
+                        ),
+                    }
+                    for idx, group in enumerate(groups)
+                ]
                 for role, groups in validated.items()
             },
         }
@@ -420,14 +461,35 @@ def _content_hash(
     validated: Any,
     schema_version: int,
     approved: Mapping[str, DynamicCandidate] | None = None,
+    pacing_metadata: Mapping[str, Sequence[int]] | None = None,
 ) -> str:
     if schema_version == 3:
-        body: dict[str, Any] = {
-            "schema_version": 3,
-            "roles": {
-                role: [list(group) for group in groups] for role, groups in validated.items()
-            },
-        }
+        has_pacing = bool(
+            pacing_metadata and any(any(p > 0 for p in pm) for pm in pacing_metadata.values())
+        )
+        if has_pacing and pacing_metadata:
+            roles_body: dict[str, Any] = {}
+            for role, groups in validated.items():
+                role_pacing = pacing_metadata.get(role, ())
+                group_list: list[Any] = []
+                for idx, group in enumerate(groups):
+                    pwm = role_pacing[idx] if idx < len(role_pacing) else 0
+                    if pwm > 0:
+                        group_list.append({"routes": list(group), "prefer_wait_minutes": pwm})
+                    else:
+                        group_list.append(list(group))
+                roles_body[role] = group_list
+            body: dict[str, Any] = {
+                "schema_version": 3,
+                "roles": roles_body,
+            }
+        else:
+            body = {
+                "schema_version": 3,
+                "roles": {
+                    role: [list(group) for group in groups] for role, groups in validated.items()
+                },
+            }
         if approved:
             body[_APPROVED_TOP_KEY] = {
                 cid: entry.to_dict() for cid, entry in sorted(approved.items())
@@ -465,6 +527,8 @@ class RoutingSnapshot:
     approved_candidates: tuple[DynamicCandidate, ...] = ()
     #: Schema the effective document was migrated from in memory (1 | 2 | None).
     migrated_from: int | None = None
+    #: Pacing metadata per role: tuple of (role, tuple of prefer_wait_minutes per group).
+    pacing_metadata: tuple[tuple[str, tuple[int, ...]], ...] = ()
 
     def _role_key(self, role: JobRole | str) -> str:
         if isinstance(role, JobRole):
@@ -478,6 +542,17 @@ class RoutingSnapshot:
             if stored_role == key:
                 return groups
         raise RoutingConfigError(f"unknown routing role {key!r}")
+
+    def prefer_wait_minutes_for(self, role: JobRole | str) -> tuple[int, ...]:
+        """Return the prefer_wait_minutes values for ``role`` fallback groups."""
+        key = self._role_key(role)
+        for stored_role, minutes in self.pacing_metadata:
+            if stored_role == key:
+                return minutes
+        try:
+            return tuple(0 for _ in self.groups_for(role))
+        except RoutingConfigError:
+            return ()
 
     def chain_for_role(self, role: JobRole | str) -> list[WorkerCandidate]:
         """Return the flattened candidate chain for ``role`` (group order)."""
@@ -495,7 +570,7 @@ def snapshot_references_exact_bindings(snapshot: RoutingSnapshot | None) -> bool
     approval names a non-empty ``binding_id``, an ordinary Run created from
     this snapshot may dispatch an exact binding and must therefore freeze the
     effective owner BindingRegistry alongside the snapshot
-Static-only snapshots return ``False`` so the
+    Static-only snapshots return ``False`` so the
     historical provider/model path neither loads nor requires owner bindings.
     """
     if snapshot is None:
@@ -513,14 +588,20 @@ def _snapshot_from_v3(
     source_path: Path | None,
     approved: Mapping[str, DynamicCandidate] | None = None,
     migrated_from: int | None = None,
+    pacing_metadata: Mapping[str, Sequence[int]] | None = None,
 ) -> RoutingSnapshot:
-    ch = _content_hash(validated, 3, approved)
+    ch = _content_hash(validated, 3, approved, pacing_metadata=pacing_metadata)
 
     def to_group(cids: list[str]) -> tuple[WorkerCandidate, ...]:
         return tuple(_parse_candidate_id(cid) for cid in cids)
 
     role_chains = tuple(
         (role, tuple(to_group(group) for group in groups)) for role, groups in validated.items()
+    )
+    pacing_tuple = (
+        tuple((role, tuple(pacing_metadata.get(role, ()))) for role in validated)
+        if pacing_metadata
+        else ()
     )
     return RoutingSnapshot(
         schema_version=3,
@@ -531,6 +612,7 @@ def _snapshot_from_v3(
         legacy_chains=None,
         approved_candidates=tuple(entry for _, entry in sorted((approved or {}).items())),
         migrated_from=migrated_from,
+        pacing_metadata=pacing_tuple,
     )
 
 
@@ -546,11 +628,16 @@ def load_packaged_default() -> RoutingSnapshot:
     except json.JSONDecodeError as exc:
         raise RoutingConfigError(f"Packaged default routing.json invalid JSON: {exc}") from exc
     canonical = canonical_routing_payload(data)
+    pacing: dict[str, list[int]] = {}
     validated = _validate_v3_structure(
-        canonical, str(path), approved=_parse_approved_candidates(canonical, str(path))
+        canonical, str(path), approved=_parse_approved_candidates(canonical, str(path)),
+        out_pacing=pacing,
     )
     approved = _parse_approved_candidates(canonical, str(path))
-    return _snapshot_from_v3(validated, source="default", source_path=None, approved=approved)
+    return _snapshot_from_v3(
+        validated, source="default", source_path=None, approved=approved,
+        pacing_metadata=pacing,
+    )
 
 
 def load_effective_routing() -> RoutingSnapshot:
@@ -579,10 +666,13 @@ def load_effective_routing() -> RoutingSnapshot:
         migrated_from = raw_sv if type(raw_sv) is int and raw_sv in (1, 2) else None
         canonical = canonical_routing_payload(data)
         approved = _parse_approved_candidates(canonical, str(user_path))
-        validated = _validate_v3_structure(canonical, str(user_path), approved=approved)
+        pacing: dict[str, list[int]] = {}
+        validated = _validate_v3_structure(
+            canonical, str(user_path), approved=approved, out_pacing=pacing
+        )
         return _snapshot_from_v3(
             validated, source="user", source_path=user_path, approved=approved,
-            migrated_from=migrated_from,
+            migrated_from=migrated_from, pacing_metadata=pacing,
         )
     return load_packaged_default()
 
@@ -610,12 +700,18 @@ def snapshot_to_payload(snapshot: RoutingSnapshot, created_at: str) -> dict[str,
                 entry.candidate_id: entry.to_dict() for entry in snapshot.approved_candidates
             }
         return payload
-    roles: dict[str, list[dict[str, list[dict[str, str]]]]] = {}
+    roles: dict[str, list[dict[str, Any]]] = {}
     for role, groups in snapshot.role_chains:
-        roles[role] = [
-            {"routes": [{"provider": c.provider, "model": c.model} for c in group]}
-            for group in groups
-        ]
+        pacing = snapshot.prefer_wait_minutes_for(role)
+        group_list: list[dict[str, Any]] = []
+        for idx, group in enumerate(groups):
+            entry: dict[str, Any] = {
+                "routes": [{"provider": c.provider, "model": c.model} for c in group]
+            }
+            if idx < len(pacing) and pacing[idx] > 0:
+                entry["prefer_wait_minutes"] = pacing[idx]
+            group_list.append(entry)
+        roles[role] = group_list
     payload = {
         "schema_version": 3,
         "source": snapshot.source,
@@ -762,6 +858,7 @@ def payload_to_snapshot(payload: Any, run_id: str | None = None) -> RoutingSnaps
                 f"Routing config at {source_label}: role {key!r} is managed elsewhere; see '{pointer}'"  # noqa: E501
             )
     validated_v3: dict[str, list[list[str]]] = {}
+    pacing_v3: dict[str, list[int]] = {}
     for role in _ROUTED_ROLE_VALUES:
         if role not in roles_obj:
             raise RoutingConfigError(
@@ -773,13 +870,26 @@ def payload_to_snapshot(payload: Any, run_id: str | None = None) -> RoutingSnaps
                 f"Routing config at {source_label}: role {role} chain must be a list"
             )
         groups: list[list[str]] = []
+        pacing_list: list[int] = []
         seen: set[str] = set()
         for index, group in enumerate(raw_groups):
             ctx_key = f"{role}[{index + 1}]"
-            if not isinstance(group, dict) or set(group.keys()) != {"routes"}:
+            if not isinstance(group, dict):
                 raise RoutingConfigError(
                     f"Routing config at {source_label}: role {role} group {index + 1} must be an object with exactly the key 'routes'"  # noqa: E501
                 )
+            allowed_keys = {"routes", "prefer_wait_minutes"}
+            unknown = set(group.keys()) - allowed_keys
+            if unknown or "routes" not in group:
+                raise RoutingConfigError(
+                    f"Routing config at {source_label}: role {role} group {index + 1} must be an object with exactly the key 'routes'"  # noqa: E501
+                )
+            pwm = group.get("prefer_wait_minutes", 0)
+            if not isinstance(pwm, int) or isinstance(pwm, bool) or pwm < 0:
+                raise RoutingConfigError(
+                    f"Routing config at {source_label}: role {role} group {index + 1} 'prefer_wait_minutes' must be a non-negative integer"  # noqa: E501
+                )
+            pacing_list.append(pwm)
             routes = group["routes"]
             if not isinstance(routes, list) or not routes:
                 raise RoutingConfigError(
@@ -802,12 +912,13 @@ def payload_to_snapshot(payload: Any, run_id: str | None = None) -> RoutingSnaps
                 cids.append(cid)
             groups.append(cids)
         validated_v3[role] = groups
+        pacing_v3[role] = pacing_list
     extra_roles = [k for k in roles_obj if k not in _ROUTED_ROLE_VALUES]
     if extra_roles:
         raise RoutingConfigError(
             f"Routing config at {source_label}: unknown roles {sorted(extra_roles)}"
         )
-    canonical_hash_v3 = _content_hash(validated_v3, 3, approved)
+    canonical_hash_v3 = _content_hash(validated_v3, 3, approved, pacing_metadata=pacing_v3)
     if "content_hash" not in payload or payload.get("content_hash") is None:
         ch3 = canonical_hash_v3
     else:
@@ -828,6 +939,9 @@ def payload_to_snapshot(payload: Any, run_id: str | None = None) -> RoutingSnaps
         (role, tuple(tuple(_parse_candidate_id(cid) for cid in group) for group in groups))
         for role, groups in validated_v3.items()
     )
+    pacing_tuple_v3 = tuple(
+        (role, tuple(pacing_v3.get(role, ()))) for role in validated_v3
+    )
     return RoutingSnapshot(
         schema_version=3,
         source=str(payload.get("source", "persisted")),
@@ -838,6 +952,7 @@ def payload_to_snapshot(payload: Any, run_id: str | None = None) -> RoutingSnaps
         role_chains=role_chains_v3,
         legacy_chains=None,
         approved_candidates=tuple(entry for _, entry in sorted(approved.items())),
+        pacing_metadata=pacing_tuple_v3,
     )
 
 
