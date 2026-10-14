@@ -453,6 +453,62 @@ def test_l10_no_samples_for_all_keys_or_owner(tmp_path: Path) -> None:
     assert _cost_rows(db2) == {}
 
 
+def test_l10_learn_from_probe_per_window_and_row_id(tmp_path: Path) -> None:
+    """Covers: ADR-0002 D5/W2 #9 and #10 per-window probe observation and row ID skip."""
+    from saberops.capacity.ledger import record_probe_window_observation
+
+    db = _db(tmp_path)
+    t0 = _T0
+    t1 = t0 + timedelta(minutes=10)
+    t2 = t0 + timedelta(minutes=20)
+    t3 = t0 + timedelta(minutes=30)
+
+    obs1 = record_probe_window_observation(
+        db,
+        pool_id="chatgpt-plus",
+        window_id="5h",
+        remaining_pct=70.0,
+        reset_at=None,
+        harness="codex",
+        now=t0,
+    )
+    assert obs1.startswith("obs_")
+
+    obs2 = record_probe_window_observation(
+        db,
+        pool_id="chatgpt-plus",
+        window_id="5h",
+        remaining_pct=70.0,
+        reset_at=None,
+        harness="codex",
+        now=t1,
+    )
+    assert obs2 != obs1
+
+    reserve(
+        db,
+        run_id="run-p1",
+        route="openai/gpt-5",
+        draws=[PoolDraw("chatgpt-plus", "5h")],
+        size_bucket=SizeBucket.M,
+        now=t2,
+    )
+    assert settle(db, "run-p1", total_tokens=2000, now=t2) == 1
+
+    obs3 = record_probe_window_observation(
+        db,
+        pool_id="chatgpt-plus",
+        window_id="5h",
+        remaining_pct=65.0,
+        reset_at=None,
+        harness="codex",
+        now=t3,
+    )
+    assert obs3 != obs2
+    rows = _cost_rows(db)
+    assert rows[("openai/gpt-5", "chatgpt-plus", "5h", "M")] == (1, 5.0)
+
+
 # L13: the legacy policy surface is gone; the vocabulary stays.
 def test_l13_legacy_policy_deleted() -> None:
     import saberops.quota as quota

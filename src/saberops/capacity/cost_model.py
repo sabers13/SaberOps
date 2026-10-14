@@ -142,11 +142,15 @@ def cost_estimate(
 def validate_route(route: str) -> str:
     """Validate a cost-model route key (``provider/model``), returning it.
 
-    The key is never a bare provider: it must be non-empty after
-    stripping. Empty routes are rejected with ``ValueError``.
+    The key is never a bare provider: it must contain a slash separating
+    non-empty provider and model parts. Empty routes or bare providers
+    are rejected with ``ValueError``.
     """
     text = route.strip() if isinstance(route, str) else ""
-    if not text:
+    if not text or "/" not in text:
+        raise ValueError("route must be a non-empty provider/model id")
+    provider, _, model = text.partition("/")
+    if not provider.strip() or not model.strip():
         raise ValueError("route must be a non-empty provider/model id")
     return text
 

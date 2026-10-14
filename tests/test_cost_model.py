@@ -108,4 +108,10 @@ def test_empty_route_rejected() -> None:
         validate_route("")
     with pytest.raises(ValueError):
         validate_route("   ")
+    with pytest.raises(ValueError):
+        validate_route("codex")
+    with pytest.raises(ValueError):
+        validate_route("codex/")
+    with pytest.raises(ValueError):
+        validate_route("/gpt-5")
     assert validate_route("codex/gpt-5") == "codex/gpt-5"

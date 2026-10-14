@@ -241,7 +241,7 @@ def record_owner_quota(
         if source == "PROBE":
             _learn_from_probe(
                 conn, pool_id, window_id, pct, reset_at,
-                observed_iso, moment,
+                observed_iso, moment, new_row_id=obs_id,
             )
         conn.commit()
     return QuotaState(
@@ -254,6 +254,44 @@ def record_owner_quota(
     )
 
 
+def record_probe_window_observation(
+    db: Database,
+    pool_id: str,
+    window_id: str,
+    remaining_pct: float,
+    reset_at: str | None,
+    *,
+    harness: str,
+    now: datetime | None = None,
+    evidence_ref: str | None = None,
+) -> str:
+    """Record a per-window probe observation in capacity_observations and fold into learning."""
+    pct = float(remaining_pct)
+    if not 0.0 <= pct <= 100.0:
+        raise ValueError("remaining_percent must be between 0 and 100")
+    moment = _utcnow(now)
+    observed_iso = moment.isoformat()
+    ensure_tables(db)
+    obs_id = f"obs_{uuid.uuid4().hex[:12]}"
+    with owner_connection(db) as conn:
+        conn.execute(
+            """
+            INSERT INTO capacity_observations (
+                id, pool_id, window_id, remaining_pct, reset_at, observed_at,
+                source, legacy_provider, legacy_pool, evidence_ref
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (obs_id, pool_id, window_id, pct, reset_at, observed_iso,
+             "PROBE", harness, None, evidence_ref),
+        )
+        _learn_from_probe(
+            conn, pool_id, window_id, pct, reset_at,
+            observed_iso, moment, new_row_id=obs_id,
+        )
+        conn.commit()
+    return obs_id
+
+
 def _learn_from_probe(
     conn: sqlite3.Connection,
     pool_id: str,
@@ -262,6 +300,7 @@ def _learn_from_probe(
     new_reset: str | None,
     new_observed_iso: str,
     moment: datetime,
+    new_row_id: str | None = None,
 ) -> None:
     """Fold one PROBE interval into the cost model (no sample or more).
 
@@ -280,16 +319,19 @@ def _learn_from_probe(
     previous: Mapping[str, Any] | None = None
     for row in rows:
         candidate = dict(row)
+        cand_id = str(candidate.get("id") or "")
+        if new_row_id is not None and cand_id == new_row_id:
+            continue
         if str(candidate.get("observed_at") or "") > new_observed_iso:
             continue
-        if str(candidate.get("id") or "") == "":
+        if cand_id == "":
             continue
-        # Skip the row just inserted above (same observed_at, newest id).
-        # The newest row overall is the one we just wrote; the previous
-        # sample is the first older one.
-        if previous is None and candidate.get("observed_at") == new_observed_iso:
-            # Ambiguous with the new row: disambiguate by id order is
-            # unreliable, so compare remaining/reset identity instead.
+        # Skip the row just inserted above if new_row_id not provided.
+        if (
+            new_row_id is None
+            and previous is None
+            and candidate.get("observed_at") == new_observed_iso
+        ):
             if float(cast(float, candidate.get("remaining_pct"))) == new_pct and (
                 (candidate.get("reset_at") or None) == (new_reset or None)
             ):
@@ -586,7 +628,7 @@ def estimate(
 
     obs: dict[str, Any] | None = None
     try:
-        with owner_connection(db) as conn:
+        with _read_connection(db) as conn:
             obs = _latest_observation(conn, pool, window)
             if obs is None and window != "ALL":
                 obs = _latest_observation(conn, pool, "ALL")
@@ -658,7 +700,7 @@ def snapshot(db: Database, now: datetime) -> list[LedgerEstimate]:
     moment = _utcnow(now)
     keys: set[tuple[str, str]] = set()
     try:
-        with owner_connection(db) as conn:
+        with _read_connection(db) as conn:
             for row in conn.execute(
                 "SELECT DISTINCT pool_id, window_id FROM capacity_observations"
             ).fetchall():
@@ -692,6 +734,7 @@ __all__ = [
     "PoolDraw",
     "Reservation",
     "record_owner_quota",
+    "record_probe_window_observation",
     "list_owner_quota",
     "get_owner_quota",
     "enable_owner_quota",

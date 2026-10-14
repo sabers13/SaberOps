@@ -1545,6 +1545,41 @@ def build_parser() -> argparse.ArgumentParser:
     job_cancel.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
     job_cancel.add_argument("--json", action="store_true", help="JSON output")
 
+    # orch scheduler run [--once] [--interval-seconds INT]
+    scheduler_parser = subparsers.add_parser(
+        "scheduler",
+        help="Run the pacing scheduler loop (ADR-0002 D7).",
+    )
+    scheduler_sub = scheduler_parser.add_subparsers(
+        dest="scheduler_command", required=True
+    )
+    scheduler_run = scheduler_sub.add_parser("run", help="Run the pacing scheduler loop.")
+    scheduler_run.add_argument(
+        "--once", action="store_true", help="Run one scheduler tick and exit."
+    )
+    scheduler_run.add_argument(
+        "--interval-seconds",
+        type=float,
+        default=60.0,
+        help="Seconds between ticks (default: 60.0).",
+    )
+    scheduler_run.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
+    scheduler_run.add_argument("--json", action="store_true", help="JSON output")
+
+    # orch capacity show [--json]
+    capacity_parser = subparsers.add_parser(
+        "capacity",
+        help="Inspect ledger capacity pools and estimates (read-only).",
+    )
+    capacity_sub = capacity_parser.add_subparsers(
+        dest="capacity_command", required=True
+    )
+    capacity_show = capacity_sub.add_parser(
+        "show", help="Show capacity pools and ledger estimates."
+    )
+    capacity_show.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
+    capacity_show.add_argument("--json", action="store_true", help="JSON output")
+
     # orch retry|continue|try-worker
     retry_parser = subparsers.add_parser(
         "retry", help="Start a fresh attempt of a run's frozen task and policy."
@@ -3831,6 +3866,82 @@ def handle_job_cancel(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_scheduler_run(args: argparse.Namespace) -> int:
+    """Handle `orch scheduler run [--once] [--interval-seconds INT]`."""
+    from saberops.capacity.loop import run_scheduler_loop
+    from saberops.db import Database as _Database
+
+    db_path = getattr(args, "db", None)
+    db = _Database(db_path) if db_path else _Database()
+    run_once = bool(getattr(args, "once", False))
+    interval = float(getattr(args, "interval_seconds", 60.0) or 60.0)
+
+    try:
+        decisions = run_scheduler_loop(
+            db,
+            tick_interval=interval,
+            once=run_once,
+        )
+        if getattr(args, "json", False):
+            payload = []
+            for d in decisions:
+                entry: dict[str, Any] = {
+                    "type": type(d).__name__,
+                    "job_id": d.job.job_id,
+                }
+                cand = getattr(d, "candidate", None)
+                if cand is not None:
+                    entry["candidate"] = f"{cand.provider}/{cand.model}"
+                reason = getattr(d, "reason", None)
+                if reason is not None:
+                    entry["reason"] = str(reason)
+                payload.append(entry)
+            print(json.dumps(payload, indent=2))
+        return 0
+    except Exception as exc:
+        print(f"[!] Scheduler loop failed: {exc}", file=sys.stderr)
+        return 1
+
+
+def handle_capacity_show(args: argparse.Namespace) -> int:
+    """Handle `orch capacity show [--json]` (read-only)."""
+    from dataclasses import asdict
+
+    from saberops.db import Database as _Database
+    from saberops.jobs.service import capacity as _capacity
+
+    db_path = getattr(args, "db", None)
+    # Open read-only to honour D5 lifecycle rule: create nothing, write nothing on read
+    db = _Database(db_path, read_only=True) if db_path else _Database(read_only=True)
+
+    try:
+        cap_view = _capacity(db)
+        if getattr(args, "json", False):
+            print(json.dumps(asdict(cap_view), indent=2))
+            return 0
+        print(f"Generated at : {cap_view.generated_at}")
+        print(f"Ledger wired : {cap_view.ledger_wired}")
+        if not cap_view.pools:
+            print("No capacity pools recorded.")
+            return 0
+        header = f"{'Pool':<18} {'Window':<8} {'Remaining':<12} {'Uncertainty':<12} {'Source':<10} {'Stale':<6} {'Excluded Until'}"
+        print(header)
+        print("-" * len(header))
+        for p in cap_view.pools:
+            rem = f"{p.remaining_est:.1f}%" if p.remaining_est is not None else "None"
+            unc = f"±{p.uncertainty:.1f}%" if p.uncertainty is not None else "0.0%"
+            src = p.source or "-"
+            stl = "yes" if p.stale else "no"
+            exc = p.excluded_until or "-"
+            print(
+                f"{p.pool_id:<18} {p.window_id:<8} {rem:<12} {unc:<12} {src:<10} {stl:<6} {exc}"
+            )
+        return 0
+    except Exception as exc:
+        print(f"[!] Capacity inspection failed: {exc}", file=sys.stderr)
+        return 1
+
+
 def handle_project_set_workflow(args: argparse.Namespace) -> int:
     """Handle `orch project set-workflow <preset> [--repo X]`."""
     from saberops.service import RunOperationError
@@ -4286,6 +4397,12 @@ def _dispatch(args: argparse.Namespace) -> int:
             return handle_job_list(args)
         elif args.job_command == "cancel":
             return handle_job_cancel(args)
+    elif args.command == "scheduler":
+        if args.scheduler_command == "run":
+            return handle_scheduler_run(args)
+    elif args.command == "capacity":
+        if args.capacity_command == "show":
+            return handle_capacity_show(args)
     elif args.command == "retry":
         return handle_retry(args)
     elif args.command == "continue":

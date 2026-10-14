@@ -308,27 +308,35 @@ def list_active_exclusions(
     db: Database, *, now: datetime | None = None
 ) -> list[dict[str, object]]:
     """Return active + PROBE_DUE exclusions, expiring EXACT/PARSED inline."""
-    ensure_tables(db)
+    owner: Database = db.owner_db if hasattr(db, "owner_db") else db
+    is_ro = bool(getattr(owner, "read_only", False) or getattr(db, "read_only", False))
+    if not is_ro:
+        ensure_tables(db)
     moment = _utcnow(now)
-    with owner_connection(db) as conn:
-        rows = conn.execute(
-            "SELECT * FROM capacity_exclusions WHERE cleared_at IS NULL"
-            " ORDER BY created_at ASC, id ASC"
-        ).fetchall()
+    with owner._get_connection() as conn:
+        try:
+            rows = conn.execute(
+                "SELECT * FROM capacity_exclusions WHERE cleared_at IS NULL"
+                " ORDER BY created_at ASC, id ASC"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []
         result: list[dict[str, object]] = []
         for row in rows:
             exc = dict(row)
             state = exclusion_state(exc, moment)
             if state == "EXPIRED":
-                conn.execute(
-                    "UPDATE capacity_exclusions SET cleared_at = ?, cleared_by = ?"
-                    " WHERE id = ?",
-                    (moment.isoformat(), "EXPIRED", exc["id"]),
-                )
+                if not is_ro:
+                    conn.execute(
+                        "UPDATE capacity_exclusions SET cleared_at = ?, cleared_by = ?"
+                        " WHERE id = ?",
+                        (moment.isoformat(), "EXPIRED", exc["id"]),
+                    )
                 continue
             if state in ("ACTIVE", "PROBE_DUE"):
                 result.append(exc)
-        conn.commit()
+        if not is_ro:
+            conn.commit()
         return result
 
 

@@ -72,15 +72,39 @@ run id is printed with `orch wait` / `orch status` hints.
 ## Worker routing policy
 
 Worker selection uses one ordered chain per role: WORKER, SURGEON and
-INTEGRATOR. Each chain is a list of fallback groups; until pacing lands,
-resolution flattens groups in order (one route per group is today's
-ordered fallback). The classifier still labels the run tier (a
-risk/telemetry label), but it no longer selects routes. Provider
-readiness, quota, capabilities, exact bindings and owner model enrollment
-still apply. Schema 3 routing files hold `roles` with `WORKER`,
-`SURGEON` and `INTEGRATOR` groups of `{"routes": [...]}`. ORCHESTRATOR
-and REVIEWER keep their existing ordered lists: see `orch orchestrator
+INTEGRATOR. Each chain is a list of fallback groups. Resolution evaluates
+fallback groups in order: the first fallback group containing an admitted
+candidate wins, and candidates within that winning group are prioritized
+by their intra-group binding-window pacing score:
+`pace = (remaining_pct - red_line_pct - reserve_pct - cost_estimate_pct) / max(hours_to_reset, 0.25)`.
+Ties break deterministically by original chain order, then by lower estimated
+cost. The classifier still labels the run tier (a risk/telemetry label), but
+it no longer selects routes. Provider readiness, quota, capabilities, exact
+bindings and owner model enrollment still apply. Schema 3 routing files hold
+`roles` with `WORKER`, `SURGEON` and `INTEGRATOR` groups of `{"routes": [...]}`.
+ORCHESTRATOR and REVIEWER keep their existing ordered lists: see `orch orchestrator
 show` and `orch reviewer show` (`orch routing show` points there too).
+
+## Pacing scheduler (`orch scheduler run`)
+
+`orch scheduler run [--once] [--interval-seconds INT]` runs the deterministic
+pacing scheduler loop (ADR-0002 D7). Queued jobs are scheduled in strict priority
+order: `URGENT` > `NORMAL` > `BACKGROUND`, with earliest deadline first, then FIFO
+by creation time. `BACKGROUND` jobs require binding-window pace >= 4.0 %/h.
+
+The scheduler uses a single-instance owner-DB lease (`capacity_scheduler_lease`)
+with fencing tokens to ensure exactly one scheduler instance dispatches at a time.
+Dispatches atomically move jobs `QUEUED` → `RUNNING`, reserve ledger capacity,
+and reconcile terminal runs upon completion or failure. Run `--once` executes
+a single evaluation tick and exits cleanly.
+
+## Capacity ledger inspection (`orch capacity show`)
+
+`orch capacity show [--json]` provides read-only inspection of the capacity
+ledger snapshot across configured provider quota pools and binding windows.
+It reports remaining capacity estimates, active uncertainties, evidence sources
+(`OWNER`, `PROBE`, or `EXHAUSTION`), staleness flags, and any active exclusion
+reset times without creating or writing tables on read.
 
 Migration: schema 1 merges exactly as before, then migrates 2 → 3 with
 WORKER as the stable union of T2, T1 and T3 (T2 order first), SURGEON as
