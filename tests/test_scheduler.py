@@ -556,7 +556,8 @@ def test_scheduler_non_dispatchable_role() -> None:
     assert len(decisions) == 1
     d = decisions[0]
     assert isinstance(d, WaitDecision)
-    assert d.reason == NO_ROUTE_FOR_REQUIREMENTS
+    assert d.reason == WaitingReason.NO_CAPACITY.value
+    assert d.details.get("diagnostic") == NO_ROUTE_FOR_REQUIREMENTS
 
 
 def test_scheduler_monotonicity_lower_capacity_never_admits_more() -> None:
@@ -645,5 +646,41 @@ def test_schedule_respects_running_counts() -> None:
     assert len(decisions) == 1
     assert isinstance(decisions[0], WaitDecision)
     assert decisions[0].reason == WaitingReason.CONCURRENCY.value
+
+
+def test_wait_eta_picks_min_from_exact_or_parsed_decisions() -> None:
+    """Covers: ADR-0002 D7 / F9: wait ETA picks minimum reset ETA over posture-valid decisions."""
+    c1 = _cand("codex", "gpt-5.6-sol")
+    c2 = _cand("opencode", "claude-sonnet")
+    snapshot = _make_snapshot(((c1,), (c2,)))
+    pool1 = _make_pool_plan("codex-pool", [("codex", 1.0)])
+    pool2 = _make_pool_plan("opencode-pool", [("opencode", 1.0)])
+    policy = _make_policy({"codex-pool": pool1, "opencode-pool": pool2})
+
+    eta1 = _NOW + timedelta(hours=3)
+    eta2 = _NOW + timedelta(hours=1)
+    q1 = _make_quota_state(
+        provider="codex", pool="codex-pool", remaining_percent=0.0, reset_at=eta1.isoformat()
+    )
+    q2 = _make_quota_state(
+        provider="opencode", pool="opencode-pool", remaining_percent=0.0, reset_at=eta2.isoformat()
+    )
+
+    job = _job("j_eta")
+    decisions = schedule(
+        now=_NOW,
+        queued=[job],
+        routing_snapshot=snapshot,
+        policy=policy,
+        quota_states=[q1, q2],
+    )
+    assert len(decisions) == 1
+    d = decisions[0]
+    assert isinstance(d, WaitDecision)
+    assert d.reason == WaitingReason.NO_CAPACITY.value
+    # Minimum ETA (1 hour from c2) is picked
+    assert d.eta == eta2
+    assert d.candidate == c2
+
 
 

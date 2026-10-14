@@ -350,6 +350,12 @@ def submit_job(
                     f"key {key!r} for caller {caller!r} was used with a different request"
                 ) from None
         raise
+    try:
+        from saberops.capacity.loop import wake_scheduler
+
+        wake_scheduler()
+    except Exception:
+        pass
     return SubmitResult(job=job, created=True)
 
 
@@ -386,7 +392,20 @@ def cancel_job(
         assert job.current_run_id is not None
         if run_canceller(job.current_run_id):
             try:
-                return CancelResult(job=store.cancel_transition(db, job_id), cancelled=True)
+                cancelled_job = store.cancel_transition(db, job_id)
+                try:
+                    from saberops.capacity.ledger import release
+
+                    release(db, job.current_run_id)
+                except Exception:
+                    pass
+                try:
+                    from saberops.capacity.loop import wake_scheduler
+
+                    wake_scheduler()
+                except Exception:
+                    pass
+                return CancelResult(job=cancelled_job, cancelled=True)
             except (JobConflictError, JobTransitionError):
                 current = store.get_job(db, job_id)
                 if current is None:

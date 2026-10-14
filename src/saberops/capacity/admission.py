@@ -443,7 +443,8 @@ def admit(
                     details={"matched_excluded": matched_fam},
                 )
 
-    # 3. Provider & training governance
+    # Note: policy=None fallback to load_control_plane_policy() is test/convenience-only;
+    # all production callers pass an explicit policy snapshot.
     effective_policy = policy or load_control_plane_policy()
     provider_policy = effective_policy.provider(candidate.provider)
     if provider_policy.state == ProviderPolicyState.DISABLED:

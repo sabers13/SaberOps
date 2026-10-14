@@ -307,13 +307,13 @@ def _validate_role_groups(
         ctx_key = f"{role}[{index + 1}]"
         if not isinstance(group, dict):
             raise RoutingConfigError(
-                f"Routing config at {source_label}: role {role} group {index + 1} must be an object with exactly the key 'routes'"  # noqa: E501
+                f"Routing config at {source_label}: role {role} group {index + 1} must be an object with key 'routes' and optional 'prefer_wait_minutes'"  # noqa: E501
             )
         allowed_keys = {"routes", "prefer_wait_minutes"}
         unknown = set(group.keys()) - allowed_keys
         if unknown or "routes" not in group:
             raise RoutingConfigError(
-                f"Routing config at {source_label}: role {role} group {index + 1} must be an object with exactly the key 'routes'"  # noqa: E501
+                f"Routing config at {source_label}: role {role} group {index + 1} must be an object with key 'routes' and optional 'prefer_wait_minutes'"  # noqa: E501
             )
         pwm = group.get("prefer_wait_minutes", 0)
         if not isinstance(pwm, int) or isinstance(pwm, bool) or pwm < 0:
@@ -876,13 +876,13 @@ def payload_to_snapshot(payload: Any, run_id: str | None = None) -> RoutingSnaps
             ctx_key = f"{role}[{index + 1}]"
             if not isinstance(group, dict):
                 raise RoutingConfigError(
-                    f"Routing config at {source_label}: role {role} group {index + 1} must be an object with exactly the key 'routes'"  # noqa: E501
+                    f"Routing config at {source_label}: role {role} group {index + 1} must be an object with key 'routes' and optional 'prefer_wait_minutes'"  # noqa: E501
                 )
             allowed_keys = {"routes", "prefer_wait_minutes"}
             unknown = set(group.keys()) - allowed_keys
             if unknown or "routes" not in group:
                 raise RoutingConfigError(
-                    f"Routing config at {source_label}: role {role} group {index + 1} must be an object with exactly the key 'routes'"  # noqa: E501
+                    f"Routing config at {source_label}: role {role} group {index + 1} must be an object with key 'routes' and optional 'prefer_wait_minutes'"  # noqa: E501
                 )
             pwm = group.get("prefer_wait_minutes", 0)
             if not isinstance(pwm, int) or isinstance(pwm, bool) or pwm < 0:

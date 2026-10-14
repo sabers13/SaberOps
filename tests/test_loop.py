@@ -575,3 +575,302 @@ def test_run_scheduler_loop_can_be_stopped(owner_db: Database) -> None:
     with owner_connection(owner_db) as conn:
         rows = conn.execute("SELECT * FROM capacity_scheduler_lease").fetchall()
         assert len(rows) == 0
+
+
+def test_valid_empty_chain_never_crashes_tick(owner_db: Database, tmp_path: Path) -> None:
+    """Covers: ADR-0002 D7 / R-002: valid empty worker chain does not crash scheduler tick."""
+    t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
+    lease = acquire_lease(owner_db, "instance_empty", ttl_seconds=30.0, now=t0)
+    assert lease is not None
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+
+    job = _make_job(
+        "job_empty_chain",
+        str(repo_dir),
+        created_at=t0.isoformat(),
+        updated_at=t0.isoformat(),
+        request_digest="dig_empty",
+    )
+    store.insert_job(owner_db, job, now=t0)
+
+    # Empty worker chain is an authorized valid owner decision (R-002)
+    routes = _make_routes(())
+    policy = _make_policy()
+
+    # First tick: job is set to waiting without ValueError crash
+    res1 = scheduler_tick(
+        owner_db,
+        lease,
+        now=t0,
+        routes=routes,
+        policy=policy,
+    )
+    assert res1.ran is True
+    assert res1.waited == 1
+    assert res1.dispatched == 0
+
+    j1 = store.get_job(owner_db, "job_empty_chain")
+    assert j1 is not None
+    assert j1.state == JobState.QUEUED
+    assert j1.waiting_reason == WaitingReason.NO_CAPACITY
+
+    # Subsequent tick: scheduler remains live and healthy
+    res2 = scheduler_tick(
+        owner_db,
+        lease,
+        now=t0 + timedelta(seconds=10),
+        routes=routes,
+        policy=policy,
+    )
+    assert res2.ran is True
+    assert res2.dispatched == 0
+
+
+def test_simultaneous_first_acquire_race_returns_denial(owner_db: Database) -> None:
+    """Covers: ADR-0002 D7 first lease race returns denial instead of unhandled IntegrityError."""
+    t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
+    ensure_capacity_tables(owner_db)
+
+    # First process acquires lease
+    lease1 = acquire_lease(owner_db, "holder_1", ttl_seconds=60.0, now=t0)
+    assert lease1 is not None
+
+    # Second process concurrent acquire returns denial (None)
+    lease2 = acquire_lease(owner_db, "holder_2", ttl_seconds=60.0, now=t0)
+    assert lease2 is None
+
+
+def test_cancel_running_job_releases_ledger_reservation(owner_db: Database, tmp_path: Path) -> None:
+    """Covers: ADR-0002 D7 cancellation of running job releases ledger reservation."""
+    from saberops.jobs.service import cancel_job
+
+    t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+
+    job = _make_job(
+        "job_cancel_res",
+        str(repo_dir),
+        created_at=t0.isoformat(),
+        updated_at=t0.isoformat(),
+        request_digest="dig_cancel",
+    )
+    store.insert_job(owner_db, job, now=t0)
+    dispatched = store.mark_dispatched(owner_db, "job_cancel_res", run_id="run_cancel_1", now=t0)
+    assert dispatched.state == JobState.RUNNING
+
+    draws = [PoolDraw(pool_id="chatgpt-plus", window_id="ALL", multiplier=1.0)]
+    reserve(
+        owner_db,
+        run_id="run_cancel_1",
+        job_id="job_cancel_res",
+        route="openai/gpt-5",
+        draws=draws,
+        size_bucket="M",
+        now=t0,
+    )
+
+    # Cancel the running job
+    res = cancel_job(owner_db, "job_cancel_res", run_canceller=lambda r_id: True)
+    assert res.cancelled is True
+    assert res.job.state == JobState.CANCELLED
+
+    # Reservation state is now RELEASED
+    with owner_connection(owner_db) as conn:
+        q = "SELECT state FROM capacity_reservations WHERE run_id = 'run_cancel_1'"
+        rows = conn.execute(q).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["state"] == "RELEASED"
+
+
+def test_mid_tick_lease_expiry_fences_subsequent_launches(
+    owner_db: Database, tmp_path: Path
+) -> None:
+    """Covers: ADR-0002 D7 mid-tick lease expiry / takeover fences subsequent dispatches."""
+    t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
+    current_time = [t0]
+
+    def mock_clock() -> datetime:
+        return current_time[0]
+
+    lease = acquire_lease(owner_db, "sched_A", ttl_seconds=30.0, now=t0)
+    assert lease is not None
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+
+    # Two queued jobs
+    j1 = _make_job(
+        "job_mid_1",
+        str(repo_dir),
+        created_at=t0.isoformat(),
+        updated_at=t0.isoformat(),
+        priority=Priority.URGENT,
+        request_digest="dig_mid1",
+    )
+    j2 = _make_job(
+        "job_mid_2",
+        str(repo_dir),
+        created_at=t0.isoformat(),
+        updated_at=t0.isoformat(),
+        priority=Priority.NORMAL,
+        request_digest="dig_mid2",
+    )
+    store.insert_job(owner_db, j1, now=t0)
+    store.insert_job(owner_db, j2, now=t0)
+
+    record_owner_quota(owner_db, "openai", "chatgpt-plus", 100.0, None, source="OWNER", now=t0)
+    routes = _make_routes(((_make_candidate("openai", "gpt-5"),),))
+    policy = _make_policy()
+
+    launched: list[str] = []
+
+    def expiring_launcher(j: Job, dec: Any, run_id: str) -> None:
+        launched.append(run_id)
+        # Advance clock past lease TTL (30s) so lease expires mid-tick before next job
+        current_time[0] = current_time[0] + timedelta(seconds=45)
+
+    res = scheduler_tick(
+        owner_db,
+        lease,
+        now=t0,
+        routes=routes,
+        policy=policy,
+        run_launcher=expiring_launcher,
+        clock_fn=mock_clock,
+    )
+    # First job dispatched; second job fenced due to lease expiry
+    assert len(launched) == 1
+    assert res.dispatched == 1
+
+    # Second job was NOT dispatched and remains QUEUED
+    updated_j2 = store.get_job(owner_db, "job_mid_2")
+    assert updated_j2 is not None
+    assert updated_j2.state == JobState.QUEUED
+
+
+def test_partial_launch_with_existing_run_does_not_requeue(
+    owner_db: Database, tmp_path: Path
+) -> None:
+    """Covers: ADR-0002 D7 launcher failure after run row creation does not requeue job."""
+    t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
+    lease = acquire_lease(owner_db, "sched_partial", ttl_seconds=30.0, now=t0)
+    assert lease is not None
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+
+    job = _make_job(
+        "job_partial_launch",
+        str(repo_dir),
+        created_at=t0.isoformat(),
+        updated_at=t0.isoformat(),
+        request_digest="dig_partial",
+    )
+    store.insert_job(owner_db, job, now=t0)
+
+    record_owner_quota(owner_db, "openai", "chatgpt-plus", 100.0, None, source="OWNER", now=t0)
+    routes = _make_routes(((_make_candidate("openai", "gpt-5"),),))
+    policy = _make_policy()
+
+    def partial_fail_launcher(j: Job, dec: Any, run_id: str) -> None:
+        # Launcher creates durable run row in DB, then raises (e.g. process supervisor failure)
+        insert_sql = (
+            "INSERT INTO runs (id, task, target_repo, base_commit, tier, "
+            "training_allowed, gate_command, status, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        with owner_db._get_connection() as conn:
+            conn.execute(
+                insert_sql,
+                (run_id, j.goal, j.repo, j.base_sha, "T1", 0, "test", "RUNNING", t0.isoformat()),
+            )
+            conn.commit()
+        raise RuntimeError("crashed after run row created")
+
+    scheduler_tick(
+        owner_db,
+        lease,
+        now=t0,
+        routes=routes,
+        policy=policy,
+        run_launcher=partial_fail_launcher,
+    )
+
+    # Job must NOT be requeued! It stays in RUNNING with current_run_id for reconciler recovery
+    updated = store.get_job(owner_db, "job_partial_launch")
+    assert updated is not None
+    assert updated.state == JobState.RUNNING
+    assert updated.current_run_id is not None
+
+    # Reservation was NOT released (remains for recovery/settlement)
+    with owner_connection(owner_db) as conn:
+        q = "SELECT state FROM capacity_reservations WHERE job_id = 'job_partial_launch'"
+        rows = conn.execute(q).fetchall()
+        assert len(rows) > 0
+        assert all(r["state"] == "RESERVED" for r in rows)
+
+
+def test_readiness_unavailable_executable_does_not_dispatch(
+    owner_db: Database, tmp_path: Path
+) -> None:
+    """Covers: ADR-0002 D7 / F12: route with unavailable executable is denied without CAS."""
+    from saberops.model_access.readiness_service import ReadinessAdmission
+    from saberops.models import ProviderReadiness
+
+    t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
+    lease = acquire_lease(owner_db, "sched_readiness", ttl_seconds=30.0, now=t0)
+    assert lease is not None
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+
+    job = _make_job(
+        "job_readiness_check",
+        str(repo_dir),
+        created_at=t0.isoformat(),
+        updated_at=t0.isoformat(),
+        request_digest="dig_ready",
+    )
+    store.insert_job(owner_db, job, now=t0)
+
+    record_owner_quota(owner_db, "openai", "chatgpt-plus", 100.0, None, source="OWNER", now=t0)
+    routes = _make_routes(((_make_candidate("openai", "gpt-5"),),))
+    policy = _make_policy()
+
+    # Mock readiness service returning unavailable executable
+    class MockReadinessService:
+        def admission_for(
+            self, *, provider: str, profile_id: str = "", backend_ref: str = ""
+        ) -> ReadinessAdmission:
+            return ReadinessAdmission(
+                state=ProviderReadiness.NOT_READY,
+                reason="EXECUTABLE_MISSING",
+                executable_available=False,
+            )
+
+    res = scheduler_tick(
+        owner_db,
+        lease,
+        now=t0,
+        routes=routes,
+        policy=policy,
+        readiness_service=MockReadinessService(),
+    )
+
+    assert res.dispatched == 0
+    assert res.waited == 1
+
+    # Job was NOT claimed and has no run_id
+    j = store.get_job(owner_db, "job_readiness_check")
+    assert j is not None
+    assert j.state == JobState.QUEUED
+    assert j.current_run_id is None
+

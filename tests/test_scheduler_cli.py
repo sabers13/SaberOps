@@ -73,6 +73,25 @@ def test_scheduler_second_instance_denied(
     assert code == 0
 
 
+def test_scheduler_second_instance_continuous_denied_returns_exit_2(
+    isolated_env: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Covers: ADR-0002 D7 / F8: second continuous scheduler returns exit 2 on lease denial."""
+    db_path = isolated_env / "test_jobs.db"
+    db = Database(db_path)
+    ensure_capacity_tables(db)
+
+    # Acquire lease by instance-1
+    lease = acquire_lease(db, holder_id="instance-1", ttl_seconds=60)
+    assert lease is not None
+
+    # Instance-2 tries to run continuous loop via CLI
+    code, out, err = _cli("scheduler", "run", "--db", str(db_path), capsys=capsys)
+    assert code == 2
+    assert "lease_held_by_other" in err
+
+
+
 def test_capacity_show_read_only_creates_no_tables(
     isolated_env: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -3876,12 +3876,26 @@ def handle_scheduler_run(args: argparse.Namespace) -> int:
     run_once = bool(getattr(args, "once", False))
     interval = float(getattr(args, "interval_seconds", 60.0) or 60.0)
 
+    readiness_svc: Any = None
+    try:
+        from saberops.model_access.readiness_service import ReadinessService
+        from saberops.project import owner_state_dir
+
+        readiness_svc = ReadinessService.for_owner_state(owner_state_dir())
+    except Exception:
+        readiness_svc = None
+
     try:
         result = run_scheduler_loop(
             db,
             tick_interval=interval,
             once=run_once,
+            readiness_service=readiness_svc,
         )
+        if result is None:
+            print("[!] Scheduler lease held by another instance (lease_held_by_other)", file=sys.stderr)
+            return 2
+
         if getattr(args, "json", False):
             payload: list[dict[str, Any]] = []
             if result is not None:

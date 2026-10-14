@@ -122,6 +122,7 @@ def schedule(
     reservations: Mapping[tuple[str, str], float] | None = None,
     global_slot_limit: int | None = None,
     background_min_pace: float = 4.0,
+    readiness_states: Mapping[Any, Any] | None = None,
 ) -> list[SchedulerDecision]:
     """Pure deterministic pacing scheduler (ADR-0002 D7).
 
@@ -168,8 +169,8 @@ def schedule(
             decisions.append(
                 WaitDecision(
                     job=job,
-                    reason=NO_ROUTE_FOR_REQUIREMENTS,
-                    details={"unsupported_role": role_val},
+                    reason=WaitingReason.NO_CAPACITY.value,
+                    details={"diagnostic": NO_ROUTE_FOR_REQUIREMENTS, "unsupported_role": role_val},
                 )
             )
             continue
@@ -180,7 +181,8 @@ def schedule(
             decisions.append(
                 WaitDecision(
                     job=job,
-                    reason=NO_ROUTE_FOR_REQUIREMENTS,
+                    reason=WaitingReason.NO_CAPACITY.value,
+                    details={"diagnostic": NO_ROUTE_FOR_REQUIREMENTS},
                 )
             )
             continue
@@ -189,7 +191,8 @@ def schedule(
             decisions.append(
                 WaitDecision(
                     job=job,
-                    reason=NO_ROUTE_FOR_REQUIREMENTS,
+                    reason=WaitingReason.NO_CAPACITY.value,
+                    details={"diagnostic": NO_ROUTE_FOR_REQUIREMENTS},
                 )
             )
             continue
@@ -201,22 +204,34 @@ def schedule(
 
         for g_idx, group in enumerate(groups):
             # Evaluate admission for every candidate in this group
-            decisions_for_group: list[AdmissionDecision] = [
-                admit(
-                    candidate=cand,
-                    now=moment,
-                    policy=policy,
-                    quota_states=quota_states,
-                    requirements=job.requirements,
-                    size_bucket=size_bucket,
-                    cost_states=cost_states,
-                    running_counts=simulated_running,
-                    global_running=global_running,
-                    max_global_concurrent=global_slot_limit,
-                    reservations=simulated_reservations,
+            decisions_for_group: list[AdmissionDecision] = []
+            for cand in group:
+                rd = None
+                if readiness_states:
+                    rd = (
+                        readiness_states.get((cand.provider, cand.model))
+                        or readiness_states.get(cand.provider)
+                    )
+                decisions_for_group.append(
+                    admit(
+                        candidate=cand,
+                        now=moment,
+                        policy=policy,
+                        quota_states=quota_states,
+                        requirements=job.requirements,
+                        size_bucket=size_bucket,
+                        cost_states=cost_states,
+                        running_counts=simulated_running,
+                        global_running=global_running,
+                        max_global_concurrent=global_slot_limit,
+                        reservations=simulated_reservations,
+                        readiness_state=getattr(rd, "state", None) if rd is not None else None,
+                        readiness_reason=getattr(rd, "reason", None) if rd is not None else None,
+                        readiness_executable_available=(
+                            getattr(rd, "executable_available", True) if rd is not None else True
+                        ),
+                    )
                 )
-                for cand in group
-            ]
             all_group_decisions.append(decisions_for_group)
             admitted_in_group = [d for d in decisions_for_group if d.admitted]
 
@@ -339,6 +354,17 @@ def schedule(
                 if all_group_decisions and all_group_decisions[0]
                 else None
             )
+            # Pick wait ETA as minimum ETA over decisions with EXACT/PARSED confidence
+            best_eta_dec: AdmissionDecision | None = None
+            for g in all_group_decisions:
+                for d in g:
+                    if d.eta is not None and d.wait_confidence in ("EXACT", "PARSED"):
+                        if best_eta_dec is None or (
+                            best_eta_dec.eta is not None and d.eta < best_eta_dec.eta
+                        ):
+                            best_eta_dec = d
+
+            dec_for_wait = best_eta_dec if best_eta_dec is not None else first_dec
             has_probe = bool(probes_needed)
             is_concurrency = any(
                 d.reason in ("CONCURRENCY_LIMIT", "GLOBAL_CONCURRENCY_LIMIT")
@@ -354,17 +380,17 @@ def schedule(
                     else WaitingReason.NO_CAPACITY.value
                 )
             )
-            eta = first_dec.eta if first_dec else None
-            confidence = first_dec.wait_confidence if first_dec else None
+            eta = dec_for_wait.eta if dec_for_wait else None
+            confidence = dec_for_wait.wait_confidence if dec_for_wait else None
             decisions.append(
                 WaitDecision(
                     job=job,
                     reason=wait_reason,
                     eta=eta,
                     confidence=confidence,
-                    candidate=first_dec.candidate if first_dec else None,
-                    pool_id=first_dec.pool_id if first_dec else None,
-                    binding_window=first_dec.binding_window if first_dec else None,
+                    candidate=dec_for_wait.candidate if dec_for_wait else None,
+                    pool_id=dec_for_wait.pool_id if dec_for_wait else None,
+                    binding_window=dec_for_wait.binding_window if dec_for_wait else None,
                 )
             )
 

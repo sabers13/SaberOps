@@ -77,6 +77,15 @@ def _utcnow(now: datetime | None) -> datetime:
     return datetime.now(UTC)
 
 
+_SCHEDULER_WAKE_EVENT = threading.Event()
+
+
+def wake_scheduler() -> None:
+    """Signal the scheduler loop to evaluate a tick immediately."""
+    _SCHEDULER_WAKE_EVENT.set()
+
+
+
 @dataclass(frozen=True)
 class SchedulerLease:
     lease_name: str
@@ -125,7 +134,7 @@ def acquire_lease(
         try:
             conn.execute("BEGIN IMMEDIATE")
         except sqlite3.OperationalError:
-            pass
+            return None
         row = conn.execute(
             "SELECT lease_name, holder_id, acquired_at, expires_at, fencing_token "
             "FROM capacity_scheduler_lease WHERE lease_name = ?",
@@ -135,20 +144,30 @@ def acquire_lease(
         if row is None:
             # First acquisition
             fencing_token = 1
-            conn.execute(
-                "INSERT INTO capacity_scheduler_lease "
-                "(lease_name, holder_id, acquired_at, expires_at, fencing_token) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (lease_name, clean_holder, now_iso, expires_iso, fencing_token),
-            )
-            conn.commit()
-            return SchedulerLease(
-                lease_name=lease_name,
-                holder_id=clean_holder,
-                fencing_token=fencing_token,
-                acquired_at=now_iso,
-                expires_at=expires_iso,
-            )
+            try:
+                conn.execute(
+                    "INSERT INTO capacity_scheduler_lease "
+                    "(lease_name, holder_id, acquired_at, expires_at, fencing_token) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (lease_name, clean_holder, now_iso, expires_iso, fencing_token),
+                )
+                conn.commit()
+                return SchedulerLease(
+                    lease_name=lease_name,
+                    holder_id=clean_holder,
+                    fencing_token=fencing_token,
+                    acquired_at=now_iso,
+                    expires_at=expires_iso,
+                )
+            except sqlite3.IntegrityError:
+                conn.rollback()
+                row = conn.execute(
+                    "SELECT lease_name, holder_id, acquired_at, expires_at, fencing_token "
+                    "FROM capacity_scheduler_lease WHERE lease_name = ?",
+                    (lease_name,),
+                ).fetchone()
+                if row is None:
+                    return None
 
         current_holder = str(row["holder_id"])
         current_token = int(row["fencing_token"])
@@ -215,7 +234,7 @@ def renew_lease(
         try:
             conn.execute("BEGIN IMMEDIATE")
         except sqlite3.OperationalError:
-            pass
+            return None
         cur = conn.execute(
             "UPDATE capacity_scheduler_lease SET expires_at = ? "
             "WHERE lease_name = ? AND holder_id = ? AND fencing_token = ?",
@@ -239,7 +258,7 @@ def release_lease(
         try:
             conn.execute("BEGIN IMMEDIATE")
         except sqlite3.OperationalError:
-            pass
+            return False
         cur = conn.execute(
             "DELETE FROM capacity_scheduler_lease "
             "WHERE lease_name = ? AND holder_id = ? AND fencing_token = ?",
@@ -349,6 +368,8 @@ def scheduler_tick(
     routes: RoutingSnapshot | None = None,
     global_slot_limit: int | None = None,
     background_min_pace: float = 4.0,
+    clock_fn: Callable[[], datetime] | None = None,
+    readiness_service: Any = None,
 ) -> TickResult:
     """Execute one complete scheduler tick.
 
@@ -368,7 +389,14 @@ def scheduler_tick(
     """
     moment = _utcnow(now)
 
-    if not check_lease(db, lease, now=moment):
+    def _current_moment() -> datetime:
+        if clock_fn is not None:
+            return clock_fn()
+        if now is None:
+            return _utcnow(None)
+        return now
+
+    if not check_lease(db, lease, now=_current_moment()):
         return TickResult(ran=False, reason="lost_lease")
 
     # 1. Startup and periodic reconciliation
@@ -377,7 +405,7 @@ def scheduler_tick(
     for ch in changes:
         if ch.to_state == JobState.SUCCEEDED:
             settle(db, ch.run_id, total_tokens=None, now=moment)
-        elif ch.to_state == JobState.FAILED:
+        elif ch.to_state in (JobState.FAILED, JobState.CANCELLED):
             release(db, ch.run_id, now=moment)
 
     # 2. Collect scheduling inputs
@@ -407,6 +435,23 @@ def scheduler_tick(
             except Exception:
                 pass
 
+    # Snapshot readiness/executable availability per provider (F12)
+    readiness_map: dict[str, Any] = {}
+    if readiness_service is not None:
+        try:
+            for role_name in ("worker", "surgeon"):
+                try:
+                    for grp in effective_routes.groups_for(role_name):
+                        for c in grp:
+                            if c.provider not in readiness_map:
+                                readiness_map[c.provider] = readiness_service.admission_for(
+                                    provider=c.provider
+                                )
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     # 3. Pure deterministic schedule evaluation
     decisions = schedule(
         now=moment,
@@ -420,6 +465,7 @@ def scheduler_tick(
         reservations=charges,
         global_slot_limit=global_slot_limit,
         background_min_pace=background_min_pace,
+        readiness_states=readiness_map if readiness_map else None,
     )
 
     dispatched_count = 0
@@ -446,22 +492,27 @@ def scheduler_tick(
 
         elif isinstance(dec, WaitDecision):
             eta_iso = dec.eta.isoformat() if dec.eta else None
+            storable_reason = dec.reason
+            try:
+                WaitingReason(str(storable_reason))
+            except ValueError:
+                storable_reason = WaitingReason.NO_CAPACITY.value
             try:
                 store.set_waiting(
                     db,
                     dec.job.job_id,
-                    reason=dec.reason,
+                    reason=storable_reason,
                     eta=eta_iso,
                     eta_confidence=dec.confidence,
                     now=moment,
                 )
                 waited_count += 1
-            except (JobConflictError, JobTransitionError, JobNotFoundError):
+            except (JobConflictError, JobTransitionError, JobNotFoundError, ValueError):
                 continue
 
         elif isinstance(dec, DispatchDecision):
             # Check lease before dispatch
-            if not check_lease(db, lease, now=moment):
+            if not check_lease(db, lease, now=_current_moment()):
                 break
 
             run_id = f"run_{uuid.uuid4().hex[:12]}"
@@ -474,7 +525,20 @@ def scheduler_tick(
             except (JobConflictError, JobTransitionError, JobNotFoundError):
                 continue
 
-            # Step B: Idempotent reservation in ledger across ALL drawn pools (F2)
+            # Step B: Re-verify lease before reservation
+            if not check_lease(db, lease, now=_current_moment()):
+                try:
+                    store.requeue(
+                        db,
+                        dec.job.job_id,
+                        reason=WaitingReason.NO_CAPACITY,
+                        now=_current_moment(),
+                    )
+                except Exception:
+                    pass
+                break
+
+            # Step C: Idempotent reservation in ledger across ALL drawn pools (F2)
             draws: list[PoolDraw] = list(dec.draws) if dec.draws else []
             if not draws:
                 target_pool_ids = (
@@ -509,34 +573,34 @@ def scheduler_tick(
                 )
             except Exception:
                 # Reservation failed; compensate partial dispatch
-                release(db, run_id=run_id, now=moment)
+                release(db, run_id=run_id, now=_current_moment())
                 try:
                     store.requeue(
                         db,
                         dec.job.job_id,
                         reason=WaitingReason.NO_CAPACITY,
-                        now=moment,
+                        now=_current_moment(),
                     )
                 except Exception:
                     pass
                 continue
 
-            # Step C: Re-verify lease right before launch
-            if not check_lease(db, lease, now=moment):
+            # Step D: Re-verify lease right before launch
+            if not check_lease(db, lease, now=_current_moment()):
                 # Lost lease between reservation and launch; compensate immediately
-                release(db, run_id=run_id, now=moment)
+                release(db, run_id=run_id, now=_current_moment())
                 try:
                     store.requeue(
                         db,
                         dec.job.job_id,
                         reason=WaitingReason.NO_CAPACITY,
-                        now=moment,
+                        now=_current_moment(),
                     )
                 except Exception:
                     pass
                 break
 
-            # Step D: Launch run
+            # Step E: Launch run
             try:
                 if run_launcher is not None:
                     run_launcher(dispatched_job, dec, run_id)
@@ -544,14 +608,27 @@ def scheduler_tick(
                     _default_run_launcher(db, dispatched_job, dec, run_id)
                 dispatched_count += 1
             except Exception:
-                # Launch failed; compensate partial dispatch immediately
-                release(db, run_id=run_id, now=moment)
+                # Launch failed; inspect durable run existence (F11)
+                run_exists = False
+                try:
+                    if hasattr(db, "get_run") and db.get_run(run_id) is not None:
+                        run_exists = True
+                except Exception:
+                    run_exists = True
+
+                if run_exists:
+                    # Run row exists or status unknown: do NOT requeue, do NOT release reservation.
+                    # Leave job in RUNNING for reconciler / supervisor recovery.
+                    continue
+
+                # Proven no side effects occurred: safe to compensate partial dispatch
+                release(db, run_id=run_id, now=_current_moment())
                 try:
                     store.requeue(
                         db,
                         dec.job.job_id,
                         reason=WaitingReason.NO_CAPACITY,
-                        now=moment,
+                        now=_current_moment(),
                     )
                 except Exception:
                     pass
@@ -583,6 +660,7 @@ def run_scheduler_loop(
     global_slot_limit: int | None = None,
     background_min_pace: float = 4.0,
     now_fn: Callable[[], datetime] | None = None,
+    readiness_service: Any = None,
 ) -> TickResult | None:
     """Run the scheduler loop or a single tick (--once)."""
     clean_holder = holder_id or f"sched_{uuid.uuid4().hex[:8]}"
@@ -607,12 +685,15 @@ def run_scheduler_loop(
                 routes=routes,
                 global_slot_limit=global_slot_limit,
                 background_min_pace=background_min_pace,
+                clock_fn=now_fn,
+                readiness_service=readiness_service,
             )
         finally:
             release_lease(db, lease, now=now)
 
     last_tick: TickResult | None = None
     stop = stop_event or threading.Event()
+    wake = wake_event if wake_event is not None else _SCHEDULER_WAKE_EVENT
 
     try:
         while not stop.is_set():
@@ -634,16 +715,20 @@ def run_scheduler_loop(
                 routes=routes,
                 global_slot_limit=global_slot_limit,
                 background_min_pace=background_min_pace,
+                clock_fn=now_fn,
+                readiness_service=readiness_service,
             )
             if not last_tick.ran:
                 break
 
-            if wake_event is not None:
-                woken = wake_event.wait(timeout=tick_interval)
-                if woken:
-                    wake_event.clear()
-            else:
-                stop.wait(timeout=tick_interval)
+            # Wait for wake event or periodic tick timeout
+            waited = 0.0
+            step = min(tick_interval, 0.5)
+            while waited < tick_interval and not stop.is_set():
+                if wake.wait(timeout=step):
+                    wake.clear()
+                    break
+                waited += step
     finally:
         now = now_fn() if now_fn else _utcnow(None)
         release_lease(db, lease, now=now)
@@ -663,4 +748,5 @@ __all__ = [
     "renew_lease",
     "run_scheduler_loop",
     "scheduler_tick",
+    "wake_scheduler",
 ]
