@@ -152,6 +152,17 @@ def ensure_tables(db: Database) -> None:
                 ON capacity_reservations (pool_id, window_id, state)
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS capacity_scheduler_lease (
+                lease_name TEXT PRIMARY KEY,
+                holder_id TEXT NOT NULL,
+                acquired_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                fencing_token INTEGER NOT NULL DEFAULT 1
+            )
+            """
+        )
         conn.commit()
 
 

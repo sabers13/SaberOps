@@ -375,11 +375,23 @@ def cancel_job(
     if job is None:
         raise JobNotFoundError(f"unknown job: {job_id}")
     if job.state == JobState.QUEUED:
-        return CancelResult(job=store.cancel_transition(db, job_id), cancelled=True)
+        try:
+            return CancelResult(job=store.cancel_transition(db, job_id), cancelled=True)
+        except (JobConflictError, JobTransitionError):
+            current = store.get_job(db, job_id)
+            if current is None:
+                raise JobNotFoundError(f"unknown job: {job_id}") from None
+            return CancelResult(job=current, cancelled=False)
     if job.state == JobState.RUNNING:
         assert job.current_run_id is not None
         if run_canceller(job.current_run_id):
-            return CancelResult(job=store.cancel_transition(db, job_id), cancelled=True)
+            try:
+                return CancelResult(job=store.cancel_transition(db, job_id), cancelled=True)
+            except (JobConflictError, JobTransitionError):
+                current = store.get_job(db, job_id)
+                if current is None:
+                    raise JobNotFoundError(f"unknown job: {job_id}") from None
+                return CancelResult(job=current, cancelled=False)
         current = store.get_job(db, job_id)
         assert current is not None
         return CancelResult(job=current, cancelled=False)
@@ -406,7 +418,7 @@ def capacity(db: Any, now: datetime | None = None) -> CapacityView:
             snapshot(db, moment), key=lambda entry: (entry.pool_id, entry.window_id)
         )
     )
-    return CapacityView(generated_at=moment.isoformat(), ledger_wired=True, pools=pools)
+    return CapacityView(generated_at=_utcnow_iso(now), ledger_wired=True, pools=pools)
 
 
 def mark_dispatched(
