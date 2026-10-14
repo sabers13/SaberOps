@@ -502,20 +502,6 @@ def admit(
                 reason=GOVERNED_INSTRUCTIONS_UNSUPPORTED,
             )
 
-    # Capacity subsystem configuration check (graceful degradation if unconfigured)
-    if not is_capacity_subsystem_configured(
-        db=db,
-        policy=effective_policy,
-        quota_states=quota_states,
-        explicit_configured=capacity_configured,
-    ):
-        return AdmissionDecision(
-            admitted=True,
-            candidate=candidate,
-            reason="unconfigured",
-            details={"capacity_configured": False},
-        )
-
     # 6. Billing posture (ADR-0002 D2)
     posture = posture_decision(
         candidate.provider,
@@ -556,6 +542,22 @@ def admit(
             candidate=candidate,
             reason=POSTURE_METERED,
             details={"posture_class": "D"},
+        )
+
+    # Capacity subsystem configuration check (graceful degradation if unconfigured)
+    # Skips only ledger-dependent checks (pool balances, red lines, overage probes, concurrency),
+    # NEVER requirements, readiness, or billing posture!
+    if not is_capacity_subsystem_configured(
+        db=db,
+        policy=effective_policy,
+        quota_states=quota_states,
+        explicit_configured=capacity_configured,
+    ):
+        return AdmissionDecision(
+            admitted=True,
+            candidate=candidate,
+            reason="unconfigured",
+            details={"capacity_configured": False},
         )
 
     # 7. Global concurrency

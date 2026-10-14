@@ -232,25 +232,34 @@ def test_two_dispatch_points_share_canonical_admit_score(owner_db: Database) -> 
 
 
 def test_unconfigured_capacity_degrades_gracefully(tmp_path: Path) -> None:
-    """Covers: ADR-0002 D7 unconfigured capacity degrades gracefully with reason=unconfigured."""
+    """Covers: ADR-0002 D2/D7 posture fail-closed on blank DB;
+    unconfigured capacity grace for verified A/C only.
+    """
+    from saberops.control_plane.posture import (
+        POSTURE_ATTENDED_ONLY,
+        POSTURE_FORBIDDEN,
+        POSTURE_UNVERIFIED,
+    )
+    from saberops.dispatch import SKIP_QUOTA_BLOCKED
+
     cand = _make_candidate("codex", "gpt-5.6-sol")
     db_file = tmp_path / "blank.sqlite3"
     blank_db = Database(db_file)
 
-    # When capacity tables do not exist and no quota is recorded
+    # When capacity tables do not exist
     assert is_capacity_subsystem_configured(db=blank_db) is False
 
-    admit_dec = admit(
+    # 1. Unverified posture fails closed even on blank DB (F1 fix)
+    admit_unverified = admit(
         cand,
         now=_NOW,
         db=blank_db,
     )
-    assert admit_dec.admitted is True
-    assert admit_dec.is_allowed is True
-    assert admit_dec.reason == "unconfigured"
+    assert admit_unverified.admitted is False
+    assert admit_unverified.is_allowed is False
+    assert admit_unverified.reason == POSTURE_UNVERIFIED
 
-    # In-run evaluate_eligibility returns None (eligible!)
-    skip = evaluate_eligibility(
+    skip_unverified = evaluate_eligibility(
         candidate=cand,
         adapter=_AvailableAdapter(),  # type: ignore[arg-type]
         training_allowed=True,
@@ -259,7 +268,80 @@ def test_unconfigured_capacity_degrades_gracefully(tmp_path: Path) -> None:
         db=blank_db,
         now=_NOW,
     )
-    assert skip is None
+    assert skip_unverified == SKIP_QUOTA_BLOCKED
+
+    # 2. Attended-only (posture B) without override fails closed on blank DB
+    b_policy = ControlPlanePolicy(
+        provider_policies={
+            "codex": ProviderPolicy("codex", ProviderPolicyState.ALLOWED),
+        },
+        quota_pools={},
+        content_hash="test-b",
+        plans=PlanSet(
+            accounts={},
+            pool_plans={},
+            postures={"codex": PostureRecord("codex", "B", ttl_days=30, verified_on="2026-10-14")},
+        ),
+    )
+    admit_b = admit(cand, now=_NOW, db=blank_db, policy=b_policy)
+    assert admit_b.admitted is False
+    assert admit_b.reason == POSTURE_ATTENDED_ONLY
+
+    # 3. Forbidden (posture X) fails closed on blank DB
+    x_policy = ControlPlanePolicy(
+        provider_policies={
+            "codex": ProviderPolicy("codex", ProviderPolicyState.ALLOWED),
+        },
+        quota_pools={},
+        content_hash="test-x",
+        plans=PlanSet(
+            accounts={},
+            pool_plans={},
+            postures={"codex": PostureRecord("codex", "X", ttl_days=30, verified_on="2026-10-14")},
+        ),
+    )
+    admit_x = admit(cand, now=_NOW, db=blank_db, policy=x_policy)
+    assert admit_x.admitted is False
+    assert admit_x.reason == POSTURE_FORBIDDEN
+
+    # 4. Verified A/C route gracefully degrades with reason=unconfigured on blank DB
+    verified_policy = _make_policy()
+    admit_verified = admit(
+        cand,
+        now=_NOW,
+        db=blank_db,
+        policy=verified_policy,
+    )
+    assert admit_verified.admitted is True
+    assert admit_verified.is_allowed is True
+    assert admit_verified.reason == "unconfigured"
+
+    # In-run evaluate_eligibility returns None (eligible!) for verified route
+    skip_verified = evaluate_eligibility(
+        candidate=cand,
+        policy=verified_policy,
+        adapter=_AvailableAdapter(),  # type: ignore[arg-type]
+        training_allowed=True,
+        quota_states=[],
+        prompt_bytes=100,
+        db=blank_db,
+        now=_NOW,
+    )
+    assert skip_verified is None
+
+    # 5. Concurrency reason code mapping (F5 fix)
+    skip_global_concurrency = evaluate_eligibility(
+        candidate=cand,
+        policy=verified_policy,
+        adapter=_AvailableAdapter(),  # type: ignore[arg-type]
+        training_allowed=True,
+        quota_states=[],
+        prompt_bytes=100,
+        now=_NOW,
+        global_running=5,
+        max_global_concurrent=5,
+    )
+    assert skip_global_concurrency == SKIP_QUOTA_BLOCKED
 
 
 def test_exhausted_shared_pool_denies_across_harnesses_at_both_dispatch_points(

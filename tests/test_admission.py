@@ -28,6 +28,13 @@ from saberops.control_plane.policy import (
     ProviderPolicy,
     ProviderPolicyState,
 )
+from saberops.control_plane.posture import (
+    POSTURE_ATTENDED_ONLY,
+    POSTURE_EXPIRED,
+    POSTURE_FORBIDDEN,
+    POSTURE_METERED,
+    POSTURE_UNVERIFIED,
+)
 from saberops.control_plane.quota_policy import (
     POOL_OFF,
     QUOTA_EVIDENCE_REQUIRED,
@@ -649,3 +656,64 @@ def test_admit_multiple_windows_binds_at_minimum_pace() -> None:
     assert decision.admitted is True
     assert decision.binding_window == "weekly"
     assert decision.score == pytest.approx(0.05)
+
+
+def test_posture_first_prevents_unconfigured_fail_open() -> None:
+    """Covers: ADR-0002 D2/F1 posture checked before unconfigured capacity grace (fail-closed)."""
+    now = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
+    cand = WorkerCandidate("codex", "gpt-5.6-sol")
+
+    # Unverified posture with explicit capacity_configured=False must still deny
+    unverified_policy = _make_policy()  # codex posture has verified_on=2026-10-14
+    # Break verified_on to make it unverified
+    unverified_policy.plans.postures["codex"] = PostureRecord(
+        "codex", "A", ttl_days=30, verified_on=None
+    )
+    dec = admit(cand, now=now, policy=unverified_policy, capacity_configured=False)
+    assert dec.admitted is False
+    assert dec.reason == POSTURE_UNVERIFIED
+
+    # Posture B (attended-only) with capacity_configured=False must still deny unattended
+    b_policy = _make_policy()
+    b_policy.plans.postures["codex"] = PostureRecord(
+        "codex", "B", ttl_days=30, verified_on="2026-10-14"
+    )
+    dec_b = admit(cand, now=now, policy=b_policy, capacity_configured=False)
+    assert dec_b.admitted is False
+    assert dec_b.reason == POSTURE_ATTENDED_ONLY
+
+    # Posture D (metered) with capacity_configured=False must still deny unattended
+    d_policy = _make_policy()
+    d_policy.plans.postures["codex"] = PostureRecord(
+        "codex", "D", ttl_days=30, verified_on="2026-10-14"
+    )
+    dec_d = admit(cand, now=now, policy=d_policy, capacity_configured=False)
+    assert dec_d.admitted is False
+    assert dec_d.reason == POSTURE_METERED
+
+    # Posture X with capacity_configured=False must still deny
+    x_policy = _make_policy()
+    x_policy.plans.postures["codex"] = PostureRecord(
+        "codex", "X", ttl_days=30, verified_on="2026-10-14"
+    )
+    dec_x = admit(cand, now=now, policy=x_policy, capacity_configured=False)
+    assert dec_x.admitted is False
+    assert dec_x.reason == POSTURE_FORBIDDEN
+
+    # Expired posture with capacity_configured=False must still deny
+    exp_policy = _make_policy()
+    exp_policy.plans.postures["codex"] = PostureRecord(
+        "codex", "A", ttl_days=1, verified_on="2026-10-01"
+    )
+    dec_exp = admit(cand, now=now, policy=exp_policy, capacity_configured=False)
+    assert dec_exp.admitted is False
+    assert dec_exp.reason == POSTURE_EXPIRED
+
+    # Verified A/C with capacity_configured=False gracefully admits with reason="unconfigured"
+    ver_policy = _make_policy(
+        postures={"codex": PostureRecord("codex", "A", ttl_days=30, verified_on="2026-10-14")}
+    )
+    dec_ver = admit(cand, now=now, policy=ver_policy, capacity_configured=False)
+    assert dec_ver.admitted is True
+    assert dec_ver.reason == "unconfigured"
+

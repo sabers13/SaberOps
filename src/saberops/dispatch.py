@@ -293,6 +293,8 @@ def evaluate_eligibility(
         "POSTURE_METERED",
         "GLOBAL_CONCURRENCY_EXCEEDED",
         "POOL_CONCURRENCY_EXCEEDED",
+        "GLOBAL_CONCURRENCY_LIMIT",
+        "CONCURRENCY_LIMIT",
     ):
         return SKIP_QUOTA_BLOCKED
     if decision.reason == "MODEL_FAMILY_EXCLUDED":
