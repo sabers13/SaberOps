@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from saberops.capacity.cost_model import CostState
+    from saberops.jobs.models import JobRequirements
 
 from saberops.control_plane import (
     GOVERNED_INSTRUCTIONS_UNSUPPORTED,
@@ -211,6 +216,14 @@ def evaluate_eligibility(
     readiness_state: ProviderReadiness | None = None,
     readiness_reason: str | None = None,
     readiness_executable_available: bool = True,
+    now: datetime | None = None,
+    requirements: JobRequirements | None = None,
+    db: Any | None = None,
+    cost_states: Mapping[tuple[str, str, str, str], CostState] | None = None,
+    running_counts: Mapping[str, int] | None = None,
+    global_running: int = 0,
+    max_global_concurrent: int | None = None,
+    capacity_configured: bool | None = None,
 ) -> str | None:
     """Return the compatibility skip reason for the canonical quota decision.
 
@@ -236,6 +249,14 @@ def evaluate_eligibility(
         readiness_reason=readiness_reason,
         readiness_executable_available=readiness_executable_available,
         explicit_unknown_readiness=explicit_override,
+        now=now,
+        requirements=requirements,
+        db=db,
+        cost_states=cost_states,
+        running_counts=running_counts,
+        global_running=global_running,
+        max_global_concurrent=max_global_concurrent,
+        capacity_configured=capacity_configured,
     )
     if decision.eligible:
         return None
@@ -265,8 +286,21 @@ def evaluate_eligibility(
         "QUOTA_EXCLUDED_UNTIL_RESET",
         "QUOTA_EVIDENCE_REQUIRED",
         "POOL_OFF",
+        "POSTURE_FORBIDDEN",
+        "POSTURE_EXPIRED",
+        "POSTURE_UNVERIFIED",
+        "POSTURE_ATTENDED_ONLY",
+        "POSTURE_METERED",
+        "GLOBAL_CONCURRENCY_EXCEEDED",
+        "POOL_CONCURRENCY_EXCEEDED",
     ):
         return SKIP_QUOTA_BLOCKED
+    if decision.reason == "MODEL_FAMILY_EXCLUDED":
+        return "model_family_excluded"
+    if decision.reason == "ROLE_MISMATCH":
+        return "role_mismatch"
+    if decision.reason == "READ_ONLY_UNSUPPORTED":
+        return "read_only_unsupported"
     if decision.reason == PROVIDER_DISABLED:
         return PROVIDER_DISABLED
     if decision.reason == GOVERNED_INSTRUCTIONS_UNSUPPORTED:
@@ -297,9 +331,17 @@ def control_plane_decision(
     readiness_reason: str | None = None,
     readiness_executable_available: bool = True,
     explicit_unknown_readiness: bool = False,
+    now: datetime | None = None,
+    requirements: JobRequirements | None = None,
+    db: Any | None = None,
+    cost_states: Mapping[tuple[str, str, str, str], CostState] | None = None,
+    running_counts: Mapping[str, int] | None = None,
+    global_running: int = 0,
+    max_global_concurrent: int | None = None,
+    capacity_configured: bool | None = None,
 ) -> ControlPlaneDecision:
     """Return the typed quota decision used by compatibility callers."""
-    return evaluate_control_plane(
+    dec = evaluate_control_plane(
         candidate,
         adapter=adapter,
         quota_states=quota_states,
@@ -318,6 +360,52 @@ def control_plane_decision(
         readiness_executable_available=readiness_executable_available,
         explicit_unknown_readiness=explicit_unknown_readiness,
     )
+    if not dec.eligible:
+        return dec
+
+    from saberops.capacity.admission import admit
+
+    admit_dec = admit(
+        candidate=candidate,
+        now=now or datetime.now(UTC),
+        policy=policy,
+        quota_states=quota_states,
+        requirements=requirements,
+        cost_states=cost_states,
+        adapter=adapter,
+        readiness_state=readiness_state,
+        readiness_reason=readiness_reason,
+        readiness_executable_available=readiness_executable_available,
+        running_counts=running_counts,
+        global_running=global_running,
+        max_global_concurrent=max_global_concurrent,
+        explicit_override=explicit_unknown_readiness,
+        reserve_override=reserve_override,
+        binding_pool_id=binding_pool_id,
+        training_allowed=training_allowed,
+        training_required=training_required,
+        routing_snapshot=routing_snapshot,
+        prompt_bytes=prompt_bytes,
+        requires_governed_instructions=requires_governed_instructions,
+        db=db,
+        capacity_configured=capacity_configured,
+    )
+    if not admit_dec.admitted:
+        return ControlPlaneDecision(
+            candidate=candidate,
+            eligible=False,
+            warnings=dec.warnings,
+            warning_reasons=dec.warning_reasons,
+            exclusion_reason=admit_dec.reason,
+            missing_capabilities=dec.missing_capabilities,
+            provider_policy=dec.provider_policy,
+            quota=dec.quota,
+            training_permitted=dec.training_permitted,
+            reserve_override=reserve_override,
+            capability_profile_digest=dec.capability_profile_digest,
+            control_plane_digest=dec.control_plane_digest,
+        )
+    return dec
 
 
 def build_skip_payload(

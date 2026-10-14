@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, time
 from typing import Any
@@ -66,7 +66,7 @@ from saberops.control_plane.quota_policy import (
     _red_line_reason,
     pools_for,
 )
-from saberops.jobs.models import JobRequirements
+from saberops.jobs.models import JobRequirements, JobRole
 from saberops.models import ProviderReadiness, QuotaState, WorkerCandidate
 from saberops.training_policy import is_training_permitted
 from saberops.workers.base import WorkerAdapter
@@ -122,6 +122,11 @@ class AdmissionDecision:
     reserve_pct: float | None = None
     multiplier: float = 1.0
     details: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def is_allowed(self) -> bool:
+        """Alias for admitted matching ADR-0002 contract."""
+        return self.admitted
 
 
 def _utcnow(now: datetime | None) -> datetime:
@@ -193,12 +198,32 @@ def matches_model_family(candidate: WorkerCandidate, family: str) -> bool:
     route = f"{provider}/{model}"
     if model == fam or route == fam:
         return True
-    parts = set(re.split(r"[/_\-.]+", route))
-    if fam in parts:
-        return True
     base_model = model.split("/")[-1]
-    if base_model == fam or base_model.startswith(f"{fam}-") or base_model.startswith(f"{fam}_"):
+    if base_model == fam:
         return True
+    if (
+        base_model.startswith(f"{fam}-")
+        or base_model.startswith(f"{fam}_")
+        or base_model.startswith(f"{fam}.")
+    ):
+        return True
+    if base_model.startswith(fam):
+        after = base_model[len(fam) :]
+        if not after or not after[0].isdigit():
+            return True
+    tokens = re.split(r"[/ ]+", route)
+    for tok in tokens:
+        if (
+            tok == fam
+            or tok.startswith(f"{fam}-")
+            or tok.startswith(f"{fam}.")
+            or tok.startswith(f"{fam}_")
+        ):
+            return True
+        if tok.startswith(fam):
+            after = tok[len(fam) :]
+            if not after or not after[0].isdigit():
+                return True
     return False
 
 
@@ -268,6 +293,40 @@ def _get_cost_estimate(
     return cost_estimate(st, window_id, size_bucket).pct
 
 
+def check_capacity_tables_exist(db: Any) -> bool:
+    """Return True if capacity subsystem tables exist in db."""
+    try:
+        from saberops.capacity.store import owner_connection
+
+        with owner_connection(db) as conn:
+            cur = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='capacity_reservations'"
+            )
+            return cur.fetchone() is not None
+    except Exception:
+        return False
+
+
+def is_capacity_subsystem_configured(
+    *,
+    db: Any | None = None,
+    policy: ControlPlanePolicy | None = None,
+    quota_states: Iterable[QuotaState] = (),
+    explicit_configured: bool | None = None,
+) -> bool:
+    """Return True iff capacity subsystem is configured and operational."""
+    if explicit_configured is not None:
+        return explicit_configured
+    if db is not None and not check_capacity_tables_exist(db):
+        return False
+    effective_policy = policy or load_control_plane_policy()
+    has_quota = bool(list(quota_states))
+    has_verified_postures = any(
+        p.verified_on is not None for p in effective_policy.plans.postures.values()
+    )
+    return has_quota or has_verified_postures
+
+
 def admit(
     candidate: WorkerCandidate,
     *,
@@ -293,6 +352,8 @@ def admit(
     routing_snapshot: Any | None = None,
     prompt_bytes: int | None = None,
     requires_governed_instructions: bool = False,
+    db: Any | None = None,
+    capacity_configured: bool | None = None,
 ) -> AdmissionDecision:
     """Canonical admission check for one candidate route.
 
@@ -440,6 +501,20 @@ def admit(
                 candidate=candidate,
                 reason=GOVERNED_INSTRUCTIONS_UNSUPPORTED,
             )
+
+    # Capacity subsystem configuration check (graceful degradation if unconfigured)
+    if not is_capacity_subsystem_configured(
+        db=db,
+        policy=effective_policy,
+        quota_states=quota_states,
+        explicit_configured=capacity_configured,
+    ):
+        return AdmissionDecision(
+            admitted=True,
+            candidate=candidate,
+            reason="unconfigured",
+            details={"capacity_configured": False},
+        )
 
     # 6. Billing posture (ADR-0002 D2)
     posture = posture_decision(
@@ -720,11 +795,80 @@ def admit(
     )
 
 
+def order_candidates_for_role(
+    role: JobRole | str,
+    *,
+    snapshot: Any | None,
+    base_candidates: Sequence[WorkerCandidate],
+    now: datetime | None = None,
+    policy: ControlPlanePolicy | None = None,
+    quota_states: Iterable[QuotaState] = (),
+    requirements: JobRequirements | None = None,
+    db: Any | None = None,
+) -> list[WorkerCandidate]:
+    """Order candidates within fallback groups by D7 intra-group pacing score.
+
+    Preserves group fallback order: Group 0 candidates are tried before Group 1.
+    Within each group, candidates are scored using admit() and ordered:
+    1. Admitted candidates first (dec.admitted)
+    2. Higher score first (dec.score or 0.0)
+    3. Stable original order in group
+    4. Lower cost estimate first
+    """
+    if snapshot is None or not hasattr(snapshot, "groups_for"):
+        return list(base_candidates)
+
+    try:
+        groups = snapshot.groups_for(role)
+    except Exception:
+        return list(base_candidates)
+
+    if not groups:
+        return list(base_candidates)
+
+    allowed_set = {(c.provider, c.model) for c in base_candidates}
+    moment = _utcnow(now)
+    ordered: list[WorkerCandidate] = []
+
+    for group in groups:
+        group_cands = [c for c in group if (c.provider, c.model) in allowed_set]
+        if not group_cands:
+            continue
+
+        decisions = [
+            admit(
+                cand,
+                now=moment,
+                policy=policy,
+                quota_states=quota_states,
+                requirements=requirements,
+                db=db,
+            )
+            for cand in group_cands
+        ]
+        sorted_indices = sorted(
+            range(len(group_cands)),
+            key=lambda idx: (
+                decisions[idx].admitted,
+                decisions[idx].score or 0.0,
+                -idx,
+                -(decisions[idx].cost_estimate or 0.0),
+            ),
+            reverse=True,
+        )
+        ordered.extend(group_cands[i] for i in sorted_indices)
+
+    return ordered if ordered else list(base_candidates)
+
+
 __all__ = [
     "AdmissionDecision",
     "admit",
     "calculate_hours_to_reset",
+    "check_capacity_tables_exist",
+    "is_capacity_subsystem_configured",
     "matches_model_family",
+    "order_candidates_for_role",
     "reserve_pct",
     "score",
 ]

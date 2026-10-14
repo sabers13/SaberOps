@@ -24,6 +24,7 @@ from saberops.autonomous_runtime import (
     SupervisorAction,
     SupervisorStopReason,
 )
+from saberops.capacity.admission import order_candidates_for_role
 from saberops.config import (
     RunConfig,
     freeze_owner_binding_registry_payload,
@@ -2692,7 +2693,14 @@ class Orchestrator:
             # other hard control-plane filter, so excluded candidates still
             # produce typed decision evidence and cannot be resurrected by
             # ranking or overrides.
-            candidates = list(base_candidates)
+            candidates = order_candidates_for_role(
+                role=current_role,
+                snapshot=routing_snapshot,
+                base_candidates=base_candidates,
+                policy=control_plane_policy,
+                quota_states=quota_states,
+                db=self.db,
+            )
             # Structured per-candidate skip evidence for this run: every
             # automatic candidate that cannot dispatch appends one
             # sanitized record (provider/model/binding, canonical skip
@@ -3217,7 +3225,14 @@ class Orchestrator:
                         provider_override=config.provider_override,
                         snapshot=routing_snapshot,
                     )
-                    candidates = list(base_candidates)
+                    candidates = order_candidates_for_role(
+                        role=current_role,
+                        snapshot=routing_snapshot,
+                        base_candidates=base_candidates,
+                        policy=control_plane_policy,
+                        quota_states=quota_states,
+                        db=self.db,
+                    )
                     selected_routing_context = routing_context_for_role(current_role)
                     self.db.record_event(
                         run_id,
@@ -4128,6 +4143,7 @@ class Orchestrator:
                         else True
                     ),
                     explicit_unknown_readiness=is_explicit,
+                    db=self.db,
                 )
                 # Keep the legacy string at this boundary for existing event
                 # consumers while persisting the authoritative typed decision
@@ -4176,6 +4192,7 @@ class Orchestrator:
                             if readiness_pre is not None
                             else True
                         ),
+                        db=self.db,
                     )
                 self.db.record_event(
                     run_id,
@@ -5418,7 +5435,14 @@ class Orchestrator:
                                     provider_override=config.provider_override,
                                     snapshot=routing_snapshot,
                                 )
-                                candidates = list(base_candidates)
+                                candidates = order_candidates_for_role(
+                                    role=current_role,
+                                    snapshot=routing_snapshot,
+                                    base_candidates=base_candidates,
+                                    policy=control_plane_policy,
+                                    quota_states=quota_states,
+                                    db=self.db,
+                                )
                                 selected_routing_context = routing_context_for_role(current_role)
                                 self.db.record_event(
                                     run_id,
@@ -5759,7 +5783,14 @@ class Orchestrator:
                                             for c in base_repair_candidates
                                             if c.provider not in blocked_repair_providers
                                         ]
-                                    repair_candidates = list(base_repair_candidates)
+                                    repair_candidates = order_candidates_for_role(
+                                        role=JobRole.WORKER,
+                                        snapshot=routing_snapshot,
+                                        base_candidates=base_repair_candidates,
+                                        policy=control_plane_policy,
+                                        quota_states=quota_states_rep,
+                                        db=self.db,
+                                    )
                                     selected_repair: (
                                         tuple[WorkerCandidate, WorkerAdapter] | None
                                     ) = None
@@ -5884,6 +5915,7 @@ class Orchestrator:
                                             readiness_state=rep_readiness_state,
                                             readiness_reason=rep_readiness_reason,
                                             readiness_executable_available=rep_executable,
+                                            db=self.db,
                                         )
                                         decision_rep = control_plane_decision(
                                             candidate=repair_candidate,
@@ -5902,6 +5934,7 @@ class Orchestrator:
                                             readiness_reason=rep_readiness_reason,
                                             readiness_executable_available=rep_executable,
                                             explicit_unknown_readiness=is_explicit_rep,
+                                            db=self.db,
                                         )
                                         self.db.record_event(
                                             run_id,
