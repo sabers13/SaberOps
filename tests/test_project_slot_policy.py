@@ -529,14 +529,17 @@ def test_malformed_limits_deny_without_raising_or_unsafe_counts() -> None:
 def test_non_occupying_candidate_is_not_launch_permission() -> None:
     """Covers: contract -- queued/blocked/terminal candidate must not spawn a child.
 
-    A naive launch path keyed on ``admitted`` alone cannot machine-distinguish
-    "may occupy one slot" from "needs no slot"; the machine-readable
-    ``occupies_slot`` discriminator is false for every non-occupying candidate.
+    A non-occupying child candidate keeps its *descriptive* status ``ADMITTED``
+    with reason ``non_occupying_candidate``, but both launch authorities are
+    false: the plain ``admitted`` flag and the explicit ``occupies_slot``
+    discriminator. The launch gate below is deliberately the naive one-liner an
+    execution-slot caller would write -- ``return decision.admitted`` -- and it
+    must refuse to start a non-occupying child.
     """
 
     def naive_launch(decision: SlotAdmissionDecision) -> bool:
-        # Minimal launch gate: require actual slot occupancy, not just `admitted`.
-        return decision.occupies_slot
+        # The obvious, minimal launch gate: keyed on `admitted` alone.
+        return decision.admitted
 
     for state in (
         SlotState.QUEUED.value,
@@ -546,11 +549,97 @@ def test_non_occupying_candidate_is_not_launch_permission() -> None:
         decision = _decide(_snapshot([]), _child("p1", 1, state=state))
         assert decision.status is AdmissionStatus.ADMITTED
         assert decision.reason is AdmissionReason.NON_OCCUPYING_CANDIDATE
+        assert decision.admitted is False
         assert decision.occupies_slot is False
         assert naive_launch(decision) is False
         assert decision.counts.occupied_child_slots == 0
 
-    occupying = _decide(_snapshot([]), _child("p1", 1))
-    assert occupying.reason is AdmissionReason.ADMITTED
-    assert occupying.occupies_slot is True
-    assert naive_launch(occupying) is True
+    # Only a genuinely slot-occupying child is launch authority.
+    for state in (SlotState.RESERVED.value, SlotState.EXECUTING.value):
+        occupying = _decide(_snapshot([]), _child("p1", 1, state=state))
+        assert occupying.status is AdmissionStatus.ADMITTED
+        assert occupying.reason is AdmissionReason.ADMITTED
+        assert occupying.admitted is True
+        assert occupying.occupies_slot is True
+        assert naive_launch(occupying) is True
+
+
+def test_admitted_is_launch_authority_for_every_non_launch_outcome() -> None:
+    """Covers: contract -- `admitted` is launch authority, false for every refusal.
+
+    Adversarial: ``admitted`` must not be a mere restatement of the descriptive
+    status. A caller that gates only on ``if decision.admitted: spawn()`` must
+    refuse to start a child for every non-occupying candidate, structural
+    denial, limit rejection, replay or wrong-kind candidate. It is True only for
+    a valid slot-occupying admission.
+    """
+    candidate = _child("p1", 1)
+
+    def naive_gate(decision: SlotAdmissionDecision) -> bool:
+        return decision.admitted
+
+    non_launch: list[SlotAdmissionDecision] = [
+        # Non-occupying candidates: descriptive status stays ADMITTED.
+        *[
+            _decide(_snapshot([]), _child("p1", 1, state=state))
+            for state in (
+                SlotState.QUEUED.value,
+                SlotState.BLOCKED.value,
+                SlotState.TERMINAL.value,
+            )
+        ],
+        # Structural denials.
+        _decide(_snapshot([], owner_id="owner-2"), candidate),
+        _decide(_snapshot([], complete=False), candidate),
+        _decide(_snapshot([], source=SnapshotSource.UNKNOWN.value), candidate),
+        _decide(_snapshot([]), candidate, limits=SlotLimits(0, 5)),
+        _decide(_snapshot([]), _record("", "task", "slot")),
+        # Known-limit rejections.
+        _decide(_snapshot([_child("p1", index) for index in range(1, 6)]), _child("p1", 6)),
+        _decide(_snapshot([_child(f"p{index}", 1) for index in range(1, 4)]), _child("p4", 1)),
+        # Replay of an active slot and a non-child candidate.
+        _decide(_snapshot([candidate]), dataclasses.replace(candidate)),
+        _decide(
+            _snapshot([]),
+            _record("p1", "wave", "p1-wave", kind=SlotKind.WAVE_WRAPPER.value),
+        ),
+    ]
+
+    for decision in non_launch:
+        assert decision.admitted is False
+        assert decision.occupies_slot is False
+        assert naive_gate(decision) is False
+        # Two independent spellings of the same launch authority never diverge.
+        assert decision.admitted == decision.occupies_slot
+
+    launchable = _decide(_snapshot([]), candidate)
+    assert launchable.status is AdmissionStatus.ADMITTED
+    assert launchable.reason is AdmissionReason.ADMITTED
+    assert launchable.admitted is True
+    assert naive_gate(launchable) is True
+
+
+def test_non_slot_limits_object_denies_without_raising() -> None:
+    """Covers: contract -- an untyped non-SlotLimits `limits` object fails closed.
+
+    Adversarial: ``SlotAdmissionRequest(limits=None)`` previously dereferenced
+    ``limits.active_projects`` and raised ``AttributeError``. It must instead
+    return the typed structural denial with non-authoritative zeroed counts and
+    no unsafe positive cap (``mypy --strict`` blocks typed callers; this closes
+    the untyped future-glue shape).
+    """
+    request = SlotAdmissionRequest(
+        owner_id=OWNER,
+        candidate=_child("p1", 1),
+        limits=cast(SlotLimits, None),
+    )
+
+    decision = evaluate_slot_admission(request, _snapshot([]))
+
+    assert decision.status is AdmissionStatus.DENIED
+    assert decision.reason is AdmissionReason.INVALID_LIMIT
+    assert decision.counts_authoritative is False
+    assert decision.admitted is False
+    assert decision.counts.derived_global_ceiling == 0
+    assert decision.counts.project_limit == 0
+    assert decision.counts.child_slots_per_project_limit == 0

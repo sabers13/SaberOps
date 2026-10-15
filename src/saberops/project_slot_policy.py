@@ -57,9 +57,11 @@ Orchestrator turns, however many of them exist. Duplicate identical slot
 records are an alias of one lane and are counted once; conflicting identities
 or malformed rows fail closed. Lowering the limits never terminates a running
 task; it only denies further starts until occupancy falls back below the new
-limits. A child in a non-occupying state is reported with reason
-``non_occupying_candidate`` and ``occupies_slot`` false: it is not permission
-to spawn a child process. An unknown, blank or mismatched ``owner_id`` on
+limits. A child in a non-occupying state keeps the *descriptive* status
+``ADMITTED`` with reason ``non_occupying_candidate``, but both launch
+authorities -- ``SlotAdmissionDecision.admitted`` and
+``SlotAdmissionDecision.occupies_slot`` -- are false: it needs no slot and is
+not permission to spawn a child process. An unknown, blank or mismatched ``owner_id`` on
 either the snapshot or the request denies (``missing_identity`` /
 ``owner_mismatch``); two blank owners never match, and malformed limits deny
 (``invalid_limit``) without raising.
@@ -155,7 +157,15 @@ class AdmissionStatus(StrEnum):
     """Typed outcome of one admission evaluation."""
 
     ADMITTED = "ADMITTED"
-    """The candidate may occupy a slot under the observed authoritative state."""
+    """The candidate is structurally valid under the observed authoritative state.
+
+    This is the *descriptive* status only. It covers both a slot-occupying
+    admission (reason ``admitted``) and a valid non-occupying child candidate
+    (reason ``non_occupying_candidate``). It is **not** launch authority: read
+    :attr:`SlotAdmissionDecision.admitted` /
+    :attr:`SlotAdmissionDecision.occupies_slot`, or the reason code, before
+    starting a child task.
+    """
 
     REJECTED = "REJECTED"
     """A known, verified owner limit is currently reached; nothing is invalid."""
@@ -172,9 +182,10 @@ class AdmissionReason(StrEnum):
 
     NON_OCCUPYING_CANDIDATE = "non_occupying_candidate"
     """The candidate needs no slot: a valid child task in a non-occupying
-    state (``queued``/``blocked``/``terminal``). Reported with status
-    ``ADMITTED`` for continuity, but it is **not** permission to spawn a
-    child process; consult :attr:`SlotAdmissionDecision.occupies_slot`."""
+    state (``queued``/``blocked``/``terminal``). Reported with the descriptive
+    status ``ADMITTED`` for continuity, but it is **not** permission to spawn a
+    child process: both :attr:`SlotAdmissionDecision.admitted` (launch
+    authority) and :attr:`SlotAdmissionDecision.occupies_slot` are ``False``."""
 
     PROJECT_LIMIT_REACHED = "project_limit_reached"
     PROJECT_SLOT_LIMIT_REACHED = "project_slot_limit_reached"
@@ -277,6 +288,12 @@ def default_slot_limits() -> SlotLimits:
     )
 
 
+#: Non-authoritative stand-in used only to report zeroed counts when an untyped
+#: caller supplies a ``limits`` object that is not a :class:`SlotLimits`
+#: (already denied with :attr:`AdmissionReason.INVALID_LIMIT`).
+_ZERO_LIMITS = SlotLimits(active_projects=0, child_slots_per_project=0)
+
+
 @dataclass(frozen=True)
 class ProjectSlotRecord:
     """One observed slot record for an already-authoritative snapshot.
@@ -353,17 +370,38 @@ class SlotAdmissionDecision:
 
     @property
     def admitted(self) -> bool:
-        """True iff the candidate may be admitted under the observed state."""
-        return self.status is AdmissionStatus.ADMITTED
+        """Launch authority: may the candidate be started as a slot-occupying child?
+
+        This is **permission to claim an execution slot**, not a restatement of
+        the descriptive :attr:`status`, and it is exactly equivalent to
+        :attr:`occupies_slot`. It is ``True`` only for an ``ADMITTED`` status
+        reached via reason ``admitted`` -- i.e. a valid child task that will
+        ``reserve`` or ``execute``.
+
+        It is deliberately ``False`` for a valid non-occupying child candidate
+        (``queued``/``blocked``/``terminal``) even though that decision's
+        descriptive :attr:`status` is ``ADMITTED`` with reason
+        ``non_occupying_candidate``. Such a candidate needs no slot and must
+        never be read as authorization to spawn a child process. It is also
+        ``False`` for every ``REJECTED`` and ``DENIED`` outcome. A caller that
+        only writes ``if decision.admitted: spawn()`` is therefore safe: it
+        cannot start work for a non-occupying, rejected or denied candidate.
+        Use :attr:`status` for the descriptive outcome.
+        """
+        return (
+            self.status is AdmissionStatus.ADMITTED
+            and self.reason is AdmissionReason.ADMITTED
+        )
 
     @property
     def occupies_slot(self) -> bool:
         """Machine-readable occupancy discriminator for launch callers.
 
         True **only** when this admission authorizes the candidate to reserve
-        or execute a child slot (status ``ADMITTED`` with reason ``admitted``).
-        A valid non-occupying candidate (``queued``/``blocked``/``terminal``)
-        reports status ``ADMITTED`` with reason ``non_occupying_candidate`` but
+        or execute a child slot (status ``ADMITTED`` with reason ``admitted``);
+        equivalent to :attr:`admitted`. A valid non-occupying candidate
+        (``queued``/``blocked``/``terminal``) reports the descriptive status
+        ``ADMITTED`` with reason ``non_occupying_candidate`` but
         ``occupies_slot`` false: it needs no slot and must never be interpreted
         as permission to spawn a child process.
         """
@@ -510,9 +548,17 @@ def evaluate_slot_admission(
     candidate = request.candidate
     reasons: list[AdmissionReason] = []
 
-    limits_valid = _is_positive_int(limits.active_projects) and _is_positive_int(
-        limits.child_slots_per_project
+    # An untyped caller may supply an object that is not a ``SlotLimits`` (e.g.
+    # ``None``); ``mypy --strict`` blocks typed callers, but fail closed here too
+    # instead of dereferencing it. A non-``SlotLimits`` object is reported with
+    # the same typed INVALID_LIMIT reason, and counts are rendered from a zeroed
+    # stand-in so a malformed object never raises or yields an unsafe cap.
+    limits_valid = (
+        isinstance(limits, SlotLimits)
+        and _is_positive_int(limits.active_projects)
+        and _is_positive_int(limits.child_slots_per_project)
     )
+    reported_limits = limits if isinstance(limits, SlotLimits) else _ZERO_LIMITS
     if not limits_valid:
         reasons.append(AdmissionReason.INVALID_LIMIT)
 
@@ -575,7 +621,7 @@ def evaluate_slot_admission(
     if structural:
         return _decision(
             _ordered_reasons(reasons),
-            counts=_empty_counts(limits, candidate_project),
+            counts=_empty_counts(reported_limits, candidate_project),
             counts_authoritative=False,
             detail="denied: snapshot or request could not be fully validated",
         )
@@ -604,7 +650,7 @@ def evaluate_slot_admission(
     if reasons:
         return _decision(
             _ordered_reasons(reasons),
-            counts=_empty_counts(limits, candidate_project),
+            counts=_empty_counts(reported_limits, candidate_project),
             counts_authoritative=False,
             detail="denied: conflicting or malformed slot identity in snapshot",
         )
@@ -618,7 +664,7 @@ def evaluate_slot_admission(
             excluded_records += 1
 
     counts = _counts(
-        limits=limits,
+        limits=reported_limits,
         occupied_by_project=occupied_by_project,
         candidate_project=candidate_project,
         excluded_records=excluded_records,
