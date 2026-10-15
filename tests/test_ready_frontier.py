@@ -226,6 +226,163 @@ def test_subtree_scope_overlap_is_detected() -> None:
     assert _sole_hold(projection, "b") is FrontierReason.WRITE_SCOPE_CONFLICT
 
 
+def test_same_relative_path_in_two_projects_does_not_conflict() -> None:
+    """Covers: review finding 1 - relative write scopes are namespaced by project identity.
+
+    Two independent projects declaring the same relative path are unrelated and
+    must BOTH be eligible; the path string alone is not proof of one physical file.
+    """
+    snapshot = _snapshot(
+        _project("p1", _task("a", phase="01", owns=("src/main.py",))),
+        _project("p2", _task("b", phase="01", owns=("src/main.py",))),
+    )
+    projection = _projection(snapshot)
+    assert projection.projected
+    assert _eligible_ids(projection) == [("p1", "a"), ("p2", "b")]
+
+
+def test_same_relative_path_in_one_project_still_conflicts() -> None:
+    """Covers: review finding 1 - two tasks of one project owning one path conflict."""
+    snapshot = _snapshot(
+        _project(
+            "p1",
+            _task("a", phase="01", owns=("src/main.py",)),
+            _task("b", phase="01", owns=("src/main.py",)),
+        ),
+    )
+    projection = _projection(snapshot)
+    assert _eligible_ids(projection) == [("p1", "a")]
+    assert _sole_hold(projection, "b") is FrontierReason.WRITE_SCOPE_CONFLICT
+
+
+def test_subtree_scope_across_projects_does_not_conflict() -> None:
+    """Covers: review finding 1 - subtree overlap is namespaced per project identity."""
+    snapshot = _snapshot(
+        _project("p1", _task("a", phase="01", owns=("src/pkg/**",))),
+        _project("p2", _task("b", phase="01", owns=("src/pkg/mod.py",))),
+    )
+    projection = _projection(snapshot)
+    assert _eligible_ids(projection) == [("p1", "a"), ("p2", "b")]
+
+
+def test_running_holder_blocks_ready_sibling_with_same_scope() -> None:
+    """Covers: review finding 2 - a RUNNING writer reserves its scope before new candidates.
+
+    The running row sorts AFTER the pending candidate by stable identity, so this
+    fails unless reservation is a two-pass over the complete snapshot.
+    """
+    snapshot = _snapshot(
+        _project(
+            "p1",
+            _task("candidate", phase="01", owns=("src/x.py",)),
+            _task("runner", phase="01", status=TaskStatus.RUNNING.value, owns=("src/x.py",)),
+        ),
+    )
+    projection = _projection(snapshot)
+    assert _eligible_ids(projection) == []
+    assert _sole_hold(projection, "runner") is FrontierReason.TASK_RUNNING
+    assert _sole_hold(projection, "candidate") is FrontierReason.WRITE_SCOPE_CONFLICT
+
+
+def test_running_holder_blocks_ready_sibling_with_subtree_scope() -> None:
+    """Covers: review finding 2 - a RUNNING subtree writer reserves the whole subtree."""
+    snapshot = _snapshot(
+        _project(
+            "p1",
+            _task("candidate", phase="01", owns=("src/pkg/mod.py",)),
+            _task("runner", phase="01", status=TaskStatus.RUNNING.value, owns=("src/**",)),
+        ),
+    )
+    projection = _projection(snapshot)
+    assert _eligible_ids(projection) == []
+    assert _sole_hold(projection, "candidate") is FrontierReason.WRITE_SCOPE_CONFLICT
+
+
+def test_running_holder_permits_disjoint_ready_sibling() -> None:
+    """Covers: review finding 2 - a RUNNING writer does not block a disjoint ready lane."""
+    snapshot = _snapshot(
+        _project(
+            "p1",
+            _task("runner", phase="01", status=TaskStatus.RUNNING.value, owns=("src/x.py",)),
+            _task("other", phase="01", owns=("src/y.py",)),
+        ),
+    )
+    projection = _projection(snapshot)
+    assert _eligible_ids(projection) == [("p1", "other")]
+
+
+def test_running_holder_in_other_project_permits_same_relative_path() -> None:
+    """Covers: review findings 1+2 - a RUNNING reservation is project-namespaced."""
+    snapshot = _snapshot(
+        _project(
+            "p1",
+            _task("runner", phase="01", status=TaskStatus.RUNNING.value, owns=("src/x.py",)),
+        ),
+        _project("p2", _task("candidate", phase="01", owns=("src/x.py",))),
+    )
+    projection = _projection(snapshot)
+    assert _eligible_ids(projection) == [("p2", "candidate")]
+
+
+def test_nonrunning_waiters_do_not_reserve_write_scopes() -> None:
+    """Covers: review finding 2 - non-executing holders reserve no executing resource.
+
+    OWNER_WAIT / RESOURCE_WAIT / BLOCKED tasks are not writing; a ready candidate
+    may use the same scope. They still hold their own START dependents, and once
+    they actually run they reserve (covered above).
+    """
+    snapshot = _snapshot(
+        _project(
+            "p1",
+            _task(
+                "owner-gated",
+                phase="01",
+                status=TaskStatus.OWNER_WAIT.value,
+                owns=("src/x.py",),
+            ),
+            _task(
+                "disk-gated",
+                phase="01",
+                status=TaskStatus.RESOURCE_WAIT.value,
+                owns=("src/y.py",),
+            ),
+            _task("blocked", phase="01", status=TaskStatus.BLOCKED.value, owns=("src/x.py",)),
+            _task("candidate", phase="01", owns=("src/x.py",)),
+        ),
+    )
+    projection = _projection(snapshot)
+    assert _eligible_ids(projection) == [("p1", "candidate")]
+    assert _sole_hold(projection, "owner-gated") is FrontierReason.OWNER_WAIT
+    assert _sole_hold(projection, "disk-gated") is FrontierReason.RESOURCE_WAIT
+    assert _sole_hold(projection, "blocked") is FrontierReason.TASK_BLOCKED
+
+
+def test_scope_normalization_folds_benign_variants() -> None:
+    """Covers: review finding 3 - a/b, a/b/ and ./a/b are one scope, never disjoint."""
+    snapshot = _snapshot(
+        _project(
+            "p1",
+            _task("a", phase="01", owns=("src/main.py",)),
+            _task("b", phase="01", owns=("src/main.py/",)),
+            _task("c", phase="01", owns=("./src/main.py",)),
+            _task("d", phase="01", owns=("src/./main.py",)),
+        ),
+    )
+    projection = _projection(snapshot)
+    assert _eligible_ids(projection) == [("p1", "a")]
+    assert _sole_hold(projection, "b") is FrontierReason.WRITE_SCOPE_CONFLICT
+    assert _sole_hold(projection, "c") is FrontierReason.WRITE_SCOPE_CONFLICT
+    assert _sole_hold(projection, "d") is FrontierReason.WRITE_SCOPE_CONFLICT
+
+
+def test_blank_scope_entries_are_ignored_and_documented() -> None:
+    """Covers: review finding 3 - a blank entry declares no scope and is not unsafe."""
+    snapshot = _snapshot(_project("p1", _task("a", phase="01", owns=("  ", "src/x.py"))))
+    projection = _projection(snapshot)
+    assert projection.projected
+    assert projection.eligible[0].owns == ("src/x.py",)
+
+
 def test_duplicate_coordination_wrappers_are_not_extra_child_tasks() -> None:
     """Covers: ADR-0004 Amendment 5 - wrapper records do not double-count as lanes."""
     wrapper = _task(
@@ -407,6 +564,28 @@ def test_unknown_kind_fails_closed() -> None:
     projection = _projection(snapshot)
     assert projection.status is ProjectionStatus.DENIED
     assert FrontierReason.UNKNOWN_TASK_KIND in projection.reasons
+
+
+@pytest.mark.parametrize(
+    "unsafe",
+    [
+        "../outside.py",
+        "src/../../etc/passwd",
+        "/etc/passwd",
+        "src\\windows.py",
+        "src/*.py",
+        "src/[a].py",
+        "src/**/*.py",
+    ],
+)
+def test_unsafe_write_scope_fails_closed(unsafe: str) -> None:
+    """Covers: review finding 3 - unsafe/absolute/traversal scopes fail closed."""
+    snapshot = _snapshot(_project("p1", _task("a", phase="01", owns=(unsafe,))))
+    projection = _projection(snapshot)
+    assert projection.status is ProjectionStatus.DENIED
+    assert FrontierReason.UNSAFE_WRITE_SCOPE in projection.reasons
+    assert projection.eligible == ()
+    assert projection.counts_authoritative is False
 
 
 def test_conflicting_duplicate_task_identity_fails_closed() -> None:

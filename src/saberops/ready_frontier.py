@@ -56,10 +56,22 @@ Semantics
   ``CHILD_TASK``; plan/wave wrappers and Orchestrator turns are coordination
   records and are reported as such, never as extra child tasks. Identical
   duplicate records are one alias.
-* Unknown statuses, unknown kinds, missing/conflicting identities, missing
-  dependency targets, dependency cycles, incomplete snapshots and non
-  authoritative sources **fail closed**: the whole projection is denied and no
-  task is reported eligible.
+* Declared write scopes are **canonical repo-relative paths namespaced by the
+  trusted registered ``project_id``** the caller attached to the row. Two
+  projects owning the same relative path (``p1/src/main.py`` and
+  ``p2/src/main.py``) are unrelated and may both be eligible; two tasks of one
+  project owning the same path or subtree conflict. Every executing
+  (``RUNNING``) child task reserves its scopes before any new candidate is
+  examined, so no ready/pending task is reported over a running writer.
+  Non-executing holders (``OWNER_WAIT`` / ``RESOURCE_WAIT`` / ``BLOCKED`` /
+  terminal / coordination) execute no resource and reserve no scope.
+  Benign scope spellings are folded (``a/b``, ``a/b/``, ``./a/b``), while
+  absolute, ``..``-traversing, backslash or glob-bearing scopes are rejected as
+  unsafe rather than silently accepted (``UNSAFE_WRITE_SCOPE``).
+* Unknown statuses, unknown kinds, missing/conflicting identities, unsafe write
+  scopes, missing dependency targets, dependency cycles, incomplete snapshots
+  and non authoritative sources **fail closed**: the whole projection is denied
+  and no task is reported eligible.
 
 The optional :data:`REQUIRES_TRANSACTIONAL_VERIFICATION` flag is always true:
 no production launch may trust this pure projection on its own. A real launch
@@ -73,6 +85,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
+from pathlib import PurePosixPath
 
 __all__ = [
     "DEFAULT_ACTIVE_PROJECT_LIMIT",
@@ -169,6 +182,11 @@ class FrontierReason(StrEnum):
     UNKNOWN_TASK_STATUS = "unknown_task_status"
     UNKNOWN_SNAPSHOT_SOURCE = "unknown_snapshot_source"
     INCOMPLETE_SNAPSHOT = "incomplete_snapshot"
+    UNSAFE_WRITE_SCOPE = "unsafe_write_scope"
+    #: Reserved for the future owner-identity integration check. Not emitted by
+    #: this projection: per-project owner verification requires the registered
+    #: owner/project identity service (see the integration-handoff obligation).
+    #: It is kept so an integration consumer does not have to guess a new code.
     OWNER_MISMATCH = "owner_mismatch"
     CONFLICTING_TASK_IDENTITY = "conflicting_task_identity"
     MISSING_DEPENDENCY = "missing_dependency"
@@ -206,6 +224,7 @@ _STRUCTURAL_REASONS: frozenset[FrontierReason] = frozenset(
         FrontierReason.UNKNOWN_TASK_STATUS,
         FrontierReason.UNKNOWN_SNAPSHOT_SOURCE,
         FrontierReason.INCOMPLETE_SNAPSHOT,
+        FrontierReason.UNSAFE_WRITE_SCOPE,
         FrontierReason.OWNER_MISMATCH,
         FrontierReason.CONFLICTING_TASK_IDENTITY,
         FrontierReason.MISSING_DEPENDENCY,
@@ -252,13 +271,57 @@ def _clean_text(value: object) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
-def _clean_scopes(scopes: tuple[str, ...]) -> tuple[str, ...]:
+def _normalized_scope(raw: object) -> str | None:
+    """Return the canonical repo-relative form of one declared write scope.
+
+    Benign presentation variants are folded so they can never silently appear
+    disjoint: ``a/b``, ``a/b/``, ``a//b``, ``a/./b`` and ``./a/b`` all name the
+    same scope. Genuinely unsafe forms are rejected (``None``) rather than
+    accepted: absolute paths, ``..`` traversal, backslashes, embedded NUL and
+    glob metacharacters other than the recognised trailing ``/**`` subtree
+    suffix. A caller that supplies an unsafe scope is a validation error, not an
+    empty scope, so the projection fails closed instead of quietly ignoring it.
+
+    This mirrors the strict canonical-form validation used by
+    ``saberops.planning`` while additionally folding benign variants.
+    """
+    if not isinstance(raw, str):
+        return None
+    text = raw.strip()
+    if not text or "\\" in text or "\x00" in text:
+        return None
+    subtree = text.endswith("/**")
+    literal = text[:-3] if subtree else text
+    if not literal or any(char in literal for char in "*?[]"):
+        return None
+    path = PurePosixPath(literal)
+    if path.is_absolute() or ".." in path.parts:
+        return None
+    canonical = path.as_posix()
+    if canonical in ("", "."):
+        return None
+    return f"{canonical}/**" if subtree else canonical
+
+
+def _clean_scopes(scopes: tuple[str, ...]) -> tuple[tuple[str, ...], bool]:
+    """Return canonical, de-duplicated scopes plus a safety flag.
+
+    The flag is ``False`` when any declared scope is unsafe or ambiguous (see
+    :func:`_normalized_scope`). Blank entries declare no scope and are ignored,
+    which is documented and covered, not silent.
+    """
     cleaned: list[str] = []
+    safe = True
     for scope in scopes:
-        text = _clean_text(scope)
-        if text and text not in cleaned:
-            cleaned.append(text)
-    return tuple(cleaned)
+        normalized = _normalized_scope(scope)
+        if normalized is None:
+            if isinstance(scope, str) and not scope.strip():
+                continue
+            safe = False
+            continue
+        if normalized not in cleaned:
+            cleaned.append(normalized)
+    return tuple(cleaned), safe
 
 
 @dataclass(frozen=True)
@@ -287,7 +350,12 @@ class PlanTask:
     fails closed instead of being silently ignored. ``start_dependencies`` are
     hard START edges; ``integration_prerequisites`` are deferred integration
     edges that never block a start. ``owns`` declares the task's exact write
-    scope. ``phase`` and ``display_step`` are presentation only.
+    scope as canonical repository-relative paths, interpreted relative to that
+    task's own project identity (``ProjectPlan.project_id``): the same relative
+    path in a different project is a different physical file. Benign spelling
+    variants are folded; unsafe (absolute, traversal, backslash, glob) scopes
+    fail the projection closed. ``phase`` and ``display_step`` are presentation
+    only.
     """
 
     task_id: str
@@ -585,6 +653,9 @@ def _validate(
             if status not in _STATUS_VALUES:
                 reasons.append(FrontierReason.UNKNOWN_TASK_STATUS)
             display_step = _clean_text(task.display_step) or None
+            owns, scopes_safe = _clean_scopes(task.owns)
+            if not scopes_safe:
+                reasons.append(FrontierReason.UNSAFE_WRITE_SCOPE)
             row = _ValidatedTask(
                 project_id=project_id,
                 task_id=task_id,
@@ -595,7 +666,7 @@ def _validate(
                 title=_clean_text(task.title),
                 start_dependencies=tuple(task.start_dependencies),
                 integration_prerequisites=tuple(task.integration_prerequisites),
-                owns=_clean_scopes(task.owns),
+                owns=owns,
             )
             existing = tasks.get(task_id)
             if existing is not None and existing != row:
@@ -702,6 +773,17 @@ def _project(index: dict[TaskRef, _ValidatedTask], limits: FrontierLimits) -> tu
 
     Ordering is by immutable stable identity ``(project_id, task_id)``. Phase
     names and three-digit display steps never reorder or gate a lane.
+
+    Write scopes are namespaced by the trusted registered ``project_id`` the
+    caller attached to the row: two projects owning the same *relative* path are
+    unrelated and may both be eligible, while two tasks of one project owning the
+    same path conflict. Reservations are two-pass over the complete authoritative
+    snapshot: every executing (``RUNNING``) child task reserves its scopes first,
+    so no newly startable candidate can be reported over a running writer even
+    when the running row sorts later by stable identity. A task that is not
+    executing (``OWNER_WAIT`` / ``RESOURCE_WAIT`` / ``BLOCKED`` / terminal /
+    coordination) holds no executing resource and therefore reserves nothing;
+    it still holds only its own START dependents.
     """
     ordered = sorted(index.values(), key=lambda item: item.sort_key)
 
@@ -710,8 +792,20 @@ def _project(index: dict[TaskRef, _ValidatedTask], limits: FrontierLimits) -> tu
 
     accepted_projects: set[str] = set()
     per_project_count: dict[str, int] = {}
-    reserved_scopes: list[tuple[str, ...]] = []
 
+    # Pass 1: executing child tasks are authoritative active writers. Their
+    # scopes are reserved per owning project before any candidate is examined.
+    reserved_scopes: dict[str, list[tuple[str, ...]]] = {}
+    for row in ordered:
+        if (
+            row.kind == TaskKind.CHILD_TASK.value
+            and row.status == TaskStatus.RUNNING.value
+            and row.owns
+        ):
+            reserved_scopes.setdefault(row.project_id, []).append(row.owns)
+
+    # Pass 2: evaluate startable candidates against the pre-reserved writers and
+    # against scopes reserved earlier in this same pass.
     for row in ordered:
         status_reason = _status_hold(row)
         if status_reason is not None:
@@ -737,7 +831,8 @@ def _project(index: dict[TaskRef, _ValidatedTask], limits: FrontierLimits) -> tu
         if at_project_limit or at_child_limit:
             reasons.append(FrontierReason.CAPACITY_WAIT)
 
-        if any(_scopes_overlap(row.owns, scopes) for scopes in reserved_scopes):
+        project_scopes = reserved_scopes.get(row.project_id, ())
+        if any(_scopes_overlap(row.owns, scopes) for scopes in project_scopes):
             reasons.append(FrontierReason.WRITE_SCOPE_CONFLICT)
 
         if reasons:
@@ -758,7 +853,7 @@ def _project(index: dict[TaskRef, _ValidatedTask], limits: FrontierLimits) -> tu
         accepted_projects.add(row.project_id)
         per_project_count[row.project_id] = per_project_count.get(row.project_id, 0) + 1
         if row.owns:
-            reserved_scopes.append(row.owns)
+            reserved_scopes.setdefault(row.project_id, []).append(row.owns)
 
     held_tasks = tuple(
         HeldTask(
