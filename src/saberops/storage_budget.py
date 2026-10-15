@@ -9,8 +9,14 @@ back from the durable ledger.
 
 Design in one paragraph.  One owner-only SQLite ledger, guarded by one
 host-wide ``flock`` critical section, is authoritative for every project,
-repository and CLI session of one user on one host.  Inside that critical
-section the module measures the live free space of each filesystem the
+repository and CLI session of one user on one host.  The ledger root, its lock
+and the owner margin policy are anchored to the *unprofiled* user state/config
+base: ``SABEROPS_PROFILE`` isolates application state, but it must never
+namespace the reservation store, or two profiles would each admit against their
+own rows and jointly overbook one filesystem.  The ledger is scoped to a single
+host (the recorded ``host`` and the ``fs_key`` host segment make a shared-path
+accident fail closed rather than silently split accounting).  Inside that
+critical section the module measures the live free space of each filesystem the
 candidate touches, sums the *remaining* growth bound of every admitted live
 reservation on the same filesystem, adds the candidate's own conservative
 bound and a calibrated recovery margin, and admits only when the measurement
@@ -441,6 +447,22 @@ class OwnerToken:
     generation: int
     identity: ProcessIdentity | None = None
 
+    def __post_init__(self) -> None:
+        """Reject an unvalidated fencing token.
+
+        A token is only a fence if both halves are well formed: an empty owner
+        id or a non-positive generation is refused here rather than being
+        written as a row, mirroring the strict generation parse the engine
+        already applies to owner reservations
+        (``ownership.parse_owner_reservation``).
+        """
+        if not self.owner_id.strip():
+            raise FencingError("owner_id is required for a fencing token")
+        if self.generation < 1:
+            raise FencingError(
+                f"owner generation must be a positive integer, got {self.generation}"
+            )
+
     def resolved_identity(self) -> ProcessIdentity:
         """Return the recorded identity, defaulting to this process."""
         return self.identity if self.identity is not None else ProcessIdentity.for_self()
@@ -572,14 +594,28 @@ def canonical_ledger_root() -> Path:
 
     Sharing is the point: every repository, project and CLI session of one
     user resolves the same root, so no configuration can silently instantiate
-    an independent ledger.
+    an independent ledger.  The root is deliberately **unprofiled**:
+    ``SABEROPS_PROFILE`` namespaces the surrounding application state, but if
+    the ledger and its admission lock were profile-scoped too then two CLI
+    sessions under different profiles would each admit up to
+    ``free - margin`` against their own rows and jointly overbook the one
+    filesystem.  The profile segment is therefore never consulted here; the
+    ``XDG_STATE_HOME`` *base* remains the only environment seam.
     """
-    return saberops_paths.owner_state_dir() / LEDGER_DIRNAME
+    return saberops_paths.state_home() / saberops_paths.STATE_APP_DIR / LEDGER_DIRNAME
 
 
 def default_policy_path() -> Path:
-    """Return the canonical owner settings path for the margin policy."""
-    return saberops_paths.saberops_config_dir() / POLICY_FILENAME
+    """Return the canonical owner settings path for the margin policy.
+
+    Like the ledger root this is a single host/user setting: a profile-scoped
+    margin policy could hand two profiles conflicting recovery reserves against
+    the one shared ledger.  Anchoring the policy to the unprofiled config base
+    keeps exactly one margin authoritative, so no profile can admit with a
+    smaller reserve than the owner approved (see
+    :meth:`StorageLedger._check_shared_scope`).
+    """
+    return saberops_paths.config_home() / saberops_paths.CONFIG_APP_DIR / POLICY_FILENAME
 
 
 @dataclass(frozen=True)
@@ -1014,6 +1050,15 @@ class StorageLedger:
                 f"independent storage ledger rejected: {actual} is not the shared root "
                 f"{canonical} (allow_isolated is for hermetic tests only)"
             )
+        policy = self._config.policy_path
+        if policy is not None:
+            canonical_policy = os.path.realpath(str(default_policy_path()))
+            if os.path.realpath(str(policy)) != canonical_policy:
+                raise LedgerSecurityError(
+                    f"conflicting margin policy rejected: {policy} is not the shared "
+                    f"host/user policy {canonical_policy} (a second policy could admit "
+                    "with a smaller recovery reserve than the owner approved)"
+                )
 
     def _secure_root(self) -> None:
         root = self._root
@@ -1196,27 +1241,35 @@ class StorageLedger:
     def _row_to_reservation(
         self, conn: sqlite3.Connection, row: sqlite3.Row
     ) -> Reservation:
-        return Reservation(
-            key=ReservationKey(
-                installation_id=str(row["installation_id"]),
-                session_id=str(row["session_id"]),
-                attempt_id=str(row["attempt_id"]),
-                phase_id=str(row["phase_id"]),
-            ),
-            owner_id=str(row["owner_id"]),
-            owner_generation=int(row["owner_generation"]),
-            owner_identity=ProcessIdentity.from_json(str(row["owner_identity"])),
-            state=ReservationState(str(row["state"])),
-            estimate_source=EstimateSource(str(row["estimate_source"])),
-            estimate_version=int(row["estimate_version"]),
-            sample_count=int(row["sample_count"]),
-            confidence=float(row["confidence"]),
-            reason=str(row["reason"]),
-            created_at=str(row["created_at"]),
-            renewed_at=str(row["renewed_at"]),
-            lease_expires_at=str(row["lease_expires_at"]),
-            filesystems=self._load_samples(conn, str(row["res_id"])),
-        )
+        try:
+            return Reservation(
+                key=ReservationKey(
+                    installation_id=str(row["installation_id"]),
+                    session_id=str(row["session_id"]),
+                    attempt_id=str(row["attempt_id"]),
+                    phase_id=str(row["phase_id"]),
+                ),
+                owner_id=str(row["owner_id"]),
+                owner_generation=int(row["owner_generation"]),
+                owner_identity=ProcessIdentity.from_json(str(row["owner_identity"])),
+                state=ReservationState(str(row["state"])),
+                estimate_source=EstimateSource(str(row["estimate_source"])),
+                estimate_version=int(row["estimate_version"]),
+                sample_count=int(row["sample_count"]),
+                confidence=float(row["confidence"]),
+                reason=str(row["reason"]),
+                created_at=str(row["created_at"]),
+                renewed_at=str(row["renewed_at"]),
+                lease_expires_at=str(row["lease_expires_at"]),
+                filesystems=self._load_samples(conn, str(row["res_id"])),
+            )
+        except ValueError as exc:
+            # A tampered or half-written row must fail closed as corruption, not
+            # surface as an unhandled conversion error that skips the typed
+            # DISK_BUDGET_* refusal.
+            raise LedgerCorruptError(
+                f"reservation row {row['res_id']!r} is unreadable: {exc}"
+            ) from exc
 
     def _load_by_key(
         self, conn: sqlite3.Connection, key: ReservationKey
@@ -1317,7 +1370,12 @@ class StorageLedger:
         return self._config.shadow_margin_bytes, "shadow-placeholder-unapproved"
 
     def _assess(
-        self, conn: sqlite3.Connection, estimate: StorageEstimate, moment: datetime
+        self,
+        conn: sqlite3.Connection,
+        estimate: StorageEstimate,
+        moment: datetime,
+        *,
+        exclude_reservation_id: str | None = None,
     ) -> StorageDecision:
         estimate.validate()
         policy = load_margin_policy(self._config.policy_path)
@@ -1331,12 +1389,20 @@ class StorageLedger:
         for fs_key in sorted(identities):
             identity = identities[fs_key]
             margin, margin_source = self._margin(policy, identity)
-            rows = tuple(item for item in contributions if item.fs_key == fs_key)
+            fs_rows = tuple(item for item in contributions if item.fs_key == fs_key)
+            # A re-declaration of an existing live key must never be charged to
+            # itself: the caller's own previous bound is replaced by the new one,
+            # so only the *other* live writers plus the new candidate are summed.
+            rows = tuple(
+                item
+                for item in fs_rows
+                if item.reservation.reservation_id != exclude_reservation_id
+            )
             active = sum(item.remaining_growth_bytes for item in rows)
             candidate = candidate_totals[fs_key]
             required = compute_required_free(margin, active, candidate)
             available = max(0, identity.free_bytes - margin - active)
-            if any(item.backpressure for item in rows):
+            if any(item.backpressure for item in fs_rows):
                 backpressure.append(fs_key)
             budgets.append(
                 FsBudget(
@@ -1457,13 +1523,24 @@ class StorageLedger:
         estimate: StorageEstimate,
         moment: datetime,
     ) -> StorageDecision:
-        decision = self._assess(conn, estimate, moment)
+        # Load and validate the existing row *before* assessing, so a live
+        # re-declaration of this key can be excluded from the active sum instead
+        # of being charged to itself (which would demand roughly twice the space
+        # a crash-after-commit replay actually needs).
+        existing = self._load_by_key(conn, key)
+        exclude = (
+            existing.reservation_id
+            if existing is not None and existing.state is ReservationState.RESERVED
+            else None
+        )
+        decision = self._assess(
+            conn, estimate, moment, exclude_reservation_id=exclude
+        )
         if decision.outcome is not AdmissionOutcome.ADMITTED:
             return decision
         candidate_totals = {
             budget.fs_key: budget.candidate_bound for budget in decision.filesystems
         }
-        existing = self._load_by_key(conn, key)
         if existing is not None and existing.state is ReservationState.RESERVED:
             # Admission is also the recovery path: a restarted attempt may adopt
             # its own orphaned reservation once the previous incarnation is
@@ -1472,6 +1549,11 @@ class StorageLedger:
                 conn, existing, owner, estimate, candidate_totals, moment, takeover=True
             )
             return replace(decision, reserved=True)
+        if existing is not None:
+            # A terminal (SETTLED/RELEASED) row may only be reopened by an
+            # authorised successor generation; a stale or foreign replay never
+            # silently becomes the row's owner.
+            self._authorise_reopen(conn, existing, owner, moment)
         self._insert_locked(conn, key, owner, estimate, candidate_totals, moment, existing)
         return replace(decision, reserved=True)
 
@@ -1487,7 +1569,11 @@ class StorageLedger:
     ) -> None:
         identity = owner.resolved_identity()
         identity_json = json.dumps(identity.to_dict(), sort_keys=True)
-        created = _iso(moment)
+        # A reopened terminal row keeps its original creation timestamp and its
+        # append-only event trail: created_at is durable audit timing that the
+        # reservation_events history refers to and must not be rewritten.
+        created = existing.created_at if existing is not None else _iso(moment)
+        renewed = _iso(moment)
         expiry = _iso(moment + timedelta(seconds=self._config.lease_seconds))
         res_id = key.reservation_id
         if existing is not None:
@@ -1509,7 +1595,7 @@ class StorageLedger:
                     estimate.reason,
                     ReservationState.RESERVED.value,
                     created,
-                    created,
+                    renewed,
                     expiry,
                     res_id,
                 ),
@@ -1539,7 +1625,7 @@ class StorageLedger:
                     estimate.reason,
                     ReservationState.RESERVED.value,
                     created,
-                    created,
+                    renewed,
                     expiry,
                 ),
             )
@@ -1551,7 +1637,12 @@ class StorageLedger:
             estimate.attribution,
             reset_observed=True,
         )
-        self._event(conn, res_id, "RESERVED", owner.generation, key.render())
+        detail = key.render()
+        if existing is not None:
+            detail = (
+                f"{key.render()} reopened from generation {existing.owner_generation}"
+            )
+        self._event(conn, res_id, "RESERVED", owner.generation, detail)
 
     def _apply_bounds(
         self,
@@ -1647,9 +1738,13 @@ class StorageLedger:
 
         A stale generation, a duplicate claim, a live or unprovable owner
         refuses.  PID reuse is caught by the recorded process identity, not by
-        the PID alone.
+        the PID alone: on the same-owner fast path the presented incarnation
+        must match the recorded one whenever both are present, so a copied
+        ``(owner_id, generation)`` pair replayed by a *different* process
+        incarnation cannot silently inherit the reservation.
         """
         if owner.owner_id == existing.owner_id and owner.generation == existing.owner_generation:
+            self._require_same_incarnation(existing, owner)
             return
         if owner.generation <= existing.owner_generation:
             raise FencingError(
@@ -1676,6 +1771,63 @@ class StorageLedger:
             "TAKEOVER",
             owner.generation,
             f"previous owner generation {existing.owner_generation}",
+        )
+
+    def _require_same_incarnation(self, existing: Reservation, owner: OwnerToken) -> None:
+        """Refuse a same-owner replay from a different process incarnation.
+
+        The check applies only when the caller actually presents an identity;
+        a caller that presents none is explicitly delegating to the recorded
+        copy of the same logical ``(owner_id, generation)`` pair.
+        """
+        presented = owner.identity
+        recorded = existing.owner_identity
+        if presented is None or recorded is None:
+            return
+        if presented != recorded:
+            raise FencingError(
+                f"incarnation mismatch for {existing.reservation_id}: the presented "
+                "process identity is not the recorded owner incarnation"
+            )
+
+    def _authorise_reopen(
+        self, conn: sqlite3.Connection, existing: Reservation, owner: OwnerToken, moment: datetime
+    ) -> None:
+        """Fence resurrection of a terminal (SETTLED/RELEASED) reservation.
+
+        Reopening a settled key is a fresh lifecycle, so it demands a strictly
+        newer owner generation.  A *different* owner additionally needs the
+        recorded predecessor proven dead with a lapsed lease, exactly like a
+        crashed-owner takeover: a foreign or stale replay can never reopen a
+        settled key and silently become its owner.  The original ``created_at``
+        and the append-only event trail are preserved by
+        :meth:`_insert_locked`.
+        """
+        if owner.generation <= existing.owner_generation:
+            raise FencingError(
+                f"stale generation {owner.generation} cannot reopen terminal "
+                f"{existing.reservation_id} (recorded generation {existing.owner_generation})"
+            )
+        if owner.owner_id == existing.owner_id:
+            return
+        liveness = probe_liveness(existing.owner_identity)
+        if liveness is not Liveness.DEAD:
+            raise FencingError(
+                f"reopen of terminal {existing.reservation_id} refused: "
+                f"previous owner is {liveness}"
+            )
+        expiry = _parse_iso(existing.lease_expires_at)
+        if expiry is None or moment < expiry:
+            raise FencingError(
+                f"reopen of terminal {existing.reservation_id} refused: lease has not expired"
+            )
+        self._event(
+            conn,
+            existing.reservation_id,
+            "TAKEOVER",
+            owner.generation,
+            f"reopened {existing.state} reservation from owner generation "
+            f"{existing.owner_generation}",
         )
 
     def renew(

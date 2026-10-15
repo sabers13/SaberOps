@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 
 import saberops.storage_budget as sb
+from saberops import paths as saberops_paths
 from saberops.ownership import Liveness, ProcessIdentity, current_boot_id
 from saberops.ownership import probe_liveness as owner_probe_liveness
 from saberops.storage_budget import (
@@ -504,6 +505,37 @@ def test_killed_before_and_after_reserve_replay(tmp_path: Path) -> None:
         assert len(ledger.active_reservations()) == 1
 
 
+def test_tight_headroom_replay_does_not_double_count(tmp_path: Path) -> None:
+    """Covers: ADR-0003 Amendment 2 (a replay never charges the row to itself)."""
+    fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 4 * GB)})
+    base = datetime(2026, 10, 15, 12, 0, 0, tzinfo=UTC)
+    with StorageLedger(make_config(tmp_path, lease_seconds=60.0), fs) as ledger:
+        key = make_key()
+        first = ledger.try_reserve(
+            key, OwnerToken("first", 1, dead_identity()), make_estimate(tmp_path, 3 * GB),
+            now=base,
+        )
+        # 4 GiB free, 1 GiB margin, 3 GiB bound: exactly the whole headroom.
+        assert first.admitted
+        assert first.required_free == 4 * GB
+        # Crash AFTER commit: the replay must see 3 GiB (not 6) and still admit.
+        replay = ledger.try_reserve(
+            key, OwnerToken("second", 2, ProcessIdentity.for_self()),
+            make_estimate(tmp_path, 3 * GB), now=base + timedelta(seconds=120),
+        )
+        assert replay.admitted, replay.reason
+        assert len(ledger.active_reservations()) == 1
+        assert ledger.assess(make_estimate(tmp_path)).total_active_remaining == 3 * GB
+        # A genuine growth delta is still checked atomically: 4 GiB no longer fits.
+        grown = ledger.try_reserve(
+            key, OwnerToken("second", 2, ProcessIdentity.for_self()),
+            make_estimate(tmp_path, 4 * GB), now=base + timedelta(seconds=120),
+        )
+        assert grown.outcome is AdmissionOutcome.EXCEEDED
+        assert len(ledger.active_reservations()) == 1
+        assert ledger.active_reservations()[0].filesystems[0].bound_bytes == 3 * GB
+
+
 def test_idempotent_settle_and_release_refusal(tmp_path: Path) -> None:
     """Covers: ADR-0003 Amendment 2 (settlement is idempotent and fenced)."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
@@ -537,6 +569,75 @@ def test_settle_requires_the_owner_generation(tmp_path: Path) -> None:
         stale = ledger.settle(key, OwnerToken("owner", 2))
         assert stale.reason_code == sb.FencingError.reason_code
         assert ledger.active_reservations() != ()
+
+
+def test_reopen_refuses_a_stale_generation_replay(tmp_path: Path) -> None:
+    """Covers: ADR-0003 Amendment 2 (no stale resurrection of a settled key)."""
+    fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
+    with StorageLedger(make_config(tmp_path), fs) as ledger:
+        key = make_key()
+        assert ledger.try_reserve(
+            key, OwnerToken("owner", 3), make_estimate(tmp_path, 2 * GB)
+        ).admitted
+        assert ledger.settle(key, OwnerToken("owner", 3)).reason == "SETTLED"
+        stale = ledger.try_reserve(key, OwnerToken("owner", 2), make_estimate(tmp_path, 2 * GB))
+        assert stale.outcome is AdmissionOutcome.UNAVAILABLE
+        assert stale.reason_code == sb.FencingError.reason_code
+        assert ledger.active_reservations() == ()
+        # The same generation cannot reopen either: monotonic strictly upward.
+        duplicate = ledger.try_reserve(
+            key, OwnerToken("owner", 3), make_estimate(tmp_path, 2 * GB)
+        )
+        assert duplicate.reason_code == sb.FencingError.reason_code
+        assert ledger.active_reservations() == ()
+        assert [event.event for event in ledger.history(key)] == ["RESERVED", "SETTLED"]
+
+
+def test_reopen_refuses_a_foreign_owner_while_the_predecessor_lives(
+    tmp_path: Path,
+) -> None:
+    """Covers: ADR-0003 Amendment 2 (a live predecessor blocks foreign reopen)."""
+    fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
+    with StorageLedger(make_config(tmp_path), fs) as ledger:
+        key = make_key()
+        assert ledger.try_reserve(
+            key, OwnerToken("owner", 1, ProcessIdentity.for_self()), make_estimate(tmp_path, GB)
+        ).admitted
+        assert ledger.settle(key, OwnerToken("owner", 1)).reason == "SETTLED"
+        intruder = ledger.try_reserve(key, OwnerToken("intruder", 2), make_estimate(tmp_path, GB))
+        assert intruder.outcome is AdmissionOutcome.UNAVAILABLE
+        assert intruder.reason_code == sb.FencingError.reason_code
+        assert ledger.active_reservations() == ()
+        assert [event.event for event in ledger.history(key)] == ["RESERVED", "SETTLED"]
+
+
+def test_reopen_by_an_authorised_successor_preserves_audit_timing(tmp_path: Path) -> None:
+    """Covers: ADR-0003 Amendment 2 (crash-after-settle reopen keeps created_at)."""
+    fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
+    base = datetime(2026, 10, 15, 12, 0, 0, tzinfo=UTC)
+    with StorageLedger(make_config(tmp_path, lease_seconds=60.0), fs) as ledger:
+        key = make_key()
+        assert ledger.try_reserve(
+            key, OwnerToken("owner", 1, dead_identity()), make_estimate(tmp_path, 2 * GB),
+            now=base,
+        ).admitted
+        created_at = ledger.active_reservations()[0].created_at
+        assert ledger.settle(key, OwnerToken("owner", 1), now=base).reason == "SETTLED"
+        # Crash after settle: a dead predecessor with a lapsed lease is replaced
+        # by a strictly newer generation, even from a different owner id.
+        reopened = ledger.try_reserve(
+            key, OwnerToken("recovery", 2, ProcessIdentity.for_self()),
+            make_estimate(tmp_path, 2 * GB), now=base + timedelta(seconds=120),
+        )
+        assert reopened.admitted, reopened.reason
+        rows = ledger.active_reservations()
+        assert [row.owner_id for row in rows] == ["recovery"]
+        assert rows[0].created_at == created_at  # original timing is preserved
+        assert rows[0].owner_generation == 2
+        assert [event.event for event in ledger.history(key)] == [
+            "RESERVED", "SETTLED", "TAKEOVER", "RESERVED",
+        ]
+        assert ledger.assess(make_estimate(tmp_path)).total_active_remaining == 2 * GB
 
 
 def test_state_restart_keeps_the_same_reservation(tmp_path: Path) -> None:
@@ -597,6 +698,67 @@ def test_lease_expiry_and_pid_reuse(tmp_path: Path) -> None:
             now=base + timedelta(seconds=200))] == ["reused"]
         dead = [r for r in ledger.active_reservations() if r.key.session_id == "dead"]
         assert dead == []
+
+
+def test_owner_token_rejects_empty_id_and_nonpositive_generation(tmp_path: Path) -> None:
+    """Covers: ADR-0003 Amendment 2 (an unvalidated fencing token is refused)."""
+    for owner_id, generation in (("", 1), ("   ", 1), ("o", 0), ("o", -3)):
+        with pytest.raises(sb.FencingError):
+            OwnerToken(owner_id, generation)
+    assert OwnerToken("o", 1).generation == 1
+    fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
+    with StorageLedger(make_config(tmp_path), fs) as ledger:
+        with pytest.raises(sb.FencingError):
+            ledger.settle(make_key(), OwnerToken("o", 0))
+        assert ledger.active_reservations() == ()
+
+
+def test_same_generation_from_another_incarnation_is_fenced(tmp_path: Path) -> None:
+    """Covers: ADR-0003 Amendment 2 (PID-reuse replay is not the recorded owner)."""
+    fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
+    with StorageLedger(make_config(tmp_path), fs) as ledger:
+        key = make_key()
+        incarnation = ProcessIdentity.for_self()
+        assert ledger.try_reserve(
+            key, OwnerToken("owner", 1, incarnation), make_estimate(tmp_path, GB)
+        ).admitted
+        reused = dataclasses.replace(
+            incarnation, start_ticks=(incarnation.start_ticks or 0) + 1
+        )
+        replay = ledger.try_reserve(
+            key, OwnerToken("owner", 1, reused), make_estimate(tmp_path, GB)
+        )
+        assert replay.outcome is AdmissionOutcome.UNAVAILABLE
+        assert replay.reason_code == sb.FencingError.reason_code
+        assert len(ledger.active_reservations()) == 1
+        with pytest.raises(sb.FencingError):
+            ledger.observe(key, OwnerToken("owner", 1, reused), tmp_path, 1024)
+        # A caller that presents no identity still rides the recorded incarnation.
+        assert ledger.try_reserve(
+            key, OwnerToken("owner", 1), make_estimate(tmp_path, GB)
+        ).admitted
+        assert len(ledger.active_reservations()) == 1
+
+
+def test_corrupt_reservation_row_fails_closed(tmp_path: Path) -> None:
+    """Covers: ADR-0003 Amendment 2 (a tampered row is corruption, not a crash)."""
+    fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
+    config = make_config(tmp_path)
+    with StorageLedger(config, fs) as ledger:
+        assert ledger.try_reserve(
+            make_key(), OwnerToken("o", 1), make_estimate(tmp_path, GB)
+        ).admitted
+    conn = sqlite3.connect(config.database_path)
+    conn.execute("UPDATE reservations SET state = ?", ("NOT_A_STATE",))
+    conn.commit()
+    conn.close()
+    with StorageLedger(config, fs) as ledger:
+        decision = ledger.try_reserve(
+            make_key(), OwnerToken("o", 1), make_estimate(tmp_path, GB)
+        )
+        assert decision.outcome is AdmissionOutcome.UNAVAILABLE
+        assert decision.reason_code == sb.LedgerCorruptError.reason_code
+        assert decision.reserved is False
 
 
 def test_corrupt_owner_identity_stays_charged(tmp_path: Path) -> None:
@@ -951,6 +1113,183 @@ def test_default_root_must_be_the_shared_one(
     guarded = LedgerConfig(root=tmp_path / "elsewhere")
     with pytest.raises(LedgerSecurityError):
         StorageLedger(guarded).open()
+
+
+def test_canonical_root_and_policy_ignore_the_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: ADR-0003 Amendment 2 (one ledger/policy, never per profile)."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    resolved: set[Path] = set()
+    for profile in ("alpha", "beta"):
+        monkeypatch.setenv("SABEROPS_PROFILE", profile)
+        resolved.add(sb.canonical_ledger_root())
+        resolved.add(sb.default_policy_path())
+        # The surrounding application state *is* still profile-scoped, so the
+        # assertion below is not vacuous.
+        assert saberops_paths.owner_state_dir() == (
+            tmp_path / "state" / "saberops" / "profiles" / profile
+        )
+    monkeypatch.delenv("SABEROPS_PROFILE")
+    resolved.add(sb.canonical_ledger_root())
+    resolved.add(sb.default_policy_path())
+    assert resolved == {
+        tmp_path / "state" / "saberops" / sb.LEDGER_DIRNAME,
+        tmp_path / "config" / "saberops" / sb.POLICY_FILENAME,
+    }
+
+
+def test_two_profiles_share_one_ledger_and_accounting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: ADR-0003 Amendment 2 (profiles cannot each book free-minus-margin)."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("SABEROPS_PROFILE", "alpha")
+    alpha = LedgerConfig(lease_seconds=900.0)
+    policy_path = alpha.policy_path
+    assert policy_path is not None
+    assert policy_path == sb.default_policy_path()
+    policy_path.parent.mkdir(parents=True, exist_ok=True)
+    policy_path.write_text(json.dumps({
+        "approved": True, "fixed_bytes": GB, "min_bytes": 64 * MIB,
+        "max_bytes": 2 * GB, "source": "test-owner", "version": "1",
+    }))
+    fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 4 * GB)})
+    with StorageLedger(alpha, fs) as ledger:
+        assert ledger.try_reserve(
+            make_key(session="alpha"), OwnerToken("a", 1), make_estimate(tmp_path, 3 * GB)
+        ).admitted
+    monkeypatch.setenv("SABEROPS_PROFILE", "beta")
+    beta = LedgerConfig(lease_seconds=900.0)
+    assert beta.root == alpha.root == sb.canonical_ledger_root()
+    with StorageLedger(beta, fs) as ledger:
+        # beta sees alpha's row and cannot independently book the same capacity.
+        assert [row.key.session_id for row in ledger.active_reservations()] == ["alpha"]
+        overbook = ledger.try_reserve(
+            make_key(session="beta"), OwnerToken("b", 1), make_estimate(tmp_path, 3 * GB)
+        )
+        assert overbook.outcome is AdmissionOutcome.EXCEEDED
+        assert overbook.total_active_remaining == 3 * GB
+        assert [row.key.session_id for row in ledger.active_reservations()] == ["alpha"]
+
+
+def test_conflicting_margin_policy_is_rejected_on_the_shared_ledger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: ADR-0003 Amendment 2 (one authoritative margin, no per-profile policy)."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.delenv("SABEROPS_PROFILE", raising=False)
+    rogue = write_policy(tmp_path, fixed_bytes=64 * MIB, min_bytes=32 * MIB, max_bytes=GB)
+    with pytest.raises(LedgerSecurityError):
+        StorageLedger(LedgerConfig(policy_path=rogue)).open()
+    canonical = LedgerConfig()
+    canonical_policy = canonical.policy_path
+    assert canonical_policy is not None
+    canonical_policy.parent.mkdir(parents=True, exist_ok=True)
+    canonical_policy.write_text(json.dumps({
+        "approved": True, "fixed_bytes": GB, "min_bytes": 64 * MIB,
+        "max_bytes": 2 * GB, "source": "test-owner", "version": "1",
+    }))
+    fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
+    with StorageLedger(canonical, fs) as ledger:
+        assert ledger.try_reserve(
+            make_key(), OwnerToken("o", 1), make_estimate(tmp_path, GB)
+        ).admitted
+
+
+_CROSS_PROFILE_CHILD = '''
+import json
+import sys
+from pathlib import Path
+
+from saberops.storage_budget import (
+    EstimateComponent,
+    EstimateSource,
+    FilesystemIdentity,
+    LedgerConfig,
+    OwnerToken,
+    ReservationKey,
+    StorageEstimate,
+    StorageLedger,
+)
+
+payload = json.loads(Path(sys.argv[1]).read_text())
+index = int(sys.argv[2])
+
+
+def probe(path: Path) -> FilesystemIdentity:
+    return FilesystemIdentity(
+        key="fs",
+        device=11,
+        total_bytes=payload["total"],
+        free_bytes=payload["free"],
+    )
+
+
+config = LedgerConfig(lease_seconds=900.0)
+estimate = StorageEstimate(
+    components=(
+        EstimateComponent(path=payload["path"], remaining_growth_bytes=payload["bytes"]),
+    ),
+    source=EstimateSource.OWNER_HINT,
+    sample_count=0,
+    confidence=0.5,
+)
+key = ReservationKey(
+    installation_id="shared", session_id=f"s{index}", attempt_id="a1", phase_id="gate"
+)
+with StorageLedger(config, probe) as ledger:
+    decision = ledger.try_reserve(key, OwnerToken(f"o{index}", 1), estimate)
+    print(json.dumps({"index": index, "outcome": str(decision.outcome),
+                      "reason": decision.reason_code, "root": str(config.root)}))
+'''
+
+
+def test_cross_profile_processes_share_one_ledger(tmp_path: Path) -> None:
+    """Covers: ADR-0003 Amendment 2 (two profiles, one host ledger: no overbook)."""
+    state = tmp_path / "state"
+    config_dir = tmp_path / "config"
+    policy = config_dir / "saberops" / sb.POLICY_FILENAME
+    policy.parent.mkdir(parents=True)
+    policy.write_text(json.dumps({
+        "approved": True, "fixed_bytes": GB, "min_bytes": 64 * MIB,
+        "max_bytes": 2 * GB, "source": "test-owner", "version": "1",
+    }))
+    script = tmp_path / "profile_child.py"
+    script.write_text(_CROSS_PROFILE_CHILD)
+    payload = {"total": 16 * GB, "free": 4 * GB, "path": str(tmp_path), "bytes": 3 * GB}
+    payload_path = tmp_path / "profile-payload.json"
+    payload_path.write_text(json.dumps(payload))
+    src = str(Path(sb.__file__).resolve().parents[1])
+    expected_root = str(state / "saberops" / sb.LEDGER_DIRNAME)
+    results: list[dict[str, object]] = []
+    for index, profile in enumerate(("alpha", "beta")):
+        env = {
+            **os.environ,
+            "PYTHONPATH": src,
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "XDG_STATE_HOME": str(state),
+            "XDG_CONFIG_HOME": str(config_dir),
+            "SABEROPS_PROFILE": profile,
+        }
+        completed = subprocess.run(
+            [sys.executable, str(script), str(payload_path), str(index)],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=120,
+        )
+        assert completed.returncode == 0, completed.stderr
+        lines = [json.loads(line) for line in completed.stdout.splitlines() if line.strip()]
+        assert lines, completed.stderr
+        results.append(lines[0])
+    # Both profiles resolved the identical unprofiled ledger root...
+    assert {row["root"] for row in results} == {expected_root}
+    # ...so 4 GiB free, 1 GiB margin, 3 GiB each admits only one of them.
+    assert [row["outcome"] for row in results] == ["ADMITTED", "EXCEEDED"], results
 
 
 def test_ledger_is_owner_only_and_symlinks_are_refused(tmp_path: Path) -> None:
