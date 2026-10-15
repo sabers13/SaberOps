@@ -162,6 +162,57 @@ def test_flaky_pass_with_still_failing_blocked() -> None:
     assert decision.accepted is False
 
 
+def test_g1_flaky_pass_with_failing_checks_blocked() -> None:
+    """Covers: D1 lint/type failure is never laundered green via FLAKY_PASS (G1)."""
+    decision = project_gate_outcome(
+        ev(
+            raw_outcome="FLAKY_PASS",
+            exit_code=0,
+            flaky=("tests/test_a.py::test_x",),
+            checks_ok=False,
+            role=GateRole.G1,
+        )
+    )
+    assert decision.decision is ProjectedDecisionKind.BLOCKED
+    assert decision.accepted is False
+    assert decision.raw_outcome == "FLAKY_PASS"
+    assert decision.raw_exit_code == 0
+
+
+def test_g3_quarantined_flaky_pass_with_failing_checks_blocked() -> None:
+    """Covers: D1 lint/type failure is never laundered green via FLAKY_PASS (G3)."""
+    flaky = ("tests/test_a.py::test_x",)
+    decision = project_gate_outcome(
+        ev(
+            raw_outcome="FLAKY_PASS",
+            exit_code=0,
+            flaky=flaky,
+            quarantined=frozenset(flaky),
+            checks_ok=False,
+            role=GateRole.G3,
+        )
+    )
+    assert decision.decision is ProjectedDecisionKind.BLOCKED
+    assert decision.accepted is False
+    assert decision.raw_outcome == "FLAKY_PASS"
+    assert decision.raw_exit_code == 0
+
+
+def test_flaky_pass_with_zero_ran_blocked() -> None:
+    """Covers: D1 FLAKY_PASS with a nonempty selection that ran zero tests."""
+    decision = project_gate_outcome(
+        ev(
+            raw_outcome="FLAKY_PASS",
+            exit_code=0,
+            flaky=("tests/test_a.py::test_x",),
+            selected_nonempty=True,
+            tests_ran=0,
+        )
+    )
+    assert decision.decision is ProjectedDecisionKind.BLOCKED
+    assert decision.accepted is False
+
+
 def test_g1_flaky_pass_needs_no_quarantine() -> None:
     """Covers: D1/D5 quarantine evidence is not required for G1 acceptability."""
     decision = project_gate_outcome(

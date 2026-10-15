@@ -262,6 +262,23 @@ def project_gate_outcome(evidence: GateEvidence) -> ProjectedDecision:
                 role_name,
                 "FLAKY_PASS with still-failing tests; contradictory evidence",
             )
+        if not evidence.checks_ok:
+            return _blocked(
+                evidence,
+                role_name,
+                "FLAKY_PASS with failing lint/type checks; contradictory evidence",
+            )
+        if (
+            evidence.selected_nonempty
+            and (evidence.tests_ran is not None)
+            and evidence.tests_ran == 0
+        ):
+            return _blocked(
+                evidence,
+                role_name,
+                "FLAKY_PASS with a nonempty selection that ran zero tests; "
+                "contradictory evidence",
+            )
         if role is GateRole.G3:
             if unquarantined:
                 return ProjectedDecision(
