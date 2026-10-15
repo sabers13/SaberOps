@@ -249,17 +249,40 @@ def test_unconfigured_capacity_degrades_gracefully(tmp_path: Path) -> None:
     # When capacity tables do not exist
     assert is_capacity_subsystem_configured(db=blank_db) is False
 
-    # 1. Unverified posture fails closed even on blank DB (F1 fix)
-    admit_unverified = admit(
+    # 1. Unverified posture fails closed on both queued and in-run seams (F1 fix)
+    req = JobRequirements(role=JobRole.WORKER)
+    admit_queued = admit(
+        cand,
+        now=_NOW,
+        db=blank_db,
+        requirements=req,
+    )
+    assert admit_queued.admitted is False
+    assert admit_queued.is_allowed is False
+    assert admit_queued.reason == POSTURE_UNVERIFIED
+
+    skip_queued = evaluate_eligibility(
+        candidate=cand,
+        adapter=_AvailableAdapter(),  # type: ignore[arg-type]
+        training_allowed=True,
+        quota_states=[],
+        prompt_bytes=100,
+        db=blank_db,
+        now=_NOW,
+        requirements=req,
+    )
+    assert skip_queued == SKIP_QUOTA_BLOCKED
+
+    admit_in_run = admit(
         cand,
         now=_NOW,
         db=blank_db,
     )
-    assert admit_unverified.admitted is False
-    assert admit_unverified.is_allowed is False
-    assert admit_unverified.reason == POSTURE_UNVERIFIED
+    assert admit_in_run.admitted is False
+    assert admit_in_run.is_allowed is False
+    assert admit_in_run.reason == POSTURE_UNVERIFIED
 
-    skip_unverified = evaluate_eligibility(
+    skip_in_run = evaluate_eligibility(
         candidate=cand,
         adapter=_AvailableAdapter(),  # type: ignore[arg-type]
         training_allowed=True,
@@ -268,7 +291,7 @@ def test_unconfigured_capacity_degrades_gracefully(tmp_path: Path) -> None:
         db=blank_db,
         now=_NOW,
     )
-    assert skip_unverified == SKIP_QUOTA_BLOCKED
+    assert skip_in_run == SKIP_QUOTA_BLOCKED
 
     # 2. Attended-only (posture B) without override fails closed on blank DB
     b_policy = ControlPlanePolicy(

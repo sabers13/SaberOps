@@ -13,7 +13,7 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, time
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -39,8 +39,6 @@ from saberops.control_plane.capabilities import (
 from saberops.control_plane.plans import (
     Window,
     effective_quota_pools,
-    load_packaged_plans_raw,
-    validate_plan_sections,
 )
 from saberops.control_plane.policy import (
     ControlPlanePolicy,
@@ -510,23 +508,15 @@ def admit(
             )
 
     # 6. Billing posture (ADR-0002 D2)
-    effective_plans = effective_policy.plans
-    if not effective_plans.postures:
-        try:
-            pkg_raw = load_packaged_plans_raw()
-            pkg_plans = validate_plan_sections(pkg_raw, "packaged plans", packaged=True)
-            merged_postures = dict(pkg_plans.postures)
-            merged_postures.update(effective_plans.postures)
-            effective_plans = replace(effective_plans, postures=merged_postures)
-        except Exception:
-            pass
-
     posture = posture_decision(
         candidate.provider,
         candidate.model,
-        plans=effective_plans,
+        plans=effective_policy.plans,
         today=moment.date(),
     )
+
+    # Hard prohibitions apply to both unattended and in-run dispatch points:
+    # Posture X and Expired routes NEVER launch, even with override or unconfigured capacity.
     if posture.posture_class == "X" or posture.reason == POSTURE_FORBIDDEN:
         return AdmissionDecision(
             admitted=False,
@@ -541,51 +531,69 @@ def admit(
             reason=POSTURE_EXPIRED,
             details={"expires_on": posture.expires_on},
         )
-    if requirements is not None:
-        # An unattended job has no owner override (F1)
-        explicit_override = False
 
-    if posture.reason == POSTURE_UNVERIFIED:
-        # For policy-unknown routes (no matching posture record in plans.postures),
-        # unattended scheduler dispatch (requirements is not None) strictly fails closed (F1).
-        # In-run attended dispatch (requirements is None) degrades gracefully only when capacity
-        # is unconfigured (allowing unmanaged/test adapters like h3); otherwise it fails closed.
-        if posture.selector is None and requirements is None:
-            if not is_capacity_subsystem_configured(
-                db=db,
-                policy=effective_policy,
-                quota_states=quota_states,
-                explicit_configured=capacity_configured,
-            ):
-                return AdmissionDecision(
-                    admitted=True,
-                    candidate=candidate,
-                    reason="unconfigured",
-                    details={"capacity_configured": False},
-                )
-        return AdmissionDecision(
-            admitted=False,
-            candidate=candidate,
-            reason=POSTURE_UNVERIFIED,
-        )
-    if posture.reason == POSTURE_ATTENDED_ONLY and not explicit_override:
-        return AdmissionDecision(
-            admitted=False,
-            candidate=candidate,
-            reason=POSTURE_ATTENDED_ONLY,
-            details={"posture_class": "B"},
-        )
-    if posture.reason == POSTURE_METERED and not explicit_override:
-        return AdmissionDecision(
-            admitted=False,
-            candidate=candidate,
-            reason=POSTURE_METERED,
-            details={"posture_class": "D"},
-        )
+    # Unattended scheduler dispatch (requirements is not None):
+    # F1: X, B, D, unverified/expired and policy-unknown routes NEVER become eligible
+    # for unattended scheduler dispatch merely because capacity tables are absent.
+    # An unattended job has no owner override.
+    if requirements is not None:
+        if posture.reason in (POSTURE_UNVERIFIED, POSTURE_ATTENDED_ONLY, POSTURE_METERED):
+            return AdmissionDecision(
+                admitted=False,
+                candidate=candidate,
+                reason=posture.reason,
+                details={"posture_class": posture.posture_class},
+            )
+        if provider_policy.state == ProviderPolicyState.ALLOWED_WITH_WARNING:
+            return AdmissionDecision(
+                admitted=False,
+                candidate=candidate,
+                reason=POSTURE_UNVERIFIED,
+                details={"warning": "policy-unknown route denied unattended"},
+            )
+    else:
+        # In-run attended dispatch:
+        # If route has a configured posture record with missing/invalid verification,
+        # it always fails closed (even attended, even with unconfigured capacity).
+        # Only policy-unknown routes (posture.selector is None) may degrade gracefully
+        # when capacity subsystem is unconfigured.
+        if posture.reason == POSTURE_UNVERIFIED:
+            if posture.selector is None:
+                if not is_capacity_subsystem_configured(
+                    db=db,
+                    policy=effective_policy,
+                    quota_states=quota_states,
+                    explicit_configured=capacity_configured,
+                ):
+                    return AdmissionDecision(
+                        admitted=True,
+                        candidate=candidate,
+                        reason="unconfigured",
+                        details={"capacity_configured": False},
+                    )
+            return AdmissionDecision(
+                admitted=False,
+                candidate=candidate,
+                reason=POSTURE_UNVERIFIED,
+            )
+        if posture.reason == POSTURE_ATTENDED_ONLY and not explicit_override:
+            return AdmissionDecision(
+                admitted=False,
+                candidate=candidate,
+                reason=POSTURE_ATTENDED_ONLY,
+                details={"posture_class": "B"},
+            )
+        if posture.reason == POSTURE_METERED and not explicit_override:
+            return AdmissionDecision(
+                admitted=False,
+                candidate=candidate,
+                reason=POSTURE_METERED,
+                details={"posture_class": "D"},
+            )
 
     # Capacity subsystem configuration check (graceful degradation if unconfigured)
     # Skips only ledger-dependent checks (pool balances, red lines, overage probes, concurrency),
-    # NEVER requirements, readiness, or billing posture!
+    # NEVER requirements, readiness, or safety/forbidden postures!
     if not is_capacity_subsystem_configured(
         db=db,
         policy=effective_policy,
