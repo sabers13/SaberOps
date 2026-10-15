@@ -20,6 +20,37 @@ still have workers that dispatched, saved partial commits and failed checks.
 Outcome explanations include those worker results before later routing blockers.
 Failed worker commits remain partial work and do not become acceptable candidates.
 
+## Current capability versus target scheduler
+
+**CURRENT — implemented today.** `saberops.parallel_work.execute_team` runs
+**one** parallel team for one parent run: two to six coherent tasks executed by
+at most two, three or four local workers, on their own worktrees and branches,
+with dependency waves, an integration worktree, a stable-order merge into that
+integration branch, and one combined gate plus review on the assembled
+candidate. `saberops.planning.represent_independent_ready_work` and
+`ready_dependents` are the persisted *within-run* plan/package dependency
+authority: they perform dependency-state transitions against the run database.
+The bounded `fetch_initial_orchestrator_guidance` call is a short initial-goal
+advisor for the first worker, not a planner. This is a single-run team
+executor, **not** a cross-project, continuously refilled scheduler.
+
+**TARGET — not yet implemented.** A deterministic, continuously refilled
+**cross-phase ready frontier across 3 active projects x 5 executing child tasks**
+(two independent, owner-adjustable limits), with hard START versus deferred
+INTEGRATE edges, stable project/task identity, exclusive write scopes, a shared
+per-filesystem storage reservation budget, lease fencing, exact-SHA evidence,
+one exclusive integration gate, and a UI that shows real ready/blocked/held
+reasons. A blocked early-phase dependency must not stop unrelated later-phase
+implementation. Early pure *projections* (for example
+`saberops.ready_frontier`, a readiness/hold projection, and a project-child
+slot-admission projection) may land on unmerged branches; they compute nothing
+about live occupancy, hold no lease, dispatch nothing, and are never launch
+authority by themselves. The target behaviour is delivered by the existing
+project/plan, settings, wave-admission, session, UI, security and certification
+work, **not** by documentation. See
+[orchestrator-parallel-first.md](orchestrator-parallel-first.md) for the
+tracked Orchestrator policy and its current-versus-target section.
+
 ## Starting in an empty project
 
 Configure an executable project gate before starting the team. If the repository

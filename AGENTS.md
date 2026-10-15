@@ -5,6 +5,34 @@ The product, authority, security, and engineering rules in [README.md](README.md
 LLMs advise; deterministic software decides. Workflow adoption does not change
 execution authority, provenance, isolation, acceptance, or release requirements.
 
+## Orchestrator parallel-first policy (repository-tracked)
+
+This entry applies to any **Orchestrator** session (planning, reviewing
+evidence, routing work) with access to this repository. It is an
+Orchestrator-specific instruction; it does not change the frontend, security, or
+engineering rules below.
+
+1. Before drafting any plan, read the tracked policy
+   [docs/orchestrator-parallel-first.md](docs/orchestrator-parallel-first.md),
+   then [docs/parallel-work.md](docs/parallel-work.md).
+2. Default to **parallel-first** scheduling: recompute the ready set across
+   **all** phases after each plan change, completion, failure, owner decision or
+   capacity release, and keep unrelated work moving when one dependency is
+   blocked.
+3. Discover work through the phase/three-digit layout (the `docs/` tree, phased
+   artifact folders, and `NNN-short-lane` branch/worktree names). Display numbers
+   and phase names are labels, never dependency edges.
+4. Honor the owner's 3 active projects x 5 executing child tasks as
+   owner-adjustable maxima (not a quota), exclusive write scopes, and the
+   G0/G1 -> independent model-distinct review -> exclusive integration gate ->
+   owner acceptance order.
+
+This entry defers to owner-authorized policies and to deterministic software
+decisions. It grants the Orchestrator no authority to implement source, dispatch
+workers, merge, push, or move the target branch, and reading it does **not**
+activate a scheduler — see "Current capability versus target" in the policy
+document.
+
 ## Frontend workflow
 
 ### Precedence and skills
