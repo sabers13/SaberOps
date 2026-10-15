@@ -6,6 +6,7 @@ import json
 import subprocess
 import threading
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +43,48 @@ def git(repo: Path, *args: str) -> str:
     ).stdout.strip()
 
 
+def _seed_verified_codex_posture(config_home: Path) -> None:
+    """Seed an isolated owner config with a verified posture for the synthetic
+    ``codex/test-model`` candidate used by this module's fixtures.
+
+    Covers: ADR-0002 D2 / WORKFLOW §7 authorized setup-only fixture migration.
+    This adds ONLY the synthetic provider/posture record needed to preserve
+    the module's historical continuation assertions now that unverified routes
+    fail closed (M2-4b D7); no assertion or expected behaviour is changed and
+    no real vendor receives an attestation. ``verified_on`` is stamped at run
+    time with a 90-day TTL so replay never expires. The hermetic owner config
+    additionally scopes the drawn ``chatgpt-plus`` pool exactly as packaged
+    (same members) but without ``overage_possible``, so the blank test DB is
+    not asked for quota evidence the historical fixture never provided; no
+    production pool semantics are changed.
+    """
+    cfg_dir = config_home / "saberops"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    today_iso = datetime.now(UTC).date().isoformat()
+    cp_doc = {
+        "version": 2,
+        "providers": {"codex": {"state": "ALLOWED"}},
+        "quota_pools": {
+            "chatgpt-plus": {
+                "mode": "STRICT",
+                "red_line_pct": 15.0,
+                "members": ["codex", "opencode/openai/*"],
+                "overage_possible": False,
+            }
+        },
+        "postures": {
+            "codex": {
+                "class": "A",
+                "policy_urls": ["https://example.com/synthetic-test-posture"],
+                "ttl_days": 90,
+                "verified_on": today_iso,
+                "note": "synthetic verified test posture for continue-run fixtures",
+            }
+        },
+    }
+    (cfg_dir / "control_plane.json").write_text(json.dumps(cp_doc), encoding="utf-8")
+
+
 @pytest.fixture
 def failed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -56,6 +99,7 @@ def failed(
         "ORCH_READINESS_STORE",
     ):
         monkeypatch.delenv(key, raising=False)
+    _seed_verified_codex_posture(tmp_path / "XDG_CONFIG_HOME")
     repo = tmp_path / "project"
     repo.mkdir()
     git(repo, "init", "-b", "main")
