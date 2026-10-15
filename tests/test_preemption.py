@@ -929,3 +929,33 @@ def test_genuine_signal_channels(tmp_path: Path) -> None:
     )
     assert preemption.has_genuine_quota_signal(db, "run_old")
     assert not preemption.has_no_eligible_evidence(db, "run_old")
+
+
+def test_preempted_run_report_renders_terminal_status(tmp_path: Path) -> None:
+    """Covers: prompt §1.H runtime status honestly renders PREEMPTED.
+
+    The run report derives ``terminal:PREEMPTED`` from the canonical
+    terminal set, and the monitor-loop exit predicate (cli.py readout)
+    recognizes the report lifecycle status through that same set -- so a
+    preempted run never spins the monitor nor renders as failure/success.
+    """
+    from saberops.observability.run_report import build_run_report
+
+    repo = tmp_path / "repo"
+    base = _repo(repo)
+    db = _db(tmp_path)
+    _dispatched(db, str(repo), base, "job1", "run_old")
+    _quota_evidence(db, "run_old")
+    out = preemption.complete_preemption(
+        db, run_id="run_old", repo_path=repo, base_sha=base, now=_NOW
+    )
+    assert out.owned
+
+    report = build_run_report(db, "run_old")
+    lifecycle = report.get("lifecycle")
+    assert isinstance(lifecycle, dict)
+    assert lifecycle.get("status") == RunStatus.PREEMPTED.value
+    assert lifecycle.get("current_stage") == "terminal:PREEMPTED"
+    assert isinstance(lifecycle.get("status"), str) and lifecycle.get(
+        "status"
+    ) in {s.value for s in TERMINAL_RUN_STATUSES}

@@ -2731,7 +2731,24 @@ def handle_monitor(args: argparse.Namespace) -> int:
                 return 1
             print(render_monitor_frame(report))
             print("", flush=True)
-            if once or is_terminal_report(report):
+            # ADR-0002 D8 (M2-5) readout-only: a PREEMPTED run is terminal
+            # for the run, so the monitor must stop here.  The canonical
+            # set is authoritative; is_terminal_report() still enumerates
+            # the pre-D8 statuses (see the Step 001 report for the narrow
+            # unification proposal), so PREEMPTED is recognized from the
+            # report's own lifecycle status without duplicating any list.
+            lifecycle = report.get("lifecycle")
+            lifecycle_status = (
+                lifecycle.get("status") if isinstance(lifecycle, dict) else None
+            )
+            if (
+                once
+                or is_terminal_report(report)
+                or (
+                    isinstance(lifecycle_status, str)
+                    and lifecycle_status in {s.value for s in TERMINAL_RUN_STATUSES}
+                )
+            ):
                 return 0
             if deadline is not None and time.monotonic() >= deadline:
                 print(
