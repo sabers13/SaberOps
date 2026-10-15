@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1353,6 +1354,206 @@ def test_scheduler_tick_invalid_explicit_limit_fails_closed(
     assert launched == []
     queued = store.get_job(owner_db, "cap_queued_0")
     assert queued is not None and queued.state == JobState.QUEUED
+
+
+# ---------------------------------------------------------------------------
+# R3-M1 — per-pool RUNNING occupancy read must fail closed
+# ---------------------------------------------------------------------------
+
+#: Unique fragment of the per-RUNNING-job pool occupancy SELECT in
+#: ``scheduler_tick`` (the debt/charge read uses a different WHERE clause).
+_OCCUPANCY_SQL_NEEDLE = "WHERE run_id = ? AND state = 'RESERVED'"
+
+
+class _OccupancyFailingConn:
+    """Forwarding connection that fails only the pool-occupancy SELECT.
+
+    ``fail_on=None`` fails every occupancy read; ``fail_on=k`` fails the k-th
+    occupancy read across all connections (the counter is shared by the
+    injector), so a partial first-succeeded/next-failed scan can be reproduced
+    deterministically.
+    """
+
+    def __init__(self, real: Any, state: dict[str, int], fail_on: int | None = None) -> None:
+        self._real = real
+        self._state = state
+        self._fail_on = fail_on
+
+    def execute(self, sql: str, *args: Any, **kwargs: Any) -> Any:
+        if _OCCUPANCY_SQL_NEEDLE in sql:
+            self._state["seen"] += 1
+            if self._fail_on is None or self._state["seen"] == self._fail_on:
+                raise sqlite3.OperationalError("database is locked")
+        return self._real.execute(sql, *args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+
+def _install_occupancy_fault(
+    owner_db: Database, monkeypatch: pytest.MonkeyPatch, *, fail_on: int | None = None
+) -> None:
+    """Wrap the owner DB connection so the occupancy scan fails as configured."""
+    owner = owner_db.owner_db
+    original = owner._get_connection
+    state: dict[str, int] = {"seen": 0}
+
+    @contextmanager
+    def failing() -> Any:
+        with original() as real:
+            yield _OccupancyFailingConn(real, state, fail_on)
+
+    monkeypatch.setattr(owner, "_get_connection", failing)
+
+
+def _mc1_policy() -> ControlPlanePolicy:
+    """Policy whose `chatgpt-plus` pool allows exactly one concurrent job."""
+    plan = PoolPlan(
+        pool_id="chatgpt-plus",
+        members=(
+            PoolMember(route="openai", multiplier=1.0),
+            PoolMember(route="codex", multiplier=1.0),
+        ),
+        windows=(Window(id="5h", duration_min=300),),
+        mode="STRICT",
+        red_line_pct=10.0,
+        overage_possible=False,
+        max_concurrent=1,
+    )
+    return _make_policy({"chatgpt-plus": plan})
+
+
+def _seed_reserved_pool_jobs(
+    owner_db: Database, repo_dir: Path, t0: datetime, *, running: int, queued: int
+) -> None:
+    """Seed RUNNING jobs (each holding a RESERVED chatgpt-plus row) plus queued jobs."""
+    _seed_cap_jobs(owner_db, repo_dir, running=running, queued=queued, t0=t0)
+    for i in range(running):
+        reserve(
+            owner_db,
+            run_id=f"cap_run_{i}",
+            job_id=f"cap_running_{i}",
+            route="openai/gpt-5",
+            draws=[PoolDraw(pool_id="chatgpt-plus", window_id="5h", multiplier=1.0)],
+            size_bucket="M",
+            now=t0,
+        )
+    record_owner_quota(
+        owner_db, "openai", "chatgpt-plus", 100.0, None, source="OWNER", now=t0
+    )
+
+
+def test_scheduler_tick_fails_closed_on_pool_occupancy_read_error(
+    owner_db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: ADR-0002 D7 / R3-M1 an unreadable per-pool RUNNING occupancy scan
+    aborts the tick with `ledger_read_error` — never zero or partial occupancy.
+    """
+    t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
+    lease = acquire_lease(owner_db, "occupancy_err", ttl_seconds=30.0, now=t0)
+    assert lease is not None
+    repo_dir = tmp_path / "repo_occupancy_err"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+    # One RUNNING job already occupies the max_concurrent=1 pool.
+    _seed_reserved_pool_jobs(owner_db, repo_dir, t0, running=1, queued=1)
+
+    routes = _make_routes(((_make_candidate("openai", "gpt-5"),),))
+    policy = _mc1_policy()
+    _install_occupancy_fault(owner_db, monkeypatch)
+
+    launched: list[str] = []
+    res = scheduler_tick(
+        owner_db,
+        lease,
+        now=t0,
+        run_launcher=lambda j, d, r: launched.append(j.job_id),
+        clock_fn=lambda: t0,
+        **_cap_tick_kwargs(routes, policy),
+    )
+    # Fail closed: zero dispatches, no launch, queued job untouched.
+    assert res.ran is False
+    assert res.reason == "ledger_read_error"
+    assert res.dispatched == 0
+    assert launched == []
+    queued = store.get_job(owner_db, "cap_queued_0")
+    assert queued is not None
+    assert queued.state == JobState.QUEUED
+
+
+def test_scheduler_tick_partial_pool_occupancy_read_fails_closed(
+    owner_db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: ADR-0002 D7 / R3-M1 a partially counted occupancy scan (first
+    running job read, next read fails) must abort, never admit on partial counts.
+    """
+    t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
+    lease = acquire_lease(owner_db, "occupancy_partial", ttl_seconds=30.0, now=t0)
+    assert lease is not None
+    repo_dir = tmp_path / "repo_occupancy_partial"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+    _seed_reserved_pool_jobs(owner_db, repo_dir, t0, running=2, queued=1)
+
+    routes = _make_routes(((_make_candidate("openai", "gpt-5"),),))
+    policy = _mc1_policy()
+    # First occupancy scan succeeds, the second raises.
+    _install_occupancy_fault(owner_db, monkeypatch, fail_on=2)
+
+    launched: list[str] = []
+    res = scheduler_tick(
+        owner_db,
+        lease,
+        now=t0,
+        run_launcher=lambda j, d, r: launched.append(j.job_id),
+        clock_fn=lambda: t0,
+        **_cap_tick_kwargs(routes, policy),
+    )
+    assert res.ran is False
+    assert res.reason == "ledger_read_error"
+    assert res.dispatched == 0
+    assert launched == []
+    queued = store.get_job(owner_db, "cap_queued_0")
+    assert queued is not None
+    assert queued.state == JobState.QUEUED
+
+
+def test_scheduler_tick_pool_max_concurrent_waits_when_occupancy_read_succeeds(
+    owner_db: Database, tmp_path: Path
+) -> None:
+    """Covers: ADR-0002 D7 / F3 normal case — when the occupancy read succeeds the
+    owner per-pool `max_concurrent=1` is honoured (queued job waits, no dispatch).
+    """
+    t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
+    lease = acquire_lease(owner_db, "occupancy_ok", ttl_seconds=30.0, now=t0)
+    assert lease is not None
+    repo_dir = tmp_path / "repo_occupancy_ok"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+    _seed_reserved_pool_jobs(owner_db, repo_dir, t0, running=1, queued=1)
+
+    routes = _make_routes(((_make_candidate("openai", "gpt-5"),),))
+    policy = _mc1_policy()
+
+    launched: list[str] = []
+    res = scheduler_tick(
+        owner_db,
+        lease,
+        now=t0,
+        run_launcher=lambda j, d, r: launched.append(j.job_id),
+        clock_fn=lambda: t0,
+        **_cap_tick_kwargs(routes, policy),
+    )
+    assert res.ran is True
+    assert res.dispatched == 0
+    assert launched == []
+    assert any(
+        isinstance(d, WaitDecision) and d.reason == WaitingReason.CONCURRENCY.value
+        for d in res.decisions
+    )
+    queued = store.get_job(owner_db, "cap_queued_0")
+    assert queued is not None
+    assert queued.state == JobState.QUEUED
 
 
 

@@ -438,23 +438,31 @@ def scheduler_tick(
     except (sqlite3.OperationalError, sqlite3.DatabaseError):
         return TickResult(ran=False, reason="ledger_read_error")
 
-    # Derive real running counts per pool from running jobs (F3)
+    # Derive real running counts per pool from running jobs (F3).
+    # Fail closed (R3-M1): per-pool occupancy is authoritative owner-DB state.
+    # If the reservation scan for any RUNNING job cannot be read, the pool
+    # occupancy is UNKNOWN, never zero — a partially counted map must never
+    # reach admission (ADR-0002 D7 requires a free pool slot as well as a free
+    # global slot). Abort the tick with zero dispatches; do not silently skip a
+    # failed job. Only targeted DB read errors are absorbed here; unrelated
+    # programming errors are not hidden.
     running_counts: dict[str, int] = {}
     for rj in running_jobs:
-        if rj.current_run_id:
-            try:
-                owner = getattr(db, "owner_db", db)
-                with owner._get_connection() as conn:
-                    rows = conn.execute(
-                        "SELECT DISTINCT pool_id FROM capacity_reservations"
-                        " WHERE run_id = ? AND state = 'RESERVED'",
-                        (rj.current_run_id,),
-                    ).fetchall()
-                    for r in rows:
-                        p = str(r["pool_id"])
-                        running_counts[p] = running_counts.get(p, 0) + 1
-            except Exception:
-                pass
+        if not rj.current_run_id:
+            continue
+        try:
+            owner = getattr(db, "owner_db", db)
+            with owner._get_connection() as conn:
+                rows = conn.execute(
+                    "SELECT DISTINCT pool_id FROM capacity_reservations"
+                    " WHERE run_id = ? AND state = 'RESERVED'",
+                    (rj.current_run_id,),
+                ).fetchall()
+        except (sqlite3.OperationalError, sqlite3.DatabaseError):
+            return TickResult(ran=False, reason="ledger_read_error")
+        for r in rows:
+            p = str(r["pool_id"])
+            running_counts[p] = running_counts.get(p, 0) + 1
 
     # Snapshot readiness/executable availability per provider (F12)
     readiness_map: dict[str, Any] = {}
