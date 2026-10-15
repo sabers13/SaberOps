@@ -279,6 +279,7 @@ def test_loss_of_lease_before_launch_compensates(
         routes=routes,
         policy=policy,
         run_launcher=mock_launcher,
+        clock_fn=lambda: t0,
     )
     # The tick aborts cleanly
     assert len(launched_runs) == 0
@@ -329,6 +330,7 @@ def test_launch_failure_compensates_cas_and_reservation(owner_db: Database, tmp_
         routes=routes,
         policy=policy,
         run_launcher=failing_launcher,
+        clock_fn=lambda: t0,
     )
 
     # Job must NOT be left RUNNING!
@@ -395,6 +397,7 @@ def test_reconcile_terminal_runs_settles_or_releases_reservations(
         lease,
         now=t0,
         run_status=mock_run_status,
+        clock_fn=lambda: t0,
     )
     assert res.ran is True
     assert len(res.reconciled_changes) == 2
@@ -472,6 +475,7 @@ def test_scheduler_tick_dispatches_highest_priority_job(owner_db: Database, tmp_
         routes=routes,
         policy=policy,
         run_launcher=mock_launcher,
+        clock_fn=lambda: t0,
     )
     assert res.ran is True
     # URGENT must be dispatched before NORMAL
@@ -524,6 +528,7 @@ def test_scheduler_tick_wait_and_probe_decisions(owner_db: Database, tmp_path: P
         now=t0,
         routes=routes,
         policy=policy,
+        clock_fn=lambda: t0,
     )
     assert res.ran is True
     assert res.dispatched == 0
@@ -607,6 +612,7 @@ def test_valid_empty_chain_never_crashes_tick(owner_db: Database, tmp_path: Path
         now=t0,
         routes=routes,
         policy=policy,
+        clock_fn=lambda: t0,
     )
     assert res1.ran is True
     assert res1.waited == 1
@@ -624,6 +630,7 @@ def test_valid_empty_chain_never_crashes_tick(owner_db: Database, tmp_path: Path
         now=t0 + timedelta(seconds=10),
         routes=routes,
         policy=policy,
+        clock_fn=lambda: t0 + timedelta(seconds=10),
     )
     assert res2.ran is True
     assert res2.dispatched == 0
@@ -801,6 +808,7 @@ def test_partial_launch_with_existing_run_does_not_requeue(
         routes=routes,
         policy=policy,
         run_launcher=partial_fail_launcher,
+        clock_fn=lambda: t0,
     )
 
     # Job must NOT be requeued! It stays in RUNNING with current_run_id for reconciler recovery
@@ -863,6 +871,7 @@ def test_readiness_unavailable_executable_does_not_dispatch(
         routes=routes,
         policy=policy,
         readiness_service=MockReadinessService(),
+        clock_fn=lambda: t0,
     )
 
     assert res.dispatched == 0
@@ -873,4 +882,166 @@ def test_readiness_unavailable_executable_does_not_dispatch(
     assert j is not None
     assert j.state == JobState.QUEUED
     assert j.current_run_id is None
+
+
+def test_production_shape_lease_expiry_without_clock_fn_fences_launches(
+    owner_db: Database, tmp_path: Path
+) -> None:
+    """Covers: ADR-0002 D7 / F10: call without clock_fn fences launches on lease expiry."""
+    # 1. Lease expired in the past: production semantics = concrete now, clock_fn=None
+    t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
+    lease = acquire_lease(owner_db, "sched_prod", ttl_seconds=0.001, now=t0)
+    assert lease is not None
+
+    launched: list[str] = []
+
+    def mock_launcher(j: Job, dec: Any, run_id: str) -> None:
+        launched.append(run_id)
+
+    # Real time is far past expires_at; clock_fn is omitted (production CLI shape).
+    # Must notice lease expiry immediately and abort with zero launches!
+    res = scheduler_tick(
+        owner_db,
+        lease,
+        now=t0,
+        run_launcher=mock_launcher,
+        # clock_fn omitted!
+    )
+    assert res.ran is False
+    assert res.reason == "lost_lease"
+    assert len(launched) == 0
+
+    # 2. Mid-tick advancing wall-clock without clock_fn fences subsequent dispatches
+    from saberops.capacity import loop
+
+    real_utcnow = loop._utcnow
+    now_fresh = datetime.now(UTC)
+    live_lease = acquire_lease(owner_db, "sched_live", ttl_seconds=30.0, now=now_fresh)
+    assert live_lease is not None
+
+    repo_dir = tmp_path / "repo2"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+
+    j1 = _make_job(
+        "j_prod_1",
+        str(repo_dir),
+        created_at=now_fresh.isoformat(),
+        updated_at=now_fresh.isoformat(),
+        priority=Priority.URGENT,
+        request_digest="dp1",
+    )
+    j2 = _make_job(
+        "j_prod_2",
+        str(repo_dir),
+        created_at=now_fresh.isoformat(),
+        updated_at=now_fresh.isoformat(),
+        priority=Priority.NORMAL,
+        request_digest="dp2",
+    )
+    store.insert_job(owner_db, j1, now=now_fresh)
+    store.insert_job(owner_db, j2, now=now_fresh)
+
+    record_owner_quota(
+        owner_db, "openai", "chatgpt-plus", 100.0, None, source="OWNER", now=now_fresh
+    )
+    routes = _make_routes(((_make_candidate("openai", "gpt-5"),),))
+    policy = _make_policy()
+
+    dispatched_live: list[str] = []
+    current_wall = [now_fresh]
+
+    def advancing_launcher(j: Job, dec: Any, run_id: str) -> None:
+        dispatched_live.append(run_id)
+        # First job launched! Wall-clock now advances 60s past the 30s lease TTL
+        current_wall[0] = current_wall[0] + timedelta(seconds=60)
+
+    def mock_advancing_utcnow(dt: Any) -> datetime:
+        if dt is not None:
+            return real_utcnow(dt)
+        return current_wall[0]
+
+    import pytest
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(loop, "_utcnow", mock_advancing_utcnow)
+        res_mid = scheduler_tick(
+            owner_db,
+            live_lease,
+            now=now_fresh,
+            routes=routes,
+            policy=policy,
+            run_launcher=advancing_launcher,
+            # clock_fn omitted (production CLI shape)!
+        )
+        # First job dispatched; second job was fenced mid-tick by advancing wall clock
+        assert len(dispatched_live) == 1
+        assert res_mid.dispatched == 1
+        # Second job remains QUEUED
+        j2_db = store.get_job(owner_db, "j_prod_2")
+        assert j2_db is not None
+        assert j2_db.state == JobState.QUEUED
+    finally:
+        monkeypatch.undo()
+
+
+def test_simultaneous_first_acquire_race_catches_integrity_error(
+    owner_db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: ADR-0002 D7 / F6: first acquisition race catches IntegrityError on insert."""
+    import sqlite3
+
+    from saberops.capacity import loop
+    from saberops.capacity.store import owner_connection
+
+    t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
+    ensure_capacity_tables(owner_db)
+
+    # Pre-seed holder_1's live lease into DB
+    with owner_connection(owner_db) as conn:
+        conn.execute(
+            "INSERT INTO capacity_scheduler_lease "
+            "(lease_name, holder_id, acquired_at, expires_at, fencing_token) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("scheduler", "holder_1", t0.isoformat(), (t0 + timedelta(seconds=60)).isoformat(), 1),
+        )
+        conn.commit()
+
+    orig_owner_conn = loop.owner_connection  # type: ignore[attr-defined]
+
+    # Simulate race: holder_2's initial SELECT sees row=None, but INSERT fails with IntegrityError
+    class ConflictConnection:
+        def __init__(self, real_conn: Any) -> None:
+            self._real = real_conn
+            self._first_select = True
+
+        def execute(self, sql: str, *args: Any) -> Any:
+            if "SELECT lease_name" in sql and self._first_select:
+                self._first_select = False
+                class DummyCursor:
+                    def fetchone(self) -> Any:
+                        return None
+                return DummyCursor()
+            if "INSERT INTO capacity_scheduler_lease" in sql:
+                raise sqlite3.IntegrityError(
+                    "UNIQUE constraint failed: capacity_scheduler_lease.lease_name"
+                )
+            return self._real.execute(sql, *args)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._real, name)
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def conflicting_owner_connection(db: Any) -> Any:
+        with orig_owner_conn(db) as conn:
+            yield ConflictConnection(conn)
+
+    monkeypatch.setattr(loop, "owner_connection", conflicting_owner_connection)
+
+    # holder_2 hits IntegrityError on insert, rolls back, reads holder_1's live lease, returns None
+    lease2 = acquire_lease(owner_db, "holder_2", ttl_seconds=60.0, now=t0)
+    assert lease2 is None
+
 

@@ -392,9 +392,7 @@ def scheduler_tick(
     def _current_moment() -> datetime:
         if clock_fn is not None:
             return clock_fn()
-        if now is None:
-            return _utcnow(None)
-        return now
+        return _utcnow(None)
 
     if not check_lease(db, lease, now=_current_moment()):
         return TickResult(ran=False, reason="lost_lease")

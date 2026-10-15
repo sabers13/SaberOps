@@ -96,11 +96,69 @@ from saberops.workers.registry import AdapterRegistry
 def isolated_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> dict[str, Path]:
-    """Isolate owner state/config plus the readiness store override."""
+    """Isolate owner state/config plus the readiness store override.
+
+    Covers: ADR-0002 D2 / WORKFLOW §7 authorized setup-only fixture migration
+    for synthetic r1b candidates.
+    """
     state = tmp_path / "state"
     config = tmp_path / "config"
     state.mkdir(parents=True)
     config.mkdir(parents=True)
+    cfg_dir = config / "saberops"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    today_iso = datetime.now(UTC).date().isoformat()
+    cp_doc = {
+        "version": 2,
+        "providers": {
+            "opencode": {"state": "ALLOWED"},
+            "codex": {"state": "ALLOWED"},
+            "antigravity": {"state": "ALLOWED"},
+        },
+        "quota_pools": {
+            "opencode-go": {"mode": "UNENFORCED", "overage_possible": False},
+            "opencode-zen": {"mode": "UNENFORCED", "overage_possible": False},
+            "chatgpt-plus": {"mode": "UNENFORCED", "overage_possible": False},
+        },
+        "postures": {
+            "opencode": {
+                "class": "A",
+                "policy_urls": ["https://example.com/opencode-policy"],
+                "ttl_days": 90,
+                "verified_on": today_iso,
+                "note": "synthetic verified test posture for r1b candidate characterization",
+            },
+            "opencode/opencode-go/*": {
+                "class": "A",
+                "policy_urls": ["https://example.com/opencode-go-policy"],
+                "ttl_days": 90,
+                "verified_on": today_iso,
+                "note": "synthetic verified test posture for r1b candidate characterization",
+            },
+            "opencode/opencode/*": {
+                "class": "C",
+                "policy_urls": ["https://example.com/opencode-zen-policy"],
+                "ttl_days": 90,
+                "verified_on": today_iso,
+                "note": "synthetic verified test posture for r1b candidate characterization",
+            },
+            "codex": {
+                "class": "A",
+                "policy_urls": ["https://example.com/codex-policy"],
+                "ttl_days": 90,
+                "verified_on": today_iso,
+                "note": "synthetic verified test posture for r1b candidate characterization",
+            },
+            "antigravity": {
+                "class": "A",
+                "policy_urls": ["https://example.com/antigravity-policy"],
+                "ttl_days": 90,
+                "verified_on": today_iso,
+                "note": "synthetic verified test posture for r1b candidate characterization",
+            },
+        },
+    }
+    (cfg_dir / "control_plane.json").write_text(json.dumps(cp_doc), encoding="utf-8")
     monkeypatch.setenv("XDG_STATE_HOME", str(state))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(config))
     monkeypatch.delenv("ORCH_ACCESS_STORE", raising=False)

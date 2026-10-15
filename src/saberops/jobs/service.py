@@ -528,6 +528,13 @@ def reconcile_jobs(
                 job=updated,
             )
         )
+    if changes:
+        try:
+            from saberops.capacity.loop import wake_scheduler
+
+            wake_scheduler()
+        except Exception:
+            pass
     return changes
 
 

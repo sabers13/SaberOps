@@ -3892,8 +3892,9 @@ def handle_scheduler_run(args: argparse.Namespace) -> int:
             once=run_once,
             readiness_service=readiness_svc,
         )
-        if result is None:
-            print("[!] Scheduler lease held by another instance (lease_held_by_other)", file=sys.stderr)
+        if result is None or (not result.ran and result.reason in ("lease_held_by_other", "lost_lease")):
+            reason = result.reason if result is not None else "lease_held_by_other"
+            print(f"[!] Scheduler lease held by another instance ({reason})", file=sys.stderr)
             return 2
 
         if getattr(args, "json", False):

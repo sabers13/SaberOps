@@ -69,8 +69,9 @@ def test_scheduler_second_instance_denied(
     code, out, err = _cli(
         "scheduler", "run", "--once", "--db", str(db_path), capsys=capsys
     )
-    # The loop fails to acquire lease and exits cleanly with 0
-    assert code == 0
+    # The loop fails to acquire lease and exits with 2 (truthful denial, F8)
+    assert code == 2
+    assert "lease_held_by_other" in err
 
 
 def test_scheduler_second_instance_continuous_denied_returns_exit_2(

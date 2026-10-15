@@ -532,20 +532,22 @@ def admit(
             details={"expires_on": posture.expires_on},
         )
 
-    # An explicit posture record that is unverified fails closed across both seams:
-    if posture.selector is not None and posture.reason == POSTURE_UNVERIFIED:
+    # Posture UNVERIFIED fails closed across BOTH seams unconditionally (ADR-0002 D2, F1):
+    # Under ADR-0002 D2, no record is treated as X; unverified posture cannot launch or be
+    # bypassed by owner overrides or unconfigured capacity grace.
+    if posture.reason == POSTURE_UNVERIFIED:
         return AdmissionDecision(
             admitted=False,
             candidate=candidate,
             reason=POSTURE_UNVERIFIED,
+            details={"selector": posture.selector},
         )
 
     # Unattended scheduler dispatch (requirements is not None):
-    # F1: X, B, D, unverified/expired and policy-unknown routes NEVER become eligible
-    # for unattended scheduler dispatch merely because capacity tables are absent.
+    # F1: B and D postures NEVER become eligible for unattended scheduler dispatch.
     # An unattended job has no owner override.
     if requirements is not None:
-        if posture.reason in (POSTURE_UNVERIFIED, POSTURE_ATTENDED_ONLY, POSTURE_METERED):
+        if posture.reason in (POSTURE_ATTENDED_ONLY, POSTURE_METERED):
             return AdmissionDecision(
                 admitted=False,
                 candidate=candidate,
@@ -561,21 +563,7 @@ def admit(
             )
     else:
         # In-run attended dispatch:
-        # Policy-unknown routes (posture.selector is None) without configured capacity
-        # degrade gracefully to allow unmanaged/test adapters (e.g. h3);
-        # when capacity is configured, unverified routes fail closed.
-        if posture.reason == POSTURE_UNVERIFIED:
-            if posture.selector is None and is_capacity_subsystem_configured(
-                db=db,
-                policy=effective_policy,
-                quota_states=quota_states,
-                explicit_configured=capacity_configured,
-            ):
-                return AdmissionDecision(
-                    admitted=False,
-                    candidate=candidate,
-                    reason=POSTURE_UNVERIFIED,
-                )
+        # Class B (ATTENDED_ONLY) and Class D (METERED) require explicit owner override.
         if posture.reason == POSTURE_ATTENDED_ONLY and not explicit_override:
             return AdmissionDecision(
                 admitted=False,
@@ -619,8 +607,18 @@ def admit(
     # 8. Quota pools & windows
     pool_policies = effective_quota_pools(effective_policy, activate_overage=activate_overage)
     drawn_pools = pools_for(candidate, pool_policies)
-    if binding_pool_id is not None:
-        drawn_pools = [binding_pool_id] if binding_pool_id in pool_policies else drawn_pools
+    if binding_pool_id is not None and binding_pool_id in pool_policies:
+        if binding_pool_id not in drawn_pools:
+            drawn_pools.append(binding_pool_id)
+
+    # Safely derive active reservation charges from db if not explicitly supplied (F2)
+    if reservations is None and db is not None:
+        try:
+            from saberops.capacity.ledger import post_observation_charges
+
+            reservations = post_observation_charges(db, moment)
+        except Exception:
+            reservations = None
 
     states = list(quota_states)
 

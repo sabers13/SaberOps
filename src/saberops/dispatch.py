@@ -224,6 +224,7 @@ def evaluate_eligibility(
     global_running: int = 0,
     max_global_concurrent: int | None = None,
     capacity_configured: bool | None = None,
+    reservations: Mapping[tuple[str, str], float] | None = None,
 ) -> str | None:
     """Return the compatibility skip reason for the canonical quota decision.
 
@@ -257,6 +258,7 @@ def evaluate_eligibility(
         global_running=global_running,
         max_global_concurrent=max_global_concurrent,
         capacity_configured=capacity_configured,
+        reservations=reservations,
     )
     if decision.eligible:
         return None
@@ -341,6 +343,7 @@ def control_plane_decision(
     global_running: int = 0,
     max_global_concurrent: int | None = None,
     capacity_configured: bool | None = None,
+    reservations: Mapping[tuple[str, str], float] | None = None,
 ) -> ControlPlaneDecision:
     """Return the typed quota decision used by compatibility callers."""
     dec = evaluate_control_plane(
@@ -391,6 +394,7 @@ def control_plane_decision(
         requires_governed_instructions=requires_governed_instructions,
         db=db,
         capacity_configured=capacity_configured,
+        reservations=reservations,
     )
     if not admit_dec.admitted:
         return ControlPlaneDecision(

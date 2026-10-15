@@ -372,6 +372,13 @@ def handle_probe_result(
     except Exception:
         pass
 
+    try:
+        from saberops.capacity.loop import wake_scheduler
+
+        wake_scheduler()
+    except Exception:
+        pass
+
 
 def run_due_probes(
     db: Any,

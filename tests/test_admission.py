@@ -6,6 +6,7 @@ All tests carry docstring `Covers: ...` and run purely in-process without I/O or
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -815,5 +816,190 @@ def test_admit_computes_draws_for_all_drawn_pools() -> None:
     draw_map = {(d.pool_id, d.window_id): d.multiplier for d in dec.draws}
     assert draw_map[("chatgpt-plus", "5h")] == 1.0
     assert draw_map[("opencode-go", "daily")] == 2.0
+
+
+def test_in_run_unverified_policy_unknown_fails_closed_on_unconfigured_db(tmp_path: Path) -> None:
+    """Covers: ADR-0002 D2 / F1 in-run unverified route fails closed even on unconfigured DB
+    or with override.
+    """
+    from saberops.db import Database
+
+    class _AvailableAdapter:
+        is_live_dispatch = True
+
+        def is_available(self) -> bool:
+            return True
+
+    now = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
+    blank_db = Database(tmp_path / "blank.sqlite3")
+    empty_policy = ControlPlanePolicy(
+        provider_policies={},
+        quota_pools={},
+        content_hash="empty_hash",
+        plans=PlanSet.empty(),
+    )
+
+    # 1. Candidate with no posture record at in-run seam (requirements=None) on unconfigured DB
+    cand = WorkerCandidate("h3", "m1")
+    dec = admit(
+        cand,
+        now=now,
+        policy=empty_policy,
+        requirements=None,
+        adapter=_AvailableAdapter(),  # type: ignore[arg-type]
+        db=blank_db,
+    )
+    assert dec.admitted is False
+    assert dec.reason == POSTURE_UNVERIFIED
+
+    # 2. Explicit owner override CANNOT bypass unverified posture (ADR-0002 D2)
+    dec_override = admit(
+        cand,
+        now=now,
+        policy=empty_policy,
+        requirements=None,
+        adapter=_AvailableAdapter(),  # type: ignore[arg-type]
+        db=blank_db,
+        explicit_override=True,
+    )
+    assert dec_override.admitted is False
+    assert dec_override.reason == POSTURE_UNVERIFIED
+
+    # 3. In-run evaluate_eligibility seam fails closed
+    from saberops.dispatch import evaluate_eligibility
+
+    skip = evaluate_eligibility(
+        candidate=cand,
+        adapter=_AvailableAdapter(),  # type: ignore[arg-type]
+        quota_states=[],
+        training_allowed=True,
+        prompt_bytes=100,
+        policy=empty_policy,
+        requirements=None,
+        db=blank_db,
+    )
+    assert skip is not None
+
+
+def test_in_run_two_pool_binding_does_not_discard_second_pool() -> None:
+    """Covers: ADR-0002 D1/D7 / F2 / M-3: binding_pool_id does not discard second pool
+    constraints.
+    """
+    now = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
+    cand = _make_candidate("opencode", "gpt-5")
+    policy = _make_policy(
+        postures={
+            "opencode": PostureRecord("opencode", "A", ttl_days=30, verified_on="2026-10-14")
+        },
+        pool_plans={
+            "chatgpt-plus": PoolPlan(
+                pool_id="chatgpt-plus",
+                members=(PoolMember(route="opencode", multiplier=1.0),),
+                windows=(Window(id="5h"),),
+                red_line_pct=10.0,
+                overage_possible=False,
+            ),
+            "opencode-go": PoolPlan(
+                pool_id="opencode-go",
+                members=(PoolMember(route="opencode", multiplier=1.0),),
+                windows=(Window(id="daily"),),
+                red_line_pct=50.0,
+                overage_possible=False,
+            ),
+        },
+    )
+    # chatgpt-plus is healthy (80% rem), but opencode-go is exhausted (20% rem < 50% red-line)
+    states = [
+        QuotaState(
+            "opencode",
+            "chatgpt-plus",
+            80.0,
+            (now + timedelta(hours=3)).isoformat(),
+            RoutingState.NORMAL,
+            now.isoformat(),
+        ),
+        QuotaState(
+            "opencode",
+            "opencode-go",
+            20.0,
+            (now + timedelta(hours=20)).isoformat(),
+            RoutingState.NORMAL,
+            now.isoformat(),
+        ),
+    ]
+    object.__setattr__(states[0], "window_id", "5h")
+    object.__setattr__(states[1], "window_id", "daily")
+
+    # When binding_pool_id is set to "chatgpt-plus", opencode-go MUST NOT be ignored
+    dec = admit(
+        cand,
+        now=now,
+        policy=policy,
+        quota_states=states,
+        requirements=None,
+        binding_pool_id="chatgpt-plus",
+    )
+    assert dec.admitted is False
+    assert dec.reason == "RED_LINE_DAILY"
+    assert dec.pool_id == "opencode-go"
+
+
+def test_in_run_safely_derives_db_reservations(tmp_path: Path) -> None:
+    """Covers: ADR-0002 D7 / F2: in-run admission safely derives reservations from db."""
+    from saberops.capacity.ledger import reserve
+    from saberops.capacity.store import ensure_tables
+    from saberops.db import Database
+
+    now = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
+    cand = _make_candidate("openai", "gpt-5")
+    policy = _make_policy(
+        postures={"openai": PostureRecord("openai", "A", ttl_days=30, verified_on="2026-10-14")},
+        pool_plans={
+            "chatgpt-plus": PoolPlan(
+                pool_id="chatgpt-plus",
+                members=(PoolMember(route="openai", multiplier=1.0),),
+                windows=(Window(id="5h"),),
+                red_line_pct=15.0,
+                overage_possible=False,
+            )
+        },
+    )
+    state = QuotaState(
+        "openai",
+        "chatgpt-plus",
+        25.0,
+        (now + timedelta(hours=2)).isoformat(),
+        RoutingState.NORMAL,
+        now.isoformat(),
+    )
+    object.__setattr__(state, "window_id", "5h")
+
+    db = Database(tmp_path / "res_test.sqlite3")
+    ensure_tables(db)
+
+    # Without reservations in db, 25% rem - 5% cost = 20% > 15% red-line: admitted
+    dec_clean = admit(cand, now=now, policy=policy, quota_states=[state], requirements=None, db=db)
+    assert dec_clean.admitted is True
+
+    # Record 10% active reservation in db
+    from saberops.capacity.ledger import PoolDraw
+    reserve(
+        db,
+        run_id="run_existing_active",
+        job_id="job_active_1",
+        route="openai/gpt-5",
+        draws=[PoolDraw("chatgpt-plus", "5h", 1.0)],
+        size_bucket="M",
+        now=now,
+    )
+
+    # Now in-run admit without explicit reservations derives the 10% charge from db:
+    # 25% - 10% = 15% effective; 15% - 5% cost = 10% < 15% red-line -> DENIED
+    dec_with_db_res = admit(
+        cand, now=now, policy=policy, quota_states=[state], requirements=None, db=db
+    )
+    assert dec_with_db_res.admitted is False
+    assert dec_with_db_res.reason == "RED_LINE_5H"
+
 
 
