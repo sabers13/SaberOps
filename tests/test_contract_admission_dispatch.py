@@ -273,10 +273,24 @@ def test_unconfigured_capacity_degrades_gracefully(tmp_path: Path) -> None:
     )
     assert skip_queued == SKIP_QUOTA_BLOCKED
 
+    # Route with unverified posture record fails closed even attended on blank DB
+    unverified_policy = ControlPlanePolicy(
+        provider_policies={
+            "codex": ProviderPolicy("codex", ProviderPolicyState.ALLOWED),
+        },
+        quota_pools={},
+        content_hash="test-unv",
+        plans=PlanSet(
+            accounts={},
+            pool_plans={},
+            postures={"codex": PostureRecord("codex", "A", ttl_days=30, verified_on=None)},
+        ),
+    )
     admit_in_run = admit(
         cand,
         now=_NOW,
         db=blank_db,
+        policy=unverified_policy,
     )
     assert admit_in_run.admitted is False
     assert admit_in_run.is_allowed is False
@@ -284,6 +298,7 @@ def test_unconfigured_capacity_degrades_gracefully(tmp_path: Path) -> None:
 
     skip_in_run = evaluate_eligibility(
         candidate=cand,
+        policy=unverified_policy,
         adapter=_AvailableAdapter(),  # type: ignore[arg-type]
         training_allowed=True,
         quota_states=[],
