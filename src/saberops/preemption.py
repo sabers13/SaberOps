@@ -199,25 +199,6 @@ def _find_any_job_for_run(db: Any, run_id: str) -> Job | None:
         if run_id in job.run_ids:
             return job
     return None
-    """Return the QUEUED/PREEMPTED job already requeued from *run_id*, if any.
-
-    This is the idempotency anchor for replays: after a completed
-    preemption the owning job is QUEUED (not RUNNING), so
-    :func:`find_job_for_run` no longer sees it.  Matches only on an exact
-    ``resume_from.run_id`` so a later re-dispatch of the same job (a NEW
-    ``current_run_id``) is never confused with the preempted generation.
-    """
-    from saberops.jobs import store
-
-    if not isinstance(run_id, str) or not run_id:
-        return None
-    for job in store.list_jobs_raw(db, state=JobState.QUEUED, limit=100_000):
-        if job.waiting_reason != WaitingReason.PREEMPTED:
-            continue
-        resume = job.resume_from
-        if resume is not None and resume.run_id == run_id:
-            return job
-    return None
 
 
 def _event_payloads(db: Any, run_id: str, event_type: str) -> list[dict[str, Any]]:
