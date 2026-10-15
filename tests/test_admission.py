@@ -5,8 +5,10 @@ All tests carry docstring `Covers: ...` and run purely in-process without I/O or
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -1000,6 +1002,225 @@ def test_in_run_safely_derives_db_reservations(tmp_path: Path) -> None:
     )
     assert dec_with_db_res.admitted is False
     assert dec_with_db_res.reason == "RED_LINE_5H"
+
+
+def test_admit_operational_error_on_reservations_read_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: ADR-0002 D7 / F2 fail-closed admission on SQLite reservation read error."""
+    import sqlite3
+
+    from saberops.capacity.ledger import PoolDraw, reserve
+    from saberops.capacity.store import ensure_tables
+    from saberops.db import Database
+
+    now = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
+    cand = _make_candidate("openai", "gpt-5")
+    policy = _make_policy(
+        postures={"openai": PostureRecord("openai", "A", ttl_days=30, verified_on="2026-10-14")},
+        pool_plans={
+            "chatgpt-plus": PoolPlan(
+                pool_id="chatgpt-plus",
+                members=(PoolMember(route="openai", multiplier=1.0),),
+                windows=(Window(id="5h"),),
+                red_line_pct=15.0,
+                overage_possible=False,
+            )
+        },
+    )
+    state = QuotaState(
+        "openai",
+        "chatgpt-plus",
+        25.0,
+        (now + timedelta(hours=2)).isoformat(),
+        RoutingState.NORMAL,
+        now.isoformat(),
+    )
+    object.__setattr__(state, "window_id", "5h")
+
+    db = Database(tmp_path / "failing_read.sqlite3")
+    ensure_tables(db)
+
+    # Record 10% active reservation in db (pushing residual to 15% - 5% cost = 10% < 15% red-line)
+    reserve(
+        db,
+        run_id="run_active",
+        job_id="job_active",
+        route="openai/gpt-5",
+        draws=[PoolDraw("chatgpt-plus", "5h", 1.0)],
+        size_bucket="M",
+        now=now,
+    )
+
+    owner = db.owner_db
+    orig_conn = owner._get_connection
+
+    class FailingConn:
+        def __init__(self, real: Any) -> None:
+            self._real = real
+
+        def execute(self, sql: str, *args: Any, **kwargs: Any) -> Any:
+            if "capacity_reservations" in sql or "capacity_observations" in sql:
+                raise sqlite3.OperationalError("database is locked")
+            return self._real.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._real, name)
+
+    @contextmanager
+    def failing_get_conn() -> Any:
+        with orig_conn() as real:
+            yield FailingConn(real)
+
+    monkeypatch.setattr(owner, "_get_connection", failing_get_conn)
+    dec = admit(cand, now=now, policy=policy, quota_states=[state], requirements=None, db=db)
+    # MUST fail closed: never green when active debt is unreadable!
+    assert dec.admitted is False
+    assert dec.reason == QUOTA_EVIDENCE_REQUIRED
+    assert "reservation_read_failed" in str(dec.details.get("error", ""))
+
+
+def test_admit_authoritative_zero_vs_read_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: ADR-0002 D7 distinguish known zero debt from failed read."""
+    import sqlite3
+
+    from saberops.capacity.store import ensure_tables
+    from saberops.db import Database
+
+    now = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
+    cand = _make_candidate("openai", "gpt-5")
+    policy = _make_policy(
+        postures={"openai": PostureRecord("openai", "A", ttl_days=30, verified_on="2026-10-14")},
+        pool_plans={
+            "chatgpt-plus": PoolPlan(
+                pool_id="chatgpt-plus",
+                members=(PoolMember(route="openai", multiplier=1.0),),
+                windows=(Window(id="5h"),),
+                red_line_pct=15.0,
+                overage_possible=False,
+            )
+        },
+    )
+    state = QuotaState(
+        "openai",
+        "chatgpt-plus",
+        25.0,
+        (now + timedelta(hours=2)).isoformat(),
+        RoutingState.NORMAL,
+        now.isoformat(),
+    )
+    object.__setattr__(state, "window_id", "5h")
+
+    # 1. Authoritative zero: caller supplies empty reservations map -> admitted
+    dec_auth_zero = admit(
+        cand,
+        now=now,
+        policy=policy,
+        quota_states=[state],
+        requirements=None,
+        reservations={},
+        capacity_configured=True,
+    )
+    assert dec_auth_zero.admitted is True
+
+    # 2. Failed read: DB error -> strictly denied with QUOTA_EVIDENCE_REQUIRED
+    db = Database(tmp_path / "auth_zero_err.sqlite3")
+    ensure_tables(db)
+    owner = db.owner_db
+    orig_conn = owner._get_connection
+
+    class FailingConn:
+        def __init__(self, real: Any) -> None:
+            self._real = real
+
+        def execute(self, sql: str, *args: Any, **kwargs: Any) -> Any:
+            if "capacity_reservations" in sql or "capacity_observations" in sql:
+                raise sqlite3.OperationalError("disk I/O error")
+            return self._real.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._real, name)
+
+    @contextmanager
+    def failing_get_conn() -> Any:
+        with orig_conn() as real:
+            yield FailingConn(real)
+
+    monkeypatch.setattr(owner, "_get_connection", failing_get_conn)
+    dec_err = admit(
+        cand, now=now, policy=policy, quota_states=[state], requirements=None, db=db
+    )
+    assert dec_err.admitted is False
+    assert dec_err.reason == QUOTA_EVIDENCE_REQUIRED
+
+
+def test_admit_two_matching_pools_nonbinding_debt_enforces_redline() -> None:
+    """Covers: ADR-0002 D4 / D7 / F2 nonbinding member pool debt enforces red-line."""
+    now = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
+    cand = _make_candidate("openai", "gpt-5")
+    policy = _make_policy(
+        postures={"openai": PostureRecord("openai", "A", ttl_days=30, verified_on="2026-10-14")},
+        pool_plans={
+            "chatgpt-plus": PoolPlan(
+                pool_id="chatgpt-plus",
+                members=(PoolMember(route="openai", multiplier=1.0),),
+                windows=(Window(id="5h"),),
+                red_line_pct=15.0,
+                mode="STRICT",
+                overage_possible=False,
+            ),
+            "openai-shared": PoolPlan(
+                pool_id="openai-shared",
+                members=(PoolMember(route="openai", multiplier=1.0),),
+                windows=(Window(id="5h"),),
+                red_line_pct=20.0,
+                mode="STRICT",
+                overage_possible=False,
+            ),
+        },
+    )
+    s_binding = QuotaState(
+        "openai",
+        "chatgpt-plus",
+        50.0,
+        (now + timedelta(hours=2)).isoformat(),
+        RoutingState.NORMAL,
+        now.isoformat(),
+    )
+    object.__setattr__(s_binding, "window_id", "5h")
+    s_shared = QuotaState(
+        "openai",
+        "openai-shared",
+        30.0,
+        (now + timedelta(hours=2)).isoformat(),
+        RoutingState.NORMAL,
+        now.isoformat(),
+    )
+    object.__setattr__(s_shared, "window_id", "5h")
+
+    # chatgpt-plus has 0 debt (effective 50% - 5% = 45% >= 15%)
+    # openai-shared has 15% debt (30% - 15% = 15%; 15% - 5% = 10% < 20% red line)
+    reservations = {
+        ("chatgpt-plus", "5h"): 0.0,
+        ("openai-shared", "5h"): 15.0,
+    }
+
+    dec = admit(
+        cand,
+        now=now,
+        policy=policy,
+        quota_states=[s_binding, s_shared],
+        binding_pool_id="chatgpt-plus",
+        reservations=reservations,
+        capacity_configured=True,
+    )
+    # MUST be denied by nonbinding openai-shared pool!
+    assert dec.admitted is False
+    assert dec.reason == "RED_LINE_5H"
+    assert dec.pool_id == "openai-shared"
+
 
 
 

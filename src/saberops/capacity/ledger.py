@@ -768,8 +768,10 @@ def post_observation_charges(
                 counted = _counted_reservations(conn, pool, window, cutoff)
                 spent = sum(float(r.get("cost_pct") or 0.0) for r in counted)
                 charges[(pool, window)] = spent
-    except sqlite3.OperationalError:
-        pass
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc):
+            return {}
+        raise
     return charges
 
 

@@ -10,8 +10,10 @@ Verifies:
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -528,3 +530,84 @@ def test_order_candidates_for_role_intra_group_pacing(owner_db: Database) -> Non
     # Higher score (chatgpt-plus 90%) must be ordered before lower score (opencode-go 20%)
     assert ordered[0].provider == "openai"
     assert ordered[1].provider == "opencode"
+
+
+def test_in_run_dispatch_fails_closed_on_sqlite_reservation_read_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: ADR-0002 D7 in-run worker/repair/review fails closed on SQLite read error."""
+    import sqlite3
+
+    from saberops.control_plane.quota_policy import QUOTA_EVIDENCE_REQUIRED
+    from saberops.dispatch import control_plane_decision
+
+    now = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
+    cand = _make_candidate("openai", "gpt-5")
+    policy = _make_policy()
+    db = Database(tmp_path / "in_run_err.sqlite3")
+    ensure_capacity_tables(db)
+
+    record_owner_quota(
+        db,
+        "openai",
+        "chatgpt-plus",
+        50.0,
+        (now + timedelta(hours=2)).isoformat(),
+        source="OWNER",
+        now=now,
+    )
+    from saberops.capacity.snapshot import effective_quota_states
+
+    quotas = effective_quota_states(db, now=now)
+
+    # Monkeypatch conn.execute to simulate OperationalError during reservation reads
+    owner = db.owner_db
+    orig_conn = owner._get_connection
+
+    class FailingConn:
+        def __init__(self, real: Any) -> None:
+            self._real = real
+
+        def execute(self, sql: str, *args: Any, **kwargs: Any) -> Any:
+            if "capacity_reservations" in sql or "capacity_observations" in sql:
+                raise sqlite3.OperationalError("database is locked")
+            return self._real.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._real, name)
+
+    @contextmanager
+    def failing_get_conn() -> Any:
+        with orig_conn() as real:
+            yield FailingConn(real)
+
+    monkeypatch.setattr(owner, "_get_connection", failing_get_conn)
+
+    # 1. control_plane_decision at the boundary MUST return eligible=False
+    dec = control_plane_decision(
+        candidate=cand,
+        adapter=_AvailableAdapter(),  # type: ignore[arg-type]
+        training_allowed=True,
+        quota_states=quotas,
+        prompt_bytes=100,
+        policy=policy,
+        db=db,
+        now=now,
+    )
+    assert dec.eligible is False
+    assert dec.reason == QUOTA_EVIDENCE_REQUIRED
+    assert dec.exclusion_reason == QUOTA_EVIDENCE_REQUIRED
+
+    # 2. evaluate_eligibility at worker/repair seam MUST return SKIP_QUOTA_BLOCKED
+    reason = evaluate_eligibility(
+        candidate=cand,
+        adapter=_AvailableAdapter(),  # type: ignore[arg-type]
+        training_allowed=True,
+        quota_states=quotas,
+        prompt_bytes=100,
+        policy=policy,
+        db=db,
+        now=now,
+    )
+    assert reason == SKIP_QUOTA_BLOCKED
+

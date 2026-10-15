@@ -413,7 +413,10 @@ def scheduler_tick(
     effective_pol = policy or load_control_plane_policy()
     quotas = effective_quota_states(db, now=moment)
     cost_states = _load_all_cost_states(db)
-    charges = post_observation_charges(db, now=moment)
+    try:
+        charges = post_observation_charges(db, now=moment)
+    except (sqlite3.OperationalError, sqlite3.DatabaseError):
+        return TickResult(ran=False, reason="ledger_read_error")
 
     # Derive real running counts per pool from running jobs (F3)
     running_counts: dict[str, int] = {}

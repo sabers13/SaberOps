@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 import re
+import sqlite3
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, time
@@ -298,16 +299,15 @@ def _get_cost_estimate(
 
 def check_capacity_tables_exist(db: Any) -> bool:
     """Return True if capacity subsystem tables exist in db."""
-    try:
-        from saberops.capacity.store import owner_connection
-
-        with owner_connection(db) as conn:
-            cur = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='capacity_reservations'"
-            )
-            return cur.fetchone() is not None
-    except Exception:
+    if db is None or (not hasattr(db, "db_path") and not hasattr(db, "owner_db")):
         return False
+    from saberops.capacity.store import owner_connection
+
+    with owner_connection(db) as conn:
+        cur = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='capacity_reservations'"
+        )
+        return cur.fetchone() is not None
 
 
 def is_capacity_subsystem_configured(
@@ -582,12 +582,21 @@ def admit(
     # Capacity subsystem configuration check (graceful degradation if unconfigured)
     # Skips only ledger-dependent checks (pool balances, red lines, overage probes, concurrency),
     # NEVER requirements, readiness, or safety/forbidden postures!
-    if not is_capacity_subsystem_configured(
-        db=db,
-        policy=effective_policy,
-        quota_states=quota_states,
-        explicit_configured=capacity_configured,
-    ):
+    try:
+        configured = is_capacity_subsystem_configured(
+            db=db,
+            policy=effective_policy,
+            quota_states=quota_states,
+            explicit_configured=capacity_configured,
+        )
+    except (sqlite3.OperationalError, sqlite3.DatabaseError) as exc:
+        return AdmissionDecision(
+            admitted=False,
+            candidate=candidate,
+            reason=QUOTA_EVIDENCE_REQUIRED,
+            details={"error": f"capacity_check_failed: {exc}"},
+        )
+    if not configured:
         return AdmissionDecision(
             admitted=True,
             candidate=candidate,
@@ -614,11 +623,17 @@ def admit(
     # Safely derive active reservation charges from db if not explicitly supplied (F2)
     if reservations is None and db is not None:
         try:
-            from saberops.capacity.ledger import post_observation_charges
+            if check_capacity_tables_exist(db):
+                from saberops.capacity.ledger import post_observation_charges
 
-            reservations = post_observation_charges(db, moment)
-        except Exception:
-            reservations = None
+                reservations = post_observation_charges(db, moment)
+        except (sqlite3.OperationalError, sqlite3.DatabaseError) as exc:
+            return AdmissionDecision(
+                admitted=False,
+                candidate=candidate,
+                reason=QUOTA_EVIDENCE_REQUIRED,
+                details={"error": f"reservation_read_failed: {exc}"},
+            )
 
     states = list(quota_states)
 

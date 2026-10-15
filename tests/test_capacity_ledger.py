@@ -8,6 +8,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from saberops.capacity.cost_model import SizeBucket
 from saberops.capacity.ledger import (
     PoolDraw,
@@ -518,3 +520,111 @@ def test_l13_legacy_policy_deleted() -> None:
                  "CODEX_WEEKLY_POOL"):
         assert not hasattr(quota, name), name
     assert callable(quota.normalize_quota_observation)
+
+
+def test_post_observation_charges_raises_operational_error_on_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: ADR-0002 D7 / F2 fail-closed reservation read on sqlite OperationalError."""
+    from contextlib import contextmanager
+    from typing import Any
+
+    from saberops.capacity.ledger import post_observation_charges
+    from saberops.capacity.store import ensure_tables
+
+    db = _db(tmp_path)
+    ensure_tables(db)
+    now = datetime(2026, 10, 15, 12, 0, 0, tzinfo=UTC)
+
+    owner = db.owner_db
+    orig_conn = owner._get_connection
+
+    class FailingConn:
+        def __init__(self, real: Any) -> None:
+            self._real = real
+
+        def execute(self, *args: Any, **kwargs: Any) -> Any:
+            raise sqlite3.OperationalError("database is locked")
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._real, name)
+
+    @contextmanager
+    def failing_get_conn() -> Any:
+        with orig_conn() as real:
+            yield FailingConn(real)
+
+    monkeypatch.setattr(owner, "_get_connection", failing_get_conn)
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        post_observation_charges(db, now)
+
+
+def test_post_observation_charges_returns_empty_when_tables_absent(tmp_path: Path) -> None:
+    """Covers: ADR-0002 D7 graceful empty charges when capacity tables do not exist."""
+    from saberops.capacity.ledger import post_observation_charges
+
+    # Fresh DB without ensure_tables: capacity_observations does not exist
+    db = _db(tmp_path, name="unconfigured.db")
+    now = datetime(2026, 10, 15, 12, 0, 0, tzinfo=UTC)
+
+    charges = post_observation_charges(db, now)
+    assert charges == {}
+
+
+def test_post_observation_charges_preserves_cutoff_and_reset_semantics(tmp_path: Path) -> None:
+    """Covers: ADR-0002 D5/D7 no double charge before observation and window roll reset."""
+    from saberops.capacity.ledger import (
+        post_observation_charges,
+        record_probe_window_observation,
+    )
+    from saberops.capacity.store import ensure_tables
+
+    db = _db(tmp_path)
+    ensure_tables(db)
+
+    t0 = datetime(2026, 10, 15, 4, 0, tzinfo=UTC)
+    t1 = datetime(2026, 10, 15, 4, 30, tzinfo=UTC)
+    t_reset = datetime(2026, 10, 15, 9, 0, tzinfo=UTC)
+    t_after_reset = datetime(2026, 10, 15, 9, 30, tzinfo=UTC)
+
+    # Observation at t0
+    record_probe_window_observation(
+        db,
+        "p1",
+        "5h",
+        remaining_pct=80.0,
+        harness="test",
+        reset_at=t_reset.isoformat(),
+        now=t0,
+    )
+
+    # Reservation before observation (t0 - 10m): must NOT be charged
+    reserve(
+        db,
+        run_id="run_old",
+        job_id="job_old",
+        route="p1/m1",
+        draws=[PoolDraw("p1", "5h", 1.0)],
+        size_bucket="M",
+        now=t0 - timedelta(minutes=10),
+    )
+
+    # Reservation after observation (t1): MUST be charged
+    reserve(
+        db,
+        run_id="run_new",
+        job_id="job_new",
+        route="p1/m1",
+        draws=[PoolDraw("p1", "5h", 1.0)],
+        size_bucket="M",
+        now=t1,
+    )
+
+    # Before reset: charges must include run_new (8.0%) but not run_old
+    charges_mid = post_observation_charges(db, t1 + timedelta(minutes=5))
+    assert charges_mid.get(("p1", "5h")) == 8.0
+
+    # After reset: window rolled; run_new was before reset, so charges must reset to 0.0
+    charges_rolled = post_observation_charges(db, t_after_reset)
+    assert charges_rolled.get(("p1", "5h")) == 0.0
+

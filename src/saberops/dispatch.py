@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -26,6 +27,7 @@ from saberops.control_plane import (
 from saberops.control_plane.capabilities import Capability
 from saberops.control_plane.policy import ControlPlanePolicy
 from saberops.control_plane.preflight import ControlPlaneDecision
+from saberops.control_plane.quota_policy import QUOTA_EVIDENCE_REQUIRED
 from saberops.models import (
     DispatchRole,
     DispatchStage,
@@ -368,7 +370,30 @@ def control_plane_decision(
     if not dec.eligible:
         return dec
 
-    from saberops.capacity.admission import admit
+    from saberops.capacity.admission import admit, check_capacity_tables_exist
+
+    # Boundary: snapshot active reservations from db if not explicitly supplied
+    if reservations is None and db is not None:
+        try:
+            if check_capacity_tables_exist(db):
+                from saberops.capacity.ledger import post_observation_charges
+
+                reservations = post_observation_charges(db, now or datetime.now(UTC))
+        except (sqlite3.OperationalError, sqlite3.DatabaseError):
+            return ControlPlaneDecision(
+                candidate=candidate,
+                eligible=False,
+                warnings=dec.warnings,
+                warning_reasons=dec.warning_reasons,
+                exclusion_reason=QUOTA_EVIDENCE_REQUIRED,
+                missing_capabilities=dec.missing_capabilities,
+                provider_policy=dec.provider_policy,
+                quota=dec.quota,
+                training_permitted=dec.training_permitted,
+                reserve_override=reserve_override,
+                capability_profile_digest=dec.capability_profile_digest,
+                control_plane_digest=dec.control_plane_digest,
+            )
 
     admit_dec = admit(
         candidate=candidate,

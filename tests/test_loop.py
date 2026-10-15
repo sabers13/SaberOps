@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1043,5 +1044,50 @@ def test_simultaneous_first_acquire_race_catches_integrity_error(
     # holder_2 hits IntegrityError on insert, rolls back, reads holder_1's live lease, returns None
     lease2 = acquire_lease(owner_db, "holder_2", ttl_seconds=60.0, now=t0)
     assert lease2 is None
+
+
+def test_scheduler_tick_aborts_on_ledger_read_error(
+    owner_db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: ADR-0002 D7 scheduler_tick aborts fail-closed on ledger read error."""
+    import saberops.capacity.loop as loop_mod
+    from saberops.capacity.loop import acquire_lease, scheduler_tick
+
+    t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
+    lease = acquire_lease(owner_db, "instance_err", ttl_seconds=30.0, now=t0)
+    assert lease is not None
+
+    repo_dir = tmp_path / "repo_err"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+
+    job = _make_job(
+        "job_ledger_err",
+        str(repo_dir),
+        created_at=t0.isoformat(),
+        updated_at=t0.isoformat(),
+        request_digest="dig_err",
+    )
+    store.insert_job(owner_db, job, now=t0)
+
+    def failing_charges(db: Any, now: Any) -> Any:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(loop_mod, "post_observation_charges", failing_charges)
+
+    res = scheduler_tick(
+        owner_db,
+        lease,
+        now=t0,
+        clock_fn=lambda: t0,
+    )
+    assert res.ran is False
+    assert res.reason == "ledger_read_error"
+
+    # Verify job remained queued, zero jobs dispatched
+    j_after = store.get_job(owner_db, "job_ledger_err")
+    assert j_after is not None
+    assert j_after.state == JobState.QUEUED
+
 
 
