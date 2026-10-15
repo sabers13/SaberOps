@@ -532,12 +532,19 @@ def admit(
             details={"expires_on": posture.expires_on},
         )
 
+    if posture.reason == POSTURE_UNVERIFIED:
+        return AdmissionDecision(
+            admitted=False,
+            candidate=candidate,
+            reason=POSTURE_UNVERIFIED,
+        )
+
     # Unattended scheduler dispatch (requirements is not None):
     # F1: X, B, D, unverified/expired and policy-unknown routes NEVER become eligible
     # for unattended scheduler dispatch merely because capacity tables are absent.
     # An unattended job has no owner override.
     if requirements is not None:
-        if posture.reason in (POSTURE_UNVERIFIED, POSTURE_ATTENDED_ONLY, POSTURE_METERED):
+        if posture.reason in (POSTURE_ATTENDED_ONLY, POSTURE_METERED):
             return AdmissionDecision(
                 admitted=False,
                 candidate=candidate,
@@ -553,29 +560,6 @@ def admit(
             )
     else:
         # In-run attended dispatch:
-        # If route has a configured posture record with missing/invalid verification,
-        # it always fails closed (even attended, even with unconfigured capacity).
-        # Only policy-unknown routes (posture.selector is None) may degrade gracefully
-        # when capacity subsystem is unconfigured.
-        if posture.reason == POSTURE_UNVERIFIED:
-            if posture.selector is None:
-                if not is_capacity_subsystem_configured(
-                    db=db,
-                    policy=effective_policy,
-                    quota_states=quota_states,
-                    explicit_configured=capacity_configured,
-                ):
-                    return AdmissionDecision(
-                        admitted=True,
-                        candidate=candidate,
-                        reason="unconfigured",
-                        details={"capacity_configured": False},
-                    )
-            return AdmissionDecision(
-                admitted=False,
-                candidate=candidate,
-                reason=POSTURE_UNVERIFIED,
-            )
         if posture.reason == POSTURE_ATTENDED_ONLY and not explicit_override:
             return AdmissionDecision(
                 admitted=False,
