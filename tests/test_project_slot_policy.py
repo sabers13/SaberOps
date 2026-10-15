@@ -9,6 +9,7 @@ decision, its counts, its reason codes and its fail-closed behaviour.
 from __future__ import annotations
 
 import dataclasses
+from typing import cast
 
 import pytest
 
@@ -58,23 +59,26 @@ def _child(
 def _snapshot(
     slots: list[ProjectSlotRecord],
     *,
-    owner_id: str = OWNER,
+    owner_id: object = OWNER,
     source: str = SnapshotSource.OWNER_DB.value,
     complete: bool = True,
 ) -> SlotSnapshot:
     return SlotSnapshot(
-        owner_id=owner_id, source=source, complete=complete, slots=tuple(slots)
+        owner_id=cast(str, owner_id),
+        source=source,
+        complete=complete,
+        slots=tuple(slots),
     )
 
 
 def _request(
     candidate: ProjectSlotRecord,
     *,
-    owner_id: str = OWNER,
+    owner_id: object = OWNER,
     limits: SlotLimits | None = None,
 ) -> SlotAdmissionRequest:
     return SlotAdmissionRequest(
-        owner_id=owner_id,
+        owner_id=cast(str, owner_id),
         candidate=candidate,
         limits=SlotLimits() if limits is None else limits,
     )
@@ -438,3 +442,115 @@ def test_empty_snapshot_admits_the_first_child() -> None:
     assert decision.counts_authoritative is True
     assert decision.counts.active_projects == 0
     assert decision.counts.occupied_child_slots == 0
+
+
+def test_blank_or_unknown_owner_identity_never_admits() -> None:
+    """Covers: contract -- unknown/blank owner on either side denies fail-closed.
+
+    Adversarial: with an otherwise valid, complete, empty snapshot and valid
+    limits, two blank owners (``""``/``None``/whitespace) previously matched and
+    could reach ADMITTED. A blank owner must never be a matching identity.
+    """
+    candidate = _child("p1", 1)
+    for unknown in ("", "   ", None):
+        from_snapshot = evaluate_slot_admission(
+            _request(candidate), _snapshot([], owner_id=unknown)
+        )
+        assert from_snapshot.status is AdmissionStatus.DENIED
+        assert from_snapshot.reason is AdmissionReason.MISSING_IDENTITY
+        assert from_snapshot.counts_authoritative is False
+        assert from_snapshot.admitted is False
+
+        from_request = evaluate_slot_admission(
+            _request(candidate, owner_id=unknown), _snapshot([])
+        )
+        assert from_request.status is AdmissionStatus.DENIED
+        assert from_request.reason is AdmissionReason.MISSING_IDENTITY
+        assert from_request.counts_authoritative is False
+
+        both_unknown = evaluate_slot_admission(
+            _request(candidate, owner_id=unknown), _snapshot([], owner_id=unknown)
+        )
+        assert both_unknown.status is AdmissionStatus.DENIED
+        assert both_unknown.reason is AdmissionReason.MISSING_IDENTITY
+        assert both_unknown.admitted is False
+
+
+def test_conflicting_known_owner_ids_deny() -> None:
+    """Covers: contract -- two distinct known owners are not the same identity."""
+    decision = evaluate_slot_admission(
+        _request(_child("p1", 1), owner_id="owner-2"),
+        _snapshot([], owner_id="owner-1"),
+    )
+
+    assert decision.status is AdmissionStatus.DENIED
+    assert decision.reason is AdmissionReason.OWNER_MISMATCH
+    assert decision.counts_authoritative is False
+    assert decision.admitted is False
+
+    # Trimming is shared on both sides, so padded forms of one owner still match.
+    padded = evaluate_slot_admission(
+        _request(_child("p1", 1), owner_id="  owner-1  "),
+        _snapshot([], owner_id="owner-1"),
+    )
+    assert padded.status is AdmissionStatus.ADMITTED
+    assert padded.reason is AdmissionReason.ADMITTED
+
+
+def test_malformed_limits_deny_without_raising_or_unsafe_counts() -> None:
+    """Covers: contract -- non-int/zero/negative limits deny typed, never raise."""
+    candidate = _child("p1", 1)
+    malformed = [
+        SlotLimits(cast(int, None), 5),
+        SlotLimits(3, cast(int, None)),
+        SlotLimits(cast(int, "3"), 5),
+        SlotLimits(cast(int, True), 5),
+        SlotLimits(cast(int, 5.5), 5),
+        SlotLimits(0, 5),
+        SlotLimits(3, -1),
+    ]
+    for limits in malformed:
+        # Must not raise out of derived_global_ceiling / _counts.
+        decision = _decide(_snapshot([]), candidate, limits=limits)
+        assert decision.status is AdmissionStatus.DENIED
+        assert decision.reason is AdmissionReason.INVALID_LIMIT
+        assert decision.counts_authoritative is False
+        assert decision.admitted is False
+        # Reported counts are non-negative and never an unsafe positive cap.
+        assert decision.counts.derived_global_ceiling == 0
+        assert decision.counts.project_limit >= 0
+        assert decision.counts.child_slots_per_project_limit >= 0
+
+    # The reported-only helper is itself exception-free for malformed limits.
+    assert SlotLimits(cast(int, None), 5).derived_global_ceiling == 0
+    assert SlotLimits(cast(int, "x"), 5).derived_global_ceiling == 0
+
+
+def test_non_occupying_candidate_is_not_launch_permission() -> None:
+    """Covers: contract -- queued/blocked/terminal candidate must not spawn a child.
+
+    A naive launch path keyed on ``admitted`` alone cannot machine-distinguish
+    "may occupy one slot" from "needs no slot"; the machine-readable
+    ``occupies_slot`` discriminator is false for every non-occupying candidate.
+    """
+
+    def naive_launch(decision: SlotAdmissionDecision) -> bool:
+        # Minimal launch gate: require actual slot occupancy, not just `admitted`.
+        return decision.occupies_slot
+
+    for state in (
+        SlotState.QUEUED.value,
+        SlotState.BLOCKED.value,
+        SlotState.TERMINAL.value,
+    ):
+        decision = _decide(_snapshot([]), _child("p1", 1, state=state))
+        assert decision.status is AdmissionStatus.ADMITTED
+        assert decision.reason is AdmissionReason.NON_OCCUPYING_CANDIDATE
+        assert decision.occupies_slot is False
+        assert naive_launch(decision) is False
+        assert decision.counts.occupied_child_slots == 0
+
+    occupying = _decide(_snapshot([]), _child("p1", 1))
+    assert occupying.reason is AdmissionReason.ADMITTED
+    assert occupying.occupies_slot is True
+    assert naive_launch(occupying) is True

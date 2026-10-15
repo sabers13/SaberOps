@@ -57,13 +57,19 @@ Orchestrator turns, however many of them exist. Duplicate identical slot
 records are an alias of one lane and are counted once; conflicting identities
 or malformed rows fail closed. Lowering the limits never terminates a running
 task; it only denies further starts until occupancy falls back below the new
-limits.
+limits. A child in a non-occupying state is reported with reason
+``non_occupying_candidate`` and ``occupies_slot`` false: it is not permission
+to spawn a child process. An unknown, blank or mismatched ``owner_id`` on
+either the snapshot or the request denies (``missing_identity`` /
+``owner_mismatch``); two blank owners never match, and malformed limits deny
+(``invalid_limit``) without raising.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import TypeGuard
 
 __all__ = [
     "AdmissionReason",
@@ -162,6 +168,13 @@ class AdmissionReason(StrEnum):
     """Stable machine-readable reason codes, in evaluation precedence order."""
 
     ADMITTED = "admitted"
+    """The candidate is admitted to *occupy* one child slot."""
+
+    NON_OCCUPYING_CANDIDATE = "non_occupying_candidate"
+    """The candidate needs no slot: a valid child task in a non-occupying
+    state (``queued``/``blocked``/``terminal``). Reported with status
+    ``ADMITTED`` for continuity, but it is **not** permission to spawn a
+    child process; consult :attr:`SlotAdmissionDecision.occupies_slot`."""
 
     PROJECT_LIMIT_REACHED = "project_limit_reached"
     PROJECT_SLOT_LIMIT_REACHED = "project_slot_limit_reached"
@@ -242,8 +255,18 @@ class SlotLimits:
 
     @property
     def derived_global_ceiling(self) -> int:
-        """Reported-only product of the two limits (default ``3 * 5 == 15``)."""
-        return self.active_projects * self.child_slots_per_project
+        """Reported-only product of the two limits (default ``3 * 5 == 15``).
+
+        Any non-positive-integer operand (``None``, a string, a bool, zero or
+        negative) makes the ceiling unusable; it is reported as ``0`` instead
+        of raising, because :func:`evaluate_slot_admission` already denies such
+        limits with :attr:`AdmissionReason.INVALID_LIMIT`.
+        """
+        if _is_positive_int(self.active_projects) and _is_positive_int(
+            self.child_slots_per_project
+        ):
+            return self.active_projects * self.child_slots_per_project
+        return 0
 
 
 def default_slot_limits() -> SlotLimits:
@@ -334,6 +357,22 @@ class SlotAdmissionDecision:
         return self.status is AdmissionStatus.ADMITTED
 
     @property
+    def occupies_slot(self) -> bool:
+        """Machine-readable occupancy discriminator for launch callers.
+
+        True **only** when this admission authorizes the candidate to reserve
+        or execute a child slot (status ``ADMITTED`` with reason ``admitted``).
+        A valid non-occupying candidate (``queued``/``blocked``/``terminal``)
+        reports status ``ADMITTED`` with reason ``non_occupying_candidate`` but
+        ``occupies_slot`` false: it needs no slot and must never be interpreted
+        as permission to spawn a child process.
+        """
+        return (
+            self.status is AdmissionStatus.ADMITTED
+            and self.reason is AdmissionReason.ADMITTED
+        )
+
+    @property
     def reason(self) -> AdmissionReason:
         """The highest-precedence reason code."""
         return self.reasons[0]
@@ -343,8 +382,25 @@ class SlotAdmissionDecision:
         return tuple(reason.value for reason in self.reasons)
 
 
-def _is_positive_int(value: object) -> bool:
+def _is_positive_int(value: object) -> TypeGuard[int]:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 1
+
+
+def _reported_limit(value: object) -> int:
+    """Return a positive-int limit unchanged, else ``0`` for a non-authoritative report."""
+    return value if _is_positive_int(value) else 0
+
+
+def _identity_text(value: object) -> str | None:
+    """Return a non-empty trimmed string identity, else ``None`` for unknowns.
+
+    ``None``, non-strings and blank/whitespace-only values are treated as an
+    unknown identity so that a blank owner can never match another blank owner.
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text or None
 
 
 def _normalized(value: object) -> str:
@@ -404,8 +460,8 @@ def _counts(
         occupied_child_slots=sum(count for _, count in ordered),
         occupied_child_slots_by_project=ordered,
         candidate_project_occupied=occupied_by_project.get(candidate_project, 0),
-        project_limit=limits.active_projects,
-        child_slots_per_project_limit=limits.child_slots_per_project,
+        project_limit=_reported_limit(limits.active_projects),
+        child_slots_per_project_limit=_reported_limit(limits.child_slots_per_project),
         derived_global_ceiling=limits.derived_global_ceiling,
         excluded_records=excluded_records,
     )
@@ -482,7 +538,14 @@ def evaluate_slot_admission(
     if not snapshot.complete:
         reasons.append(AdmissionReason.INCOMPLETE_SNAPSHOT)
 
-    if str(snapshot.owner_id).strip() != str(request.owner_id).strip():
+    snapshot_owner = _identity_text(snapshot.owner_id)
+    request_owner = _identity_text(request.owner_id)
+    if snapshot_owner is None or request_owner is None:
+        # An unknown or blank owner on either side is never a match: a blank
+        # snapshot owner and a blank request owner must not both be treated as
+        # the same identity.
+        reasons.append(AdmissionReason.MISSING_IDENTITY)
+    elif snapshot_owner != request_owner:
         reasons.append(AdmissionReason.OWNER_MISMATCH)
 
     # Validate every snapshot row before any conflict or capacity reasoning.
@@ -589,10 +652,13 @@ def evaluate_slot_admission(
 
     if not candidate_occupies:
         return _decision(
-            (AdmissionReason.ADMITTED,),
+            (AdmissionReason.NON_OCCUPYING_CANDIDATE,),
             counts=counts,
             counts_authoritative=True,
-            detail="admitted: non-occupying child state consumes no execution slot",
+            detail=(
+                "admitted: non-occupying child state consumes no execution slot "
+                "and is not permission to spawn a child process"
+            ),
         )
 
     project_is_active = candidate_project in occupied_by_project
