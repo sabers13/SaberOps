@@ -18,6 +18,7 @@ from saberops.capacity.ledger import (
     reserve,
 )
 from saberops.capacity.loop import (
+    _default_run_launcher,
     acquire_lease,
     check_lease,
     release_lease,
@@ -49,7 +50,7 @@ from saberops.jobs.models import (
     Priority,
     WaitingReason,
 )
-from saberops.models import RunStatus, WorkerCandidate
+from saberops.models import Attempt, AttemptStatus, Run, RunStatus, Tier, WorkerCandidate
 from saberops.routing_config import RoutingSnapshot
 
 _NOW = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
@@ -1557,3 +1558,225 @@ def test_scheduler_tick_pool_max_concurrent_waits_when_occupancy_read_succeeds(
 
 
 
+
+
+def test_scheduler_tick_reconciles_preempted_run_and_releases_reservation(
+    owner_db: Database, tmp_path: Path
+) -> None:
+    """Covers: ADR-0002 D8 tick completes a crashed preemption and releases.
+
+    A RUNNING job whose run is conclusively PREEMPTED (crash between run
+    terminalization and job requeue) is requeued QUEUED/PREEMPTED with its
+    resume capsule, and the old run's reservation is released exactly once
+    by tick settlement. No provider, model, or network is involved.
+    """
+    t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
+    lease = acquire_lease(owner_db, "instance_A", ttl_seconds=30.0, now=t0)
+    assert lease is not None
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+
+    job = _make_job(
+        "job_prem",
+        str(repo_dir),
+        state=JobState.RUNNING,
+        current_run_id="run_old",
+        run_ids=("run_old",),
+        created_at=t0.isoformat(),
+        updated_at=t0.isoformat(),
+        request_digest="dig_prem",
+    )
+    store.insert_job(owner_db, job, event_kind="dispatched", now=t0)
+    owner_db.create_run(
+        Run(
+            id="run_old",
+            task="task for job_prem",
+            target_repo=str(repo_dir),
+            base_commit="abc1234",
+            tier=Tier.T2,
+            training_allowed=True,
+            gate_command="make gate",
+            status=RunStatus.PREEMPTED,
+            created_at=t0.isoformat(),
+            config_json="{}",
+        )
+    )
+    owner_db.record_event(
+        "run_old",
+        "preemption_committed",
+        payload={
+            "job_id": "job_prem",
+            "checkpoint_sha": "abc1234",
+            "checkpoint_ref": "refs/saberops/checkpoints/job_prem/0",
+            "handoff_id": "handoff_tick_crash",
+            "not_before": None,
+            "preemptions_next": 1,
+        },
+    )
+    reserve(
+        owner_db,
+        run_id="run_old",
+        job_id="job_prem",
+        route="openai/gpt-5",
+        draws=[PoolDraw("chatgpt-plus", "5h")],
+        size_bucket="M",
+        now=t0,
+    )
+
+    launched: list[str] = []
+
+    def mock_launcher(j: Job, dec: Any, run_id: str) -> None:
+        launched.append(j.job_id)
+
+    res = scheduler_tick(
+        owner_db,
+        lease,
+        now=t0,
+        routes=_make_routes(()),
+        policy=_make_policy(),
+        run_status=lambda r_id: RunStatus.PREEMPTED if r_id == "run_old" else None,
+        run_launcher=mock_launcher,
+        clock_fn=lambda: t0,
+    )
+    assert res.ran is True
+    assert len(res.reconciled_changes) == 1
+    assert res.reconciled_changes[0].job_id == "job_prem"
+    assert res.reconciled_changes[0].to_state == JobState.QUEUED
+
+    current = store.get_job(owner_db, "job_prem")
+    assert current is not None
+    assert current.state == JobState.QUEUED
+    assert current.preemptions == 1
+    assert current.resume_from is not None
+    assert current.resume_from.run_id == "run_old"
+    # The empty worker chain parks the job under the pre-existing M2-4b wait
+    # semantics; resume capsule, bound count, and timing survive relabeling.
+    assert current.resume_from.checkpoint_sha == "abc1234"
+
+    with owner_connection(owner_db) as conn:
+        row = conn.execute(
+            "SELECT state FROM capacity_reservations WHERE run_id = 'run_old'"
+        ).fetchone()
+    assert row is not None and row["state"] == "RELEASED"
+
+
+def test_default_run_launcher_stages_verified_resume(
+    owner_db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: ADR-0002 D8 dispatch wires the verified capsule into the new run.
+
+    The launcher anchors the new run at the original job base and stages the
+    checkpoint plus capsule through the run's ordinary worker-checkpoint
+    channel; admission, posture, and lease behavior are untouched (a stubbed
+    supervisor launch proves no execution policy is decided here).
+    """
+    import subprocess
+
+    from saberops.capacity.scheduler import DispatchDecision
+    from saberops.config import resolve_run_config
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "loop@example.com"], cwd=repo, check=True
+    )
+    subprocess.run(["git", "config", "user.name", "Loop"], cwd=repo, check=True)
+    (repo / "base.txt").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True,
+                   capture_output=True)
+    base = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
+
+    t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
+    from saberops import preemption as _preemption
+
+    job = _make_job(
+        "job_resume",
+        str(repo),
+        created_at=t0.isoformat(),
+        updated_at=t0.isoformat(),
+        request_digest="dig_resume",
+    )
+    # The stored base must resolve for resume verification.
+    job = replace(job, base_sha=base)
+    store.insert_job(owner_db, job, now=t0)
+    store.mark_dispatched(owner_db, "job_resume", "run_old", now=t0)
+    owner_db.create_run(
+        Run(
+            id="run_old",
+            task="task for job_resume",
+            target_repo=str(repo),
+            base_commit=base,
+            tier=Tier.T2,
+            training_allowed=True,
+            gate_command="make gate",
+            status=RunStatus.RUNNING,
+            created_at=t0.isoformat(),
+            config_json="{}",
+        )
+    )
+    owner_db.record_event(
+        "run_old",
+        "quota_exhaustion_recorded",
+        payload={"provider": "p", "until": None, "until_confidence": "UNKNOWN"},
+    )
+    owner_db.record_event(
+        "run_old", "no_eligible_candidate", payload={"outcome": "NO_ELIGIBLE_CANDIDATE"}
+    )
+    owner_db.create_attempt(
+        Attempt(
+            id="run_old_a1",
+            run_id="run_old",
+            attempt_number=1,
+            provider="synthetic",
+            model="synthetic",
+            worktree_path=str(repo),
+            branch_name="orch/run_old/a1",
+            status=AttemptStatus.FAILED,
+            created_at=t0.isoformat(),
+            completed_at=t0.isoformat(),
+            interruption_reason="QUOTA_EXHAUSTED",
+        )
+    )
+    out = _preemption.complete_preemption(
+        owner_db, run_id="run_old", repo_path=repo, base_sha=base, now=t0
+    )
+    assert out.owned
+    queued = store.get_job(owner_db, "job_resume")
+    assert queued is not None and queued.resume_from is not None
+
+    monkeypatch.setattr(
+        "saberops.run_creation.resolve_effective_run_config",
+        lambda req: resolve_run_config(
+            task=req.task,
+            target_repo=req.repo_path,
+            gate_command="make gate",
+        ),
+    )
+    monkeypatch.setattr(
+        "saberops.supervisor.RunSupervisor.ensure_running",
+        lambda self, run_id, config=None: True,
+    )
+    decision = DispatchDecision(
+        job=queued,
+        candidate=_make_candidate("openai", "gpt-5"),
+        pool_id=None,
+        binding_window=None,
+        score=1.0,
+        cost_estimate=1.0,
+    )
+    _default_run_launcher(owner_db, queued, decision, "run_new")
+
+    assert owner_db.get_run("run_new") is not None
+    staged = owner_db.get_latest_worker_checkpoint("run_new")
+    assert staged is not None
+    assert staged.checkpoint_sha == queued.resume_from.checkpoint_sha
+    assert staged.handoff_id == queued.resume_from.handoff_id
+    prepared = owner_db.get_events_by_type("run_new", "resume_prepared")
+    assert len(prepared) == 1

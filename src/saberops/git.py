@@ -143,6 +143,59 @@ def validate_candidate_sha(sha: object) -> str:
     return sha
 
 
+# Engine-owned WIP checkpoint refs (ADR-0002 D8, M2-5):
+# ``refs/saberops/checkpoints/<job_id>/<n>``.  Anchoring the preemption
+# checkpoint under this exact namespace keeps the WIP commit reachable
+# after worktree retirement plus ``git gc``.  The ref is engine-owned and
+# never a branch: nothing ever checks it out, merges it, or pushes it, and
+# it is never deleted before the approved retention window (ADR-0003 D6).
+CHECKPOINT_REF_PREFIX: Final = "refs/saberops/checkpoints/"
+
+# Job identities admitted into a checkpoint ref name.  The ref is built by
+# exact interpolation of a validated job_id and a bounded integer index --
+# never by embedding caller-supplied ref text -- so symlink/ref injection
+# (``..``, ``@{``, ``:``, whitespace, control characters) cannot smuggle an
+# unrelated user ref or branch into the update.
+_JOB_ID_RE: Final = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+# Upper bound for the monotonic per-job checkpoint index.  The preemption
+# bound (default 5) makes this unreachable in normal operation; the cap
+# exists so a malformed index can never spray unbounded refs.
+MAX_CHECKPOINT_INDEX: Final = 64
+
+
+def validate_checkpoint_ref(job_id: object, index: object) -> str:
+    """Build the exact engine-owned checkpoint ref for a job, failing closed.
+
+    Only ``refs/saberops/checkpoints/<job_id>/<n>`` with a validated
+    job_id and a bounded integer ``n`` is ever produced.  Any other shape
+    -- including a caller-supplied full ref, a negative/oversized index,
+    or a job_id outside ``[A-Za-z0-9_-]{1,64}`` -- raises instead of
+    touching Git.
+    """
+    if not isinstance(job_id, str) or not _JOB_ID_RE.match(job_id):
+        raise CandidatePublicationError(
+            "Refusing checkpoint ref: job_id must match "
+            f"[A-Za-z0-9_-]{{1,64}}, got {str(job_id)[:64]!r}"
+        )
+    if isinstance(index, bool) or not isinstance(index, int):
+        raise CandidatePublicationError(
+            "Refusing checkpoint ref: index must be an int, "
+            f"got {str(index)[:64]!r}"
+        )
+    if not 0 <= index <= MAX_CHECKPOINT_INDEX:
+        raise CandidatePublicationError(
+            "Refusing checkpoint ref: index out of bounds "
+            f"[0, {MAX_CHECKPOINT_INDEX}], got {index!r}"
+        )
+    ref = f"{CHECKPOINT_REF_PREFIX}{job_id}/{index}"
+    if _REF_DANGEROUS_RE.search(ref):
+        raise CandidatePublicationError(
+            f"Refusing checkpoint ref: unsafe characters in {ref!r}"
+        )
+    return ref
+
+
 class WorktreeMetadataLockError(RuntimeError):
     """Repository worktree-metadata serialization could not be established.
 
@@ -562,6 +615,90 @@ class GitManager:
                 f"{redact_remote_secrets(result.stderr).strip()[:500]}"
             )
         return target
+
+    @staticmethod
+    def anchor_checkpoint_ref(
+        repo_path: Path | str, job_id: str, index: int, sha: str
+    ) -> str:
+        """Anchor a verified checkpoint SHA under the engine-owned ref.
+
+        Writes exactly ``refs/saberops/checkpoints/<job_id>/<n>`` (see
+        :func:`validate_checkpoint_ref`) via ``git update-ref`` and then
+        verifies the ref resolves to *sha*.  A verification mismatch --
+        partial Git write, concurrent branch race, or storage failure --
+        raises instead of reporting a checkpoint that is not durable.
+        """
+        ref = validate_checkpoint_ref(job_id, index)
+        target = validate_candidate_sha(sha)
+        repo = Path(repo_path).resolve()
+        result = run_process(["git", "update-ref", ref, target], cwd=repo)
+        if not result.passed:
+            raise CandidatePublicationError(
+                f"Refusing checkpoint: update-ref for '{ref}' failed: "
+                f"{redact_remote_secrets(result.stderr).strip()[:500]}"
+            )
+        resolved = GitManager.get_ref_commit(repo, ref)
+        if resolved != target:
+            raise CandidatePublicationError(
+                f"Refusing checkpoint: ref '{ref}' resolves to "
+                f"{str(resolved)[:64]!r}, expected {target!r}"
+            )
+        return ref
+
+    @staticmethod
+    def read_checkpoint_ref(
+        repo_path: Path | str, job_id: str, index: int
+    ) -> str | None:
+        """Read one engine-owned checkpoint ref, or None when absent."""
+        ref = validate_checkpoint_ref(job_id, index)
+        return GitManager.get_ref_commit(Path(repo_path).resolve(), ref)
+
+    @staticmethod
+    def list_checkpoint_refs(repo_path: Path | str, job_id: str) -> dict[int, str]:
+        """List ``{index: sha}`` for every checkpoint ref owned by *job_id*."""
+        if not isinstance(job_id, str) or not _JOB_ID_RE.match(job_id):
+            raise CandidatePublicationError(
+                "Refusing checkpoint listing: job_id must match "
+                f"[A-Za-z0-9_-]{{1,64}}, got {str(job_id)[:64]!r}"
+            )
+        repo = Path(repo_path).resolve()
+        pattern = f"{CHECKPOINT_REF_PREFIX}{job_id}/"
+        result = run_process(
+            ["git", "for-each-ref", "--format=%(refname) %(objectname)", pattern],
+            cwd=repo,
+        )
+        if not result.passed:
+            raise CandidatePublicationError(
+                "Checkpoint listing failed: "
+                f"{redact_remote_secrets(result.stderr).strip()[:500]}"
+            )
+        out: dict[int, str] = {}
+        for line in result.stdout.splitlines():
+            parts = line.strip().split()
+            if len(parts) != 2:
+                continue
+            refname, sha = parts
+            if not refname.startswith(pattern):
+                continue
+            try:
+                index = int(refname[len(pattern):])
+            except ValueError:
+                continue
+            if 0 <= index <= MAX_CHECKPOINT_INDEX and re.fullmatch(
+                r"[0-9a-f]{40}", sha
+            ):
+                out[index] = sha
+        return out
+
+    @staticmethod
+    def commit_exists(repo_path: Path | str, sha: str) -> bool:
+        """Return True iff *sha* resolves to an existing commit object."""
+        target = validate_candidate_sha(sha)
+        res = run_process(
+            ["git", "cat-file", "-e", f"{target}^{{commit}}"],
+            cwd=Path(repo_path).resolve(),
+        )
+        return res.passed
 
     @staticmethod
     def sync_index_worktree(repo_path: Path | str) -> None:

@@ -21,13 +21,22 @@ from saberops.config import resolve_run_config
 from saberops.continuation import prepare_continuation
 from saberops.db import Database
 from saberops.git import GitManager
-from saberops.jobs.models import JobRole
+from saberops.jobs import store
+from saberops.jobs.models import (
+    Job,
+    JobRequirements,
+    JobRole,
+    JobState,
+    Priority,
+    WaitingReason,
+)
 from saberops.models import (
     AttemptStatus,
     DispatchOutcome,
     RunStatus,
     Tier,
     WorkerCandidate,
+    WorkerInterruptionReason,
     WorkerRequest,
     WorkerResult,
 )
@@ -693,3 +702,216 @@ def test_escalation_is_per_package_and_worker_chain_returns_next_package(
         "WORKER",
     ]
 
+
+
+def _quota_exhausted_action(provider: str, model: str) -> Any:
+    """Script a genuine plan-quota interruption with unknown reset (D8 trigger)."""
+
+    def _action(request: WorkerRequest) -> WorkerResult:
+        return WorkerResult(
+            provider=provider,
+            model=request.model,
+            status=AttemptStatus.FAILED,
+            summary="Synthetic plan quota exhausted with unknown reset",
+            stdout="",
+            stderr="",
+            changed_paths=[],
+            has_changes=False,
+            error="synthetic quota exhausted",
+            outcome=DispatchOutcome.PROVIDER_OR_RUNTIME_FAILURE,
+            interruption_reason=WorkerInterruptionReason.QUOTA_EXHAUSTED,
+            quota_reset_at=None,
+            quota_reset_confidence="UNKNOWN",
+            execution_quiescent=True,
+        )
+
+    return _action
+
+
+def _owning_job(db: Database, repo: Path, base: str, job_id: str, run_id: str) -> None:
+    store.insert_job(
+        db,
+        Job(
+            job_id=job_id,
+            idempotency_key=None,
+            caller_id="owner",
+            repo=str(repo),
+            base_ref="HEAD",
+            base_sha=base,
+            goal="fix typo in readme",
+            acceptance=None,
+            requirements=JobRequirements(role=JobRole.WORKER),
+            priority=Priority.NORMAL,
+            state=JobState.QUEUED,
+            waiting_reason=WaitingReason.NEW,
+            created_at=datetime.now(UTC).isoformat(),
+            updated_at=datetime.now(UTC).isoformat(),
+            request_digest="digest-" + job_id,
+        ),
+        now=datetime.now(UTC),
+    )
+    store.mark_dispatched(db, job_id, run_id, now=datetime.now(UTC))
+
+
+def test_quota_exhausted_job_run_preempts_with_resume_capsule(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """Covers: ADR-0002 D8 trigger end to end (quota + no admitted fallback group).
+
+    A durable job-owned run whose only fallback-group candidate reports
+    genuine QUOTA_EXHAUSTED ends PREEMPTED (terminal for the run, not the
+    job): the job returns to QUEUED/PREEMPTED with a verified checkpoint ref
+    and a factual resume capsule, parked with explicit uncertainty because
+    the reset is UNKNOWN.
+    """
+    repo = tmp_path / "repo"
+    base = _init_repo(repo)
+    log: list[str] = []
+    calls: list[str] = []
+    worker = ScriptedWorker("h3", {"m1": _quota_exhausted_action("h3", "m1")}, log)
+    monkeypatch.setattr(
+        "saberops.orchestrator.resolve_candidate_chain",
+        _role_keyed_chain([WorkerCandidate("h3", "m1")], [], calls),
+    )
+    db = Database(tmp_path / "orch.db")
+    orch = Orchestrator(db=db, registry=AdapterRegistry([worker]), worktree_base=tmp_path / "wt")
+    config = resolve_run_config(
+        task="fix typo in readme",
+        target_repo=repo,
+        gate_command=_passing_gate(),
+        publish_candidate=False,
+    )
+    # Own the run at mint time, mirroring production order (the scheduler
+    # creates the job before the run exists; here the job is attached the
+    # moment _run_core mints the run identity, before any quota signal).
+    from saberops.provenance import mint_run_provenance as _real_mint
+
+    _owned: list[str] = []
+
+    def _mint_and_own(mint_repo: Any, mint_task: str) -> Any:
+        provenance = _real_mint(mint_repo, mint_task)
+        if not _owned:
+            _owning_job(db, repo, base, "job1", provenance.run_id)
+            _owned.append(provenance.run_id)
+        return provenance
+
+    monkeypatch.setattr(
+        "saberops.orchestrator.mint_run_provenance", _mint_and_own
+    )
+
+    result = orch.run(config=config, is_peak=False)
+    run_id = result.run_id
+
+    assert result.status == RunStatus.PREEMPTED
+    assert db.get_run(run_id) is not None
+    assert db.get_run(run_id).status == RunStatus.PREEMPTED  # type: ignore[union-attr]
+    job = store.get_job(db, "job1")
+    assert job is not None
+    assert job.state == JobState.QUEUED
+    assert job.waiting_reason == WaitingReason.PREEMPTED
+    assert job.preemptions == 1
+    assert job.resume_from is not None
+    assert job.resume_from.run_id == run_id
+    # Unknown reset parks with explicit uncertainty: no fabricated ETA.
+    assert job.not_before is None
+    assert GitManager.get_ref_commit(
+        repo, "refs/saberops/checkpoints/job1/0"
+    ) == job.resume_from.checkpoint_sha
+    capsule = db.get_handoff(job.resume_from.handoff_id)
+    assert capsule is not None and capsule.run_id == run_id
+    # The run's own ladder recorded genuine quota evidence: the exact
+    # contract the coordinator consumes.  A single-candidate chain breaks
+    # on exhaustion before a skip is recorded, so there is deliberately no
+    # no_eligible_candidate event here -- every launched attempt dying of
+    # quota IS the exhausted shape (see the coordinator's second rule).
+    assert not _events_by_type(db.get_events(run_id), "no_eligible_candidate")
+    assert _events_by_type(db.get_events(run_id), "quota_exhaustion_recorded")
+    assert _events_by_type(db.get_events(run_id), "worker_interrupted")
+    assert _events_by_type(db.get_events(run_id), "preemption_committed")
+    assert _events_by_type(db.get_events(run_id), "run_preempted")
+
+
+def test_quota_exhausted_multi_candidate_chain_records_no_eligible(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """Covers: ADR-0002 D8 multi-fallback shape records the ladder verdict.
+
+    Every fallback-group candidate reports quota: the ladder records a
+    ``no_eligible_candidate`` event (the coordinator's first rule) and the
+    job-owned run preempts.
+    """
+    repo = tmp_path / "repo"
+    base = _init_repo(repo)
+    log: list[str] = []
+    calls: list[str] = []
+    worker = ScriptedWorker(
+        "h3",
+        {
+            "m1": _quota_exhausted_action("h3", "m1"),
+            "m2": _quota_exhausted_action("h3", "m2"),
+        },
+        log,
+    )
+    monkeypatch.setattr(
+        "saberops.orchestrator.resolve_candidate_chain",
+        _role_keyed_chain(
+            [WorkerCandidate("h3", "m1"), WorkerCandidate("h3", "m2")], [], calls
+        ),
+    )
+    db = Database(tmp_path / "orch.db")
+    orch = Orchestrator(db=db, registry=AdapterRegistry([worker]), worktree_base=tmp_path / "wt")
+    config = resolve_run_config(
+        task="fix typo in readme",
+        target_repo=repo,
+        gate_command=_passing_gate(),
+        publish_candidate=False,
+    )
+    from saberops.provenance import mint_run_provenance as _real_mint
+
+    _owned: list[str] = []
+
+    def _mint_and_own(mint_repo: Any, mint_task: str) -> Any:
+        provenance = _real_mint(mint_repo, mint_task)
+        if not _owned:
+            _owning_job(db, repo, base, "job1", provenance.run_id)
+            _owned.append(provenance.run_id)
+        return provenance
+
+    monkeypatch.setattr(
+        "saberops.orchestrator.mint_run_provenance", _mint_and_own
+    )
+
+    result = orch.run(config=config, is_peak=False)
+
+    assert result.status == RunStatus.PREEMPTED
+    assert _events_by_type(db.get_events(result.run_id), "no_eligible_candidate")
+    job = store.get_job(db, "job1")
+    assert job is not None and job.preemptions == 1
+    assert job.resume_from is not None
+
+
+def test_quota_exhausted_standalone_run_keeps_failed_behavior(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """Covers: ADR-0002 D8 standalone runs keep truthful failure (keep-compat)."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    log: list[str] = []
+    calls: list[str] = []
+    worker = ScriptedWorker("h3", {"m1": _quota_exhausted_action("h3", "m1")}, log)
+    monkeypatch.setattr(
+        "saberops.orchestrator.resolve_candidate_chain",
+        _role_keyed_chain([WorkerCandidate("h3", "m1")], [], calls),
+    )
+    db = Database(tmp_path / "orch.db")
+    orch = Orchestrator(db=db, registry=AdapterRegistry([worker]), worktree_base=tmp_path / "wt")
+    config = resolve_run_config(
+        task="fix typo in readme",
+        target_repo=repo,
+        gate_command=_passing_gate(),
+        publish_candidate=False,
+    )
+    result = orch.run(config=config, is_peak=False)
+    assert result.status == RunStatus.FAILED
+    assert db.get_run(result.run_id) is not None
+    assert db.get_run(result.run_id).status == RunStatus.FAILED  # type: ignore[union-attr]

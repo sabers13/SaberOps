@@ -162,7 +162,9 @@ _TIERS = ("T1", "T2", "T3")
 
 _DEFAULT_GATE_COMMAND = "make gate"
 
-TERMINAL_EVENT_TYPES: frozenset[str] = frozenset({"run_completed", "run_failed", "run_exception"})
+TERMINAL_EVENT_TYPES: frozenset[str] = frozenset(
+    {"run_completed", "run_failed", "run_exception", "run_preempted"}
+)
 
 #: Owner-action event types that must reach the run-page EventSource even
 #: after the run itself is terminal (manual Review / Accept happens on an
@@ -1655,7 +1657,7 @@ def create_app(
         persisted_run = db.get_run(run_id)
         terminal_persisted = (
             persisted_run is not None
-            and persisted_run.status in (RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.ORPHANED)
+            and persisted_run.status in TERMINAL_RUN_STATUSES
         ) or any(event.event_type in TERMINAL_EVENT_TYPES for event in persisted)
         # A terminal run with an active post-run owner action
         # (Review / Accept) keeps a usable live stream so queued/started/
@@ -1693,7 +1695,7 @@ def create_app(
             terminal_initial = (
                 initial_run is not None
                 and initial_run.status
-                in (RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.ORPHANED)
+                in TERMINAL_RUN_STATUSES
             ) or any(event.event_type in TERMINAL_EVENT_TYPES for event in initial_events)
             if terminal_initial and not _owner_actions_stream_active(db, run_id):
                 for ev in initial_events:
@@ -1752,7 +1754,7 @@ def create_app(
                     is_terminal = (
                         run is not None
                         and run.status
-                        in (RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.ORPHANED)
+                        in TERMINAL_RUN_STATUSES
                     ) or any(ev.event_type in TERMINAL_EVENT_TYPES for ev in db.get_events(run_id))
                     if is_terminal and not _owner_actions_stream_active(db, run_id):
                         # Terminal events are durable before this check.  End immediately

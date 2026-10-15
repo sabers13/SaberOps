@@ -494,7 +494,10 @@ def reconcile_jobs(
     ``COMPLETED`` -> SUCCEEDED; ``FAILED`` -> FAILED ``RUN_FAILED``;
     ``None`` (run not found) -> FAILED ``RUN_MISSING``; ``PENDING``,
     ``RUNNING`` and ``ORPHANED`` stay (run recovery belongs to the
-    supervisor) with no event. Idempotent: a second call changes
+    supervisor) with no event.  ``PREEMPTED`` (ADR-0002 D8, M2-5) completes
+    an interrupted preemption idempotently: the run is conclusively
+    terminal, so the job is requeued to QUEUED/PREEMPTED with its verified
+    resume capsule instead of failing.  Idempotent: a second call changes
     nothing. A concurrent ``cancel_job`` wins or loses cleanly per job
     via the same compare-and-set (the loser is skipped).
     """
@@ -510,6 +513,31 @@ def reconcile_jobs(
             to_state, failure = JobState.SUCCEEDED, None
         elif status == RunStatus.FAILED:
             to_state, failure = JobState.FAILED, RUN_FAILED
+        elif status == RunStatus.PREEMPTED:
+            # Crash between run terminalization and job requeue (D8): finish
+            # the protocol from durable state.  The coordinator is
+            # idempotent; a concurrent cancel still wins via CAS inside.
+            from saberops.preemption import complete_preemption
+
+            try:
+                outcome = complete_preemption(
+                    db, run_id=run_id, repo_path=job.repo,
+                    job_id=job.job_id, base_sha=job.base_sha, now=now,
+                )
+            except Exception:
+                continue
+            if not outcome.owned or outcome.job is None:
+                continue
+            changes.append(
+                ReconcileChange(
+                    job_id=job.job_id,
+                    run_id=run_id,
+                    to_state=JobState.QUEUED,
+                    failure_reason=None,
+                    job=outcome.job,
+                )
+            )
+            continue
         else:  # PENDING, RUNNING, ORPHANED: supervisor's recovery, not ours
             continue
         try:

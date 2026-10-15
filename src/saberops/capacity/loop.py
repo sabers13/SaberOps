@@ -331,6 +331,7 @@ def _default_run_launcher(
 ) -> Any:
     from saberops.jobs.service import job_dispatch_spec
     from saberops.models import Run
+    from saberops.preemption import prepare_resume
     from saberops.run_creation import resolve_effective_run_config
     from saberops.supervisor import RunSupervisor
 
@@ -352,6 +353,17 @@ def _default_run_launcher(
         config_json=json.dumps(config.as_dict()),
     )
     db.create_run(run)
+    # ADR-0002 D8 (M2-5) durable resume wiring -- and ONLY resume wiring:
+    # when the dispatched job carries a verified preemption capsule, stage
+    # the checkpoint plus capsule into the new run through its ordinary
+    # worker-checkpoint channel.  The new run is still anchored at the
+    # original job base and still passes the full M2-4b posture / quota /
+    # readiness / lease / concurrency guard at (and inside) this dispatch;
+    # a malformed resume stages nothing and the run launches fresh, with a
+    # ``resume_skipped`` event recording the exact cause.  Admission,
+    # ledger, pool scheduler, and capacity safety invariants are untouched.
+    if job.resume_from is not None:
+        prepare_resume(db, job=job, new_run_id=run_id, repo_path=job.repo)
     supervisor = RunSupervisor(db=db)
     supervisor.ensure_running(run_id, config)
     return run_id
@@ -406,6 +418,12 @@ def scheduler_tick(
         if ch.to_state == JobState.SUCCEEDED:
             settle(db, ch.run_id, total_tokens=None, now=moment)
         elif ch.to_state in (JobState.FAILED, JobState.CANCELLED):
+            release(db, ch.run_id, now=moment)
+        elif ch.to_state == JobState.QUEUED:
+            # ADR-0002 D8 (M2-5): a completed preemption requeue.  The old
+            # run is conclusively terminal (PREEMPTED), so its reservation
+            # is released exactly once here; release is idempotent, so this
+            # is also safe when the coordinator already released it.
             release(db, ch.run_id, now=moment)
 
     # 2. Collect scheduling inputs

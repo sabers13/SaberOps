@@ -3295,6 +3295,34 @@ class Orchestrator:
                     # drive method is never invoked here.
                     def _autonomous_stop(stop_summary: str, stop_reason: str) -> RunResult:
                         """Terminalize the run for a supervisor STOP (fail closed)."""
+                        if stop_reason == SupervisorStopReason.NO_ELIGIBLE_BINDING.value:
+                            # ADR-0002 D8 (M2-5): a durable job-owned run that
+                            # suffered genuine quota exhaustion with no
+                            # admitted fallback route parks (PREEMPTED +
+                            # requeue with resume capsule) instead of failing.
+                            # Standalone runs and non-quota stops decline
+                            # inside and keep this FAILED path unchanged.
+                            from saberops.preemption import complete_preemption
+
+                            preempted = complete_preemption(
+                                self.db,
+                                run_id=run_id,
+                                repo_path=str(repo),
+                                base_sha=base_commit,
+                            )
+                            if preempted.owned:
+                                assert preempted.status is not None
+                                return RunResult(
+                                    run_id=run_id,
+                                    passed=False,
+                                    status=preempted.status,
+                                    summary=preempted.summary,
+                                    target_repo=str(repo),
+                                    base_commit=base_commit,
+                                    attempts=attempts,
+                                    checks=checks,
+                                    reviews=reviews,
+                                )
                         now_stop = current_iso_timestamp()
                         self.db.update_run(
                             run_id=run_id,
@@ -8499,6 +8527,36 @@ class Orchestrator:
                 summary = (
                     f"All {chain_attempt_count} attempt(s) failed to pass gate "
                     f"'{gate_command}'."
+                )
+            # ADR-0002 D8 (M2-5): quota-preemption owns this terminal outcome
+            # when the run suffered genuine quota exhaustion with no admitted
+            # fallback route and a durable job owns it.  The coordinator
+            # declines (owned=False) for ordinary gate failures, standalone
+            # runs, and non-quota exhaustion, leaving every assertion below
+            # -- including the plan-step failure marking -- untouched.  The
+            # hook sits BEFORE the plan-failure marking because a preempted
+            # run is parked, not failed: its plan steps stay exactly as they
+            # were for the resumed run to continue.
+            from saberops.preemption import complete_preemption as _complete_preemption
+
+            _preemption = _complete_preemption(
+                self.db,
+                run_id=run_id,
+                repo_path=str(repo),
+                base_sha=base_commit,
+            )
+            if _preemption.owned:
+                assert _preemption.status is not None
+                return RunResult(
+                    run_id=run_id,
+                    passed=False,
+                    status=_preemption.status,
+                    summary=_preemption.summary,
+                    target_repo=str(repo),
+                    base_commit=base_commit,
+                    attempts=attempts,
+                    checks=checks,
+                    reviews=reviews,
                 )
             failed_step = next(
                 (

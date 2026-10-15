@@ -37,7 +37,7 @@ from saberops.jobs.service import (
     reconcile_jobs,
     submit_job,
 )
-from saberops.models import RunStatus, WorkerCandidate
+from saberops.models import RunStatus, Tier, WorkerCandidate
 from saberops.routing_config import RoutingSnapshot, load_packaged_default
 
 _NOW = datetime(2026, 10, 12, 12, 0, 0, tzinfo=UTC)
@@ -520,3 +520,59 @@ def test_surgeon_only_capability_is_not_feasible_at_submit() -> None:
     ok, reason = feasible(req, snapshot)
     assert ok is False
     assert reason == NO_ROUTE_FOR_REQUIREMENTS
+
+
+def test_reconcile_preempted_run_completes_requeue(tmp_path: Path) -> None:
+    """Covers: ADR-0002 D8 reconciler finishes a crashed preemption (service)."""
+    from saberops.git import GitManager
+    from saberops.models import Run
+
+    db = Database(tmp_path / "jobs.db")
+    repo = _git_repo(tmp_path / "repo")
+    base = _head(repo)
+    job_id = _submit_running(db, repo, "preempt me", "run_p1")
+    db.create_run(
+        Run(
+            id="run_p1",
+            task="preempt me",
+            target_repo=str(repo),
+            base_commit=base,
+            tier=Tier.T2,
+            training_allowed=True,
+            gate_command="make gate",
+            status=RunStatus.PREEMPTED,
+            created_at=_NOW.isoformat(),
+            config_json="{}",
+        )
+    )
+    ref = GitManager.anchor_checkpoint_ref(repo, job_id, 0, base)
+    db.record_event(
+        "run_p1",
+        "preemption_committed",
+        payload={
+            "job_id": job_id,
+            "checkpoint_sha": base,
+            "checkpoint_ref": ref,
+            "handoff_id": "handoff_svc_crash",
+            "not_before": None,
+            "preemptions_next": 1,
+        },
+    )
+
+    def status(run_id: str) -> RunStatus | None:
+        assert run_id == "run_p1"
+        return RunStatus.PREEMPTED
+
+    changes = reconcile_jobs(db, run_status=status, now=_NOW)
+    assert len(changes) == 1
+    assert changes[0].job_id == job_id
+    assert changes[0].to_state == JobState.QUEUED
+    assert changes[0].failure_reason is None
+    job = get_job(db, job_id)
+    assert job is not None
+    assert job.state == JobState.QUEUED
+    assert job.waiting_reason == WaitingReason.PREEMPTED
+    assert job.preemptions == 1
+    assert job.resume_from is not None
+    assert job.resume_from.checkpoint_sha == base
+    assert reconcile_jobs(db, run_status=status, now=_NOW) == []
