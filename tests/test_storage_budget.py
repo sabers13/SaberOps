@@ -24,7 +24,8 @@ from pathlib import Path
 import pytest
 
 import saberops.storage_budget as sb
-from saberops.ownership import ProcessIdentity, current_boot_id
+from saberops.ownership import Liveness, ProcessIdentity, current_boot_id
+from saberops.ownership import probe_liveness as owner_probe_liveness
 from saberops.storage_budget import (
     AdmissionOutcome,
     Attribution,
@@ -615,6 +616,37 @@ def test_corrupt_owner_identity_stays_charged(tmp_path: Path) -> None:
     with StorageLedger(config, fs) as ledger:
         assert ledger.reclaim_stale(now=base + timedelta(seconds=600)) == ()
         assert ledger.assess(make_estimate(tmp_path)).total_active_remaining == 2 * GB
+
+
+def test_assessment_does_not_probe_live_leases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: ADR-0003 Amendment 2 (bounded owner scan, unexpired lease charged)."""
+    fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
+    base = datetime(2026, 10, 15, 12, 0, 0, tzinfo=UTC)
+    calls: list[int] = []
+
+    def counted(identity: ProcessIdentity | None) -> Liveness:
+        calls.append(1)
+        return owner_probe_liveness(identity)
+
+    # Patched through the module namespace: the probe is bound at import time.
+    monkeypatch.setattr(sb, "probe_liveness", counted)
+    with StorageLedger(make_config(tmp_path, lease_seconds=60.0), fs) as ledger:
+        for index in range(5):
+            assert ledger.try_reserve(
+                make_key(session=f"s{index}"), OwnerToken(f"o{index}", 1, dead_identity()),
+                make_estimate(tmp_path, GB), now=base,
+            ).admitted
+        report = ledger.assess(make_estimate(tmp_path), now=base + timedelta(seconds=30))
+        assert report.total_active_remaining == 5 * GB  # unexpired leases stay charged
+        assert calls == []  # no /proc read while the lease is valid
+        assert not any(item.stale for item in report.filesystems[0].contributions)
+        assert ledger.reclaim_stale(now=base + timedelta(seconds=30)) == ()
+        lapsed = ledger.assess(make_estimate(tmp_path), now=base + timedelta(seconds=120))
+        assert len(calls) == 5
+        assert all(item.stale for item in lapsed.filesystems[0].contributions)
+        assert lapsed.total_active_remaining == 5 * GB
 
 
 def test_stale_reservations_stay_fully_charged(tmp_path: Path) -> None:

@@ -1245,17 +1245,20 @@ class StorageLedger:
         Stale rows are still charged in full: an unproven owner never shrinks a
         reservation.  Only :meth:`reclaim_stale` may retire one, and only on
         positive proof of death plus an expired lease.
+
+        Liveness is probed only after the lease has lapsed.  A row inside its
+        lease can be neither reclaimed nor shrunk, so probing every row on
+        every assessment would cost one ``/proc`` read per reservation without
+        changing any decision; this keeps the assessment cost proportional to
+        the number of lapsed leases instead of the ledger size.  An unparseable
+        lease is never read as expired.
         """
         expiry = _parse_iso(reservation.lease_expires_at)
-        lease_expired = expiry is not None and moment >= expiry
-        liveness = probe_liveness(reservation.owner_identity)
-        if liveness is Liveness.DEAD and lease_expired:
+        if expiry is None or moment < expiry:
+            return False, ""
+        if probe_liveness(reservation.owner_identity) is Liveness.DEAD:
             return True, "owner_dead_lease_expired"
-        if liveness is Liveness.DEAD:
-            return True, "owner_dead_lease_active"
-        if lease_expired:
-            return True, "lease_expired_owner_unproven"
-        return False, ""
+        return True, "lease_expired_owner_unproven"
 
     def _contributions(
         self, conn: sqlite3.Connection, moment: datetime
