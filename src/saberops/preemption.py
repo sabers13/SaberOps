@@ -401,48 +401,104 @@ def _resolve_anchor_sha(
 ) -> str | None:
     """Resolve the exact commit SHA to anchor, failing closed with None.
 
-    Preference order: the newest recorded worker checkpoint (verified present
-    in the repo) -- the interruption path already committed the WIP there;
-    else a fresh checkpoint commit of dirty worktree state (the worktree is
-    located from the explicit hint or, when absent, from the newest attempt
-    row); else the exact existing worktree HEAD (never a fabricated hash);
-    else the job's frozen base SHA.  Every candidate is verified to exist
-    before it is returned.
+    The recorded worker checkpoint is only a *starting* candidate, never an
+    unconditional winner: an older recorded row (for example the checkpoint a
+    previous generation staged through :func:`prepare_resume`) must not shadow
+    newer verified work committed by the current attempt.  Resolution inspects
+    the current attempt's worktree (explicit hint, else the newest attempt row)
+    and proves lineage relative to the recorded anchor before preferring
+    either side:
+
+    * a dirty worktree is snapshotted as a fresh checkpoint commit and used
+      when it extends the trusted recorded anchor (an independently correct
+      capture of the latest attempt state);
+    * a clean worktree whose HEAD is the recorded anchor (or descends from it)
+      resolves to that newer commit; a clean worktree whose HEAD is an
+      *ancestor* of the recorded anchor resolves to the recorded anchor;
+    * a worktree HEAD that is neither ancestor nor descendant of the recorded
+      anchor is ambiguous -- untrusted, unrelated lineage -- so resolution
+      fails closed instead of discarding or fabricating the resume point;
+    * with no recorded anchor, the current behaviour is kept: dirty snapshot,
+      else the exact existing worktree HEAD, else the job's frozen base SHA.
+
+    Every returned candidate is a verified commit object in ``repo_path``;
+    object existence alone is never treated as lineage.  A recorded attempt
+    that points at a worktree this process cannot verify fails closed rather
+    than silently anchoring the frozen base.
     """
     recorded = latest_checkpoint_sha(db, run_id)
     if recorded is not None:
         try:
-            if GitManager.commit_exists(repo_path, recorded):
-                return recorded
+            if not GitManager.commit_exists(repo_path, recorded):
+                recorded = None
         except Exception:
             return None
+
     hint = worktree_path or _attempt_worktree_path(db, run_id)
+    work: Path | None = None
     if hint:
-        work = Path(hint)
+        candidate_path = Path(hint)
         try:
-            if work.exists():
-                changed = GitManager.get_changed_paths(work)
-                if changed:
-                    sha = GitManager.create_checkpoint_commit(
-                        work,
-                        f"orch checkpoint({run_id}/preempt): "
-                        "partial worker state (QUOTA_EXHAUSTED)",
-                    )
-                    if sha is not None:
-                        try:
-                            validate_candidate_sha(sha)
-                        except Exception:
-                            return None
-                        return sha
-                head = GitManager.get_ref_commit(work, "HEAD")
-                if head is not None:
-                    try:
-                        validate_candidate_sha(head)
-                    except Exception:
-                        return None
-                    return head
+            # Only a real worktree of the job repo is inspected; a stale or
+            # unrelated path is never trusted for a fabricated HEAD.
+            if candidate_path.exists() and GitManager.is_git_repo(candidate_path):
+                work = candidate_path
         except Exception:
             return None
+
+    if work is not None:
+        try:
+            changed = GitManager.get_changed_paths(work)
+            if changed:
+                sha = GitManager.create_checkpoint_commit(
+                    work,
+                    f"orch checkpoint({run_id}/preempt): "
+                    "partial worker state (QUOTA_EXHAUSTED)",
+                )
+                if sha is None:
+                    return None
+                try:
+                    validate_candidate_sha(sha)
+                except Exception:
+                    return None
+                if recorded is not None and not GitManager.is_ancestor(
+                    repo_path, recorded, sha
+                ):
+                    # The snapshot diverges from the trusted anchor: refuse
+                    # to pretend either lineage.
+                    return None
+                return sha
+            head = GitManager.get_ref_commit(work, "HEAD")
+            if head is not None:
+                try:
+                    validate_candidate_sha(head)
+                except Exception:
+                    return None
+                if recorded is not None:
+                    if head == recorded:
+                        return recorded
+                    if GitManager.is_ancestor(repo_path, recorded, head):
+                        # Verified newer work committed on top of the anchor.
+                        return head
+                    if GitManager.is_ancestor(repo_path, head, recorded):
+                        # The recorded anchor already covers this HEAD.
+                        return recorded
+                    return None
+                if GitManager.commit_exists(repo_path, head):
+                    return head
+                return None
+        except Exception:
+            return None
+        # A usable worktree with no HEAD and nothing dirty carries no newer
+        # work; the recorded anchor (if any) is the only honest candidate.
+        return recorded
+
+    if recorded is not None:
+        return recorded
+    if hint:
+        # An attempt recorded a worktree that is now absent or unverifiable:
+        # there may be lost WIP this process cannot prove, so fail closed
+        # instead of anchoring the frozen base.
         return None
     for candidate in (base_sha, job.base_sha):
         if not candidate:

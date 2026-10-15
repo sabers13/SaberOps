@@ -156,7 +156,14 @@ def _stage_run(db: Database, repo: str, base: str, run_id: str) -> None:
     db.create_run(_run(run_id, repo, base, status=RunStatus.PENDING))
 
 
-def _seed_quota_attempt(db: Database, run_id: str, repo: str, num: int = 1) -> None:
+def _seed_quota_attempt(
+    db: Database,
+    run_id: str,
+    repo: str,
+    num: int = 1,
+    *,
+    worktree: str | Path | None = None,
+) -> None:
     db.create_attempt(
         Attempt(
             id=f"{run_id}_a{num}",
@@ -164,7 +171,7 @@ def _seed_quota_attempt(db: Database, run_id: str, repo: str, num: int = 1) -> N
             attempt_number=num,
             provider="synthetic-provider",
             model="synthetic-model",
-            worktree_path=repo,
+            worktree_path=str(worktree) if worktree is not None else repo,
             branch_name=f"orch/{run_id}/a{num}",
             status=AttemptStatus.FAILED,
             created_at=_NOW.isoformat(),
@@ -346,6 +353,195 @@ def test_empty_worktree_anchors_real_head(tmp_path: Path) -> None:
     )
 
     assert out.owned and out.checkpoint_sha == base
+
+
+# ---------------------------------------------------------------------------
+# R4: recorded-anchor vs newer verified work
+# ---------------------------------------------------------------------------
+
+
+def _anchor_older_checkpoint(
+    db: Database, tmp_path: Path, repo: Path, base: str
+) -> tuple[str, Job]:
+    """Preempt ``run_old`` carrying committed WIP; return (recorded SHA, job).
+
+    Reproduces the generation boundary behind R4: an older checkpoint survives
+    on the job's resume contract (``resume_from``) and is re-staged onto a
+    later run, while that later run goes on to produce newer verified work.
+    """
+    wt_old = tmp_path / "wt_old"
+    GitManager.create_worktree(repo, "wt-old", wt_old, start_point=base)
+    (wt_old / "old.txt").write_text("older wip\n", encoding="utf-8")
+    _dispatched(db, str(repo), base, "job1", "run_old")
+    _seed_quota_attempt(db, "run_old", str(repo), worktree=wt_old)
+    _quota_evidence(db, "run_old")
+    out = preemption.complete_preemption(
+        db, run_id="run_old", repo_path=repo,
+        worktree_path=str(wt_old), base_sha=base, now=_NOW,
+    )
+    assert out.owned and out.checkpoint_sha is not None and out.checkpoint_sha != base
+    job = store.get_job(db, "job1")
+    assert job is not None and job.waiting_reason == WaitingReason.PREEMPTED
+    return out.checkpoint_sha, job
+
+
+def _stage_and_dispatch_resume(
+    db: Database,
+    repo: Path,
+    base: str,
+    *,
+    job: Job,
+    run_id: str,
+    worktree: Path,
+    recorded: str,
+) -> None:
+    """Stage the recorded anchor onto a fresh run, then re-dispatch it RUNNING.
+
+    Mirrors production order: ``prepare_resume`` writes the older checkpoint
+    row onto the new run *before* its worker runs; the resume path never calls
+    ``complete_preemption`` with an explicit ``worktree_path``, so resolution
+    must find the current attempt's worktree through the attempt row.
+    """
+    _stage_run(db, str(repo), base, run_id)
+    prep = preemption.prepare_resume(db, job=job, new_run_id=run_id, now=_NOW)
+    assert prep.resumed and prep.checkpoint_sha == recorded
+    db.update_run(run_id=run_id, status=RunStatus.RUNNING)
+    _seed_quota_attempt(db, run_id, str(repo), worktree=worktree)
+    store.mark_dispatched(db, "job1", run_id, now=_NOW)
+    _quota_evidence(db, run_id)
+
+
+def test_recorded_anchor_does_not_shadow_newer_verified_commit(tmp_path: Path) -> None:
+    """Covers: ADR-0002 D8 R4 newer clean committed work outranks stale anchor."""
+    repo = tmp_path / "repo"
+    base = _repo(repo)
+    db = _db(tmp_path)
+    recorded, job = _anchor_older_checkpoint(db, tmp_path, repo, base)
+
+    # The new generation's worker commits newer *clean* work on top of the
+    # staged record and then dies of quota with a clean tree, so the
+    # orchestrator writes no new checkpoint row: the persisted row is the old
+    # record.  Without the fix, resolution anchors the old SHA and loses T.
+    wt_new = tmp_path / "wt_new"
+    GitManager.create_worktree(repo, "wt-new", wt_new, start_point=recorded)
+    _stage_and_dispatch_resume(
+        db, repo, base, job=job, run_id="run_new",
+        worktree=wt_new, recorded=recorded,
+    )
+    (wt_new / "newer.txt").write_text("newer\n", encoding="utf-8")
+    _git(["add", "-A"], wt_new)
+    _git(["commit", "-m", "newer work"], wt_new)
+    newer = _git(["rev-parse", "HEAD"], wt_new)
+    assert newer != recorded and GitManager.is_ancestor(repo, recorded, newer)
+    latest = db.get_latest_worker_checkpoint("run_new")
+    assert latest is not None and latest.checkpoint_sha == recorded
+
+    out = preemption.complete_preemption(
+        db, run_id="run_new", repo_path=repo, base_sha=base, now=_NOW
+    )
+
+    assert out.owned and out.detail == "preempted"
+    assert out.checkpoint_sha == newer
+    assert GitManager.read_checkpoint_ref(repo, "job1", 1) == newer
+    requeued = store.get_job(db, "job1")
+    assert requeued is not None and requeued.resume_from is not None
+    assert requeued.resume_from.checkpoint_sha == newer
+    # The anchored commit really carries the newer file.
+    assert _git(["show", f"{newer}:newer.txt"], repo) == "newer"
+
+
+def test_newer_dirty_wip_supersedes_recorded_anchor(tmp_path: Path) -> None:
+    """Covers: ADR-0002 D8 R4 dirty newer WIP is snapshotted over old anchor."""
+    repo = tmp_path / "repo"
+    base = _repo(repo)
+    db = _db(tmp_path)
+    recorded, job = _anchor_older_checkpoint(db, tmp_path, repo, base)
+
+    wt_new = tmp_path / "wt_new"
+    GitManager.create_worktree(repo, "wt-new", wt_new, start_point=recorded)
+    _stage_and_dispatch_resume(
+        db, repo, base, job=job, run_id="run_new",
+        worktree=wt_new, recorded=recorded,
+    )
+    (wt_new / "dirty.txt").write_text("newer dirty\n", encoding="utf-8")
+
+    out = preemption.complete_preemption(
+        db, run_id="run_new", repo_path=repo, base_sha=base, now=_NOW
+    )
+
+    assert out.owned and out.detail == "preempted"
+    assert out.checkpoint_sha is not None and out.checkpoint_sha != recorded
+    assert GitManager.is_ancestor(repo, recorded, out.checkpoint_sha)
+    assert _git(["show", f"{out.checkpoint_sha}:dirty.txt"], repo) == "newer dirty"
+    requeued = store.get_job(db, "job1")
+    assert requeued is not None and requeued.resume_from is not None
+    assert requeued.resume_from.checkpoint_sha == out.checkpoint_sha
+
+
+def test_divergent_unrelated_head_fails_closed(tmp_path: Path) -> None:
+    """Covers: ADR-0002 D8 R4 untrusted divergent HEAD declines, keeps artifacts."""
+    repo = tmp_path / "repo"
+    base = _repo(repo)
+    db = _db(tmp_path)
+    recorded, job = _anchor_older_checkpoint(db, tmp_path, repo, base)
+
+    # An unrelated sibling commit: neither it nor the record is an ancestor
+    # of the other, so no trusted lineage can be proven.
+    other = tmp_path / "wt_other"
+    GitManager.create_worktree(repo, "wt-other", other, start_point=base)
+    (other / "other.txt").write_text("unrelated\n", encoding="utf-8")
+    _git(["add", "-A"], other)
+    _git(["commit", "-m", "unrelated"], other)
+    unrelated = _git(["rev-parse", "HEAD"], other)
+    assert not GitManager.is_ancestor(repo, recorded, unrelated)
+    assert not GitManager.is_ancestor(repo, unrelated, recorded)
+
+    _stage_and_dispatch_resume(
+        db, repo, base, job=job, run_id="run_new",
+        worktree=other, recorded=recorded,
+    )
+
+    out = preemption.complete_preemption(
+        db, run_id="run_new", repo_path=repo, base_sha=base, now=_NOW
+    )
+
+    assert not out.owned and out.detail == "no_anchor"
+    # Fail closed: nothing preempted, no new anchor, existing artifacts intact.
+    run_new = db.get_run("run_new")
+    assert run_new is not None and run_new.status == RunStatus.RUNNING
+    still = store.get_job(db, "job1")
+    assert still is not None and still.state == JobState.RUNNING
+    assert still.resume_from is not None
+    assert still.resume_from.checkpoint_sha == recorded
+    assert still.preemptions == 1
+    assert GitManager.read_checkpoint_ref(repo, "job1", 0) == recorded
+    assert GitManager.read_checkpoint_ref(repo, "job1", 1) is None
+
+
+def test_recorded_anchor_covers_clean_worktree_behind_it(tmp_path: Path) -> None:
+    """Covers: ADR-0002 D8 R4 a record ahead of a clean HEAD is not discarded."""
+    repo = tmp_path / "repo"
+    base = _repo(repo)
+    db = _db(tmp_path)
+    recorded, job = _anchor_older_checkpoint(db, tmp_path, repo, base)
+
+    # The new generation's worktree is still parked at the frozen base (a
+    # crash before restore): the record legitimately covers it, so the anchor
+    # stays the record rather than blindly forcing HEAD.
+    wt_new = tmp_path / "wt_new"
+    GitManager.create_worktree(repo, "wt-new", wt_new, start_point=base)
+    assert GitManager.is_ancestor(repo, base, recorded)
+    _stage_and_dispatch_resume(
+        db, repo, base, job=job, run_id="run_new",
+        worktree=wt_new, recorded=recorded,
+    )
+
+    out = preemption.complete_preemption(
+        db, run_id="run_new", repo_path=repo, base_sha=base, now=_NOW
+    )
+
+    assert out.owned and out.detail == "preempted"
+    assert out.checkpoint_sha == recorded
 
 
 def test_reset_confidence_gating(tmp_path: Path) -> None:
