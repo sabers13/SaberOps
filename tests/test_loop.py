@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -1160,6 +1161,198 @@ def test_scheduler_tick_default_global_ceiling_blocks_16th_job(
     queued = store.get_job(owner_db, "queued_over_ceiling")
     assert queued is not None
     assert queued.state == JobState.QUEUED
+
+
+def _seed_cap_jobs(
+    owner_db: Database, repo_dir: Path, running: int, queued: int, t0: datetime
+) -> None:
+    """Seed durable RUNNING and QUEUED jobs for global-capacity tick tests."""
+    for i in range(running):
+        store.insert_job(
+            owner_db,
+            _make_job(
+                f"cap_running_{i}",
+                str(repo_dir),
+                state=JobState.RUNNING,
+                current_run_id=f"cap_run_{i}",
+                created_at=t0.isoformat(),
+                updated_at=t0.isoformat(),
+                request_digest=f"cap_rg_{i}",
+            ),
+            now=t0,
+        )
+    for i in range(queued):
+        store.insert_job(
+            owner_db,
+            _make_job(
+                f"cap_queued_{i}",
+                str(repo_dir),
+                created_at=t0.isoformat(),
+                updated_at=t0.isoformat(),
+                request_digest=f"cap_dg_{i}",
+            ),
+            now=t0,
+        )
+
+
+def _cap_tick_kwargs(routes: RoutingSnapshot, policy: ControlPlanePolicy) -> dict[str, Any]:
+    from saberops.models import RunStatus
+
+    return {
+        "routes": routes,
+        "policy": policy,
+        "run_status": lambda rid: RunStatus.RUNNING,
+    }
+
+
+def test_scheduler_tick_explicit_limit_cannot_exceed_owner_cap(
+    owner_db: Database, tmp_path: Path
+) -> None:
+    """Covers: ADR-0002 D7 / F3 a programmatic global_slot_limit cannot raise
+    admission above the owner-configured concurrency.max_global cap.
+    """
+    t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
+    lease = acquire_lease(owner_db, "instance_cap_owner", ttl_seconds=30.0, now=t0)
+    assert lease is not None
+    repo_dir = tmp_path / "repo_cap_owner"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+    _seed_cap_jobs(owner_db, repo_dir, running=3, queued=1, t0=t0)
+
+    record_owner_quota(owner_db, "openai", "chatgpt-plus", 100.0, None, source="OWNER", now=t0)
+    routes = _make_routes(((_make_candidate("openai", "gpt-5"),),))
+    policy = replace(_make_policy(), max_global_concurrent=3)
+
+    launched: list[str] = []
+    res = scheduler_tick(
+        owner_db,
+        lease,
+        now=t0,
+        run_launcher=lambda j, d, r: launched.append(j.job_id),
+        clock_fn=lambda: t0,
+        global_slot_limit=99,  # attempt to raise far above the owner cap of 3
+        **_cap_tick_kwargs(routes, policy),
+    )
+    assert res.ran is True
+    assert res.dispatched == 0
+    assert launched == []
+    assert any(
+        isinstance(d, WaitDecision) and d.reason == WaitingReason.CONCURRENCY.value
+        for d in res.decisions
+    )
+    queued = store.get_job(owner_db, "cap_queued_0")
+    assert queued is not None and queued.state == JobState.QUEUED
+
+
+def test_scheduler_tick_explicit_limit_lowers_below_default(
+    owner_db: Database, tmp_path: Path
+) -> None:
+    """Covers: ADR-0002 D7 / F3 an explicit injection limit lowers the effective
+    ceiling below the 15 default (2 running with an injected limit of 2 waits).
+    """
+    t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
+    lease = acquire_lease(owner_db, "instance_cap_lower", ttl_seconds=30.0, now=t0)
+    assert lease is not None
+    repo_dir = tmp_path / "repo_cap_lower"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+    _seed_cap_jobs(owner_db, repo_dir, running=2, queued=1, t0=t0)
+
+    record_owner_quota(owner_db, "openai", "chatgpt-plus", 100.0, None, source="OWNER", now=t0)
+    routes = _make_routes(((_make_candidate("openai", "gpt-5"),),))
+    policy = _make_policy()  # no owner key -> deterministic default 15
+    assert policy.max_global_concurrent is None
+
+    res = scheduler_tick(
+        owner_db,
+        lease,
+        now=t0,
+        clock_fn=lambda: t0,
+        global_slot_limit=2,
+        **_cap_tick_kwargs(routes, policy),
+    )
+    assert res.ran is True
+    assert res.dispatched == 0
+    assert any(
+        isinstance(d, WaitDecision)
+        and d.reason == WaitingReason.CONCURRENCY.value
+        and d.details.get("limit") == 2
+        for d in res.decisions
+    )
+
+
+def test_scheduler_tick_cli_and_explicit_limits_both_lower(
+    owner_db: Database, tmp_path: Path
+) -> None:
+    """Covers: ADR-0002 D7 / F3 the effective ceiling is the minimum of the owner
+    cap, the CLI override and any explicit injection.
+    """
+    t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
+    lease = acquire_lease(owner_db, "instance_cap_min", ttl_seconds=30.0, now=t0)
+    assert lease is not None
+    repo_dir = tmp_path / "repo_cap_min"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+    _seed_cap_jobs(owner_db, repo_dir, running=2, queued=1, t0=t0)
+
+    record_owner_quota(owner_db, "openai", "chatgpt-plus", 100.0, None, source="OWNER", now=t0)
+    routes = _make_routes(((_make_candidate("openai", "gpt-5"),),))
+    policy = replace(_make_policy(), max_global_concurrent=15)
+
+    res = scheduler_tick(
+        owner_db,
+        lease,
+        now=t0,
+        clock_fn=lambda: t0,
+        global_slot_limit=99,
+        max_concurrent_override=2,
+        **_cap_tick_kwargs(routes, policy),
+    )
+    assert res.ran is True
+    assert res.dispatched == 0
+    assert any(
+        isinstance(d, WaitDecision)
+        and d.reason == WaitingReason.CONCURRENCY.value
+        and d.details.get("limit") == 2
+        for d in res.decisions
+    )
+
+
+@pytest.mark.parametrize("bad", [0, -1, True])
+def test_scheduler_tick_invalid_explicit_limit_fails_closed(
+    owner_db: Database, tmp_path: Path, bad: int
+) -> None:
+    """Covers: ADR-0002 D7 / F3 an invalid explicit limit fails closed and is
+    never interpreted as unlimited.
+    """
+    t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
+    lease = acquire_lease(owner_db, "instance_cap_bad", ttl_seconds=30.0, now=t0)
+    assert lease is not None
+    repo_dir = tmp_path / "repo_cap_bad"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+    _seed_cap_jobs(owner_db, repo_dir, running=0, queued=1, t0=t0)
+
+    record_owner_quota(owner_db, "openai", "chatgpt-plus", 100.0, None, source="OWNER", now=t0)
+    routes = _make_routes(((_make_candidate("openai", "gpt-5"),),))
+    policy = replace(_make_policy(), max_global_concurrent=15)
+
+    launched: list[str] = []
+    res = scheduler_tick(
+        owner_db,
+        lease,
+        now=t0,
+        run_launcher=lambda j, d, r: launched.append(j.job_id),
+        clock_fn=lambda: t0,
+        global_slot_limit=bad,
+        **_cap_tick_kwargs(routes, policy),
+    )
+    assert res.ran is False
+    assert res.reason == "invalid_global_concurrency"
+    assert res.dispatched == 0
+    assert launched == []
+    queued = store.get_job(owner_db, "cap_queued_0")
+    assert queued is not None and queued.state == JobState.QUEUED
 
 
 

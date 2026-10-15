@@ -415,19 +415,21 @@ def scheduler_tick(
     effective_pol = policy or load_control_plane_policy()
 
     # Resolve the effective aggregate top-level job ceiling (D7/F3).
-    # An explicit global_slot_limit is honoured verbatim; otherwise the
-    # owner-configured concurrency.max_global (or the deterministic default)
-    # applies, with any CLI --max-concurrent override lowering only.
-    if global_slot_limit is not None:
-        effective_global_limit: int | None = global_slot_limit
-    else:
-        try:
-            effective_global_limit = effective_global_slot_limit(
-                effective_pol, override=max_concurrent_override
-            )
-        except ValueError:
-            # Invalid override / config fails closed: no dispatch this tick.
-            return TickResult(ran=False, reason="invalid_global_concurrency")
+    # The owner-configured concurrency.max_global (or the deterministic
+    # default) is the authority; the CLI --max-concurrent override and any
+    # explicit programmatic global_slot_limit are LOWERING-ONLY additional
+    # inputs (effective = min of all), so neither can raise admission above
+    # the owner's cap. Invalid inputs fail closed.
+    try:
+        effective_global_limit: int = effective_global_slot_limit(
+            effective_pol,
+            override=max_concurrent_override,
+            injected=global_slot_limit,
+        )
+    except ValueError:
+        # Invalid override / injected limit / config fails closed: no
+        # dispatch this tick, never "unlimited".
+        return TickResult(ran=False, reason="invalid_global_concurrency")
 
     quotas = effective_quota_states(db, now=moment)
     cost_states = _load_all_cost_states(db)

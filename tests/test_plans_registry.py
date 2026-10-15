@@ -706,3 +706,29 @@ def test_effective_global_slot_limit_override_lowers_only() -> None:
         effective_global_slot_limit(owner15, override=-1)
     with pytest.raises(ValueError, match="max-concurrent override"):
         effective_global_slot_limit(owner15, override=True)
+
+
+def test_effective_global_slot_limit_injected_lowers_only() -> None:
+    """Covers: ADR-0002 D7 / F3 an injected programmatic limit is lowering-only
+    and cannot raise admission above the owner cap.
+    """
+    from saberops.control_plane.policy import effective_global_slot_limit
+
+    owner3 = _build(_concurrency_doc(3), "test")
+    owner15 = _build(_concurrency_doc(15), "test")
+    default = _build({"version": 2, "providers": {}, "quota_pools": {}}, "test")
+
+    # Owner cap of 3 always wins over a larger injected limit.
+    assert effective_global_slot_limit(owner3, injected=99) == 3
+    assert effective_global_slot_limit(owner3, injected=1) == 1
+    # The 15 default is the authority when the owner set no key.
+    assert effective_global_slot_limit(default, injected=7) == 7
+    assert effective_global_slot_limit(default, injected=99) == 15
+    # Minimum of owner, CLI override and injection.
+    assert effective_global_slot_limit(owner15, override=5, injected=2) == 2
+    assert effective_global_slot_limit(owner15, override=2, injected=99) == 2
+    assert effective_global_slot_limit(owner15, override=99, injected=99) == 15
+
+    for bad in (0, -1, True, False, "3", 1.5):
+        with pytest.raises(ValueError, match="injected global slot limit"):
+            effective_global_slot_limit(owner15, injected=bad)  # type: ignore[arg-type]
