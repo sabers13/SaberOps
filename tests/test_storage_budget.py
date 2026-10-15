@@ -571,6 +571,73 @@ def test_settle_requires_the_owner_generation(tmp_path: Path) -> None:
         assert ledger.active_reservations() != ()
 
 
+def test_settle_and_release_reject_a_foreign_incarnation(tmp_path: Path) -> None:
+    """Covers: ADR-0003 Amendment 2 (a copied token cannot close another incarnation)."""
+    fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
+    with StorageLedger(make_config(tmp_path), fs) as ledger:
+        recorded = ProcessIdentity.for_self()
+        # PID reuse: the same pid later, a different start time.  The pair
+        # (owner_id, generation) is identical, so only the incarnation can
+        # distinguish the stale process from the one that booked the row.
+        forged = dataclasses.replace(recorded, start_ticks=(recorded.start_ticks or 0) + 1)
+        assert forged != recorded
+
+        settle_key = make_key(session="settle")
+        owner = OwnerToken("owner", 1, recorded)
+        assert ledger.try_reserve(settle_key, owner, make_estimate(tmp_path, 2 * GB)).admitted
+        bogus = ledger.settle(settle_key, OwnerToken("owner", 1, forged))
+        assert bogus.outcome is AdmissionOutcome.UNAVAILABLE
+        assert bogus.reason_code == sb.FencingError.reason_code
+        # The live row, its charge and its audit trail are untouched.
+        assert [row.state for row in ledger.active_reservations()] == [
+            sb.ReservationState.RESERVED
+        ]
+        assert ledger.assess(make_estimate(tmp_path)).total_active_remaining == 2 * GB
+        assert [event.event for event in ledger.history(settle_key)] == ["RESERVED"]
+
+        release_key = make_key(session="release")
+        assert ledger.try_reserve(
+            release_key, OwnerToken("owner", 1, recorded), make_estimate(tmp_path, 2 * GB)
+        ).admitted
+        bogus_release = ledger.release(release_key, OwnerToken("owner", 1, forged))
+        assert bogus_release.outcome is AdmissionOutcome.UNAVAILABLE
+        assert bogus_release.reason_code == sb.FencingError.reason_code
+        assert ledger.assess(make_estimate(tmp_path)).total_active_remaining == 4 * GB
+
+        # The recorded incarnation closes normally, and idempotent replay (same
+        # incarnation) plus the documented no-identity delegation are preserved.
+        assert ledger.settle(settle_key, owner).reason == "SETTLED"
+        assert ledger.settle(settle_key, owner).reason == "already SETTLED"
+        assert (
+            ledger.release(release_key, OwnerToken("owner", 1)).outcome
+            is AdmissionOutcome.ADMITTED
+        )
+        assert ledger.active_reservations() == ()
+
+
+def test_no_identity_delegation_is_explicit_and_preserved(tmp_path: Path) -> None:
+    """Covers: ADR-0003 Amendment 2 (absent identity is documented delegation)."""
+    fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
+    with StorageLedger(make_config(tmp_path), fs) as ledger:
+        key = make_key()
+        # A caller that presents no identity opts into the logical-owner
+        # delegation: it rides the recorded copy of (owner_id, generation) and
+        # may start the next generation in-process.  That must keep working
+        # explicitly rather than being silently reinterpreted as a mismatch.
+        assert ledger.try_reserve(
+            key, OwnerToken("owner", 1, ProcessIdentity.for_self()),
+            make_estimate(tmp_path, 2 * GB),
+        ).admitted
+        assert ledger.settle(key, OwnerToken("owner", 1)).reason == "SETTLED"
+        reopened = ledger.try_reserve(
+            key, OwnerToken("owner", 2), make_estimate(tmp_path, 2 * GB)
+        )
+        assert reopened.admitted, reopened.reason
+        assert [event.event for event in ledger.history(key)] == [
+            "RESERVED", "SETTLED", "RESERVED",
+        ]
+
+
 def test_reopen_refuses_a_stale_generation_replay(tmp_path: Path) -> None:
     """Covers: ADR-0003 Amendment 2 (no stale resurrection of a settled key)."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
@@ -638,6 +705,101 @@ def test_reopen_by_an_authorised_successor_preserves_audit_timing(tmp_path: Path
             "RESERVED", "SETTLED", "TAKEOVER", "RESERVED",
         ]
         assert ledger.assess(make_estimate(tmp_path)).total_active_remaining == 2 * GB
+
+
+def test_reopen_refuses_a_foreign_live_incarnation_sharing_the_owner_id(
+    tmp_path: Path,
+) -> None:
+    """Covers: ADR-0003 Amendment 2 (a live foreign incarnation cannot reopen)."""
+    fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        foreign: ProcessIdentity | None = None
+        for _ in range(400):
+            foreign = ProcessIdentity.for_pid(child.pid)
+            if foreign is not None:
+                break
+            time.sleep(0.005)
+        assert foreign is not None, "could not read the child process identity"
+        assert owner_probe_liveness(foreign) is Liveness.LIVE
+        recorded = ProcessIdentity.for_self()
+        assert foreign != recorded
+        with StorageLedger(make_config(tmp_path), fs) as ledger:
+            key = make_key()
+            assert ledger.try_reserve(
+                key, OwnerToken("shared", 1, recorded), make_estimate(tmp_path, 2 * GB)
+            ).admitted
+            assert ledger.settle(key, OwnerToken("shared", 1)).reason == "SETTLED"
+            # A different live process that copied the owner_id string and merely
+            # raised the generation is not the recorded incarnation: the settled
+            # key stays closed while its predecessor is provably alive.
+            intruder = ledger.try_reserve(
+                key, OwnerToken("shared", 2, foreign), make_estimate(tmp_path, 2 * GB)
+            )
+            assert intruder.outcome is AdmissionOutcome.UNAVAILABLE
+            assert intruder.reason_code == sb.FencingError.reason_code
+            assert ledger.active_reservations() == ()
+            assert [event.event for event in ledger.history(key)] == ["RESERVED", "SETTLED"]
+    finally:
+        child.terminate()
+        child.wait(timeout=10)
+
+
+def test_reopen_by_a_distinct_incarnation_after_proven_death(tmp_path: Path) -> None:
+    """Covers: ADR-0003 Amendment 2 (recovery survives a legitimate identity change)."""
+    fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
+    base = datetime(2026, 10, 15, 12, 0, 0, tzinfo=UTC)
+    with StorageLedger(make_config(tmp_path, lease_seconds=60.0), fs) as ledger:
+        key = make_key()
+        assert ledger.try_reserve(
+            key, OwnerToken("shared", 1, dead_identity()), make_estimate(tmp_path, 2 * GB),
+            now=base,
+        ).admitted
+        created_at = ledger.active_reservations()[0].created_at
+        assert ledger.settle(key, OwnerToken("shared", 1), now=base).reason == "SETTLED"
+        # The recorded predecessor is proven dead *and* its lease has lapsed, so
+        # a distinct incarnation may take the next generation under the same
+        # owner id: genuine crash recovery is not broken by the incarnation fence.
+        successor = ProcessIdentity.for_self()
+        assert successor != dead_identity()
+        reopened = ledger.try_reserve(
+            key, OwnerToken("shared", 2, successor), make_estimate(tmp_path, 2 * GB),
+            now=base + timedelta(seconds=120),
+        )
+        assert reopened.admitted, reopened.reason
+        rows = ledger.active_reservations()
+        assert [row.owner_id for row in rows] == ["shared"]
+        assert rows[0].owner_generation == 2
+        assert rows[0].created_at == created_at
+        assert [event.event for event in ledger.history(key)] == [
+            "RESERVED", "SETTLED", "TAKEOVER", "RESERVED",
+        ]
+        assert ledger.assess(make_estimate(tmp_path)).total_active_remaining == 2 * GB
+
+
+def test_reopen_of_a_dead_predecessor_still_needs_a_lapsed_lease(tmp_path: Path) -> None:
+    """Covers: ADR-0003 Amendment 2 (proven death alone does not release the lease)."""
+    fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
+    base = datetime(2026, 10, 15, 12, 0, 0, tzinfo=UTC)
+    with StorageLedger(make_config(tmp_path, lease_seconds=60.0), fs) as ledger:
+        key = make_key()
+        assert ledger.try_reserve(
+            key, OwnerToken("shared", 1, dead_identity()), make_estimate(tmp_path, 2 * GB),
+            now=base,
+        ).admitted
+        assert ledger.settle(key, OwnerToken("shared", 1), now=base).reason == "SETTLED"
+        early = ledger.try_reserve(
+            key, OwnerToken("shared", 2, ProcessIdentity.for_self()),
+            make_estimate(tmp_path, 2 * GB), now=base + timedelta(seconds=30),
+        )
+        assert early.outcome is AdmissionOutcome.UNAVAILABLE
+        assert early.reason_code == sb.FencingError.reason_code
+        assert ledger.active_reservations() == ()
+        assert [event.event for event in ledger.history(key)] == ["RESERVED", "SETTLED"]
 
 
 def test_state_restart_keeps_the_same_reservation(tmp_path: Path) -> None:

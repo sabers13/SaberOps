@@ -1773,6 +1773,31 @@ class StorageLedger:
             f"previous owner generation {existing.owner_generation}",
         )
 
+    def _incarnation_conflict(self, existing: Reservation, owner: OwnerToken) -> bool:
+        """Report whether the caller presents a *different* process incarnation.
+
+        A pair of ``(owner_id, generation)`` values is only a fence when the
+        presenting process is the one that recorded it.  This is the shared
+        decision behind both the same-owner write path
+        (:meth:`_require_same_incarnation`) and the terminal reopen path
+        (:meth:`_authorise_reopen`): a presented identity that differs from the
+        recorded one is a PID-reused or copied token and can never inherit the
+        reservation on identity alone.
+
+        The check applies only when both sides record an incarnation.  A caller
+        that presents none keeps the historical opt-in *logical-owner
+        delegation* to the recorded ``(owner_id, generation)`` pair, and an
+        unreadable recorded identity (a corrupt row) cannot be compared either;
+        such a row is already held charged rather than read as free, because the
+        staleness/reclaim path needs positive proof of ``DEAD`` and
+        ``probe_liveness(None)`` is ``UNKNOWN`` (:meth:`_staleness`).
+        """
+        presented = owner.identity
+        recorded = existing.owner_identity
+        if presented is None or recorded is None:
+            return False
+        return presented != recorded
+
     def _require_same_incarnation(self, existing: Reservation, owner: OwnerToken) -> None:
         """Refuse a same-owner replay from a different process incarnation.
 
@@ -1780,11 +1805,7 @@ class StorageLedger:
         a caller that presents none is explicitly delegating to the recorded
         copy of the same logical ``(owner_id, generation)`` pair.
         """
-        presented = owner.identity
-        recorded = existing.owner_identity
-        if presented is None or recorded is None:
-            return
-        if presented != recorded:
+        if self._incarnation_conflict(existing, owner):
             raise FencingError(
                 f"incarnation mismatch for {existing.reservation_id}: the presented "
                 "process identity is not the recorded owner incarnation"
@@ -1796,11 +1817,16 @@ class StorageLedger:
         """Fence resurrection of a terminal (SETTLED/RELEASED) reservation.
 
         Reopening a settled key is a fresh lifecycle, so it demands a strictly
-        newer owner generation.  A *different* owner additionally needs the
-        recorded predecessor proven dead with a lapsed lease, exactly like a
-        crashed-owner takeover: a foreign or stale replay can never reopen a
-        settled key and silently become its owner.  The original ``created_at``
-        and the append-only event trail are preserved by
+        newer owner generation.  The same logical owner may take the next
+        generation only while it *is* the recorded incarnation (or delegates in
+        the documented no-identity form): a different live process that merely
+        shares the ``owner_id`` string and raises the generation is not that
+        owner and is fenced exactly like a foreign owner.  A *different*
+        owner — or a distinct presented incarnation of the same owner id —
+        additionally needs the recorded predecessor proven dead with a lapsed
+        lease, exactly like a crashed-owner takeover: a foreign or stale replay
+        can never reopen a settled key and silently become its owner.  The
+        original ``created_at`` and the append-only event trail are preserved by
         :meth:`_insert_locked`.
         """
         if owner.generation <= existing.owner_generation:
@@ -1808,7 +1834,9 @@ class StorageLedger:
                 f"stale generation {owner.generation} cannot reopen terminal "
                 f"{existing.reservation_id} (recorded generation {existing.owner_generation})"
             )
-        if owner.owner_id == existing.owner_id:
+        if owner.owner_id == existing.owner_id and not self._incarnation_conflict(
+            existing, owner
+        ):
             return
         liveness = probe_liveness(existing.owner_identity)
         if liveness is not Liveness.DEAD:
@@ -2017,6 +2045,12 @@ class StorageLedger:
                 raise FencingError(
                     f"owner mismatch closing {key.render()}: generation {owner.generation}"
                 )
+            # A copied ``(owner_id, generation)`` pair replayed by a different
+            # process incarnation (PID reuse) is not the recorded owner and may
+            # neither close the row nor ride the idempotent fast path: the same
+            # fence that guards try_reserve/renew/observe also guards settle and
+            # release, so a stale token cannot free another incarnation's bytes.
+            self._require_same_incarnation(existing, owner)
             if existing.state is state:
                 return StorageDecision(
                     outcome=AdmissionOutcome.ADMITTED,
