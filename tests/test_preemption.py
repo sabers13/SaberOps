@@ -568,6 +568,225 @@ def test_mixed_quota_and_gate_failure_does_not_preempt(tmp_path: Path) -> None:
     assert not out.owned and out.detail == "eligible_candidate_remains"
 
 
+def test_quota_then_admitted_gate_failure_with_no_eligible_event_declines(
+    tmp_path: Path,
+) -> None:
+    """Covers: ADR-0002 D8 F1 -- a durable no_eligible_candidate event must not
+    convert an admitted, gate-failing fallback into quota preemption.
+
+    The production ladder writes ``no_eligible_candidate`` for MIXED chains
+    that both launched and skipped candidates, so its mere presence is not
+    proof that no route was admitted.  Genuine quota (A) followed by an
+    admitted candidate that failed the gate (B) leaves the run's true verdict a
+    gate failure: the coordinator must decline and the normal FAILED path must
+    remain.
+    """
+    repo = tmp_path / "repo"
+    base = _repo(repo)
+    db = _db(tmp_path)
+    _dispatched(db, str(repo), base, "job1", "run_old")
+    # A: genuine quota interruption (attempt channel).
+    _seed_quota_attempt(db, "run_old", str(repo), num=1)
+    db.record_event(
+        "run_old", "quota_exhaustion_recorded",
+        payload={"provider": "p", "until": None, "until_confidence": "UNKNOWN"},
+    )
+    # B: admitted candidate that ran and failed the deterministic gate.  A gate
+    # failure carries no quota interruption reason (status FAILED only).
+    db.create_attempt(
+        Attempt(
+            id="run_old_a2", run_id="run_old", attempt_number=2,
+            provider="p2", model="m2", worktree_path=str(repo),
+            branch_name="orch/run_old/a2", status=AttemptStatus.FAILED,
+            created_at=_NOW.isoformat(), completed_at=_NOW.isoformat(),
+        )
+    )
+    # The ladder's own durable mixed-chain evidence.
+    db.record_event(
+        "run_old", "no_eligible_candidate",
+        payload={"outcome": "NO_ELIGIBLE_CANDIDATE"},
+    )
+
+    # Genuine quota is unchanged; the conservative predicate is what declines.
+    assert preemption.has_genuine_quota_signal(db, "run_old")
+    assert not preemption.has_no_eligible_evidence(db, "run_old")
+
+    out = preemption.complete_preemption(
+        db, run_id="run_old", repo_path=repo, base_sha=base, now=_NOW
+    )
+
+    assert not out.owned and out.detail == "eligible_candidate_remains"
+    assert db.get_run("run_old").status == RunStatus.RUNNING  # type: ignore[union-attr]
+    assert store.get_job(db, "job1").state == JobState.RUNNING  # type: ignore[union-attr]
+    assert GitManager.list_checkpoint_refs(repo, "job1") == {}
+
+
+def test_earlier_quota_evidence_plus_later_admitted_failure_declines(
+    tmp_path: Path,
+) -> None:
+    """Covers: ADR-0002 D8 F1 -- cross-generation pairing must not preempt.
+
+    Genuine quota evidence from an *earlier* chain/package (here the durable
+    ``quota_exhaustion_recorded`` event channel, with no quota attempt) must
+    never be paired with a *later* chain's mixed ``no_eligible_candidate``
+    event to mask an admitted candidate that failed on its merits.  The
+    durable schema carries no chain identity, so the predicate is run-global
+    and fails closed on this ambiguity.
+    """
+    repo = tmp_path / "repo"
+    base = _repo(repo)
+    db = _db(tmp_path)
+    _dispatched(db, str(repo), base, "job1", "run_old")
+    # Earlier generation/package: genuine quota, recorded as durable evidence.
+    db.record_event(
+        "run_old", "quota_exhaustion_recorded",
+        payload={
+            "provider": "pkg1-provider", "until": None,
+            "until_confidence": "UNKNOWN",
+        },
+    )
+    # Later generation/package: an admitted candidate that failed (non-quota).
+    db.create_attempt(
+        Attempt(
+            id="run_old_a1", run_id="run_old", attempt_number=1,
+            provider="pkg2-provider", model="m", worktree_path=str(repo),
+            branch_name="orch/run_old/a1", status=AttemptStatus.FAILED,
+            created_at=_NOW.isoformat(), completed_at=_NOW.isoformat(),
+        )
+    )
+    db.record_event(
+        "run_old", "no_eligible_candidate",
+        payload={"outcome": "NO_ELIGIBLE_CANDIDATE"},
+    )
+
+    assert preemption.has_genuine_quota_signal(db, "run_old")
+    assert not preemption.has_no_eligible_evidence(db, "run_old")
+    ready = preemption.should_preempt(db, "run_old")
+    assert not ready.eligible and ready.detail == "eligible_candidate_remains"
+
+    out = preemption.complete_preemption(
+        db, run_id="run_old", repo_path=repo, base_sha=base, now=_NOW
+    )
+
+    assert not out.owned and out.detail == "eligible_candidate_remains"
+    assert db.get_run("run_old").status == RunStatus.RUNNING  # type: ignore[union-attr]
+
+
+def test_admitted_timeout_attempt_blocks_quota_only_preemption(tmp_path: Path) -> None:
+    """Covers: ADR-0002 D8 F1 -- any admitted non-quota failure is disqualifying.
+
+    A timeout (or any non-quota failure) is not quota exhaustion; combined with
+    genuine quota and a durable no_eligible_candidate event it makes the run's
+    outcome ambiguous, so the conservative predicate declines.
+    """
+    repo = tmp_path / "repo"
+    base = _repo(repo)
+    db = _db(tmp_path)
+    _dispatched(db, str(repo), base, "job1", "run_old")
+    _seed_quota_attempt(db, "run_old", str(repo), num=1)
+    db.record_event(
+        "run_old", "quota_exhaustion_recorded",
+        payload={"provider": "p", "until": None, "until_confidence": "UNKNOWN"},
+    )
+    db.create_attempt(
+        Attempt(
+            id="run_old_a2", run_id="run_old", attempt_number=2,
+            provider="p2", model="m2", worktree_path=str(repo),
+            branch_name="orch/run_old/a2", status=AttemptStatus.TIMEOUT,
+            created_at=_NOW.isoformat(), completed_at=_NOW.isoformat(),
+        )
+    )
+    db.record_event(
+        "run_old", "no_eligible_candidate",
+        payload={"outcome": "NO_ELIGIBLE_CANDIDATE"},
+    )
+
+    assert preemption.has_genuine_quota_signal(db, "run_old")
+    assert not preemption.has_no_eligible_evidence(db, "run_old")
+
+    out = preemption.complete_preemption(
+        db, run_id="run_old", repo_path=repo, base_sha=base, now=_NOW
+    )
+
+    assert not out.owned and out.detail == "eligible_candidate_remains"
+    assert db.get_run("run_old").status == RunStatus.RUNNING  # type: ignore[union-attr]
+
+
+def test_later_quota_only_chain_after_earlier_success_still_preempts(
+    tmp_path: Path,
+) -> None:
+    """Covers: ADR-0002 D8 -- the conservative predicate is not a blanket rule.
+
+    An admitted candidate that *succeeded* in an earlier plan package is
+    compatible with a later, genuinely quota-only chain: the run still has no
+    admitted fallback left and must preempt.
+    """
+    repo = tmp_path / "repo"
+    base = _repo(repo)
+    db = _db(tmp_path)
+    _dispatched(db, str(repo), base, "job1", "run_old")
+    # Earlier package: an admitted candidate that completed successfully.
+    db.create_attempt(
+        Attempt(
+            id="run_old_a1", run_id="run_old", attempt_number=1,
+            provider="p1", model="m1", worktree_path=str(repo),
+            branch_name="orch/run_old/a1", status=AttemptStatus.SUCCESS,
+            commit_sha=base,
+            created_at=_NOW.isoformat(), completed_at=_NOW.isoformat(),
+        )
+    )
+    # Current chain: the only route dies of quota and the ladder records the
+    # no-eligible event for the skipped fallbacks.
+    _seed_quota_attempt(db, "run_old", str(repo), num=2)
+    db.record_event(
+        "run_old", "quota_exhaustion_recorded",
+        payload={"provider": "p2", "until": None, "until_confidence": "UNKNOWN"},
+    )
+    db.record_event(
+        "run_old", "no_eligible_candidate",
+        payload={"outcome": "NO_ELIGIBLE_CANDIDATE"},
+    )
+
+    assert preemption.has_no_eligible_evidence(db, "run_old")
+
+    out = preemption.complete_preemption(
+        db, run_id="run_old", repo_path=repo, base_sha=base, now=_NOW
+    )
+
+    assert out.owned and out.detail == "preempted"
+    assert store.get_job(db, "job1").state == JobState.QUEUED  # type: ignore[union-attr]
+
+
+def test_quota_only_multi_candidate_skip_still_preempts(tmp_path: Path) -> None:
+    """Covers: ADR-0002 D8 -- quota-only multi-candidate exhaustion still preempts.
+
+    Attempts are exclusively quota while the ladder skipped the remaining
+    candidates: the durable event plus the quota-only attempt history is the
+    genuine exhausted shape and must still preempt.
+    """
+    repo = tmp_path / "repo"
+    base = _repo(repo)
+    db = _db(tmp_path)
+    _dispatched(db, str(repo), base, "job1", "run_old")
+    _seed_quota_attempt(db, "run_old", str(repo), num=1)
+    db.record_event(
+        "run_old", "quota_exhaustion_recorded",
+        payload={"provider": "p", "until": None, "until_confidence": "UNKNOWN"},
+    )
+    db.record_event(
+        "run_old", "no_eligible_candidate",
+        payload={"outcome": "NO_ELIGIBLE_CANDIDATE"},
+    )
+
+    assert preemption.has_no_eligible_evidence(db, "run_old")
+
+    out = preemption.complete_preemption(
+        db, run_id="run_old", repo_path=repo, base_sha=base, now=_NOW
+    )
+
+    assert out.owned and out.detail == "preempted"
+
+
 def test_cancel_racing_preemption_fails_closed(tmp_path: Path) -> None:
     """Covers: prompt §3.7 cancel vs requeue races fail closed, touch nothing."""
     repo = tmp_path / "repo"

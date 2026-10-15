@@ -73,6 +73,7 @@ from saberops.jobs.models import (
 )
 from saberops.models import (
     TERMINAL_RUN_STATUSES,
+    AttemptStatus,
     RunStatus,
     WorkerCheckpoint,
     WorkerInterruptionReason,
@@ -257,26 +258,52 @@ def has_genuine_quota_signal(db: Any, run_id: str) -> bool:
 
 
 def has_no_eligible_evidence(db: Any, run_id: str) -> bool:
-    """True iff the run determined it has no admitted fallback route left.
+    """True iff the run's terminal outcome is quota-only exhaustion.
 
-    Two durable shapes count, both produced by the run's own M2-4b ladder
-    (never re-derived here by re-running admission):
+    Deliberately conservative ("fail closed"): D8 may preempt only when the
+    run ended with genuine quota exhaustion and **no admitted fallback**.  The
+    durable attempt and event channels carry no chain, tier, or generation
+    identity, so a non-quota failure can never be proven to belong to an older
+    chain than the quota signal.  Whenever the run admitted a candidate that
+    then failed for any non-quota reason -- a deterministic gate failure, a
+    model error, a timeout, an abort, a review failure -- the run failed on
+    its merits and quota-only exhaustion is unproven, even if a
+    ``no_eligible_candidate`` event is also present (that event is written for
+    mixed chains that both launched and skipped candidates).  A candidate that
+    *succeeded* (for example an earlier plan package) is not such a failure and
+    does not by itself contradict a later, genuinely quota-only chain.
 
-    1. a ``no_eligible_candidate`` event -- written when the ladder skips
-       every remaining candidate (the multi-candidate shape); or
-    2. every launched attempt ended with a QUOTA_EXHAUSTED interruption --
-       the single-candidate shape, where the ladder breaks on exhaustion
-       before a skip is ever recorded because the only route died of quota.
+    Only these durable shapes, all produced by the run's own M2-4b ladder
+    (never re-derived here by re-running admission), qualify:
 
-    Ordinary gate failures, model errors, aborts, and review failures leave
-    at least one non-quota attempt behind and never qualify.
+    1. a ``no_eligible_candidate`` event alongside no admitted non-quota
+       failure (the multi-candidate ladder shape);
+    2. every launched attempt ended with a QUOTA_EXHAUSTED interruption (the
+       single-candidate shape, where the ladder breaks on exhaustion before a
+       skip is ever recorded); or
+    3. no launched attempt at all alongside the recorded event (the zero-launch
+       shape, where every candidate was skipped before dispatch).
+
+    An unreadable attempt channel fails closed (declines).  Ordinary gate
+    failures, model errors, aborts, and review failures leave at least one
+    non-quota failed attempt behind and never qualify.
     """
-    if _event_payloads(db, run_id, "no_eligible_candidate"):
-        return True
     try:
         attempts = db.get_attempts_for_run(run_id)
     except Exception:
         return False
+    for attempt in attempts:
+        if getattr(attempt, "interruption_reason", None) == _QUOTA_EXHAUSTED:
+            continue
+        if getattr(attempt, "status", None) == AttemptStatus.SUCCESS:
+            # An older admitted success (e.g. a previous plan package) is
+            # compatible with a later quota-only chain; it is not a failure.
+            continue
+        # An admitted, non-quota, non-successful attempt: the run's outcome
+        # was decided on its merits, so quota-only exhaustion is unproven.
+        return False
+    if _event_payloads(db, run_id, "no_eligible_candidate"):
+        return True
     if not attempts:
         return False
     return all(

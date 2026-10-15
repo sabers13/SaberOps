@@ -890,6 +890,115 @@ def test_quota_exhausted_multi_candidate_chain_records_no_eligible(
     assert job.resume_from is not None
 
 
+def test_mixed_quota_gate_failure_and_skip_chain_does_not_preempt(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """Covers: ADR-0002 D8 F1 -- the real 3-candidate mixed-chain ladder shape.
+
+    Chain ``[A/h3/m1 -> QUOTA_EXHAUSTED]`` then ``[B/h4/m2 -> admitted, gate
+    FAILED]`` then ``[C/h3/m3 -> skipped as quota-blocked]``.  The production
+    ladder records a durable ``no_eligible_candidate`` event (it both launched
+    and skipped candidates) and a genuine quota attempt, but B was admitted and
+    failed the deterministic gate.  The run's true verdict is a gate failure:
+    the job-owned run must stay FAILED (never PREEMPTED) and the job must not
+    be requeued.
+    """
+    repo = tmp_path / "repo"
+    base = _init_repo(repo)
+    # The module fixture only verifies ``h3``; this regression needs a second,
+    # independently admitted provider so candidate B can actually be launched.
+    # Scope an isolated owner config (h3 + h4) to this test only.
+    cfg = tmp_path / "xdg_cfg"
+    _write_synthetic_verified_postures(cfg)
+    cp_path = cfg / "saberops" / "control_plane.json"
+    cp_doc = json.loads(cp_path.read_text(encoding="utf-8"))
+    cp_doc["providers"]["h4"] = {"state": "ALLOWED"}
+    cp_doc["postures"]["h4"] = {
+        "class": "A",
+        "policy_urls": ["https://example.com/h4-policy"],
+        "ttl_days": 90,
+        "verified_on": datetime.now(UTC).date().isoformat(),
+        "note": "synthetic verified posture for the mixed-chain F1 regression",
+    }
+    cp_path.write_text(json.dumps(cp_doc), encoding="utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(cfg))
+    monkeypatch.setenv("XDG_STATE_HOME", str(cfg))
+    log: list[str] = []
+    calls: list[str] = []
+    worker_h3 = ScriptedWorker("h3", {"m1": _quota_exhausted_action("h3", "m1")}, log)
+    worker_h4 = ScriptedWorker(
+        "h4", {"m2": _success_with_file("h4", "m2", "candidate.txt", "x\n")}, log
+    )
+    monkeypatch.setattr(
+        "saberops.orchestrator.resolve_candidate_chain",
+        _role_keyed_chain(
+            [
+                WorkerCandidate("h3", "m1"),
+                WorkerCandidate("h4", "m2"),
+                WorkerCandidate("h3", "m3"),
+            ],
+            [],
+            calls,
+        ),
+    )
+    db = Database(tmp_path / "orch.db")
+    orch = Orchestrator(
+        db=db,
+        registry=AdapterRegistry([worker_h3, worker_h4]),
+        worktree_base=tmp_path / "wt",
+    )
+    config = resolve_run_config(
+        task="fix typo in readme",
+        target_repo=repo,
+        # B writes candidate.txt but never ok.txt, so the deterministic gate
+        # fails on an admitted candidate (a real GATE_FAILURE, not quota).
+        gate_command=_ok_gate(),
+        publish_candidate=False,
+    )
+    from saberops.provenance import mint_run_provenance as _real_mint
+
+    _owned: list[str] = []
+
+    def _mint_and_own(mint_repo: Any, mint_task: str) -> Any:
+        provenance = _real_mint(mint_repo, mint_task)
+        if not _owned:
+            _owning_job(db, repo, base, "job1", provenance.run_id)
+            _owned.append(provenance.run_id)
+        return provenance
+
+    monkeypatch.setattr("saberops.orchestrator.mint_run_provenance", _mint_and_own)
+
+    result = orch.run(config=config, is_peak=False)
+    run_id = result.run_id
+
+    # The production ladder really produced the F1 shape: mixed-chain evidence
+    # plus an admitted, gate-failing candidate.
+    assert _events_by_type(db.get_events(run_id), "no_eligible_candidate")
+    assert _events_by_type(db.get_events(run_id), "quota_exhaustion_recorded")
+    assert _events_by_type(db.get_events(run_id), "gate_failed")
+    attempts = db.get_attempts_for_run(run_id)
+    quota = WorkerInterruptionReason.QUOTA_EXHAUSTED.value
+    assert any(a.interruption_reason == quota for a in attempts)
+    assert any(
+        a.interruption_reason != quota and a.status == AttemptStatus.FAILED
+        for a in attempts
+    )
+
+    # F1: the truthful FAILED outcome must remain -- no preemption, no requeue.
+    assert result.status == RunStatus.FAILED
+    assert db.get_run(run_id) is not None
+    assert db.get_run(run_id).status == RunStatus.FAILED  # type: ignore[union-attr]
+    job = store.get_job(db, "job1")
+    assert job is not None
+    assert job.state == JobState.RUNNING
+    assert job.waiting_reason != WaitingReason.PREEMPTED
+    assert job.preemptions == 0
+    assert job.resume_from is None
+    assert not _events_by_type(db.get_events(run_id), "run_preempted")
+    assert not _events_by_type(db.get_events(run_id), "preemption_committed")
+    assert GitManager.list_checkpoint_refs(repo, "job1") == {}
+
+
 def test_quota_exhausted_standalone_run_keeps_failed_behavior(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
