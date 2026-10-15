@@ -601,6 +601,17 @@ def _check_legacy_manager_state() -> DoctorFinding | None:
     return None
 
 
+def _positive_int_arg(value: str) -> int:
+    """argparse type for a strictly positive integer (used by --max-concurrent)."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(f"invalid integer value: {value!r}") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer (>= 1)")
+    return parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build CLI argument parser."""
     parser = argparse.ArgumentParser(
@@ -1562,6 +1573,17 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=60.0,
         help="Seconds between ticks (default: 60.0).",
+    )
+    scheduler_run.add_argument(
+        "--max-concurrent",
+        type=_positive_int_arg,
+        default=None,
+        metavar="N",
+        help=(
+            "Lower the effective owner global ceiling on concurrently RUNNING"
+            " top-level jobs for this run (aggregate admission only; cannot"
+            " raise the owner-configured ceiling)."
+        ),
     )
     scheduler_run.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
     scheduler_run.add_argument("--json", action="store_true", help="JSON output")
@@ -3875,6 +3897,7 @@ def handle_scheduler_run(args: argparse.Namespace) -> int:
     db = _Database(db_path) if db_path else _Database()
     run_once = bool(getattr(args, "once", False))
     interval = float(getattr(args, "interval_seconds", 60.0) or 60.0)
+    max_concurrent = getattr(args, "max_concurrent", None)
 
     readiness_svc: Any = None
     try:
@@ -3891,10 +3914,17 @@ def handle_scheduler_run(args: argparse.Namespace) -> int:
             tick_interval=interval,
             once=run_once,
             readiness_service=readiness_svc,
+            max_concurrent_override=max_concurrent,
         )
         if result is None or (not result.ran and result.reason in ("lease_held_by_other", "lost_lease")):
             reason = result.reason if result is not None else "lease_held_by_other"
             print(f"[!] Scheduler lease held by another instance ({reason})", file=sys.stderr)
+            return 2
+        if not result.ran and result.reason == "invalid_global_concurrency":
+            print(
+                "[!] Scheduler aborted: invalid global concurrency configuration",
+                file=sys.stderr,
+            )
             return 2
 
         if getattr(args, "json", False):

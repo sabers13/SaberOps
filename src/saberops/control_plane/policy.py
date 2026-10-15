@@ -14,6 +14,13 @@ from saberops.control_plane.capabilities import normalize_required_capabilities
 from saberops.control_plane.plans import PlanSet, validate_plan_sections
 from saberops.control_plane.quota_policy import QuotaPoolMode, QuotaPoolPolicy
 
+#: Owner-approved interim default for the aggregate ceiling on concurrently
+#: RUNNING top-level scheduled jobs (D7 global slot). Derived from the owner
+#: decision of "3 active projects x 5 executing tasks"; it is an interim
+#: aggregate bridge only and does NOT enforce the project-aware 3x5 policy
+#: (that belongs to the wave executor / project registry / UI steps).
+DEFAULT_MAX_GLOBAL_CONCURRENT: int = 15
+
 
 class ProviderPolicyState(StrEnum):
     ALLOWED = "ALLOWED"
@@ -43,6 +50,11 @@ class ControlPlanePolicy:
     quota_pools: dict[str, QuotaPoolPolicy]
     content_hash: str
     plans: PlanSet = field(default_factory=PlanSet.empty)
+    #: Owner-configured aggregate ceiling on concurrently RUNNING top-level
+    #: scheduled jobs (``concurrency.max_global``). ``None`` means the owner
+    #: has not set one, so the deterministic interim default
+    #: :data:`DEFAULT_MAX_GLOBAL_CONCURRENT` applies at the scheduler seam.
+    max_global_concurrent: int | None = None
 
     def provider(self, name: str) -> ProviderPolicy:
         return self.provider_policies.get(
@@ -51,6 +63,27 @@ class ControlPlanePolicy:
                 name.strip().lower(), ProviderPolicyState.ALLOWED_WITH_WARNING, "unknown provider"
             ),
         )
+
+
+def effective_global_slot_limit(
+    policy: ControlPlanePolicy, *, override: int | None = None
+) -> int:
+    """Resolve the effective aggregate top-level job ceiling.
+
+    The owner-configured ``concurrency.max_global`` wins when present;
+    otherwise the deterministic interim default
+    :data:`DEFAULT_MAX_GLOBAL_CONCURRENT` applies.  An ``override`` (the
+    ``orch scheduler run --max-concurrent N`` flag) can only **lower** the
+    effective ceiling: raising it requires an owner config/UI change, not an
+    untrusted process flag.  An invalid override fails closed.
+    """
+    owner_cap = policy.max_global_concurrent
+    effective = DEFAULT_MAX_GLOBAL_CONCURRENT if owner_cap is None else owner_cap
+    if override is None:
+        return effective
+    if isinstance(override, bool) or not isinstance(override, int) or override < 1:
+        raise ValueError("max-concurrent override must be an int >= 1")
+    return min(effective, override)
 
 
 def _quota_pool_entry(pool: QuotaPoolPolicy) -> dict[str, object]:
@@ -106,6 +139,10 @@ class FrozenControlPlane:
         }
         plans_payload = _plans_digest_payload(self.policy.plans)
         payload.update(plans_payload)
+        if self.policy.max_global_concurrent is not None:
+            # Covered only when the owner set it, so snapshots frozen before
+            # this key existed keep their historical digest byte-for-byte.
+            payload["concurrency"] = {"max_global": self.policy.max_global_concurrent}
         return payload
 
     def as_dict(self) -> dict[str, object]:
@@ -235,6 +272,10 @@ def _policy_payload(policy: ControlPlanePolicy) -> dict[str, object]:
         },
     }
     payload.update(_plans_digest_payload(policy.plans))
+    if policy.max_global_concurrent is not None:
+        # Conditional so a document without the owner key hashes exactly as
+        # it did before the key existed (legacy content_hash stability).
+        payload["concurrency"] = {"max_global": policy.max_global_concurrent}
     return payload
 
 
@@ -264,6 +305,24 @@ def _build(data: object, source: str) -> ControlPlanePolicy:
             plans = validate_plan_sections(data, source)
         except ValueError as exc:
             raise ValueError(f"Control-plane config at {source}: {exc}") from exc
+
+    # Owner global aggregate ceiling (concurrency.max_global). Absent key ->
+    # unset (scheduler applies DEFAULT_MAX_GLOBAL_CONCURRENT). A present but
+    # invalid block fails closed here; it never degrades to unbounded.
+    max_global_concurrent: int | None = None
+    concurrency = data.get("concurrency")
+    if concurrency is not None:
+        if not isinstance(concurrency, dict):
+            raise ValueError(
+                f"Control-plane config at {source}: concurrency must be an object"
+            )
+        raw_max = concurrency.get("max_global")
+        if isinstance(raw_max, bool) or not isinstance(raw_max, int) or raw_max < 1:
+            raise ValueError(
+                f"Control-plane config at {source}: concurrency.max_global"
+                " must be an int >= 1"
+            )
+        max_global_concurrent = raw_max
     parsed_pools: dict[str, QuotaPoolPolicy] = {}
     for pool_id, raw in pools.items():
         if not isinstance(pool_id, str) or not isinstance(raw, dict):
@@ -297,7 +356,7 @@ def _build(data: object, source: str) -> ControlPlanePolicy:
             float(raw.get("red_line_pct", 15.0)),
             member_routes,
         )
-    policy = ControlPlanePolicy(parsed, parsed_pools, "", plans)
+    policy = ControlPlanePolicy(parsed, parsed_pools, "", plans, max_global_concurrent)
     canonical = json.dumps(
         _policy_payload(policy),
         sort_keys=True,
@@ -305,7 +364,11 @@ def _build(data: object, source: str) -> ControlPlanePolicy:
         separators=(",", ":"),
     )
     return ControlPlanePolicy(
-        parsed, parsed_pools, hashlib.sha256(canonical.encode()).hexdigest(), plans
+        parsed,
+        parsed_pools,
+        hashlib.sha256(canonical.encode()).hexdigest(),
+        plans,
+        max_global_concurrent,
     )
 
 
@@ -403,7 +466,7 @@ def reconstruct_frozen_control_plane(
         "providers": provider_data,
         "quota_pools": _merge_snapshot_pools(pools, raw.get("pool_plans")),
     }
-    for key in ("accounts", "postures", "reserves"):
+    for key in ("accounts", "postures", "reserves", "concurrency"):
         if key in raw:
             policy_data[key] = raw[key]
     policy = _build(policy_data, "frozen run snapshot")
@@ -513,7 +576,7 @@ def _dump_v2(policy: ControlPlanePolicy, raw: dict[str, object]) -> dict[str, ob
         },
         "quota_pools": pools,
     }
-    for key in ("accounts", "postures", "reserves"):
+    for key in ("accounts", "postures", "reserves", "concurrency"):
         if key in raw:
             data[key] = raw[key]
     return data
@@ -554,7 +617,11 @@ def set_provider_policy(provider: str, state: str, warning: str | None = None) -
         provider.strip().lower(), state, warning
     )
     updated = ControlPlanePolicy(
-        providers, dict(current.quota_pools), current.content_hash, current.plans
+        providers,
+        dict(current.quota_pools),
+        current.content_hash,
+        current.plans,
+        current.max_global_concurrent,
     )
     return _write_policy(updated, raw)
 
@@ -573,7 +640,11 @@ def set_quota_pool_policy(
     pools = dict(current.quota_pools)
     pools[pool_id] = pool
     updated = ControlPlanePolicy(
-        dict(current.provider_policies), pools, current.content_hash, current.plans
+        dict(current.provider_policies),
+        pools,
+        current.content_hash,
+        current.plans,
+        current.max_global_concurrent,
     )
     # The caller replaces this pool's member list outright (plain strings);
     # every other section and this pool's non-member extras are preserved.

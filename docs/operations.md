@@ -87,10 +87,39 @@ show` and `orch reviewer show` (`orch routing show` points there too).
 
 ## Pacing scheduler (`orch scheduler run`)
 
-`orch scheduler run [--once] [--interval-seconds INT]` runs the deterministic
-pacing scheduler loop (ADR-0002 D7). Queued jobs are scheduled in strict priority
-order: `URGENT` > `NORMAL` > `BACKGROUND`, with earliest deadline first, then FIFO
-by creation time. `BACKGROUND` jobs require binding-window pace >= 4.0 %/h.
+`orch scheduler run [--once] [--interval-seconds INT] [--max-concurrent N]`
+runs the deterministic pacing scheduler loop (ADR-0002 D7). Queued jobs are
+scheduled in strict priority order: `URGENT` > `NORMAL` > `BACKGROUND`, with
+earliest deadline first, then FIFO by creation time. `BACKGROUND` jobs require
+binding-window pace >= 4.0 %/h.
+
+### Global aggregate concurrency ceiling (interim bridge)
+
+The scheduler enforces a ceiling on concurrently **RUNNING top-level jobs**.
+It counts durable RUNNING job state (including jobs with no
+`capacity_reservations` row) plus same-tick simulated starts, so two jobs from
+distinct pools both count against the same ceiling. Per-model turns inside an
+already-running job are *not* separate jobs and are never counted.
+
+The effective ceiling is the owner setting `concurrency.max_global` in the
+control-plane config, or the deterministic interim default **15** when the
+owner has not set it. The value is a positive integer; an invalid value (0,
+negative, boolean, string, or a `concurrency` block without `max_global`) fails
+closed at config load — it never degrades to unbounded.
+
+`--max-concurrent N` can only **lower** the effective ceiling for that run; it
+cannot raise it above the owner-configured value. Raising the ceiling is an
+owner config/UI change.
+
+**Scope limitation (honest):** this is aggregate admission only. It does **not**
+enforce the owner's project-aware policy of *3 concurrently active projects ×
+5 executing tasks per project*, because M2-4b has no durable registered project
+identity or wave-child task identity yet. That two-dimensional enforcement
+belongs to the wave executor (parent/child tasks), project registry, owner
+settings service, and the editable UI. Until then the status is:
+`GLOBAL AGGREGATE IMPLEMENTED / PROJECT-AWARE DIMENSIONS DEFERRED`. This
+ceiling is independent of, and does not replace, provider-pool maxima, quota
+red lines, billing posture, gate-slot or host limits.
 
 The scheduler uses a single-instance owner-DB lease (`capacity_scheduler_lease`)
 with fencing tokens to ensure exactly one scheduler instance dispatches at a time.

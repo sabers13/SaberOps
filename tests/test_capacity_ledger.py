@@ -628,3 +628,76 @@ def test_post_observation_charges_preserves_cutoff_and_reset_semantics(tmp_path:
     charges_rolled = post_observation_charges(db, t_after_reset)
     assert charges_rolled.get(("p1", "5h")) == 0.0
 
+
+def test_post_observation_charges_partial_schema_reservations_only_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """Covers: ADR-0002 D2/D7 partial capacity schema (reservations present,
+    observations missing) must never be reported as zero debt.
+    """
+    from saberops.capacity.ledger import post_observation_charges
+    from saberops.capacity.store import ensure_tables, owner_connection
+
+    db = _db(tmp_path, name="partial_res_only.db")
+    ensure_tables(db)
+    now = datetime(2026, 10, 15, 12, 0, 0, tzinfo=UTC)
+    with owner_connection(db) as conn:
+        # Active debt recorded, then the observations table is lost, leaving
+        # a partially initialized capacity schema.
+        conn.execute(
+            "INSERT INTO capacity_reservations (id, run_id, job_id, route,"
+            " pool_id, window_id, multiplier, size_bucket, cost_pct, spread_pct,"
+            " state, total_tokens, created_at, settled_at) VALUES"
+            " ('res_1', 'run_1', 'job_1', 'p1/m1', 'p1', '5h', 1.0, 'M', 42.0,"
+            " 3.0, 'RESERVED', NULL, '2026-10-15T03:00:00+00:00', NULL)"
+        )
+        conn.execute("DROP TABLE capacity_observations")
+        conn.commit()
+
+    with pytest.raises(sqlite3.OperationalError, match="partially initialized"):
+        post_observation_charges(db, now)
+
+
+def test_post_observation_charges_partial_schema_observations_only_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """Covers: ADR-0002 D2/D7 reversed partial schema (observations present,
+    reservations missing) also fails closed rather than reporting zero debt.
+    """
+    from saberops.capacity.ledger import (
+        post_observation_charges,
+        record_probe_window_observation,
+    )
+    from saberops.capacity.store import ensure_tables, owner_connection
+
+    db = _db(tmp_path, name="partial_obs_only.db")
+    ensure_tables(db)
+    now = datetime(2026, 10, 15, 12, 0, 0, tzinfo=UTC)
+    record_probe_window_observation(
+        db, "p1", "5h", remaining_pct=50.0, harness="test", reset_at=None, now=now
+    )
+    with owner_connection(db) as conn:
+        conn.execute("DROP TABLE capacity_reservations")
+        conn.commit()
+
+    with pytest.raises(sqlite3.OperationalError, match="partially initialized"):
+        post_observation_charges(db, now)
+
+
+def test_capacity_tables_present_reports_required_subset(tmp_path: Path) -> None:
+    """Covers: ADR-0002 D2/D7 schema discovery distinguishes absent from partial."""
+    from saberops.capacity.ledger import (
+        REQUIRED_CAPACITY_TABLES,
+        capacity_tables_present,
+    )
+    from saberops.capacity.store import ensure_tables, owner_connection
+
+    unconfigured = _db(tmp_path, name="unconfigured_scan.db")
+    with owner_connection(unconfigured) as conn:
+        assert capacity_tables_present(conn) == frozenset()
+
+    full = _db(tmp_path, name="full_scan.db")
+    ensure_tables(full)
+    with owner_connection(full) as conn:
+        assert capacity_tables_present(conn) == REQUIRED_CAPACITY_TABLES
+

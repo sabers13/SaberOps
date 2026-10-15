@@ -298,16 +298,35 @@ def _get_cost_estimate(
 
 
 def check_capacity_tables_exist(db: Any) -> bool:
-    """Return True if capacity subsystem tables exist in db."""
+    """Return True iff **every** required capacity table exists in ``db``.
+
+    ``False`` means the owner DB is genuinely unconfigured: no required
+    capacity table exists at all.  A *partially* initialized schema (some
+    required tables present, others missing) or an error during schema
+    discovery raises ``sqlite3.OperationalError``/``sqlite3.DatabaseError``
+    instead of returning a bool, so callers wrapped in a fail-closed
+    boundary map it to ``QUOTA_EVIDENCE_REQUIRED`` rather than mistaking a
+    half-built ledger for "no debt" (ADR-0002 D2/D7).
+    """
     if db is None or (not hasattr(db, "db_path") and not hasattr(db, "owner_db")):
         return False
+    from saberops.capacity.ledger import (
+        REQUIRED_CAPACITY_TABLES,
+        capacity_tables_present,
+    )
     from saberops.capacity.store import owner_connection
 
     with owner_connection(db) as conn:
-        cur = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='capacity_reservations'"
+        present = capacity_tables_present(conn)
+    if not present:
+        return False
+    missing = REQUIRED_CAPACITY_TABLES - present
+    if missing:
+        raise sqlite3.OperationalError(
+            "capacity schema partially initialized; missing required"
+            " tables: " + ", ".join(sorted(missing))
         )
-        return cur.fetchone() is not None
+    return True
 
 
 def is_capacity_subsystem_configured(

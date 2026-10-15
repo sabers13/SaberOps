@@ -7,8 +7,10 @@ one capability escalation).
 
 from __future__ import annotations
 
+import json
 import sys
 from collections.abc import Generator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -36,11 +38,42 @@ from saberops.workers.base import WorkerAdapter
 from saberops.workers.registry import AdapterRegistry
 
 
+def _write_synthetic_verified_postures(config_home: Path) -> None:
+    """Seed an isolated owner config with a verified posture for the synthetic
+    ``h3`` candidate used by this module.
+
+    Covers: ADR-0002 D2 / WORKFLOW §7 authorized setup-only fixture migration.
+    This adds ONLY a synthetic provider/posture record needed to preserve the
+    module's historical control-flow assertions now that unverified routes
+    fail closed (F1); no assertion or expected behaviour is changed and no real
+    vendor receives an attestation.
+    """
+    cfg_dir = config_home / "saberops"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    today_iso = datetime.now(UTC).date().isoformat()
+    cp_doc = {
+        "version": 2,
+        "providers": {"h3": {"state": "ALLOWED"}},
+        "quota_pools": {},
+        "postures": {
+            "h3": {
+                "class": "A",
+                "policy_urls": ["https://example.com/h3-policy"],
+                "ttl_days": 90,
+                "verified_on": today_iso,
+                "note": "synthetic verified test posture for role-chain contract",
+            }
+        },
+    }
+    (cfg_dir / "control_plane.json").write_text(json.dumps(cp_doc), encoding="utf-8")
+
+
 def _isolate_xdg_config(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> Generator[None, None, None]:
     mpatch = pytest.MonkeyPatch()
     temp_dir = tmp_path_factory.mktemp("hermetic_xdg_config_role_contract")
+    _write_synthetic_verified_postures(temp_dir)
     mpatch.setenv("XDG_CONFIG_HOME", str(temp_dir))
     mpatch.setenv("XDG_STATE_HOME", str(temp_dir))
     yield
@@ -488,6 +521,7 @@ def test_schema2_frozen_snapshot_continuation_keeps_bytes_and_worker_chain(
         monkeypatch.setenv(key, str(tmp_path / key))
     for key in ("SABEROPS_PROFILE", "ORCH_BINDING_STORE"):
         monkeypatch.delenv(key, raising=False)
+    _write_synthetic_verified_postures(tmp_path / "XDG_CONFIG_HOME")
     repo = tmp_path / "project"
     _init_repo(repo)
     db = Database(tmp_path / "project-state" / "runs.db")

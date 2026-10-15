@@ -23,6 +23,7 @@ from saberops.capacity.loop import (
     run_scheduler_loop,
     scheduler_tick,
 )
+from saberops.capacity.scheduler import WaitDecision
 from saberops.capacity.store import ensure_tables as ensure_capacity_tables
 from saberops.capacity.store import owner_connection
 from saberops.control_plane.plans import (
@@ -1088,6 +1089,77 @@ def test_scheduler_tick_aborts_on_ledger_read_error(
     j_after = store.get_job(owner_db, "job_ledger_err")
     assert j_after is not None
     assert j_after.state == JobState.QUEUED
+
+
+def test_scheduler_tick_default_global_ceiling_blocks_16th_job(
+    owner_db: Database, tmp_path: Path
+) -> None:
+    """Covers: ADR-0002 D7 / F3 scheduler_tick resolves the deterministic interim
+    default global ceiling (15) from owner policy (max_global_concurrent absent)
+    and blocks the next top-level job without launching it.
+    """
+    from saberops.models import RunStatus
+
+    t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
+    lease = acquire_lease(owner_db, "instance_g", ttl_seconds=30.0, now=t0)
+    assert lease is not None
+
+    repo_dir = tmp_path / "repo_global"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+
+    for i in range(15):
+        store.insert_job(
+            owner_db,
+            _make_job(
+                f"running_{i}",
+                str(repo_dir),
+                state=JobState.RUNNING,
+                current_run_id=f"run_{i}",
+                created_at=t0.isoformat(),
+                updated_at=t0.isoformat(),
+                request_digest=f"dg_run_{i}",
+            ),
+            now=t0,
+        )
+    store.insert_job(
+        owner_db,
+        _make_job(
+            "queued_over_ceiling",
+            str(repo_dir),
+            created_at=t0.isoformat(),
+            updated_at=t0.isoformat(),
+            request_digest="dg_queued",
+        ),
+        now=t0,
+    )
+
+    record_owner_quota(owner_db, "openai", "chatgpt-plus", 100.0, None, source="OWNER", now=t0)
+    routes = _make_routes(((_make_candidate("openai", "gpt-5"),),))
+    policy = _make_policy()
+    assert policy.max_global_concurrent is None  # owner key absent -> default 15
+
+    launched: list[str] = []
+    res = scheduler_tick(
+        owner_db,
+        lease,
+        now=t0,
+        routes=routes,
+        policy=policy,
+        run_launcher=lambda j, d, r: launched.append(j.job_id),
+        run_status=lambda rid: RunStatus.RUNNING,
+        clock_fn=lambda: t0,
+    )
+    assert res.ran is True
+    assert res.dispatched == 0
+    assert launched == []
+    assert any(
+        isinstance(d, WaitDecision) and d.reason == WaitingReason.CONCURRENCY.value
+        for d in res.decisions
+    )
+    queued = store.get_job(owner_db, "queued_over_ceiling")
+    assert queued is not None
+    assert queued.state == JobState.QUEUED
 
 
 

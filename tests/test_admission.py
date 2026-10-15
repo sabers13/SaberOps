@@ -1222,5 +1222,64 @@ def test_admit_two_matching_pools_nonbinding_debt_enforces_redline() -> None:
     assert dec.pool_id == "openai-shared"
 
 
+def test_check_capacity_tables_exist_partial_schema_raises(tmp_path: Path) -> None:
+    """Covers: ADR-0002 D2/D7 schema probe fails closed on a partial ledger."""
+    import sqlite3
+
+    from saberops.capacity.admission import check_capacity_tables_exist
+    from saberops.capacity.store import ensure_tables, owner_connection
+    from saberops.db import Database
+
+    db = Database(tmp_path / "partial.db")
+    ensure_tables(db)
+    with owner_connection(db) as conn:
+        conn.execute("DROP TABLE capacity_observations")
+        conn.commit()
+
+    with pytest.raises(sqlite3.OperationalError, match="partially initialized"):
+        check_capacity_tables_exist(db)
+
+
+def test_check_capacity_tables_exist_all_absent_is_false(tmp_path: Path) -> None:
+    """Covers: ADR-0002 D2/D7 a wholly uninitialized DB is unconfigured, not partial."""
+    from saberops.capacity.admission import check_capacity_tables_exist
+    from saberops.db import Database
+
+    db = Database(tmp_path / "blank_check.db")
+    assert check_capacity_tables_exist(db) is False
+
+
+def test_admit_partial_capacity_schema_fails_closed(tmp_path: Path) -> None:
+    """Covers: ADR-0002 D2/D7 live admit() seam returns typed
+    QUOTA_EVIDENCE_REQUIRED (never zero debt) on a partial capacity schema.
+    """
+    from saberops.capacity.store import ensure_tables, owner_connection
+    from saberops.db import Database
+
+    now = datetime(2026, 10, 14, 12, 0, tzinfo=UTC)
+    cand = _make_candidate()
+    policy = _make_policy(
+        postures={"codex": PostureRecord("codex", "A", ttl_days=30, verified_on="2026-10-01")},
+    )
+    db = Database(tmp_path / "partial_admit.db")
+    ensure_tables(db)
+    with owner_connection(db) as conn:
+        # Nonzero recorded debt, observations table missing.
+        conn.execute(
+            "INSERT INTO capacity_reservations (id, run_id, job_id, route,"
+            " pool_id, window_id, multiplier, size_bucket, cost_pct, spread_pct,"
+            " state, total_tokens, created_at, settled_at) VALUES"
+            " ('res_p', 'run_p', 'job_p', 'codex/m', 'chatgpt-plus', '5h', 1.0,"
+            " 'M', 42.0, 3.0, 'RESERVED', NULL, '2026-10-14T03:00:00+00:00', NULL)"
+        )
+        conn.execute("DROP TABLE capacity_observations")
+        conn.commit()
+
+    dec = admit(cand, now=now, policy=policy, db=db)
+    assert dec.admitted is False
+    assert dec.is_allowed is False
+    assert dec.reason == QUOTA_EVIDENCE_REQUIRED
+
+
 
 

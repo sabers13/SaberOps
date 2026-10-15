@@ -134,3 +134,67 @@ def test_capacity_show_json_output(
     assert data["ledger_wired"] is True
     assert "pools" in data
     assert isinstance(data["pools"], list)
+
+
+def test_scheduler_run_accepts_lowering_max_concurrent(
+    isolated_env: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Covers: ADR-0002 D7 / F3 `orch scheduler run --max-concurrent N` accepts a
+    positive override and completes a tick.
+    """
+    db_path = isolated_env / "test_jobs.db"
+    db = Database(db_path)
+    ensure_capacity_tables(db)
+
+    code, out, err = _cli(
+        "scheduler", "run", "--once", "--max-concurrent", "3", "--db", str(db_path),
+        capsys=capsys,
+    )
+    assert code == 0
+    assert err == ""
+
+
+@pytest.mark.parametrize("bad", ["0", "-1", "abc"])
+def test_scheduler_run_rejects_invalid_max_concurrent(
+    isolated_env: Path, bad: str
+) -> None:
+    """Covers: ADR-0002 D7 / F3 an invalid --max-concurrent value is refused by
+    argparse (fail closed) rather than silently disabling the ceiling.
+    """
+    db_path = isolated_env / "bad_jobs.db"
+    Database(db_path)
+    with pytest.raises(SystemExit) as excinfo:
+        main(["scheduler", "run", "--once", "--max-concurrent", bad, "--db", str(db_path)])
+    assert excinfo.value.code == 2
+
+
+def test_scheduler_run_invalid_owner_concurrency_config_fails_closed(
+    isolated_env: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Covers: ADR-0002 D7 / F3 an invalid owner concurrency.max_global fails the
+    scheduler closed instead of running unbounded.
+    """
+    from saberops.paths import get_control_plane_config_path
+
+    config_path = get_control_plane_config_path()
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "providers": {"codex": {"state": "ALLOWED"}},
+                "quota_pools": {},
+                "concurrency": {"max_global": 0},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    db_path = isolated_env / "bad_config_jobs.db"
+    db = Database(db_path)
+    ensure_capacity_tables(db)
+
+    code, out, err = _cli("scheduler", "run", "--once", "--db", str(db_path), capsys=capsys)
+    assert code == 1
+    assert "concurrency.max_global" in err
+

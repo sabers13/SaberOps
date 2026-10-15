@@ -5,6 +5,7 @@ All tests carry docstring `Covers: ...` and execute purely in-memory.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 from saberops.capacity.scheduler import (
@@ -681,6 +682,138 @@ def test_wait_eta_picks_min_from_exact_or_parsed_decisions() -> None:
     # Minimum ETA (1 hour from c2) is picked
     assert d.eta == eta2
     assert d.candidate == c2
+
+
+def _running_job(job_id: str) -> Job:
+    return replace(
+        _job(job_id),
+        state=JobState.RUNNING,
+        waiting_reason=None,
+        current_run_id=f"run_{job_id}",
+    )
+
+
+def _global_quota(pool: str, provider: str) -> QuotaState:
+    return _make_quota_state(
+        provider=provider,
+        pool=pool,
+        remaining_percent=100.0,
+        reset_at=(_NOW + timedelta(hours=3)).isoformat(),
+    )
+
+
+def test_schedule_global_ceiling_blocks_when_full() -> None:
+    """Covers: ADR-0002 D7 / F3 global aggregate ceiling: at 15 RUNNING the
+    next queued job WAITs with CONCURRENCY, counting jobs even without pool
+    reservation rows.
+    """
+    c1 = _cand("codex", "gpt-5.6-sol")
+    snapshot = _make_snapshot(((c1,),))
+    policy = _make_policy({"chatgpt-plus": _make_pool_plan("chatgpt-plus", [("codex", 1.0)])})
+    running = [_running_job(f"run_{i}") for i in range(15)]
+
+    decisions = schedule(
+        now=_NOW,
+        queued=[_job("q1")],
+        running=running,
+        routing_snapshot=snapshot,
+        policy=policy,
+        quota_states=[_global_quota("chatgpt-plus", "codex")],
+        global_slot_limit=15,
+    )
+    assert len(decisions) == 1
+    assert isinstance(decisions[0], WaitDecision)
+    assert decisions[0].reason == WaitingReason.CONCURRENCY.value
+    assert decisions[0].details.get("global_running") == 15
+    assert decisions[0].details.get("limit") == 15
+
+
+def test_schedule_global_ceiling_admits_at_most_one_from_last_slot() -> None:
+    """Covers: ADR-0002 D7 / F3 at 14 RUNNING with ceiling 15, exactly one of
+    two queued jobs begins and the second waits (simulated same-tick start).
+    """
+    c1 = _cand("codex", "gpt-5.6-sol")
+    snapshot = _make_snapshot(((c1,),))
+    policy = _make_policy({"chatgpt-plus": _make_pool_plan("chatgpt-plus", [("codex", 1.0)])})
+    running = [_running_job(f"run_{i}") for i in range(14)]
+    queued = [
+        _job("q_old", created_at=_NOW - timedelta(minutes=2)),
+        _job("q_new", created_at=_NOW - timedelta(minutes=1)),
+    ]
+
+    decisions = schedule(
+        now=_NOW,
+        queued=queued,
+        running=running,
+        routing_snapshot=snapshot,
+        policy=policy,
+        quota_states=[_global_quota("chatgpt-plus", "codex")],
+        global_slot_limit=15,
+    )
+    dispatches = [d for d in decisions if isinstance(d, DispatchDecision)]
+    waits = [d for d in decisions if isinstance(d, WaitDecision)]
+    assert len(dispatches) == 1
+    assert dispatches[0].job.job_id == "q_old"
+    assert len(waits) == 1
+    assert waits[0].reason == WaitingReason.CONCURRENCY.value
+    assert waits[0].details.get("global_running") == 15
+
+
+def test_schedule_global_ceiling_spans_distinct_pools() -> None:
+    """Covers: ADR-0002 D7 / F3 two queued jobs bound for distinct pools with
+    spare per-pool capacity still share one global ceiling.
+    """
+    c_g1 = _cand("codex", "gpt-5.6-sol")
+    c_g2 = _cand("opencode", "gpt-5.6-sonnet")
+    snapshot = _make_snapshot(((c_g1,), (c_g2,)))
+    policy = _make_policy({
+        "chatgpt-plus": _make_pool_plan("chatgpt-plus", [("codex", 1.0)]),
+        "opencode-go": _make_pool_plan("opencode-go", [("opencode", 1.0)]),
+    })
+    queued = [
+        _job("j_codex", created_at=_NOW - timedelta(minutes=2)),
+        _job("j_open", created_at=_NOW - timedelta(minutes=1)),
+    ]
+
+    decisions = schedule(
+        now=_NOW,
+        queued=queued,
+        routing_snapshot=snapshot,
+        policy=policy,
+        quota_states=[
+            _global_quota("chatgpt-plus", "codex"),
+            _global_quota("opencode-go", "opencode"),
+        ],
+        global_slot_limit=1,
+    )
+    dispatches = [d for d in decisions if isinstance(d, DispatchDecision)]
+    waits = [d for d in decisions if isinstance(d, WaitDecision)]
+    assert len(dispatches) == 1
+    assert len(waits) == 1
+    # Denied by the shared global ceiling, not by pool exhaustion.
+    assert waits[0].reason == WaitingReason.CONCURRENCY.value
+
+
+def test_schedule_global_ceiling_absent_is_unbounded() -> None:
+    """Covers: ADR-0002 D7 / F3 pure scheduler leaves the global gate off when
+    no ceiling is supplied (backward-compatible per-pool-only behaviour).
+    """
+    c1 = _cand("codex", "gpt-5.6-sol")
+    snapshot = _make_snapshot(((c1,),))
+    pool = _make_pool_plan("chatgpt-plus", [("codex", 1.0)], red_line_pct=0.0)
+    policy = _make_policy({"chatgpt-plus": pool})
+    jobs = [_job(f"j{i}", created_at=_NOW - timedelta(minutes=10 - i)) for i in range(3)]
+
+    decisions = schedule(
+        now=_NOW,
+        queued=jobs,
+        routing_snapshot=snapshot,
+        policy=policy,
+        quota_states=[_global_quota("chatgpt-plus", "codex")],
+        global_slot_limit=None,
+    )
+    assert all(isinstance(d, DispatchDecision) for d in decisions)
+    assert len(decisions) == 3
 
 
 

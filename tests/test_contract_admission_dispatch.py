@@ -611,3 +611,79 @@ def test_in_run_dispatch_fails_closed_on_sqlite_reservation_read_error(
     )
     assert reason == SKIP_QUOTA_BLOCKED
 
+
+def test_partial_capacity_schema_fails_closed_at_live_boundaries(
+    tmp_path: Path,
+) -> None:
+    """Covers: ADR-0002 D2/D7 a partially initialized capacity schema (some
+    required tables present, others missing) must fail closed with typed
+    QUOTA_EVIDENCE_REQUIRED at the live control_plane_decision boundary and
+    SKIP_QUOTA_BLOCKED at the worker/repair seam, never zero debt.
+    """
+    from saberops.capacity.store import owner_connection
+    from saberops.control_plane.quota_policy import QUOTA_EVIDENCE_REQUIRED
+    from saberops.dispatch import control_plane_decision
+
+    now = _NOW
+    cand = _make_candidate("openai", "gpt-5")
+    policy = _make_policy()
+
+    # Unverified posture would mask the capacity path, so use a verified route
+    # (posture A) for the candidate's provider.
+    db = Database(tmp_path / "partial_schema.sqlite3")
+    ensure_capacity_tables(db)
+    record_owner_quota(
+        db,
+        "openai",
+        "chatgpt-plus",
+        50.0,
+        (now + timedelta(hours=2)).isoformat(),
+        source="OWNER",
+        now=now,
+    )
+    from saberops.capacity.snapshot import effective_quota_states
+
+    quotas = effective_quota_states(db, now=now)
+
+    with owner_connection(db) as conn:
+        # Recorded debt in the reservations table, then lose observations:
+        # the schema is now partial, not unconfigured.
+        conn.execute(
+            "INSERT INTO capacity_reservations (id, run_id, job_id, route,"
+            " pool_id, window_id, multiplier, size_bucket, cost_pct, spread_pct,"
+            " state, total_tokens, created_at, settled_at) VALUES"
+            " ('res_partial', 'run_partial', 'job_partial', 'openai/gpt-5',"
+            " 'chatgpt-plus', '5h', 1.0, 'M', 42.0, 3.0, 'RESERVED', NULL,"
+            " '2026-10-14T03:00:00+00:00', NULL)"
+        )
+        conn.execute("DROP TABLE capacity_observations")
+        conn.commit()
+
+    # 1. Live in-run boundary fails closed with typed QUOTA_EVIDENCE_REQUIRED.
+    dec = control_plane_decision(
+        candidate=cand,
+        adapter=_AvailableAdapter(),  # type: ignore[arg-type]
+        training_allowed=True,
+        quota_states=quotas,
+        prompt_bytes=100,
+        policy=policy,
+        db=db,
+        now=now,
+    )
+    assert dec.eligible is False
+    assert dec.reason == QUOTA_EVIDENCE_REQUIRED
+    assert dec.exclusion_reason == QUOTA_EVIDENCE_REQUIRED
+
+    # 2. Worker/repair compatibility seam maps it to SKIP_QUOTA_BLOCKED.
+    reason = evaluate_eligibility(
+        candidate=cand,
+        adapter=_AvailableAdapter(),  # type: ignore[arg-type]
+        training_allowed=True,
+        quota_states=quotas,
+        prompt_bytes=100,
+        policy=policy,
+        db=db,
+        now=now,
+    )
+    assert reason == SKIP_QUOTA_BLOCKED
+

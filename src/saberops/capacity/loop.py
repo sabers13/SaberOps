@@ -46,6 +46,7 @@ from saberops.capacity.store import (
 )
 from saberops.control_plane.policy import (
     ControlPlanePolicy,
+    effective_global_slot_limit,
     load_control_plane_policy,
 )
 from saberops.jobs import store
@@ -367,6 +368,7 @@ def scheduler_tick(
     policy: ControlPlanePolicy | None = None,
     routes: RoutingSnapshot | None = None,
     global_slot_limit: int | None = None,
+    max_concurrent_override: int | None = None,
     background_min_pace: float = 4.0,
     clock_fn: Callable[[], datetime] | None = None,
     readiness_service: Any = None,
@@ -411,6 +413,22 @@ def scheduler_tick(
     running_jobs = store.list_jobs_raw(db, state=JobState.RUNNING, limit=100_000)
     effective_routes = routes or load_effective_routing()
     effective_pol = policy or load_control_plane_policy()
+
+    # Resolve the effective aggregate top-level job ceiling (D7/F3).
+    # An explicit global_slot_limit is honoured verbatim; otherwise the
+    # owner-configured concurrency.max_global (or the deterministic default)
+    # applies, with any CLI --max-concurrent override lowering only.
+    if global_slot_limit is not None:
+        effective_global_limit: int | None = global_slot_limit
+    else:
+        try:
+            effective_global_limit = effective_global_slot_limit(
+                effective_pol, override=max_concurrent_override
+            )
+        except ValueError:
+            # Invalid override / config fails closed: no dispatch this tick.
+            return TickResult(ran=False, reason="invalid_global_concurrency")
+
     quotas = effective_quota_states(db, now=moment)
     cost_states = _load_all_cost_states(db)
     try:
@@ -464,7 +482,7 @@ def scheduler_tick(
         cost_states=cost_states,
         running_counts=running_counts,
         reservations=charges,
-        global_slot_limit=global_slot_limit,
+        global_slot_limit=effective_global_limit,
         background_min_pace=background_min_pace,
         readiness_states=readiness_map if readiness_map else None,
     )
@@ -659,6 +677,7 @@ def run_scheduler_loop(
     policy: ControlPlanePolicy | None = None,
     routes: RoutingSnapshot | None = None,
     global_slot_limit: int | None = None,
+    max_concurrent_override: int | None = None,
     background_min_pace: float = 4.0,
     now_fn: Callable[[], datetime] | None = None,
     readiness_service: Any = None,
@@ -685,6 +704,7 @@ def run_scheduler_loop(
                 policy=policy,
                 routes=routes,
                 global_slot_limit=global_slot_limit,
+                max_concurrent_override=max_concurrent_override,
                 background_min_pace=background_min_pace,
                 clock_fn=now_fn,
                 readiness_service=readiness_service,
@@ -715,6 +735,7 @@ def run_scheduler_loop(
                 policy=policy,
                 routes=routes,
                 global_slot_limit=global_slot_limit,
+                max_concurrent_override=max_concurrent_override,
                 background_min_pace=background_min_pace,
                 clock_fn=now_fn,
                 readiness_service=readiness_service,

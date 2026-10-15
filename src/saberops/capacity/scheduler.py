@@ -133,6 +133,9 @@ def schedule(
       with admitted candidates.
     - BACKGROUND jobs require binding pace >= background_min_pace.
     - Honors prefer_wait_minutes on fallback groups when exact/parsed ETA matches.
+    - A global aggregate ceiling (``global_slot_limit``) blocks dispatch once
+      the number of top-level RUNNING jobs plus same-tick simulated starts
+      reaches the ceiling, independent of pool mapping.
     """
     moment = _utcnow(now)
     decisions: list[SchedulerDecision] = []
@@ -141,6 +144,8 @@ def schedule(
     # Track simulated concurrency and reservations across the scheduling batch (F2 & F3)
     simulated_running: dict[str, int] = dict(running_counts or {})
     simulated_reservations: dict[tuple[str, str], float] = dict(reservations or {})
+    # Counts every top-level RUNNING job supplied by the caller, including
+    # jobs with no capacity_reservations row or unknown pool mapping (F3).
     global_running = len(running)
 
     # Sort queued jobs according to D7 deterministic priority order
@@ -161,6 +166,24 @@ def schedule(
                     )
                 )
                 continue
+
+        # Global aggregate ceiling (D7/F3). Enforced here rather than only
+        # through admit() so a full ceiling blocks dispatch even when the
+        # capacity subsystem is unconfigured and admit() would otherwise
+        # short-circuit to "unconfigured". Two jobs from distinct pools count
+        # against the same ceiling.
+        if global_slot_limit is not None and global_running >= global_slot_limit:
+            decisions.append(
+                WaitDecision(
+                    job=job,
+                    reason=WaitingReason.CONCURRENCY.value,
+                    details={
+                        "global_running": global_running,
+                        "limit": global_slot_limit,
+                    },
+                )
+            )
+            continue
 
         # Check role dispatchability
         role = job.requirements.role
