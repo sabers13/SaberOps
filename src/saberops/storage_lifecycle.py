@@ -8,10 +8,17 @@ accepted retention policy allow?" so a future GC service can execute it.
 
 Accepted policy implemented here (ADR-0003 D4/D6, Q1/Q4; frozen values):
 
-- Evidence: compress after 7 days; accepted runs retained 90 days, other
+- Evidence: compress after 7 days (anchored at creation, non-destructive);
+  deletion only for terminal runs with an explicit timezone-aware terminal
+  timestamp, measured from terminal time: accepted runs 90 days, other
   terminal runs 30 days (owner-configurable via :func:`plan_gc` arguments).
+  The terminal anchor is an UNAPPROVED conservative retention safety floor,
+  not an ADR decision: ADR-0003 D6/Q4 does not settle the anchor, and the
+  owner must rule on the canonical anchor before any GC execution.
 - Checkpoint refs (``refs/saberops/checkpoints/<job_id>/<n>``): retained
-  until 7 days after the owning job is terminal.
+  until 7 days after the owning job is terminal. The ref's embedded job
+  segment must equal the caller-supplied ``job_id`` exactly; terminal
+  metadata belonging to a different job never authorizes deletion.
 - Gate scratch: eligible at end of gate; on failure only the newest scratch
   per run is kept, capped by total size (default 2 GB); older ones eligible.
 - Attempt worktrees: eligible only when the attempt is terminal and its
@@ -173,7 +180,14 @@ class CheckpointRef:
 
 @dataclass(frozen=True)
 class EvidenceBundle:
-    """One run-evidence bundle as described by the caller."""
+    """One run-evidence bundle as described by the caller.
+
+    ``terminal_at`` is an optional transitional caller input (default None):
+    deletion of terminal evidence is measured from it, never from creation,
+    as an UNAPPROVED conservative safety floor until the owner settles the
+    canonical retention anchor. Creation time still guides non-destructive
+    compression.
+    """
 
     artifact_id: str
     path: str
@@ -182,8 +196,9 @@ class EvidenceBundle:
     run_terminal: bool | None
     run_accepted: bool | None
     created_at: datetime | None
-    compressed: bool | None
-    size_bytes: int | None
+    terminal_at: datetime | None = None
+    compressed: bool | None = None
+    size_bytes: int | None = None
     is_symlink_escape: bool = False
 
 
@@ -258,8 +273,10 @@ def _check_filesystem_path(path: str, owned_roots: Sequence[str]) -> str | None:
     """Return None when ``path`` is safe, else the KEEP reason code.
 
     Covers: outside-root escapes and ``..`` traversals (ADR-0003 D6 root
-    confinement). Purely lexical; the future GC service must resolve
-    symlinks and re-check at execution time.
+    confinement). Purely lexical: blind to symlink, mount/bind, and TOCTOU
+    escapes. Eligible verdicts are policy proposals only, never deletion
+    authorization; only a future GC executor that resolves paths against
+    validated owner roots at execution time may act.
     """
     if path == "":
         return "missing-metadata"
@@ -281,8 +298,13 @@ def _check_filesystem_path(path: str, owned_roots: Sequence[str]) -> str | None:
     return "outside-roots"
 
 
-def _check_ref(ref: str) -> str | None:
-    """Return None when ``ref`` stays inside the checkpoint namespace."""
+def _check_ref(ref: str, job_id: str | None) -> str | None:
+    """Return None when ``ref`` is exactly ``<job_id>/<seq>`` in-namespace.
+
+    Covers: checkpoint ref↔job ownership binding (ADR-0003 D6 "the OWNING
+    job"). Terminal metadata belonging to a different job must never
+    authorize deletion, and a merely valid prefix never implies ownership.
+    """
     if ref == "":
         return "missing-metadata"
     if "\x00" in ref:
@@ -291,9 +313,13 @@ def _check_ref(ref: str) -> str | None:
         return "ref-escape"
     if not ref.startswith(CHECKPOINT_REF_PREFIX):
         return "outside-roots"
-    rest = ref[len(CHECKPOINT_REF_PREFIX):]
-    if rest == "" or rest.endswith("/"):
+    segments = ref[len(CHECKPOINT_REF_PREFIX):].split("/")
+    if len(segments) != 2 or segments[0] == "" or segments[1] == "":
         return "invalid-ref"
+    if job_id is None or job_id == "" or "/" in job_id:
+        return "missing-metadata"
+    if segments[0] != job_id:
+        return "ref-job-mismatch"
     return None
 
 
@@ -402,12 +428,10 @@ def _plan_worktree(
 def _plan_checkpoint(
     item: CheckpointRef, *, now: datetime, checkpoint_retention: timedelta
 ) -> PlanDecision:
-    """Covers: ADR-0003 D6 checkpoint refs (job terminal + 7 days)."""
-    reason = _check_ref(item.ref)
+    """Covers: ADR-0003 D6 checkpoint refs (job terminal + 7 days, job-bound)."""
+    reason = _check_ref(item.ref, item.job_id)
     if reason is not None:
         return _keep(item.artifact_id, ArtifactKind.CHECKPOINT_REF, reason, item.owner)
-    if item.job_id is None or item.job_id == "":
-        return _keep(item.artifact_id, ArtifactKind.CHECKPOINT_REF, "missing-metadata", item.owner)
     if item.job_terminal is None or item.job_preempted is None:
         return _keep(item.artifact_id, ArtifactKind.CHECKPOINT_REF, "missing-metadata", item.owner)
     if not item.job_terminal:
@@ -444,7 +468,7 @@ def _plan_evidence(
     accepted_retention: timedelta,
     other_retention: timedelta,
 ) -> PlanDecision:
-    """Covers: ADR-0003 D6/Q4 evidence (compress 7d; accepted 90d/other 30d)."""
+    """Covers: ADR-0003 D6/Q4 evidence (compress 7d; delete from terminal time)."""
     reason = _check_filesystem_path(item.path, owned_roots)
     if reason is not None:
         return _keep(item.artifact_id, ArtifactKind.EVIDENCE, reason, item.owner)
@@ -458,8 +482,14 @@ def _plan_evidence(
         return _keep(item.artifact_id, ArtifactKind.EVIDENCE, "evidence-active", item.owner)
     if item.run_accepted is None:
         return _keep(item.artifact_id, ArtifactKind.EVIDENCE, "missing-metadata", item.owner)
+    if item.terminal_at is None:
+        return _keep(item.artifact_id, ArtifactKind.EVIDENCE, "missing-metadata", item.owner)
+    if item.terminal_at.tzinfo is None:
+        return _keep(item.artifact_id, ArtifactKind.EVIDENCE, "invalid-time", item.owner)
+    if item.terminal_at > now:
+        return _keep(item.artifact_id, ArtifactKind.EVIDENCE, "terminal-future", item.owner)
     retention = accepted_retention if item.run_accepted else other_retention
-    if now >= item.created_at + retention:
+    if now >= item.terminal_at + retention:
         if item.size_bytes is None:
             return _keep(item.artifact_id, ArtifactKind.EVIDENCE, "missing-metadata", item.owner)
         return PlanDecision(
@@ -516,6 +546,8 @@ def _plan_owner_db(
         return _keep(item.artifact_id, ArtifactKind.OWNER_DB, "missing-metadata", item.owner)
     if item.last_vacuum_at.tzinfo is None:
         return _keep(item.artifact_id, ArtifactKind.OWNER_DB, "invalid-time", item.owner)
+    if not 0.0 <= item.free_page_ratio <= 1.0:
+        return _keep(item.artifact_id, ArtifactKind.OWNER_DB, "invalid-ratio", item.owner)
     if now >= item.last_vacuum_at + OWNER_DB_VACUUM_INTERVAL and (
         item.free_page_ratio > OWNER_DB_VACUUM_FREE_PAGE_RATIO
     ):
@@ -548,6 +580,16 @@ def plan_gc(
     """
     if now.tzinfo is None:
         raise ValueError("now must be timezone-aware")
+    for name, bound in (
+        ("compress_after", compress_after),
+        ("accepted_retention", accepted_retention),
+        ("other_retention", other_retention),
+        ("checkpoint_retention", checkpoint_retention),
+    ):
+        if bound < timedelta(0):
+            raise ValueError(f"{name} must be nonnegative")
+    if failed_scratch_cap_bytes < 0:
+        raise ValueError("failed_scratch_cap_bytes must be nonnegative")
     seen: set[str] = set()
     staged: list[PlanDecision] = []
     for item in artifacts:
@@ -556,9 +598,15 @@ def plan_gc(
         if item.artifact_id in seen:
             raise ValueError(f"duplicated artifact_id: {item.artifact_id!r}")
         seen.add(item.artifact_id)
+        kind = _kind_of(item)
         if not _owner_ok(item.owner, item.owner_state):
-            kind = _kind_of(item)
             staged.append(_keep(item.artifact_id, kind, "unknown-owner", item.owner))
+            continue
+        size: int | None = None
+        if isinstance(item, (GateScratch, EvidenceBundle)):
+            size = item.size_bytes
+        if size is not None and size < 0:
+            staged.append(_keep(item.artifact_id, kind, "invalid-size", item.owner))
             continue
         if isinstance(item, GateScratch):
             staged.append(
@@ -591,28 +639,27 @@ def plan_gc(
         elif isinstance(item, OwnerDatabase):
             staged.append(_plan_owner_db(item, now=now, owned_roots=owned_roots))
     staged.sort(key=lambda d: (d.kind.value, d.artifact_id))
+    by_id = {item.artifact_id: item for item in artifacts}
     log: list[DeletionEvent] = []
     for decision in staged:
         if decision.action is not Action.ELIGIBLE_DELETE:
             continue
-        original: Artifact | None = None
-        for item in artifacts:
-            if item.artifact_id == decision.artifact_id:
-                original = item
-                break
+        original = by_id[decision.artifact_id]
         path = ""
-        size: int | None = None
+        logged_size: int | None = None
         if isinstance(original, CheckpointRef):
             path = original.ref
-        elif original is not None:
+        elif isinstance(original, (GateScratch, EvidenceBundle)):
             path = original.path
-            size = getattr(original, "size_bytes", None)
+            logged_size = original.size_bytes
+        else:
+            path = original.path
         log.append(
             DeletionEvent(
                 ts=now,
                 artifact_class=decision.kind.value,
                 path=path,
-                bytes=size,
+                bytes=logged_size,
                 reason=decision.reason,
             )
         )

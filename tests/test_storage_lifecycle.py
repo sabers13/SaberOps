@@ -34,6 +34,7 @@ DB = "/data/saberops/owner.db"
 REF = f"{CHECKPOINT_REF_PREFIX}job-9/3"
 _OLD_CHECKPOINT_TIME = NOW - timedelta(days=8)
 _OLD_EVIDENCE_TIME = NOW - timedelta(days=31)
+_OLD_TERMINAL_TIME = NOW - timedelta(days=31)
 
 
 def _scratch(
@@ -116,6 +117,7 @@ def _evidence(
     run_terminal: bool | None = True,
     run_accepted: bool | None = False,
     created_at: datetime | None = _OLD_EVIDENCE_TIME,
+    terminal_at: datetime | None = _OLD_TERMINAL_TIME,
     compressed: bool | None = True,
     size_bytes: int | None = 4096,
     is_symlink_escape: bool = False,
@@ -128,6 +130,7 @@ def _evidence(
         run_terminal=run_terminal,
         run_accepted=run_accepted,
         created_at=created_at,
+        terminal_at=terminal_at,
         compressed=compressed,
         size_bytes=size_bytes,
         is_symlink_escape=is_symlink_escape,
@@ -325,13 +328,20 @@ def test_checkpoint_ref_namespace_escape_kept() -> None:
 
 def test_evidence_compress_boundary() -> None:
     """Covers: ADR-0003 D6/Q4 evidence compressed after 7 days."""
+    recent_terminal = NOW - timedelta(days=1)
     young = _evidence(
-        run_accepted=False, created_at=NOW - timedelta(days=6), compressed=False
+        run_accepted=False,
+        created_at=NOW - timedelta(days=6),
+        terminal_at=recent_terminal,
+        compressed=False,
     )
     (d1,) = _decisions([young])
     assert (d1.action, d1.reason) == (Action.KEEP, "evidence-retained")
     due = _evidence(
-        run_accepted=False, created_at=NOW - timedelta(days=7), compressed=False
+        run_accepted=False,
+        created_at=NOW - timedelta(days=7),
+        terminal_at=recent_terminal,
+        compressed=False,
     )
     (d2,) = _decisions([due])
     assert (d2.action, d2.reason) == (
@@ -339,18 +349,23 @@ def test_evidence_compress_boundary() -> None:
         "evidence-compress-eligible",
     )
     done = _evidence(
-        run_accepted=False, created_at=NOW - timedelta(days=8), compressed=True
+        run_accepted=False,
+        created_at=NOW - timedelta(days=8),
+        terminal_at=recent_terminal,
+        compressed=True,
     )
     (d3,) = _decisions([done])
     assert (d3.action, d3.reason) == (Action.KEEP, "evidence-retained")
 
 
 def test_evidence_accepted_90d_boundary() -> None:
-    """Covers: ADR-0003 Q4 accepted evidence retained 90 days."""
+    """Covers: ADR-0003 Q4 accepted evidence deleted 90d after terminal time."""
+    old_created = NOW - timedelta(days=200)
     for days, eligible in ((89, False), (90, True), (91, True)):
         item = _evidence(
             run_accepted=True,
-            created_at=NOW - timedelta(days=days),
+            created_at=old_created,
+            terminal_at=NOW - timedelta(days=days),
             compressed=True,
         )
         (d,) = _decisions([item])
@@ -358,11 +373,13 @@ def test_evidence_accepted_90d_boundary() -> None:
 
 
 def test_evidence_other_terminal_30d_boundary() -> None:
-    """Covers: ADR-0003 Q4 other terminal evidence retained 30 days."""
+    """Covers: ADR-0003 Q4 other terminal evidence deleted 30d after terminal."""
+    old_created = NOW - timedelta(days=200)
     for days, eligible in ((29, False), (30, True), (31, True)):
         item = _evidence(
             run_accepted=False,
-            created_at=NOW - timedelta(days=days),
+            created_at=old_created,
+            terminal_at=NOW - timedelta(days=days),
             compressed=True,
         )
         (d,) = _decisions([item])
@@ -608,3 +625,113 @@ def test_owner_state_live_blocks_but_known_dead_proceeds() -> None:
     unknown = _scratch(owner_state=OwnerState.UNKNOWN)
     (d3,) = _decisions([unknown])
     assert (d3.action, d3.reason) == (Action.KEEP, "unknown-owner")
+
+
+def test_checkpoint_cross_job_mismatch_kept() -> None:
+    """Covers: fixup B1 terminal metadata of another job never authorizes delete."""
+    live_ref = f"{CHECKPOINT_REF_PREFIX}job-LIVE/5"
+    item = _checkpoint(
+        artifact_id="c-x",
+        ref=live_ref,
+        owner="job-OLD",
+        owner_state=OwnerState.KNOWN_DEAD,
+        job_id="job-OLD",
+        job_terminal=True,
+        terminal_at=NOW - timedelta(days=8),
+        job_preempted=False,
+    )
+    (d,) = _decisions([item])
+    assert (d.action, d.reason) == (Action.KEEP, "ref-job-mismatch")
+
+
+def test_checkpoint_malformed_refs_kept() -> None:
+    """Covers: fixup B1 accepted ref shape is exactly <job_id>/<nonempty-seq>."""
+    cases = [
+        (f"{CHECKPOINT_REF_PREFIX}job-9", "invalid-ref"),
+        (f"{CHECKPOINT_REF_PREFIX}job-9/", "invalid-ref"),
+        (f"{CHECKPOINT_REF_PREFIX}job-9/3/extra", "invalid-ref"),
+        (f"{CHECKPOINT_REF_PREFIX}/3", "invalid-ref"),
+    ]
+    for ref, reason in cases:
+        (d,) = _decisions([_checkpoint(ref=ref)])
+        assert (d.action, d.reason) == (Action.KEEP, reason), ref
+    (slashed,) = _decisions([_checkpoint(job_id="job/9")])
+    assert (slashed.action, slashed.reason) == (Action.KEEP, "missing-metadata")
+
+
+def test_evidence_long_running_recently_terminal_kept() -> None:
+    """Covers: fixup B2 deletion measured from terminal time, not creation."""
+    item = _evidence(
+        run_accepted=True,
+        created_at=NOW - timedelta(days=100),
+        terminal_at=NOW - timedelta(days=1),
+        compressed=True,
+    )
+    (d,) = _decisions([item])
+    assert d.action == Action.KEEP
+    assert d.reason == "evidence-retained"
+
+
+def test_evidence_terminal_anchor_invalid_kept() -> None:
+    """Covers: fixup B2 missing/naive/future terminal anchor fails closed."""
+    old_created = NOW - timedelta(days=200)
+    (d1,) = _decisions(
+        [_evidence(created_at=old_created, terminal_at=None, compressed=True)]
+    )
+    assert (d1.action, d1.reason) == (Action.KEEP, "missing-metadata")
+    naive = datetime(2026, 9, 1, 12, 0, 0)
+    (d2,) = _decisions(
+        [_evidence(created_at=old_created, terminal_at=naive, compressed=True)]
+    )
+    assert (d2.action, d2.reason) == (Action.KEEP, "invalid-time")
+    (d3,) = _decisions(
+        [
+            _evidence(
+                created_at=old_created,
+                terminal_at=NOW + timedelta(days=1),
+                compressed=True,
+            )
+        ]
+    )
+    assert (d3.action, d3.reason) == (Action.KEEP, "terminal-future")
+
+
+def test_negative_policy_bounds_rejected() -> None:
+    """Covers: fixup B3 negative retention/cap bounds fail closed with ValueError."""
+    neg = timedelta(days=-1)
+    with pytest.raises(ValueError):
+        plan_gc([_scratch()], now=NOW, owned_roots=ROOTS, compress_after=neg)
+    with pytest.raises(ValueError):
+        plan_gc([_scratch()], now=NOW, owned_roots=ROOTS, accepted_retention=neg)
+    with pytest.raises(ValueError):
+        plan_gc([_scratch()], now=NOW, owned_roots=ROOTS, other_retention=neg)
+    with pytest.raises(ValueError):
+        plan_gc([_scratch()], now=NOW, owned_roots=ROOTS, checkpoint_retention=neg)
+    with pytest.raises(ValueError):
+        plan_gc([_scratch()], now=NOW, owned_roots=ROOTS, failed_scratch_cap_bytes=-1)
+
+
+def test_negative_size_never_eligible() -> None:
+    """Covers: fixup B3 negative artifact sizes never yield eligible deletes."""
+    (d1,) = _decisions([_scratch(size_bytes=-1)])
+    assert (d1.action, d1.reason) == (Action.KEEP, "invalid-size")
+    (d2,) = _decisions([_evidence(size_bytes=-100)])
+    assert (d2.action, d2.reason) == (Action.KEEP, "invalid-size")
+    plan = plan_gc(
+        [_scratch(size_bytes=-1, artifact_id="z1")], now=NOW, owned_roots=ROOTS
+    )
+    assert plan.deletion_log == ()
+
+
+def test_ratio_out_of_range_never_vacuum() -> None:
+    """Covers: fixup B3 out-of-range free-page ratios never yield vacuum."""
+    for ratio in (-0.1, 1.5, float("nan")):
+        (d,) = _decisions(
+            [
+                _ownerdb(
+                    last_vacuum_at=NOW - timedelta(days=30),
+                    free_page_ratio=ratio,
+                )
+            ]
+        )
+        assert (d.action, d.reason) == (Action.KEEP, "invalid-ratio"), ratio
