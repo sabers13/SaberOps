@@ -163,6 +163,14 @@ _JOB_ID_RE: Final = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 # exists so a malformed index can never spray unbounded refs.
 MAX_CHECKPOINT_INDEX: Final = 64
 
+# Expected-old sentinel for a create-only checkpoint ref transaction: the
+# all-zero object id means "this exact ref must not exist yet".  Combined with
+# ``git update-ref --no-deref`` it turns anchoring into an atomic
+# create-or-nothing compare-and-swap instead of an unconditional overwrite, so
+# a ref (or symbolic ref) injected at the allocated name can never be silently
+# replaced.
+_NULL_OID: Final = "0" * 40
+
 
 def validate_checkpoint_ref(job_id: object, index: object) -> str:
     """Build the exact engine-owned checkpoint ref for a job, failing closed.
@@ -617,31 +625,115 @@ class GitManager:
         return target
 
     @staticmethod
+    def _checkpoint_ref_state(repo: Path, ref: str) -> tuple[str, str | None]:
+        """Classify *ref* WITHOUT ever dereferencing a symbolic ref.
+
+        Returns ``("absent", None)`` when the exact ref does not exist,
+        ``("symbolic", <referent>)`` when it is a symbolic ref (including a
+        dangling one), and ``("direct", <commit-sha>)`` when it is a direct ref
+        that resolves to a commit object.
+
+        ``git symbolic-ref`` is consulted first on purpose: ``for-each-ref``
+        reports a symbolic ref's *dereferenced* object name (and omits a
+        dangling one entirely), and ``rev-parse`` follows the symlink.  Either
+        would let an injected ref laundering a user branch masquerade as an
+        engine checkpoint anchor, so classification must never follow it.
+        """
+        symbolic = run_process(["git", "symbolic-ref", "--quiet", ref], cwd=repo)
+        if symbolic.exit_code == 0:
+            return ("symbolic", symbolic.stdout.strip() or None)
+        if symbolic.exit_code != 1:
+            raise CandidatePublicationError(
+                f"Refusing checkpoint: cannot classify ref '{ref}': "
+                f"{redact_remote_secrets(symbolic.stderr).strip()[:500]}"
+            )
+        resolved = run_process(
+            ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+            cwd=repo,
+        )
+        if resolved.passed and resolved.stdout.strip():
+            return ("direct", resolved.stdout.strip())
+        return ("absent", None)
+
+    @staticmethod
     def anchor_checkpoint_ref(
         repo_path: Path | str, job_id: str, index: int, sha: str
     ) -> str:
-        """Anchor a verified checkpoint SHA under the engine-owned ref.
+        """Anchor a verified checkpoint SHA under the engine-owned ref, safely.
 
         Writes exactly ``refs/saberops/checkpoints/<job_id>/<n>`` (see
-        :func:`validate_checkpoint_ref`) via ``git update-ref`` and then
-        verifies the ref resolves to *sha*.  A verification mismatch --
-        partial Git write, concurrent branch race, or storage failure --
-        raises instead of reporting a checkpoint that is not durable.
+        :func:`validate_checkpoint_ref`) as a *direct* ref using an atomic
+        create-only compare-and-swap::
+
+            git update-ref --no-deref <ref> <sha> <all-zero-oid>
+
+        which Git accepts only when the exact ref name does not already exist.
+        This replaces the previous unconditional ``git update-ref <ref> <sha>``,
+        under which an injected ref at the allocated name was silently
+        overwritten and a symbolic ref was transparently followed into an
+        unrelated user branch.
+
+        Properties, all fail-closed and with no partial mutation:
+
+        - the target must be a commit object resolving to the exact ``sha``;
+        - a symbolic ref at the name is refused (never dereferenced, never
+          rewritten), including a dangling one;
+        - a pre-existing *direct* ref at the name with a different SHA is
+          refused and left untouched;
+        - a pre-existing *direct* ref with the identical SHA is reused
+          idempotently -- reuse is never permission to overwrite;
+        - a concurrent create between classification and the update loses the
+          compare-and-swap and raises;
+        - the anchor is re-read (direct kind, exact SHA) before being reported
+          durable.
+
+        Raises:
+            CandidatePublicationError: malformed job/index/SHA, a missing or
+                non-commit target, or a symbolic / otherwise non-direct ref.
+            GitRefRaceError: the create-only compare-and-swap lost a race with
+                a concurrent writer that installed or changed the ref.
         """
         ref = validate_checkpoint_ref(job_id, index)
         target = validate_candidate_sha(sha)
         repo = Path(repo_path).resolve()
-        result = run_process(["git", "update-ref", ref, target], cwd=repo)
-        if not result.passed:
+
+        exists = run_process(
+            ["git", "rev-parse", "--verify", "--quiet", f"{target}^{{commit}}"],
+            cwd=repo,
+        )
+        if not exists.passed or exists.stdout.strip() != target:
             raise CandidatePublicationError(
-                f"Refusing checkpoint: update-ref for '{ref}' failed: "
-                f"{redact_remote_secrets(result.stderr).strip()[:500]}"
+                f"Refusing checkpoint: target {target[:8]} does not resolve to "
+                "that exact commit object"
             )
-        resolved = GitManager.get_ref_commit(repo, ref)
-        if resolved != target:
+
+        kind, current = GitManager._checkpoint_ref_state(repo, ref)
+        if kind == "symbolic":
             raise CandidatePublicationError(
-                f"Refusing checkpoint: ref '{ref}' resolves to "
-                f"{str(resolved)[:64]!r}, expected {target!r}"
+                f"Refusing checkpoint: '{ref}' is a symbolic ref to "
+                f"{str(current)[:64]!r}; engine checkpoint refs must be direct"
+            )
+        if kind == "direct":
+            if current == target:
+                return ref
+            raise GitRefRaceError(
+                f"Refusing checkpoint: '{ref}' already anchors "
+                f"{str(current)[:8]}, not {target[:8]}; refusing to overwrite"
+            )
+
+        created = run_process(
+            ["git", "update-ref", "--no-deref", ref, target, _NULL_OID], cwd=repo
+        )
+        if not created.passed:
+            raise GitRefRaceError(
+                f"Refusing checkpoint: create-only update of '{ref}' failed: "
+                f"{redact_remote_secrets(created.stderr).strip()[:500]}"
+            )
+        kind, current = GitManager._checkpoint_ref_state(repo, ref)
+        if kind != "direct" or current != target:
+            raise CandidatePublicationError(
+                f"Refusing checkpoint: ref '{ref}' did not settle as a durable "
+                f"direct anchor (kind={kind!r}, value={str(current)[:64]!r})"
             )
         return ref
 
@@ -649,13 +741,31 @@ class GitManager:
     def read_checkpoint_ref(
         repo_path: Path | str, job_id: str, index: int
     ) -> str | None:
-        """Read one engine-owned checkpoint ref, or None when absent."""
+        """Read one engine-owned direct checkpoint ref, or None when absent.
+
+        A symbolic ref at the name is never dereferenced: an injected symlink
+        must never be reported as a verified checkpoint anchor, so it fails
+        closed with :class:`CandidatePublicationError` rather than returning
+        the referent branch's commit.
+        """
         ref = validate_checkpoint_ref(job_id, index)
-        return GitManager.get_ref_commit(Path(repo_path).resolve(), ref)
+        kind, value = GitManager._checkpoint_ref_state(Path(repo_path).resolve(), ref)
+        if kind == "symbolic":
+            raise CandidatePublicationError(
+                f"Refusing checkpoint read: '{ref}' is a symbolic ref to "
+                f"{str(value)[:64]!r}, not a direct anchor"
+            )
+        return value if kind == "direct" else None
 
     @staticmethod
     def list_checkpoint_refs(repo_path: Path | str, job_id: str) -> dict[int, str]:
-        """List ``{index: sha}`` for every checkpoint ref owned by *job_id*."""
+        """List ``{index: sha}`` for every direct checkpoint ref owned by *job_id*.
+
+        The listing is fail-closed: any symbolic ref inside the job's checkpoint
+        namespace raises instead of being dereferenced into a plausible-looking
+        anchor, so a symlink injection can never be reused -- or reported -- as
+        a durable direct checkpoint ref.
+        """
         if not isinstance(job_id, str) or not _JOB_ID_RE.match(job_id):
             raise CandidatePublicationError(
                 "Refusing checkpoint listing: job_id must match "
@@ -664,7 +774,12 @@ class GitManager:
         repo = Path(repo_path).resolve()
         pattern = f"{CHECKPOINT_REF_PREFIX}{job_id}/"
         result = run_process(
-            ["git", "for-each-ref", "--format=%(refname) %(objectname)", pattern],
+            [
+                "git",
+                "for-each-ref",
+                "--format=%(refname) %(objectname) %(symref)",
+                pattern,
+            ],
             cwd=repo,
         )
         if not result.passed:
@@ -675,11 +790,14 @@ class GitManager:
         out: dict[int, str] = {}
         for line in result.stdout.splitlines():
             parts = line.strip().split()
-            if len(parts) != 2:
+            if len(parts) < 2 or not parts[0].startswith(pattern):
                 continue
-            refname, sha = parts
-            if not refname.startswith(pattern):
-                continue
+            refname, sha = parts[0], parts[1]
+            if len(parts) >= 3:
+                raise CandidatePublicationError(
+                    f"Refusing checkpoint listing: '{refname}' is a symbolic ref "
+                    f"to '{parts[2]}'; engine checkpoint refs must be direct"
+                )
             try:
                 index = int(refname[len(pattern):])
             except ValueError:
