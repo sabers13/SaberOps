@@ -102,6 +102,13 @@
   background: var(--surface);
 }
 
+.fr-noscript-note {
+  padding: 10px 12px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
 .fr-main {
   min-width: 0;
 }
@@ -174,6 +181,7 @@
 
 .fr-blocked {
   border-left: 4px solid var(--danger);
+  background: var(--surface);
   background: color-mix(in oklch, var(--danger) 8%, var(--surface));
   padding: 10px 12px;
   margin: 10px 0;

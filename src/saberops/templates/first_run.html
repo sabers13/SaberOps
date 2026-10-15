@@ -58,6 +58,7 @@
       </ol>
     </nav>
     <p class="fr-status" role="status" id="fr-status" aria-live="polite">Preview ready. Step 1 of 10. No live backend.</p>
+    <noscript><p class="fr-noscript-note" role="note">JavaScript is off: all 10 steps are shown below in order — follow the step links to jump to each one. Every setup action stays disabled until backend wiring.</p></noscript>
     <main id="fr-main" class="fr-main">
 
       <!-- 1 · Install & first launch -->
@@ -89,7 +90,7 @@
       </section>
 
       <!-- 2 · Connect providers -->
-      <section class="fr-card" id="fr-step-2" data-fr-step="2" aria-labelledby="fr-h2" tabindex="-1" hidden>
+      <section class="fr-card" id="fr-step-2" data-fr-step="2" aria-labelledby="fr-h2" tabindex="-1">
         <h2 id="fr-h2">2 · Connect providers <span class="fr-pill" data-state="info">external handoff</span></h2>
         <p>Vendor logins always happen on the vendor’s own site or in your own
         terminal. This page has no password, token, or secret field and never
@@ -125,7 +126,7 @@
       </section>
 
       <!-- 3 · Discover models -->
-      <section class="fr-card" id="fr-step-3" data-fr-step="3" aria-labelledby="fr-h3" tabindex="-1" hidden>
+      <section class="fr-card" id="fr-step-3" data-fr-step="3" aria-labelledby="fr-h3" tabindex="-1">
         <h2 id="fr-h3">3 · Discover models: listed vs executable</h2>
         <p><strong>Listed</strong> means the vendor enumerates the model.
         <strong>Executable</strong> (<span class="fr-pill" data-state="ok">SUPPORTED</span>)
@@ -154,7 +155,7 @@
       </section>
 
       <!-- 4 · Posture attestation -->
-      <section class="fr-card" id="fr-step-4" data-fr-step="4" aria-labelledby="fr-h4" tabindex="-1" hidden>
+      <section class="fr-card" id="fr-step-4" data-fr-step="4" aria-labelledby="fr-h4" tabindex="-1">
         <h2 id="fr-h4">4 · Posture attestation <span class="fr-pill" data-state="owner">OWNER</span></h2>
         <p>Billing class per route. Missing or expired verification blocks the
         route everywhere — there is no override.</p>
@@ -185,7 +186,7 @@
       </section>
 
       <!-- 5 · Role routing + explicit Orchestrator -->
-      <section class="fr-card" id="fr-step-5" data-fr-step="5" aria-labelledby="fr-h5" tabindex="-1" hidden>
+      <section class="fr-card" id="fr-step-5" data-fr-step="5" aria-labelledby="fr-h5" tabindex="-1">
         <h2 id="fr-h5">5 · Role routing + explicit Orchestrator <span class="fr-pill" data-state="owner">OWNER</span></h2>
         <div class="fr-grid">
           <div>
@@ -233,7 +234,7 @@
       </section>
 
       <!-- 6 · Project setup -->
-      <section class="fr-card" id="fr-step-6" data-fr-step="6" aria-labelledby="fr-h6" tabindex="-1" hidden>
+      <section class="fr-card" id="fr-step-6" data-fr-step="6" aria-labelledby="fr-h6" tabindex="-1">
         <h2 id="fr-h6">6 · Project setup</h2>
         <label class="fr-field" for="fr-project">Project
           <select id="fr-project" disabled aria-describedby="fr-prev-note">
@@ -253,7 +254,7 @@
       </section>
 
       <!-- 7 · Plan propose → owner approve -->
-      <section class="fr-card" id="fr-step-7" data-fr-step="7" aria-labelledby="fr-h7" tabindex="-1" hidden>
+      <section class="fr-card" id="fr-step-7" data-fr-step="7" aria-labelledby="fr-h7" tabindex="-1">
         <h2 id="fr-h7">7 · Plan proposal → owner approval <span class="fr-pill" data-state="owner">OWNER</span></h2>
         <details class="fr-details" open><summary>What a proposal contains</summary>
           <ul>
@@ -281,7 +282,7 @@
       </section>
 
       <!-- 8 · Readiness → Start -->
-      <section class="fr-card" id="fr-step-8" data-fr-step="8" aria-labelledby="fr-h8" tabindex="-1" hidden>
+      <section class="fr-card" id="fr-step-8" data-fr-step="8" aria-labelledby="fr-h8" tabindex="-1">
         <h2 id="fr-h8">8 · Readiness → Start <span class="fr-pill" data-state="owner">OWNER</span></h2>
         <table class="fr-table">
           <caption class="sr-only">Preflight checklist (empty state)</caption>
@@ -305,7 +306,7 @@
       </section>
 
       <!-- 9 · Run monitor · questions · evidence -->
-      <section class="fr-card" id="fr-step-9" data-fr-step="9" aria-labelledby="fr-h9" tabindex="-1" hidden>
+      <section class="fr-card" id="fr-step-9" data-fr-step="9" aria-labelledby="fr-h9" tabindex="-1">
         <h2 id="fr-h9">9 · Run monitor · questions · evidence</h2>
         <p>Live progress, the owner-question queue, and gate/review evidence
         appear here once a run exists.</p>
@@ -330,7 +331,7 @@
       </section>
 
       <!-- 10 · Accept -->
-      <section class="fr-card" id="fr-step-10" data-fr-step="10" aria-labelledby="fr-h10" tabindex="-1" hidden>
+      <section class="fr-card" id="fr-step-10" data-fr-step="10" aria-labelledby="fr-h10" tabindex="-1">
         <h2 id="fr-h10">10 · Accept <span class="fr-pill" data-state="owner">OWNER</span></h2>
         <ul class="fr-checklist">
           <li>Gate green — <span class="muted">no run yet</span></li>

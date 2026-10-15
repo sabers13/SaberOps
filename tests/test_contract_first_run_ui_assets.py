@@ -153,3 +153,23 @@ def test_no_absolute_urls_in_assets() -> None:
         text = _read(path)
         assert "http://" not in text, f"absolute URL in {path.name}"
         assert "https://" not in text, f"absolute URL in {path.name}"
+
+
+def test_nojs_all_sections_visible_without_javascript() -> None:
+    """Covers: fix-up 1 — full walkthrough reachable with JS disabled."""
+    from jinja2 import Environment
+
+    rendered = Environment(autoescape=True).from_string(_read(TEMPLATE)).render()
+    sections = re.findall(r"<section[^>]*data-fr-step=\"(\d+)\"[^>]*>", rendered)
+    assert sorted(sections, key=int) == [str(n) for n in range(1, 11)]
+    for m in re.finditer(r"<section[^>]*data-fr-step[^>]*>", rendered):
+        assert "hidden" not in m.group(0), f"no-JS unreachable: {m.group(0)}"
+    assert "<noscript>" in rendered, "no-JS guidance missing"
+
+
+def test_js_collapses_to_single_step_on_init() -> None:
+    """Covers: fix-up 1 — JS navigation still shows one step at a time."""
+    text = _read(JS)
+    assert re.search(r"\.hidden\s*=", text), "JS never hides sections"
+    assert "show(currentFromHash())" in text, "JS init does not route by hash"
+    assert "aria-current" in text, "JS step-nav state missing"
