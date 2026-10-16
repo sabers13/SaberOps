@@ -24,7 +24,12 @@ covers the sum.  Bytes already on disk are already reflected in the
 measurement, so reservations track **future growth only**.  Unknown inputs, an
 unapproved margin policy, a corrupt or foreign ledger, lock contention and
 unreadable filesystems all fail closed with a typed ``DISK_BUDGET_*`` result
-that reserves nothing.
+that reserves nothing.  Ownership is fenced by the recorded process
+incarnation: a token that omits its identity resolves to the *live calling
+process* (never implicit cross-process authority), and a row whose recorded
+identity cannot be read is corruption that blocks every mutation while its
+capacity stays charged.  The identity evidence is non-secret OS state, so this
+fences cooperating processes rather than sandboxing a malicious local user.
 
 Deliberate scope limits (see ADR-0003 Amendment 2 §Rollout): this slice is not
 wired into ``scripts/gate_tools.py`` or the engine capacity loop.  The existing
@@ -464,7 +469,16 @@ class OwnerToken:
             )
 
     def resolved_identity(self) -> ProcessIdentity:
-        """Return the recorded identity, defaulting to this process."""
+        """Return the caller's effective process incarnation.
+
+        An explicit identity is the token holder's claim; an omitted identity
+        is resolved to the *actual* invoking process.  Omission is therefore
+        never implicit cross-process authority: it can only ever match the
+        recorded owner when this very process is that owner
+        (owner-approved fail-closed identity doctrine).  The evidence is
+        non-secret OS state, so this fences cooperating processes rather than
+        sandboxing a malicious local user (see ADR-0003 Amendment 2).
+        """
         return self.identity if self.identity is not None else ProcessIdentity.for_self()
 
 
@@ -1738,11 +1752,15 @@ class StorageLedger:
 
         A stale generation, a duplicate claim, a live or unprovable owner
         refuses.  PID reuse is caught by the recorded process identity, not by
-        the PID alone: on the same-owner fast path the presented incarnation
-        must match the recorded one whenever both are present, so a copied
+        the PID alone: on the same-owner fast path the caller's *effective*
+        incarnation (the explicit token identity, or the live process when the
+        token omits one) must match the recorded one, so a copied
         ``(owner_id, generation)`` pair replayed by a *different* process
-        incarnation cannot silently inherit the reservation.
+        incarnation cannot silently inherit the reservation.  A recorded
+        incarnation that cannot be read at all is corruption, not a match, and
+        fails closed before any owner comparison.
         """
+        recorded = self._recorded_identity(existing)
         if owner.owner_id == existing.owner_id and owner.generation == existing.owner_generation:
             self._require_same_incarnation(existing, owner)
             return
@@ -1755,7 +1773,7 @@ class StorageLedger:
             raise FencingError(
                 "a different owner may not renew this reservation; release or settle it first"
             )
-        liveness = probe_liveness(existing.owner_identity)
+        liveness = probe_liveness(recorded)
         if liveness is not Liveness.DEAD:
             raise FencingError(
                 f"takeover refused for {existing.reservation_id}: previous owner is {liveness}"
@@ -1773,37 +1791,51 @@ class StorageLedger:
             f"previous owner generation {existing.owner_generation}",
         )
 
+    def _recorded_identity(self, existing: Reservation) -> ProcessIdentity:
+        """Return the recorded owner incarnation, or fail closed as corruption.
+
+        ``owner_identity`` is stored ``NOT NULL``, but decoding still yields
+        ``None`` for malformed or tampered JSON (and for a genuine pre-schema
+        row that predates incarnation recording).  Absent evidence is never
+        ownership and is never "equal": every mutating path calls this first,
+        so such a row becomes a typed ``LEDGER_CORRUPT`` refusal while its
+        capacity stays conservatively charged for assessment and reclaim.  A
+        real migration/recovery for an old identity-less row is a separate
+        owner decision, not something this module may fabricate as the caller.
+        """
+        recorded = existing.owner_identity
+        if recorded is None:
+            raise LedgerCorruptError(
+                f"reservation {existing.reservation_id!r} records no readable owner "
+                "incarnation; refusing to treat absent evidence as ownership"
+            )
+        return recorded
+
     def _incarnation_conflict(self, existing: Reservation, owner: OwnerToken) -> bool:
-        """Report whether the caller presents a *different* process incarnation.
+        """Report whether the caller is a *different* process incarnation.
 
         A pair of ``(owner_id, generation)`` values is only a fence when the
         presenting process is the one that recorded it.  This is the shared
         decision behind both the same-owner write path
         (:meth:`_require_same_incarnation`) and the terminal reopen path
-        (:meth:`_authorise_reopen`): a presented identity that differs from the
-        recorded one is a PID-reused or copied token and can never inherit the
-        reservation on identity alone.
-
-        The check applies only when both sides record an incarnation.  A caller
-        that presents none keeps the historical opt-in *logical-owner
-        delegation* to the recorded ``(owner_id, generation)`` pair, and an
-        unreadable recorded identity (a corrupt row) cannot be compared either;
-        such a row is already held charged rather than read as free, because the
-        staleness/reclaim path needs positive proof of ``DEAD`` and
-        ``probe_liveness(None)`` is ``UNKNOWN`` (:meth:`_staleness`).
+        (:meth:`_authorise_reopen`): a token that omits its identity is resolved
+        to the live invoking process, so omission can never be cross-process
+        authority — it matches only when this process *is* the recorded owner.
+        A row whose recorded incarnation cannot be read is corruption and fails
+        closed here (:meth:`_recorded_identity`), never a comparison that
+        silently succeeds.
         """
-        presented = owner.identity
-        recorded = existing.owner_identity
-        if presented is None or recorded is None:
-            return False
-        return presented != recorded
+        recorded = self._recorded_identity(existing)
+        return owner.resolved_identity() != recorded
 
     def _require_same_incarnation(self, existing: Reservation, owner: OwnerToken) -> None:
-        """Refuse a same-owner replay from a different process incarnation.
+        """Refuse a same-owner write from a different process incarnation.
 
-        The check applies only when the caller actually presents an identity;
-        a caller that presents none is explicitly delegating to the recorded
-        copy of the same logical ``(owner_id, generation)`` pair.
+        The caller's *effective* identity — the explicit token identity, or the
+        live invoking process when the token omits one — must equal the recorded
+        incarnation.  An omitted identity is therefore authorised exactly when
+        this process is the recorded owner, never as delegation to another live
+        process sharing the ``(owner_id, generation)`` pair.
         """
         if self._incarnation_conflict(existing, owner):
             raise FencingError(
@@ -1818,17 +1850,20 @@ class StorageLedger:
 
         Reopening a settled key is a fresh lifecycle, so it demands a strictly
         newer owner generation.  The same logical owner may take the next
-        generation only while it *is* the recorded incarnation (or delegates in
-        the documented no-identity form): a different live process that merely
-        shares the ``owner_id`` string and raises the generation is not that
-        owner and is fenced exactly like a foreign owner.  A *different*
-        owner — or a distinct presented incarnation of the same owner id —
-        additionally needs the recorded predecessor proven dead with a lapsed
-        lease, exactly like a crashed-owner takeover: a foreign or stale replay
-        can never reopen a settled key and silently become its owner.  The
-        original ``created_at`` and the append-only event trail are preserved by
+        generation only while it *is* the recorded incarnation (an omitted
+        identity resolves to the live caller, so it too must be that
+        incarnation): a different live process that merely shares the
+        ``owner_id`` string and raises the generation is not that owner and is
+        fenced exactly like a foreign owner.  A *different* owner — or a
+        distinct caller incarnation of the same owner id — additionally needs
+        the recorded predecessor proven dead with a lapsed lease, exactly like a
+        crashed-owner takeover: a foreign or stale replay can never reopen a
+        settled key and silently become its owner.  A recorded incarnation that
+        cannot be read is corruption and fails closed.  The original
+        ``created_at`` and the append-only event trail are preserved by
         :meth:`_insert_locked`.
         """
+        recorded = self._recorded_identity(existing)
         if owner.generation <= existing.owner_generation:
             raise FencingError(
                 f"stale generation {owner.generation} cannot reopen terminal "
@@ -1838,7 +1873,7 @@ class StorageLedger:
             existing, owner
         ):
             return
-        liveness = probe_liveness(existing.owner_identity)
+        liveness = probe_liveness(recorded)
         if liveness is not Liveness.DEAD:
             raise FencingError(
                 f"reopen of terminal {existing.reservation_id} refused: "
@@ -2041,15 +2076,21 @@ class StorageLedger:
             existing = self._load_by_key(conn, key)
             if existing is None:
                 raise FencingError(f"unknown reservation {key.render()}")
+            # A row whose recorded incarnation cannot be read is corruption: a
+            # settle/release must never remove its charge on unprovable
+            # ownership, so fail closed before the owner comparison.
+            self._recorded_identity(existing)
             if owner.owner_id != existing.owner_id or owner.generation != existing.owner_generation:
                 raise FencingError(
                     f"owner mismatch closing {key.render()}: generation {owner.generation}"
                 )
             # A copied ``(owner_id, generation)`` pair replayed by a different
-            # process incarnation (PID reuse) is not the recorded owner and may
-            # neither close the row nor ride the idempotent fast path: the same
-            # fence that guards try_reserve/renew/observe also guards settle and
-            # release, so a stale token cannot free another incarnation's bytes.
+            # process incarnation (PID reuse), or a token that merely omits its
+            # identity from another live process, is not the recorded owner and
+            # may neither close the row nor ride the idempotent fast path: the
+            # same fence that guards try_reserve/renew/observe also guards settle
+            # and release, so a stale token cannot free another incarnation's
+            # bytes.
             self._require_same_incarnation(existing, owner)
             if existing.state is state:
                 return StorageDecision(

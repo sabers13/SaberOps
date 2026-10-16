@@ -604,8 +604,9 @@ def test_settle_and_release_reject_a_foreign_incarnation(tmp_path: Path) -> None
         assert bogus_release.reason_code == sb.FencingError.reason_code
         assert ledger.assess(make_estimate(tmp_path)).total_active_remaining == 4 * GB
 
-        # The recorded incarnation closes normally, and idempotent replay (same
-        # incarnation) plus the documented no-identity delegation are preserved.
+        # The recorded incarnation closes normally; an idempotent replay and a
+        # token that omits the identity both resolve to this same live process,
+        # so they are the recorded owner rather than a delegated foreign caller.
         assert ledger.settle(settle_key, owner).reason == "SETTLED"
         assert ledger.settle(settle_key, owner).reason == "already SETTLED"
         assert (
@@ -615,20 +616,29 @@ def test_settle_and_release_reject_a_foreign_incarnation(tmp_path: Path) -> None
         assert ledger.active_reservations() == ()
 
 
-def test_no_identity_delegation_is_explicit_and_preserved(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (absent identity is documented delegation)."""
+def test_omitted_identity_resolves_to_the_actual_process(tmp_path: Path) -> None:
+    """Covers: ADR-0003 Amendment 2 (an omitted identity is the live caller).
+
+    Policy correction (owner-approved): the former "no-identity delegation"
+    doctrine is revoked.  A token that omits its identity is resolved to the
+    live invoking process, so it is authorised exactly when this process *is*
+    the recorded incarnation — never because omission grants another live
+    process authority over the shared ``(owner_id, generation)`` pair.
+    """
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
     with StorageLedger(make_config(tmp_path), fs) as ledger:
         key = make_key()
-        # A caller that presents no identity opts into the logical-owner
-        # delegation: it rides the recorded copy of (owner_id, generation) and
-        # may start the next generation in-process.  That must keep working
-        # explicitly rather than being silently reinterpreted as a mismatch.
+        recorded = ProcessIdentity.for_self()
+        # The owner records its own real incarnation explicitly.
         assert ledger.try_reserve(
-            key, OwnerToken("owner", 1, ProcessIdentity.for_self()),
-            make_estimate(tmp_path, 2 * GB),
+            key, OwnerToken("owner", 1, recorded), make_estimate(tmp_path, 2 * GB)
         ).admitted
+        # An omitted identity resolves to this live process, which is the
+        # recorded incarnation; settlement and the in-process next generation
+        # therefore keep working on actual-process identity, not delegation.
+        assert OwnerToken("owner", 1).resolved_identity() == recorded
         assert ledger.settle(key, OwnerToken("owner", 1)).reason == "SETTLED"
+        assert ledger.settle(key, OwnerToken("owner", 1)).reason == "already SETTLED"
         reopened = ledger.try_reserve(
             key, OwnerToken("owner", 2), make_estimate(tmp_path, 2 * GB)
         )
@@ -689,7 +699,12 @@ def test_reopen_by_an_authorised_successor_preserves_audit_timing(tmp_path: Path
             now=base,
         ).admitted
         created_at = ledger.active_reservations()[0].created_at
-        assert ledger.settle(key, OwnerToken("owner", 1), now=base).reason == "SETTLED"
+        # Policy correction: closing a row owned by the fabricated dead identity
+        # now requires that recorded identity, not an omitted (delegated) one.
+        assert (
+            ledger.settle(key, OwnerToken("owner", 1, dead_identity()), now=base).reason
+            == "SETTLED"
+        )
         # Crash after settle: a dead predecessor with a lapsed lease is replaced
         # by a strictly newer generation, even from a different owner id.
         reopened = ledger.try_reserve(
@@ -760,7 +775,12 @@ def test_reopen_by_a_distinct_incarnation_after_proven_death(tmp_path: Path) -> 
             now=base,
         ).admitted
         created_at = ledger.active_reservations()[0].created_at
-        assert ledger.settle(key, OwnerToken("shared", 1), now=base).reason == "SETTLED"
+        # Policy correction: the recorded dead incarnation, not an omitted one,
+        # must settle the row before the distinct successor takes over.
+        assert (
+            ledger.settle(key, OwnerToken("shared", 1, dead_identity()), now=base).reason
+            == "SETTLED"
+        )
         # The recorded predecessor is proven dead *and* its lease has lapsed, so
         # a distinct incarnation may take the next generation under the same
         # owner id: genuine crash recovery is not broken by the incarnation fence.
@@ -791,7 +811,12 @@ def test_reopen_of_a_dead_predecessor_still_needs_a_lapsed_lease(tmp_path: Path)
             key, OwnerToken("shared", 1, dead_identity()), make_estimate(tmp_path, 2 * GB),
             now=base,
         ).admitted
-        assert ledger.settle(key, OwnerToken("shared", 1), now=base).reason == "SETTLED"
+        # Policy correction: settle as the recorded dead incarnation; an omitted
+        # identity is no longer cross-process authority.
+        assert (
+            ledger.settle(key, OwnerToken("shared", 1, dead_identity()), now=base).reason
+            == "SETTLED"
+        )
         early = ledger.try_reserve(
             key, OwnerToken("shared", 2, ProcessIdentity.for_self()),
             make_estimate(tmp_path, 2 * GB), now=base + timedelta(seconds=30),
@@ -800,6 +825,281 @@ def test_reopen_of_a_dead_predecessor_still_needs_a_lapsed_lease(tmp_path: Path)
         assert early.reason_code == sb.FencingError.reason_code
         assert ledger.active_reservations() == ()
         assert [event.event for event in ledger.history(key)] == ["RESERVED", "SETTLED"]
+
+
+def test_omitted_identity_takeover_requires_proven_death_and_lapsed_lease(
+    tmp_path: Path,
+) -> None:
+    """Covers: ADR-0003 Amendment 2 (takeover: proven death + lapsed lease + new gen)."""
+    fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
+    base = datetime(2026, 10, 15, 12, 0, 0, tzinfo=UTC)
+    with StorageLedger(make_config(tmp_path, lease_seconds=60.0), fs) as ledger:
+        key = make_key()
+        assert ledger.try_reserve(
+            key, OwnerToken("shared", 1, dead_identity()), make_estimate(tmp_path, 2 * GB),
+            now=base,
+        ).admitted
+        created_at = ledger.active_reservations()[0].created_at
+        # A live incarnation presenting *no* identity must still prove the
+        # predecessor dead *and* the lease lapsed before it may take over.
+        early = ledger.try_reserve(
+            key, OwnerToken("shared", 2), make_estimate(tmp_path, 2 * GB),
+            now=base + timedelta(seconds=30),
+        )
+        assert early.outcome is AdmissionOutcome.UNAVAILABLE
+        assert early.reason_code == sb.FencingError.reason_code
+        # Proven-dead predecessor with a lapsed lease: the strictly newer
+        # generation is admitted and the original audit timing is retained.
+        takeover = ledger.try_reserve(
+            key, OwnerToken("shared", 2), make_estimate(tmp_path, 2 * GB),
+            now=base + timedelta(seconds=120),
+        )
+        assert takeover.admitted, takeover.reason
+        rows = ledger.active_reservations()
+        assert [row.owner_id for row in rows] == ["shared"]
+        assert rows[0].owner_generation == 2
+        assert rows[0].created_at == created_at
+        assert [event.event for event in ledger.history(key)] == [
+            "RESERVED", "TAKEOVER", "RENEWED",
+        ]
+        assert ledger.assess(make_estimate(tmp_path)).total_active_remaining == 2 * GB
+
+
+def _corrupt_owner_identity(config: LedgerConfig, value: str) -> None:
+    conn = sqlite3.connect(config.database_path)
+    conn.execute("UPDATE reservations SET owner_identity = ?", (value,))
+    conn.commit()
+    conn.close()
+
+
+@pytest.mark.parametrize("corrupt", ["{not json", "", "null", "[]", '{"host": "x"}'])
+def test_corrupt_recorded_identity_denies_every_mutation_and_stays_charged(
+    tmp_path: Path, corrupt: str
+) -> None:
+    """Covers: ADR-0003 Amendment 2 (unreadable recorded identity fails closed)."""
+    fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
+    config = make_config(tmp_path)
+    key = make_key()
+    owner = OwnerToken("owner", 1, ProcessIdentity.for_self())
+    with StorageLedger(config, fs) as ledger:
+        assert ledger.try_reserve(key, owner, make_estimate(tmp_path, 2 * GB)).admitted
+    _corrupt_owner_identity(config, corrupt)
+    with StorageLedger(config, fs) as ledger:
+        same = OwnerToken("owner", 1)
+        reserve = ledger.try_reserve(key, same, make_estimate(tmp_path, 2 * GB))
+        assert reserve.outcome is AdmissionOutcome.UNAVAILABLE
+        assert reserve.reason_code == LedgerCorruptError.reason_code
+        renew = ledger.renew(key, same, make_estimate(tmp_path, 2 * GB))
+        assert renew.outcome is AdmissionOutcome.UNAVAILABLE
+        assert renew.reason_code == LedgerCorruptError.reason_code
+        with pytest.raises(LedgerCorruptError):
+            ledger.observe(key, same, tmp_path, 1024)
+        assert ledger.settle(key, same).reason_code == LedgerCorruptError.reason_code
+        assert ledger.release(key, same).reason_code == LedgerCorruptError.reason_code
+        # A token carrying the exact recorded-looking identity cannot help: with
+        # no readable recorded incarnation there is nothing to match against.
+        assert ledger.settle(key, owner).reason_code == LedgerCorruptError.reason_code
+        # Conservative: nothing was mutated and the capacity stays fully charged.
+        assert ledger.reclaim_stale() == ()
+        active = ledger.active_reservations()
+        assert [row.state for row in active] == [sb.ReservationState.RESERVED]
+        assert sum(sample.bound_bytes for sample in active[0].filesystems) == 2 * GB
+        assert ledger.assess(make_estimate(tmp_path)).total_active_remaining == 2 * GB
+        assert [event.event for event in ledger.history(key)] == ["RESERVED"]
+
+
+def test_corrupt_recorded_identity_denies_terminal_reopen(tmp_path: Path) -> None:
+    """Covers: ADR-0003 Amendment 2 (a corrupt terminal row is not resurrectable)."""
+    fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
+    config = make_config(tmp_path)
+    key = make_key()
+    owner = OwnerToken("owner", 1, ProcessIdentity.for_self())
+    with StorageLedger(config, fs) as ledger:
+        assert ledger.try_reserve(key, owner, make_estimate(tmp_path, 2 * GB)).admitted
+        assert ledger.settle(key, owner).reason == "SETTLED"
+    _corrupt_owner_identity(config, "{not json")
+    with StorageLedger(config, fs) as ledger:
+        reopened = ledger.try_reserve(
+            key, OwnerToken("owner", 2), make_estimate(tmp_path, 2 * GB)
+        )
+        assert reopened.outcome is AdmissionOutcome.UNAVAILABLE
+        assert reopened.reason_code == LedgerCorruptError.reason_code
+        assert reopened.reserved is False
+        # Even a matching explicit incarnation and a newer generation cannot
+        # fabricate ownership over an unprovable predecessor.
+        again = ledger.try_reserve(
+            key, OwnerToken("owner", 2, ProcessIdentity.for_self()),
+            make_estimate(tmp_path, 2 * GB),
+        )
+        assert again.reason_code == LedgerCorruptError.reason_code
+        assert ledger.active_reservations() == ()
+        assert [event.event for event in ledger.history(key)] == ["RESERVED", "SETTLED"]
+
+
+def test_unknown_reservation_mutations_are_typed_refusals(tmp_path: Path) -> None:
+    """Covers: ADR-0003 Amendment 2 (an unknown key is a typed refusal, never a write)."""
+    fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
+    with StorageLedger(make_config(tmp_path), fs) as ledger:
+        absent = make_key(session="absent")
+        assert (
+            ledger.settle(absent, OwnerToken("o", 1)).reason_code
+            == sb.FencingError.reason_code
+        )
+        assert (
+            ledger.release(absent, OwnerToken("o", 1)).reason_code
+            == sb.FencingError.reason_code
+        )
+        renew = ledger.renew(absent, OwnerToken("o", 1), make_estimate(tmp_path, GB))
+        assert renew.reason_code == sb.FencingError.reason_code
+        with pytest.raises(sb.FencingError):
+            ledger.observe(absent, OwnerToken("o", 1), tmp_path, 1024)
+        assert ledger.active_reservations() == ()
+
+
+_FOREIGN_OMITTED_IDENTITY_SOURCE = '''
+import json
+import sys
+from pathlib import Path
+
+from saberops.storage_budget import (
+    EstimateComponent,
+    EstimateSource,
+    FilesystemIdentity,
+    LedgerConfig,
+    OwnerToken,
+    ReservationKey,
+    StorageEstimate,
+    StorageLedger,
+)
+
+payload = json.loads(Path(sys.argv[1]).read_text())
+
+
+def probe(path: Path) -> FilesystemIdentity:
+    return FilesystemIdentity(
+        key=payload["fs_key"],
+        device=11,
+        total_bytes=payload["total"],
+        free_bytes=payload["free"],
+    )
+
+
+def summarise(decision):
+    return {
+        "outcome": str(decision.outcome),
+        "reason": decision.reason_code,
+        "reserved": decision.reserved,
+    }
+
+
+config = LedgerConfig(
+    root=Path(payload["root"]),
+    policy_path=Path(payload["policy"]),
+    allow_isolated=True,
+    lock_timeout_seconds=60.0,
+)
+estimate = StorageEstimate(
+    components=(
+        EstimateComponent(path=payload["path"], remaining_growth_bytes=payload["bytes"]),
+    ),
+    source=EstimateSource.OWNER_HINT,
+    sample_count=0,
+    confidence=0.5,
+)
+key = ReservationKey(
+    installation_id=payload["installation"],
+    session_id=payload["session"],
+    attempt_id=payload["attempt"],
+    phase_id=payload["phase"],
+)
+owner_id = payload["owner_id"]
+generation = int(payload["generation"])
+
+results = {}
+with StorageLedger(config, probe) as ledger:
+    # Every token below omits its identity: the child resolves to its own live
+    # process and must be refused because it is not the recorded owner.
+    omitted = OwnerToken(owner_id, generation)
+    results["try_reserve"] = summarise(ledger.try_reserve(key, omitted, estimate))
+    results["renew"] = summarise(ledger.renew(key, omitted, estimate))
+    results["settle"] = summarise(ledger.settle(key, omitted))
+    results["release"] = summarise(ledger.release(key, omitted))
+    try:
+        ledger.observe(key, omitted, Path(payload["path"]), 1024)
+        results["observe"] = "NO_REFUSAL"
+    except Exception as exc:
+        results["observe"] = type(exc).__name__
+    results["reopen"] = summarise(
+        ledger.try_reserve(key, OwnerToken(owner_id, generation + 1), estimate)
+    )
+print(json.dumps(results))
+'''
+
+
+def test_foreign_process_omitted_identity_cannot_mutate_a_live_reservation(
+    tmp_path: Path,
+) -> None:
+    """Covers: ADR-0003 Amendment 2 (omitting identity is not cross-process authority)."""
+    fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
+    config = make_config(tmp_path)
+    script = tmp_path / "foreign_omitted.py"
+    script.write_text(_FOREIGN_OMITTED_IDENTITY_SOURCE)
+    key = make_key()
+    owner = OwnerToken("shared", 1, ProcessIdentity.for_self())
+    with StorageLedger(config, fs) as ledger:
+        assert ledger.try_reserve(key, owner, make_estimate(tmp_path, 2 * GB)).admitted
+    payload = {
+        "fs_key": "fs",
+        "total": 16 * GB,
+        "free": 8 * GB,
+        "root": str(config.root),
+        "policy": str(config.policy_path),
+        "path": str(tmp_path),
+        "bytes": 2 * GB,
+        "installation": key.installation_id,
+        "session": key.session_id,
+        "attempt": key.attempt_id,
+        "phase": key.phase_id,
+        "owner_id": "shared",
+        "generation": 1,
+    }
+    payload_path = tmp_path / "foreign-payload.json"
+    payload_path.write_text(json.dumps(payload))
+    src = str(Path(sb.__file__).resolve().parents[1])
+    env = {**os.environ, "PYTHONPATH": src, "PYTHONDONTWRITEBYTECODE": "1"}
+    completed = subprocess.run(
+        [sys.executable, str(script), str(payload_path)],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=120,
+    )
+    assert completed.returncode == 0, completed.stderr
+    lines = [json.loads(line) for line in completed.stdout.splitlines() if line.strip()]
+    assert lines, completed.stderr
+    results = lines[0]
+    for name in ("try_reserve", "renew", "settle", "release", "reopen"):
+        assert results[name]["outcome"] == "UNAVAILABLE", (name, results[name])
+        assert results[name]["reason"] == sb.FencingError.reason_code, (name, results[name])
+        assert results[name]["reserved"] is False, (name, results[name])
+    assert results["observe"] == "FencingError", results
+    # The original reservation is untouched and still fully charged: the
+    # foreign no-identity attempts caused no capacity undercount.
+    with StorageLedger(config, fs) as ledger:
+        active = ledger.active_reservations()
+        assert len(active) == 1
+        assert active[0].owner_identity == owner.identity
+        assert sum(sample.bound_bytes for sample in active[0].filesystems) == 2 * GB
+        assert ledger.assess(make_estimate(tmp_path)).total_active_remaining == 2 * GB
+        assert [event.event for event in ledger.history(key)] == ["RESERVED"]
+        # The genuine same-process owner (omitted identity) still operates.
+        assert ledger.settle(key, OwnerToken("shared", 1)).reason == "SETTLED"
+        assert ledger.try_reserve(
+            key, OwnerToken("shared", 2), make_estimate(tmp_path, 2 * GB)
+        ).admitted
+        assert [event.event for event in ledger.history(key)] == [
+            "RESERVED", "SETTLED", "RESERVED",
+        ]
 
 
 def test_state_restart_keeps_the_same_reservation(tmp_path: Path) -> None:
