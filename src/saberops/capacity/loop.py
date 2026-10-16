@@ -109,6 +109,17 @@ class TickResult:
     preemption_settled: int = 0
     preemption_pending: tuple[str, ...] = ()
     preemption_blocked: tuple[str, ...] = ()
+    # ADR-0002 D7 legacy-RUNNING hold diagnostics (owner-visible job ids).
+    # ``legacy_running_jobs``: RUNNING jobs with no ``current_run_id`` or no
+    # live RESERVED reservation row, held by
+    # ``reason="legacy_running_without_reservation"``.
+    # ``unresolved_running_jobs``: RUNNING jobs whose run is invisible to the
+    # tick's status lookup (e.g. project-local run in another store), held by
+    # ``reason="running_run_status_unresolved"`` instead of being failed as
+    # RUN_MISSING.  Both are pure functions of durable state, so a repeated
+    # tick reports the same diagnostics without any side effect.
+    legacy_running_jobs: tuple[str, ...] = ()
+    unresolved_running_jobs: tuple[str, ...] = ()
 
 
 def acquire_lease(
@@ -416,6 +427,10 @@ def scheduler_tick(
 ) -> TickResult:
     """Execute one complete scheduler tick.
 
+    0. ADR-0002 D7 fail-closed RUNNING accounting: refuse the whole tick when
+       any RUNNING job has no trustworthy capacity reservation, or when the
+       owner status lookup cannot see a RUNNING job's run (a project-local
+       run in a distinct store).  Zero schedule/dispatch/CAS/provider calls.
     1. Verify scheduler lease.
     2. Reconcile terminal runs and settle/release their reservations.
     3. Query queued/running jobs and system state.
@@ -440,9 +455,83 @@ def scheduler_tick(
     if not check_lease(db, lease, now=_current_moment()):
         return TickResult(ran=False, reason="lost_lease")
 
-    # 1. Startup and periodic reconciliation
     status_fn = run_status or (lambda r_id: _lookup_run_status(db, r_id))
-    changes = reconcile_jobs(db, run_status=status_fn, now=moment)
+    # One status snapshot per tick: the fail-closed RUNNING guard, the RUNNING
+    # reconciler and the D8 preemption reconciler all ask about the same runs,
+    # so share a single memoized owner lookup instead of repeating the read
+    # once per caller.
+    status_cache: dict[str, RunStatus | None] = {}
+
+    def tick_status(run_id: str) -> RunStatus | None:
+        if run_id not in status_cache:
+            status_cache[run_id] = status_fn(run_id)
+        return status_cache[run_id]
+
+    # 0. Fail-closed RUNNING accounting (ADR-0002 D7 legacy reservations).
+    #
+    # Per-pool occupancy and outstanding debt are derived from RESERVED
+    # ``capacity_reservations`` rows.  A legacy/upgraded job persisted in
+    # RUNNING state with no reservation row (or no ``current_run_id``) would
+    # therefore read as ZERO occupancy and ZERO debt, so the per-pool guard in
+    # ``admit()`` could over-admit and the red-line check could pass on an
+    # already-drained pool while the global ceiling alone still held.  A
+    # successful read that returns no rows is NOT proof the pool is free.
+    #
+    # Before anything is reconciled, scheduled, or dispatched we require EVERY
+    # RUNNING job to hold a live ``RESERVED`` row.  Any job that does not
+    # holds the whole tick (zero reconcile side effects, zero dispatch, zero
+    # CAS, zero provider calls) with an owner-visible diagnostic.  We never
+    # backfill a reservation or auto-promote the job: an owner-approved
+    # promotion rule is a separate decision.
+    try:
+        running_snapshot = store.list_jobs_raw(db, state=JobState.RUNNING, limit=100_000)
+    except (sqlite3.OperationalError, sqlite3.DatabaseError):
+        return TickResult(ran=False, reason="ledger_read_error")
+
+    owner_store = getattr(db, "owner_db", db)
+    reserved_run_ids: set[str] = set()
+    if running_snapshot:
+        try:
+            with owner_store._get_connection() as conn:
+                reserved_rows = conn.execute(
+                    "SELECT DISTINCT run_id FROM capacity_reservations"
+                    " WHERE state = 'RESERVED'"
+                ).fetchall()
+        except (sqlite3.OperationalError, sqlite3.DatabaseError):
+            return TickResult(ran=False, reason="ledger_read_error")
+        reserved_run_ids = {str(row["run_id"]) for row in reserved_rows}
+
+    legacy_running_jobs: list[str] = []
+    unresolved_running_jobs: list[str] = []
+    for running_job in running_snapshot:
+        run_id = running_job.current_run_id
+        if not run_id or run_id not in reserved_run_ids:
+            legacy_running_jobs.append(running_job.job_id)
+            continue
+        if tick_status(run_id) is None:
+            # The tick's status lookup cannot see this run.  ``reconcile_jobs``
+            # would read that as RUN_MISSING, mark the job FAILED and (through
+            # the reconciler above) release a reservation that may still belong
+            # to a live project-local run held in a different store.  An
+            # unknown run is never proof the run is gone, so hold instead and
+            # retain the job and its reservation for owner resolution.
+            unresolved_running_jobs.append(running_job.job_id)
+
+    if legacy_running_jobs:
+        return TickResult(
+            ran=False,
+            reason="legacy_running_without_reservation",
+            legacy_running_jobs=tuple(legacy_running_jobs),
+        )
+    if unresolved_running_jobs:
+        return TickResult(
+            ran=False,
+            reason="running_run_status_unresolved",
+            unresolved_running_jobs=tuple(unresolved_running_jobs),
+        )
+
+    # 1. Startup and periodic reconciliation
+    changes = reconcile_jobs(db, run_status=tick_status, now=moment)
     for ch in changes:
         if ch.to_state == JobState.SUCCEEDED:
             settle(db, ch.run_id, total_tokens=None, now=moment)
@@ -478,7 +567,7 @@ def scheduler_tick(
     try:
         preempt_recon = reconcile_preemptions(
             db,
-            run_status=status_fn,
+            run_status=tick_status,
             recover=_preempt_recover,
             lease_guard=_preempt_lease_guard,
             now=moment,

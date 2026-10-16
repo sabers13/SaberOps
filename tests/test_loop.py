@@ -1125,6 +1125,19 @@ def test_scheduler_tick_default_global_ceiling_blocks_16th_job(
             ),
             now=t0,
         )
+        # Setup-only realism: a real scheduler dispatch always holds a pool
+        # reservation for its RUNNING job, so the D7 fail-closed RUNNING
+        # accounting guard (legacy reservations) sees 15 claimed slots, not
+        # 15 unreserved legacy rows.  Assertions below are unchanged.
+        reserve(
+            owner_db,
+            run_id=f"run_{i}",
+            job_id=f"running_{i}",
+            route="openai/gpt-5",
+            draws=[PoolDraw(pool_id="chatgpt-plus", window_id="5h", multiplier=1.0)],
+            size_bucket="M",
+            now=t0,
+        )
     store.insert_job(
         owner_db,
         _make_job(
@@ -1166,9 +1179,22 @@ def test_scheduler_tick_default_global_ceiling_blocks_16th_job(
 
 
 def _seed_cap_jobs(
-    owner_db: Database, repo_dir: Path, running: int, queued: int, t0: datetime
+    owner_db: Database,
+    repo_dir: Path,
+    running: int,
+    queued: int,
+    t0: datetime,
+    *,
+    reserve_running: bool = False,
 ) -> None:
-    """Seed durable RUNNING and QUEUED jobs for global-capacity tick tests."""
+    """Seed durable RUNNING and QUEUED jobs for global-capacity tick tests.
+
+    ``reserve_running`` also records the pool reservation every real scheduler
+    dispatch holds for a RUNNING job.  The global-ceiling fixtures use it so
+    their synthetic RUNNING jobs model dispatched jobs; without it they would
+    be legacy RUNNING rows with no reservation, which the D7 fail-closed
+    accounting guard now (correctly) refuses to schedule past.
+    """
     for i in range(running):
         store.insert_job(
             owner_db,
@@ -1195,6 +1221,17 @@ def _seed_cap_jobs(
             ),
             now=t0,
         )
+    if reserve_running:
+        for i in range(running):
+            reserve(
+                owner_db,
+                run_id=f"cap_run_{i}",
+                job_id=f"cap_running_{i}",
+                route="openai/gpt-5",
+                draws=[PoolDraw(pool_id="chatgpt-plus", window_id="5h", multiplier=1.0)],
+                size_bucket="M",
+                now=t0,
+            )
 
 
 def _cap_tick_kwargs(routes: RoutingSnapshot, policy: ControlPlanePolicy) -> dict[str, Any]:
@@ -1219,7 +1256,7 @@ def test_scheduler_tick_explicit_limit_cannot_exceed_owner_cap(
     repo_dir = tmp_path / "repo_cap_owner"
     repo_dir.mkdir()
     (repo_dir / ".git").mkdir()
-    _seed_cap_jobs(owner_db, repo_dir, running=3, queued=1, t0=t0)
+    _seed_cap_jobs(owner_db, repo_dir, running=3, queued=1, t0=t0, reserve_running=True)
 
     record_owner_quota(owner_db, "openai", "chatgpt-plus", 100.0, None, source="OWNER", now=t0)
     routes = _make_routes(((_make_candidate("openai", "gpt-5"),),))
@@ -1258,7 +1295,7 @@ def test_scheduler_tick_explicit_limit_lowers_below_default(
     repo_dir = tmp_path / "repo_cap_lower"
     repo_dir.mkdir()
     (repo_dir / ".git").mkdir()
-    _seed_cap_jobs(owner_db, repo_dir, running=2, queued=1, t0=t0)
+    _seed_cap_jobs(owner_db, repo_dir, running=2, queued=1, t0=t0, reserve_running=True)
 
     record_owner_quota(owner_db, "openai", "chatgpt-plus", 100.0, None, source="OWNER", now=t0)
     routes = _make_routes(((_make_candidate("openai", "gpt-5"),),))
@@ -1295,7 +1332,7 @@ def test_scheduler_tick_cli_and_explicit_limits_both_lower(
     repo_dir = tmp_path / "repo_cap_min"
     repo_dir.mkdir()
     (repo_dir / ".git").mkdir()
-    _seed_cap_jobs(owner_db, repo_dir, running=2, queued=1, t0=t0)
+    _seed_cap_jobs(owner_db, repo_dir, running=2, queued=1, t0=t0, reserve_running=True)
 
     record_owner_quota(owner_db, "openai", "chatgpt-plus", 100.0, None, source="OWNER", now=t0)
     routes = _make_routes(((_make_candidate("openai", "gpt-5"),),))
@@ -1839,3 +1876,508 @@ def test_default_run_launcher_stages_verified_resume(
     assert staged.handoff_id == queued.resume_from.handoff_id
     prepared = owner_db.get_events_by_type("run_new", "resume_prepared")
     assert len(prepared) == 1
+
+
+
+# ---------------------------------------------------------------------------
+# ADR-0002 D7 — legacy RUNNING without a trustworthy reservation fails closed
+# ---------------------------------------------------------------------------
+
+
+def test_scheduler_tick_fails_closed_on_legacy_running_without_reservation(
+    owner_db: Database, tmp_path: Path
+) -> None:
+    """Covers: ADR-0002 D7 a RUNNING job with no live RESERVED row holds the
+    whole tick: no reconcile side effect, no schedule, no dispatch, no CAS, no
+    provider call and no ledger write.  A successful empty reservation read is
+    not proof the pool is free.
+    """
+    t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
+    lease = acquire_lease(owner_db, "legacy_hold", ttl_seconds=30.0, now=t0)
+    assert lease is not None
+
+    repo_dir = tmp_path / "repo_legacy"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+
+    # The offending legacy row: RUNNING with a run id but zero RESERVED rows.
+    store.insert_job(
+        owner_db,
+        _make_job(
+            "legacy_no_reservation",
+            str(repo_dir),
+            state=JobState.RUNNING,
+            current_run_id="run_legacy_nores",
+            run_ids=("run_legacy_nores",),
+            created_at=t0.isoformat(),
+            updated_at=t0.isoformat(),
+            request_digest="dg_legacy_nores",
+        ),
+        now=t0,
+    )
+    # A fully valid RUNNING job whose run looks terminal.  Its reservation is
+    # live, so only the legacy row above holds the tick; the guard must run
+    # BEFORE reconciliation, or this job would be settled to SUCCEEDED.
+    store.insert_job(
+        owner_db,
+        _make_job(
+            "valid_before_reconcile",
+            str(repo_dir),
+            state=JobState.RUNNING,
+            current_run_id="run_valid_completed",
+            run_ids=("run_valid_completed",),
+            created_at=t0.isoformat(),
+            updated_at=t0.isoformat(),
+            request_digest="dg_valid_before",
+        ),
+        now=t0,
+    )
+    reserve(
+        owner_db,
+        run_id="run_valid_completed",
+        job_id="valid_before_reconcile",
+        route="openai/gpt-5",
+        draws=[PoolDraw(pool_id="chatgpt-plus", window_id="5h", multiplier=1.0)],
+        size_bucket="M",
+        now=t0,
+    )
+    store.insert_job(
+        owner_db,
+        _make_job(
+            "legacy_queued",
+            str(repo_dir),
+            created_at=t0.isoformat(),
+            updated_at=t0.isoformat(),
+            request_digest="dg_legacy_queued",
+        ),
+        now=t0,
+    )
+
+    record_owner_quota(owner_db, "openai", "chatgpt-plus", 100.0, None, source="OWNER", now=t0)
+    routes = _make_routes(((_make_candidate("openai", "gpt-5"),),))
+    policy = _make_policy()
+
+    def legacy_status(rid: str) -> RunStatus:
+        return RunStatus.COMPLETED if rid == "run_valid_completed" else RunStatus.RUNNING
+
+    launched: list[str] = []
+
+    def _tick() -> Any:
+        return scheduler_tick(
+            owner_db,
+            lease,
+            now=t0,
+            routes=routes,
+            policy=policy,
+            run_launcher=lambda j, d, r: launched.append(j.job_id),
+            run_status=legacy_status,
+            clock_fn=lambda: t0,
+        )
+
+    res = _tick()
+    assert res.ran is False
+    assert res.reason == "legacy_running_without_reservation"
+    assert res.dispatched == 0
+    assert res.decisions == ()
+    assert res.reconciled_changes == ()
+    assert launched == []
+    assert res.legacy_running_jobs == ("legacy_no_reservation",)
+
+    # No reconciliation ran: the valid terminal-status job is still RUNNING and
+    # its reservation is untouched, and the queued job was never touched.
+    hold_after = store.get_job(owner_db, "valid_before_reconcile")
+    assert hold_after is not None
+    assert hold_after.state == JobState.RUNNING
+    with owner_connection(owner_db) as conn:
+        valid_state = conn.execute(
+            "SELECT state FROM capacity_reservations WHERE run_id = 'run_valid_completed'"
+        ).fetchone()["state"]
+        n_res = conn.execute(
+            "SELECT COUNT(*) AS n FROM capacity_reservations"
+        ).fetchone()["n"]
+        n_events = conn.execute(
+            "SELECT COUNT(*) AS n FROM job_events WHERE job_id = 'legacy_queued'"
+        ).fetchone()["n"]
+    assert valid_state == "RESERVED"
+    assert n_res == 1  # only the valid job's own reservation; no backfill
+    assert n_events == 1  # the submit event only; the tick added nothing
+
+    queued_after = store.get_job(owner_db, "legacy_queued")
+    assert queued_after is not None
+    assert queued_after.state == JobState.QUEUED
+    assert queued_after.waiting_reason == WaitingReason.NEW
+    assert queued_after.current_run_id is None
+
+    # Idempotence: a second tick reports exactly the same hold, with no new
+    # side effects anywhere.
+    res2 = _tick()
+    assert res2.ran is False
+    assert res2.reason == res.reason
+    assert res2.legacy_running_jobs == res.legacy_running_jobs
+    assert res2.dispatched == 0
+    assert launched == []
+    with owner_connection(owner_db) as conn:
+        n_res2 = conn.execute(
+            "SELECT COUNT(*) AS n FROM capacity_reservations"
+        ).fetchone()["n"]
+    assert n_res2 == 1
+
+
+def test_scheduler_tick_fails_closed_on_running_job_without_run_id(
+    owner_db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: ADR-0002 D7 a legacy RUNNING row with no ``current_run_id`` is
+    never silently treated as zero occupancy; the tick holds with an
+    owner-visible diagnostic and dispatches nothing.
+
+    Such a row can exist in an upgraded owner DB (the column is nullable), but
+    the current ``Job`` model refuses to *represent* RUNNING without a run id,
+    so the read path is injected to reach the guard's defensive branch.
+    """
+    t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
+    lease = acquire_lease(owner_db, "legacy_null_run", ttl_seconds=30.0, now=t0)
+    assert lease is not None
+
+    repo_dir = tmp_path / "repo_legacy_null"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+
+    with owner_connection(owner_db) as conn:
+        conn.execute(
+            "INSERT INTO jobs (job_id, caller_id, repo, base_ref, base_sha,"
+            " goal, requirements_json, priority, state, created_at, updated_at,"
+            " request_digest, run_ids_json)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "legacy_null_run",
+                "test",
+                str(repo_dir),
+                "main",
+                "abc1234",
+                "legacy row without a run id",
+                "{}",
+                "NORMAL",
+                "RUNNING",
+                t0.isoformat(),
+                t0.isoformat(),
+                "dg_null_run",
+                "[]",
+            ),
+        )
+        conn.commit()
+        present = conn.execute(
+            "SELECT COUNT(*) AS n FROM jobs"
+            " WHERE job_id = 'legacy_null_run' AND current_run_id IS NULL"
+        ).fetchone()["n"]
+    assert present == 1  # the legacy row really exists in owner storage
+
+    from saberops.jobs import store as jobs_store
+
+    class _LegacyRunningRow:
+        job_id = "legacy_null_run"
+        current_run_id = None
+
+    monkeypatch.setattr(jobs_store, "list_jobs_raw", lambda *a, **k: [_LegacyRunningRow()])
+
+    launched: list[str] = []
+    res = scheduler_tick(
+        owner_db,
+        lease,
+        now=t0,
+        run_launcher=lambda j, d, r: launched.append(j.job_id),
+        probes={},
+        clock_fn=lambda: t0,
+    )
+    assert res.ran is False
+    assert res.reason == "legacy_running_without_reservation"
+    assert res.legacy_running_jobs == ("legacy_null_run",)
+    assert res.dispatched == 0
+    assert launched == []
+
+
+def test_scheduler_tick_legacy_guard_allows_valid_reserved_running_job(
+    owner_db: Database, tmp_path: Path
+) -> None:
+    """Covers: ADR-0002 D7 the legacy-RUNNING guard does not block a valid
+    in-use pool: a RUNNING job with a live RESERVED row still counts against
+    its pool, stays untouched, and an eligible queued job still dispatches
+    when a pool slot is free.
+    """
+    t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
+    lease = acquire_lease(owner_db, "legacy_guard_ok", ttl_seconds=30.0, now=t0)
+    assert lease is not None
+
+    repo_dir = tmp_path / "repo_legacy_ok"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+
+    store.insert_job(
+        owner_db,
+        _make_job(
+            "valid_running",
+            str(repo_dir),
+            state=JobState.RUNNING,
+            current_run_id="run_valid",
+            run_ids=("run_valid",),
+            created_at=t0.isoformat(),
+            updated_at=t0.isoformat(),
+            request_digest="dg_valid_run",
+        ),
+        now=t0,
+    )
+    reserve(
+        owner_db,
+        run_id="run_valid",
+        job_id="valid_running",
+        route="openai/gpt-5",
+        draws=[PoolDraw(pool_id="chatgpt-plus", window_id="5h", multiplier=1.0)],
+        size_bucket="M",
+        now=t0,
+    )
+    store.insert_job(
+        owner_db,
+        _make_job(
+            "valid_queued",
+            str(repo_dir),
+            created_at=t0.isoformat(),
+            updated_at=t0.isoformat(),
+            request_digest="dg_valid_queued",
+        ),
+        now=t0,
+    )
+
+    record_owner_quota(owner_db, "openai", "chatgpt-plus", 100.0, None, source="OWNER", now=t0)
+    # Owner plan allows two concurrent jobs on the pool, so one live RUNNING
+    # occupant must not block the queued job.
+    plan = PoolPlan(
+        pool_id="chatgpt-plus",
+        members=(PoolMember(route="openai", multiplier=1.0),),
+        windows=(Window(id="5h", duration_min=300),),
+        mode="STRICT",
+        red_line_pct=10.0,
+        overage_possible=False,
+        max_concurrent=2,
+    )
+    policy = _make_policy({"chatgpt-plus": plan})
+    routes = _make_routes(((_make_candidate("openai", "gpt-5"),),))
+
+    launched: list[str] = []
+    res = scheduler_tick(
+        owner_db,
+        lease,
+        now=t0,
+        routes=routes,
+        policy=policy,
+        run_launcher=lambda j, d, r: launched.append(j.job_id),
+        run_status=lambda rid: RunStatus.RUNNING,
+        clock_fn=lambda: t0,
+    )
+    assert res.ran is True
+    assert res.legacy_running_jobs == ()
+    assert res.unresolved_running_jobs == ()
+    assert res.dispatched == 1
+    assert launched == ["valid_queued"]
+
+    running_after = store.get_job(owner_db, "valid_running")
+    assert running_after is not None
+    assert running_after.state == JobState.RUNNING
+    assert running_after.current_run_id == "run_valid"
+    with owner_connection(owner_db) as conn:
+        state = conn.execute(
+            "SELECT state FROM capacity_reservations WHERE run_id = 'run_valid'"
+        ).fetchone()["state"]
+    assert state == "RESERVED"
+    queued_after = store.get_job(owner_db, "valid_queued")
+    assert queued_after is not None and queued_after.state == JobState.RUNNING
+
+
+def test_scheduler_tick_holds_split_store_running_run_instead_of_failing_it(
+    owner_db: Database, tmp_path: Path
+) -> None:
+    """Covers: ADR-0002 D7/D8 an owner-only status lookup cannot see a
+    project-local execution run held in a second SQLite store, so the tick must
+    fail closed: no false FAILED job, no RELEASED reservation, no dispatch.
+
+    Two real, separate SQLite files: the job row and its RESERVED capacity row
+    live in the owner DB, while the live RUNNING run row lives in another DB.
+    ``reconcile_jobs`` alone would read the invisible run as RUN_MISSING.
+    """
+    t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
+    lease = acquire_lease(owner_db, "split_hold", ttl_seconds=30.0, now=t0)
+    assert lease is not None
+
+    repo_dir = tmp_path / "repo_split"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+
+    exec_db = Database(tmp_path / "project_local.db")
+    assert exec_db.db_path != owner_db.db_path
+    run_id = "run_project_local_0001"
+    exec_db.create_run(
+        Run(
+            id=run_id,
+            task="project-local run",
+            target_repo=str(repo_dir),
+            base_commit="abc1234",
+            tier=Tier.T2,
+            training_allowed=True,
+            gate_command="true",
+            status=RunStatus.RUNNING,
+            created_at=t0.isoformat(),
+            config_json="{}",
+        )
+    )
+
+    store.insert_job(
+        owner_db,
+        _make_job(
+            "split_running",
+            str(repo_dir),
+            state=JobState.RUNNING,
+            current_run_id=run_id,
+            run_ids=(run_id,),
+            created_at=t0.isoformat(),
+            updated_at=t0.isoformat(),
+            request_digest="dg_split",
+        ),
+        now=t0,
+    )
+    reserve(
+        owner_db,
+        run_id=run_id,
+        job_id="split_running",
+        route="openai/gpt-5",
+        draws=[PoolDraw(pool_id="chatgpt-plus", window_id="5h", multiplier=1.0)],
+        size_bucket="M",
+        now=t0,
+    )
+    # The split really exists: the owner DB cannot see the run.
+    assert owner_db.get_run(run_id) is None
+    assert exec_db.get_run(run_id) is not None
+
+    def owner_only_status(rid: str) -> RunStatus | None:
+        run = owner_db.get_run(rid)
+        return run.status if run is not None else None
+
+    launched: list[str] = []
+    res = scheduler_tick(
+        owner_db,
+        lease,
+        now=t0,
+        run_status=owner_only_status,
+        run_launcher=lambda j, d, r: launched.append(j.job_id),
+        probes={},
+        clock_fn=lambda: t0,
+    )
+    assert res.ran is False
+    assert res.reason == "running_run_status_unresolved"
+    assert res.unresolved_running_jobs == ("split_running",)
+    assert res.dispatched == 0
+    assert launched == []
+
+    # The valid job and its live reservation are retained, not falsely failed.
+    job_after = store.get_job(owner_db, "split_running")
+    assert job_after is not None
+    assert job_after.state == JobState.RUNNING
+    assert job_after.current_run_id == run_id
+    assert job_after.failure_reason is None
+    with owner_connection(owner_db) as conn:
+        rows = conn.execute(
+            "SELECT state FROM capacity_reservations WHERE run_id = ?", (run_id,)
+        ).fetchall()
+    assert [r["state"] for r in rows] == ["RESERVED"]
+    # The run itself is untouched in its own store.
+    run_after = exec_db.get_run(run_id)
+    assert run_after is not None
+    assert run_after.status == RunStatus.RUNNING
+
+
+class _ReservationSetFailingConn:
+    """Forwarding connection that fails only the guard's reservation lookup."""
+
+    def __init__(self, real: Any) -> None:
+        self._real = real
+
+    def execute(self, sql: str, *args: Any, **kwargs: Any) -> Any:
+        if "SELECT DISTINCT run_id FROM capacity_reservations" in sql:
+            raise sqlite3.OperationalError("database is locked")
+        return self._real.execute(sql, *args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+
+def test_scheduler_tick_legacy_guard_reservation_read_error_fails_closed(
+    owner_db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: ADR-0002 D7 an unreadable RUNNING reservation-occupancy snapshot
+    aborts the tick with ``ledger_read_error`` before any reconcile or
+    dispatch -- an unknown reservation map is never treated as free capacity.
+    """
+    t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
+    lease = acquire_lease(owner_db, "guard_read_err", ttl_seconds=30.0, now=t0)
+    assert lease is not None
+
+    repo_dir = tmp_path / "repo_guard_err"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+
+    store.insert_job(
+        owner_db,
+        _make_job(
+            "guard_err_running",
+            str(repo_dir),
+            state=JobState.RUNNING,
+            current_run_id="run_guard_err",
+            run_ids=("run_guard_err",),
+            created_at=t0.isoformat(),
+            updated_at=t0.isoformat(),
+            request_digest="dg_guard_err",
+        ),
+        now=t0,
+    )
+    reserve(
+        owner_db,
+        run_id="run_guard_err",
+        job_id="guard_err_running",
+        route="openai/gpt-5",
+        draws=[PoolDraw(pool_id="chatgpt-plus", window_id="5h", multiplier=1.0)],
+        size_bucket="M",
+        now=t0,
+    )
+    store.insert_job(
+        owner_db,
+        _make_job(
+            "guard_err_queued",
+            str(repo_dir),
+            created_at=t0.isoformat(),
+            updated_at=t0.isoformat(),
+            request_digest="dg_guard_err_q",
+        ),
+        now=t0,
+    )
+
+    owner = owner_db.owner_db
+    original = owner._get_connection
+
+    @contextmanager
+    def failing() -> Any:
+        with original() as real:
+            yield _ReservationSetFailingConn(real)
+
+    monkeypatch.setattr(owner, "_get_connection", failing)
+
+    launched: list[str] = []
+    res = scheduler_tick(
+        owner_db,
+        lease,
+        now=t0,
+        run_launcher=lambda j, d, r: launched.append(j.job_id),
+        clock_fn=lambda: t0,
+    )
+    assert res.ran is False
+    assert res.reason == "ledger_read_error"
+    assert res.dispatched == 0
+    assert launched == []
+    queued_after = store.get_job(owner_db, "guard_err_queued")
+    assert queued_after is not None and queued_after.state == JobState.QUEUED

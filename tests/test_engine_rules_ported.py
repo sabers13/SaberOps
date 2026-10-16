@@ -78,6 +78,53 @@ def isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
+def _seed_verified_opencode_posture(config_home: Path) -> None:
+    """Seed an isolated owner config with a verified class-A posture for the
+    synthetic ``opencode`` provider used by this module's dispatch fixtures.
+
+    Covers: ADR-0002 D2 / WORKFLOW §7 authorized setup-only fixture migration.
+    The R3E1 fixtures dispatch synthetic ``opencode/<model>`` candidates with no
+    matching posture record, so the accepted M2-4b admission seam rightfully
+    returns ``quota_blocked`` (POSTURE_UNVERIFIED fails closed).  This seeds
+    ONLY the synthetic provider identity those fixtures use; no assertion,
+    parameter or expected model list changes, no real vendor receives an
+    attestation, and no production posture/admission/billing logic is touched.
+    ``verified_on`` is stamped at run time with a 90-day TTL so replay never
+    expires.  The drawn pool is the non-overage synthetic ``opencode`` default,
+    so no quota evidence is required.
+    """
+    cfg_dir = config_home / "saberops"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    today_iso = datetime.now(UTC).date().isoformat()
+    cp_doc = {
+        "version": 2,
+        "providers": {
+            "opencode": {"state": "ALLOWED"},
+            "codex": {"state": "ALLOWED"},
+            "cline": {"state": "ALLOWED"},
+        },
+        "quota_pools": {},
+        "postures": {
+            "opencode": {
+                "class": "A",
+                "policy_urls": ["https://example.com/synthetic-test-posture"],
+                "ttl_days": 90,
+                "verified_on": today_iso,
+                "note": "synthetic verified test posture for ported dispatch fixtures",
+            }
+        },
+    }
+    (cfg_dir / "control_plane.json").write_text(json.dumps(cp_doc), encoding="utf-8")
+
+
+@pytest.fixture()
+def dispatch_posture(isolated: Path) -> Path:
+    """Hermetic verified class-A posture for the synthetic ``opencode``
+    dispatch fixtures in this module (setup-only fixture migration)."""
+    _seed_verified_opencode_posture(isolated / "config")
+    return isolated
+
+
 def _git_repo(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "init", "-b", "main"], cwd=path, check=True, capture_output=True)
@@ -270,6 +317,19 @@ class _ScriptedAdapter(WorkerAdapter):
 
 
 def _seed_reviewable_run(db: Database, repo: Path, run_id: str) -> None:
+    """Seed one reviewable run bound to the isolated owner control plane.
+
+    Covers: ADR-0002 D2 / WORKFLOW §7 authorized setup-only fixture migration
+    for the synthetic r3e1 reviewable run.  Attaching the frozen owner
+    control-plane snapshot (with the ``dispatch_posture`` fixture's verified
+    synthetic ``opencode`` posture) is setup only: the run's frozen contract now
+    reflects the same isolated owner policy the reviewer dispatch is evaluated
+    against, exactly as ``tests/test_r3e1_reviewer_dispatch_authority.py`` does.
+    No assertion, candidate, or expected model list changes.
+    """
+    from saberops.control_plane.policy import freeze_control_plane_policy, load_control_plane_policy
+
+    frozen = freeze_control_plane_policy(load_control_plane_policy())
     base = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
     ).stdout.strip()
@@ -284,6 +344,8 @@ def _seed_reviewable_run(db: Database, repo: Path, run_id: str) -> None:
             gate_command="true",
             status=RunStatus.RUNNING,
             created_at=_CREATED,
+            control_plane_snapshot_json=frozen.as_json(),
+            control_plane_snapshot_digest=frozen.digest,
         )
     )
     db.create_attempt(
@@ -312,6 +374,7 @@ def _seed_reviewable_run(db: Database, repo: Path, run_id: str) -> None:
 )
 def test_ported_owner_reviewer_chain_respects_fallback_budget(
     isolated: Path,
+    dispatch_posture: Path,
     tmp_path: Path,
     first_outcome: str,
     limit: int,
@@ -408,7 +471,7 @@ def _patch_implementer_chain(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_ported_quick_workflow_skips_gate_and_review_through_acceptance(
-    isolated: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    isolated: Path, dispatch_posture: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Ported from test_quick_workflow_skips_gate_and_review_through_acceptance."""
     from saberops.accept import AcceptEngine
@@ -455,6 +518,7 @@ def test_ported_quick_workflow_skips_gate_and_review_through_acceptance(
 @pytest.mark.parametrize("gate_enabled,review_disabled", [(True, True), (False, False)])
 def test_ported_custom_workflow_gate_and_review_are_independent(
     isolated: Path,
+    dispatch_posture: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     gate_enabled: bool,
