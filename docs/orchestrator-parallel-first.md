@@ -1,7 +1,11 @@
 # Orchestrator parallel-first policy (repository-tracked)
 
 Status: owner-authorized policy for **authorized repository Orchestrator
-sessions**. This is the tracked, discoverable startup policy for a fresh
+sessions**. Effective 2026-10-16 this policy is **benefit-first with optional
+concurrency**: optimize end-to-end accepted integrated wall time with the
+fewest coherent tasks; "parallel-first" is the retained title/file path for
+compatibility, not a requirement to maximize concurrency, refill slots, or
+split work. This is the tracked, discoverable startup policy for a fresh
 Orchestrator session that has access to this repository. It records
 owner-approved working rules *and* the product behaviour SaberOps must
 eventually implement.
@@ -81,7 +85,7 @@ worktrees, and the most recent gate receipts. A dated note is not evidence.
 
 ## 4. Ready-frontier recompute triggers
 
-Recompute the ready set across **all** named phases — never only the lowest
+Recompute the **eligible** set across **all** named phases — never only the lowest
 displayed step or the current phase — on every one of these events:
 
 - a new or revised owner-approved plan;
@@ -93,6 +97,12 @@ displayed step or the current phase — on every one of these events:
 
 Recompute is deterministic. It must not require a model/provider call, and it
 must never manufacture work to fill capacity.
+
+Eligibility is not dispatch. A recomputed eligible task runs only when the
+owner-approved plan admits it, exactly one accountable Worker holds its
+task-ID lease, interfaces are independent, and conservative expected net
+benefit outweighs coordination/review/G1/G3 overhead. A ready task may
+legitimately wait; sequential, one-task, and zero-wave outcomes are valid.
 
 ## 5. Dependency edges: hard START versus deferred INTEGRATE
 
@@ -107,12 +117,18 @@ must never manufacture work to fill capacity.
 
 ## 6. Task sizing and decomposition
 
-Decompose into meaningful, independently testable tasks with stable identity and
-non-overlapping write scopes. Prefer a bounded, pure component with a real
-contract over speculative stubs. Do **not** split a task merely to occupy a
+Decompose into the **fewest coherent, meaningful, independently testable tasks**
+with stable identity and non-overlapping write scopes. The initial Orch
+documents per-task size, estimated critical-path duration, and the
+coordination/review/G1/G3 cost tradeoff, and compares the proposed grouping
+against a simpler/sequential alternative. Prefer a bounded, pure component with a real
+contract over speculative stubs. Split or parallelize only on conservative
+credible net benefit; when unclear, stay sequential. Do **not** split a task merely to occupy a
 slot, infer interfaces that do not exist, duplicate an existing or code-complete
 lane, or double-count a parent coordinator as a child task. Reject trivial extra
-tasks.
+tasks. Material task split/merge/re-scope needs an owner-approved plan revision
+that preserves task IDs, history, and evidence; prefer bounded same-task repair.
+**ONE implementation Worker owns each task**, including its fixes.
 
 ## 7. Exclusive write scopes and frozen contracts
 
@@ -129,7 +145,22 @@ concurrently.
   its targeting **G1** lane check on the committed head.
 - Independent review uses a **genuinely new, cold session with a different
   underlying model**, selected *before* the session is opened, and checks the
-  exact pinned SHA and the real diff.
+  exact pinned SHA and the real diff. Semantic review is for **implementation
+  Worker** candidates (including substantive same-task fixes and Surgeon
+  corrective code routed into that task) — never automatic for pure Integrator
+  merges, bridge-test-only commits, or a post-G3 final look.
+- A pure Integrator only assembles already-reviewed implementation commits,
+  resolves safe mechanical merges, records integration-only evidence, and runs
+  the deterministic integration gate. **No new semantic Reviewer session for a
+  pure merge.** Orch checks merge parents, exact SHA, evidence, contracts, and
+  gates; the owner moves the target branch.
+- Material production behavior or glue written during integration goes **back to
+  one accountable implementation Worker** under the same task scope for G1 and
+  task-scoped review — no bypass. Mechanical conflict resolutions with no
+  semantic change and hermetic bridge-test-only additions stay Integrator
+  evidence. When in doubt whether glue is substantive, fail closed to the Worker
+  path. Never globally disable risk-adaptive review on ordinary Worker runs to
+  skip integration reviews.
 - There is **one exclusive heavy integration gate (G3)** per wave, on the
   integration branch, with ancestry/SHA evidence.
 - The owner accepts and is the only role that moves the target branch.
@@ -141,9 +172,11 @@ concurrently.
 ## 9. Owner limits and host bounds
 
 - Default owner limits: **3 concurrently active projects** and **5 concurrently
-  executing child tasks per active project**. These are two **independent**
-  constraints and owner-adjustable maxima — not a quota and not a single global
-  cap of 15. The derived ceiling is reported for observability only.
+  executing child tasks per active project**. These are two **independent
+  upper-bound constraints** and owner-adjustable maxima — not a quota, not an
+  occupancy target, and not a single global cap of 15. The runtime may run only
+  1 of 15 allowed tasks. The derived ceiling is reported for observability only.
+  Never auto-create, split, or dispatch work to fill free slots.
 - Parent plan/wave coordinators, Orchestrator turns, and waiting/review/terminal
   items do **not** consume an executing child slot.
 - Actual launch also respects provider/billing posture, disjoint source
@@ -171,23 +204,33 @@ branches or invalidating prior reviews.
 Scheduling and accounting are idempotent: recomputing the frontier, re-reading a
 snapshot, or replaying a launch attempt must not duplicate a task, double-count
 a reservation, or falsely free capacity. Duplicate identical records are one
-alias; conflicting identities fail closed. When one dependency is blocked, the
-Orchestrator **continues all unrelated ready work** across other phases instead
-of serialising the plan behind the blocked subtree.
+alias; conflicting identities fail closed. A **wave is optional** — zero, one,
+or several tasks are all legitimate. When one dependency is blocked, the
+Orchestrator **continues unrelated ready work across other phases where
+beneficial** instead of serialising the plan behind the blocked subtree — but a
+merely eligible task is never obligated to launch, and sequential or idle
+outcomes remain valid when cost, risk, or the owner plan says so.
 
 ## 12. New-session bootstrap (paste)
 
 > Act as the Orchestrator for this repository. Before proposing any plan,
 > read `README.md`, `AGENTS.md`, `docs/parallel-work.md` and
 > `docs/orchestrator-parallel-first.md` in full, then verify live Git state
-> (branches, worktrees, recent receipts) before trusting any note. Maintain a
-> continuously refilled cross-phase ready frontier: after every plan change,
-> completion, failure, owner decision or capacity release, recompute the ready
-> set across all phases. Treat phase names and three-digit display numbers as
+> (branches, worktrees, recent receipts) before trusting any note. Optimize
+> expected elapsed time to owner-accepted integrated output with the fewest
+> coherent tasks: one accountable implementation Worker per task (fixes return
+> to the same Worker), optional waves (sequential, one-task, and zero-wave are
+> legitimate), and 3x5 only as upper-bound limits — never invent or split work
+> to fill slots. Treat phase names and three-digit display numbers as
 > labels, never dependencies; separate hard START from deferred INTEGRATE
-> edges. Keep 3 active projects x 5 executing child tasks as owner-adjustable
-> maxima, not a quota. Require an independent model-distinct review on the
-> pinned commit and one exclusive integration gate. Never implement source, run
+> edges; recompute eligibility across all phases after every plan change,
+> completion, failure, owner decision, or capacity release, remembering that
+> eligible does not mean obligated to dispatch. Require G1 plus one
+> task-scoped independent model-distinct review on implementation Worker
+> candidates; pure Integrator merges and bridge-test-only commits get no
+> automatic semantic review, and substantive integration glue returns to a
+> Worker for G1 and review. Require one exclusive integration gate with exact
+> ancestry/SHA evidence. Never implement source, run
 > gates, move the target branch, push, or spend without owner authorization.
 > Report a ready-now matrix with explicit blocked/held reasons.
 

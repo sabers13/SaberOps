@@ -5,27 +5,41 @@ The product, authority, security, and engineering rules in [README.md](README.md
 LLMs advise; deterministic software decides. Workflow adoption does not change
 execution authority, provenance, isolation, acceptance, or release requirements.
 
-## Orchestrator parallel-first policy (repository-tracked)
+## Orchestrator benefit-first policy (repository-tracked)
 
 This entry applies to any **Orchestrator** session (planning, reviewing
 evidence, routing work) with access to this repository. It is an
 Orchestrator-specific instruction; it does not change the frontend, security, or
-engineering rules below.
+engineering rules below, and it never overwrites safety instructions. It does
+not authorize an autonomous engine: LLMs advise; deterministic software decides.
 
 1. Before drafting any plan, read the tracked policy
    [docs/orchestrator-parallel-first.md](docs/orchestrator-parallel-first.md),
-   then [docs/parallel-work.md](docs/parallel-work.md).
-2. Default to **parallel-first** scheduling: recompute the ready set across
-   **all** phases after each plan change, completion, failure, owner decision or
-   capacity release, and keep unrelated work moving when one dependency is
-   blocked.
-3. Discover work through the phase/three-digit layout (the `docs/` tree, phased
-   artifact folders, and `NNN-short-lane` branch/worktree names). Display numbers
-   and phase names are labels, never dependency edges.
-4. Honor the owner's 3 active projects x 5 executing child tasks as
-   owner-adjustable maxima (not a quota), exclusive write scopes, and the
-   G0/G1 -> independent model-distinct review -> exclusive integration gate ->
-   owner acceptance order.
+   then [docs/parallel-work.md](docs/parallel-work.md). Optimize expected
+   elapsed time to **owner-accepted integrated output**, not concurrent Worker
+   count: account for critical path, setup/context, coordination, review/rework,
+   G1/G3, and merge overhead before declaring parallelism worthwhile.
+2. Plan the **fewest coherent tasks** reasonably needed — each one meaningful,
+   independently finishable deliverable with clear acceptance criteria. Compare a
+   simple/sequential plan against any parallel split; parallelize only when
+   conservative expected net time saved outweighs overhead and risk. A ready task
+   is **eligible**, never automatically obligated to dispatch.
+3. **ONE implementation Worker owns each task**, including its fixes. Review
+   findings return to that same Worker/session/branch. A failed Worker is
+   replaced by one fenced single-owner handoff, never duplicated in parallel.
+   Material task split/merge needs an owner-approved plan revision.
+4. **Waves are optional**: zero, one, or several tasks are all legitimate.
+   Sequential, one-task, and zero-wave plans are valid when that is the
+   credible fastest/safest path. Never invent work to fill free slots.
+5. Honor **3 active projects x 5 executing child tasks as owner-adjustable
+   upper-bound limits** (not a quota or occupancy target). The runtime may run
+   1 of 15 allowed tasks. Eligibility never equals obligation to dispatch.
+6. Worker implementation candidates receive G0/G1 plus one task-scoped
+   independent review. **Pure Integrator merges, bridge-test-only commits, and
+   post-G3 looks get no automatic semantic review**; material production
+   glue/behavior changes found at integration go back to an accountable Worker
+   for G1 and task-scoped review. The exclusive integration gate (G3) and owner
+   acceptance stay binding. Do not globally weaken Worker risk-adaptive review.
 
 This entry defers to owner-authorized policies and to deterministic software
 decisions. It grants the Orchestrator no authority to implement source, dispatch
