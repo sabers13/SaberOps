@@ -1,0 +1,2 @@
+{"type": "assistant", "message": {"role": "assistant", "content": []}, "api_error": {"api_error": "usage_limit_reached", "rateLimitType": "seven_day", "resetsAt": 1791597600, "overageStatus": "rejected"}}
+{"type": "result", "subtype": "success", "is_error": true, "api_error_status": 429, "result": "You've hit your monthly spend limit · raise it at https://claude.ai/settings/usage?from=cc_cli_limit_message · your weekly limit resets Oct 10, 2am (UTC)"}

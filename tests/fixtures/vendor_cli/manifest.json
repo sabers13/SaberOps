@@ -1,0 +1,273 @@
+{
+  "version": 1,
+  "fixtures": [
+    {
+      "vendor": "codex",
+      "cli": "codex",
+      "cli_version": "codex-cli 0.162.1",
+      "captured_on": "2026-10-16",
+      "kind": "config_help",
+      "source": "real-capture",
+      "redacted": true,
+      "file": "codex/codex-cli-0.162.1/config_help.txt",
+      "consumer": "saberops.workers.codex:CodexAdapter",
+      "expect": {
+        "flags": [
+          "--cd",
+          "--ephemeral",
+          "--ignore-user-config",
+          "--image",
+          "--json",
+          "--model",
+          "--sandbox",
+          "--skip-git-repo-check",
+          "-c",
+          "exec",
+          "resume"
+        ]
+      },
+      "provenance": "Installed CLI on the HV-1 host, 2026-10-16: `codex --version`, `codex --help`, `codex exec --help`, `codex resume --help` (token-free)."
+    },
+    {
+      "vendor": "claude",
+      "cli": "claude",
+      "cli_version": "2.1.301 (Claude Code)",
+      "captured_on": "2026-10-16",
+      "kind": "config_help",
+      "source": "real-capture",
+      "redacted": true,
+      "file": "claude/2.1.301-claude-code/config_help.txt",
+      "consumer": "saberops.workers.claude:ClaudeCodeAdapter",
+      "expect": {
+        "flags": [
+          "--allowedTools",
+          "--include-partial-messages",
+          "--input-format",
+          "--mcp-config",
+          "--model",
+          "--no-session-persistence",
+          "--output-format",
+          "--permission-mode",
+          "--print",
+          "--resume",
+          "--setting-sources",
+          "--settings",
+          "--strict-mcp-config",
+          "--tools",
+          "--verbose",
+          "auth",
+          "--json",
+          "status"
+        ]
+      },
+      "provenance": "Installed CLI on the HV-1 host, 2026-10-16: `claude --version`, `claude --help`, `claude auth --help` (token-free)."
+    },
+    {
+      "vendor": "opencode",
+      "cli": "opencode",
+      "cli_version": "opencode v2.0.29",
+      "captured_on": "2026-10-16",
+      "kind": "config_help",
+      "source": "real-capture",
+      "redacted": true,
+      "file": "opencode/opencode-v2.0.29/config_help.txt",
+      "consumer": "saberops.workers.opencode:OpenCodeAdapter",
+      "expect": {
+        "flags": [
+          "--dir",
+          "--format",
+          "--model",
+          "--pure",
+          "--session",
+          "models",
+          "run"
+        ],
+        "known_missing": [
+          "--pure",
+          "--dir"
+        ]
+      },
+      "provenance": "Installed CLI on the HV-1 host, 2026-10-16: `opencode --version`, `opencode --help`, `opencode run --help`, `opencode models --help` (token-free). HV-1 finding F1: the v2.0.29 help has no --pure/--dir."
+    },
+    {
+      "vendor": "codex",
+      "cli": "codex",
+      "cli_version": "unknown",
+      "captured_on": "2026-10-11",
+      "kind": "exhaustion",
+      "source": "owner-supplied-log",
+      "redacted": true,
+      "file": "codex/unknown/exhaustion-plan-limit.jsonl",
+      "consumer": "saberops.workers.exhaustion.classify_codex",
+      "expect": {
+        "verdict": "QUOTA_EXHAUSTED",
+        "rule": "codex:usage-limit",
+        "confidence": "VERIFIED",
+        "reset_at": "2026-10-03T23:58:00+00:00",
+        "window": null,
+        "model_scope": null,
+        "reset_confidence": "HINT"
+      },
+      "tz": "UTC",
+      "provenance": "R-001 findings.md (collected 2026-10-11), verbatim plan-limit text from harness-cli-normalizer issue 325 inside the documented dual `error` + `turn.failed` envelope (codex #43337). Exact CLI version not recorded; cli_version=unknown."
+    },
+    {
+      "vendor": "claude",
+      "cli": "claude",
+      "cli_version": "unknown",
+      "captured_on": "2026-10-11",
+      "kind": "exhaustion",
+      "source": "owner-supplied-log",
+      "redacted": true,
+      "file": "claude/unknown/exhaustion-session-limit.jsonl",
+      "consumer": "saberops.workers.exhaustion.classify_claude",
+      "expect": {
+        "verdict": "QUOTA_EXHAUSTED",
+        "rule": "claude:usage-limit",
+        "confidence": "VERIFIED",
+        "reset_at": "2026-10-11T22:20:00+00:00",
+        "window": "5h",
+        "model_scope": null,
+        "reset_confidence": "HINT"
+      },
+      "now": "2026-10-11T12:00:00+00:00",
+      "tz": "UTC",
+      "provenance": "R-001 findings.md (collected 2026-10-11), verbatim session-limit prose from rhei issue 451 (success/is_error trap). Exact CLI version not recorded; cli_version=unknown."
+    },
+    {
+      "vendor": "claude",
+      "cli": "claude",
+      "cli_version": "unknown",
+      "captured_on": "2026-10-11",
+      "kind": "exhaustion",
+      "source": "owner-supplied-log",
+      "redacted": true,
+      "file": "claude/unknown/exhaustion-weekly-structured.jsonl",
+      "consumer": "saberops.workers.exhaustion.classify_claude",
+      "expect": {
+        "verdict": "QUOTA_EXHAUSTED",
+        "rule": "claude:usage-limit",
+        "confidence": "VERIFIED",
+        "reset_at": "2026-10-10T02:00:00+00:00",
+        "window": "weekly",
+        "model_scope": null,
+        "reset_confidence": "EXACT"
+      },
+      "now": "2026-10-11T12:00:00+00:00",
+      "tz": "UTC",
+      "provenance": "R-001 findings.md (collected 2026-10-11), verbatim structured companions from thirdshift issue 587 (usage_limit_reached / seven_day / resetsAt epoch + weekly prose). Exact CLI version not recorded; cli_version=unknown."
+    },
+    {
+      "vendor": "opencode",
+      "cli": "opencode",
+      "cli_version": "unknown",
+      "captured_on": "2026-10-11",
+      "kind": "exhaustion",
+      "source": "owner-supplied-log",
+      "redacted": true,
+      "file": "opencode/unknown/exhaustion-provider-quota.jsonl",
+      "consumer": "saberops.workers.exhaustion.classify_opencode",
+      "expect": {
+        "verdict": "QUOTA_EXHAUSTED",
+        "rule": "opencode:quota",
+        "confidence": "VERIFIED",
+        "reset_at": null,
+        "window": null,
+        "model_scope": null,
+        "reset_confidence": "UNKNOWN"
+      },
+      "now": "2026-10-11T12:00:00+00:00",
+      "provenance": "R-001 findings.md (collected 2026-10-11), verbatim Zen pool-exhaustion envelope captured from the real CLI 2026-09-23 (coforge PR 749). Exact CLI version not recorded; cli_version=unknown."
+    },
+    {
+      "vendor": "opencode",
+      "cli": "opencode",
+      "cli_version": "unknown",
+      "captured_on": "2026-10-11",
+      "kind": "exhaustion",
+      "source": "owner-supplied-log",
+      "redacted": true,
+      "file": "opencode/unknown/exhaustion-clinepass.jsonl",
+      "consumer": "saberops.workers.exhaustion.classify_opencode",
+      "expect": {
+        "verdict": "QUOTA_EXHAUSTED",
+        "rule": "opencode:quota",
+        "confidence": "VERIFIED",
+        "reset_at": "2026-10-11T12:23:00+00:00",
+        "window": "weekly",
+        "model_scope": null,
+        "reset_confidence": "PARSED"
+      },
+      "now": "2026-10-11T12:00:00+00:00",
+      "provenance": "R-001 findings.md (collected 2026-10-11), verbatim ClinePass weekly-limit envelope through opencode (relevo issue 616). Exact CLI version not recorded; cli_version=unknown."
+    }
+  ],
+  "fake_only": [
+    {
+      "vendor": "codex",
+      "kind": "usage_json",
+      "consumer": "saberops.cli_usage.parse_limits",
+      "reason": "No owner-supplied raw rateLimitsByLimitId payload; read_limits only returns parsed rows. Owner capture pending (needs-decision key=CAPTURE)."
+    },
+    {
+      "vendor": "codex",
+      "kind": "usage_json",
+      "consumer": "saberops.capacity.probes.duration_to_window",
+      "reason": "Consumes the parse_limits duration field; no real windowed-duration payload committed yet."
+    },
+    {
+      "vendor": "claude",
+      "kind": "usage_panel",
+      "consumer": "saberops.native_usage_panel.parse_panel",
+      "reason": "No real /usage panel text: read_panel returns parsed rows only. Owner capture pending (needs-decision key=CAPTURE)."
+    },
+    {
+      "vendor": "claude",
+      "kind": "usage_panel",
+      "consumer": "saberops.capacity.probes.parse_claude_reset_text",
+      "reason": "No real panel reset_text committed yet; owner capture pending (needs-decision key=CAPTURE)."
+    },
+    {
+      "vendor": "opencode",
+      "kind": "usage_json",
+      "consumer": "saberops.opencode_go_usage.parse_go_limits",
+      "reason": "No real OpenCode Go usage JSON: read_go_limits returns parsed rows only. Owner capture pending (needs-decision key=CAPTURE)."
+    },
+    {
+      "vendor": "antigravity",
+      "kind": "usage_panel",
+      "consumer": "saberops.native_usage_panel.parse_panel",
+      "reason": "No installed Antigravity CLI on this host; stays fake-only per the HV-1 prompt."
+    },
+    {
+      "vendor": "antigravity",
+      "kind": "usage_json",
+      "consumer": "saberops.workers.exhaustion.parse_antigravity_usage",
+      "reason": "No installed Antigravity CLI on this host; the R-001 /usage capture is truncated (remaining_fraction 0.31...) so it cannot be a byte-exact fixture."
+    },
+    {
+      "vendor": "antigravity",
+      "kind": "exhaustion",
+      "consumer": "saberops.workers.exhaustion.classify_antigravity",
+      "reason": "PROVISIONAL text rule; no installed CLI to confirm the RESOURCE_EXHAUSTED/AGY_ERROR wording."
+    },
+    {
+      "vendor": "antigravity",
+      "kind": "config_help",
+      "consumer": "saberops.workers.antigravity:AntigravityAdapter",
+      "reason": "No installed Antigravity CLI on this host."
+    },
+    {
+      "vendor": "cline",
+      "kind": "exhaustion",
+      "consumer": "saberops.workers.exhaustion.classify_cline",
+      "reason": "PROVISIONAL text-only rule; no verified exact Cline CLI limit signal and no installed CLI."
+    },
+    {
+      "vendor": "cline",
+      "kind": "config_help",
+      "consumer": "saberops.workers.cline:ClineAdapter",
+      "reason": "No installed Cline CLI on this host."
+    }
+  ]
+}
