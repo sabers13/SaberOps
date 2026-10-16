@@ -18,8 +18,10 @@ Hermetic and offline: no provider, model, credential, or network access.
 
 from __future__ import annotations
 
+import json
 import subprocess
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -58,8 +60,46 @@ _R3E12_CREATED = "2026-09-25T00:00:00+00:00"
 _R3E12_PROVIDER = "opencode"
 _R3E12_WORKER_MODEL = "r3e12-worker-model"
 _R3E12_REVIEWER_MODEL = "r3e12-reviewer-model"
+#: Connection A is the *sibling* account: it serves a different model, so its
+#: pool membership never overlaps the selected reviewer's route (setup-only
+#: fixture correction; the concept is the connection-scoped pool identity).
+_R3E12_SIBLING_REVIEWER_MODEL = "r3e12-reviewer-sibling-model"
 _R3E12_CONN_A = "r3e12-conn-a"
 _R3E12_CONN_B = "r3e12-conn-b"
+
+
+def _seed_verified_opencode_posture(config_home: Path) -> None:
+    """Seed an isolated owner config with a verified class-A posture for the
+    synthetic ``opencode`` reviewer provider these fixtures dispatch.
+
+    Covers: ADR-0002 D2 / WORKFLOW §7 authorized setup-only fixture migration.
+    The R3-E1.2 fixtures dispatch synthetic ``opencode`` reviewer candidates
+    with no matching posture record, so the accepted M2-4b F1 admission seam
+    rightfully returns ``REVIEW_UNAVAILABLE`` (POSTURE_UNVERIFIED).  This seeds
+    ONLY that synthetic provider identity in the isolated config; no assertion,
+    candidate, pool, or expected verdict changes, no real vendor receives an
+    attestation, and no production posture/admission/billing logic is touched.
+    ``verified_on`` is stamped at run time with a 90-day TTL so replay never
+    expires.
+    """
+    cfg_dir = config_home / "saberops"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    today_iso = datetime.now(UTC).date().isoformat()
+    cp_doc = {
+        "version": 2,
+        "providers": {"opencode": {"state": "ALLOWED"}},
+        "quota_pools": {},
+        "postures": {
+            "opencode": {
+                "class": "A",
+                "policy_urls": ["https://example.com/synthetic-test-posture"],
+                "ttl_days": 90,
+                "verified_on": today_iso,
+                "note": "synthetic verified test posture for R3-E1.2 reviewer fixtures",
+            }
+        },
+    }
+    (cfg_dir / "control_plane.json").write_text(json.dumps(cp_doc), encoding="utf-8")
 
 
 @pytest.fixture()
@@ -75,6 +115,7 @@ def isolated_xdg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("XDG_CACHE_HOME", str(cache))
     monkeypatch.delenv("ORCH_BINDING_STORE", raising=False)
     monkeypatch.delenv("SABEROPS_PROFILE", raising=False)
+    _seed_verified_opencode_posture(config)
 
 
 class _R3E12ScriptedAdapter(WorkerAdapter):
@@ -128,7 +169,7 @@ def _seed_two_connection_reviewers() -> tuple[str, str, str, str, str, str]:
     binding_a, profile_a, pool_a = materialize_discovered_binding(
         connection_id=_R3E12_CONN_A,
         provider=_R3E12_PROVIDER,
-        model=_R3E12_REVIEWER_MODEL,
+        model=_R3E12_SIBLING_REVIEWER_MODEL,
         binding_role=BindingRole.REVIEWER,
     )
     owner = upsert_owner_binding(
@@ -164,6 +205,15 @@ def _seed_reviewable_run(
     control_plane_snapshot_json: str | None = None,
     control_plane_snapshot_digest: str | None = None,
 ) -> Run:
+    if control_plane_snapshot_json is None:
+        # Setup-only: bind the run to the isolated owner control plane (with the
+        # fixture's verified synthetic ``opencode`` posture) exactly as
+        # ``tests/test_r3e1_reviewer_dispatch_authority.py`` does, so reviewer
+        # dispatch is evaluated against the same frozen policy the fixture
+        # seeds.  No assertion or expected verdict changes.
+        frozen = freeze_control_plane_policy(load_control_plane_policy())
+        control_plane_snapshot_json = frozen.as_json()
+        control_plane_snapshot_digest = frozen.digest
     base = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
     ).stdout.strip()
@@ -301,9 +351,26 @@ def test_bound_reviewer_admits_through_exact_connection_profile(
 
 
 def _seed_quota_policy_pools(pool_a: str, pool_b: str) -> tuple[str, str]:
-    """Declare canonical STRICT quota policies for both pools; return frozen snapshot."""
-    set_quota_pool_policy(pool_a)
-    set_quota_pool_policy(pool_b)
+    """Declare canonical STRICT quota policies for both pools; return frozen snapshot.
+
+    Setup-only fixture correction (ADR-0002 D1/D7 / QuotaPool contract).  The
+    canonical evaluator resolves a candidate's pools from pool *membership*; a
+    declared pool with no matching member makes it fall back to a provider-wide
+    default pool, which the binding's ``quota_pool_id`` must never do.  Each
+    connection's pool is therefore given its own exact reviewer route as
+    membership: connection A's pool advertises A's sibling route and connection
+    B's pool advertises B's route.  The selected reviewer (bound to B) then
+    resolves to its own pool only, so the sibling account's pool can neither
+    block nor authorize it.  No pool id, assertion, or expected verdict changes.
+    """
+    set_quota_pool_policy(
+        pool_a,
+        members=(f"{_R3E12_PROVIDER}/{_R3E12_SIBLING_REVIEWER_MODEL}",),
+    )
+    set_quota_pool_policy(
+        pool_b,
+        members=(f"{_R3E12_PROVIDER}/{_R3E12_REVIEWER_MODEL}",),
+    )
     frozen = freeze_control_plane_policy(load_control_plane_policy())
     return frozen.as_json(), frozen.digest
 

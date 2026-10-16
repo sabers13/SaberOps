@@ -14,9 +14,16 @@ No real provider/model calls; no timing/thread tests.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
 import pytest
 
+from saberops.control_plane.plans import PlanSet, PostureRecord
+from saberops.control_plane.policy import (
+    ControlPlanePolicy,
+    ProviderPolicy,
+    ProviderPolicyState,
+)
 from saberops.control_plane.preflight import (
     TRAINING_PERMISSION_DENIED,
     evaluate_control_plane,
@@ -106,6 +113,58 @@ def _cid(candidate: WorkerCandidate) -> str:
     return f"{candidate.provider}/{candidate.model}"
 
 
+def _synthetic_policy() -> ControlPlanePolicy:
+    """Isolated synthetic policy with verified class-A posture for the synthetic
+    providers these training-policy fixtures use.
+
+    Covers: ADR-0002 D2 / WORKFLOW §7 authorized setup-only fixture migration.
+    These fixtures dispatch synthetic ``dynacustom`` / ``opencode`` / ``codex``
+    candidates with no matching posture record, so the accepted M2-4b F1
+    admission seam rightfully returns ``quota_blocked``
+    (``POSTURE_UNVERIFIED``).  This seeds ONLY the synthetic identities the
+    fixtures use and neutralizes the packaged quota *membership* (these
+    candidates carry no quota evidence) so the decision under test stays the
+    training/data-policy one.  No assertion, candidate, or expected outcome
+    changes, no real vendor receives an attestation, and no production
+    admission, packaged policy or owner config is touched.  ``verified_on`` is
+    stamped at run time with a 90-day TTL so replay never expires.
+    """
+    from dataclasses import replace
+
+    from saberops.control_plane.plans import load_packaged_plans_raw, validate_plan_sections
+
+    today = datetime.now(UTC).date().isoformat()
+    providers = ("opencode", "codex", DYN_PROVIDER)
+    postures = {
+        provider: PostureRecord(
+            selector=provider,
+            posture_class="A",
+            policy_urls=("https://example.com/synthetic-test-posture",),
+            ttl_days=90,
+            verified_on=today,
+            note="synthetic verified test posture for R2-B training-policy fixtures",
+        )
+        for provider in providers
+    }
+    provider_policies = {
+        provider: ProviderPolicy(provider, ProviderPolicyState.ALLOWED)
+        for provider in providers
+    }
+    packaged = validate_plan_sections(
+        load_packaged_plans_raw(), "packaged plans", packaged=True
+    )
+    neutral_pools = {
+        pool_id: replace(plan, members=(), max_concurrent=None)
+        for pool_id, plan in packaged.pool_plans.items()
+    }
+    return ControlPlanePolicy(
+        provider_policies=provider_policies,
+        quota_pools={},
+        content_hash="r2b-synthetic-policy",
+        plans=PlanSet(pool_plans=neutral_pools, postures=postures),
+    )
+
+
 # -- canonical authority -----------------------------------------------------
 
 
@@ -188,6 +247,7 @@ def test_r2b_cde_dynamic_denied(requirement: str, permitted: bool) -> None:
         quota_states=[],
         training_allowed=False,
         routing_snapshot=snapshot,
+        policy=_synthetic_policy(),
     )
     assert decision.training_permitted is permitted
     if permitted:
@@ -203,6 +263,7 @@ def test_r2b_cde_dynamic_denied(requirement: str, permitted: bool) -> None:
         quota_states=[],
         prompt_bytes=10,
         explicit_override=False,
+        policy=_synthetic_policy(),
     )
     assert (skip is None) is permitted
     if not permitted:
@@ -320,6 +381,7 @@ def test_r2b_h_reviewer_dispatch_parity() -> None:
             quota_states=[],
             prompt_bytes=10,
             explicit_override=False,
+            policy=_synthetic_policy(),
         )
         review_skip = _pre_dispatch_skip_reason(
             candidate=candidate,
@@ -328,6 +390,7 @@ def test_r2b_h_reviewer_dispatch_parity() -> None:
             routing_snapshot=snapshot,
             quota_states=[],
             prompt_bytes=10,
+            policy=_synthetic_policy(),
         )
         assert review_skip == worker_skip
     assert (
@@ -339,6 +402,7 @@ def test_r2b_h_reviewer_dispatch_parity() -> None:
             quota_states=[],
             prompt_bytes=10,
             explicit_override=False,
+            policy=_synthetic_policy(),
         )
         is None
     )
@@ -376,6 +440,7 @@ def test_r2b_i_preflight_parity() -> None:
         quota_states=[],
         training_allowed=False,
         routing_snapshot=snapshot,
+        policy=_synthetic_policy(),
     )
     skip = evaluate_eligibility(
         candidate=candidate,
@@ -385,6 +450,7 @@ def test_r2b_i_preflight_parity() -> None:
         quota_states=[],
         prompt_bytes=10,
         explicit_override=False,
+        policy=_synthetic_policy(),
     )
     assert decision.eligible is True
     assert decision.exclusion_reason != TRAINING_PERMISSION_DENIED
@@ -633,6 +699,7 @@ def test_r2b1_d_dispatch_skip_contradictory_muse() -> None:
         quota_states=[],
         prompt_bytes=10,
         explicit_override=False,
+        policy=_synthetic_policy(),
     )
     assert skip is None
     review_skip = _pre_dispatch_skip_reason(
@@ -642,6 +709,7 @@ def test_r2b1_d_dispatch_skip_contradictory_muse() -> None:
         routing_snapshot=snapshot,
         quota_states=[],
         prompt_bytes=10,
+        policy=_synthetic_policy(),
     )
     assert review_skip is None
 

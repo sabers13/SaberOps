@@ -41,7 +41,12 @@ from pathlib import Path
 import pytest
 
 import saberops.web as web_module
-from saberops.control_plane.policy import packaged_control_plane_policy
+from saberops.control_plane.plans import PlanSet, PostureRecord
+from saberops.control_plane.policy import (
+    ControlPlanePolicy,
+    ProviderPolicy,
+    ProviderPolicyState,
+)
 from saberops.control_plane.preflight import PROVIDER_READINESS_UNKNOWN, ControlPlaneDecision
 from saberops.dispatch import (
     SKIP_PROVIDER_READINESS_UNKNOWN,
@@ -110,6 +115,60 @@ def _candidate(provider: str, model: str) -> WorkerCandidate:
     return WorkerCandidate(provider=provider, model=model)
 
 
+def _synthetic_policy() -> ControlPlanePolicy:
+    """Isolated synthetic policy with verified class-A posture for the fixture's
+    synthetic providers.
+
+    Covers: ADR-0002 D2 / WORKFLOW §7 authorized setup-only fixture migration.
+    Under the accepted M2-4b F1 admission seam an unmatched route fails closed
+    with ``POSTURE_UNVERIFIED``, so this characterization's real preflight seam
+    would skip every synthetic route unless the fixture supplies a verified
+    posture.  The helper deliberately does NOT rely on XDG config alone (the
+    module pins a packaged policy), injecting an isolated in-memory policy
+    instead.  The packaged quota *membership* is neutralized for this isolated
+    policy because these candidates carry no quota evidence: that keeps the
+    test measuring the readiness seam rather than quota enforcement.  Only the
+    synthetic identities this module uses are seeded; no real vendor receives
+    an attestation and no production admission, packaged policy or owner config
+    is touched.  ``verified_on`` is stamped at run time with a 90-day TTL so
+    replay never expires.
+    """
+    from dataclasses import replace
+
+    from saberops.control_plane.plans import load_packaged_plans_raw, validate_plan_sections
+
+    today = datetime.now(UTC).date().isoformat()
+    providers = ("opencode", "codex")
+    postures = {
+        provider: PostureRecord(
+            selector=provider,
+            posture_class="A",
+            policy_urls=("https://example.com/synthetic-test-posture",),
+            ttl_days=90,
+            verified_on=today,
+            note="synthetic verified test posture for R1-A routing fixtures",
+        )
+        for provider in providers
+    }
+    provider_policies = {
+        provider: ProviderPolicy(provider, ProviderPolicyState.ALLOWED)
+        for provider in providers
+    }
+    packaged = validate_plan_sections(
+        load_packaged_plans_raw(), "packaged plans", packaged=True
+    )
+    neutral_pools = {
+        pool_id: replace(plan, members=(), max_concurrent=None)
+        for pool_id, plan in packaged.pool_plans.items()
+    }
+    return ControlPlanePolicy(
+        provider_policies=provider_policies,
+        quota_pools={},
+        content_hash="r1a-synthetic-policy",
+        plans=PlanSet(pool_plans=neutral_pools, postures=postures),
+    )
+
+
 def _automatic_outcome(
     service: ReadinessService, candidate: WorkerCandidate
 ) -> tuple[ReadinessAdmission, ControlPlaneDecision, str | None]:
@@ -120,7 +179,7 @@ def _automatic_outcome(
     is the typed skip reason the orchestrator records and continues past.
     """
     adapter = _AvailableAdapter(candidate.provider)
-    policy = packaged_control_plane_policy()
+    policy = _synthetic_policy()
     admission = service.admission_for(provider=candidate.provider)
     decision = control_plane_decision(
         candidate=candidate,
@@ -267,7 +326,7 @@ def test_r1a_explicit_override_path_differs_from_automatic(tmp_path: Path) -> No
     service = _service(tmp_path / "access-readiness.json")
     target = _candidate("opencode", "opencode/mimo-v2.5-free")
     adapter = _AvailableAdapter(target.provider)
-    policy = packaged_control_plane_policy()
+    policy = _synthetic_policy()
     admission = service.admission_for(provider=target.provider)
     assert admission.state is ProviderReadiness.UNKNOWN
 
@@ -297,6 +356,48 @@ def test_r1a_explicit_override_path_differs_from_automatic(tmp_path: Path) -> No
     )
     assert decision.eligible is True
     assert skip is None
+
+
+def test_r1a_unverified_route_still_fails_closed() -> None:
+    """Negative control: the synthetic policy admits ONLY its verified
+    identities.  Any other synthetic route keeps the accepted M2-4b F1
+    fail-closed behavior (``POSTURE_UNVERIFIED``), proving the fixture seed
+    did not globally waive posture admission."""
+    policy = _synthetic_policy()
+    target = _candidate("unverified-vendor", "unverified-model")
+    admission = ReadinessAdmission(
+        state=ProviderReadiness.READY,
+        reason="READY",
+        executable_available=True,
+        connection_id=None,
+    )
+    decision = control_plane_decision(
+        candidate=target,
+        adapter=_AvailableAdapter(target.provider),
+        training_allowed=True,
+        quota_states=[],
+        prompt_bytes=64,
+        policy=policy,
+        readiness_state=admission.state,
+        readiness_reason=admission.reason,
+        readiness_executable_available=admission.executable_available,
+        explicit_unknown_readiness=False,
+    )
+    skip = evaluate_eligibility(
+        candidate=target,
+        adapter=_AvailableAdapter(target.provider),
+        training_allowed=True,
+        quota_states=[],
+        prompt_bytes=64,
+        policy=policy,
+        readiness_state=admission.state,
+        readiness_reason=admission.reason,
+        readiness_executable_available=admission.executable_available,
+        explicit_override=False,
+    )
+    assert decision.eligible is False
+    assert decision.exclusion_reason == "POSTURE_UNVERIFIED"
+    assert skip is not None
 
 
 # ---------------------------------------------------------------------------

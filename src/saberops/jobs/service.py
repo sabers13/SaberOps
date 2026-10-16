@@ -443,7 +443,7 @@ def capacity(db: Any, now: datetime | None = None) -> CapacityView:
             snapshot(db, moment), key=lambda entry: (entry.pool_id, entry.window_id)
         )
     )
-    return CapacityView(generated_at=_utcnow_iso(now), ledger_wired=True, pools=pools)
+    return CapacityView(generated_at=moment.isoformat(), ledger_wired=True, pools=pools)
 
 
 def mark_dispatched(
