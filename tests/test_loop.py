@@ -2023,16 +2023,20 @@ def test_scheduler_tick_fails_closed_on_legacy_running_without_reservation(
     assert n_res2 == 1
 
 
+@pytest.mark.parametrize("blank_run_id", [None, ""])
 def test_scheduler_tick_fails_closed_on_running_job_without_run_id(
-    owner_db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    owner_db: Database, tmp_path: Path, blank_run_id: str | None
 ) -> None:
-    """Covers: ADR-0002 D7 a legacy RUNNING row with no ``current_run_id`` is
-    never silently treated as zero occupancy; the tick holds with an
-    owner-visible diagnostic and dispatches nothing.
+    """Covers: ADR-0002 D7 a *real* legacy RUNNING row persisted with a NULL or
+    empty ``current_run_id`` is never silently treated as zero occupancy and
+    never aborts the tick by raising.
 
-    Such a row can exist in an upgraded owner DB (the column is nullable), but
-    the current ``Job`` model refuses to *represent* RUNNING without a run id,
-    so the read path is injected to reach the guard's defensive branch.
+    This drives the genuine integration boundary: the row is written straight
+    into owner SQLite (the ``Job`` model itself refuses to represent RUNNING
+    without a run id) and ``scheduler_tick`` is called with NO monkeypatch of
+    ``store.list_jobs_raw``.  The tick must hold with an owner-visible
+    diagnostic, zero dispatch, and no side effects, and stay stable across a
+    repeated tick.
     """
     t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
     lease = acquire_lease(owner_db, "legacy_null_run", ttl_seconds=30.0, now=t0)
@@ -2042,12 +2046,14 @@ def test_scheduler_tick_fails_closed_on_running_job_without_run_id(
     repo_dir.mkdir()
     (repo_dir / ".git").mkdir()
 
+    # The offending legacy row: RUNNING with a NULL/empty run id, written as a
+    # real SQLite row because the model cannot represent it.
     with owner_connection(owner_db) as conn:
         conn.execute(
             "INSERT INTO jobs (job_id, caller_id, repo, base_ref, base_sha,"
-            " goal, requirements_json, priority, state, created_at, updated_at,"
-            " request_digest, run_ids_json)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " goal, requirements_json, priority, state, current_run_id,"
+            " created_at, updated_at, request_digest, run_ids_json)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 "legacy_null_run",
                 "test",
@@ -2058,6 +2064,7 @@ def test_scheduler_tick_fails_closed_on_running_job_without_run_id(
                 "{}",
                 "NORMAL",
                 "RUNNING",
+                blank_run_id,
                 t0.isoformat(),
                 t0.isoformat(),
                 "dg_null_run",
@@ -2067,32 +2074,95 @@ def test_scheduler_tick_fails_closed_on_running_job_without_run_id(
         conn.commit()
         present = conn.execute(
             "SELECT COUNT(*) AS n FROM jobs"
-            " WHERE job_id = 'legacy_null_run' AND current_run_id IS NULL"
+            " WHERE job_id = 'legacy_null_run'"
+            " AND (current_run_id IS NULL OR current_run_id = '')"
         ).fetchone()["n"]
     assert present == 1  # the legacy row really exists in owner storage
 
-    from saberops.jobs import store as jobs_store
-
-    class _LegacyRunningRow:
-        job_id = "legacy_null_run"
-        current_run_id = None
-
-    monkeypatch.setattr(jobs_store, "list_jobs_raw", lambda *a, **k: [_LegacyRunningRow()])
+    # A valid RUNNING job with a live reservation and a queued job: neither may
+    # be touched while the legacy row holds the tick.
+    store.insert_job(
+        owner_db,
+        _make_job(
+            "valid_reserved",
+            str(repo_dir),
+            state=JobState.RUNNING,
+            current_run_id="run_valid_reserved",
+            run_ids=("run_valid_reserved",),
+            created_at=t0.isoformat(),
+            updated_at=t0.isoformat(),
+            request_digest="dg_valid_reserved",
+        ),
+        now=t0,
+    )
+    reserve(
+        owner_db,
+        run_id="run_valid_reserved",
+        job_id="valid_reserved",
+        route="openai/gpt-5",
+        draws=[PoolDraw(pool_id="chatgpt-plus", window_id="5h", multiplier=1.0)],
+        size_bucket="M",
+        now=t0,
+    )
+    store.insert_job(
+        owner_db,
+        _make_job(
+            "legacy_queued",
+            str(repo_dir),
+            created_at=t0.isoformat(),
+            updated_at=t0.isoformat(),
+            request_digest="dg_legacy_queued",
+        ),
+        now=t0,
+    )
 
     launched: list[str] = []
-    res = scheduler_tick(
-        owner_db,
-        lease,
-        now=t0,
-        run_launcher=lambda j, d, r: launched.append(j.job_id),
-        probes={},
-        clock_fn=lambda: t0,
-    )
+
+    def _tick() -> Any:
+        return scheduler_tick(
+            owner_db,
+            lease,
+            now=t0,
+            run_launcher=lambda j, d, r: launched.append(j.job_id),
+            probes={},
+            clock_fn=lambda: t0,
+        )
+
+    res = _tick()
     assert res.ran is False
     assert res.reason == "legacy_running_without_reservation"
     assert res.legacy_running_jobs == ("legacy_null_run",)
     assert res.dispatched == 0
     assert launched == []
+
+    # No reconcile/schedule side effects: the valid reservation is untouched
+    # and the queued job is unchanged.
+    with owner_connection(owner_db) as conn:
+        valid_state = conn.execute(
+            "SELECT state FROM capacity_reservations WHERE run_id = 'run_valid_reserved'"
+        ).fetchone()["state"]
+        n_res = conn.execute(
+            "SELECT COUNT(*) AS n FROM capacity_reservations"
+        ).fetchone()["n"]
+    assert valid_state == "RESERVED"
+    assert n_res == 1  # no backfill for the legacy row
+    queued_after = store.get_job(owner_db, "legacy_queued")
+    assert queued_after is not None
+    assert queued_after.state == JobState.QUEUED
+    assert queued_after.current_run_id is None
+
+    # Repeated tick is stable and side-effect free.
+    res2 = _tick()
+    assert res2.ran is False
+    assert res2.reason == res.reason
+    assert res2.legacy_running_jobs == res.legacy_running_jobs
+    assert res2.dispatched == 0
+    assert launched == []
+    with owner_connection(owner_db) as conn:
+        n_res2 = conn.execute(
+            "SELECT COUNT(*) AS n FROM capacity_reservations"
+        ).fetchone()["n"]
+    assert n_res2 == 1
 
 
 def test_scheduler_tick_legacy_guard_allows_valid_reserved_running_job(

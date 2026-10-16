@@ -483,12 +483,40 @@ def scheduler_tick(
     # CAS, zero provider calls) with an owner-visible diagnostic.  We never
     # backfill a reservation or auto-promote the job: an owner-approved
     # promotion rule is a separate decision.
+    #
+    # A persisted RUNNING row whose ``current_run_id`` is NULL or empty cannot
+    # be represented by the ``Job`` model (``__post_init__`` rejects RUNNING
+    # without a run id), so ``store.list_jobs_raw`` below would abort the whole
+    # tick with a ``ValueError`` instead of surfacing the clean hold.  The
+    # ``jobs.current_run_id`` column is nullable and legacy/upgraded owner DBs
+    # can really contain such rows, so read that raw persisted state with one
+    # deterministic, schema-safe owner SELECT BEFORE materialising any ``Job``.
+    # ``ensure_tables`` is idempotent, so a fresh empty owner DB is initialised
+    # here (an absent table is never read as legacy occupancy) and a genuine
+    # read error still fails closed as ``ledger_read_error``.
+    owner_store = getattr(db, "owner_db", db)
+    try:
+        store.ensure_tables(db)
+        with owner_store._get_connection() as conn:
+            null_run_rows = conn.execute(
+                "SELECT job_id FROM jobs WHERE state = ?"
+                " AND (current_run_id IS NULL OR current_run_id = '')",
+                (JobState.RUNNING.value,),
+            ).fetchall()
+    except (sqlite3.OperationalError, sqlite3.DatabaseError):
+        return TickResult(ran=False, reason="ledger_read_error")
+    if null_run_rows:
+        return TickResult(
+            ran=False,
+            reason="legacy_running_without_reservation",
+            legacy_running_jobs=tuple(str(row["job_id"]) for row in null_run_rows),
+        )
+
     try:
         running_snapshot = store.list_jobs_raw(db, state=JobState.RUNNING, limit=100_000)
     except (sqlite3.OperationalError, sqlite3.DatabaseError):
         return TickResult(ran=False, reason="ledger_read_error")
 
-    owner_store = getattr(db, "owner_db", db)
     reserved_run_ids: set[str] = set()
     if running_snapshot:
         try:
