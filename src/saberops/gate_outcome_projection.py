@@ -16,11 +16,40 @@ Design law (ADR-0003 D1/D2/D5, fail-closed):
 * Exit codes follow ``docs/gate.md``: 0 = PASS/FLAKY_PASS, 1 = FAIL/TIMEOUT,
   3 = INFRA, 5 = selector defect.  Any other code (including the
   conventional exit 2 for tool/usage errors) is ambiguous: ``BLOCKED``.
-* This module never executes a gate, never touches slots/disk admission,
-  never calls a provider, and never modifies the existing
-  :class:`saberops.models.GateOutcome` taxonomy or any existing JSON:
-  :func:`to_gate_outcome` only maps exact matches and returns ``None``
-  where no exact shared word exists (the FLAKY_PASS/BLOCKED naming gap).
+
+Evidence-completeness contract (fail-closed, fix-up 2):
+
+* ``has_provenance`` is ``bool | None = None``.  Only an explicit ``True``
+  establishes authoritative provenance; omission (``None``) and ``False``
+  are ``BLOCKED``.  Authority is asserted by the caller, never inferred
+  from a PASS word or a zero exit code.
+* ``checks_ok`` is ``bool | None = None``.  Accepting ``PASS`` /
+  ``FLAKY_PASS`` requires an explicit ``True`` lint/type result; omitted
+  (unknown) or explicitly failed checks are ``BLOCKED``, including a fully
+  quarantined G3 flaky pass.
+* ``tests_ran`` is the number of tests the gate actually executed.  For a
+  nonempty selection (``selected_nonempty=True``, the fail-closed default)
+  acceptance requires a concrete positive ``int``; omitted, zero, negative
+  or malformed (bool / non-int) counts are ``BLOCKED``.  A genuinely empty
+  selection (for example a lint/type-only role) must be declared explicitly
+  with ``selected_nonempty=False``; only then may ``tests_ran`` be ``None``
+  or ``0``.  A positive count paired with an explicitly empty selection is
+  contradictory and ``BLOCKED``.
+* Producer FAIL-only reasons (``SELECTED_BUT_ZERO_RAN``,
+  ``pytest failed without rerunnable node IDs`` and the ``unquarantined:``
+  prefix) are emitted *only* with ``FAIL``; seeing one under
+  ``PASS`` / ``FLAKY_PASS`` is never-emittable contradictory evidence and is
+  ``BLOCKED`` rather than laundered green.
+
+Caller migration (future engine wiring): populate ``has_provenance``,
+``checks_ok`` and ``tests_ran`` from the trusted gate receipt, never with
+invented or defaulted values.  A word alone is not acceptance evidence.
+
+This module never executes a gate, never touches slots/disk admission,
+never calls a provider, and never modifies the existing
+:class:`saberops.models.GateOutcome` taxonomy or any existing JSON:
+:func:`to_gate_outcome` only maps exact matches and returns ``None``
+where no exact shared word exists (the FLAKY_PASS/BLOCKED naming gap).
 """
 
 from __future__ import annotations
@@ -45,8 +74,19 @@ EXIT_INFRA: Final[int] = 3
 EXIT_SELECTOR_DEFECT: Final[int] = 5
 
 #: Selector-defect reason emitted by ``gate_tools.evaluate`` for a
-#: nonempty selection that ran zero tests.
+#: nonempty selection that ran zero tests (always paired with FAIL/exit 5).
 SELECTOR_DEFECT_REASON: Final[str] = "SELECTED_BUT_ZERO_RAN"
+
+#: Producer reasons (``scripts/gate_tools.py::evaluate``) emitted only
+#: alongside a ``FAIL`` verdict.  Seeing one under ``PASS``/``FLAKY_PASS``
+#: is never-emittable contradictory evidence and must not be green.
+PRODUCER_FAIL_ONLY_REASONS: Final[frozenset[str]] = frozenset(
+    {SELECTOR_DEFECT_REASON, "pytest failed without rerunnable node IDs"}
+)
+
+#: Producer FAIL-only reasons that embed the failing node IDs, so only the
+#: exact emitted prefix is matched -- not a broad substring heuristic.
+PRODUCER_FAIL_ONLY_REASON_PREFIXES: Final[tuple[str, ...]] = ("unquarantined: ",)
 
 
 class GateRole(StrEnum):
@@ -70,7 +110,14 @@ class ProjectedDecisionKind(StrEnum):
 
 @dataclass(frozen=True)
 class GateEvidence:
-    """Observed developer-gate evidence (inputs; raw identity preserved)."""
+    """Observed developer-gate evidence (inputs; raw identity preserved).
+
+    The completeness flags default to *absent* (``None``) so that omitting
+    evidence fails closed instead of asserting authority.  A caller must
+    positively supply ``has_provenance=True``, ``checks_ok=True`` and, for a
+    nonempty selection, a positive ``tests_ran`` before any ``PASS`` /
+    ``FLAKY_PASS`` is accepted.
+    """
 
     raw_outcome: str
     exit_code: int | None
@@ -78,10 +125,10 @@ class GateEvidence:
     failed: tuple[str, ...] = ()
     flaky: tuple[str, ...] = ()
     quarantined: frozenset[str] = field(default_factory=frozenset)
-    checks_ok: bool = True
+    checks_ok: bool | None = None
     selected_nonempty: bool = True
     tests_ran: int | None = None
-    has_provenance: bool = True
+    has_provenance: bool | None = None
     role: GateRole | str = GateRole.G1
 
 
@@ -122,12 +169,80 @@ def _blocked(
     )
 
 
+def _is_producer_fail_only_reason(reason: str) -> bool:
+    """True when ``reason`` is one the producer emits only with ``FAIL``."""
+    return reason in PRODUCER_FAIL_ONLY_REASONS or reason.startswith(
+        PRODUCER_FAIL_ONLY_REASON_PREFIXES
+    )
+
+
+def _checks_blocked(
+    evidence: GateEvidence, role_name: str, word: str
+) -> ProjectedDecision | None:
+    """Fail-closed lint/type-check guard; ``None`` when explicitly passed."""
+    if evidence.checks_ok is None:
+        return _blocked(
+            evidence,
+            role_name,
+            f"{word} with unknown lint/type-check evidence; contradictory evidence",
+        )
+    if evidence.checks_ok is not True:
+        return _blocked(
+            evidence,
+            role_name,
+            f"{word} with failing lint/type checks; contradictory evidence",
+        )
+    return None
+
+
+def _execution_count_blocked(
+    evidence: GateEvidence, role_name: str, word: str
+) -> ProjectedDecision | None:
+    """Fail-closed executed-test-count guard; ``None`` when acceptable.
+
+    A nonempty selection requires a concrete positive integer.  An
+    explicitly empty selection (``selected_nonempty=False``) permits
+    ``None`` or ``0``; a positive count there is contradictory.
+    """
+    ran = evidence.tests_ran
+    if isinstance(ran, bool) or (ran is not None and not isinstance(ran, int)):
+        return _blocked(
+            evidence,
+            role_name,
+            f"{word} with malformed executed-test count {ran!r}; contradictory evidence",
+        )
+    if evidence.selected_nonempty:
+        if ran is None:
+            return _blocked(
+                evidence,
+                role_name,
+                f"{word} with unknown executed-test count for a nonempty selection; "
+                "contradictory evidence",
+            )
+        if ran <= 0:
+            return _blocked(
+                evidence,
+                role_name,
+                f"{word} with a nonempty selection that ran {ran} tests; "
+                "contradictory evidence",
+            )
+        return None
+    if ran:
+        return _blocked(
+            evidence,
+            role_name,
+            f"{word} reporting {ran} executed tests for an explicitly empty selection; "
+            "contradictory evidence",
+        )
+    return None
+
+
 def project_gate_outcome(evidence: GateEvidence) -> ProjectedDecision:
     """Project developer-gate evidence to a normalized decision.
 
     Pure and deterministic: no I/O, no gate execution, no provider calls.
-    Fail-closed: every ambiguous input yields ``BLOCKED`` with
-    ``accepted=False``.
+    Fail-closed: every ambiguous or incomplete input yields ``BLOCKED``
+    with ``accepted=False``.
     """
     try:
         role = GateRole(evidence.role)
@@ -139,8 +254,13 @@ def project_gate_outcome(evidence: GateEvidence) -> ProjectedDecision:
         )
     role_name = role.value
 
-    if not evidence.has_provenance:
-        return _blocked(evidence, role_name, "missing provenance; evidence not authoritative")
+    if evidence.has_provenance is not True:
+        return _blocked(
+            evidence,
+            role_name,
+            "evidence provenance unknown or missing "
+            f"(has_provenance={evidence.has_provenance!r}); not authoritative",
+        )
 
     raw = evidence.raw_outcome
     if raw not in KNOWN_RAW_OUTCOMES:
@@ -181,6 +301,7 @@ def project_gate_outcome(evidence: GateEvidence) -> ProjectedDecision:
             failed=failed,
             flaky=flaky,
             unquarantined_flaky=unquarantined,
+            selector_defect=selector_defect,
         )
 
     if raw == "TIMEOUT":
@@ -199,6 +320,7 @@ def project_gate_outcome(evidence: GateEvidence) -> ProjectedDecision:
             failed=failed,
             flaky=flaky,
             unquarantined_flaky=unquarantined,
+            selector_defect=selector_defect,
         )
 
     if raw == "FAIL":
@@ -239,18 +361,26 @@ def project_gate_outcome(evidence: GateEvidence) -> ProjectedDecision:
             raw_exit_code=code,
             raw_reason=evidence.reason,
             role=role_name,
-            reason="code failure; repair-loop input"
-            if evidence.checks_ok
-            else "lint/type checks or validation failed; repair-loop input",
+            reason="lint/type checks or validation failed; repair-loop input"
+            if evidence.checks_ok is False
+            else "code failure; repair-loop input",
             failed=failed,
             flaky=flaky,
             unquarantined_flaky=unquarantined,
+            selector_defect=selector_defect,
         )
 
     if raw == "FLAKY_PASS":
         if code != EXIT_PASS:
             return _blocked(
                 evidence, role_name, f"FLAKY_PASS with exit {code}; contradictory evidence"
+            )
+        if _is_producer_fail_only_reason(evidence.reason):
+            return _blocked(
+                evidence,
+                role_name,
+                f"FLAKY_PASS with producer FAIL-only reason {evidence.reason!r}; "
+                "contradictory evidence",
             )
         if not flaky:
             return _blocked(
@@ -262,23 +392,12 @@ def project_gate_outcome(evidence: GateEvidence) -> ProjectedDecision:
                 role_name,
                 "FLAKY_PASS with still-failing tests; contradictory evidence",
             )
-        if not evidence.checks_ok:
-            return _blocked(
-                evidence,
-                role_name,
-                "FLAKY_PASS with failing lint/type checks; contradictory evidence",
-            )
-        if (
-            evidence.selected_nonempty
-            and (evidence.tests_ran is not None)
-            and evidence.tests_ran == 0
-        ):
-            return _blocked(
-                evidence,
-                role_name,
-                "FLAKY_PASS with a nonempty selection that ran zero tests; "
-                "contradictory evidence",
-            )
+        checks_block = _checks_blocked(evidence, role_name, raw)
+        if checks_block is not None:
+            return checks_block
+        count_block = _execution_count_blocked(evidence, role_name, raw)
+        if count_block is not None:
+            return count_block
         if role is GateRole.G3:
             if unquarantined:
                 return ProjectedDecision(
@@ -293,6 +412,7 @@ def project_gate_outcome(evidence: GateEvidence) -> ProjectedDecision:
                     failed=failed,
                     flaky=flaky,
                     unquarantined_flaky=unquarantined,
+                    selector_defect=selector_defect,
                 )
             return ProjectedDecision(
                 decision=ProjectedDecisionKind.FLAKY_PASS,
@@ -305,6 +425,7 @@ def project_gate_outcome(evidence: GateEvidence) -> ProjectedDecision:
                 failed=failed,
                 flaky=flaky,
                 unquarantined_flaky=unquarantined,
+                selector_defect=selector_defect,
             )
         return ProjectedDecision(
             decision=ProjectedDecisionKind.FLAKY_PASS,
@@ -317,6 +438,7 @@ def project_gate_outcome(evidence: GateEvidence) -> ProjectedDecision:
             failed=failed,
             flaky=flaky,
             unquarantined_flaky=unquarantined,
+            selector_defect=selector_defect,
         )
 
     # raw == "PASS".
@@ -324,18 +446,23 @@ def project_gate_outcome(evidence: GateEvidence) -> ProjectedDecision:
         return _blocked(
             evidence, role_name, f"PASS with exit {code}; contradictory evidence"
         )
-    if not evidence.checks_ok:
+    if _is_producer_fail_only_reason(evidence.reason):
         return _blocked(
-            evidence, role_name, "PASS with failing lint/type checks; contradictory evidence"
+            evidence,
+            role_name,
+            f"PASS with producer FAIL-only reason {evidence.reason!r}; "
+            "contradictory evidence",
         )
+    checks_block = _checks_blocked(evidence, role_name, raw)
+    if checks_block is not None:
+        return checks_block
     if failed or flaky:
         return _blocked(
             evidence, role_name, "PASS with failed or flaky tests; contradictory evidence"
         )
-    if evidence.selected_nonempty and (evidence.tests_ran is not None) and evidence.tests_ran == 0:
-        return _blocked(
-            evidence, role_name, "PASS with a nonempty selection that ran zero tests"
-        )
+    count_block = _execution_count_blocked(evidence, role_name, raw)
+    if count_block is not None:
+        return count_block
     return ProjectedDecision(
         decision=ProjectedDecisionKind.PASS,
         accepted=True,
@@ -347,6 +474,7 @@ def project_gate_outcome(evidence: GateEvidence) -> ProjectedDecision:
         failed=failed,
         flaky=flaky,
         unquarantined_flaky=unquarantined,
+        selector_defect=selector_defect,
     )
 
 

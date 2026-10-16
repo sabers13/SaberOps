@@ -2,20 +2,41 @@
 
 from __future__ import annotations
 
+import importlib.util
+import sys
+from pathlib import Path
+from typing import Any
+
 import pytest
 
 from saberops.gate_outcome_projection import (
     GateEvidence,
     GateRole,
+    ProjectedDecision,
     ProjectedDecisionKind,
     project_gate_outcome,
     to_gate_outcome,
 )
 from saberops.models import GateOutcome
 
+#: Literal selector-defect reason emitted by scripts/gate_tools.py::evaluate.
+SELECTOR_DEFECT_REASON = "SELECTED_BUT_ZERO_RAN"
+
 
 def ev(**kwargs: object) -> GateEvidence:
-    base: dict[str, object] = {"raw_outcome": "PASS", "exit_code": 0}
+    """Complete, explicitly-truthful synthetic evidence for positive cases.
+
+    Omitting a completeness flag is exactly what the fail-closed contract
+    rejects, so omission proofs must build :class:`GateEvidence` directly
+    instead of relying on this helper's concrete values.
+    """
+    base: dict[str, object] = {
+        "raw_outcome": "PASS",
+        "exit_code": 0,
+        "has_provenance": True,
+        "checks_ok": True,
+        "tests_ran": 1,
+    }
     base.update(kwargs)
     return GateEvidence(**base)  # type: ignore[arg-type]
 
@@ -295,3 +316,460 @@ def test_mapping_never_invents_taxonomy() -> None:
     """Covers: contract freeze that existing GateOutcome names are untouched."""
     assert to_gate_outcome(ProjectedDecisionKind.FLAKY_PASS) is None
     assert to_gate_outcome(ProjectedDecisionKind.BLOCKED) is None
+
+
+# --- fix-up 2: omitted-evidence (fail-closed) adversarial cases ---------------
+# These construct GateEvidence directly (never via ev()) so that omitting a
+# completeness flag is the input under test.
+
+
+def test_direct_omitted_provenance_blocked() -> None:
+    """Covers: ADR-0003 D1/D5 omitted provenance is never accepted green."""
+    decision = project_gate_outcome(
+        GateEvidence(raw_outcome="PASS", exit_code=0, checks_ok=True, tests_ran=1)
+    )
+    assert decision.decision is ProjectedDecisionKind.BLOCKED
+    assert decision.accepted is False
+    assert decision.raw_outcome == "PASS"
+    assert decision.raw_exit_code == 0
+
+
+def test_direct_omitted_provenance_flaky_blocked() -> None:
+    """Covers: ADR-0003 D1/D5 omitted provenance blocks FLAKY_PASS too."""
+    decision = project_gate_outcome(
+        GateEvidence(
+            raw_outcome="FLAKY_PASS",
+            exit_code=0,
+            flaky=("tests/test_a.py::test_x",),
+            checks_ok=True,
+            tests_ran=1,
+        )
+    )
+    assert decision.decision is ProjectedDecisionKind.BLOCKED
+    assert decision.accepted is False
+    assert decision.raw_outcome == "FLAKY_PASS"
+
+
+def test_explicit_false_provenance_blocked() -> None:
+    """Covers: ADR-0003 D1/D5 provenance asserted False stays blocked."""
+    decision = project_gate_outcome(
+        GateEvidence(
+            raw_outcome="PASS",
+            exit_code=0,
+            has_provenance=False,
+            checks_ok=True,
+            tests_ran=1,
+        )
+    )
+    assert decision.decision is ProjectedDecisionKind.BLOCKED
+    assert decision.accepted is False
+
+
+def test_omitted_checks_ok_blocks_pass() -> None:
+    """Covers: ADR-0003 D1/D5 unknown lint/type result is never accepted."""
+    decision = project_gate_outcome(
+        GateEvidence(raw_outcome="PASS", exit_code=0, has_provenance=True, tests_ran=1)
+    )
+    assert decision.decision is ProjectedDecisionKind.BLOCKED
+    assert decision.accepted is False
+
+
+def test_omitted_checks_ok_blocks_flaky_pass() -> None:
+    """Covers: ADR-0003 D1/D5 unknown lint/type result blocks FLAKY_PASS."""
+    decision = project_gate_outcome(
+        GateEvidence(
+            raw_outcome="FLAKY_PASS",
+            exit_code=0,
+            flaky=("tests/test_a.py::test_x",),
+            has_provenance=True,
+            tests_ran=1,
+            role=GateRole.G1,
+        )
+    )
+    assert decision.decision is ProjectedDecisionKind.BLOCKED
+    assert decision.accepted is False
+
+
+def test_omitted_checks_ok_blocks_g3_quarantined_flaky() -> None:
+    """Covers: ADR-0003 D1/D5 quarantine cannot excuse unknown lint/type evidence."""
+    flaky = ("tests/test_a.py::test_x",)
+    decision = project_gate_outcome(
+        GateEvidence(
+            raw_outcome="FLAKY_PASS",
+            exit_code=0,
+            flaky=flaky,
+            quarantined=frozenset(flaky),
+            has_provenance=True,
+            tests_ran=1,
+            role=GateRole.G3,
+        )
+    )
+    assert decision.decision is ProjectedDecisionKind.BLOCKED
+    assert decision.accepted is False
+
+
+def test_omitted_tests_ran_blocks_pass_nonempty() -> None:
+    """Covers: ADR-0003 D1/D5 nonempty selection with unknown count is blocked."""
+    decision = project_gate_outcome(
+        GateEvidence(
+            raw_outcome="PASS",
+            exit_code=0,
+            has_provenance=True,
+            checks_ok=True,
+            selected_nonempty=True,
+        )
+    )
+    assert decision.decision is ProjectedDecisionKind.BLOCKED
+    assert decision.accepted is False
+
+
+def test_omitted_tests_ran_blocks_flaky_pass_nonempty() -> None:
+    """Covers: ADR-0003 D1/D5 FLAKY_PASS with unknown count is blocked."""
+    decision = project_gate_outcome(
+        GateEvidence(
+            raw_outcome="FLAKY_PASS",
+            exit_code=0,
+            flaky=("tests/test_a.py::test_x",),
+            has_provenance=True,
+            checks_ok=True,
+            selected_nonempty=True,
+        )
+    )
+    assert decision.decision is ProjectedDecisionKind.BLOCKED
+    assert decision.accepted is False
+
+
+@pytest.mark.parametrize("count", [0, -1, -7])
+def test_nonpositive_tests_ran_blocks_pass(count: int) -> None:
+    """Covers: ADR-0003 D1/D5 zero/negative executed count is never green."""
+    decision = project_gate_outcome(
+        GateEvidence(
+            raw_outcome="PASS",
+            exit_code=0,
+            has_provenance=True,
+            checks_ok=True,
+            tests_ran=count,
+        )
+    )
+    assert decision.decision is ProjectedDecisionKind.BLOCKED
+    assert decision.accepted is False
+
+
+@pytest.mark.parametrize("count", [True, False, "3", 1.5])
+def test_malformed_tests_ran_blocks_pass(count: object) -> None:
+    """Covers: ADR-0003 D1/D5 bool/non-int counts fail closed."""
+    decision = project_gate_outcome(
+        GateEvidence(
+            raw_outcome="PASS",
+            exit_code=0,
+            has_provenance=True,
+            checks_ok=True,
+            tests_ran=count,  # type: ignore[arg-type]
+        )
+    )
+    assert decision.decision is ProjectedDecisionKind.BLOCKED
+    assert decision.accepted is False
+
+
+def test_empty_selection_allows_zero_ran_lint_only() -> None:
+    """Covers: ADR-0003 D1/D5 explicit empty selection permits a zero count."""
+    decision = project_gate_outcome(
+        GateEvidence(
+            raw_outcome="PASS",
+            exit_code=0,
+            has_provenance=True,
+            checks_ok=True,
+            selected_nonempty=False,
+            tests_ran=0,
+        )
+    )
+    assert decision.decision is ProjectedDecisionKind.PASS
+    assert decision.accepted is True
+
+
+def test_empty_selection_allows_unknown_ran() -> None:
+    """Covers: ADR-0003 D1/D5 explicit empty selection permits unknown count."""
+    decision = project_gate_outcome(
+        GateEvidence(
+            raw_outcome="PASS",
+            exit_code=0,
+            has_provenance=True,
+            checks_ok=True,
+            selected_nonempty=False,
+        )
+    )
+    assert decision.decision is ProjectedDecisionKind.PASS
+    assert decision.accepted is True
+
+
+def test_empty_selection_with_positive_ran_blocked() -> None:
+    """Covers: ADR-0003 D1/D5 count for an explicitly empty selection contradicts."""
+    decision = project_gate_outcome(
+        GateEvidence(
+            raw_outcome="PASS",
+            exit_code=0,
+            has_provenance=True,
+            checks_ok=True,
+            selected_nonempty=False,
+            tests_ran=5,
+        )
+    )
+    assert decision.decision is ProjectedDecisionKind.BLOCKED
+    assert decision.accepted is False
+
+
+# --- fix-up 2: contradictory selector / producer FAIL-only reasons -----------
+
+
+def test_pass_with_selector_defect_reason_blocked() -> None:
+    """Covers: ADR-0003 D1/D5 contradictory selector reason cannot be green."""
+    decision = project_gate_outcome(
+        GateEvidence(
+            raw_outcome="PASS",
+            exit_code=0,
+            reason=SELECTOR_DEFECT_REASON,
+            has_provenance=True,
+            checks_ok=True,
+            tests_ran=1,
+        )
+    )
+    assert decision.decision is ProjectedDecisionKind.BLOCKED
+    assert decision.accepted is False
+    assert decision.selector_defect is True
+    assert decision.raw_reason == SELECTOR_DEFECT_REASON
+    assert decision.raw_outcome == "PASS"
+    assert decision.raw_exit_code == 0
+
+
+def test_flaky_pass_with_selector_defect_reason_blocked() -> None:
+    """Covers: ADR-0003 D1/D5 FLAKY_PASS + selector reason cannot be green."""
+    decision = project_gate_outcome(
+        GateEvidence(
+            raw_outcome="FLAKY_PASS",
+            exit_code=0,
+            reason=SELECTOR_DEFECT_REASON,
+            flaky=("tests/test_a.py::test_x",),
+            has_provenance=True,
+            checks_ok=True,
+            tests_ran=1,
+        )
+    )
+    assert decision.decision is ProjectedDecisionKind.BLOCKED
+    assert decision.accepted is False
+    assert decision.selector_defect is True
+    assert decision.raw_reason == SELECTOR_DEFECT_REASON
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "pytest failed without rerunnable node IDs",
+        "unquarantined: tests/test_a.py::test_x",
+    ],
+)
+def test_pass_with_producer_fail_only_reason_blocked(reason: str) -> None:
+    """Covers: ADR-0003 D1/D5 other producer FAIL-only reasons never go green."""
+    decision = project_gate_outcome(
+        GateEvidence(
+            raw_outcome="PASS",
+            exit_code=0,
+            reason=reason,
+            has_provenance=True,
+            checks_ok=True,
+            tests_ran=1,
+        )
+    )
+    assert decision.decision is ProjectedDecisionKind.BLOCKED
+    assert decision.accepted is False
+    assert decision.raw_reason == reason
+
+
+def test_fail_selector_defect_preserved() -> None:
+    """Covers: ADR-0003 D1/D5 normal selector FAIL/exit5 stays FAIL, flagged."""
+    decision = project_gate_outcome(
+        GateEvidence(
+            raw_outcome="FAIL",
+            exit_code=5,
+            reason=SELECTOR_DEFECT_REASON,
+            has_provenance=True,
+            checks_ok=True,
+            selected_nonempty=True,
+            tests_ran=0,
+        )
+    )
+    assert decision.decision is ProjectedDecisionKind.FAIL
+    assert decision.accepted is False
+    assert decision.selector_defect is True
+    assert decision.raw_reason == SELECTOR_DEFECT_REASON
+    assert decision.raw_exit_code == 5
+
+
+# --- fix-up 2: explicit complete-evidence positives (all roles) --------------
+
+
+def test_full_evidence_pass_accepted_direct() -> None:
+    """Covers: ADR-0003 D1/D5 complete evidence yields PASS."""
+    decision = project_gate_outcome(
+        GateEvidence(
+            raw_outcome="PASS",
+            exit_code=0,
+            has_provenance=True,
+            checks_ok=True,
+            selected_nonempty=True,
+            tests_ran=44,
+        )
+    )
+    assert decision.decision is ProjectedDecisionKind.PASS
+    assert decision.accepted is True
+    assert decision.selector_defect is False
+
+
+def test_full_evidence_flaky_pass_g1_accepted_direct() -> None:
+    """Covers: ADR-0003 D1/D5 complete G1 evidence yields FLAKY_PASS."""
+    flaky = ("tests/test_a.py::test_x",)
+    decision = project_gate_outcome(
+        GateEvidence(
+            raw_outcome="FLAKY_PASS",
+            exit_code=0,
+            flaky=flaky,
+            has_provenance=True,
+            checks_ok=True,
+            tests_ran=44,
+            role=GateRole.G1,
+        )
+    )
+    assert decision.decision is ProjectedDecisionKind.FLAKY_PASS
+    assert decision.accepted is True
+    assert decision.unquarantined_flaky == flaky
+
+
+def test_full_evidence_flaky_pass_g3_quarantined_accepted_direct() -> None:
+    """Covers: ADR-0003 D5 complete G3 quarantined evidence yields FLAKY_PASS."""
+    flaky = ("tests/test_a.py::test_x",)
+    decision = project_gate_outcome(
+        GateEvidence(
+            raw_outcome="FLAKY_PASS",
+            exit_code=0,
+            flaky=flaky,
+            quarantined=frozenset(flaky),
+            has_provenance=True,
+            checks_ok=True,
+            tests_ran=44,
+            role=GateRole.G3,
+        )
+    )
+    assert decision.decision is ProjectedDecisionKind.FLAKY_PASS
+    assert decision.accepted is True
+    assert decision.unquarantined_flaky == ()
+
+
+def test_g2_pass_accepted() -> None:
+    """Covers: ADR-0003 D1/D2 G2 fast-gate PASS is accepted."""
+    decision = project_gate_outcome(
+        GateEvidence(
+            raw_outcome="PASS",
+            exit_code=0,
+            has_provenance=True,
+            checks_ok=True,
+            tests_ran=3,
+            role=GateRole.G2,
+        )
+    )
+    assert decision.decision is ProjectedDecisionKind.PASS
+    assert decision.accepted is True
+    assert decision.role == "G2"
+
+
+def test_g2_flaky_pass_needs_no_quarantine() -> None:
+    """Covers: ADR-0003 D1/D2/D5 G2 accepts unquarantined FLAKY_PASS."""
+    decision = project_gate_outcome(
+        GateEvidence(
+            raw_outcome="FLAKY_PASS",
+            exit_code=0,
+            flaky=("tests/test_a.py::test_x",),
+            has_provenance=True,
+            checks_ok=True,
+            tests_ran=3,
+            role=GateRole.G2,
+        )
+    )
+    assert decision.decision is ProjectedDecisionKind.FLAKY_PASS
+    assert decision.accepted is True
+    assert decision.role == "G2"
+
+
+# --- fix-up 2: hermetic producer -> adapter compatibility (no gate run) ------
+
+
+def _load_gate_tools() -> Any:
+    """Load scripts/gate_tools.py by path: pure import, no gate execution."""
+    root = Path(__file__).resolve().parents[1]
+    path = root / "scripts" / "gate_tools.py"
+    spec = importlib.util.spec_from_file_location("_gs2_gate_tools_probe", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _project_producer(
+    word: str,
+    reason: str,
+    code: int,
+    failed: list[str],
+    flaky: list[str],
+    *,
+    tests_ran: int,
+    role: GateRole = GateRole.G1,
+) -> ProjectedDecision:
+    """Bind an evaluate() tuple to the projection with trusted receipt extras."""
+    return project_gate_outcome(
+        GateEvidence(
+            raw_outcome=word,
+            exit_code=code,
+            reason=reason,
+            failed=tuple(failed),
+            flaky=tuple(flaky),
+            has_provenance=True,
+            checks_ok=True,
+            selected_nonempty=True,
+            tests_ran=tests_ran,
+            role=role,
+        )
+    )
+
+
+def test_producer_evaluate_round_trip_maps_cleanly() -> None:
+    """Covers: ADR-0003 D1/D5 real evaluate() evidence projects consistently."""
+    gate_tools = _load_gate_tools()
+
+    passing = gate_tools.Evidence(
+        codes=[0], count=2, passed={"tests/t.py::a", "tests/t.py::b"}
+    )
+    word, reason, code, failed, flaky = gate_tools.evaluate(passing)
+    assert (word, reason, code) == ("PASS", "", 0)
+    decision = _project_producer(word, reason, code, failed, flaky, tests_ran=passing.count)
+    assert decision.decision is ProjectedDecisionKind.PASS
+    assert decision.accepted is True
+
+    flaked = gate_tools.Evidence(
+        codes=[1], count=2, passed={"tests/t.py::b"}, failed={"tests/t.py::a": "boom"}
+    )
+    rerun = gate_tools.Evidence(codes=[0], count=1, passed={"tests/t.py::a"})
+    word, reason, code, failed, flaky = gate_tools.evaluate(
+        flaked, rerun, quarantine={"tests/t.py::a"}
+    )
+    assert (word, code) == ("FLAKY_PASS", 0)
+    decision = _project_producer(word, reason, code, failed, flaky, tests_ran=flaked.count)
+    assert decision.decision is ProjectedDecisionKind.FLAKY_PASS
+    assert decision.accepted is True
+    assert decision.flaky == tuple(flaky)
+
+    defect = gate_tools.Evidence(codes=[0], count=0)
+    word, reason, code, failed, flaky = gate_tools.evaluate(defect, selected=True)
+    assert (word, reason, code) == ("FAIL", SELECTOR_DEFECT_REASON, 5)
+    decision = _project_producer(word, reason, code, failed, flaky, tests_ran=defect.count)
+    assert decision.decision is ProjectedDecisionKind.FAIL
+    assert decision.accepted is False
+    assert decision.selector_defect is True
