@@ -214,7 +214,6 @@ def _seed_prepared_intent(
     return str(capsule.id)
 
 
-
 def _stage_run(db: Database, repo: str, base: str, run_id: str) -> None:
     """Create the fresh run row, mirroring launcher order (row before resume)."""
     db.create_run(_run(run_id, repo, base, status=RunStatus.PENDING))
@@ -1159,8 +1158,6 @@ def test_earlier_quota_evidence_plus_later_admitted_failure_declines(
 
     assert preemption.has_genuine_quota_signal(db, "run_old")
     assert not preemption.has_no_eligible_evidence(db, "run_old")
-    ready = preemption.should_preempt(db, "run_old")
-    assert not ready.eligible and ready.detail == "eligible_candidate_remains"
 
     out = preemption.complete_preemption(
         db, run_id="run_old", repo_path=repo, base_sha=base, now=_NOW
@@ -1556,34 +1553,6 @@ def test_reservation_released_exactly_once(tmp_path: Path) -> None:
     )
     assert replay.owned and replay.detail == "already_preempted"
     assert release(db, "run_old", now=_NOW) == 0
-
-
-def test_should_preempt_predicate_matrix(tmp_path: Path) -> None:
-    """Covers: D8 trigger gates (quota x no-eligible x ownership x budget)."""
-    repo = tmp_path / "repo"
-    base = _repo(repo)
-
-    db = _db(tmp_path, name="m.db")
-    ready = preemption.should_preempt(db, "run_absent")
-    assert not ready.eligible and ready.detail == "no_job"
-
-    _dispatched(db, str(repo), base, "job1", "run_old")
-    assert preemption.should_preempt(db, "run_old").detail == "no_quota_signal"
-    _quota_evidence(db, "run_old", no_eligible=False)
-    assert (
-        preemption.should_preempt(db, "run_old").detail == "eligible_candidate_remains"
-    )
-    db.record_event(
-        "run_old", "no_eligible_candidate", payload={"outcome": "NO_ELIGIBLE_CANDIDATE"}
-    )
-    ok = preemption.should_preempt(db, "run_old")
-    assert ok.eligible and ok.detail == "ok"
-    assert ok.genuine_quota and ok.no_eligible_candidate
-    assert ok.job is not None and ok.job.job_id == "job1"
-    assert ok.checkpoint_sha is None  # no checkpoint row recorded yet
-
-    limited = preemption.should_preempt(db, "run_old", max_preemptions=0)
-    assert not limited.eligible and limited.detail == "preemption_limit"
 
 
 def test_failure_vocabulary_and_terminal_recognition() -> None:

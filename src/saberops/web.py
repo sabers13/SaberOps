@@ -58,9 +58,7 @@ from saberops.model_access import (
     AccessStore,
     ConnectionTestReason,
     ExecutionSupport,
-    ModelCatalog,
     ModelCatalogStore,
-    ModelCatalogStoreError,
     ModelDiscoveryResult,
     ModelListingError,
     ModelSource,
@@ -693,14 +691,6 @@ def _model_catalog_store() -> ModelCatalogStore:
     return ModelCatalogStore(owner_state_dir() / ModelCatalogStore.FILENAME)
 
 
-def _load_catalog_safely() -> ModelCatalog:
-    """Load the last-observed catalog, degrading to empty on corrupt state."""
-    try:
-        return _model_catalog_store().load()
-    except ModelCatalogStoreError:
-        return ModelCatalog()
-
-
 def _binding_store() -> OwnerBindingStore:
     """Return the owner binding store (overridable for tests).
 
@@ -767,50 +757,6 @@ def _exact_binding_for(
             continue
         return binding
     return None
-
-
-def _resolve_exact_binding(
-    owner: OwnerBindings,
-    registry: AdapterRegistry,
-    *,
-    provider: str,
-    model: str,
-    connection_id: str | None = None,
-    role: BindingRole | None = None,
-) -> Any | None:
-    """Resolve the exact binding for a model through the real resolver.
-
-    Returns the binding only when an exact registry entry exists AND
-    :func:`resolve_execution_binding` succeeds against the real adapter;
-    otherwise ``None`` (no provider/model fallback, no synthesized identity).
-
-    The lookup accepts an explicit ``connection_id`` and
-    ``role`` so the same provider/model pair reached through two
-    different connections (or a WORKER-role / ORCHESTRATOR-role split)
-    resolves to its own exact binding rather than the first registry
-    declaration.
-    """
-    binding = _exact_binding_for(
-        owner,
-        provider=provider,
-        model=model,
-        connection_id=connection_id,
-        role=role,
-    )
-    if binding is None:
-        return None
-    adapter = registry.get(binding.provider)
-    if adapter is None:
-        return None
-    try:
-        resolve_execution_binding(
-            registry=owner.registry,
-            binding_id=binding.binding_id,
-            adapter=adapter,
-        )
-    except BindingResolutionError:
-        return None
-    return binding
 
 
 def _http_get(

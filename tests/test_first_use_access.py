@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -12,14 +11,9 @@ from typing import Any
 import pytest
 
 from saberops.model_access import (
-    AccessStore,
-    DiscoveredModel,
-    ExecutionSupport,
-    ModelCatalogStore,
     ReadinessService,
     ReadinessStore,
     build_access_registry,
-    build_model_catalog,
     default_account_connections,
 )
 from saberops.model_access.model_verification import verify_native_model
@@ -102,71 +96,3 @@ def test_fresh_account_can_verify_before_any_task_and_survives_refresh(
         service.verify_model(replace(connection, enabled=False), "upstream/exact-model")
 
 
-def test_first_use_requires_exact_current_model(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """First-use verification needs an exact current catalog model.
-
-    L-A step 5 removed the access page; this drives the same engine seam
-    the removed verify-model route used (exact-model catalog gate +
-    ReadinessService.verify_model with sanitized persistence).
-    """
-    from saberops.model_access import ReadinessService
-    from saberops.web import _access_store, _readiness_store
-
-    for name in ("XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"):
-        monkeypatch.setenv(name, str(tmp_path / name))
-    for name in ("SABEROPS_PROFILE", "ORCH_BINDING_STORE"):
-        monkeypatch.delenv(name, raising=False)
-    paths = {"ORCH_ACCESS_STORE": tmp_path / "access.json",
-             "ORCH_ACCESS_MODELS_STORE": tmp_path / "models.json",
-             "ORCH_READINESS_STORE": tmp_path / "readiness.json"}
-    for key, path in paths.items():
-        monkeypatch.setenv(key, str(path))
-    AccessStore(paths["ORCH_ACCESS_STORE"]).save(build_access_registry(default_account_connections()))
-    catalog = build_model_catalog([
-        DiscoveredModel("opencode-account", "opencode", "opencode", "upstream/model",
-                        execution_support=ExecutionSupport.SUPPORTED),
-        DiscoveredModel("opencode-account", "opencode", "opencode", "stale/model",
-                        execution_support=ExecutionSupport.SUPPORTED, stale=True),
-        DiscoveredModel("antigravity-google-account", "antigravity", "antigravity", "other/model",
-                        execution_support=ExecutionSupport.SUPPORTED),
-    ])
-    ModelCatalogStore(paths["ORCH_ACCESS_MODELS_STORE"]).save(catalog)
-    calls: list[str] = []
-
-    def verify(_executable: str, _backend: str, model: str) -> str:
-        calls.append(model)
-        return "READY"
-
-    def current_model(connection_id: str, model_id: str) -> str:
-        registry = _access_store().load()
-        connection = registry.try_get(connection_id)
-        assert connection is not None
-        from saberops.web import _load_catalog_safely
-
-        model = next((m for m in _load_catalog_safely().for_connection(connection_id)
-                      if m.model_id == model_id and m.is_execution_supported
-                      and not m.is_stale and m.provider == connection.provider
-                      and m.backend == connection.backend), None)
-        if model is None:
-            raise ValueError("Choose a current model from this provider's catalog.")
-        return model.model_id
-
-    for model in ("", "invented/model", "other/model", "stale/model"):
-        with pytest.raises((ValueError, AssertionError)):
-            current_model("opencode-account", model)
-    assert not calls
-    monkeypatch.setattr("saberops.model_access.model_verification.verify_native_model", verify)
-    monkeypatch.setattr("shutil.which", lambda _: "/fake/cli")
-    registry = _access_store().load()
-    connection = registry.try_get("opencode-account")
-    assert connection is not None
-    service = ReadinessService(registry, _readiness_store(), which=shutil.which)
-    evidence = service.verify_model(connection, current_model("opencode-account", "upstream/model"))
-    assert evidence.state == ProviderReadiness.READY
-    assert calls == ["upstream/model"]
-    assert "private" not in paths["ORCH_READINESS_STORE"].read_text()
-    stored = ReadinessStore(paths["ORCH_READINESS_STORE"]).load().try_get("opencode-account")
-    assert stored is not None and stored.model_id == "upstream/model"
-    assert stored.state == ProviderReadiness.READY

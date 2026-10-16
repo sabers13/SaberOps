@@ -858,56 +858,6 @@ def latest_checkpoint_sha(db: Any, run_id: str) -> str | None:
     return sha if isinstance(sha, str) and sha else None
 
 
-def should_preempt(
-    db: Any,
-    run_id: str,
-    *,
-    job: Job | None = None,
-    max_preemptions: int = DEFAULT_MAX_PREEMPTIONS,
-) -> PreemptionReadiness:
-    """Decide whether *run_id* qualifies for D8 preemption right now.
-
-    Pure read-only predicate: no Git, handoff, run, job, or ledger state is
-    touched.  All four gates must hold: genuine quota signal, recorded
-    no-eligible determination, a RUNNING job owning this exact run, and
-    remaining preemption budget.
-    """
-    owner = job if job is not None else find_job_for_run(db, run_id)
-    if owner is None:
-        return PreemptionReadiness(
-            eligible=False, detail="no_job", job=None,
-            genuine_quota=False, no_eligible_candidate=False,
-        )
-    genuine = has_genuine_quota_signal(db, run_id)
-    no_eligible = has_no_eligible_evidence(db, run_id)
-    if not genuine:
-        return PreemptionReadiness(
-            eligible=False, detail="no_quota_signal", job=owner,
-            genuine_quota=False, no_eligible_candidate=no_eligible,
-        )
-    if not no_eligible:
-        return PreemptionReadiness(
-            eligible=False, detail="eligible_candidate_remains", job=owner,
-            genuine_quota=True, no_eligible_candidate=False,
-        )
-    if owner.state != JobState.RUNNING or owner.current_run_id != run_id:
-        return PreemptionReadiness(
-            eligible=False, detail="job_not_owned", job=owner,
-            genuine_quota=True, no_eligible_candidate=True,
-        )
-    if owner.preemptions >= max_preemptions:
-        return PreemptionReadiness(
-            eligible=False, detail="preemption_limit", job=owner,
-            genuine_quota=True, no_eligible_candidate=True,
-        )
-    return PreemptionReadiness(
-        eligible=True, detail="ok", job=owner,
-        genuine_quota=True, no_eligible_candidate=True,
-        not_before=quota_reset_eta(db, run_id),
-        checkpoint_sha=latest_checkpoint_sha(db, run_id),
-    )
-
-
 def _git_common_dir(path: Path) -> Path | None:
     """Canonical common Git directory for *path*, or ``None`` when unprovable.
 
@@ -1938,6 +1888,5 @@ __all__ = [
     "prepare_resume",
     "quota_reset_eta",
     "record_preparation_decision",
-    "should_preempt",
     "verify_prepared_artifacts",
 ]
