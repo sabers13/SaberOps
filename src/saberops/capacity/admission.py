@@ -634,16 +634,26 @@ def admit(
 
     # 8. Quota pools & windows
     pool_policies = effective_quota_pools(effective_policy, activate_overage=activate_overage)
-    # ADR-0002 D1/D7 QuotaPool binding contract: when a resolved binding's
-    # ``binding_pool_id`` is supplied it is authoritative for that candidate, so
-    # it is the ONLY drawn pool.  The route/provider scan (``pools_for``) and
-    # its provider-wide fallback must not run, or a sibling account's pool on
-    # the same route could block or authorize the bound candidate.  This
-    # mirrors ``quota_decision(pool_id=...)``; the unbound path (``None``)
-    # keeps the legacy route-membership behavior unchanged.
+    # ADR-0002 D1/D7 QuotaPool binding contract: a bound route draws its
+    # ``binding_pool_id`` plus every pool whose ``members`` match the candidate
+    # (declared shared scarcity), and NEVER the synthesized provider-wide
+    # default from ``pools_for``'s no-match fallback.  The unbound path
+    # (``None``) keeps the legacy ``pools_for`` behavior unchanged.
     binding_scoped = binding_pool_id is not None
     if binding_pool_id is not None:
         drawn_pools: list[str] = [binding_pool_id]
+        for pid, pol in pool_policies.items():
+            if pid == binding_pool_id:
+                continue
+            for member_entry in pol.members or ():
+                sel = (
+                    member_entry.get("route")
+                    if isinstance(member_entry, dict)
+                    else member_entry
+                )
+                if isinstance(sel, str) and _member_matches(sel, candidate):
+                    drawn_pools.append(pid)
+                    break
     else:
         drawn_pools = pools_for(candidate, pool_policies)
 
@@ -670,13 +680,7 @@ def admit(
         if not exc_id:
             continue
         exc_pool = getattr(state, "pool_id", None) or state.pool
-        if binding_scoped:
-            # Binding-scoped callers only see their own pool's exclusions: a
-            # sibling pool can neither block nor authorize the candidate.  No
-            # provider-wide fallback (quota_decision(pool_id=...) is identical).
-            if exc_pool != binding_pool_id:
-                continue
-        elif exc_pool not in drawn_pools and exc_pool != candidate.provider.lower():
+        if exc_pool not in drawn_pools and exc_pool != candidate.provider.lower():
             continue
         scope = getattr(state, "exclusion_model_scope", None)
         if not model_scope_matches(scope if isinstance(scope, str) else None, candidate.model):
