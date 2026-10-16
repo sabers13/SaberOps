@@ -78,6 +78,7 @@ from saberops.models import (
     WorkerCheckpoint,
     WorkerInterruptionReason,
 )
+from saberops.process import run_process
 
 #: Default bound from ADR-0002 D8: how many times one job may be preempted
 #: before it goes terminally FAILED with ``PREEMPTION_LIMIT``.
@@ -378,6 +379,110 @@ def should_preempt(
     )
 
 
+def _git_common_dir(path: Path) -> Path | None:
+    """Canonical common Git directory for *path*, or ``None`` when unprovable.
+
+    ``git rev-parse --git-common-dir`` is authoritative for every spelling of
+    one repository: the main checkout and each linked worktree all resolve to
+    the same common directory, while a different repository -- even one that
+    shares commit object SHAs through clone/object sharing -- resolves to a
+    different one.  Relative Git output is rebased on *path* before
+    canonicalization, matching the existing engine convention.
+    """
+    res = run_process(["git", "rev-parse", "--git-common-dir"], cwd=path)
+    if not res.passed or not res.stdout.strip():
+        return None
+    common = Path(res.stdout.strip())
+    if not common.is_absolute():
+        common = path / common
+    try:
+        return common.resolve()
+    except OSError:
+        return None
+
+
+def _git_worktree_root(path: Path) -> Path | None:
+    """Canonical top-level worktree root containing *path*, or ``None``."""
+    res = run_process(["git", "rev-parse", "--show-toplevel"], cwd=path)
+    if not res.passed or not res.stdout.strip():
+        return None
+    try:
+        return Path(res.stdout.strip()).resolve()
+    except OSError:
+        return None
+
+
+def _registered_worktree_roots(repo_path: Path) -> set[Path] | None:
+    """Canonical roots registered for *repo_path*, or ``None`` when unknown.
+
+    ``git worktree list --porcelain`` is the repository's own registration
+    record.  A ``None`` result is an unknown/ambiguous ownership answer and
+    callers must fail closed; an empty set cannot describe a real repository
+    (its main worktree is always registered) and is likewise treated as
+    unknown.
+    """
+    res = run_process(["git", "worktree", "list", "--porcelain"], cwd=repo_path)
+    if not res.passed:
+        return None
+    roots: set[Path] = set()
+    for line in res.stdout.splitlines():
+        if not line.startswith("worktree "):
+            continue
+        raw = line[len("worktree ") :].strip()
+        if not raw:
+            return None
+        try:
+            roots.add(Path(raw).resolve())
+        except OSError:
+            return None
+    if not roots:
+        return None
+    return roots
+
+
+def _verified_worktree_root(repo_path: Path, candidate: str | Path) -> Path | None:
+    """Prove *candidate* is the attempt worktree root of the job repository.
+
+    Ownership is established positively from Git's own metadata *before* any
+    inspection or mutation, so a valid-but-unrelated repository -- or a stale,
+    redirected, or aliased path -- can never be staged, committed, or elected
+    as HEAD:
+
+    * the candidate resolves to an existing directory and is itself the
+      worktree root (``git rev-parse --show-toplevel``), so a subdirectory or
+      nested checkout never qualifies;
+    * the candidate's canonical common Git directory equals the job
+      repository's canonical common Git directory, so a foreign repository --
+      including one that shares object SHAs -- never qualifies;
+    * the candidate root is registered for the job repository by
+      ``git worktree list --porcelain``.
+
+    Unknown, malformed, or inaccessible metadata returns ``None`` (fail
+    closed) rather than a guess.  This is an identity proof over Git's recorded
+    ownership, not an OS sandbox: a path replaced between this proof and the
+    later mutation is re-proved immediately before the mutating call, and the
+    residual race is reported honestly rather than claimed impossible.
+    """
+    try:
+        resolved = Path(candidate).resolve()
+    except OSError:
+        return None
+    if not resolved.is_dir():
+        return None
+    repo_common = _git_common_dir(repo_path)
+    if repo_common is None:
+        return None
+    candidate_common = _git_common_dir(resolved)
+    if candidate_common is None or candidate_common != repo_common:
+        return None
+    if _git_worktree_root(resolved) != resolved:
+        return None
+    registered = _registered_worktree_roots(repo_path)
+    if registered is None or resolved not in registered:
+        return None
+    return resolved
+
+
 def _attempt_worktree_path(db: Any, run_id: str) -> str | None:
     """Newest attempt worktree path recorded for the run, if any."""
     try:
@@ -404,9 +509,11 @@ def _resolve_anchor_sha(
     The recorded worker checkpoint is only a *starting* candidate, never an
     unconditional winner: an older recorded row (for example the checkpoint a
     previous generation staged through :func:`prepare_resume`) must not shadow
-    newer verified work committed by the current attempt.  Resolution inspects
-    the current attempt's worktree (explicit hint, else the newest attempt row)
-    and proves lineage relative to the recorded anchor before preferring
+    newer verified work committed by the current attempt.  Resolution first
+    proves the current attempt's worktree genuinely belongs to the job
+    repository (exact common Git directory, exact registered worktree root) --
+    never inspecting, staging, or committing into any other repository -- and
+    then proves lineage relative to the recorded anchor before preferring
     either side:
 
     * a dirty worktree is snapshotted as a fresh checkpoint commit and used
@@ -423,8 +530,9 @@ def _resolve_anchor_sha(
 
     Every returned candidate is a verified commit object in ``repo_path``;
     object existence alone is never treated as lineage.  A recorded attempt
-    that points at a worktree this process cannot verify fails closed rather
-    than silently anchoring the frozen base.
+    that points at a worktree this process cannot prove belongs to
+    ``repo_path`` fails closed rather than silently anchoring the frozen base,
+    and its repository, index, HEAD, and refs are left untouched.
     """
     recorded = latest_checkpoint_sha(db, run_id)
     if recorded is not None:
@@ -437,12 +545,11 @@ def _resolve_anchor_sha(
     hint = worktree_path or _attempt_worktree_path(db, run_id)
     work: Path | None = None
     if hint:
-        candidate_path = Path(hint)
         try:
-            # Only a real worktree of the job repo is inspected; a stale or
-            # unrelated path is never trusted for a fabricated HEAD.
-            if candidate_path.exists() and GitManager.is_git_repo(candidate_path):
-                work = candidate_path
+            # Ownership is proven BEFORE any inspection, index write, or
+            # commit: a valid-but-unrelated repository, a stale/repointed
+            # path, a subdirectory, or an alias is never trusted.
+            work = _verified_worktree_root(repo_path, hint)
         except Exception:
             return None
 
@@ -450,6 +557,11 @@ def _resolve_anchor_sha(
         try:
             changed = GitManager.get_changed_paths(work)
             if changed:
+                # Re-prove ownership across the inspection boundary so a path
+                # swapped between the read above and the mutation below cannot
+                # redirect the commit into another repository.
+                if _verified_worktree_root(repo_path, work) is None:
+                    return None
                 sha = GitManager.create_checkpoint_commit(
                     work,
                     f"orch checkpoint({run_id}/preempt): "
@@ -460,6 +572,11 @@ def _resolve_anchor_sha(
                 try:
                     validate_candidate_sha(sha)
                 except Exception:
+                    return None
+                # Defense in depth: the snapshot must be a real commit object
+                # in the destination repository, never a SHA from an unrelated
+                # object store.
+                if not GitManager.commit_exists(repo_path, sha):
                     return None
                 if recorded is not None and not GitManager.is_ancestor(
                     repo_path, recorded, sha
@@ -493,13 +610,15 @@ def _resolve_anchor_sha(
         # work; the recorded anchor (if any) is the only honest candidate.
         return recorded
 
+    if hint:
+        # An attempt recorded a worktree that cannot be positively verified as
+        # this job's own: ownership is ambiguous, there may be unprovable WIP
+        # behind the hint, and the hinted repository must stay untouched.  Fail
+        # closed rather than falling back to a stale checkpoint, and never
+        # anchor the frozen base from ambiguity.
+        return None
     if recorded is not None:
         return recorded
-    if hint:
-        # An attempt recorded a worktree that is now absent or unverifiable:
-        # there may be lost WIP this process cannot prove, so fail closed
-        # instead of anchoring the frozen base.
-        return None
     for candidate in (base_sha, job.base_sha):
         if not candidate:
             continue

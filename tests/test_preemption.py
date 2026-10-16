@@ -544,6 +544,244 @@ def test_recorded_anchor_covers_clean_worktree_behind_it(tmp_path: Path) -> None
     assert out.checkpoint_sha == recorded
 
 
+# ---------------------------------------------------------------------------
+# R4-M1: positively verified worktree ownership BEFORE any Git mutation
+# ---------------------------------------------------------------------------
+
+
+def _repo_state(path: Path) -> tuple[str, str, str, str]:
+    """Comparable identity of a repository's HEAD, refs, and worktree/index.
+
+    Any foreign-repository mutation -- a new checkpoint commit, an advanced
+    branch/ref, a staged index, or a changed working tree -- changes at least
+    one element, so equality proves the repository was left untouched.
+    """
+    return (
+        _git(["rev-parse", "HEAD"], path),
+        _git(["rev-list", "--count", "HEAD"], path),
+        _git(["for-each-ref", "--format=%(refname) %(objectname)"], path),
+        _git(["status", "--porcelain"], path),
+    )
+
+
+def test_foreign_dirty_repo_is_never_committed_without_record(tmp_path: Path) -> None:
+    """Covers: ADR-0002 D8 R4-M1 a foreign dirty repo is never staged/committed."""
+    repo = tmp_path / "repo"
+    base = _repo(repo)
+    foreign = tmp_path / "foreign"
+    _repo(foreign)
+    (foreign / "foreign_wip.txt").write_text("foreign wip\n", encoding="utf-8")
+    before = _repo_state(foreign)
+
+    db = _db(tmp_path)
+    _dispatched(db, str(repo), base, "job1", "run_old")
+    _quota_evidence(db, "run_old")
+
+    out = preemption.complete_preemption(
+        db, run_id="run_old", repo_path=repo,
+        worktree_path=str(foreign), base_sha=base, now=_NOW,
+    )
+
+    assert not out.owned and out.detail == "no_anchor"
+    # The valid-but-unrelated repository is entirely untouched: no commit, no
+    # advanced ref, no staged index, no worktree change.
+    assert _repo_state(foreign) == before
+    assert GitManager.list_checkpoint_refs(repo, "job1") == {}
+    still = store.get_job(db, "job1")
+    assert still is not None and still.state == JobState.RUNNING
+    run_row = db.get_run("run_old")
+    assert run_row is not None and run_row.status == RunStatus.RUNNING
+
+
+def test_foreign_dirty_repo_with_recorded_anchor_stays_untouched(
+    tmp_path: Path,
+) -> None:
+    """Covers: ADR-0002 D8 R4-M1 foreign WIP is never staged even when S exists."""
+    repo = tmp_path / "repo"
+    base = _repo(repo)
+    db = _db(tmp_path)
+    recorded, job = _anchor_older_checkpoint(db, tmp_path, repo, base)
+
+    foreign = tmp_path / "foreign"
+    _repo(foreign)
+    (foreign / "foreign_wip.txt").write_text("foreign wip\n", encoding="utf-8")
+    before = _repo_state(foreign)
+
+    _stage_and_dispatch_resume(
+        db, repo, base, job=job, run_id="run_new",
+        worktree=foreign, recorded=recorded,
+    )
+
+    out = preemption.complete_preemption(
+        db, run_id="run_new", repo_path=repo, base_sha=base, now=_NOW
+    )
+
+    assert not out.owned and out.detail == "no_anchor"
+    assert _repo_state(foreign) == before
+    # The trusted record and its anchor are preserved exactly; no new ref.
+    assert GitManager.read_checkpoint_ref(repo, "job1", 0) == recorded
+    assert GitManager.read_checkpoint_ref(repo, "job1", 1) is None
+    still = store.get_job(db, "job1")
+    assert still is not None and still.resume_from is not None
+    assert still.resume_from.checkpoint_sha == recorded
+    assert still.preemptions == 1
+
+
+def test_unrelated_repo_sharing_object_store_fails_closed(tmp_path: Path) -> None:
+    """Covers: ADR-0002 D8 R4-M1 a shared object-SHA foreign HEAD is not elected."""
+    repo = tmp_path / "repo"
+    base = _repo(repo)
+    clone = tmp_path / "clone"
+    _git(["clone", str(repo), str(clone)], tmp_path)
+    _git(["config", "user.email", "test@example.com"], clone)
+    _git(["config", "user.name", "test"], clone)
+    (clone / "shared.txt").write_text("unrelated work\n", encoding="utf-8")
+    _git(["add", "-A"], clone)
+    _git(["commit", "-m", "unrelated shared work"], clone)
+    foreign_head = _git(["rev-parse", "HEAD"], clone)
+    assert foreign_head != base
+    # Make the unrelated commit resolvable in repo A's own object store, so a
+    # bare commit-existence check would accept it; ownership must still refuse.
+    _git(["fetch", str(clone), "HEAD"], repo)
+    assert GitManager.commit_exists(repo, foreign_head)
+    assert GitManager.is_clean(clone)
+
+    db = _db(tmp_path)
+    _dispatched(db, str(repo), base, "job1", "run_old")
+    _seed_quota_attempt(db, "run_old", str(repo), worktree=clone)
+    _quota_evidence(db, "run_old")
+
+    out = preemption.complete_preemption(
+        db, run_id="run_old", repo_path=repo, base_sha=base, now=_NOW
+    )
+
+    assert not out.owned and out.detail == "no_anchor"
+    assert GitManager.list_checkpoint_refs(repo, "job1") == {}
+    still = store.get_job(db, "job1")
+    assert still is not None and still.state == JobState.RUNNING
+
+
+def test_subdirectory_of_job_repo_is_not_a_trusted_worktree(tmp_path: Path) -> None:
+    """Covers: ADR-0002 D8 R4-M1 a subdirectory never stages a commit."""
+    repo = tmp_path / "repo"
+    base = _repo(repo)
+    sub = repo / "nested"
+    sub.mkdir()
+    (sub / "dirty.txt").write_text("nested wip\n", encoding="utf-8")
+    before = _repo_state(repo)
+
+    db = _db(tmp_path)
+    _dispatched(db, str(repo), base, "job1", "run_old")
+    _seed_quota_attempt(db, "run_old", str(repo), worktree=sub)
+    _quota_evidence(db, "run_old")
+
+    out = preemption.complete_preemption(
+        db, run_id="run_old", repo_path=repo, base_sha=base, now=_NOW
+    )
+
+    assert not out.owned and out.detail == "no_anchor"
+    assert _repo_state(repo) == before
+    assert GitManager.list_checkpoint_refs(repo, "job1") == {}
+    assert GitManager.get_ref_commit(repo, "HEAD") == base
+
+
+def test_nested_repo_inside_job_repo_is_rejected(tmp_path: Path) -> None:
+    """Covers: ADR-0002 D8 R4-M1 a nested checkout is not the attempt worktree."""
+    repo = tmp_path / "repo"
+    base = _repo(repo)
+    nested = repo / "nested_repo"
+    _repo(nested)
+    (nested / "nested_wip.txt").write_text("nested repo wip\n", encoding="utf-8")
+    before = _repo_state(nested)
+
+    db = _db(tmp_path)
+    _dispatched(db, str(repo), base, "job1", "run_old")
+    _seed_quota_attempt(db, "run_old", str(repo), worktree=nested)
+    _quota_evidence(db, "run_old")
+
+    out = preemption.complete_preemption(
+        db, run_id="run_old", repo_path=repo, base_sha=base, now=_NOW
+    )
+
+    assert not out.owned and out.detail == "no_anchor"
+    assert _repo_state(nested) == before
+    assert GitManager.list_checkpoint_refs(repo, "job1") == {}
+
+
+def test_symlinked_foreign_repo_is_rejected(tmp_path: Path) -> None:
+    """Covers: ADR-0002 D8 R4-M1 a symlink alias cannot redirect the commit."""
+    repo = tmp_path / "repo"
+    base = _repo(repo)
+    foreign = tmp_path / "foreign"
+    _repo(foreign)
+    (foreign / "foreign_wip.txt").write_text("foreign wip\n", encoding="utf-8")
+    link = tmp_path / "attempt_link"
+    link.symlink_to(foreign, target_is_directory=True)
+    before = _repo_state(foreign)
+
+    db = _db(tmp_path)
+    _dispatched(db, str(repo), base, "job1", "run_old")
+    _seed_quota_attempt(db, "run_old", str(repo), worktree=link)
+    _quota_evidence(db, "run_old")
+
+    out = preemption.complete_preemption(
+        db, run_id="run_old", repo_path=repo, base_sha=base, now=_NOW
+    )
+
+    assert not out.owned and out.detail == "no_anchor"
+    assert _repo_state(foreign) == before
+
+
+def test_legitimate_linked_worktree_wip_is_still_snapshotted(tmp_path: Path) -> None:
+    """Covers: ADR-0002 D8 R4-M1 verified linked worktrees keep WIP snapshots."""
+    repo = tmp_path / "repo"
+    base = _repo(repo)
+    wt = tmp_path / "wt_linked"
+    GitManager.create_worktree(repo, "wt-linked", wt, start_point=base)
+    (wt / "wip.txt").write_text("legit wip\n", encoding="utf-8")
+
+    db = _db(tmp_path)
+    _dispatched(db, str(repo), base, "job1", "run_old")
+    # Trusted attempt binding: the worktree is discovered through the run's
+    # own attempt row, never an explicit caller hint.
+    _seed_quota_attempt(db, "run_old", str(repo), worktree=wt)
+    _quota_evidence(db, "run_old")
+
+    out = preemption.complete_preemption(
+        db, run_id="run_old", repo_path=repo, base_sha=base, now=_NOW
+    )
+
+    assert out.owned and out.detail == "preempted"
+    assert out.checkpoint_sha is not None and out.checkpoint_sha != base
+    assert GitManager.commit_exists(repo, out.checkpoint_sha)
+    assert GitManager.read_checkpoint_ref(repo, "job1", 0) == out.checkpoint_sha
+    assert _git(["show", f"{out.checkpoint_sha}:wip.txt"], repo) == "legit wip"
+    assert _git(["rev-parse", "HEAD"], wt) == out.checkpoint_sha
+
+
+def test_main_repo_recorded_as_attempt_worktree_still_snapshots(
+    tmp_path: Path,
+) -> None:
+    """Covers: ADR-0002 D8 R4-M1 the job's own main worktree stays trusted."""
+    repo = tmp_path / "repo"
+    base = _repo(repo)
+    (repo / "main_wip.txt").write_text("main wip\n", encoding="utf-8")
+
+    db = _db(tmp_path)
+    _dispatched(db, str(repo), base, "job1", "run_old")
+    _seed_quota_attempt(db, "run_old", str(repo), worktree=repo)
+    _quota_evidence(db, "run_old")
+
+    out = preemption.complete_preemption(
+        db, run_id="run_old", repo_path=repo, base_sha=base, now=_NOW
+    )
+
+    assert out.owned and out.detail == "preempted"
+    assert out.checkpoint_sha is not None and out.checkpoint_sha != base
+    assert GitManager.is_ancestor(repo, base, out.checkpoint_sha)
+    assert _git(["show", f"{out.checkpoint_sha}:main_wip.txt"], repo) == "main wip"
+
+
 def test_reset_confidence_gating(tmp_path: Path) -> None:
     """Covers: prompt §3.3 EXACT/PARSED vs UNKNOWN/HINT reset handling."""
     repo = tmp_path / "repo"
