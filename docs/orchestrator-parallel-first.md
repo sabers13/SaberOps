@@ -104,6 +104,17 @@ task-ID lease, interfaces are independent, and conservative expected net
 benefit outweighs coordination/review/G1/G3 overhead. A ready task may
 legitimately wait; sequential, one-task, and zero-wave outcomes are valid.
 
+Checking is mandatory, not optional. Before every owner-launched run and on
+each frontier-changing transition, scan the current approved roadmap across
+all phases and projects against live state, identify the ready frontier of
+already-approved task IDs with satisfied hard START edges, evaluate safe
+beneficial overlap against the critical path, and launch — or, in manual
+operation, present for owner launch — the selected concurrent cohort rather
+than defaulting to one task. Never duplicate a running Worker. Record a short
+audit per scan: trigger, plan version, eligible/held IDs with reasons,
+selected sessions, next trigger. The manual check is operative now; runtime
+auto-dispatch remains TARGET until wired.
+
 ## 5. Dependency edges: hard START versus deferred INTEGRATE
 
 - A **hard START** prerequisite must be satisfied before a dependent may begin.
@@ -207,9 +218,11 @@ a reservation, or falsely free capacity. Duplicate identical records are one
 alias; conflicting identities fail closed. A **wave is optional** — zero, one,
 or several tasks are all legitimate. When one dependency is blocked, the
 Orchestrator **continues unrelated ready work across other phases where
-beneficial** instead of serialising the plan behind the blocked subtree — but a
-merely eligible task is never obligated to launch, and sequential or idle
-outcomes remain valid when cost, risk, or the owner plan says so.
+beneficial** instead of serialising the plan behind the blocked subtree —
+genuine independent approved work must not wait merely because an earlier
+phase is unfinished — but a merely eligible task is never obligated to launch,
+and sequential or idle outcomes remain valid when cost, risk, or the owner
+plan says so. Never invent tasks to fill the freed slots.
 
 ## 12. New-session bootstrap (paste)
 
@@ -232,7 +245,8 @@ outcomes remain valid when cost, risk, or the owner plan says so.
 > Worker for G1 and review. Require one exclusive integration gate with exact
 > ancestry/SHA evidence. Never implement source, run
 > gates, move the target branch, push, or spend without owner authorization.
-> Report a ready-now matrix with explicit blocked/held reasons.
+> Report pre-run scan done, with a ready-now matrix of explicit blocked/held
+> reasons and the selected concurrent sessions.
 
 Primary discoverability is the tracked `AGENTS.md` anchor, which points every
 new repository Orchestrator here. A session that has **no** repository access

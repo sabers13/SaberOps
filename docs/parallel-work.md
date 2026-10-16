@@ -53,7 +53,19 @@ production glue returns to an accountable Worker for G1 and task-scoped review.
 That stage guard (trusted role/stage/task provenance, never prompt or
 branch-name inference, no phantom pending-REVIEW for Integrator work) is
 **TARGET runtime behavior, not yet wired**: the UI and status evidence must not
-present a phantom review blocker for integration-only artifacts. Early pure *projections* (for example
+present a phantom review blocker for integration-only artifacts. At every
+approved plan-run start and frontier-changing transition the target runtime
+deterministically recomputes the ready set under the frozen plan, selects the
+advantageous concurrent cohort, and starts each via atomic task-ID
+ownership/worktree reservation — readiness is dispatched, not merely
+displayed — without LLM per-slot decisions or invented costs. Every scan
+persists an audit (trigger, plan version, eligible/active/selected/held IDs
+with reasons, evidence versions, next trigger); the UI shows
+READY/SELECTED/RUNNING/HELD/INTEGRATION-BLOCKED separately. Manual operation
+follows the same check with owner-launched sessions: Orch states the scan
+conclusion and presents all selected pinned prompts together, never
+duplicating running Workers. The manual pre-run check is operative now;
+runtime enforcement is TARGET, not yet proven on main. Early pure *projections* (for example
 `saberops.ready_frontier`, a readiness/hold projection, and a project-child
 slot-admission projection) may land on unmerged branches; they compute nothing
 about live occupancy, hold no lease, dispatch nothing, and are never launch

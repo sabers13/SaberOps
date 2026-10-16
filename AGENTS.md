@@ -40,6 +40,16 @@ not authorize an autonomous engine: LLMs advise; deterministic software decides.
    glue/behavior changes found at integration go back to an accountable Worker
    for G1 and task-scoped review. The exclusive integration gate (G3) and owner
    acceptance stay binding. Do not globally weaken Worker risk-adaptive review.
+7. **Before every run, check the roadmap for parallel work.** On each
+   owner-launched session and on start/finish/block/unblock/approval/capacity
+   events, scan readiness across ALL phases and projects against live branches,
+   worktrees, leases, and evidence — never dated notes or phase order alone.
+   Select safe, beneficial, already-approved concurrent tasks (disjoint scopes,
+   one Worker lease each, within 3x5 maxima) and present ALL selected pinned
+   prompts together with the scan conclusion (eligible/held reasons, selected
+   sessions); never duplicate an already-running Worker. If no credible net
+   benefit, stay sequential and record why. Empty slots never justify a new
+   task.
 
 This entry defers to owner-authorized policies and to deterministic software
 decisions. It grants the Orchestrator no authority to implement source, dispatch
