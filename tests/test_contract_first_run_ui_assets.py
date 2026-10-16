@@ -173,3 +173,140 @@ def test_js_collapses_to_single_step_on_init() -> None:
     assert re.search(r"\.hidden\s*=", text), "JS never hides sections"
     assert "show(currentFromHash())" in text, "JS init does not route by hash"
     assert "aria-current" in text, "JS step-nav state missing"
+
+
+# --- fix-up 2: document-scroll / cascade contract -------------------------
+
+
+def _strip_comments(css: str) -> str:
+    """Remove CSS comments so selector/brace scanning sees only live rules."""
+    return re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+
+
+def _parse_rules(css: str, inside_at: bool = False) -> list[tuple[str, str, bool]]:
+    """Return (selector, declaration_block, inside_at_rule) for every rule.
+
+    At-rule preludes (e.g. ``@media (...)``) are not rules; their bodies are
+    scanned recursively with ``inside_at=True`` so a root override cannot hide
+    inside a media query without the guard below noticing.
+    """
+    rules: list[tuple[str, str, bool]] = []
+    i, n, buf = 0, len(css), ""
+    while i < n:
+        ch = css[i]
+        if ch == "{":
+            selector = buf.strip()
+            buf = ""
+            depth, k = 1, i + 1
+            while k < n and depth:
+                if css[k] == "{":
+                    depth += 1
+                elif css[k] == "}":
+                    depth -= 1
+                k += 1
+            block = css[i + 1:k - 1]
+            if selector.startswith("@"):
+                rules.extend(_parse_rules(block, inside_at=True))
+            else:
+                rules.append((selector, block, inside_at))
+            i = k
+            continue
+        if ch == "}":
+            i += 1
+            continue
+        buf += ch
+        i += 1
+    return rules
+
+
+def _declarations(block: str) -> dict[str, str]:
+    """Last-wins declarations of a plain rule block (lower-cased property)."""
+    out: dict[str, str] = {}
+    for part in block.split(";"):
+        prop, sep, value = part.partition(":")
+        prop = prop.strip().lower()
+        if not sep or not prop or "{" in prop or "}" in prop:
+            continue
+        out[prop] = value.strip()
+    return out
+
+
+def _root_selector_parts(selector: str) -> list[str]:
+    """The selector's parts that target the document root, if any."""
+    return [s.strip() for s in selector.split(",") if s.strip() in ("html", "body")]
+
+
+def _effective_root(ordered: list[tuple[str, str, bool]], target: str) -> dict[str, str]:
+    """Effective declarations for ``html``/``body`` in stylesheet load order.
+
+    Last-wins is valid only while every competing rule is a plain type
+    selector; the test asserts that precondition before trusting this result.
+    """
+    eff: dict[str, str] = {}
+    for selector, block, _inside in ordered:
+        if target in _root_selector_parts(selector):
+            eff.update(_declarations(block))
+    return eff
+
+
+def _overflow_y(decls: dict[str, str]) -> str | None:
+    """Resolve the effective ``overflow-y`` from longhand or shorthand."""
+    if "overflow-y" in decls:
+        return decls["overflow-y"].lower()
+    if "overflow" in decls:
+        parts = decls["overflow"].split()
+        return (parts[1] if len(parts) > 1 else parts[0]).lower()
+    return None
+
+
+def test_css_restores_document_scroll_over_shared_viewport_lock() -> None:
+    """Covers: fix-up 2 — the two loaded stylesheets must cascade to a
+    vertically scrollable document so all ten sections and the footer are
+    reachable, without editing the shared console shell."""
+    template = _read(TEMPLATE)
+    links = re.findall(r'<link[^>]*rel="stylesheet"[^>]*href="([^"]+)"', template)
+    console_href, first_href = "/static/css/console-v2.css", "/static/css/first_run.css"
+    assert console_href in links and first_href in links, "expected the two stylesheets"
+    assert links.index(console_href) < links.index(first_href), (
+        "first_run.css must load after console-v2.css for the override to win"
+    )
+
+    static = REPO_ROOT / "src" / "saberops" / "static"
+    console_rules = _parse_rules(_strip_comments(_read(static / "css" / "console-v2.css")))
+    first_rules = _parse_rules(_strip_comments(_read(CSS)))
+
+    # (1) The inherited restriction is real and applies at base width.
+    console_root = _effective_root(console_rules, "html")
+    assert _overflow_y(console_root) == "hidden", "shared console root clip changed"
+    assert console_root.get("height") == "100%", "shared console root height changed"
+
+    # (2) Every competing root rule is a plain `html`/`body` type selector, so
+    #     they share specificity and stylesheet order alone decides the winner.
+    for selector, block, _inside in console_rules + first_rules:
+        if not _root_selector_parts(selector):
+            continue
+        decls = _declarations(block)
+        if not {"overflow", "overflow-y", "height", "min-height"} & set(decls):
+            continue
+        parts = [p.strip() for p in selector.split(",")]
+        assert parts and all(p in ("html", "body") for p in parts), (
+            f"root scroll rule is not a plain type selector: {selector!r}"
+        )
+
+    # (3) first_run.css itself carries the override (no reliance on the shell).
+    assert any(
+        _root_selector_parts(sel) and _overflow_y(_declarations(block)) in ("auto", "scroll")
+        for sel, block, _inside in first_rules
+    ), "first_run.css defines no scrollable html/body override"
+
+    # (4) Resolve the real cascade: both roots must grow and scroll vertically.
+    ordered = console_rules + first_rules
+    for target in ("html", "body"):
+        eff = _effective_root(ordered, target)
+        assert eff.get("height") == "auto", (
+            f"{target} height still locked: {eff.get('height')!r}"
+        )
+        assert eff.get("min-height") == "100%", f"{target} min-height missing"
+        assert _overflow_y(eff) in ("auto", "scroll"), (
+            f"{target} overflow-y not scrollable: {_overflow_y(eff)!r}"
+        )
