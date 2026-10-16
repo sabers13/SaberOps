@@ -60,10 +60,6 @@ _R3E12_CREATED = "2026-09-25T00:00:00+00:00"
 _R3E12_PROVIDER = "opencode"
 _R3E12_WORKER_MODEL = "r3e12-worker-model"
 _R3E12_REVIEWER_MODEL = "r3e12-reviewer-model"
-#: Connection A is the *sibling* account: it serves a different model, so its
-#: pool membership never overlaps the selected reviewer's route (setup-only
-#: fixture correction; the concept is the connection-scoped pool identity).
-_R3E12_SIBLING_REVIEWER_MODEL = "r3e12-reviewer-sibling-model"
 _R3E12_CONN_A = "r3e12-conn-a"
 _R3E12_CONN_B = "r3e12-conn-b"
 
@@ -169,7 +165,7 @@ def _seed_two_connection_reviewers() -> tuple[str, str, str, str, str, str]:
     binding_a, profile_a, pool_a = materialize_discovered_binding(
         connection_id=_R3E12_CONN_A,
         provider=_R3E12_PROVIDER,
-        model=_R3E12_SIBLING_REVIEWER_MODEL,
+        model=_R3E12_REVIEWER_MODEL,
         binding_role=BindingRole.REVIEWER,
     )
     owner = upsert_owner_binding(
@@ -351,26 +347,9 @@ def test_bound_reviewer_admits_through_exact_connection_profile(
 
 
 def _seed_quota_policy_pools(pool_a: str, pool_b: str) -> tuple[str, str]:
-    """Declare canonical STRICT quota policies for both pools; return frozen snapshot.
-
-    Setup-only fixture correction (ADR-0002 D1/D7 / QuotaPool contract).  The
-    canonical evaluator resolves a candidate's pools from pool *membership*; a
-    declared pool with no matching member makes it fall back to a provider-wide
-    default pool, which the binding's ``quota_pool_id`` must never do.  Each
-    connection's pool is therefore given its own exact reviewer route as
-    membership: connection A's pool advertises A's sibling route and connection
-    B's pool advertises B's route.  The selected reviewer (bound to B) then
-    resolves to its own pool only, so the sibling account's pool can neither
-    block nor authorize it.  No pool id, assertion, or expected verdict changes.
-    """
-    set_quota_pool_policy(
-        pool_a,
-        members=(f"{_R3E12_PROVIDER}/{_R3E12_SIBLING_REVIEWER_MODEL}",),
-    )
-    set_quota_pool_policy(
-        pool_b,
-        members=(f"{_R3E12_PROVIDER}/{_R3E12_REVIEWER_MODEL}",),
-    )
+    """Declare canonical STRICT quota policies for both pools; return frozen snapshot."""
+    set_quota_pool_policy(pool_a)
+    set_quota_pool_policy(pool_b)
     frozen = freeze_control_plane_policy(load_control_plane_policy())
     return frozen.as_json(), frozen.digest
 
@@ -446,3 +425,136 @@ def test_selected_reviewer_blocked_pool_refuses_with_zero_launch(
     assert skips[0].payload["reason"] == "quota_blocked"
     assert skips[0].payload["binding_id"] == binding_b
     assert db.get_dispatch_evidence_for_run("run_pool_b_blocked") == []
+
+
+def _seed_shared_membership_quota_policies(
+    pool_a: str, pool_b: str
+) -> tuple[str, str]:
+    """Declare BOTH accounts' pools over the identical reviewer route.
+
+    Covers: ADR-0002 D1/D7 QuotaPool binding contract.  Even when two accounts'
+    pools list the exact same route, the resolved reviewer's ``quota_pool_id``
+    scopes eligibility to its own pool, so the sibling's exhausted pool can
+    neither block nor authorize it.  Both pool ids, assertions and expected
+    verdicts are unchanged from the sibling-blocked case.
+    """
+    shared = (f"{_R3E12_PROVIDER}/{_R3E12_REVIEWER_MODEL}",)
+    set_quota_pool_policy(pool_a, members=shared)
+    set_quota_pool_policy(pool_b, members=shared)
+    frozen = freeze_control_plane_policy(load_control_plane_policy())
+    return frozen.as_json(), frozen.digest
+
+
+def test_sibling_blocked_shared_membership_does_not_block_selected_reviewer(
+    isolated_xdg: None, tmp_path: Path
+) -> None:
+    """Same-route shared membership: pool A blocked + pool B healthy -> B still launches.
+
+    Connection A's pool and the selected reviewer B's pool both advertise the
+    same ``opencode/<reviewer-model>`` membership, which is exactly the case a
+    route-membership scan cannot separate on its own.  The binding's own pool
+    therefore has to be authoritative: reviewer B remains eligible, launches
+    on B, and records no quota skip.
+    """
+    _binding_a, binding_b, _pa, _pb, pool_a, pool_b = _seed_two_connection_reviewers()
+    snapshot_json, digest = _seed_shared_membership_quota_policies(pool_a, pool_b)
+    repo = _git_repo(tmp_path / "sibling-shared" / "repo")
+    db = Database(tmp_path / "sibling-shared" / "review.db")
+    _seed_reviewable_run(
+        db,
+        repo,
+        "run_pool_a_shared_blocked",
+        control_plane_snapshot_json=snapshot_json,
+        control_plane_snapshot_digest=digest,
+    )
+    db.set_quota(_R3E12_PROVIDER, pool_a, 0.0)
+    db.set_quota(_R3E12_PROVIDER, pool_b, 100.0)
+    _engine, call_log, result = _run_bound_reviewer(
+        db, "run_pool_a_shared_blocked", binding_b
+    )
+    assert result.verdict is ReviewVerdict.PASS
+    assert call_log == [f"review:{_R3E12_REVIEWER_MODEL}"]
+    assert (
+        db.get_events_by_type("run_pool_a_shared_blocked", "review_candidate_skipped")
+        == []
+    )
+
+
+def test_admit_binding_pool_scope_matches_quota_decision(
+    isolated_xdg: None, tmp_path: Path
+) -> None:
+    """Covers: ADR-0002 D1/D7 ``admit()`` binding scope mirrors ``quota_decision(pool_id)``.
+
+    Direct seam check with the real binding-derived candidate and real quota
+    states (no dispatch): a sibling same-route pool at 0%% is ignored, the
+    candidate's OWN pool at 0%% refuses, and a binding pool that has no
+    declared policy yields the same outcome as the canonical
+    ``quota_decision`` for that pool (no invented red line).
+    """
+    from datetime import UTC, datetime
+
+    from saberops.capacity.admission import admit
+    from saberops.control_plane.plans import effective_quota_pools
+    from saberops.control_plane.quota_policy import quota_decision
+
+    now = datetime.now(UTC)
+    _binding_a, binding_b, _pa, _pb, pool_a, pool_b = _seed_two_connection_reviewers()
+    snapshot_json, digest = _seed_shared_membership_quota_policies(pool_a, pool_b)
+    policy = load_control_plane_policy()
+    assert freeze_control_plane_policy(policy).digest == digest
+    candidate = WorkerCandidate(
+        provider=_R3E12_PROVIDER,
+        model=_R3E12_REVIEWER_MODEL,
+        binding_id=binding_b,
+    )
+    repo = _git_repo(tmp_path / "admit-scope" / "repo")
+    db = Database(tmp_path / "admit-scope" / "review.db")
+    _seed_reviewable_run(db, repo, "run_admit_scope")
+
+    # 1. Sibling pool exhausted, own pool healthy -> admitted on the own pool.
+    db.set_quota(_R3E12_PROVIDER, pool_a, 0.0)
+    db.set_quota(_R3E12_PROVIDER, pool_b, 100.0)
+    sibling_blocked = admit(
+        candidate,
+        now=now,
+        policy=policy,
+        quota_states=db.list_quota(),
+        binding_pool_id=pool_b,
+        requirements=None,
+    )
+    assert sibling_blocked.admitted is True
+    assert set(sibling_blocked.drawn_pools) == {pool_b}
+
+    # 2. The candidate's OWN pool exhausted -> refused (binding pool decides).
+    db.set_quota(_R3E12_PROVIDER, pool_b, 0.0)
+    own_blocked = admit(
+        candidate,
+        now=now,
+        policy=policy,
+        quota_states=db.list_quota(),
+        binding_pool_id=pool_b,
+        requirements=None,
+    )
+    assert own_blocked.admitted is False
+    assert own_blocked.pool_id == pool_b
+    assert own_blocked.reason is not None and own_blocked.reason.startswith("RED_LINE")
+
+    # 3. Binding pool with no declared policy: same outcome as quota_decision,
+    #    even with a stale provider-wide state at 0%.
+    db.set_quota(_R3E12_PROVIDER, _R3E12_PROVIDER, 0.0)
+    unknown_pool = "discovered-pool:no-such-connection"
+    states = db.list_quota()
+    pools = effective_quota_pools(policy)
+    canonical = quota_decision(
+        candidate, states, pool_policies=pools, pool_id=unknown_pool
+    )
+    unknown = admit(
+        candidate,
+        now=now,
+        policy=policy,
+        quota_states=states,
+        binding_pool_id=unknown_pool,
+        requirements=None,
+    )
+    assert unknown.admitted is canonical.eligible
+

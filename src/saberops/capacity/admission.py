@@ -634,10 +634,18 @@ def admit(
 
     # 8. Quota pools & windows
     pool_policies = effective_quota_pools(effective_policy, activate_overage=activate_overage)
-    drawn_pools = pools_for(candidate, pool_policies)
-    if binding_pool_id is not None and binding_pool_id in pool_policies:
-        if binding_pool_id not in drawn_pools:
-            drawn_pools.append(binding_pool_id)
+    # ADR-0002 D1/D7 QuotaPool binding contract: when a resolved binding's
+    # ``binding_pool_id`` is supplied it is authoritative for that candidate, so
+    # it is the ONLY drawn pool.  The route/provider scan (``pools_for``) and
+    # its provider-wide fallback must not run, or a sibling account's pool on
+    # the same route could block or authorize the bound candidate.  This
+    # mirrors ``quota_decision(pool_id=...)``; the unbound path (``None``)
+    # keeps the legacy route-membership behavior unchanged.
+    binding_scoped = binding_pool_id is not None
+    if binding_pool_id is not None:
+        drawn_pools: list[str] = [binding_pool_id]
+    else:
+        drawn_pools = pools_for(candidate, pool_policies)
 
     # Safely derive active reservation charges from db if not explicitly supplied (F2)
     if reservations is None and db is not None:
@@ -662,7 +670,13 @@ def admit(
         if not exc_id:
             continue
         exc_pool = getattr(state, "pool_id", None) or state.pool
-        if exc_pool not in drawn_pools and exc_pool != candidate.provider.lower():
+        if binding_scoped:
+            # Binding-scoped callers only see their own pool's exclusions: a
+            # sibling pool can neither block nor authorize the candidate.  No
+            # provider-wide fallback (quota_decision(pool_id=...) is identical).
+            if exc_pool != binding_pool_id:
+                continue
+        elif exc_pool not in drawn_pools and exc_pool != candidate.provider.lower():
             continue
         scope = getattr(state, "exclusion_model_scope", None)
         if not model_scope_matches(scope if isinstance(scope, str) else None, candidate.model):
@@ -685,6 +699,14 @@ def admit(
 
     for pool_id in drawn_pools:
         pool_pol = pool_policies.get(pool_id, QuotaPoolPolicy(pool_id=pool_id))
+        if binding_scoped and pool_id not in pool_policies:
+            # ``quota_decision(pool_id=...)`` treats a binding pool with no
+            # declared policy as non-authoritative: its observations are
+            # ignored rather than measured against an invented red line, so it
+            # can neither block nor authorize.  Reproduce that exactly.
+            pool_pol = QuotaPoolPolicy(
+                pool_id, QuotaPoolMode.UNENFORCED, pool_pol.red_line_pct
+            )
         if pool_pol.mode == QuotaPoolMode.OFF:
             return AdmissionDecision(
                 admitted=False,
@@ -728,7 +750,8 @@ def admit(
                     continue
                 s_pool = getattr(s, "pool_id", None) or s.pool
                 matches_provider_pool = (
-                    pool_id == candidate.provider.lower()
+                    not binding_scoped
+                    and pool_id == candidate.provider.lower()
                     and s.provider.lower() == pool_id
                 )
                 if s_pool == pool_id or matches_provider_pool:
