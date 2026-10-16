@@ -105,6 +105,10 @@ class TickResult:
     probed: int = 0
     waited: int = 0
     decisions: tuple[SchedulerDecision, ...] = ()
+    # ADR-0002 D8 crash recovery (R1 + R2) evidence for this tick.
+    preemption_settled: int = 0
+    preemption_pending: tuple[str, ...] = ()
+    preemption_blocked: tuple[str, ...] = ()
 
 
 def acquire_lease(
@@ -297,6 +301,31 @@ def check_lease(
         return True
 
 
+def _lease_still_valid(
+    conn: sqlite3.Connection, lease: SchedulerLease, moment: datetime
+) -> bool:
+    """Verify *lease* against the lease row inside an open owner transaction.
+
+    Used as the ``lease_guard`` for capacity settlement so a scheduler whose
+    lease expired (or was taken over) between discovery and the write commits
+    nothing.  Any missing/malformed row fails closed.
+    """
+    row = conn.execute(
+        "SELECT holder_id, expires_at, fencing_token"
+        " FROM capacity_scheduler_lease WHERE lease_name = ?",
+        (lease.lease_name,),
+    ).fetchone()
+    if row is None:
+        return False
+    if str(row["holder_id"]) != lease.holder_id:
+        return False
+    if int(row["fencing_token"]) != lease.fencing_token:
+        return False
+    raw = row["expires_at"]
+    expires = parse_iso(raw) if isinstance(raw, str) else None
+    return expires is not None and moment < expires
+
+
 def _lookup_run_status(db: Any, run_id: str) -> RunStatus | None:
     try:
         run = db.get_run(run_id)
@@ -425,6 +454,39 @@ def scheduler_tick(
             # is released exactly once here; release is idempotent, so this
             # is also safe when the coordinator already released it.
             release(db, ch.run_id, now=moment)
+
+    # 1b. ADR-0002 D8 crash recovery (R1 + R2).  This is the restart entry
+    # point for two gaps that the RUNNING-only job reconciliation above cannot
+    # see:
+    #   R1 -- a job already requeued (QUEUED / terminal / re-dispatched) still
+    #         owes its OLD run's RESERVED capacity; the debt is discovered from
+    #         durable owner storage, not from job state.
+    #   R2 -- a run interrupted between its durable D8 decision and
+    #         terminalization; the supervisor finishes it BEFORE generic
+    #         orphaning, only for a provably dead owner + quiescent worker.
+    # It never decides a route, calls a provider, or frees capacity on an
+    # unverified receipt, and it is fully idempotent across restarts.
+    from saberops.jobs.service import reconcile_preemptions
+    from saberops.supervisor import RunSupervisor
+
+    def _preempt_lease_guard(conn: sqlite3.Connection) -> bool:
+        return _lease_still_valid(conn, lease, _current_moment())
+
+    def _preempt_recover(run_id: str) -> Any:
+        return RunSupervisor(db=db).reconcile(run_id)
+
+    try:
+        preempt_recon = reconcile_preemptions(
+            db,
+            run_status=status_fn,
+            recover=_preempt_recover,
+            lease_guard=_preempt_lease_guard,
+            now=moment,
+        )
+    except (sqlite3.OperationalError, sqlite3.DatabaseError):
+        return TickResult(ran=False, reason="ledger_read_error")
+    except Exception:
+        preempt_recon = None
 
     # 2. Collect scheduling inputs
     queued_jobs = store.list_jobs_raw(db, state=JobState.QUEUED, limit=100_000)
@@ -687,6 +749,15 @@ def scheduler_tick(
         probed=probed_count,
         waited=waited_count,
         decisions=tuple(decisions),
+        preemption_settled=(
+            preempt_recon.settlement.released if preempt_recon is not None else 0
+        ),
+        preemption_pending=(
+            preempt_recon.pending if preempt_recon is not None else ()
+        ),
+        preemption_blocked=(
+            preempt_recon.blocked if preempt_recon is not None else ()
+        ),
     )
 
 

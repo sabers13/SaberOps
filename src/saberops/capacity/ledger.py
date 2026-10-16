@@ -564,6 +564,114 @@ def release(db: Database, run_id: str, now: datetime | None = None) -> int:
         return int(cur.rowcount or 0)
 
 
+@dataclass(frozen=True)
+class ReservedDebt:
+    """One run's outstanding (RESERVED) capacity obligation.
+
+    ``job_id`` is the opaque owning job recorded at dispatch, or ``None`` for
+    a legacy row.  This is a *read model* only: the ledger never interprets
+    job state (cross-lane contract C2).
+    """
+
+    run_id: str
+    job_id: str | None
+    pool_windows: tuple[tuple[str, str], ...]
+
+
+def list_reserved_debts(
+    db: Database,
+    *,
+    limit: int = 200,
+    after_run_id: str | None = None,
+) -> list[ReservedDebt]:
+    """Deterministically page runs that still hold RESERVED capacity.
+
+    Ordered by ``run_id`` with an exclusive ``after_run_id`` cursor so a
+    caller scanning a large owner DB cannot permanently hide old debt behind
+    a fixed ``LIMIT``.  A non-positive ``limit`` is refused (fail closed).
+    """
+    if int(limit) < 1:
+        raise ValueError(f"limit must be >= 1; got {limit!r}")
+    ensure_tables(db)
+    out: list[ReservedDebt] = []
+    with owner_connection(db) as conn:
+        rows = conn.execute(
+            "SELECT run_id, job_id, pool_id, window_id FROM capacity_reservations"
+            " WHERE state = 'RESERVED' AND run_id > ?"
+            " ORDER BY run_id ASC, pool_id ASC, window_id ASC LIMIT ?",
+            (after_run_id or "", int(limit)),
+        ).fetchall()
+    by_run: dict[str, list[tuple[str, str]]] = {}
+    jobs: dict[str, str | None] = {}
+    for row in rows:
+        rid = str(row["run_id"])
+        jobs.setdefault(rid, str(row["job_id"]) if row["job_id"] is not None else None)
+        by_run.setdefault(rid, []).append((str(row["pool_id"]), str(row["window_id"])))
+    for rid in by_run:
+        out.append(
+            ReservedDebt(
+                run_id=rid,
+                job_id=jobs.get(rid),
+                pool_windows=tuple(by_run[rid]),
+            )
+        )
+    return out
+
+
+def release_terminal_debt(
+    db: Database,
+    *,
+    run_id: str,
+    job_id: str | None = None,
+    now: datetime | None = None,
+    lease_guard: Any | None = None,
+) -> int:
+    """Release one conclusively terminal run's RESERVED rows (idempotent).
+
+    This is the owner-authorised settlement write for old-run D8 debt.  It is
+    deliberately narrower than :func:`release`:
+
+    * a ``job_id`` guard (when given) keeps an unrelated job's rows with the
+      same ``run_id`` untouched, so the write can never free another job's
+      obligation;
+    * an optional ``lease_guard(conn) -> bool`` is evaluated *inside* the same
+      ``BEGIN IMMEDIATE`` transaction as the UPDATE, so a stale scheduler
+      holding an expired lease cannot commit a release (the callback returns
+      False and nothing is written);
+    * it only ever moves ``RESERVED`` rows to ``RELEASED`` -- never
+      ``SETTLED``, never a delete -- so observation-based charging stays
+      truthful.
+
+    Returns the number of rows released, or ``-1`` when the lease guard denied
+    the write (the caller must treat that as "nothing was settled").
+    """
+    rid = run_id.strip() if isinstance(run_id, str) else ""
+    if not rid:
+        return 0
+    moment = _utcnow(now)
+    ensure_tables(db)
+    where = "run_id = ? AND state = 'RESERVED'"
+    params: list[Any] = [rid]
+    if job_id is not None:
+        where += " AND job_id = ?"
+        params.append(job_id)
+    with owner_connection(db) as conn:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError:
+            return 0
+        if lease_guard is not None and not bool(lease_guard(conn)):
+            conn.rollback()
+            return -1
+        cur = conn.execute(
+            f"UPDATE capacity_reservations SET state = 'RELEASED', settled_at = ?"
+            f" WHERE {where}",
+            (moment.isoformat(), *params),
+        )
+        conn.commit()
+        return int(cur.rowcount or 0)
+
+
 def _default_window_kinds() -> dict[tuple[str, str], str]:
     """Resolve window kinds from the effective plan set.
 
@@ -818,6 +926,7 @@ __all__ = [
     "PoolDraw",
     "REQUIRED_CAPACITY_TABLES",
     "Reservation",
+    "ReservedDebt",
     "capacity_tables_present",
     "record_owner_quota",
     "record_probe_window_observation",
@@ -827,6 +936,8 @@ __all__ = [
     "reserve",
     "settle",
     "release",
+    "list_reserved_debts",
+    "release_terminal_debt",
     "estimate",
     "snapshot",
     "post_observation_charges",

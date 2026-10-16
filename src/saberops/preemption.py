@@ -54,6 +54,7 @@ truthful failure behavior.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -61,6 +62,7 @@ from typing import Any
 
 from saberops.git import (
     MAX_CHECKPOINT_INDEX,
+    CandidatePublicationError,
     GitManager,
     validate_candidate_sha,
 )
@@ -78,11 +80,23 @@ from saberops.models import (
     WorkerCheckpoint,
     WorkerInterruptionReason,
 )
+from saberops.ownership import ExecutionOwner
 from saberops.process import run_process
 
 #: Default bound from ADR-0002 D8: how many times one job may be preempted
 #: before it goes terminally FAILED with ``PREEMPTION_LIMIT``.
 DEFAULT_MAX_PREEMPTIONS: int = 5
+
+#: R2 durable receipt: the factual "D8 owns this terminal outcome" decision,
+#: written BEFORE any preemption side effect (checkpoint/ref/capsule/intent).
+PREPARATION_EVENT = "preemption_preparing"
+#: Durable prepared-artifact record (the crash-replay intent).
+INTENT_EVENT = "preemption_committed"
+#: Terminal run event for a completed park.
+RUN_PREEMPTED_EVENT = "run_preempted"
+#: Bound payload schema version for the decision receipt and the intent.
+DECISION_VERSION: int = 1
+INTENT_VERSION: int = 2
 
 _QUOTA_EXHAUSTED = WorkerInterruptionReason.QUOTA_EXHAUSTED.value
 
@@ -131,6 +145,357 @@ class ResumePreparation:
     reason: str
     checkpoint_sha: str | None = None
     handoff_id: str | None = None
+
+
+@dataclass(frozen=True)
+class PreemptionDecision:
+    """Bounded, factual receipt that D8 owns a run's terminal outcome (R2).
+
+    Written *before* any preemption side effect so a crash at any later
+    boundary is recognisable from durable state alone.  It carries only facts
+    already durable at decision time -- source attempt identities/states, the
+    frozen base, the repository, and (when the caller can supply it) the exact
+    execution-owner generation that made the decision.  It is deliberately
+    *not* an authority token: recovery still re-checks the live owner/job.
+    """
+
+    run_id: str
+    job_id: str
+    preemptions_before: int
+    base_sha: str
+    repo: str
+    source_attempt_ids: tuple[str, ...] = ()
+    source_attempt_states: tuple[str, ...] = ()
+    owner_id: str | None = None
+    owner_generation: int | None = None
+    decision_ref: str | None = None
+    version: int = DECISION_VERSION
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "version": self.version,
+            "run_id": self.run_id,
+            "job_id": self.job_id,
+            "preemptions_before": self.preemptions_before,
+            "base_sha": self.base_sha,
+            "repo": self.repo,
+            "source_attempt_ids": list(self.source_attempt_ids),
+            "source_attempt_states": list(self.source_attempt_states),
+            "owner_id": self.owner_id,
+            "owner_generation": self.owner_generation,
+            "decision_ref": self.decision_ref,
+        }
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any] | None) -> PreemptionDecision | None:
+        if not isinstance(payload, Mapping):
+            return None
+        try:
+            run_id = str(payload["run_id"])
+            job_id = str(payload["job_id"])
+            preemptions_before = int(payload["preemptions_before"])
+            base_sha = str(payload["base_sha"])
+            repo = str(payload["repo"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not run_id or not job_id or preemptions_before < 0:
+            return None
+        raw_ids = payload.get("source_attempt_ids") or ()
+        raw_states = payload.get("source_attempt_states") or ()
+        ids = (
+            tuple(str(x) for x in raw_ids)
+            if isinstance(raw_ids, (list, tuple))
+            else ()
+        )
+        states = (
+            tuple(str(x) for x in raw_states)
+            if isinstance(raw_states, (list, tuple))
+            else ()
+        )
+        owner_raw = payload.get("owner_id")
+        gen_raw = payload.get("owner_generation")
+        ref_raw = payload.get("decision_ref")
+        return cls(
+            run_id=run_id,
+            job_id=job_id,
+            preemptions_before=preemptions_before,
+            base_sha=base_sha,
+            repo=repo,
+            source_attempt_ids=ids,
+            source_attempt_states=states,
+            owner_id=str(owner_raw) if isinstance(owner_raw, str) and owner_raw else None,
+            owner_generation=int(gen_raw) if isinstance(gen_raw, int) else None,
+            decision_ref=str(ref_raw) if isinstance(ref_raw, str) and ref_raw else None,
+            version=int(payload.get("version") or 1),
+        )
+
+
+@dataclass(frozen=True)
+class PreparedArtifacts:
+    """A *verified* prepared preemption: WIP anchor + factual capsule."""
+
+    checkpoint_sha: str
+    checkpoint_ref: str
+    handoff_id: str
+    not_before: str | None = None
+    preemptions_next: int | None = None
+
+
+@dataclass(frozen=True)
+class PreemptionTransaction:
+    """Classified durable state of one run's D8 transaction.
+
+    ``state`` is one of ``none`` (no D8 receipt), ``preparing`` (a factual
+    decision exists, side effects incomplete), ``prepared`` (verified
+    artifacts exist), or ``blocked`` (a receipt exists but does not verify --
+    fail closed, never fabricate a different transaction from it).
+    """
+
+    state: str
+    detail: str
+    artifacts: PreparedArtifacts | None = None
+    decision: PreemptionDecision | None = None
+    job: Job | None = None
+
+
+def build_preemption_decision(
+    db: Any,
+    *,
+    run_id: str,
+    job: Job,
+    owner_id: str | None = None,
+    owner_generation: int | None = None,
+    decision_ref: str | None = None,
+) -> PreemptionDecision:
+    """Assemble the factual D8 decision receipt from durable state."""
+    attempt_ids: tuple[str, ...] = ()
+    attempt_states: tuple[str, ...] = ()
+    try:
+        attempts = db.get_attempts_for_run(run_id)
+    except Exception:
+        attempts = []
+    attempt_ids = tuple(str(getattr(a, "id", "") or "") for a in attempts)
+    attempt_states = tuple(
+        str(getattr(getattr(a, "status", None), "value", "") or "") for a in attempts
+    )
+    return PreemptionDecision(
+        run_id=run_id,
+        job_id=job.job_id,
+        preemptions_before=int(job.preemptions),
+        base_sha=str(job.base_sha or ""),
+        repo=str(job.repo or ""),
+        source_attempt_ids=attempt_ids,
+        source_attempt_states=attempt_states,
+        owner_id=owner_id,
+        owner_generation=owner_generation,
+        decision_ref=decision_ref,
+    )
+
+
+def _decision_payload(db: Any, run_id: str, job_id: str) -> dict[str, Any] | None:
+    """Return the recorded ``preemption_preparing`` decision for the job."""
+    for payload in _event_payloads(db, run_id, PREPARATION_EVENT):
+        if payload.get("job_id") == job_id:
+            return payload
+    return None
+
+
+def record_preparation_decision(db: Any, decision: PreemptionDecision) -> bool:
+    """Persist the D8 decision receipt exactly once (idempotent).
+
+    Returns True only when this call wrote the receipt.  Called *before* any
+    checkpoint, capsule, ref or intent side effect so that a crash between the
+    decision and its artifacts is later recognisable; a repeat never
+    duplicates the receipt.
+    """
+    try:
+        existing = _decision_payload(db, decision.run_id, decision.job_id)
+    except Exception:
+        existing = None
+    if existing is not None:
+        return False
+    try:
+        db.record_event(
+            decision.run_id, PREPARATION_EVENT, payload=decision.to_payload()
+        )
+    except Exception:
+        return False
+    return True
+
+
+def _parse_checkpoint_ref(ref: str, job_id: str) -> int | None:
+    prefix = f"refs/saberops/checkpoints/{job_id}/"
+    if not isinstance(ref, str) or not ref.startswith(prefix):
+        return None
+    suffix = ref[len(prefix):]
+    if not suffix.isdigit():
+        return None
+    index = int(suffix)
+    if not 0 <= index <= MAX_CHECKPOINT_INDEX:
+        return None
+    return index
+
+
+def verify_prepared_artifacts(
+    db: Any,
+    *,
+    run_id: str,
+    job: Job,
+    repo_path: Path,
+    payload: Mapping[str, Any],
+) -> tuple[PreparedArtifacts | None, str]:
+    """Verify a recorded prepared-artifact intent against durable state.
+
+    Everything must independently hold, or the caller must fail closed:
+
+    * the intent names this job;
+    * ``checkpoint_sha`` is a well-formed, existing commit in the job repo;
+    * ``checkpoint_ref`` is a well-formed engine checkpoint ref for this job
+      and that ref is *currently* a direct anchor resolving to exactly that
+      SHA (R3 create-only/read-only discipline; a symbolic or colliding ref is
+      refused rather than dereferenced);
+    * ``handoff_id`` resolves to a real handoff row belonging to this run;
+    * ``preemptions_next`` (when present) equals the job's current count + 1.
+    """
+    raw_sha = payload.get("checkpoint_sha")
+    raw_ref = payload.get("checkpoint_ref")
+    raw_handoff = payload.get("handoff_id")
+    if not isinstance(raw_sha, str) or not raw_sha:
+        return None, "missing_sha"
+    if not isinstance(raw_ref, str) or not raw_ref:
+        return None, "missing_ref"
+    if not isinstance(raw_handoff, str) or not raw_handoff:
+        return None, "missing_handoff"
+    try:
+        validate_candidate_sha(raw_sha)
+        if not GitManager.commit_exists(repo_path, raw_sha):
+            return None, "unreachable_sha"
+    except Exception:
+        return None, "unreachable_sha"
+    index = _parse_checkpoint_ref(raw_ref, job.job_id)
+    if index is None:
+        return None, "malformed_ref"
+    try:
+        anchored = GitManager.read_checkpoint_ref(repo_path, job.job_id, index)
+    except CandidatePublicationError:
+        return None, "symbolic_ref"
+    except Exception:
+        return None, "ref_read_failed"
+    if anchored != raw_sha:
+        return None, "ref_mismatch"
+    try:
+        handoff = db.get_handoff(raw_handoff)
+    except Exception:
+        return None, "handoff_read_failed"
+    if handoff is None or str(getattr(handoff, "run_id", "") or "") != run_id:
+        return None, "handoff_mismatch"
+    raw_next = payload.get("preemptions_next")
+    preemptions_next: int | None = None
+    if raw_next is not None:
+        try:
+            preemptions_next = int(raw_next)
+        except (TypeError, ValueError):
+            return None, "malformed_count"
+        if preemptions_next != int(job.preemptions) + 1:
+            return None, "count_mismatch"
+    raw_nb = payload.get("not_before")
+    not_before = raw_nb if isinstance(raw_nb, str) and raw_nb else None
+    return (
+        PreparedArtifacts(
+            checkpoint_sha=raw_sha,
+            checkpoint_ref=raw_ref,
+            handoff_id=raw_handoff,
+            not_before=not_before,
+            preemptions_next=preemptions_next,
+        ),
+        "ok",
+    )
+
+
+def classify_preemption_transaction(
+    db: Any,
+    *,
+    run_id: str,
+    job: Job,
+    repo_path: str | Path,
+) -> PreemptionTransaction:
+    """Classify one run/job's durable D8 transaction state (read-only).
+
+    Never infers a D8 decision from quota history or WIP alone: a transaction
+    exists only when a durable receipt (intent or decision) does.  A receipt
+    whose artifacts/identity do not verify is ``blocked`` -- the caller must
+    not fall through to generic orphaning or settle its capacity.
+    """
+    repo = Path(repo_path).resolve() if not isinstance(repo_path, Path) else repo_path
+    intent = _intent_payload(db, run_id, job.job_id)
+    if intent is not None:
+        artifacts, detail = verify_prepared_artifacts(
+            db, run_id=run_id, job=job, repo_path=repo, payload=intent
+        )
+        if artifacts is not None:
+            return PreemptionTransaction(
+                state="prepared", detail="intent_verified",
+                artifacts=artifacts, job=job,
+            )
+        return PreemptionTransaction(
+            state="blocked", detail=f"intent_unverified:{detail}", job=job,
+        )
+    raw = _decision_payload(db, run_id, job.job_id)
+    if raw is not None:
+        decision = PreemptionDecision.from_payload(raw)
+        if decision is None:
+            return PreemptionTransaction(
+                state="blocked", detail="decision_malformed", job=job,
+            )
+        if decision.run_id != run_id or decision.job_id != job.job_id:
+            return PreemptionTransaction(
+                state="blocked", detail="decision_mismatched", job=job,
+            )
+        if decision.preemptions_before != int(job.preemptions):
+            return PreemptionTransaction(
+                state="blocked", detail="decision_stale", job=job,
+            )
+        return PreemptionTransaction(
+            state="preparing", detail="decision_recorded",
+            decision=decision, job=job,
+        )
+    return PreemptionTransaction(state="none", detail="no_transaction", job=job)
+
+
+def finish_interrupted_preemption(
+    db: Any,
+    *,
+    run_id: str,
+    job: Job,
+    repo_path: str | Path,
+    owner_id: str | None = None,
+    owner_generation: int | None = None,
+    now: datetime | None = None,
+    max_preemptions: int = DEFAULT_MAX_PREEMPTIONS,
+) -> PreemptionOutcome:
+    """Continue an already-durable D8 transaction through production recovery.
+
+    This is the narrow entry point used by the scheduler/supervisor restart
+    path.  It performs **no** new routing decision, no provider/model call and
+    no admission: it only re-verifies durable evidence (genuine quota, F1
+    no-eligible, exact RUNNING job/run, verification of the recorded artifacts)
+    and then finishes the fenced terminalization, exact-generation requeue and
+    settlement.  A caller that has not itself proven the predecessor dead and
+    the worker quiescent must not call this.
+    """
+    return complete_preemption(
+        db,
+        run_id=run_id,
+        repo_path=repo_path,
+        job_id=job.job_id,
+        base_sha=job.base_sha,
+        owner_id=owner_id,
+        owner_generation=owner_generation,
+        recovering=True,
+        max_preemptions=max_preemptions,
+        now=now,
+    )
+
 
 
 def find_job_for_run(db: Any, run_id: str) -> Job | None:
@@ -731,28 +1096,54 @@ def _anchor_verified_ref(
 
 
 def _terminalize_preempted(
-    db: Any, *, run_id: str, summary: str, now_iso: str
-) -> tuple[bool, bool]:
+    db: Any,
+    *,
+    run_id: str,
+    summary: str,
+    now_iso: str,
+    owner_id: str | None = None,
+    owner_generation: int | None = None,
+) -> tuple[bool, bool, str]:
     """Move RUNNING -> PREEMPTED exactly once.
 
-    Returns ``(ok, transitioned)``: ``ok`` is True when the run is (now)
-    PREEMPTED; ``transitioned`` is True only when this call performed the
+    Returns ``(ok, transitioned, detail)``: ``ok`` is True when the run is
+    (now) PREEMPTED; ``transitioned`` is True only when this call performed the
     transition, so replay callers can skip re-emitting terminal events.
-    Any other terminal state, a missing run, or a non-RUNNING live state
-    yields ``(False, False)`` and touches nothing.
+
+    When an exact execution-owner token is supplied the transition uses
+    :meth:`Database.terminalize_preemption_fenced`, which additionally refuses
+    when any attempt is still RUNNING/PENDING (a live worker is not a
+    recoverable D8 crash) or when the generation changed.  Without a token the
+    existing guarded read-check + update path is kept, so standalone/in-process
+    runs behave exactly as before.
     """
     try:
         run = db.get_run(run_id)
     except Exception:
-        return (False, False)
+        return (False, False, "run_lookup_failed")
     if run is None:
-        return (False, False)
+        return (False, False, "no_run")
     if run.status == RunStatus.PREEMPTED:
-        return (True, False)
+        return (True, False, "already_preempted")
     if run.status in TERMINAL_RUN_STATUSES:
-        return (False, False)
+        return (False, False, "run_terminal_other")
     if run.status != RunStatus.RUNNING:
-        return (False, False)
+        return (False, False, "run_not_running")
+    if owner_id is not None and owner_generation is not None:
+        try:
+            receipt = db.terminalize_preemption_fenced(
+                run_id,
+                owner_id=owner_id,
+                generation=owner_generation,
+                result_summary=summary,
+                expected_owner_states=(ExecutionOwner.CLAIMED,),
+                completed_at=now_iso,
+            )
+        except Exception:
+            return (False, False, "fenced_terminalize_failed")
+        if receipt is None:
+            return (False, False, "fenced_terminalize_refused")
+        return (True, True, "transitioned")
     try:
         db.update_run(
             run_id=run_id,
@@ -761,8 +1152,8 @@ def _terminalize_preempted(
             result_summary=summary,
         )
     except Exception:
-        return (False, False)
-    return (True, True)
+        return (False, False, "update_failed")
+    return (True, True, "transitioned")
 
 
 def _fail_at_limit(
@@ -775,7 +1166,7 @@ def _fail_at_limit(
     now_iso: str,
 ) -> PreemptionOutcome:
     """Record terminal FAILED ``PREEMPTION_LIMIT`` on the run and the job."""
-    from saberops.capacity.ledger import release
+    from saberops.capacity.ledger import release_terminal_debt
     from saberops.jobs import store
 
     summary = (
@@ -816,7 +1207,7 @@ def _fail_at_limit(
     except Exception:
         failed_job = None
     try:
-        release(db, run_id, now=now)
+        release_terminal_debt(db, run_id=run_id, job_id=job.job_id, now=now)
     except Exception:
         pass
     return PreemptionOutcome(
@@ -834,21 +1225,32 @@ def complete_preemption(
     job_id: str | None = None,
     worktree_path: str | None = None,
     base_sha: str | None = None,
+    owner_id: str | None = None,
+    owner_generation: int | None = None,
+    decision_ref: str | None = None,
+    recovering: bool = False,
     max_preemptions: int = DEFAULT_MAX_PREEMPTIONS,
     now: datetime | None = None,
 ) -> PreemptionOutcome:
     """Execute (or idempotently complete) the D8 preemption protocol.
 
-    Ordered for crash safety: checkpoint commit -> resume capsule -> anchor
-    ref -> durable intent event -> run terminalization -> job requeue ->
-    reservation release.  A crash before terminalization leaves the caller's
-    existing FAILED path intact (reconciler replays from durable state); a
-    crash after terminalization is completed idempotently from the intent
-    event.  Never raises for expected failure modes: declines with
-    ``owned=False`` instead, so the caller keeps its truthful behavior.
+    Ordered for crash safety: durable decision receipt ->
+    checkpoint/anchor -> resume capsule -> anchor ref -> verified intent ->
+    fenced run terminalization -> exact-generation job requeue -> owner-aware
+    settlement of the old run's capacity.  A crash before terminalization
+    leaves an exact, recognisable D8 transaction (verified artifacts, or the
+    decision receipt) that the scheduler/supervisor restart path finishes;
+    a crash after terminalization is completed idempotently.  Never raises for
+    expected failure modes: declines with ``owned=False`` instead, so the
+    caller keeps its truthful behaviour.
+
+    ``owner_id``/``owner_generation`` are supplied by a recovery caller that
+    has itself proven the predecessor generation dead and the worker
+    quiescent; when present the run transition is fenced to that exact
+    generation and refuses to force-close a live attempt.
     """
-    from saberops.capacity.ledger import release
-    from saberops.jobs import service, store
+    from saberops.capacity.ledger import release_terminal_debt
+    from saberops.jobs import store
 
     moment = now if now is not None else datetime.now(UTC)
     now_iso = moment.isoformat()
@@ -926,25 +1328,53 @@ def complete_preemption(
         )
 
     not_before = quota_reset_eta(db, run_id)
+    preemptions_before = int(job.preemptions)
 
-    # Crash-replay fast path: a recorded intent already carries every
-    # verified artifact; skip straight to terminalization + requeue.
-    intent = _intent_payload(db, run_id, job.job_id)
+    # Crash-replay: a recorded intent carries every artifact, but it is only
+    # reused after independent verification.  An unverifiable "prepared"
+    # record is fail-closed: never fabricate a different transaction from it,
+    # and never terminalize on unverified evidence.
     checkpoint_sha: str | None = None
     checkpoint_ref: str | None = None
     handoff_id: str | None = None
+    intent = _intent_payload(db, run_id, job.job_id)
     if intent is not None:
-        raw_sha = intent.get("checkpoint_sha")
-        raw_ref = intent.get("checkpoint_ref")
-        raw_handoff = intent.get("handoff_id")
-        if (
-            isinstance(raw_sha, str) and raw_sha
-            and isinstance(raw_ref, str) and raw_ref
-            and isinstance(raw_handoff, str) and raw_handoff
-        ):
-            checkpoint_sha, checkpoint_ref, handoff_id = raw_sha, raw_ref, raw_handoff
+        verified, detail = verify_prepared_artifacts(
+            db, run_id=run_id, job=job, repo_path=repo, payload=intent
+        )
+        if verified is None:
+            return PreemptionOutcome(
+                owned=False, detail=f"intent_unverified:{detail}", job=job
+            )
+        checkpoint_sha = verified.checkpoint_sha
+        checkpoint_ref = verified.checkpoint_ref
+        handoff_id = verified.handoff_id
 
     if checkpoint_sha is None:
+        existing_decision = _decision_payload(db, run_id, job.job_id)
+        if recovering and existing_decision is None:
+            # A recovery caller may only *continue* an already-durable D8
+            # transaction.  It must never start one from quota history or WIP
+            # alone, so a missing decision receipt fails closed here.
+            return PreemptionOutcome(
+                owned=False, detail="recovery_without_decision", job=job
+            )
+        # R2: record the factual D8 decision BEFORE any side effect so a crash
+        # at (or between) the checkpoint/capsule/ref/intent boundaries leaves
+        # an exact, recognisable transaction for restart recovery.
+        decision = build_preemption_decision(
+            db, run_id=run_id, job=job,
+            owner_id=owner_id, owner_generation=owner_generation,
+            decision_ref=decision_ref,
+        )
+        if not record_preparation_decision(db, decision):
+            # The receipt could not be made durable: do not perform any
+            # preemption side effect that recovery would then depend on.
+            if _decision_payload(db, run_id, job.job_id) is None:
+                return PreemptionOutcome(
+                    owned=False, detail="decision_not_durable", job=job
+                )
+
         checkpoint_sha = _resolve_anchor_sha(
             db, repo_path=repo, run_id=run_id, job=job,
             worktree_path=worktree_path, base_sha=base_sha,
@@ -974,14 +1404,18 @@ def complete_preemption(
         try:
             db.record_event(
                 run_id,
-                "preemption_committed",
+                INTENT_EVENT,
                 payload={
+                    "version": INTENT_VERSION,
                     "job_id": job.job_id,
                     "checkpoint_sha": checkpoint_sha,
                     "checkpoint_ref": checkpoint_ref,
                     "handoff_id": handoff_id,
                     "not_before": not_before,
-                    "preemptions_next": job.preemptions + 1,
+                    "preemptions_before": preemptions_before,
+                    "preemptions_next": preemptions_before + 1,
+                    "owner_id": owner_id,
+                    "owner_generation": owner_generation,
                 },
             )
         except Exception:
@@ -995,16 +1429,17 @@ def complete_preemption(
         f"fallback route. WIP anchored at {checkpoint_ref} "
         f"({checkpoint_sha[:12]}); job {job.job_id} requeued with resume capsule."
     )
-    terminal_ok, terminal_transitioned = _terminalize_preempted(
-        db, run_id=run_id, summary=summary, now_iso=now_iso
+    terminal_ok, terminal_transitioned, terminal_detail = _terminalize_preempted(
+        db, run_id=run_id, summary=summary, now_iso=now_iso,
+        owner_id=owner_id, owner_generation=owner_generation,
     )
     if not terminal_ok:
-        return PreemptionOutcome(owned=False, detail="run_not_running", job=job)
+        return PreemptionOutcome(owned=False, detail=terminal_detail, job=job)
     if terminal_transitioned:
         try:
             db.record_event(
                 run_id,
-                "run_preempted",
+                RUN_PREEMPTED_EVENT,
                 payload={
                     "summary": summary,
                     "job_id": job.job_id,
@@ -1026,22 +1461,25 @@ def complete_preemption(
             owned=True, detail="resume_malformed", status=RunStatus.PREEMPTED,
             summary=summary, job=job, checkpoint_sha=checkpoint_sha,
             checkpoint_ref=checkpoint_ref, handoff_id=handoff_id,
-            preemptions=job.preemptions, not_before=not_before,
+            preemptions=preemptions_before, not_before=not_before,
         )
     requeued: Job | None = None
     try:
-        requeued = service.requeue(
+        requeued = store.requeue_exact(
             db, job.job_id, WaitingReason.PREEMPTED,
+            expected_run_id=run_id, expected_preemptions=preemptions_before,
             resume_from=resume_from, not_before=not_before, now=moment,
         )
     except Exception:
         requeued = None
     if requeued is None:
-        # Lost the requeue race (cancel/concurrent dispatch): the run is
-        # conclusively terminal, so still release its reservation, but never
-        # touch a job we no longer own.
+        # Lost the requeue race (cancel/concurrent dispatch/new generation):
+        # the run is conclusively terminal, so still settle its reservation
+        # through the same owner-aware path, but never touch a job we no
+        # longer own.  If settlement fails here, the run is terminal and has
+        # a D8 receipt, so the durable settlement scan completes it later.
         try:
-            release(db, run_id, now=moment)
+            release_terminal_debt(db, run_id=run_id, job_id=job.job_id, now=moment)
         except Exception:
             pass
         try:
@@ -1052,14 +1490,16 @@ def complete_preemption(
             owned=True, detail="job_raced", status=RunStatus.PREEMPTED,
             summary=summary, job=current if current is not None else job,
             checkpoint_sha=checkpoint_sha, checkpoint_ref=checkpoint_ref,
-            handoff_id=handoff_id, preemptions=job.preemptions,
+            handoff_id=handoff_id, preemptions=preemptions_before,
             not_before=not_before,
         )
+    # The run is terminal and the job is requeued; settle the old run's
+    # reserved capacity exactly once.  A failure here is not fatal: the old
+    # run's D8 receipt makes it discoverable by the durable settlement scan,
+    # which is why R1 no longer depends on this call succeeding.
     try:
-        release(db, run_id, now=moment)
+        release_terminal_debt(db, run_id=run_id, job_id=job.job_id, now=moment)
     except Exception:
-        # The scheduler-tick settlement (QUEUED -> release) completes this;
-        # release is idempotent, so a later retry is safe.
         pass
     return PreemptionOutcome(
         owned=True, detail="preempted", status=RunStatus.PREEMPTED,
@@ -1255,16 +1695,29 @@ def prepare_resume(
 
 __all__ = [
     "DEFAULT_MAX_PREEMPTIONS",
+    "DECISION_VERSION",
+    "INTENT_EVENT",
+    "INTENT_VERSION",
+    "PREPARATION_EVENT",
+    "RUN_PREEMPTED_EVENT",
+    "PreemptionDecision",
     "PreemptionOutcome",
     "PreemptionReadiness",
+    "PreemptionTransaction",
+    "PreparedArtifacts",
     "ResumePreparation",
+    "build_preemption_decision",
+    "classify_preemption_transaction",
     "complete_preemption",
     "find_job_for_run",
     "find_preempted_job_for_run",
+    "finish_interrupted_preemption",
     "has_genuine_quota_signal",
     "has_no_eligible_evidence",
     "latest_checkpoint_sha",
     "prepare_resume",
     "quota_reset_eta",
+    "record_preparation_decision",
     "should_preempt",
+    "verify_prepared_artifacts",
 ]

@@ -151,6 +151,44 @@ def _dispatched(db: Database, repo: str, base: str, job_id: str, run_id: str) ->
     db.create_run(_run(run_id, repo, base))
 
 
+def _seed_prepared_intent(
+    db: Database,
+    run_id: str,
+    job_id: str,
+    *,
+    checkpoint_sha: str,
+    index: int = 0,
+    preemptions_before: int = 0,
+) -> str:
+    """Seed a *genuine* prepared-artifact intent (setup-only crash fixture).
+
+    Recovery re-verifies the recorded artifacts before it will finish a
+    crashed transaction, so these fixtures must reference objects that really
+    exist: a real resume capsule produced by the production handoff builder
+    and (by the caller) a real direct checkpoint anchor ref.  Only the setup
+    is realistic here -- the behaviour under test is unchanged.
+    """
+    from saberops.handoff import create_handoffs
+
+    _, capsule = create_handoffs(db, run_id)
+    db.record_event(
+        run_id,
+        "preemption_committed",
+        payload={
+            "version": 2,
+            "job_id": job_id,
+            "checkpoint_sha": checkpoint_sha,
+            "checkpoint_ref": f"refs/saberops/checkpoints/{job_id}/{index}",
+            "handoff_id": capsule.id,
+            "not_before": None,
+            "preemptions_before": preemptions_before,
+            "preemptions_next": preemptions_before + 1,
+        },
+    )
+    return str(capsule.id)
+
+
+
 def _stage_run(db: Database, repo: str, base: str, run_id: str) -> None:
     """Create the fresh run row, mirroring launcher order (row before resume)."""
     db.create_run(_run(run_id, repo, base, status=RunStatus.PENDING))
@@ -1247,17 +1285,10 @@ def test_crash_between_terminalize_and_requeue_recovers_once(tmp_path: Path) -> 
     db = _db(tmp_path)
     _dispatched(db, str(repo), base, "job1", "run_old")
     _quota_evidence(db, "run_old")
-    # Simulate the crash: intent + PREEMPTED run durable, job still RUNNING.
-    db.record_event(
-        "run_old", "preemption_committed",
-        payload={
-            "job_id": "job1", "checkpoint_sha": base,
-            "checkpoint_ref": "refs/saberops/checkpoints/job1/0",
-            "handoff_id": "handoff_crash1",
-            "not_before": None, "preemptions_next": 1,
-        },
-    )
+    # Simulate the crash: a *verified* intent + PREEMPTED run durable, job
+    # still RUNNING.  Guarded WIP anchor + real capsule (setup-only realism).
     GitManager.anchor_checkpoint_ref(repo, "job1", 0, base)
+    _seed_prepared_intent(db, "run_old", "job1", checkpoint_sha=base)
     db.update_run(
         run_id="run_old", status=RunStatus.PREEMPTED,
         completed_at=_NOW.isoformat(), result_summary="crashed mid-protocol",
@@ -1452,16 +1483,8 @@ def test_reconcile_completes_interrupted_preemption(tmp_path: Path) -> None:
     db = _db(tmp_path)
     _dispatched(db, str(repo), base, "job1", "run_old")
     _quota_evidence(db, "run_old")
-    db.record_event(
-        "run_old", "preemption_committed",
-        payload={
-            "job_id": "job1", "checkpoint_sha": base,
-            "checkpoint_ref": "refs/saberops/checkpoints/job1/0",
-            "handoff_id": "handoff_crash2",
-            "not_before": None, "preemptions_next": 1,
-        },
-    )
     GitManager.anchor_checkpoint_ref(repo, "job1", 0, base)
+    _seed_prepared_intent(db, "run_old", "job1", checkpoint_sha=base)
     db.update_run(
         run_id="run_old", status=RunStatus.PREEMPTED,
         completed_at=_NOW.isoformat(), result_summary="crashed",

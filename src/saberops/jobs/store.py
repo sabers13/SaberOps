@@ -527,6 +527,110 @@ def requeue(
         return _row_to_job(updated_row)
 
 
+def requeue_exact(
+    db: Any,
+    job_id: str,
+    reason: WaitingReason | str,
+    *,
+    expected_run_id: str,
+    expected_preemptions: int,
+    resume_from: ResumeFrom | None = None,
+    not_before: str | None = None,
+    now: datetime | None = None,
+) -> Job:
+    """RUNNING -> QUEUED fenced to the *exact* generation being parked.
+
+    :func:`requeue` CAS-guards only ``state = 'RUNNING'``.  That is sufficient
+    for ordinary dispatch parking, but a crash-recovery replay that resumes
+    after an arbitrary delay can observe a job that has already been requeued
+    *and re-dispatched* onto a newer run (an A-B-A on the row).  Requeuing then
+    would count a second preemption against the wrong generation and clear the
+    newer run's ``current_run_id``.
+
+    This variant additionally requires ``current_run_id == expected_run_id``
+    **and** ``preemptions == expected_preemptions`` inside the same
+    ``BEGIN IMMEDIATE`` transaction, so a stale recovery tail can only ever
+    complete the exact generation it inspected.  A mismatch raises
+    :class:`JobConflictError` and writes nothing.
+    """
+    want = reason if isinstance(reason, WaitingReason) else WaitingReason(str(reason))
+    if not expected_run_id:
+        raise ValueError("expected_run_id must be a non-empty string")
+    ensure_tables(db)
+    at = _utcnow_iso(now)
+    with _owner_conn(db) as conn:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError:
+            pass
+        row = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+        if row is None:
+            raise JobNotFoundError(f"unknown job: {job_id}")
+        state = str(row["state"])
+        if state != JobState.RUNNING.value:
+            raise JobTransitionError(
+                f"job {job_id}: state {state} does not allow this transition"
+            )
+        current_run = row["current_run_id"]
+        current_preemptions = int(row["preemptions"] or 0)
+        if current_run != expected_run_id or current_preemptions != int(expected_preemptions):
+            raise JobConflictError(
+                f"job {job_id} moved to generation run={current_run!r} "
+                f"preemptions={current_preemptions} (expected run={expected_run_id!r} "
+                f"preemptions={expected_preemptions})"
+            )
+        preemptions = current_preemptions + (1 if want == WaitingReason.PREEMPTED else 0)
+        nb = (
+            not_before
+            if not_before is not None
+            else (str(row["not_before"]) if row["not_before"] is not None else None)
+        )
+        resume_json = (
+            json.dumps(resume_from.to_dict(), sort_keys=True) if resume_from is not None else None
+        )
+        cur = conn.execute(
+            "UPDATE jobs SET state = ?, waiting_reason = ?, current_run_id = NULL,"
+            " resume_from_json = ?, not_before = ?, preemptions = ?, updated_at = ?"
+            " WHERE job_id = ? AND state = ? AND current_run_id = ? AND preemptions = ?",
+            (
+                JobState.QUEUED.value,
+                want.value,
+                resume_json,
+                nb,
+                preemptions,
+                at,
+                job_id,
+                JobState.RUNNING.value,
+                expected_run_id,
+                int(expected_preemptions),
+            ),
+        )
+        if (cur.rowcount or 0) == 0:
+            raise JobConflictError(
+                f"job {job_id} moved concurrently (expected RUNNING/{expected_run_id})"
+            )
+        try:
+            _append_event(
+                conn,
+                job_id=job_id,
+                at=at,
+                kind="requeued",
+                from_state=JobState.RUNNING.value,
+                to_state=JobState.QUEUED.value,
+                payload={
+                    "waiting_reason": want.value,
+                    "preemptions": preemptions,
+                    "preempted_run_id": expected_run_id,
+                },
+            )
+        except sqlite3.IntegrityError as exc:
+            raise JobConflictError(f"event sequence conflict for {job_id}: {exc}") from exc
+        conn.commit()
+        updated_row = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+        assert updated_row is not None
+        return _row_to_job(updated_row)
+
+
 def cancel_transition(db: Any, job_id: str, *, now: datetime | None = None) -> Job:
     """QUEUED/RUNNING -> CANCELLED. Terminal or unknown handled by caller."""
     current = get_job(db, job_id)
@@ -591,5 +695,6 @@ __all__ = [
     "mark_dispatched",
     "reconcile_transition",
     "requeue",
+    "requeue_exact",
     "set_waiting",
 ]

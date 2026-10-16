@@ -1570,13 +1570,33 @@ def test_scheduler_tick_reconciles_preempted_run_and_releases_reservation(
     resume capsule, and the old run's reservation is released exactly once
     by tick settlement. No provider, model, or network is involved.
     """
+    import subprocess
+
+    from saberops.git import GitManager
+
     t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
     lease = acquire_lease(owner_db, "instance_A", ttl_seconds=30.0, now=t0)
     assert lease is not None
 
+    # Setup-only realism: recovery re-verifies the WIP anchor (a real direct
+    # checkpoint ref in a real repository) and the resume capsule (a real
+    # handoff row).  Only the fixture became realistic; assertions unchanged.
     repo_dir = tmp_path / "repo"
     repo_dir.mkdir()
-    (repo_dir / ".git").mkdir()
+    subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "loop@example.com"], cwd=repo_dir, check=True
+    )
+    subprocess.run(["git", "config", "user.name", "Loop"], cwd=repo_dir, check=True)
+    (repo_dir / "base.txt").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "base"], cwd=repo_dir, check=True, capture_output=True
+    )
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo_dir, check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
 
     job = _make_job(
         "job_prem",
@@ -1594,7 +1614,7 @@ def test_scheduler_tick_reconciles_preempted_run_and_releases_reservation(
             id="run_old",
             task="task for job_prem",
             target_repo=str(repo_dir),
-            base_commit="abc1234",
+            base_commit=base_sha,
             tier=Tier.T2,
             training_allowed=True,
             gate_command="make gate",
@@ -1603,15 +1623,21 @@ def test_scheduler_tick_reconciles_preempted_run_and_releases_reservation(
             config_json="{}",
         )
     )
+    GitManager.anchor_checkpoint_ref(repo_dir, "job_prem", 0, base_sha)
+    from saberops.handoff import create_handoffs
+
+    _, capsule = create_handoffs(owner_db, "run_old")
     owner_db.record_event(
         "run_old",
         "preemption_committed",
         payload={
+            "version": 2,
             "job_id": "job_prem",
-            "checkpoint_sha": "abc1234",
+            "checkpoint_sha": base_sha,
             "checkpoint_ref": "refs/saberops/checkpoints/job_prem/0",
-            "handoff_id": "handoff_tick_crash",
+            "handoff_id": capsule.id,
             "not_before": None,
+            "preemptions_before": 0,
             "preemptions_next": 1,
         },
     )
@@ -1653,7 +1679,7 @@ def test_scheduler_tick_reconciles_preempted_run_and_releases_reservation(
     assert current.resume_from.run_id == "run_old"
     # The empty worker chain parks the job under the pre-existing M2-4b wait
     # semantics; resume capsule, bound count, and timing survive relabeling.
-    assert current.resume_from.checkpoint_sha == "abc1234"
+    assert current.resume_from.checkpoint_sha == base_sha
 
     with owner_connection(owner_db) as conn:
         row = conn.execute(

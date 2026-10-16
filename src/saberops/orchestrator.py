@@ -3309,6 +3309,7 @@ class Orchestrator:
                                 run_id=run_id,
                                 repo_path=str(repo),
                                 base_sha=base_commit,
+                                decision_ref=f"autonomous_stop:{stop_reason}",
                             )
                             if preempted.owned:
                                 assert preempted.status is not None
@@ -8544,6 +8545,7 @@ class Orchestrator:
                 run_id=run_id,
                 repo_path=str(repo),
                 base_sha=base_commit,
+                decision_ref="end_of_chain",
             )
             if _preemption.owned:
                 assert _preemption.status is not None

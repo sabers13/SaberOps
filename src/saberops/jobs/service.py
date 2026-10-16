@@ -22,6 +22,7 @@ from saberops.jobs.feasibility import feasible
 from saberops.jobs.ids import new_job_id
 from saberops.jobs.models import (
     NO_ROUTE_FOR_REQUIREMENTS,
+    PREEMPTION_LIMIT,
     RUN_FAILED,
     RUN_MISSING,
     Effort,
@@ -50,6 +51,8 @@ __all__ = [
     "JobDispatchSpec",
     "JobNotFoundError",
     "PoolCapacity",
+    "PreemptionReconciliation",
+    "PreemptionSettlement",
     "ReconcileChange",
     "SubmitResult",
     "cancel_job",
@@ -59,7 +62,10 @@ __all__ = [
     "list_jobs",
     "mark_dispatched",
     "reconcile_jobs",
+    "reconcile_preemptions",
     "requeue",
+    "requeue_preemption",
+    "settle_preemption_debts",
     "set_waiting",
     "submit_job",
 ]
@@ -479,6 +485,267 @@ def requeue(
     )
     return store.requeue(
         db, job_id, reason, resume_from=resume_from, not_before=clean_not_before, now=now
+    )
+
+
+def requeue_preemption(
+    db: Any,
+    job_id: str,
+    *,
+    expected_run_id: str,
+    expected_preemptions: int,
+    resume_from: ResumeFrom | None = None,
+    not_before: str | None = None,
+    now: datetime | None = None,
+) -> Job:
+    """RUNNING -> QUEUED fenced to the exact preempted generation (D8).
+
+    Unlike :func:`requeue` this refuses an A-B-A on the job row: the CAS
+    requires ``current_run_id == expected_run_id`` and
+    ``preemptions == expected_preemptions``, so a crash-recovery tail that
+    resumes after the job was requeued *and re-dispatched* cannot count a
+    second preemption or clear the newer run's ownership.
+    """
+    clean_not_before = (
+        _parse_aware_instant(not_before, field="not_before")
+        if not_before is not None
+        else None
+    )
+    return store.requeue_exact(
+        db,
+        job_id,
+        WaitingReason.PREEMPTED,
+        expected_run_id=expected_run_id,
+        expected_preemptions=expected_preemptions,
+        resume_from=resume_from,
+        not_before=clean_not_before,
+        now=now,
+    )
+
+
+@dataclass(frozen=True)
+class PreemptionSettlement:
+    """Outcome of one durable old-run capacity settlement scan (R1)."""
+
+    scanned: int = 0
+    released: int = 0
+    skipped: int = 0
+
+
+@dataclass(frozen=True)
+class PreemptionReconciliation:
+    """Outcome of one D8 crash-recovery reconciliation pass (R1 + R2)."""
+
+    settlement: PreemptionSettlement = PreemptionSettlement()
+    pending: tuple[str, ...] = ()
+    blocked: tuple[str, ...] = ()
+
+
+def _resolve_run_and_db(db: Any, run_id: str) -> tuple[Any, Any] | None:
+    """Return ``(run, db_owning_the_run)`` or ``None`` when unresolvable.
+
+    Runtime state is project-local while jobs/capacity live in the owner DB,
+    so the run may not be in ``db`` at all.  We resolve through the run ID's
+    own project segment (never a current selection); anything unresolvable
+    fails closed (the caller leaves the charge in place).
+    """
+    try:
+        run = db.get_run(run_id)
+    except Exception:
+        return None
+    if run is not None:
+        return run, db
+    try:
+        from saberops.db import Database
+        from saberops.runtime import db_path_for_run
+
+        path = db_path_for_run(run_id)
+        if path is None:
+            return None
+        other = Database(path)
+        other_run = other.get_run(run_id)
+        if other_run is None:
+            return None
+        return other_run, other
+    except Exception:
+        return None
+
+
+def _run_has_d8_receipt(run_db: Any, run_id: str) -> bool:
+    """True iff the run durably carries a D8 preemption receipt.
+
+    A receipt is a decision, an intent, a completed park, or the typed
+    ``PREEMPTION_LIMIT`` terminal failure.  This is what makes old-run debt
+    settleable **without** the job still being RUNNING.  Any unreadable event
+    channel fails closed (returns False) so ambiguity never frees capacity.
+    """
+    from saberops.preemption import INTENT_EVENT, PREPARATION_EVENT, RUN_PREEMPTED_EVENT
+
+    for event_type in (INTENT_EVENT, PREPARATION_EVENT, RUN_PREEMPTED_EVENT):
+        try:
+            if run_db.get_events_by_type(run_id, event_type):
+                return True
+        except Exception:
+            return False
+    try:
+        failed = run_db.get_events_by_type(run_id, "run_failed")
+    except Exception:
+        return False
+    return any(
+        isinstance(getattr(event, "payload", None), dict)
+        and event.payload.get("reason") == PREEMPTION_LIMIT
+        for event in failed
+    )
+
+
+def settle_preemption_debts(
+    db: Any,
+    *,
+    run_status: Callable[[str], RunStatus | None] | None = None,
+    lease_guard: Callable[[Any], bool] | None = None,
+    now: datetime | None = None,
+    page_size: int = 200,
+) -> PreemptionSettlement:
+    """Settle terminal D8 runs' reserved capacity, independent of job state.
+
+    R1: :func:`reconcile_jobs` scans only RUNNING jobs, so a job that has
+    already been requeued (QUEUED / terminal / re-dispatched onto a newer run)
+    can leave its *old* run's RESERVED rows charged forever.  This scan starts
+    from durable owner-storage debt (:func:`ledger.list_reserved_debts`, paged
+    so old debt is never starved) and releases only runs that are provably
+    terminal **and** carry a D8 receipt.  It is:
+
+    * idempotent (a released row no longer appears; the UPDATE is
+      state-guarded);
+    * independent of ``waiting_reason`` and of the job's current RUNNING state;
+    * fenced, when a ``lease_guard`` is supplied, inside the same transaction
+      as the release (a stale scheduler writes nothing);
+    * fail-closed: an unresolvable run, a non-terminal run, a COMPLETED run
+      (settled elsewhere), or a run without a D8 receipt is skipped.
+    """
+    moment = now if now is not None else datetime.now(UTC)
+    from saberops.capacity.ledger import list_reserved_debts, release_terminal_debt
+
+    scanned = 0
+    released = 0
+    skipped = 0
+    after: str | None = None
+    while True:
+        page = list_reserved_debts(db, limit=page_size, after_run_id=after)
+        if not page:
+            break
+        for debt in page:
+            scanned += 1
+            after = debt.run_id
+            resolved = _resolve_run_and_db(db, debt.run_id)
+            if resolved is None:
+                skipped += 1
+                continue
+            run, run_db = resolved
+            status = run_status(debt.run_id) if run_status is not None else run.status
+            if status in (None, RunStatus.RUNNING, RunStatus.PENDING, RunStatus.COMPLETED):
+                skipped += 1
+                continue
+            if not _run_has_d8_receipt(run_db, debt.run_id):
+                skipped += 1
+                continue
+            if debt.job_id is not None:
+                # Never free capacity while the owning job is STILL the live
+                # generation of this exact run: its reservation is what makes
+                # the pool/global occupancy accounting truthful (releasing it
+                # early could over-admit another job into the same pool).  That
+                # generation's own requeue tail settles it instead.  An
+                # unresolvable job fails closed.
+                try:
+                    owning_job = store.get_job(db, debt.job_id)
+                except Exception:
+                    skipped += 1
+                    continue
+                if owning_job is None:
+                    skipped += 1
+                    continue
+                if owning_job.state == JobState.RUNNING and owning_job.current_run_id == (
+                    debt.run_id
+                ):
+                    skipped += 1
+                    continue
+            result = release_terminal_debt(
+                db,
+                run_id=debt.run_id,
+                job_id=debt.job_id,
+                now=moment,
+                lease_guard=lease_guard,
+            )
+            if result < 0:
+                skipped += 1
+                continue
+            released += result
+        if len(page) < page_size:
+            break
+    return PreemptionSettlement(scanned=scanned, released=released, skipped=skipped)
+
+
+def reconcile_preemptions(
+    db: Any,
+    *,
+    run_status: Callable[[str], RunStatus | None] | None = None,
+    recover: Callable[[str], Any] | None = None,
+    lease_guard: Callable[[Any], bool] | None = None,
+    now: datetime | None = None,
+    page_size: int = 200,
+    job_scan_limit: int = 100_000,
+) -> PreemptionReconciliation:
+    """One D8 crash-recovery pass: settle settled debt and finish interrupted
+    preemption transactions (R1 + R2).
+
+    ``recover`` is an injected production entry point (in the scheduler this is
+    :meth:`RunSupervisor.reconcile`, which owns the dead-owner/quiescence
+    fencing).  This function only *discovers* interrupted transactions from
+    durable state and delegates; it never decides a route, calls a provider,
+    or fabricates a preemption.
+    """
+    from saberops import preemption
+
+    moment = now if now is not None else datetime.now(UTC)
+    settlement = settle_preemption_debts(
+        db, run_status=run_status, lease_guard=lease_guard, now=moment, page_size=page_size
+    )
+    pending: list[str] = []
+    blocked: list[str] = []
+    if recover is None:
+        return PreemptionReconciliation(settlement=settlement)
+    try:
+        running_jobs = store.list_jobs_raw(db, state=JobState.RUNNING, limit=job_scan_limit)
+    except Exception:
+        running_jobs = []
+    for job in running_jobs:
+        run_id = job.current_run_id
+        if not run_id:
+            continue
+        resolved = _resolve_run_and_db(db, run_id)
+        if resolved is None:
+            continue
+        run, run_db = resolved
+        if run.status != RunStatus.RUNNING:
+            continue
+        try:
+            txn = preemption.classify_preemption_transaction(
+                run_db, run_id=run_id, job=job, repo_path=job.repo
+            )
+        except Exception:
+            continue
+        if txn.state == "none":
+            continue
+        if txn.state == "blocked":
+            blocked.append(run_id)
+            continue
+        pending.append(run_id)
+        try:
+            recover(run_id)
+        except Exception:
+            pass
+    return PreemptionReconciliation(
+        settlement=settlement, pending=tuple(pending), blocked=tuple(blocked)
     )
 
 
