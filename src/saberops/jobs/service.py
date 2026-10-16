@@ -572,9 +572,16 @@ def _resolve_run_and_db(db: Any, run_id: str) -> tuple[Any, Any] | None:
 
 
 def _run_has_authentic_d8_receipt(
-    run_db: Any, db: Any, run_id: str, job: Job
+    run_db: Any, run_id: str, job: Job
 ) -> bool:
     """True iff the run's terminal D8 outcome can be authenticated.
+
+    ``run_db`` **must** be the database that owns the run's execution evidence
+    (events, attempts, execution-owner row, handoffs), never the owner DB: in
+    the split layout the decision/intent/owner/handoff rows live with the run,
+    so authenticating them against the owner DB would make every legitimate
+    preemption look like ``decision_missing`` and leak the old run's charge
+    forever.
 
     A receipt is acceptable only when it is **authentic**:
 
@@ -598,7 +605,7 @@ def _run_has_authentic_d8_receipt(
         return False
     try:
         txn = preemption.authenticate_prepared_transaction(
-            db,
+            run_db,
             run_id=run_id,
             job=job,
             repo_path=job.repo,
@@ -620,6 +627,36 @@ def _run_has_authentic_d8_receipt(
         and event.payload.get("reason") == PREEMPTION_LIMIT
         for event in failed
     )
+
+
+def _terminal_run_status(
+    resolved_run: Any,
+    run_id: str,
+    run_status: Callable[[str], RunStatus | None] | None,
+) -> RunStatus | None:
+    """Authoritative terminal status for a reservation's run.
+
+    The run row resolved from the run's **own** database (``resolved_run``) is
+    authoritative.  An injected ``run_status`` callback -- in production the
+    scheduler's lookup over the owner DB -- may legitimately have no evidence
+    at all for a project-local run, in which case its ``None`` is not a verdict
+    and the resolved row decides.  A callback that positively *contradicts* the
+    resolved row is ambiguous evidence and fails closed.
+    """
+    resolved = getattr(resolved_run, "status", None)
+    if not isinstance(resolved, RunStatus):
+        return None
+    if run_status is None:
+        return resolved
+    try:
+        injected = run_status(run_id)
+    except Exception:
+        return None
+    if injected is None:
+        return resolved
+    if injected != resolved:
+        return None
+    return resolved
 
 
 def settle_preemption_debts(
@@ -669,7 +706,7 @@ def settle_preemption_debts(
                 skipped += 1
                 continue
             run, run_db = resolved
-            status = run_status(debt.run_id) if run_status is not None else run.status
+            status = _terminal_run_status(run, debt.run_id, run_status)
             if status in (None, RunStatus.RUNNING, RunStatus.PENDING, RunStatus.COMPLETED):
                 skipped += 1
                 continue
@@ -699,7 +736,7 @@ def settle_preemption_debts(
                 # over-admit).  That generation's own requeue tail settles it.
                 skipped += 1
                 continue
-            if not _run_has_authentic_d8_receipt(run_db, db, debt.run_id, owning_job):
+            if not _run_has_authentic_d8_receipt(run_db, debt.run_id, owning_job):
                 skipped += 1
                 continue
             result = release_terminal_debt(

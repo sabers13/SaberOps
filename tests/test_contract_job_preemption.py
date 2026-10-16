@@ -839,3 +839,203 @@ def test_requeue_exact_rejects_aba_on_the_job_row(
     if second_reason == "requeued_and_redispatched":
         assert job.state == JobState.RUNNING
         assert job.current_run_id == "run_new"
+
+
+# ---------------------------------------------------------------------------
+# R1 across a SPLIT store: job/ledger in the owner DB, run evidence in the
+# project-local execution DB.  No mocked run lookup and no owner-DB run rows.
+# ---------------------------------------------------------------------------
+
+
+def _split_stores(tmp_path: Path, repo: Path) -> tuple[Database, Database, str]:
+    """Build a real owner DB plus a properly registered project execution DB."""
+    from saberops.db import Database as _Database
+    from saberops.project import compute_project_identity, new_run_id
+    from saberops.runtime import project_db_path_for_repo
+
+    owner_db = _db(tmp_path, "owner.db")
+    exec_path = project_db_path_for_repo(repo)  # binds the project state dir
+    identity = compute_project_identity(repo)
+    run_id = new_run_id(identity)
+    exec_db = _Database(exec_path, owner_db=owner_db)
+    assert exec_db.db_path != owner_db.db_path
+    assert project_id_of(run_id) == identity.project_id
+    return owner_db, exec_db, run_id
+
+
+def project_id_of(run_id: str) -> str | None:
+    from saberops.project import project_id_from_run_id
+
+    return project_id_from_run_id(run_id)
+
+
+def _split_park(
+    owner_db: Database, exec_db: Database, repo: Path, base: str, run_id: str,
+    *, job_id: str = "job1",
+) -> str:
+    """Real cross-store D8 park, then re-open the pre-release crash window."""
+    store.insert_job(owner_db, _job(job_id, str(repo), base), now=_NOW)
+    store.mark_dispatched(owner_db, job_id, run_id, now=_NOW)
+    reserve(
+        owner_db, run_id=run_id, job_id=job_id, route="p/m",
+        draws=[PoolDraw("pool1", "5h")], size_bucket="M", now=_NOW,
+    )
+    exec_db.create_run(
+        Run(
+            id=run_id, task="t", target_repo=str(repo), base_commit=base,
+            tier=Tier.T2, training_allowed=True, gate_command="make gate",
+            status=RunStatus.RUNNING, created_at=_NOW.isoformat(), config_json="{}",
+        )
+    )
+    _quota_attempt(exec_db, run_id, str(repo), AttemptStatus.FAILED)
+    _quota_evidence(exec_db, run_id)
+    owner = exec_db.claim_execution_owner(run_id, identity=_dead_identity())
+
+    # The job/ledger live in the owner DB; the run evidence lives elsewhere.
+    assert owner_db.get_run(run_id) is None
+    assert exec_db.get_run(run_id) is not None
+
+    out = preemption.complete_preemption(
+        exec_db, run_id=run_id, repo_path=repo, base_sha=base,
+        owner_id=owner.owner_id, owner_generation=owner.generation,
+        decision_ref="test:split", now=_NOW,
+    )
+    assert out.owned and out.detail == "preempted", out.detail
+    with owner_connection(owner_db) as conn:
+        conn.execute(
+            "UPDATE capacity_reservations SET state = 'RESERVED', settled_at = NULL"
+            " WHERE run_id = ?",
+            (run_id,),
+        )
+        conn.commit()
+    assert _reservation_states(owner_db, run_id) == ["RESERVED"]
+    return owner.owner_id
+
+
+def test_split_db_settlement_releases_stranded_old_run_exactly_once(
+    tmp_path: Path,
+) -> None:
+    """Covers: ADR-0002 D8 R1 -- split-DB stranded debt settles exactly once.
+
+    Real two-file layout: the job, its requeue event and the RESERVED rows live
+    in the owner DB; the run, attempt, execution-owner row, decision, intent,
+    capsule and handoff live in the project execution DB.  Settlement must
+    authenticate the receipt against the database that actually owns that
+    evidence, or a legitimate preemption looks like ``decision_missing`` and
+    the charge leaks forever.
+    """
+    repo = tmp_path / "repo"
+    base = _repo(repo)
+    owner_db, exec_db, run_id = _split_stores(tmp_path, repo)
+    _split_park(owner_db, exec_db, repo, base, run_id)
+
+    # A newer live run of the same job keeps its own reservation untouched.
+    store.mark_dispatched(owner_db, "job1", "run_newer", now=_NOW)
+    reserve(
+        owner_db, run_id="run_newer", job_id="job1", route="p/m",
+        draws=[PoolDraw("pool1", "5h")], size_bucket="M", now=_NOW,
+    )
+
+    settlement = service.settle_preemption_debts(owner_db, now=_NOW)
+
+    assert settlement.released == 1
+    _assert_released(owner_db, run_id)
+    assert _reservation_states(owner_db, "run_newer") == ["RESERVED"]
+    job = _job_for(owner_db, "job1")
+    assert job.preemptions == 1
+    assert job.state == JobState.RUNNING
+    assert job.current_run_id == "run_newer"
+    assert len([e for e in store.list_events(owner_db, "job1") if e["kind"] == "requeued"]) == 1
+    # Idempotent across restarts.
+    assert service.settle_preemption_debts(owner_db, now=_NOW).released == 0
+    assert _job_for(owner_db, "job1").preemptions == 1
+
+
+def test_split_db_settlement_retains_unbound_legacy_charge(tmp_path: Path) -> None:
+    """Covers: ADR-0002 D8 R1 -- split-DB legacy receipt is not authenticated."""
+    from saberops.handoff import create_handoffs
+
+    repo = tmp_path / "repo"
+    base = _repo(repo)
+    owner_db, exec_db, run_id = _split_stores(tmp_path, repo)
+    store.insert_job(owner_db, _job("job1", str(repo), base), now=_NOW)
+    store.mark_dispatched(owner_db, "job1", run_id, now=_NOW)
+    reserve(
+        owner_db, run_id=run_id, job_id="job1", route="p/m",
+        draws=[PoolDraw("pool1", "5h")], size_bucket="M", now=_NOW,
+    )
+    exec_db.create_run(
+        Run(
+            id=run_id, task="t", target_repo=str(repo), base_commit=base,
+            tier=Tier.T2, training_allowed=True, gate_command="make gate",
+            status=RunStatus.RUNNING, created_at=_NOW.isoformat(), config_json="{}",
+        )
+    )
+    _quota_attempt(exec_db, run_id, str(repo), AttemptStatus.FAILED)
+    _quota_evidence(exec_db, run_id)
+    exec_db.claim_execution_owner(run_id, identity=_dead_identity())
+    # Genuine artifacts in the run's own DB, but NO bound decision receipt.
+    GitManager.anchor_checkpoint_ref(repo, "job1", 0, base)
+    _, capsule = create_handoffs(exec_db, run_id)
+    exec_db.record_event(
+        run_id,
+        "preemption_committed",
+        payload={
+            "job_id": "job1",
+            "checkpoint_sha": base,
+            "checkpoint_ref": "refs/saberops/checkpoints/job1/0",
+            "handoff_id": capsule.id,
+            "not_before": None,
+            "preemptions_next": 1,
+        },
+    )
+    exec_db.update_run(
+        run_id=run_id, status=RunStatus.PREEMPTED,
+        completed_at=_NOW.isoformat(), result_summary="legacy park",
+    )
+    store.requeue_exact(
+        owner_db, "job1", WaitingReason.PREEMPTED,
+        expected_run_id=run_id, expected_preemptions=0,
+        resume_from=ResumeFrom(run_id=run_id, checkpoint_sha=base, handoff_id=capsule.id),
+        now=_NOW,
+    )
+
+    assert service.settle_preemption_debts(owner_db, now=_NOW).released == 0
+    assert _reservation_states(owner_db, run_id) == ["RESERVED"]
+    assert _job_for(owner_db, "job1").preemptions == 1
+
+
+def test_split_db_scheduler_tick_settles_stranded_debt(tmp_path: Path) -> None:
+    """Covers: ADR-0002 D8 R1 -- the real tick settles split-DB debt.
+
+    The scheduler is handed the owner DB (its production shape) and its
+    default status lookup has no evidence for a project-local run; the
+    resolved run row must therefore decide.
+    """
+    from saberops.capacity.loop import acquire_lease, scheduler_tick
+
+    repo = tmp_path / "repo"
+    base = _repo(repo)
+    owner_db, exec_db, run_id = _split_stores(tmp_path, repo)
+    _split_park(owner_db, exec_db, repo, base, run_id)
+    lease = acquire_lease(owner_db, "instance_A", ttl_seconds=300.0, now=_NOW)
+    assert lease is not None
+
+    def owner_only_status(rid: str) -> RunStatus | None:
+        run = owner_db.get_run(rid)
+        return run.status if run is not None else None
+
+    res = scheduler_tick(
+        owner_db,
+        lease,
+        now=_NOW,
+        run_status=owner_only_status,
+        run_launcher=lambda *_a, **_k: None,
+        probes={},
+        clock_fn=lambda: _NOW,
+    )
+
+    assert res.ran is True
+    assert res.preemption_settled == 1
+    _assert_released(owner_db, run_id)
+    assert _job_for(owner_db, "job1").preemptions == 1
