@@ -1,1 +1,0 @@
-{"type": "error", "timestamp": "2026-09-23T10:00:00Z", "sessionID": "ses_abc", "error": {"type": "provider.rate-limit", "message": "Error 429: You have reached your weekly Clinepass limit. The limit resets in 23m, please try again later.", "status": 429}}

@@ -59,15 +59,15 @@ classifier in `consumer`.  Until then the gap stays visible in the manifest's
 
 | Date | CLI versions | Drift result | Fixtures refreshed |
 | --- | --- | --- | --- |
-| 2026-10-16 | codex `codex-cli 0.162.1`; claude `2.1.301 (Claude Code)`; opencode `opencode v2.0.29` | no drift (`check` exit 0; 3 `config_help` fixtures match) | y — `config_help` captured this lane; usage/exhaustion **not** refreshed (owner capture pending, `key=CAPTURE`) |
+| 2026-10-16 | codex `codex-cli 0.162.1`; claude `2.1.301 (Claude Code)`; opencode `opencode v2.0.29` | no drift (`check` exit 0; 3 `config_help` fixtures match) | y — `config_help` captured and owner-kept (D-0015); usage panels/JSON and exhaustion **not** refreshed: owner-declined 2026-10-16 (D-0016), recorded under `fake_only` |
 
 ## 5. Open finding
 
-**F1 — OpenCode flag pinning drift.**  `src/saberops/workers/opencode.py` pins
+**F1 — OpenCode flag pinning drift (routed to idea, D-0017).**  `src/saberops/workers/opencode.py` pins
 `--pure` and `--dir`, but the installed `opencode v2.0.29` help (and binary)
 expose neither.  The fixture records the drift in
 `tests/fixtures/vendor_cli/opencode/opencode-v2.0.29/config_help.txt`; the
 contract test
 `tests/test_contract_vendor_cli_parsers.py::test_opencode_adapter_flags_are_all_documented`
 is a strict `xfail` for this finding.  No adapter is edited here (out of
-scope); the fix belongs to the OpenCode adapter's owning step.
+scope); Orch confirmed the finding and captured it as an idea for owner triage (D-0017).

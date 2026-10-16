@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from saberops.capacity.probes import parse_claude_reset_text
+from saberops.capacity.probes import duration_to_window, parse_claude_reset_text
 from saberops.cli_usage import parse_limits
 from saberops.native_usage_panel import parse_panel
 from saberops.opencode_go_usage import parse_go_limits
@@ -46,6 +46,7 @@ EXPECTED_CONSUMERS: dict[str, Any] = {
     "saberops.cli_usage.parse_limits": parse_limits,
     "saberops.opencode_go_usage.parse_go_limits": parse_go_limits,
     "saberops.capacity.probes.parse_claude_reset_text": parse_claude_reset_text,
+    "saberops.capacity.probes.duration_to_window": duration_to_window,
     "saberops.workers.exhaustion.classify_codex": classify_codex,
     "saberops.workers.exhaustion.classify_claude": classify_claude,
     "saberops.workers.exhaustion.classify_opencode": classify_opencode,
@@ -57,7 +58,11 @@ EXPECTED_CONSUMERS: dict[str, Any] = {
 MANIFEST = load_manifest(MANIFEST_PATH)
 REAL = MANIFEST.fixtures
 CONFIG_HELP = [fx for fx in REAL if fx.kind == "config_help"]
-PARSER_FIXTURES = [fx for fx in REAL if fx.kind != "config_help"]
+FIXTURE_FILES = sorted(
+    p.relative_to(FIXTURES_ROOT).as_posix()
+    for p in FIXTURES_ROOT.rglob("*")
+    if p.is_file() and p != MANIFEST_PATH
+)
 
 
 def _text(fixture: Fixture) -> str:
@@ -92,27 +97,36 @@ def _serialize(classification: ExhaustionClassification) -> dict[str, Any]:
 
 
 def _invoke(fixture: Fixture, text: str) -> Any:
-    """Feed one fixture file to the parser named by ``fixture.consumer``."""
+    """Feed one fixture file to the parser or adapter named by ``fixture.consumer``."""
     consumer = fixture.consumer
-    parse = _resolve(consumer)
+    target = _resolve(consumer)
+    if fixture.kind == "config_help":
+        flags = list(fixture.expect["flags"])
+        missing = [flag for flag in flags if flag not in text]
+        result: dict[str, Any] = {"flags": flags}
+        if missing:
+            result["known_missing"] = missing
+        return result
     if consumer == "saberops.native_usage_panel.parse_panel":
-        return parse(fixture.provider, text)
+        return target(fixture.provider, text)
     if consumer == "saberops.cli_usage.parse_limits":
-        return parse(fixture.provider, json.loads(text))
+        return target(fixture.provider, json.loads(text))
     if consumer == "saberops.opencode_go_usage.parse_go_limits":
-        return parse(json.loads(text))
+        return target(json.loads(text))
     if consumer == "saberops.capacity.probes.parse_claude_reset_text":
         reset, confidence = parse_claude_reset_text(text, now=_now(fixture), tz=_tz(fixture))
         return {"reset_at": reset.isoformat() if reset else None, "confidence": confidence}
+    if consumer == "saberops.capacity.probes.duration_to_window":
+        return {"window": duration_to_window(text.strip())}
     if consumer == "saberops.workers.exhaustion.parse_antigravity_usage":
-        reset = parse(text)
+        reset = target(text)
         return {"reset_at": reset.isoformat() if reset else None}
     if consumer.endswith("classify_opencode"):
         return _serialize(classify_opencode(text, now=_now(fixture)))
     if consumer.endswith(("classify_codex", "classify_claude")):
-        return _serialize(parse(text, now=_now(fixture), tz=_tz(fixture)))
+        return _serialize(target(text, now=_now(fixture), tz=_tz(fixture)))
     if consumer.endswith(("classify_cline", "classify_antigravity")):
-        return _serialize(parse(text, now=_now(fixture)))
+        return _serialize(target(text, now=_now(fixture)))
     raise AssertionError(f"no replay dispatch for consumer {consumer!r}")
 
 
@@ -128,15 +142,23 @@ def test_consumer_paths_resolve_to_the_existing_parsers(dotted: str) -> None:
     assert _resolve(dotted) is EXPECTED_CONSUMERS[dotted]
 
 
-@pytest.mark.parametrize("fixture", REAL, ids=lambda fx: fx.file)
-def test_every_real_fixture_is_redacted(fixture: Fixture) -> None:
+def test_every_parser_is_either_fixtured_or_recorded_fake_only() -> None:
+    """Covers: HV-1 every parser assumption has a real fixture or a fake-only gap."""
+    covered = {fx.consumer for fx in REAL} | {gap.consumer for gap in MANIFEST.fake_only}
+    for gap in MANIFEST.fake_only:
+        assert _resolve(gap.consumer) is not None
+    assert set(EXPECTED_CONSUMERS) <= covered
+
+
+@pytest.mark.parametrize("relpath", FIXTURE_FILES)
+def test_every_real_fixture_is_redacted(relpath: str) -> None:
     """Covers: HV-1 redaction of every committed fixture file."""
-    assert_redacted(_text(fixture))
+    assert_redacted((FIXTURES_ROOT / relpath).read_text(encoding="utf-8"))
 
 
-@pytest.mark.parametrize("fixture", PARSER_FIXTURES, ids=lambda fx: fx.file)
+@pytest.mark.parametrize("fixture", REAL, ids=lambda fx: fx.file)
 def test_real_fixture_replays_through_its_consumer(fixture: Fixture) -> None:
-    """Covers: HV-1 contract replay of a real fixture through its parser."""
+    """Covers: HV-1 contract replay of a real fixture through its consumer."""
     assert _invoke(fixture, _text(fixture)) == fixture.expect
 
 

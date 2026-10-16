@@ -61,7 +61,7 @@ KINDS: tuple[str, ...] = ("usage_panel", "usage_json", "exhaustion", "config_hel
 
 #: Provenance of a committed fixture.  ``real-capture`` is a byte capture taken
 #: by this project (e.g. the installed CLI's own ``--help``); ``owner-supplied-log``
-#: is a real vendor-output log the owner supplied (e.g. collected in R-001).
+#: is a redacted real vendor-output log supplied by the owner.
 SOURCES: tuple[str, ...] = ("real-capture", "owner-supplied-log")
 
 #: Sentinel returned by :func:`read_installed_version` when no CLI is on PATH.

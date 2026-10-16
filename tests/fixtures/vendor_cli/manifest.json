@@ -26,7 +26,7 @@
           "resume"
         ]
       },
-      "provenance": "Installed CLI on the HV-1 host, 2026-10-16: `codex --version`, `codex --help`, `codex exec --help`, `codex resume --help` (token-free)."
+      "provenance": "Installed CLI on the HV-1 host, 2026-10-16: `codex --version`, `codex --help`, `codex exec --help`, `codex resume --help` (token-free, owner-kept D-0015)."
     },
     {
       "vendor": "claude",
@@ -60,7 +60,7 @@
           "status"
         ]
       },
-      "provenance": "Installed CLI on the HV-1 host, 2026-10-16: `claude --version`, `claude --help`, `claude auth --help` (token-free)."
+      "provenance": "Installed CLI on the HV-1 host, 2026-10-16: `claude --version`, `claude --help`, `claude auth --help` (token-free, owner-kept D-0015)."
     },
     {
       "vendor": "opencode",
@@ -83,123 +83,11 @@
           "run"
         ],
         "known_missing": [
-          "--pure",
-          "--dir"
+          "--dir",
+          "--pure"
         ]
       },
-      "provenance": "Installed CLI on the HV-1 host, 2026-10-16: `opencode --version`, `opencode --help`, `opencode run --help`, `opencode models --help` (token-free). HV-1 finding F1: the v2.0.29 help has no --pure/--dir."
-    },
-    {
-      "vendor": "codex",
-      "cli": "codex",
-      "cli_version": "unknown",
-      "captured_on": "2026-10-11",
-      "kind": "exhaustion",
-      "source": "owner-supplied-log",
-      "redacted": true,
-      "file": "codex/unknown/exhaustion-plan-limit.jsonl",
-      "consumer": "saberops.workers.exhaustion.classify_codex",
-      "expect": {
-        "verdict": "QUOTA_EXHAUSTED",
-        "rule": "codex:usage-limit",
-        "confidence": "VERIFIED",
-        "reset_at": "2026-10-03T23:58:00+00:00",
-        "window": null,
-        "model_scope": null,
-        "reset_confidence": "HINT"
-      },
-      "tz": "UTC",
-      "provenance": "R-001 findings.md (collected 2026-10-11), verbatim plan-limit text from harness-cli-normalizer issue 325 inside the documented dual `error` + `turn.failed` envelope (codex #43337). Exact CLI version not recorded; cli_version=unknown."
-    },
-    {
-      "vendor": "claude",
-      "cli": "claude",
-      "cli_version": "unknown",
-      "captured_on": "2026-10-11",
-      "kind": "exhaustion",
-      "source": "owner-supplied-log",
-      "redacted": true,
-      "file": "claude/unknown/exhaustion-session-limit.jsonl",
-      "consumer": "saberops.workers.exhaustion.classify_claude",
-      "expect": {
-        "verdict": "QUOTA_EXHAUSTED",
-        "rule": "claude:usage-limit",
-        "confidence": "VERIFIED",
-        "reset_at": "2026-10-11T22:20:00+00:00",
-        "window": "5h",
-        "model_scope": null,
-        "reset_confidence": "HINT"
-      },
-      "now": "2026-10-11T12:00:00+00:00",
-      "tz": "UTC",
-      "provenance": "R-001 findings.md (collected 2026-10-11), verbatim session-limit prose from rhei issue 451 (success/is_error trap). Exact CLI version not recorded; cli_version=unknown."
-    },
-    {
-      "vendor": "claude",
-      "cli": "claude",
-      "cli_version": "unknown",
-      "captured_on": "2026-10-11",
-      "kind": "exhaustion",
-      "source": "owner-supplied-log",
-      "redacted": true,
-      "file": "claude/unknown/exhaustion-weekly-structured.jsonl",
-      "consumer": "saberops.workers.exhaustion.classify_claude",
-      "expect": {
-        "verdict": "QUOTA_EXHAUSTED",
-        "rule": "claude:usage-limit",
-        "confidence": "VERIFIED",
-        "reset_at": "2026-10-10T02:00:00+00:00",
-        "window": "weekly",
-        "model_scope": null,
-        "reset_confidence": "EXACT"
-      },
-      "now": "2026-10-11T12:00:00+00:00",
-      "tz": "UTC",
-      "provenance": "R-001 findings.md (collected 2026-10-11), verbatim structured companions from thirdshift issue 587 (usage_limit_reached / seven_day / resetsAt epoch + weekly prose). Exact CLI version not recorded; cli_version=unknown."
-    },
-    {
-      "vendor": "opencode",
-      "cli": "opencode",
-      "cli_version": "unknown",
-      "captured_on": "2026-10-11",
-      "kind": "exhaustion",
-      "source": "owner-supplied-log",
-      "redacted": true,
-      "file": "opencode/unknown/exhaustion-provider-quota.jsonl",
-      "consumer": "saberops.workers.exhaustion.classify_opencode",
-      "expect": {
-        "verdict": "QUOTA_EXHAUSTED",
-        "rule": "opencode:quota",
-        "confidence": "VERIFIED",
-        "reset_at": null,
-        "window": null,
-        "model_scope": null,
-        "reset_confidence": "UNKNOWN"
-      },
-      "now": "2026-10-11T12:00:00+00:00",
-      "provenance": "R-001 findings.md (collected 2026-10-11), verbatim Zen pool-exhaustion envelope captured from the real CLI 2026-09-23 (coforge PR 749). Exact CLI version not recorded; cli_version=unknown."
-    },
-    {
-      "vendor": "opencode",
-      "cli": "opencode",
-      "cli_version": "unknown",
-      "captured_on": "2026-10-11",
-      "kind": "exhaustion",
-      "source": "owner-supplied-log",
-      "redacted": true,
-      "file": "opencode/unknown/exhaustion-clinepass.jsonl",
-      "consumer": "saberops.workers.exhaustion.classify_opencode",
-      "expect": {
-        "verdict": "QUOTA_EXHAUSTED",
-        "rule": "opencode:quota",
-        "confidence": "VERIFIED",
-        "reset_at": "2026-10-11T12:23:00+00:00",
-        "window": "weekly",
-        "model_scope": null,
-        "reset_confidence": "PARSED"
-      },
-      "now": "2026-10-11T12:00:00+00:00",
-      "provenance": "R-001 findings.md (collected 2026-10-11), verbatim ClinePass weekly-limit envelope through opencode (relevo issue 616). Exact CLI version not recorded; cli_version=unknown."
+      "provenance": "Installed CLI on the HV-1 host, 2026-10-16: `opencode --version`, `opencode --help`, `opencode run --help`, `opencode models --help` (token-free, owner-kept D-0015). HV-1 finding F1: the v2.0.29 help has no --pure/--dir."
     }
   ],
   "fake_only": [
@@ -207,31 +95,49 @@
       "vendor": "codex",
       "kind": "usage_json",
       "consumer": "saberops.cli_usage.parse_limits",
-      "reason": "No owner-supplied raw rateLimitsByLimitId payload; read_limits only returns parsed rows. Owner capture pending (needs-decision key=CAPTURE)."
+      "reason": "No owner-supplied raw rateLimitsByLimitId payload; read_limits only returns parsed rows. Owner-declined 2026-10-16 (D-0016)."
     },
     {
       "vendor": "codex",
       "kind": "usage_json",
       "consumer": "saberops.capacity.probes.duration_to_window",
-      "reason": "Consumes the parse_limits duration field; no real windowed-duration payload committed yet."
+      "reason": "Consumes the parse_limits duration field; no real windowed-duration payload committed (owner-declined 2026-10-16, D-0016)."
     },
     {
       "vendor": "claude",
       "kind": "usage_panel",
       "consumer": "saberops.native_usage_panel.parse_panel",
-      "reason": "No real /usage panel text: read_panel returns parsed rows only. Owner capture pending (needs-decision key=CAPTURE)."
+      "reason": "No real /usage panel text: read_panel returns parsed rows only. Owner-declined 2026-10-16 (D-0016)."
     },
     {
       "vendor": "claude",
       "kind": "usage_panel",
       "consumer": "saberops.capacity.probes.parse_claude_reset_text",
-      "reason": "No real panel reset_text committed yet; owner capture pending (needs-decision key=CAPTURE)."
+      "reason": "No real panel reset_text committed; owner-declined 2026-10-16 (D-0016)."
     },
     {
       "vendor": "opencode",
       "kind": "usage_json",
       "consumer": "saberops.opencode_go_usage.parse_go_limits",
-      "reason": "No real OpenCode Go usage JSON: read_go_limits returns parsed rows only. Owner capture pending (needs-decision key=CAPTURE)."
+      "reason": "No real OpenCode Go usage JSON: read_go_limits returns parsed rows only. Owner-declined 2026-10-16 (D-0016)."
+    },
+    {
+      "vendor": "codex",
+      "kind": "exhaustion",
+      "consumer": "saberops.workers.exhaustion.classify_codex",
+      "reason": "No owner-supplied exhaustion log (owner-declined 2026-10-16, D-0016); third-party lead in .orch/R-001/findings.md (harness-cli-normalizer #325 / codex #43337 dual error+turn.failed envelope) is covered as a constant in tests/test_plan_exhaustion.py."
+    },
+    {
+      "vendor": "claude",
+      "kind": "exhaustion",
+      "consumer": "saberops.workers.exhaustion.classify_claude",
+      "reason": "No owner-supplied exhaustion log (owner-declined 2026-10-16, D-0016); third-party leads in .orch/R-001/findings.md (rhei #451 session-limit prose, thirdshift #587 usage_limit_reached JSON) are covered as constants in tests/test_plan_exhaustion.py."
+    },
+    {
+      "vendor": "opencode",
+      "kind": "exhaustion",
+      "consumer": "saberops.workers.exhaustion.classify_opencode",
+      "reason": "No owner-supplied exhaustion log (owner-declined 2026-10-16, D-0016); third-party leads in .orch/R-001/findings.md (coforge PR #749 Zen pool quota, relevo #616 ClinePass weekly limit) are covered as constants in tests/test_plan_exhaustion.py."
     },
     {
       "vendor": "antigravity",

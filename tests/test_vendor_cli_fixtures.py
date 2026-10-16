@@ -73,10 +73,23 @@ def test_manifest_records_visible_fake_only_gaps() -> None:
     """Covers: HV-1 fake-only gap listing."""
     manifest = load_manifest(MANIFEST_PATH)
     consumers = {gap.consumer for gap in manifest.fake_only}
-    # The usage parsers for every installed CLI still have no real fixture.
+    # The usage and exhaustion parsers for every installed CLI are recorded fake-only.
     assert "saberops.cli_usage.parse_limits" in consumers
     assert "saberops.native_usage_panel.parse_panel" in consumers
     assert "saberops.opencode_go_usage.parse_go_limits" in consumers
+    for vendor, consumer in (
+        ("codex", "saberops.workers.exhaustion.classify_codex"),
+        ("claude", "saberops.workers.exhaustion.classify_claude"),
+        ("opencode", "saberops.workers.exhaustion.classify_opencode"),
+    ):
+        matches = [
+            gap
+            for gap in manifest.fake_only
+            if gap.vendor == vendor and gap.kind == "exhaustion" and gap.consumer == consumer
+        ]
+        assert len(matches) == 1
+        assert ".orch/R-001/findings.md" in matches[0].reason
+        assert "D-0016" in matches[0].reason
     # Antigravity has no installed CLI, so it stays fake-only.
     assert any(gap.vendor == "antigravity" for gap in manifest.fake_only)
 
