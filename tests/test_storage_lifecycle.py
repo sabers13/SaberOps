@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -735,3 +737,178 @@ def test_ratio_out_of_range_never_vacuum() -> None:
             ]
         )
         assert (d.action, d.reason) == (Action.KEEP, "invalid-ratio"), ratio
+
+
+ROOT = ROOTS[0]
+
+
+def test_owned_root_itself_never_eligible() -> None:
+    """Covers: fixup-2 O1 owned roots are never eligible delete or compress.
+
+    Every destructive-class artifact placed at exactly the owned root, but
+    otherwise fully terminal/dead and policy-eligible, must fail closed to
+    KEEP ``root-itself-protected`` and never reach the deletion log. The owner
+    DB is included per the O1 default-refuse decision at root equality.
+    """
+    items: list[Artifact] = [
+        _scratch(path=ROOT, artifact_id="r1"),
+        _worktree(path=ROOT, artifact_id="r2"),
+        _venv(path=ROOT, artifact_id="r3"),
+        _evidence(
+            path=ROOT,
+            artifact_id="r4",
+            created_at=NOW - timedelta(days=200),
+            terminal_at=NOW - timedelta(days=31),
+            run_accepted=False,
+            compressed=True,
+            size_bytes=4096,
+        ),
+        _evidence(
+            path=ROOT,
+            artifact_id="r5",
+            created_at=NOW - timedelta(days=30),
+            terminal_at=NOW - timedelta(days=1),
+            run_accepted=False,
+            compressed=False,
+        ),
+        _ownerdb(
+            path=ROOT,
+            artifact_id="r6",
+            last_vacuum_at=NOW - timedelta(days=30),
+            free_page_ratio=0.9,
+        ),
+    ]
+    plan = plan_gc(items, now=NOW, owned_roots=ROOTS)
+    assert plan.decisions
+    for d in plan.decisions:
+        assert (d.action, d.reason) == (Action.KEEP, "root-itself-protected"), d
+    assert plan.deletion_log == ()
+
+
+def test_owned_root_path_aliases_protected() -> None:
+    """Covers: fixup-2 O1 trailing-slash/dot aliases of the root stay protected."""
+    for alias in (ROOT + "/", ROOT + "/.", ROOT + "/./"):
+        (d,) = _decisions([_scratch(path=alias, artifact_id="a1")])
+        assert (d.action, d.reason) == (Action.KEEP, "root-itself-protected"), alias
+
+
+def test_owned_root_strict_descendants_still_eligible() -> None:
+    """Covers: fixup-2 O1 strict descendants of a root keep normal eligibility."""
+    items: list[Artifact] = [
+        _scratch(path=ROOT + "/scratch/run-1", artifact_id="d1"),
+        _evidence(
+            path=ROOT + "/evidence/run-1",
+            artifact_id="d2",
+            created_at=NOW - timedelta(days=200),
+            terminal_at=NOW - timedelta(days=31),
+            run_accepted=False,
+            compressed=True,
+            size_bytes=4096,
+        ),
+    ]
+    plan = plan_gc(items, now=NOW, owned_roots=ROOTS)
+    by_id = {d.artifact_id: d for d in plan.decisions}
+    assert by_id["d1"].action == Action.ELIGIBLE_DELETE
+    assert by_id["d2"].action == Action.ELIGIBLE_DELETE
+    assert len(plan.deletion_log) == 2
+
+
+def test_filesystem_root_never_confers_eligibility() -> None:
+    """Covers: fixup-2 O1 '/' as an owned root never means the whole filesystem."""
+    plan = plan_gc(
+        [
+            _scratch(path="/etc/passwd", artifact_id="f1"),
+            _evidence(
+                path="/etc/shadow",
+                artifact_id="f2",
+                created_at=NOW - timedelta(days=200),
+                terminal_at=NOW - timedelta(days=31),
+                run_accepted=False,
+                compressed=True,
+                size_bytes=4096,
+            ),
+            _scratch(path="/", artifact_id="f3"),
+        ],
+        now=NOW,
+        owned_roots=("/",),
+    )
+    for d in plan.decisions:
+        assert d.action == Action.KEEP, d
+        assert d.reason == "outside-roots", d
+    assert plan.deletion_log == ()
+
+
+def test_malformed_owned_roots_fail_closed() -> None:
+    """Covers: fixup-2 O1 relative/traversal/empty/NUL roots confer no eligibility."""
+    path = "/data/saberops/scratch/run-1"
+    for roots in (
+        ("data/saberops",),
+        ("/data/../saberops",),
+        ("",),
+        ("/data/saberops\x00",),
+        ("/",),
+    ):
+        plan = plan_gc([_scratch(artifact_id="g1", path=path)], now=NOW, owned_roots=roots)
+        (d,) = plan.decisions
+        assert (d.action, d.reason) == (Action.KEEP, "outside-roots"), roots
+        assert plan.deletion_log == ()
+
+
+def test_raw_string_owner_state_fails_closed() -> None:
+    """Covers: fixup-2 O2 raw StrEnum-valued strings never authorize ownership."""
+    corrupt: list[Artifact] = [
+        _scratch(owner_state=cast(OwnerState, "unknown"), artifact_id="o1"),
+        _scratch(owner_state=cast(OwnerState, "known-dead"), artifact_id="o2"),
+        _scratch(owner_state=cast(OwnerState, "known-live"), artifact_id="o3"),
+    ]
+    plan = plan_gc(corrupt, now=NOW, owned_roots=ROOTS)
+    assert plan.decisions
+    for d in plan.decisions:
+        assert (d.action, d.reason) == (Action.KEEP, "unknown-owner"), d
+    assert plan.deletion_log == ()
+
+
+def test_non_enum_owner_state_fails_closed() -> None:
+    """Covers: fixup-2 O2 missing/foreign/non-enum owner_state fails closed."""
+
+    class _ForeignOwnerState(StrEnum):
+        KNOWN_DEAD = "known-dead"
+        KNOWN_LIVE = "known-live"
+
+    corrupt: list[Artifact] = [
+        _scratch(owner_state=cast(OwnerState, None), artifact_id="n1"),
+        _scratch(owner_state=cast(OwnerState, 42), artifact_id="n2"),
+        _worktree(owner_state=cast(OwnerState, "accepted"), artifact_id="n3"),
+        _evidence(owner_state=cast(OwnerState, ["known-dead"]), artifact_id="n4"),
+        _scratch(
+            owner_state=cast(OwnerState, _ForeignOwnerState.KNOWN_DEAD), artifact_id="n5"
+        ),
+        _scratch(
+            owner_state=cast(OwnerState, _ForeignOwnerState.KNOWN_LIVE), artifact_id="n6"
+        ),
+    ]
+    plan = plan_gc(corrupt, now=NOW, owned_roots=ROOTS)
+    assert plan.decisions
+    for d in plan.decisions:
+        assert (d.action, d.reason) == (Action.KEEP, "unknown-owner"), d
+    assert plan.deletion_log == ()
+
+
+def test_exact_enum_owner_state_still_authorizes() -> None:
+    """Covers: fixup-2 O2 exact KNOWN_LIVE/KNOWN_DEAD enums and blank owners."""
+    items: list[Artifact] = [
+        _scratch(owner="g", owner_state=OwnerState.KNOWN_DEAD, artifact_id="e1"),
+        _worktree(owner="a", owner_state=OwnerState.KNOWN_LIVE, artifact_id="e2"),
+        _scratch(owner=None, owner_state=OwnerState.KNOWN_DEAD, artifact_id="e3"),
+        _scratch(owner="", owner_state=OwnerState.KNOWN_LIVE, artifact_id="e4"),
+    ]
+    plan = plan_gc(items, now=NOW, owned_roots=ROOTS)
+    by_id = {d.artifact_id: d for d in plan.decisions}
+    assert by_id["e1"].action == Action.ELIGIBLE_DELETE
+    assert by_id["e2"].action == Action.ELIGIBLE_DELETE
+    assert (by_id["e3"].action, by_id["e3"].reason) == (Action.KEEP, "unknown-owner")
+    assert (by_id["e4"].action, by_id["e4"].reason) == (Action.KEEP, "unknown-owner")
+    assert {e.reason for e in plan.deletion_log} == {
+        "scratch-succeeded-eligible",
+        "worktree-terminal-eligible",
+    }

@@ -32,12 +32,16 @@ Accepted policy implemented here (ADR-0003 D4/D6, Q1/Q4; frozen values):
   reclamation (ADR-0003 D6) needs engine ownership records that do not exist
   yet (Steps 001/002); until then unknown ownership fails closed to KEEP.
 
-Fail-closed rules: unknown or missing ownership, missing required metadata,
-naive (timezone-unaware) timestamps, paths outside the caller-declared owned
-roots, ``..`` path escapes, caller-flagged symlink escapes, pending review,
-live worktrees, preempted-but-unterminated jobs, and unknown enum states all
-produce KEEP with a machine-readable reason. Every decision echoes the
-caller-supplied owner identity and a reason code.
+Fail-closed rules: unknown, missing, non-enum or unrecognized ownership
+(only an exact :class:`OwnerState` member authorizes a destructive action),
+missing required metadata, naive (timezone-unaware) timestamps, paths outside
+or exactly equal to the caller-declared owned roots (a path identical to an
+owned root is never eligible: ``root-itself-protected``), malformed owned
+roots (empty/NUL/relative/traversal/filesystem root are ignored), ``..`` path
+escapes, caller-flagged symlink escapes, pending review, live worktrees,
+preempted-but-unterminated jobs, and unknown enum states all produce KEEP with
+a machine-readable reason. Every decision echoes the caller-supplied owner
+identity and a reason code.
 
 The caller-supplied dataclass shapes in this module are explicit and
 provisional: no persisted owner table or schema is invented here. They stay
@@ -264,19 +268,52 @@ class GcPlan:
     deletion_log: tuple[DeletionEvent, ...]
 
 
-def _owner_ok(owner: str | None, state: OwnerState) -> bool:
-    """Covers: fail-closed ownership (ADR-0003 D6 orphan rule, provisional)."""
-    return owner is not None and owner != "" and state is not OwnerState.UNKNOWN
+def _owner_ok(owner: str | None, state: object) -> bool:
+    """Covers: fail-closed ownership (ADR-0003 D6 orphan rule, provisional).
+
+    Ownership is authorized only by an exact :class:`OwnerState` member that
+    is not ``UNKNOWN``. Raw strings (``"unknown"``, ``"known-dead"``),
+    foreign or deserialized values, ``None`` and the ``UNKNOWN`` sentinel all
+    fail closed, so a corrupt inventory rebuilt from JSON/SQLite can never
+    turn an unowned item into an eligible action. A plain string compares
+    equal to a ``StrEnum`` member, so an identity comparison alone is not a
+    sufficient ownership gate.
+    """
+    if not isinstance(state, OwnerState) or state is OwnerState.UNKNOWN:
+        return False
+    return owner is not None and owner != ""
+
+
+def _usable_root(root: str) -> PurePosixPath | None:
+    """Return a usable owned root, or None when the root must be discarded.
+
+    Covers: malformed owned roots fail closed. Empty, NUL-bearing, relative,
+    traversal (``..``) and filesystem-root (``/``) roots are ignored so they
+    can never confer eligibility on arbitrary paths. This stays within the
+    existing lexical parser: no new root source or resolution is introduced.
+    """
+    if root == "" or "\x00" in root:
+        return None
+    pure_root = PurePosixPath(root)
+    if not pure_root.is_absolute():
+        return None
+    if ".." in pure_root.parts:
+        return None
+    if pure_root == PurePosixPath("/"):
+        return None
+    return pure_root
 
 
 def _check_filesystem_path(path: str, owned_roots: Sequence[str]) -> str | None:
     """Return None when ``path`` is safe, else the KEEP reason code.
 
-    Covers: outside-root escapes and ``..`` traversals (ADR-0003 D6 root
-    confinement). Purely lexical: blind to symlink, mount/bind, and TOCTOU
-    escapes. Eligible verdicts are policy proposals only, never deletion
-    authorization; only a future GC executor that resolves paths against
-    validated owner roots at execution time may act.
+    Covers: outside-root escapes, ``..`` traversals and owned-root
+    self-protection (ADR-0003 D6 root confinement). A path equal to an owned
+    root is never eligible (``root-itself-protected``); only a strict
+    descendant of a usable owned root is. Purely lexical: blind to symlink,
+    mount/bind, and TOCTOU escapes. Eligible verdicts are policy proposals
+    only, never deletion authorization; only a future GC executor that
+    resolves paths against validated owner roots at execution time may act.
     """
     if path == "":
         return "missing-metadata"
@@ -287,14 +324,17 @@ def _check_filesystem_path(path: str, owned_roots: Sequence[str]) -> str | None:
         return "relative-path"
     if ".." in pure.parts:
         return "path-escape"
+    descendant = False
     for root in owned_roots:
-        if root == "" or "\x00" in root:
+        pure_root = _usable_root(root)
+        if pure_root is None:
             continue
-        pure_root = PurePosixPath(root)
-        if not pure_root.is_absolute():
-            continue
-        if pure == pure_root or pure_root in pure.parents:
-            return None
+        if pure == pure_root:
+            return "root-itself-protected"
+        if pure_root in pure.parents:
+            descendant = True
+    if descendant:
+        return None
     return "outside-roots"
 
 
