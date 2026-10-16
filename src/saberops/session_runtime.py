@@ -168,8 +168,16 @@ class AgentSessionRuntime:
 
         def serve() -> None:
             try:
+                # No ``--pure``: the installed opencode v2.0.29 ``serve --help``
+                # (committed at
+                # tests/fixtures/vendor_cli/opencode/opencode-v2.0.29/config_help.txt)
+                # documents no such flag (HV-1 F1, fixed in Step 024/HV-2).
+                # Isolation is the hermetic child environment plus the pinned
+                # inline ``OPENCODE_CONFIG_CONTENT`` built from ``{}``; the
+                # worktree is the child ``cwd`` and the per-request
+                # ``?directory=`` query parameter (see ``api``).
                 self.process_result = launch_worker_process(
-                    [binary, "serve", "--pure", "--hostname", "127.0.0.1", "--port", "0"],
+                    [binary, "serve", "--hostname", "127.0.0.1", "--port", "0"],
                     cwd=request.worktree_path,
                     # Hermetic child environment: only safe runtime variables
                     # plus the explicit request overlay (including the injected

@@ -69,10 +69,14 @@ def verify_native_model(
         env: dict[str, str] = {}
         if backend == "opencode":
             agent = "saberops-access-check"
-            # A dedicated agent overrides ambient build/plan permissions. Pure
-            # disables plugins. The check runs in an empty temporary
-            # directory, so no project config loads; the inline config
-            # below outranks the user's global config file.
+            # A dedicated agent overrides ambient build/plan permissions.
+            # The check runs in an empty temporary directory (the child
+            # ``cwd``), so no project config loads; the inline config below
+            # outranks the user's global config file.  The installed
+            # opencode v2.0.29 ``run --help`` documents no ``--dir`` or
+            # ``--pure`` flag (HV-1 F1, fixed in Step 024/HV-2), so the
+            # directory is the child ``cwd`` and isolation is this pinned
+            # inline config (deny-by-default permissions) rather than a flag.
             access_config: dict[str, Any] = {
                 "permission": "deny", "share": "disabled",
                 # steps=1 injects OpenCode's final-step summary instruction
@@ -88,8 +92,8 @@ def verify_native_model(
             if separator and provider:
                 access_config["enabled_providers"] = [provider]
             env["OPENCODE_CONFIG_CONTENT"] = json.dumps(access_config)
-            argv = [executable, "run", prompt, "--model", model, "--dir", directory,
-                    "--pure", "--agent", agent, "--format", "json"]
+            argv = [executable, "run", prompt, "--model", model,
+                    "--agent", agent, "--format", "json"]
         else:
             agent = "saberops-access-" + uuid.uuid4().hex
             agents = cwd / ".agents" / "agents"

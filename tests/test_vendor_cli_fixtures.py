@@ -7,6 +7,7 @@ real vendor CLI, sends a prompt, or contacts a vendor.
 from __future__ import annotations
 
 import getpass
+import io
 import json
 import stat
 from pathlib import Path
@@ -16,6 +17,7 @@ import pytest
 
 from saberops import vendor_cli_fixtures as vcf
 from saberops.vendor_cli_fixtures import (
+    CHECK_INVALID_MANIFEST_EXIT,
     HELP_COMMANDS,
     MANIFEST_PATH,
     MISSING,
@@ -267,6 +269,14 @@ def test_detect_drift_skips_unknown_versions() -> None:
 
 
 def _write_manifest(tmp_path: Path, version: str) -> Path:
+    """Write a *valid* manifest and the fixture file it names.
+
+    ``run_check`` validates the manifest first (HV-2), so the drift tests need
+    a manifest whose fixture file exists and is redaction-clean.
+    """
+    fixture = tmp_path / "help" / "x" / "config_help.txt"
+    fixture.parent.mkdir(parents=True, exist_ok=True)
+    fixture.write_text("$ codex --help (exit 0)\nstub help for codex\n", encoding="utf-8")
     path = tmp_path / "manifest.json"
     path.write_text(
         json.dumps(
@@ -281,7 +291,7 @@ def _write_manifest(tmp_path: Path, version: str) -> Path:
                         "kind": "config_help",
                         "source": "real-capture",
                         "redacted": True,
-                        "file": "codex/x/config_help.txt",
+                        "file": "help/x/config_help.txt",
                         "consumer": "saberops.workers.codex:CodexAdapter",
                         "expect": {"flags": []},
                     }
@@ -304,6 +314,47 @@ def test_check_exit_codes_for_match_and_drift(
     assert match == 0
     drift = run_check(_write_manifest(tmp_path, "codex 0.9"), which=which, stream=_Null())
     assert drift == 1
+
+
+def test_check_refuses_an_invalid_manifest_without_running_drift(
+    tmp_path: Path,
+) -> None:
+    """Covers: HV-2 `check` validates the manifest before the drift run."""
+    probes: list[str] = []
+
+    def which(name: str) -> str | None:
+        probes.append(name)
+        return None
+
+    path = tmp_path / "manifest.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "fixtures": [
+                    {
+                        "vendor": "codex",
+                        "cli": "codex",
+                        "cli_version": "codex 1.0",
+                        "captured_on": "2026-10-16",
+                        "kind": "not-a-kind",
+                        "source": "real-capture",
+                        "redacted": True,
+                        "file": "codex/x/config_help.txt",
+                        "consumer": "saberops.workers.codex:CodexAdapter",
+                        "expect": {"flags": []},
+                    }
+                ],
+                "fake_only": [],
+            }
+        )
+    )
+    stream = io.StringIO()
+    exit_code = run_check(path, which=which, stream=stream)
+    assert exit_code == CHECK_INVALID_MANIFEST_EXIT
+    assert exit_code != 0
+    assert "INVALID manifest" in stream.getvalue()
+    assert probes == [], "drift must not probe versions for an invalid manifest"
 
 
 class _Null:

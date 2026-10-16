@@ -33,6 +33,8 @@ from saberops.process import ProcessResult
 def test_model_check_requires_completed_challenge_and_denies_tools(
     tmp_path: Path, backend: str, outcome: str,
 ) -> None:
+    """Covers: HV-2 isolation contract (opencode check cwd + deny inline config)."""
+
     def runner(argv: list[str], **kwargs: Any) -> ProcessResult:
         directory = Path(kwargs["cwd"])
         assert directory != tmp_path and directory.is_dir()
@@ -45,7 +47,11 @@ def test_model_check_requires_completed_challenge_and_denies_tools(
             config = json.loads(kwargs["env"]["OPENCODE_CONFIG_CONTENT"])
             agent = config["agent"][argv[argv.index("--agent") + 1]]
             assert agent["permission"] == "deny" and agent["steps"] == 2
-            assert "--pure" in argv
+            # v2.0.29 documents neither ``--pure`` nor ``--dir`` (HV-1 F1,
+            # fixed in Step 024/HV-2): the directory is the child cwd and
+            # isolation is this deny-by-default inline config.
+            assert "--pure" not in argv and "--dir" not in argv
+            assert config["permission"] == "deny"
             output = json.dumps({"type": "text", "part": {"text": challenge[0]}})
             if outcome != "partial":
                 output += '\n' + json.dumps({"type": "step_finish", "part": {"reason": "stop"}})

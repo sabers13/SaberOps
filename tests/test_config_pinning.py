@@ -37,7 +37,8 @@ def _write_recording_stub(bindir: Path, name: str, outfile: Path) -> None:
         f"#!{sys.executable}\n"
         "import json, os, sys\n"
         f"with open({str(outfile)!r}, 'w', encoding='utf-8') as fh:\n"
-        "    json.dump({'argv': sys.argv, 'env': dict(os.environ)}, fh, sort_keys=True)\n"
+        "    json.dump({'argv': sys.argv, 'cwd': os.getcwd(), 'env': dict(os.environ)},"
+        " fh, sort_keys=True)\n"
     )
     path = bindir / name
     path.write_text(script, encoding="utf-8")
@@ -69,6 +70,7 @@ def _child(outfile: Path) -> dict[str, Any]:
 def test_opencode_run_pins_enabled_providers_and_drops_shell_config(
     stub_bin: tuple[Path, Path], tmp_path: Path
 ) -> None:
+    """Covers: HV-2 isolation contract (pinned inline config + child cwd)."""
     bindir, outfile = stub_bin
     _write_recording_stub(bindir, "stub-opencode", outfile)
     adapter = OpenCodeAdapter(opencode_bin="stub-opencode")
@@ -98,8 +100,14 @@ def test_opencode_run_pins_enabled_providers_and_drops_shell_config(
     # selection, and billing itself is pinned above.
     assert child["env"]["OPENCODE_SERVER_USERNAME"] == "shell-user"
     argv = child["argv"]
-    assert argv[1] == "run" and "--pure" in argv
+    # opencode v2.0.29 documents neither ``--pure`` nor ``--dir`` (HV-1 F1,
+    # fixed in Step 024/HV-2).  The worktree now travels as the child ``cwd``
+    # (the documented directory mechanism) and isolation is the pinned inline
+    # ``OPENCODE_CONFIG_CONTENT`` asserted above -- never an argv flag.
+    assert argv[1] == "run"
+    assert "--pure" not in argv and "--dir" not in argv
     assert argv[argv.index("--model") + 1] == MODEL
+    assert Path(child["cwd"]).resolve() == tmp_path.resolve()
 
 
 def test_opencode_run_refuses_model_without_provider_prefix(

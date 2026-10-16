@@ -332,6 +332,7 @@ def test_native_resume_keeps_readonly_permissions_and_frozen_environment(
     provider: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Covers: HV-2 isolation contract (opencode resume argv + pinned config)."""
     calls: list[tuple[list[str], dict[str, Any]]] = []
     monkeypatch.setattr("saberops.workers.codex.GitManager.get_changed_paths", lambda _: [])
 
@@ -379,7 +380,14 @@ def test_native_resume_keeps_readonly_permissions_and_frozen_environment(
         assert args[args.index("--tools") + 1] == "Read,Glob,Grep"
         assert args[args.index("--permission-mode") + 1] == "plan"
     else:
-        assert "--pure" in args and "--session" in args
+        # opencode v2.0.29 documents neither ``--pure`` nor ``--dir`` (HV-1 F1,
+        # fixed in Step 024/HV-2).  Isolation is the inline config pinned from
+        # an empty base -- not an argv flag.
+        assert "--pure" not in args and "--dir" not in args
+        assert "--session" in args
+        assert json.loads(kwargs["env"]["OPENCODE_CONFIG_CONTENT"]) == {
+            "enabled_providers": ["test"]
+        }
 
 
 def test_only_successful_matching_orchestrator_session_is_reused(tmp_path: Path) -> None:

@@ -184,18 +184,25 @@ def test_config_help_absent_flags_match_recorded_drift(fixture: Fixture) -> None
     assert absent == set(fixture.expect.get("known_missing", []))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "HV-1 finding F1: workers/opencode.py pins --pure/--dir, which are absent "
-        "from the installed opencode v2.0.29 help (installed-version drift)"
-    ),
-)
 def test_opencode_adapter_flags_are_all_documented() -> None:
-    """Covers: HV-1 finding F1 correct expectation (adapter flags documented)."""
+    """Covers: HV-2 F1 (every flag SaberOps pins is in the v2.0.29 help).
+
+    HV-1 recorded this as a strict ``xfail`` (F1 drift: the adapter pinned
+    ``--pure``/``--dir``, which the installed help does not document).  Step
+    024 (HV-2) removed both flags from ``workers/opencode.py``,
+    ``session_runtime.py`` and ``model_access/model_verification.py``, so the
+    fixture's pinned-flag expectation is documented and this contract test is
+    a plain pass.  ``fixture.expect["flags"]`` is the union of the flags and
+    subcommands the three sites pass: ``run``/``--model``/``--format``/
+    ``--session`` (worker), ``--agent`` (first-use check), and
+    ``serve``/``--hostname``/``--port`` (session server).
+    """
     fixture = next(
         fx for fx in CONFIG_HELP if fx.consumer == "saberops.workers.opencode:OpenCodeAdapter"
     )
     text = _text(fixture)
     absent = [flag for flag in fixture.expect["flags"] if flag not in text]
     assert absent == [], f"opencode adapter pins flags absent from help: {absent}"
+    assert not fixture.expect.get("known_missing"), (
+        "F1 is fixed: no pinned flag may remain recorded as missing from help"
+    )

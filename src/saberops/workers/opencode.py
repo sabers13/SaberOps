@@ -163,20 +163,19 @@ class OpenCodeAdapter(WorkerAdapter):
         # stdin as the message when no positional is given (see
         # max_prompt_bytes docstring). This never risks E2BIG for a large
         # prompt: the oversized text never enters argv.
+        #
+        # The installed opencode v2.0.29 ``run --help`` (committed at
+        # tests/fixtures/vendor_cli/opencode/opencode-v2.0.29/config_help.txt)
+        # documents neither ``--dir`` nor ``--pure`` (HV-1 finding F1, fixed in
+        # Step 024/HV-2).  The worktree is carried by the child ``cwd`` below --
+        # not by an argv flag -- and isolation is the hermetic child
+        # environment plus the pinned inline ``OPENCODE_CONFIG_CONTENT``, which
+        # outranks project and global config.  Do not re-add a flag that the
+        # installed CLI's help does not document.
         cmd = [self.opencode_bin, "run"]
         if not use_stdin:
             cmd.append(request.task)
-        cmd.extend(
-            [
-                "--model",
-                request.model,
-                "--dir",
-                str(request.worktree_path),
-                "--pure",
-                "--format",
-                "json",
-            ]
-        )
+        cmd.extend(["--model", request.model, "--format", "json"])
         if request.native_resume_id:
             cmd.extend(["--session", request.native_resume_id])
         # Installed OpenCode 1.18.25 exposes provider-native usage on JSONL

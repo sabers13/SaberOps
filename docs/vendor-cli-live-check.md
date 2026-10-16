@@ -21,6 +21,12 @@ recorded version differs from the installed one.  Owner-supplied logs whose
 exact version was not recorded (`cli_version = "unknown"`) are skipped: drift
 cannot be assessed for them.
 
+The manifest is validated first (`validate_manifest`).  An unknown kind or
+source, a missing or unredacted fixture file, a duplicate path or a bad date
+prints an `INVALID manifest` block and exits `2` **without** running the drift
+comparison: a version comparison over an unverified manifest could otherwise
+print a misleading `no drift`.
+
 ## 2. Capture (owner-run, token-free)
 
 ```bash
@@ -60,14 +66,32 @@ classifier in `consumer`.  Until then the gap stays visible in the manifest's
 | Date | CLI versions | Drift result | Fixtures refreshed |
 | --- | --- | --- | --- |
 | 2026-10-16 | codex `codex-cli 0.162.1`; claude `2.1.301 (Claude Code)`; opencode `opencode v2.0.29` | no drift (`check` exit 0; 3 `config_help` fixtures match) | y — `config_help` captured and owner-kept (D-0015); usage panels/JSON and exhaustion **not** refreshed: owner-declined 2026-10-16 (D-0016), recorded under `fake_only` |
+| 2026-10-17 | opencode `opencode v2.0.29` | not run (fixture edit only) | y — `opencode/opencode-v2.0.29/config_help.txt` re-captured token-free with `opencode serve --help` appended (Step 024/HV-2, authorized by the step prompt); the first three sections reproduced byte-for-byte |
 
-## 5. Open finding
+## 5. Findings
 
-**F1 — OpenCode flag pinning drift (routed to idea, D-0017).**  `src/saberops/workers/opencode.py` pins
-`--pure` and `--dir`, but the installed `opencode v2.0.29` help (and binary)
-expose neither.  The fixture records the drift in
-`tests/fixtures/vendor_cli/opencode/opencode-v2.0.29/config_help.txt`; the
-contract test
+**F1 — OpenCode flag pinning drift — FIXED in Step 024 (HV-2).**  HV-1 recorded that the
+adapters pinned flags the installed `opencode v2.0.29` help does not document:
+`src/saberops/workers/opencode.py` passed `--dir`/`--pure`,
+`src/saberops/session_runtime.py` passed `serve --pure`, and
+`src/saberops/model_access/model_verification.py` passed `--dir`/`--pure`.  Step 024 removed
+every one of them — no undocumented flag remains.  The worktree now travels as the child
+process `cwd` (the documented directory mechanism: the top-level help's
+`opencode <subcommand> [flags] [<directory>]` argument), and isolation is preserved by the
+hermetic child environment plus the pinned inline `OPENCODE_CONFIG_CONTENT`, which outranks
+project and global config.  The fixture capture was extended token-free with
+`opencode serve --help` so the serve site's flags are covered too, and the former strict
+`xfail` on
 `tests/test_contract_vendor_cli_parsers.py::test_opencode_adapter_flags_are_all_documented`
-is a strict `xfail` for this finding.  No adapter is edited here (out of
-scope); Orch confirmed the finding and captured it as an idea for owner triage (D-0017).
+is now a plain pass.
+
+Help lines relied on (installed `opencode v2.0.29`, exit 0), in
+`tests/fixtures/vendor_cli/opencode/opencode-v2.0.29/config_help.txt`:
+
+* `$ opencode run --help` — `opencode run [flags] [<message...>]`; flags `--model, -m`,
+  `--agent`, `--format`, `--session, -s`, `--fork`, `--continue, -c`, `--auto`, …; **no
+  `--pure`, no `--dir`**.
+* `$ opencode serve --help` — `opencode serve [flags]`; flags `--hostname`, `--port`
+  (and `--cors`, `--service`, `--stdio`); **no `--pure`**.
+* `$ opencode --help` — top-level usage `opencode <subcommand> [flags] [<directory>]` with
+  a `directory` argument; subcommands `run`, `serve`, `models`.
