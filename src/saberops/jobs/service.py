@@ -571,22 +571,46 @@ def _resolve_run_and_db(db: Any, run_id: str) -> tuple[Any, Any] | None:
         return None
 
 
-def _run_has_d8_receipt(run_db: Any, run_id: str) -> bool:
-    """True iff the run durably carries a D8 preemption receipt.
+def _run_has_authentic_d8_receipt(
+    run_db: Any, db: Any, run_id: str, job: Job
+) -> bool:
+    """True iff the run's terminal D8 outcome can be authenticated.
 
-    A receipt is a decision, an intent, a completed park, or the typed
-    ``PREEMPTION_LIMIT`` terminal failure.  This is what makes old-run debt
-    settleable **without** the job still being RUNNING.  Any unreadable event
-    channel fails closed (returns False) so ambiguity never frees capacity.
+    A receipt is acceptable only when it is **authentic**:
+
+    * an authenticated bound ``preemption_preparing`` decision (real decision
+      reference, exact job/repo/base identity, exact attempt snapshot, exact
+      durable owner generation) -- with or without a matching verified intent;
+      or
+    * the typed ``PREEMPTION_LIMIT`` terminal failure, whose only production
+      writer is the fenced limit tail.
+
+    A plausible-looking legacy intent, or a receipt whose owner/source binding
+    cannot be proven, returns False so the caller retains WIP, job and charged
+    capacity and surfaces the owner question.  Any unreadable channel fails
+    closed.
     """
-    from saberops.preemption import INTENT_EVENT, PREPARATION_EVENT, RUN_PREEMPTED_EVENT
+    from saberops import preemption
 
-    for event_type in (INTENT_EVENT, PREPARATION_EVENT, RUN_PREEMPTED_EVENT):
-        try:
-            if run_db.get_events_by_type(run_id, event_type):
-                return True
-        except Exception:
-            return False
+    consumed = not (job.state == JobState.RUNNING and job.current_run_id == run_id)
+    expected_before = int(job.preemptions) - (1 if consumed else 0)
+    if expected_before < 0:
+        return False
+    try:
+        txn = preemption.authenticate_prepared_transaction(
+            db,
+            run_id=run_id,
+            job=job,
+            repo_path=job.repo,
+            expected_preemptions_before=expected_before,
+        )
+    except Exception:
+        return False
+    if txn.ok:
+        return True
+    if txn.detail != "decision_missing":
+        return False
+    # Only the fenced limit tail may stand in for a preemption decision here.
     try:
         failed = run_db.get_events_by_type(run_id, "run_failed")
     except Exception:
@@ -613,7 +637,8 @@ def settle_preemption_debts(
     can leave its *old* run's RESERVED rows charged forever.  This scan starts
     from durable owner-storage debt (:func:`ledger.list_reserved_debts`, paged
     so old debt is never starved) and releases only runs that are provably
-    terminal **and** carry a D8 receipt.  It is:
+    terminal **and** whose D8 outcome can be authenticated (bound decision or
+    the typed limit tail).  It is:
 
     * idempotent (a released row no longer appears; the UPDATE is
       state-guarded);
@@ -621,7 +646,9 @@ def settle_preemption_debts(
     * fenced, when a ``lease_guard`` is supplied, inside the same transaction
       as the release (a stale scheduler writes nothing);
     * fail-closed: an unresolvable run, a non-terminal run, a COMPLETED run
-      (settled elsewhere), or a run without a D8 receipt is skipped.
+      (settled elsewhere), a run outside the job's dispatch lineage, a live
+      generation, or a run whose receipt cannot be authenticated (e.g. an
+      unbound legacy intent) is skipped -- WIP, job and charge are retained.
     """
     moment = now if now is not None else datetime.now(UTC)
     from saberops.capacity.ledger import list_reserved_debts, release_terminal_debt
@@ -646,29 +673,35 @@ def settle_preemption_debts(
             if status in (None, RunStatus.RUNNING, RunStatus.PENDING, RunStatus.COMPLETED):
                 skipped += 1
                 continue
-            if not _run_has_d8_receipt(run_db, debt.run_id):
+            if debt.job_id is None:
+                # No owning job means no way to authenticate the D8 receipt:
+                # fail closed and retain the charge.
                 skipped += 1
                 continue
-            if debt.job_id is not None:
+            try:
+                owning_job = store.get_job(db, debt.job_id)
+            except Exception:
+                skipped += 1
+                continue
+            if owning_job is None:
+                skipped += 1
+                continue
+            if debt.run_id not in owning_job.run_ids:
+                # The reservation is not on this job's own dispatch lineage.
+                skipped += 1
+                continue
+            if owning_job.state == JobState.RUNNING and owning_job.current_run_id == (
+                debt.run_id
+            ):
                 # Never free capacity while the owning job is STILL the live
                 # generation of this exact run: its reservation is what makes
-                # the pool/global occupancy accounting truthful (releasing it
-                # early could over-admit another job into the same pool).  That
-                # generation's own requeue tail settles it instead.  An
-                # unresolvable job fails closed.
-                try:
-                    owning_job = store.get_job(db, debt.job_id)
-                except Exception:
-                    skipped += 1
-                    continue
-                if owning_job is None:
-                    skipped += 1
-                    continue
-                if owning_job.state == JobState.RUNNING and owning_job.current_run_id == (
-                    debt.run_id
-                ):
-                    skipped += 1
-                    continue
+                # pool/global occupancy truthful (early release could
+                # over-admit).  That generation's own requeue tail settles it.
+                skipped += 1
+                continue
+            if not _run_has_authentic_d8_receipt(run_db, db, debt.run_id, owning_job):
+                skipped += 1
+                continue
             result = release_terminal_debt(
                 db,
                 run_id=debt.run_id,

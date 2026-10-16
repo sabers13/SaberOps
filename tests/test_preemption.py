@@ -45,6 +45,7 @@ from saberops.models import (
     Tier,
     WorkerInterruptionReason,
 )
+from saberops.ownership import ProcessIdentity
 
 _NOW = datetime(2026, 10, 15, 12, 0, 0, tzinfo=UTC)
 _QUOTA = WorkerInterruptionReason.QUOTA_EXHAUSTED.value
@@ -151,6 +152,18 @@ def _dispatched(db: Database, repo: str, base: str, job_id: str, run_id: str) ->
     db.create_run(_run(run_id, repo, base))
 
 
+def _dead_owner_identity() -> ProcessIdentity:
+    """A provably DEAD incarnation (recorded boot id cannot be this boot)."""
+    return ProcessIdentity(
+        host=ProcessIdentity.for_self().host,
+        boot_id="00000000-0000-0000-0000-000000000000",
+        pid=2147483646,
+        start_ticks=None,
+        session_id=None,
+        process_group_id=None,
+    )
+
+
 def _seed_prepared_intent(
     db: Database,
     run_id: str,
@@ -160,16 +173,27 @@ def _seed_prepared_intent(
     index: int = 0,
     preemptions_before: int = 0,
 ) -> str:
-    """Seed a *genuine* prepared-artifact intent (setup-only crash fixture).
+    """Seed an *authentic* bound prepared-artifact transaction (setup-only).
 
-    Recovery re-verifies the recorded artifacts before it will finish a
-    crashed transaction, so these fixtures must reference objects that really
-    exist: a real resume capsule produced by the production handoff builder
-    and (by the caller) a real direct checkpoint anchor ref.  Only the setup
-    is realistic here -- the behaviour under test is unchanged.
+    Recovery only promotes a D8 transaction that is bound to a real executor
+    generation, so these crash fixtures must build the genuine protocol state:
+    a claimed executor generation, an authentic ``preemption_preparing``
+    decision over the current attempt snapshot, a real resume capsule produced
+    by the production handoff builder, and (by the caller) a real direct
+    checkpoint anchor ref.  Only the setup is realistic; the behaviour under
+    test is unchanged.
     """
     from saberops.handoff import create_handoffs
 
+    owner = db.claim_execution_owner(run_id, identity=_dead_owner_identity())
+    job = store.get_job(db, job_id)
+    assert job is not None
+    decision = preemption.build_preemption_decision(
+        db, run_id=run_id, job=job,
+        owner_id=owner.owner_id, owner_generation=owner.generation,
+        decision_ref="test:bound-crash-fixture",
+    )
+    assert preemption.record_preparation_decision(db, decision)
     _, capsule = create_handoffs(db, run_id)
     db.record_event(
         run_id,
@@ -183,6 +207,8 @@ def _seed_prepared_intent(
             "not_before": None,
             "preemptions_before": preemptions_before,
             "preemptions_next": preemptions_before + 1,
+            "owner_id": owner.owner_id,
+            "owner_generation": owner.generation,
         },
     )
     return str(capsule.id)

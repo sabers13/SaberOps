@@ -1053,6 +1053,31 @@ def _reconstruct_frozen_worker_binding_registry(payload: Any | None) -> Any | No
         return None
 
 
+def _current_executor_owner_token(db: Any, run_id: str) -> tuple[str | None, int | None]:
+    """Return ``(owner_id, generation)`` iff *this process* is the executor.
+
+    ADR-0002 D8 crash recovery binds a decision receipt to the exact executor
+    generation that made it, so the receipt must name the durable owner row
+    only when that row's recorded process incarnation **is this process**.
+    Looking up "whatever owner row happens to exist" would let a stale process
+    stamp its decision with another generation's identity, so anything not
+    positively adopted by this incarnation returns ``(None, None)`` -- an
+    unbound receipt that recovery refuses to promote (fail closed).
+    """
+    try:
+        owner = db.get_execution_owner(run_id)
+    except Exception:
+        return None, None
+    if owner is None or not owner.is_active:
+        return None, None
+    try:
+        if owner.identity != ProcessIdentity.for_self():
+            return None, None
+    except Exception:
+        return None, None
+    return owner.owner_id, int(owner.generation)
+
+
 class Orchestrator:
     """Orchestrates end-to-end task execution in isolated Git worktrees."""
 
@@ -3304,11 +3329,16 @@ class Orchestrator:
                             # inside and keep this FAILED path unchanged.
                             from saberops.preemption import complete_preemption
 
+                            _stop_owner_id, _stop_owner_gen = _current_executor_owner_token(
+                                self.db, run_id
+                            )
                             preempted = complete_preemption(
                                 self.db,
                                 run_id=run_id,
                                 repo_path=str(repo),
                                 base_sha=base_commit,
+                                owner_id=_stop_owner_id,
+                                owner_generation=_stop_owner_gen,
                                 decision_ref=f"autonomous_stop:{stop_reason}",
                             )
                             if preempted.owned:
@@ -8540,11 +8570,16 @@ class Orchestrator:
             # were for the resumed run to continue.
             from saberops.preemption import complete_preemption as _complete_preemption
 
+            _chain_owner_id, _chain_owner_gen = _current_executor_owner_token(
+                self.db, run_id
+            )
             _preemption = _complete_preemption(
                 self.db,
                 run_id=run_id,
                 repo_path=str(repo),
                 base_sha=base_commit,
+                owner_id=_chain_owner_id,
+                owner_generation=_chain_owner_gen,
                 decision_ref="end_of_chain",
             )
             if _preemption.owned:

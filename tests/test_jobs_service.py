@@ -524,8 +524,11 @@ def test_surgeon_only_capability_is_not_feasible_at_submit() -> None:
 
 def test_reconcile_preempted_run_completes_requeue(tmp_path: Path) -> None:
     """Covers: ADR-0002 D8 reconciler finishes a crashed preemption (service)."""
+    from saberops import preemption
     from saberops.git import GitManager
+    from saberops.handoff import create_handoffs
     from saberops.models import Run
+    from saberops.ownership import ProcessIdentity
 
     db = Database(tmp_path / "jobs.db")
     repo = _git_repo(tmp_path / "repo")
@@ -540,16 +543,35 @@ def test_reconcile_preempted_run_completes_requeue(tmp_path: Path) -> None:
             tier=Tier.T2,
             training_allowed=True,
             gate_command="make gate",
-            status=RunStatus.PREEMPTED,
+            status=RunStatus.RUNNING,
             created_at=_NOW.isoformat(),
             config_json="{}",
         )
     )
+    # Setup-only realism: recovery only finishes an *authenticated* bound
+    # transaction, so seed the real protocol state (claimed executor
+    # generation, authentic decision over the current attempt snapshot, real
+    # direct anchor ref, real capsule) before crashing to PREEMPTED.
+    owner = db.claim_execution_owner(
+        "run_p1",
+        identity=ProcessIdentity(
+            host=ProcessIdentity.for_self().host,
+            boot_id="00000000-0000-0000-0000-000000000000",
+            pid=2147483646,
+            start_ticks=None,
+            session_id=None,
+            process_group_id=None,
+        ),
+    )
+    job = get_job(db, job_id)
+    assert job is not None
+    decision = preemption.build_preemption_decision(
+        db, run_id="run_p1", job=job,
+        owner_id=owner.owner_id, owner_generation=owner.generation,
+        decision_ref="test:svc-bound",
+    )
+    assert preemption.record_preparation_decision(db, decision)
     ref = GitManager.anchor_checkpoint_ref(repo, job_id, 0, base)
-    # Setup-only realism: recovery re-verifies the capsule, so seed a real one
-    # through the production handoff builder (behaviour under test unchanged).
-    from saberops.handoff import create_handoffs
-
     _, capsule = create_handoffs(db, "run_p1")
     db.record_event(
         "run_p1",
@@ -563,7 +585,15 @@ def test_reconcile_preempted_run_completes_requeue(tmp_path: Path) -> None:
             "not_before": None,
             "preemptions_before": 0,
             "preemptions_next": 1,
+            "owner_id": owner.owner_id,
+            "owner_generation": owner.generation,
         },
+    )
+    db.update_run(
+        run_id="run_p1",
+        status=RunStatus.PREEMPTED,
+        completed_at=_NOW.isoformat(),
+        result_summary="crashed mid-protocol",
     )
 
     def status(run_id: str) -> RunStatus | None:

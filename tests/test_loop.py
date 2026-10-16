@@ -1572,7 +1572,9 @@ def test_scheduler_tick_reconciles_preempted_run_and_releases_reservation(
     """
     import subprocess
 
+    from saberops import preemption
     from saberops.git import GitManager
+    from saberops.ownership import ProcessIdentity
 
     t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
     lease = acquire_lease(owner_db, "instance_A", ttl_seconds=30.0, now=t0)
@@ -1618,11 +1620,34 @@ def test_scheduler_tick_reconciles_preempted_run_and_releases_reservation(
             tier=Tier.T2,
             training_allowed=True,
             gate_command="make gate",
-            status=RunStatus.PREEMPTED,
+            status=RunStatus.RUNNING,
             created_at=t0.isoformat(),
             config_json="{}",
         )
     )
+    # Setup-only realism: recovery only finishes an *authenticated* bound
+    # transaction, so seed the real protocol state (claimed executor
+    # generation, authentic decision over the current attempt snapshot, real
+    # direct anchor ref, real capsule) before the crash to PREEMPTED.
+    owner = owner_db.claim_execution_owner(
+        "run_old",
+        identity=ProcessIdentity(
+            host=ProcessIdentity.for_self().host,
+            boot_id="00000000-0000-0000-0000-000000000000",
+            pid=2147483646,
+            start_ticks=None,
+            session_id=None,
+            process_group_id=None,
+        ),
+    )
+    job_after = store.get_job(owner_db, "job_prem")
+    assert job_after is not None
+    decision = preemption.build_preemption_decision(
+        owner_db, run_id="run_old", job=job_after,
+        owner_id=owner.owner_id, owner_generation=owner.generation,
+        decision_ref="test:tick-bound",
+    )
+    assert preemption.record_preparation_decision(owner_db, decision)
     GitManager.anchor_checkpoint_ref(repo_dir, "job_prem", 0, base_sha)
     from saberops.handoff import create_handoffs
 
@@ -1639,7 +1664,15 @@ def test_scheduler_tick_reconciles_preempted_run_and_releases_reservation(
             "not_before": None,
             "preemptions_before": 0,
             "preemptions_next": 1,
+            "owner_id": owner.owner_id,
+            "owner_generation": owner.generation,
         },
+    )
+    owner_db.update_run(
+        run_id="run_old",
+        status=RunStatus.PREEMPTED,
+        completed_at=t0.isoformat(),
+        result_summary="crashed mid-protocol",
     )
     reserve(
         owner_db,

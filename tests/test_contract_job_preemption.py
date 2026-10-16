@@ -158,6 +158,31 @@ def _dead_identity() -> ProcessIdentity:
     )
 
 
+def _claim_dead_owner(db: Database, run_id: str) -> tuple[str, int]:
+    """Claim the run for a provably dead generation; return its token."""
+    owner = db.claim_execution_owner(run_id, identity=_dead_identity())
+    return owner.owner_id, int(owner.generation)
+
+
+def _seed_bound_decision(
+    db: Database,
+    run_id: str,
+    job_id: str,
+    *,
+    owner_id: str,
+    owner_generation: int,
+    decision_ref: str = "test:bound",
+) -> None:
+    """Record an authentic current-protocol D8 decision receipt (setup-only)."""
+    job = _job_for(db, job_id)
+    decision = preemption.build_preemption_decision(
+        db, run_id=run_id, job=job,
+        owner_id=owner_id, owner_generation=owner_generation,
+        decision_ref=decision_ref,
+    )
+    assert preemption.record_preparation_decision(db, decision)
+
+
 def _job_for(db: Database, job_id: str) -> Job:
     job = store.get_job(db, job_id)
     assert job is not None
@@ -170,15 +195,17 @@ def _park_then_reopen_release_window(
 ) -> None:
     """Produce the exact R1 crash window deterministically.
 
-    The coordinator is run for real, so the durable evidence (verified intent,
-    capsule, anchor ref, one count) is genuine; then, setup-only, the old
-    run's settlement rows are put back to RESERVED to re-create the precise
-    state "committed requeue, release not yet committed" that the crash leaves
-    behind.  Nothing else about the transaction is synthesized.
+    The coordinator is run for real under the authentic executor token, so the
+    durable evidence (bound decision, verified intent, capsule, anchor ref, one
+    count) is genuine; then, setup-only, the old run's settlement rows are put
+    back to RESERVED to re-create the precise state "committed requeue, release
+    not yet committed" that the crash leaves behind.  Nothing else about the
+    transaction is synthesized.
     """
     _dispatched(db, str(repo), base, job_id, run_id)
     _quota_attempt(db, run_id, str(repo), AttemptStatus.FAILED)
     _quota_evidence(db, run_id)
+    owner_id, owner_generation = _claim_dead_owner(db, run_id)
     reserve(
         db,
         run_id=run_id,
@@ -189,7 +216,9 @@ def _park_then_reopen_release_window(
         now=_NOW,
     )
     out = preemption.complete_preemption(
-        db, run_id=run_id, repo_path=repo, base_sha=base, now=_NOW
+        db, run_id=run_id, repo_path=repo, base_sha=base,
+        owner_id=owner_id, owner_generation=owner_generation,
+        decision_ref="test:r1-window", now=_NOW,
     )
     assert out.owned and out.detail == "preempted"
     job = _job_for(db, job_id)
@@ -456,7 +485,7 @@ def _seed_running_preparation_crash(
         AttemptStatus.RUNNING if live_attempt else AttemptStatus.FAILED,
     )
     _quota_evidence(db, run_id)
-    db.claim_execution_owner(run_id, identity=_dead_identity())
+    owner_id, owner_generation = _claim_dead_owner(db, run_id)
 
     # Scoped patch: kill the protocol right after the decision receipt, before
     # any checkpoint/ref side effect.  A context manager keeps the autouse
@@ -464,14 +493,24 @@ def _seed_running_preparation_crash(
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("saberops.preemption._resolve_anchor_sha", lambda *_a, **_k: None)
         out = preemption.complete_preemption(
-            db, run_id=run_id, repo_path=repo, base_sha=base, now=_NOW
+            db, run_id=run_id, repo_path=repo, base_sha=base,
+            owner_id=owner_id, owner_generation=owner_generation,
+            decision_ref="test:prep-crash", now=_NOW,
         )
     assert not out.owned and out.detail == "no_anchor"
-    # Durable D8 decision exists; the run is still RUNNING (nothing else ran).
-    decision = db.get_events_by_type(run_id, preemption.PREPARATION_EVENT)
-    assert len(decision) == 1
+    # Durable, *authentic* D8 decision exists; the run is still RUNNING.
+    decision = authenticate_bound_transaction(db, run_id, job_id, repo)
+    assert decision == "preparing", decision
     assert db.get_run(run_id).status == RunStatus.RUNNING  # type: ignore[union-attr]
     assert _job_for(db, job_id).state == JobState.RUNNING
+
+
+def authenticate_bound_transaction(db: Database, run_id: str, job_id: str, repo: Path) -> str:
+    """Classify the durable transaction state via the production classifier."""
+    job = _job_for(db, job_id)
+    return preemption.classify_preemption_transaction(
+        db, run_id=run_id, job=job, repo_path=repo
+    ).state
 
 
 def test_supervisor_recovers_interrupted_preparation_before_orphaning(
@@ -567,10 +606,18 @@ def test_supervisor_does_not_infer_d8_from_quota_history_alone(
     assert db.get_events_by_type("run_old", preemption.PREPARATION_EVENT) == []
 
 
-def test_supervisor_blocks_unverified_intent_without_orphaning(
+def test_supervisor_blocks_legacy_intent_with_valid_artifacts(
     tmp_path: Path
 ) -> None:
-    """Covers: ADR-0002 D8 R2 -- an unverifiable receipt fails closed."""
+    """Covers: ADR-0002 D8 R2 -- an unbound legacy intent is NOT D8 authority.
+
+    The intent's SHA, direct anchor ref, capsule and quota-attempt evidence all
+    genuinely exist, but there is no authentic bound ``preemption_preparing``
+    decision: a valid SHA + capsule is not proof that D8 took this job's
+    terminal outcome, so restart must retain WIP/job/charge and NOT preempt or
+    orphan.
+    """
+    from saberops.handoff import create_handoffs
     from saberops.supervisor import RunSupervisor
 
     repo = tmp_path / "repo"
@@ -580,8 +627,9 @@ def test_supervisor_blocks_unverified_intent_without_orphaning(
     _quota_attempt(db, "run_old", str(repo), AttemptStatus.FAILED)
     _quota_evidence(db, "run_old")
     db.claim_execution_owner("run_old", identity=_dead_identity())
-    # A durable intent whose capsule does not exist: must NOT be trusted,
-    # NOT orphaned, NOT settled.
+    # Fully genuine artifacts, deliberately WITHOUT a bound decision receipt.
+    GitManager.anchor_checkpoint_ref(repo, "job1", 0, base)
+    _, capsule = create_handoffs(db, "run_old")
     db.record_event(
         "run_old",
         "preemption_committed",
@@ -589,18 +637,162 @@ def test_supervisor_blocks_unverified_intent_without_orphaning(
             "job_id": "job1",
             "checkpoint_sha": base,
             "checkpoint_ref": "refs/saberops/checkpoints/job1/0",
-            "handoff_id": "handoff_does_not_exist",
+            "handoff_id": capsule.id,
             "not_before": None,
             "preemptions_next": 1,
         },
     )
+    reserve(
+        db, run_id="run_old", job_id="job1", route="p/m",
+        draws=[PoolDraw("pool1", "5h")], size_bucket="M", now=_NOW,
+    )
+    assert authenticate_bound_transaction(db, "run_old", "job1", repo) == "blocked"
 
     result = RunSupervisor(db=db).reconcile("run_old")
-    assert result["action"] == "none"
+
+    assert result["action"] == "none", result
+    assert str(result["reason"]).startswith("preemption_blocked")
+    run = db.get_run("run_old")
+    assert run is not None and run.status == RunStatus.RUNNING
+    job = _job_for(db, "job1")
+    assert job.state == JobState.RUNNING
+    assert job.preemptions == 0
+    assert job.resume_from is None
+    # A bounded, owner-facing diagnostic is recorded; nothing was mutated.
+    blocked = db.get_events_by_type("run_old", "preemption_recovery_blocked")
+    assert len(blocked) == 1
+    # The charged reservation is retained.
+    assert _reservation_states(db, "run_old") == ["RESERVED"]
+
+
+def test_settlement_retains_charge_for_a_legacy_parked_run(tmp_path: Path) -> None:
+    """Covers: ADR-0002 D8 R1 -- no release on an unauthenticated receipt."""
+    from saberops.handoff import create_handoffs
+
+    repo = tmp_path / "repo"
+    base = _repo(repo)
+    db = _db(tmp_path)
+    _dispatched(db, str(repo), base, "job1", "run_old")
+    _quota_attempt(db, "run_old", str(repo), AttemptStatus.FAILED)
+    _quota_evidence(db, "run_old")
+    db.claim_execution_owner("run_old", identity=_dead_identity())
+    GitManager.anchor_checkpoint_ref(repo, "job1", 0, base)
+    _, capsule = create_handoffs(db, "run_old")
+    # Legacy parked state: PREEMPTED run + legacy intent, job requeued, with
+    # NO authentic bound decision.
+    db.record_event(
+        "run_old",
+        "preemption_committed",
+        payload={
+            "job_id": "job1",
+            "checkpoint_sha": base,
+            "checkpoint_ref": "refs/saberops/checkpoints/job1/0",
+            "handoff_id": capsule.id,
+            "not_before": None,
+            "preemptions_next": 1,
+        },
+    )
+    db.update_run(
+        run_id="run_old", status=RunStatus.PREEMPTED,
+        completed_at=_NOW.isoformat(), result_summary="legacy park",
+    )
+    store.requeue_exact(
+        db, "job1", WaitingReason.PREEMPTED,
+        expected_run_id="run_old", expected_preemptions=0,
+        resume_from=ResumeFrom(
+            run_id="run_old", checkpoint_sha=base, handoff_id=capsule.id
+        ),
+        now=_NOW,
+    )
+    reserve(
+        db, run_id="run_old", job_id="job1", route="p/m",
+        draws=[PoolDraw("pool1", "5h")], size_bucket="M", now=_NOW,
+    )
+
+    settlement = service.settle_preemption_debts(db, now=_NOW)
+    assert settlement.released == 0
+    assert _reservation_states(db, "run_old") == ["RESERVED"]
+    assert _job_for(db, "job1").preemptions == 1
+
+
+def test_supervisor_blocks_stale_owner_generation_decision(tmp_path: Path) -> None:
+    """Covers: ADR-0002 D8 R2 -- a decision bound to another generation is not authority."""
+    from saberops.supervisor import RunSupervisor
+
+    repo = tmp_path / "repo"
+    base = _repo(repo)
+    db = _db(tmp_path)
+    _seed_running_preparation_crash(db, repo, base)
+    # A newer execution generation claimed the run after the crash: the old
+    # decision can no longer be authenticated and must not be promoted.
+    db.claim_execution_owner("run_old", identity=_dead_identity())
+    assert authenticate_bound_transaction(db, "run_old", "job1", repo) == "blocked"
+
+    result = RunSupervisor(db=db).reconcile("run_old")
+
+    assert result["action"] == "none", result
     assert str(result["reason"]).startswith("preemption_blocked")
     run = db.get_run("run_old")
     assert run is not None and run.status == RunStatus.RUNNING
     assert _job_for(db, "job1").preemptions == 0
+
+
+def test_recovery_refuses_unfenced_terminalization(
+    tmp_path: Path
+) -> None:
+    """Covers: ADR-0002 D8 R2 -- crash recovery never takes the unfenced path."""
+    repo = tmp_path / "repo"
+    base = _repo(repo)
+    db = _db(tmp_path)
+    _seed_running_preparation_crash(db, repo, base)
+    job = _job_for(db, "job1")
+    # Authentic decision, but the recovery caller supplies no owner token.
+    outcome = preemption.finish_interrupted_preemption(
+        db, run_id="run_old", job=job, repo_path=repo,
+        owner_id=None, owner_generation=None, now=_NOW,
+    )
+    assert not outcome.owned
+    assert outcome.detail in ("fencing_required", "fenced_terminalize_refused"), outcome.detail
+    run = db.get_run("run_old")
+    assert run is not None and run.status == RunStatus.RUNNING
+    assert _job_for(db, "job1").preemptions == 0
+
+
+def test_limit_tail_is_fenced_against_a_newer_generation(tmp_path: Path) -> None:
+    """Covers: ADR-0002 D8 -- the limit tail never rewrites another generation."""
+    repo = tmp_path / "repo"
+    base = _repo(repo)
+    db = _db(tmp_path)
+    store.insert_job(db, _job("job1", str(repo), base, preemptions=5), now=_NOW)
+    store.mark_dispatched(db, "job1", "run_old", now=_NOW)
+    db.create_run(
+        Run(
+            id="run_old", task="t", target_repo=str(repo), base_commit=base,
+            tier=Tier.T2, training_allowed=True, gate_command="make gate",
+            status=RunStatus.RUNNING, created_at=_NOW.isoformat(), config_json="{}",
+        )
+    )
+    _quota_evidence(db, "run_old")
+    reserve(
+        db, run_id="run_old", job_id="job1", route="p/m",
+        draws=[PoolDraw("pool1", "5h")], size_bucket="M", now=_NOW,
+    )
+    # The durable owner row belongs to a DIFFERENT (newer) generation.
+    owner = db.claim_execution_owner("run_old", identity=_dead_identity())
+
+    out = preemption.complete_preemption(
+        db, run_id="run_old", repo_path=repo, base_sha=base,
+        owner_id="stale-owner", owner_generation=owner.generation + 7,
+        decision_ref="test:stale", now=_NOW,
+    )
+
+    assert not out.owned and out.detail == "limit_fence_refused", out.detail
+    run = db.get_run("run_old")
+    assert run is not None and run.status == RunStatus.RUNNING
+    job = _job_for(db, "job1")
+    assert job.state == JobState.RUNNING
+    assert job.preemptions == 5
+    assert _reservation_states(db, "run_old") == ["RESERVED"]
 
 
 @pytest.mark.parametrize("second_reason", ["relabel", "requeued_and_redispatched"])

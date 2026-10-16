@@ -343,6 +343,7 @@ def verify_prepared_artifacts(
     job: Job,
     repo_path: Path,
     payload: Mapping[str, Any],
+    expected_preemptions_before: int | None = None,
 ) -> tuple[PreparedArtifacts | None, str]:
     """Verify a recorded prepared-artifact intent against durable state.
 
@@ -355,7 +356,14 @@ def verify_prepared_artifacts(
       SHA (R3 create-only/read-only discipline; a symbolic or colliding ref is
       refused rather than dereferenced);
     * ``handoff_id`` resolves to a real handoff row belonging to this run;
-    * ``preemptions_next`` (when present) equals the job's current count + 1.
+    * ``preemptions_next`` (when present) equals the expected pre-preemption
+      count + 1.
+
+    ``expected_preemptions_before`` defaults to the job's current count (the
+    normal pre-preemption call site); a caller looking at an already-consumed
+    generation (settlement) passes the pre-preemption count explicitly.
+    Verifying artifacts is necessary but **not** sufficient authority: see
+    :func:`authenticate_prepared_transaction`.
     """
     raw_sha = payload.get("checkpoint_sha")
     raw_ref = payload.get("checkpoint_ref")
@@ -391,12 +399,17 @@ def verify_prepared_artifacts(
         return None, "handoff_mismatch"
     raw_next = payload.get("preemptions_next")
     preemptions_next: int | None = None
+    before = (
+        int(job.preemptions)
+        if expected_preemptions_before is None
+        else int(expected_preemptions_before)
+    )
     if raw_next is not None:
         try:
             preemptions_next = int(raw_next)
         except (TypeError, ValueError):
             return None, "malformed_count"
-        if preemptions_next != int(job.preemptions) + 1:
+        if preemptions_next != before + 1:
             return None, "count_mismatch"
     raw_nb = payload.get("not_before")
     not_before = raw_nb if isinstance(raw_nb, str) and raw_nb else None
@@ -412,6 +425,173 @@ def verify_prepared_artifacts(
     )
 
 
+def _attempt_snapshot(db: Any, run_id: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Current durable (attempt_ids, attempt_states) snapshot for the run."""
+    try:
+        attempts = db.get_attempts_for_run(run_id)
+    except Exception:
+        return (), ()
+    ids = tuple(str(getattr(a, "id", "") or "") for a in attempts)
+    states = tuple(
+        str(getattr(getattr(a, "status", None), "value", "") or "") for a in attempts
+    )
+    return ids, states
+
+
+def _decision_owner_binding(db: Any, run_id: str, decision: PreemptionDecision) -> tuple[bool, str]:
+    """True iff the decision's owner binding names the durable owner row.
+
+    The receipt must name the *exact* executor generation that took the
+    decision.  A newer/older generation -- or no row at all -- cannot be
+    authenticated, so the caller must fail closed.
+    """
+    if decision.owner_id is None or decision.owner_generation is None:
+        return False, "owner_unbound"
+    try:
+        owner = db.get_execution_owner(run_id)
+    except Exception:
+        return False, "owner_unreadable"
+    if owner is None:
+        return False, "owner_missing"
+    if owner.owner_id != decision.owner_id:
+        return False, "owner_id_mismatch"
+    if int(owner.generation) != int(decision.owner_generation):
+        return False, "owner_generation_mismatch"
+    return True, "ok"
+
+
+def authenticate_decision(
+    db: Any,
+    *,
+    run_id: str,
+    job: Job,
+    decision: PreemptionDecision,
+    expected_preemptions_before: int,
+) -> tuple[bool, str]:
+    """Authenticate a ``preemption_preparing`` receipt against durable state.
+
+    A receipt is authentic only when it is bound to
+
+    * the exact job/run and the frozen job identity (repo + base SHA);
+    * a non-empty decision reference (the real terminal routing decision);
+    * the pre-preemption count for this generation;
+    * the exact durable source-attempt snapshot that was terminal when the
+      decision was taken; and
+    * the exact durable execution-owner generation.
+
+    All of it must hold, or the caller must fail closed: a plausible receipt is
+    not proof that D8 took this job's terminal outcome.
+    """
+    if decision.run_id != run_id or decision.job_id != job.job_id:
+        return False, "decision_mismatched"
+    if decision.version < DECISION_VERSION:
+        return False, "decision_version"
+    if not decision.decision_ref:
+        return False, "decision_ref_missing"
+    if str(decision.repo or "") != str(job.repo or ""):
+        return False, "decision_repo_mismatch"
+    if str(decision.base_sha or "") != str(job.base_sha or ""):
+        return False, "decision_base_mismatch"
+    if int(decision.preemptions_before) != int(expected_preemptions_before):
+        return False, "decision_count"
+    ids, states = _attempt_snapshot(db, run_id)
+    # The snapshot must still be exactly the durable state the decision was
+    # taken over (a zero-launch decision legitimately carries an empty
+    # snapshot; a run that gained/lost/changed an attempt is ambiguous).
+    if tuple(decision.source_attempt_ids) != ids:
+        return False, "decision_source_attempts_changed"
+    if tuple(decision.source_attempt_states) != states:
+        return False, "decision_source_states_changed"
+    return _decision_owner_binding(db, run_id, decision)
+
+
+def _intent_matches_decision(
+    intent: Mapping[str, Any], decision: PreemptionDecision
+) -> tuple[bool, str]:
+    """True iff the prepared intent belongs to the same authenticated transaction."""
+    try:
+        intent_before = int(intent.get("preemptions_before", -1))
+    except (TypeError, ValueError):
+        return False, "intent_count_malformed"
+    if intent_before != int(decision.preemptions_before):
+        return False, "intent_count_mismatch"
+    owner_raw = intent.get("owner_id")
+    gen_raw = intent.get("owner_generation")
+    intent_owner = str(owner_raw) if isinstance(owner_raw, str) and owner_raw else None
+    intent_gen = int(gen_raw) if isinstance(gen_raw, int) else None
+    if intent_owner != decision.owner_id or intent_gen != decision.owner_generation:
+        return False, "intent_owner_mismatch"
+    return True, "ok"
+
+
+@dataclass(frozen=True)
+class _AuthenticatedTransaction:
+    ok: bool
+    detail: str
+    decision: PreemptionDecision | None = None
+    artifacts: PreparedArtifacts | None = None
+
+
+def authenticate_prepared_transaction(
+    db: Any,
+    *,
+    run_id: str,
+    job: Job,
+    repo_path: str | Path,
+    expected_preemptions_before: int | None = None,
+) -> _AuthenticatedTransaction:
+    """Authenticate a durable D8 transaction end to end (read-only).
+
+    Requires **both** an authentic ``preemption_preparing`` decision receipt
+    and, when a ``preemption_committed`` intent exists, artifacts that verify
+    and belong to that same authenticated transaction.  A legacy/unbound intent
+    (no decision, or a decision that cannot be authenticated) is rejected here:
+    a valid SHA + capsule is not proof that D8 took this job's terminal
+    outcome, so it must never be promoted to authority.
+    """
+    repo = Path(repo_path).resolve() if not isinstance(repo_path, Path) else repo_path
+    before = (
+        int(job.preemptions)
+        if expected_preemptions_before is None
+        else int(expected_preemptions_before)
+    )
+    raw = _decision_payload(db, run_id, job.job_id)
+    intent = _intent_payload(db, run_id, job.job_id)
+    if raw is None:
+        if intent is not None:
+            return _AuthenticatedTransaction(
+                ok=False, detail="legacy_intent_without_decision"
+            )
+        return _AuthenticatedTransaction(ok=False, detail="decision_missing")
+    decision = PreemptionDecision.from_payload(raw)
+    if decision is None:
+        return _AuthenticatedTransaction(ok=False, detail="decision_malformed")
+    ok, detail = authenticate_decision(
+        db, run_id=run_id, job=job, decision=decision,
+        expected_preemptions_before=before,
+    )
+    if not ok:
+        return _AuthenticatedTransaction(ok=False, detail=f"decision_unauthenticated:{detail}",
+                                         decision=decision)
+    if intent is None:
+        return _AuthenticatedTransaction(ok=True, detail="decision_authenticated",
+                                         decision=decision)
+    artifacts, adetail = verify_prepared_artifacts(
+        db, run_id=run_id, job=job, repo_path=repo, payload=intent,
+        expected_preemptions_before=before,
+    )
+    if artifacts is None:
+        return _AuthenticatedTransaction(
+            ok=False, detail=f"intent_unverified:{adetail}", decision=decision,
+        )
+    mok, mdetail = _intent_matches_decision(intent, decision)
+    if not mok:
+        return _AuthenticatedTransaction(ok=False, detail=mdetail, decision=decision)
+    return _AuthenticatedTransaction(
+        ok=True, detail="transaction_authenticated", decision=decision, artifacts=artifacts,
+    )
+
+
 def classify_preemption_transaction(
     db: Any,
     *,
@@ -421,45 +601,29 @@ def classify_preemption_transaction(
 ) -> PreemptionTransaction:
     """Classify one run/job's durable D8 transaction state (read-only).
 
-    Never infers a D8 decision from quota history or WIP alone: a transaction
-    exists only when a durable receipt (intent or decision) does.  A receipt
-    whose artifacts/identity do not verify is ``blocked`` -- the caller must
-    not fall through to generic orphaning or settle its capacity.
+    Never infers a D8 decision from quota history or WIP alone, and never
+    promotes an unauthenticated legacy receipt: a transaction is ``prepared``
+    only when an authentic bound decision **and** matching verified artifacts
+    exist, ``preparing`` only when an authentic bound decision exists, and
+    otherwise ``blocked`` (fail closed) or ``none``.
     """
-    repo = Path(repo_path).resolve() if not isinstance(repo_path, Path) else repo_path
-    intent = _intent_payload(db, run_id, job.job_id)
-    if intent is not None:
-        artifacts, detail = verify_prepared_artifacts(
-            db, run_id=run_id, job=job, repo_path=repo, payload=intent
-        )
-        if artifacts is not None:
+    txn = authenticate_prepared_transaction(db, run_id=run_id, job=job, repo_path=repo_path)
+    if txn.ok:
+        if txn.artifacts is not None:
             return PreemptionTransaction(
-                state="prepared", detail="intent_verified",
-                artifacts=artifacts, job=job,
+                state="prepared", detail=txn.detail, artifacts=txn.artifacts,
+                decision=txn.decision, job=job,
             )
         return PreemptionTransaction(
-            state="blocked", detail=f"intent_unverified:{detail}", job=job,
+            state="preparing", detail=txn.detail, decision=txn.decision, job=job,
         )
-    raw = _decision_payload(db, run_id, job.job_id)
-    if raw is not None:
-        decision = PreemptionDecision.from_payload(raw)
-        if decision is None:
-            return PreemptionTransaction(
-                state="blocked", detail="decision_malformed", job=job,
-            )
-        if decision.run_id != run_id or decision.job_id != job.job_id:
-            return PreemptionTransaction(
-                state="blocked", detail="decision_mismatched", job=job,
-            )
-        if decision.preemptions_before != int(job.preemptions):
-            return PreemptionTransaction(
-                state="blocked", detail="decision_stale", job=job,
-            )
-        return PreemptionTransaction(
-            state="preparing", detail="decision_recorded",
-            decision=decision, job=job,
-        )
-    return PreemptionTransaction(state="none", detail="no_transaction", job=job)
+    if txn.detail == "decision_missing":
+        # No decision receipt and no intent: an ordinary run with no D8
+        # transaction at all (not a promoted legacy intent).
+        return PreemptionTransaction(state="none", detail="no_transaction", job=job)
+    return PreemptionTransaction(
+        state="blocked", detail=txn.detail, decision=txn.decision, job=job,
+    )
 
 
 def finish_interrupted_preemption(
@@ -1103,6 +1267,7 @@ def _terminalize_preempted(
     now_iso: str,
     owner_id: str | None = None,
     owner_generation: int | None = None,
+    require_fenced: bool = False,
 ) -> tuple[bool, bool, str]:
     """Move RUNNING -> PREEMPTED exactly once.
 
@@ -1115,7 +1280,9 @@ def _terminalize_preempted(
     when any attempt is still RUNNING/PENDING (a live worker is not a
     recoverable D8 crash) or when the generation changed.  Without a token the
     existing guarded read-check + update path is kept, so standalone/in-process
-    runs behave exactly as before.
+    runs behave exactly as before -- except that ``require_fenced`` callers
+    (every crash-recovery pass) must supply a token and never take the
+    unfenced branch.
     """
     try:
         run = db.get_run(run_id)
@@ -1144,6 +1311,10 @@ def _terminalize_preempted(
         if receipt is None:
             return (False, False, "fenced_terminalize_refused")
         return (True, True, "transitioned")
+    if require_fenced:
+        # A crash-recovery pass must never fall back to the unfenced writer:
+        # without a proven token there is no authority to terminalize.
+        return (False, False, "fencing_required")
     try:
         db.update_run(
             run_id=run_id,
@@ -1164,8 +1335,18 @@ def _fail_at_limit(
     max_preemptions: int,
     now: datetime,
     now_iso: str,
+    owner_id: str | None = None,
+    owner_generation: int | None = None,
 ) -> PreemptionOutcome:
-    """Record terminal FAILED ``PREEMPTION_LIMIT`` on the run and the job."""
+    """Record terminal FAILED ``PREEMPTION_LIMIT`` on the run and the job.
+
+    When an exact execution-owner token is supplied the run transition is the
+    fenced :meth:`Database.terminalize_run_fenced` (exact ``CLAIMED``
+    generation), so a newer generation that claimed the run while this decision
+    was being made is never FAILED or released by a stale caller.  A refusing
+    fence means *no authority*: nothing is rewritten and no reservation is
+    released.  Without a token the pre-existing in-process path is kept.
+    """
     from saberops.capacity.ledger import release_terminal_debt
     from saberops.jobs import store
 
@@ -1175,15 +1356,34 @@ def _fail_at_limit(
         "Quota exhaustion recurred with no admitted fallback route; "
         "not requeueing again."
     )
+    fenced = owner_id is not None and owner_generation is not None
+    run_failed = False
     try:
         run = db.get_run(run_id)
         if run is not None and run.status == RunStatus.RUNNING:
-            db.update_run(
-                run_id=run_id,
-                status=RunStatus.FAILED,
-                completed_at=now_iso,
-                result_summary=summary,
-            )
+            if fenced:
+                receipt = db.terminalize_run_fenced(
+                    run_id,
+                    owner_id=owner_id,
+                    generation=owner_generation,
+                    status=RunStatus.FAILED,
+                    result_summary=summary,
+                    attempt_reason=f"preemption limit: {summary}",
+                    expected_owner_states=(ExecutionOwner.CLAIMED,),
+                    release_reason="preemption_limit",
+                    completed_at=now_iso,
+                )
+                if receipt is None:
+                    return PreemptionOutcome(
+                        owned=False, detail="limit_fence_refused", job=job,
+                    )
+            else:
+                db.update_run(
+                    run_id=run_id,
+                    status=RunStatus.FAILED,
+                    completed_at=now_iso,
+                    result_summary=summary,
+                )
             db.record_event(
                 run_id,
                 "run_failed",
@@ -1194,8 +1394,12 @@ def _fail_at_limit(
                     "max_preemptions": max_preemptions,
                 },
             )
+            run_failed = True
     except Exception:
-        pass
+        if fenced:
+            return PreemptionOutcome(owned=False, detail="limit_terminalize_failed", job=job)
+    if fenced and not run_failed:
+        return PreemptionOutcome(owned=False, detail="limit_fence_refused", job=job)
     failed_job: Job | None = None
     try:
         fresh = store.get_job(db, job.job_id)
@@ -1325,40 +1529,53 @@ def complete_preemption(
         return _fail_at_limit(
             db, run_id=run_id, job=job,
             max_preemptions=max_preemptions, now=moment, now_iso=now_iso,
+            owner_id=owner_id, owner_generation=owner_generation,
         )
 
     not_before = quota_reset_eta(db, run_id)
     preemptions_before = int(job.preemptions)
 
-    # Crash-replay: a recorded intent carries every artifact, but it is only
-    # reused after independent verification.  An unverifiable "prepared"
-    # record is fail-closed: never fabricate a different transaction from it,
-    # and never terminalize on unverified evidence.
+    # Crash-replay: an existing prepared intent is reused ONLY when the whole
+    # transaction authenticates (authentic bound decision + matching verified
+    # artifacts).  A legacy/unbound intent is fail-closed: never fabricate a
+    # different transaction from it, and never terminalize/requeue/release on
+    # it -- retain WIP, job and charged capacity and surface the owner question.
     checkpoint_sha: str | None = None
     checkpoint_ref: str | None = None
     handoff_id: str | None = None
     intent = _intent_payload(db, run_id, job.job_id)
     if intent is not None:
-        verified, detail = verify_prepared_artifacts(
-            db, run_id=run_id, job=job, repo_path=repo, payload=intent
+        txn = authenticate_prepared_transaction(
+            db, run_id=run_id, job=job, repo_path=repo,
+            expected_preemptions_before=preemptions_before,
         )
-        if verified is None:
+        if not txn.ok or txn.artifacts is None:
             return PreemptionOutcome(
-                owned=False, detail=f"intent_unverified:{detail}", job=job
+                owned=False, detail=f"intent_not_authenticated:{txn.detail}", job=job
             )
-        checkpoint_sha = verified.checkpoint_sha
-        checkpoint_ref = verified.checkpoint_ref
-        handoff_id = verified.handoff_id
+        checkpoint_sha = txn.artifacts.checkpoint_sha
+        checkpoint_ref = txn.artifacts.checkpoint_ref
+        handoff_id = txn.artifacts.handoff_id
 
     if checkpoint_sha is None:
-        existing_decision = _decision_payload(db, run_id, job.job_id)
-        if recovering and existing_decision is None:
-            # A recovery caller may only *continue* an already-durable D8
-            # transaction.  It must never start one from quota history or WIP
-            # alone, so a missing decision receipt fails closed here.
-            return PreemptionOutcome(
-                owned=False, detail="recovery_without_decision", job=job
-            )
+        # A durable decision receipt already on record must itself authenticate
+        # before this (fresh or recovering) pass continues from it.
+        existing = authenticate_prepared_transaction(
+            db, run_id=run_id, job=job, repo_path=repo,
+            expected_preemptions_before=preemptions_before,
+        )
+        if not existing.ok:
+            if existing.detail != "decision_missing":
+                return PreemptionOutcome(
+                    owned=False, detail=f"decision_not_authenticated:{existing.detail}",
+                    job=job,
+                )
+            if recovering:
+                # Recovery may only *continue* an already-durable transaction,
+                # never start one from quota history or WIP alone.
+                return PreemptionOutcome(
+                    owned=False, detail="recovery_without_decision", job=job
+                )
         # R2: record the factual D8 decision BEFORE any side effect so a crash
         # at (or between) the checkpoint/capsule/ref/intent boundaries leaves
         # an exact, recognisable transaction for restart recovery.
@@ -1432,6 +1649,7 @@ def complete_preemption(
     terminal_ok, terminal_transitioned, terminal_detail = _terminalize_preempted(
         db, run_id=run_id, summary=summary, now_iso=now_iso,
         owner_id=owner_id, owner_generation=owner_generation,
+        require_fenced=recovering,
     )
     if not terminal_ok:
         return PreemptionOutcome(owned=False, detail=terminal_detail, job=job)
@@ -1706,6 +1924,8 @@ __all__ = [
     "PreemptionTransaction",
     "PreparedArtifacts",
     "ResumePreparation",
+    "authenticate_decision",
+    "authenticate_prepared_transaction",
     "build_preemption_decision",
     "classify_preemption_transaction",
     "complete_preemption",
