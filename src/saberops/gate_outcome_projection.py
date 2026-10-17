@@ -84,6 +84,11 @@ PRODUCER_FAIL_ONLY_REASONS: Final[frozenset[str]] = frozenset(
     {SELECTOR_DEFECT_REASON, "pytest failed without rerunnable node IDs"}
 )
 
+#: The only producer whose gates are authoritative evidence (ADR-0004 D3).
+#: A model's own iteration run (G0) may execute the same commands but is never
+#: accepted as gate evidence.
+PRODUCER_ENGINE: Final[str] = "engine"
+
 #: Producer FAIL-only reasons that embed the failing node IDs, so only the
 #: exact emitted prefix is matched -- not a broad substring heuristic.
 PRODUCER_FAIL_ONLY_REASON_PREFIXES: Final[tuple[str, ...]] = ("unquarantined: ",)
@@ -129,6 +134,10 @@ class GateEvidence:
     selected_nonempty: bool = True
     tests_ran: int | None = None
     has_provenance: bool | None = None
+    #: Producer of the evidence.  ``None`` means the caller did not classify
+    #: it (legacy contract, provenance already asserted).  An explicit
+    #: non-engine producer (``model``/``G0``/...) is never authoritative.
+    producer: str | None = None
     role: GateRole | str = GateRole.G1
 
 
@@ -260,6 +269,14 @@ def project_gate_outcome(evidence: GateEvidence) -> ProjectedDecision:
             role_name,
             "evidence provenance unknown or missing "
             f"(has_provenance={evidence.has_provenance!r}); not authoritative",
+        )
+
+    if evidence.producer is not None and evidence.producer != PRODUCER_ENGINE:
+        return _blocked(
+            evidence,
+            role_name,
+            f"non-engine producer {evidence.producer!r} is not authoritative evidence "
+            "(G0/model runs are never gate evidence)",
         )
 
     raw = evidence.raw_outcome

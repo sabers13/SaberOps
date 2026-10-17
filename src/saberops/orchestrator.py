@@ -77,6 +77,12 @@ from saberops.dispatch import (
 )
 from saberops.dispatch import control_plane_decision as control_plane_decision
 from saberops.execution_failover import FailoverEngine
+from saberops.gate_runner import (
+    EngineGateExecutor,
+    EngineGateRequest,
+    EngineGateResult,
+    GateSlotPool,
+)
 from saberops.git import (
     CandidatePublication,
     CandidatePublicationError,
@@ -967,6 +973,67 @@ def _gate_disposition_payload(disposition: GateDisposition) -> dict[str, object]
         "candidate_sha": disposition.candidate_sha,
         "source_tree_hash": disposition.source_tree_hash,
     }
+
+
+def run_engine_gate(
+    *,
+    target_repo: Path | str,
+    kind: str,
+    evidence_dir: Path | str,
+    base: str = "",
+    head_sha: str = "",
+    requested_profile: str | None = None,
+    state_dir: Path | str | None = None,
+    touches: tuple[str, ...] = (),
+    must_not_touch: tuple[str, ...] = (),
+    changed_files: tuple[str, ...] = (),
+    disk_estimate_bytes: int = 0,
+) -> EngineGateResult:
+    """Run one engine-owned gate and record ``producer: engine`` evidence.
+
+    Covers: ADR-0004 D3 (engine is the only producer of gate evidence),
+    ADR-0004 D3 write-scope preflight, ADR-0003 D2 profiles and D3 slots.
+
+    A model's own run of the same commands stays G0: it never reaches the
+    history ledger and is rejected by :func:`project_gate_outcome` as
+    non-engine evidence.  This seam is intentionally thin so the engine can
+    call it for G1, G2, G3 and the periodic main gate with the same rules.
+    """
+    resolve_state = Path(state_dir).expanduser() if state_dir is not None else None
+    executor = EngineGateExecutor(slot_pool=GateSlotPool(_common_dir_for(target_repo)))
+    return executor.execute(
+        EngineGateRequest(
+            target_repo=Path(target_repo).expanduser(),
+            kind=kind,
+            evidence_dir=Path(evidence_dir).expanduser(),
+            base=base,
+            head_sha=head_sha,
+            requested_profile=requested_profile,
+            state_dir=resolve_state,
+            touches=touches,
+            must_not_touch=must_not_touch,
+            changed_files=changed_files,
+            disk_estimate_bytes=disk_estimate_bytes,
+        )
+    )
+
+
+def _common_dir_for(repo: Path | str) -> Path:
+    """Resolve the git common dir for a repository path (engine gate seam)."""
+    path = Path(repo).expanduser()
+    completed = subprocess.run(
+        ["git", "rev-parse", "--git-common-dir"],
+        cwd=path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"cannot resolve git common dir for {path}: {completed.stderr.strip()}"
+        )
+    raw = completed.stdout.strip()
+    return (path / raw).resolve() if not Path(raw).is_absolute() else Path(raw)
 
 
 def load_owner_runtime_bindings(
@@ -8757,6 +8824,44 @@ class Orchestrator:
                 checks=checks,
                 reviews=reviews,
             )
+
+    def run_engine_gate(
+        self,
+        *,
+        target_repo: Path | str,
+        kind: str,
+        evidence_dir: Path | str,
+        base: str = "",
+        head_sha: str = "",
+        requested_profile: str | None = None,
+        state_dir: Path | str | None = None,
+        touches: tuple[str, ...] = (),
+        must_not_touch: tuple[str, ...] = (),
+        changed_files: tuple[str, ...] = (),
+        disk_estimate_bytes: int = 0,
+    ) -> EngineGateResult:
+        """Orchestrator-owned entry point for engine-run G1/G2/G3 evidence.
+
+        Covers: ADR-0004 D3 (engine gate evidence + write-scope preflight).
+
+        Delegates to the deterministic :func:`run_engine_gate` seam so the
+        engine (and only the engine) produces authoritative gate evidence; a
+        model's iteration run remains G0 and can never be submitted as
+        evidence.
+        """
+        return run_engine_gate(
+            target_repo=target_repo,
+            kind=kind,
+            evidence_dir=evidence_dir,
+            base=base,
+            head_sha=head_sha,
+            requested_profile=requested_profile,
+            state_dir=state_dir,
+            touches=touches,
+            must_not_touch=must_not_touch,
+            changed_files=changed_files,
+            disk_estimate_bytes=disk_estimate_bytes,
+        )
 
     def cleanup_run(self, run_id: str) -> dict[str, list[str]]:
         """Guardedly retire clean attempt worktrees for a terminal run.

@@ -382,6 +382,48 @@ remove the two unit files and `systemctl --user daemon-reload`.
 
 Run once by hand: `bash scripts/main-gate.sh` from the checkout.
 
+## Engine-run gates (G1 / G2 / G3) and the history ledger
+
+The engine is the only producer of authoritative gate evidence (ADR-0004 D3).
+`Orchestrator.run_engine_gate(...)` (module seam `saberops.orchestrator.
+run_engine_gate`) runs one profile against one repository and records typed
+evidence:
+
+- **Profiles are project data** (`saberops.gate_profiles`). A project may ship
+  `gate-profiles.json` in its state directory to override commands and budgets:
+  `fast` (lint + types + selected tests, 10 min), `acceptance` (`fast` + rerun
+  rule + test-map freshness, 20 min) and `full` (lint + types + whole suite,
+  30 min). A caller may request a *stronger* profile than the lifecycle kind
+  requires but never a weaker one; asking for `fast` on a G3 raises
+  `GateProfileError` and the gate does not run. An optional
+  `selector_command` is a project selector plugin whose stdout node IDs fill the
+  `{selector}` placeholder.
+- **Slots** come from the `host-gates` local capacity pool (`GateSlotPool`):
+  the exclusive heavy slot for G3/main-gate runs (which also drain all light
+  slots) and one of two light slots for G1/G2, using the same flock files as
+  `scripts/gate_tools.py`, so engine and shell gates never run past each other.
+- **Write-scope and retirement preflight** (`saberops.gate_scope`) runs before a
+  G1/G2 command: changed files must be inside the lane Touches and outside
+  must-not-touch, and no test may be removed or rewritten unless authorized by
+  the lane's retirement table. Both fail closed as engine-raised findings
+  (`WRITE_SCOPE_VIOLATION`, `TEST_RETIREMENT_VIOLATION`) with no command run.
+- **Disk admission** enforces the shared free-space floor (ADR-0003 D4) and,
+  when the Step 008 storage ledger is available, the gate's declared estimate
+  through `host-disk` admission.
+- **Evidence** is written to the run's evidence directory as `engine-outcome.json`
+  and appended, once, to `<git-common-dir>/saberops-gate-history/full.jsonl`
+  with `kind` (`G1|G2|G3|main-gate|manual`) and `producer: engine`. Model-run
+  commands are G0: `project_gate_outcome` rejects any explicit non-engine
+  producer, and `gate_history.require_engine_evidence` refuses to treat it as
+  evidence.
+
+`gate_tools.py` still writes `outcome.json` for human/worker runs (producer
+`developer`), and its `kind`/`producer`/`profile`/`checks_ok`/`selected` fields
+are what the engine reads when a profile command is one of the repository gate
+scripts. When the engine invokes a script it sets `SABEROPS_GATE_EXTERNAL_SLOT=1`
+(no nested slot acquisition) and `SABEROPS_GATE_NO_HISTORY=1` (the engine writes
+the single history line).
+
 ## Fixed-source candidate verification
 Candidate gates and independent reviews run in separate detached verification
 worktrees at the exact candidate commit. Their tree hash is recorded in evidence.

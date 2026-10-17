@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from saberops.gate_outcome_projection import (
+    PRODUCER_ENGINE,
     GateEvidence,
     GateRole,
     ProjectedDecision,
@@ -773,3 +774,40 @@ def test_producer_evaluate_round_trip_maps_cleanly() -> None:
     assert decision.decision is ProjectedDecisionKind.FAIL
     assert decision.accepted is False
     assert decision.selector_defect is True
+
+
+# ---------------------------------------------------------------------------
+# Engine producer contract (ADR-0004 D3): only engine-run gates are evidence
+# ---------------------------------------------------------------------------
+
+
+def test_engine_producer_green_pass_accepted() -> None:
+    """Covers: ADR-0004 D3 (engine-run gate is authoritative evidence)."""
+    decision = project_gate_outcome(ev(producer=PRODUCER_ENGINE))
+    assert decision.decision is ProjectedDecisionKind.PASS
+    assert decision.accepted is True
+
+
+def test_unspecified_producer_keeps_legacy_contract() -> None:
+    """Covers: producer=None keeps the existing caller-asserted contract."""
+    decision = project_gate_outcome(ev())
+    assert decision.decision is ProjectedDecisionKind.PASS
+    assert decision.accepted is True
+
+
+@pytest.mark.parametrize("producer", ["model", "G0", "worker", "unknown", ""])
+def test_non_engine_producer_blocked_even_when_green_shaped(producer: str) -> None:
+    """Covers: ADR-0004 D3 (G0/model runs are never accepted as evidence)."""
+    decision = project_gate_outcome(ev(producer=producer))
+    assert decision.decision is ProjectedDecisionKind.BLOCKED
+    assert decision.accepted is False
+    assert "producer" in decision.reason
+
+
+def test_non_engine_producer_blocks_fail_too() -> None:
+    """Covers: a model's own failing run is also not authoritative evidence."""
+    decision = project_gate_outcome(
+        ev(raw_outcome="FAIL", exit_code=1, producer="model")
+    )
+    assert decision.decision is ProjectedDecisionKind.BLOCKED
+    assert decision.accepted is False
