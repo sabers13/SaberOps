@@ -112,32 +112,6 @@ _POLICY_VERDICT_ALIASES: dict[str, ReviewPolicyVerdict] = {
     token.upper(): member for member in ReviewPolicyVerdict for token in (member.value, member.name)
 }
 
-_FENCED_JSON_PATTERN = re.compile(
-    r"```(?:[A-Za-z0-9_+-]+)?[ \t]*\r?\n?(?P<body>.*?)\r?\n?[ \t]*```",
-    re.DOTALL,
-)
-
-
-def _strip_code_fence(raw_text: str) -> str:
-    """Return the JSON body, tolerating one fenced code block amid prose.
-
-    The fence may carry any language tag (``json``, ``JSON``, ...); when the
-    whole payload is wrapped in prose, the first fenced block is extracted.
-    Text without a fence is returned unchanged so malformed payloads still
-    fail closed.
-    """
-    text = raw_text.strip()
-    match = _FENCED_JSON_PATTERN.search(text)
-    return match.group("body") if match is not None else text
-
-
-def _coerce_verdict(raw: object) -> ReviewPolicyVerdict:
-    token = str(raw).strip().upper()
-    member = _POLICY_VERDICT_ALIASES.get(token)
-    if member is None:
-        raise ReviewProtocolError(f"unknown verdict: {raw!r}")
-    return member
-
 
 def _coerce_classification(raw: object) -> FindingClassification:
     token = str(raw).strip().upper()
