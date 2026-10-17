@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 __all__ = [
+    "CHECK_INVALID_MANIFEST_EXIT",
     "CaptureRecord",
     "Drift",
     "FakeOnly",
@@ -93,7 +94,7 @@ USAGE_PROVIDER: Mapping[str, str] = {
 HELP_COMMANDS: Mapping[str, tuple[tuple[str, ...], ...]] = {
     "codex": (("--help",), ("exec", "--help"), ("resume", "--help")),
     "claude": (("--help",), ("auth", "--help")),
-    "opencode": (("--help",), ("run", "--help"), ("models", "--help")),
+    "opencode": (("--help",), ("run", "--help"), ("models", "--help"), ("serve", "--help")),
 }
 
 
@@ -590,15 +591,43 @@ def capture(
 # ---------------------------------------------------------------------------
 
 
+#: Exit code of the ``check`` subcommand when the manifest itself is invalid.
+#: Distinct from the drift exit code ``1`` so the owner can tell "a fixture is
+#: stale" from "the manifest is broken".
+CHECK_INVALID_MANIFEST_EXIT = 2
+
+
 def run_check(
     manifest_path: str | Path = MANIFEST_PATH,
     *,
     which: Callable[[str], str | None] = shutil.which,
     stream: Any = None,
 ) -> int:
-    """Print drift records; return non-zero when any fixture is stale."""
+    """Validate the manifest, then print drift records.
+
+    Returns ``0`` when the validated manifest matches every installed version,
+    ``1`` when a fixture is stale, and :data:`CHECK_INVALID_MANIFEST_EXIT` when
+    the manifest itself is invalid (unknown kind/source, a missing or
+    unredacted fixture file, a duplicate path, a bad date).  An invalid
+    manifest stops the check before any ``--version`` probe: a drift
+    comparison over an unverified manifest could otherwise print a misleading
+    ``no drift``.
+    """
     out = stream if stream is not None else sys.stdout
-    manifest = load_manifest(manifest_path)
+    path = Path(manifest_path)
+    manifest = load_manifest(path)
+    # Fixture ``file`` entries are relative to the manifest's own directory
+    # (``tests/fixtures/vendor_cli/`` for the committed manifest), so an
+    # explicit ``--manifest`` is validated against its own fixtures root.
+    errors = validate_manifest(manifest, fixtures_root=path.parent)
+    if errors:
+        print(
+            f"INVALID manifest {path}: {len(errors)} error(s); drift not run",
+            file=out,
+        )
+        for error in errors:
+            print(f"  - {error}", file=out)
+        return CHECK_INVALID_MANIFEST_EXIT
     installed = {
         cli: read_installed_version(cli, which=which) for cli in manifest.checked_clis()
     }

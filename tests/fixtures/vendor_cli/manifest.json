@@ -74,20 +74,18 @@
       "consumer": "saberops.workers.opencode:OpenCodeAdapter",
       "expect": {
         "flags": [
-          "--dir",
+          "--agent",
           "--format",
+          "--hostname",
           "--model",
-          "--pure",
+          "--port",
           "--session",
           "models",
-          "run"
-        ],
-        "known_missing": [
-          "--dir",
-          "--pure"
+          "run",
+          "serve"
         ]
       },
-      "provenance": "Installed CLI on the HV-1 host, 2026-10-16: `opencode --version`, `opencode --help`, `opencode run --help`, `opencode models --help` (token-free, owner-kept D-0015). HV-1 finding F1: the v2.0.29 help has no --pure/--dir."
+      "provenance": "Installed CLI on the HV-1 host, 2026-10-16: `opencode --version`, `opencode --help`, `opencode run --help`, `opencode models --help` (token-free, owner-kept D-0015). HV-1 finding F1: the v2.0.29 help has no --pure/--dir. Step 024 (HV-2): the capture was extended token-free with `opencode serve --help` so the serve site's flags (--hostname/--port) are covered, and the F1 flags were removed from the adapters."
     }
   ],
   "fake_only": [

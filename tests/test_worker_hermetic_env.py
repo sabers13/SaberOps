@@ -162,6 +162,7 @@ def test_per_harness_additions_are_harness_specific() -> None:
 
 
 def test_overlay_allowlist_keeps_safe_and_saberops_keys_only() -> None:
+    """Covers: HV-2 owned env pins (only exact required OPENCODE_* names)."""
     overlay = {
         **CANARIES,
         "PATH": "/custom-bin",
@@ -169,6 +170,13 @@ def test_overlay_allowlist_keeps_safe_and_saberops_keys_only() -> None:
         "ORCH_RUN_ID": "run-1",
         "ORCH_DB_PATH": "/state/runs.db",
         "OPENCODE_CONFIG_CONTENT": "{}",
+        "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
+        "OPENCODE_CONFIG": "/tmp/hostile.json",
+        "OPENCODE_CONFIG_DIR": "/tmp/hostile-dir",
+        "OPENCODE_MODEL": "evil/model",
+        "OPENCODE_CONFIG_PROJECT_DISABLE": "0",
+        "OPENCODE_MODELS_PATH": "/tmp/hostile-models",
+        "OPENCODE_CLI_CONFIG_CONTENT": "{}",
         "CLAUDE_CODE_DISABLE_FAST_MODE": "1",
         "FROZEN": "not-saberops-owned",
     }
@@ -176,6 +184,18 @@ def test_overlay_allowlist_keeps_safe_and_saberops_keys_only() -> None:
         env = hermetic_env(harness, overlay, {})
         for canary in CANARIES:
             assert canary not in env, f"{canary} reached {harness}"
+        # The exact discovery switch is pinned for every harness; every other
+        # config selector is dropped (no OPENCODE_* prefix is allowed).
+        assert env["OPENCODE_DISABLE_PROJECT_CONFIG"] == "1"
+        for selector in (
+            "OPENCODE_CONFIG",
+            "OPENCODE_CONFIG_DIR",
+            "OPENCODE_MODEL",
+            "OPENCODE_CONFIG_PROJECT_DISABLE",
+            "OPENCODE_MODELS_PATH",
+            "OPENCODE_CLI_CONFIG_CONTENT",
+        ):
+            assert selector not in env, f"{selector} reached {harness}"
         assert env["PATH"] == "/custom-bin"
         assert env["HOME"] == "/custom-home"
         assert env["ORCH_RUN_ID"] == "run-1"
@@ -318,10 +338,27 @@ def _child_env(outfile: Path) -> dict[str, str]:
     return {str(k): str(v) for k, v in loaded.items()}
 
 
-def _assert_hermetic(child: dict[str, str], home: Path) -> None:
+def _assert_hermetic(
+    child: dict[str, str], home: Path, harness: str | None = None
+) -> None:
     for name in CANARIES:
         assert name not in child, f"canary {name} reached the worker child"
     assert child.get("PATH")
+    if harness == "opencode":
+        # HV-2 isolation repair: the OpenCode child HOME is the owned private
+        # root, never the ambient home; the same holds for the global config
+        # directory, and project/ancestor discovery is disabled.  The owned
+        # root is removed after the child exits, so post-run assertions check
+        # the redirect (not on-disk presence); creation-time emptiness is
+        # covered by the helper tests.
+        owned_home = Path(child["HOME"])
+        assert str(owned_home) != str(home)
+        assert "saberops-opencode-isolation-" in str(owned_home.parent)
+        owned_config = Path(child["XDG_CONFIG_HOME"])
+        assert owned_config.parent == owned_home.parent
+        assert child["OPENCODE_DISABLE_PROJECT_CONFIG"] == "1"
+        assert not owned_home.parent.exists(), "owned root must be cleaned up"
+        return
     assert child.get("HOME") == str(home)
 
 
@@ -360,7 +397,7 @@ def test_no_adapter_child_sees_gateway_env(
         WorkerRequest("task", tmp_path, _model_for(harness), env=dict(DISALLOWED_GATEWAY_OVERLAY))
     )
     child = _child_env(outfile)
-    _assert_hermetic(child, home)
+    _assert_hermetic(child, home, harness)
     for key in DISALLOWED_GATEWAY_OVERLAY:
         assert key not in child, f"{key} reached {harness}"
 
@@ -391,7 +428,7 @@ def test_production_shaped_overlay_is_hermetic(
     adapter = _adapter_for(harness, name)
     adapter.run(WorkerRequest("task", tmp_path, _model_for(harness), env=production_env))
     child = _child_env(outfile)
-    _assert_hermetic(child, home)
+    _assert_hermetic(child, home, harness)
     assert child["ORCH_RUN_ID"] == "run-1"
     assert child["ORCH_ATTEMPT_ID"] == "attempt-1"
     assert child["ORCH_DB_PATH"] == "/state/runs.db"

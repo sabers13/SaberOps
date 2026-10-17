@@ -332,6 +332,7 @@ def test_native_resume_keeps_readonly_permissions_and_frozen_environment(
     provider: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Covers: HV-2 isolation contract (opencode resume argv + pinned config)."""
     calls: list[tuple[list[str], dict[str, Any]]] = []
     monkeypatch.setattr("saberops.workers.codex.GitManager.get_changed_paths", lambda _: [])
 
@@ -379,7 +380,55 @@ def test_native_resume_keeps_readonly_permissions_and_frozen_environment(
         assert args[args.index("--tools") + 1] == "Read,Glob,Grep"
         assert args[args.index("--permission-mode") + 1] == "plan"
     else:
-        assert "--pure" in args and "--session" in args
+        # opencode v2.0.29 documents neither ``--pure`` nor ``--dir`` (HV-1 F1,
+        # fixed in Step 024/HV-2).  Isolation is the owned private config/home
+        # root (asserted in the env below) plus inline deny policies -- not an
+        # argv flag.
+        assert "--pure" not in args and "--dir" not in args
+        assert "--session" in args
+        assert kwargs["inherit_env"] is False
+        assert kwargs["env"]["OPENCODE_DISABLE_PROJECT_CONFIG"] == "1"
+        assert json.loads(kwargs["env"]["OPENCODE_CONFIG_CONTENT"]) == {
+            "enabled_providers": ["test"],
+            "policies": [
+                {"action": "integration.use", "resource": "plugin:*",
+                 "effect": "deny"},
+                {"action": "integration.use", "resource": "mcp:*",
+                 "effect": "deny"},
+                {"action": "integration.use", "resource": "skill:*",
+                 "effect": "deny"},
+            ],
+        }
+
+
+def test_opencode_direct_run_refuses_before_launch_when_isolation_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: HV-2 refusal before spawn (system config cannot be excluded)."""
+    import saberops.workers.opencode as opencode_adapter
+    from saberops.models import DispatchOutcome
+    from saberops.workers.opencode_isolation import OpenCodeIsolationUnavailable
+
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def runner(args: list[str], **kwargs: Any) -> ProcessResult:
+        calls.append((args, kwargs))
+        return ProcessResult(args, 0, "{}", "", 0.01)
+
+    def fail(_env: Any) -> Any:
+        raise OpenCodeIsolationUnavailable(
+            "OpenCode system configuration is present"
+        )
+
+    monkeypatch.setattr(opencode_adapter, "opencode_isolation", fail)
+    refused = OpenCodeAdapter(runner=runner).run(
+        WorkerRequest("Manual reply", tmp_path, "test/m")
+    )
+    assert refused.status == AttemptStatus.FAILED
+    assert refused.outcome == DispatchOutcome.ELIGIBILITY_SKIP
+    assert "system configuration" in (refused.error or "")
+    # Refusal happens before any process launch.
+    assert calls == []
 
 
 def test_only_successful_matching_orchestrator_session_is_reused(tmp_path: Path) -> None:
