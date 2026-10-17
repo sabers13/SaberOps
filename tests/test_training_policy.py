@@ -343,7 +343,10 @@ def test_r2b_g_override_admitted_under_denied() -> None:
 
 
 def test_r2b_h_reviewer_dispatch_parity() -> None:
-    from saberops.review import _pre_dispatch_skip_reason
+    from saberops.review import (
+        _pre_dispatch_skip_reason,
+        select_reviewer_ladder_unfiltered,
+    )
 
     model = _dyn_model("parity")
     snapshot = _snapshot(_approval(model, "UNKNOWN"))
@@ -382,6 +385,22 @@ def test_r2b_h_reviewer_dispatch_parity() -> None:
         )
         is None
     )
+
+    # The live runtime ladder (``select_reviewer_ladder_unfiltered``) keeps the
+    # retained production order for a codex/gpt-5.6-terra implementer, excludes
+    # only the implementer, and keeps Muse as the first reviewer candidate.
+    ladder = select_reviewer_ladder_unfiltered(
+        candidate_provider="codex",
+        candidate_model="gpt-5.6-terra",
+        tier=Tier.T1,
+    )
+    assert [candidate.model for candidate in ladder] == [
+        "opencode-go/muse-spark-1.2-contributor",
+        "opencode-go/ox-alpha-free",
+        "opencode-go/deepseek-v4-pro",
+    ]
+    assert all(candidate.model != "gpt-5.6-terra" for candidate in ladder)
+    assert any("muse" in candidate.model.lower() for candidate in ladder)
 
 
 # -- I. C07 preflight parity --------------------------------------------------
@@ -719,3 +738,96 @@ def test_r2b1_j_static_binding_carried_and_routes_when_permitted() -> None:
     denied_ids = [_cid(c) for c in denied]
     assert _CLEAN_CID in denied_ids
     assert _MUSE_CID in denied_ids
+
+
+# -- K. Retained historical-evidence helpers (D-0045) -------------------------
+#
+# These exported helpers survive the approved cleanup because old frozen
+# snapshots still carry the tri-state vocabulary.  The tests below pin their
+# retained normalization/identity/classification contracts; they do NOT
+# re-enable training-based admission (``is_training_permitted`` stays True).
+
+
+def test_r2b_historical_requirement_normalization_contract() -> None:
+    """Retained tri-state normalization for historical evidence snapshots.
+
+    Covers: D-0045 retained-behavior repair of
+    ``training_policy.normalize_training_requirement``; no admission-policy
+    reversal.
+    """
+    from saberops.training_policy import normalize_training_requirement
+
+    assert normalize_training_requirement(None) is None
+    assert normalize_training_requirement(" true ") == "TRUE"
+    assert normalize_training_requirement("False") == "FALSE"
+    assert normalize_training_requirement("unknown") == "UNKNOWN"
+    # Unrecognized evidence falls through to the next rank, never guessed.
+    assert normalize_training_requirement("permitted?") is None
+    assert normalize_training_requirement("") is None
+
+
+def test_r2b_historical_candidate_identity_contract() -> None:
+    """Canonical ``provider/model`` identity used by retained evidence lookups.
+
+    Covers: D-0045 retained-behavior repair of
+    ``training_policy.candidate_id_of``.
+    """
+    from saberops.training_policy import candidate_id_of
+
+    assert (
+        candidate_id_of(WorkerCandidate(provider="codex", model="gpt-5.6-terra"))
+        == "codex/gpt-5.6-terra"
+    )
+    assert candidate_id_of(WorkerCandidate(provider="", model="solo-model")) == "solo-model"
+    # Historical callers already passing a slashed id keep it verbatim.
+    assert candidate_id_of(WorkerCandidate(provider="open/code", model="m")) == "open/code/m"
+    assert candidate_id_of(WorkerCandidate(provider="  codex  ", model="  m  ")) == "codex/m"
+
+
+def test_r2b_historical_approved_requirement_evidence_contract() -> None:
+    """Frozen approved evidence stays readable; absent evidence yields ``None``.
+
+    Covers: D-0045 retained-behavior repair of
+    ``training_policy.approved_training_requirement`` (old-snapshot
+    compatibility; reads only the frozen snapshot, never live state).
+    """
+    from saberops.training_policy import approved_training_requirement
+
+    assert approved_training_requirement(None, "codex/gpt-5.6-terra") is None
+    # A snapshot with no approvals carries no evidence for any id.
+    assert approved_training_requirement(_snapshot(), "codex/gpt-5.6-terra") is None
+
+    model = _dyn_model("hist-approved")
+    snapshot = _snapshot(_approval(model, "TRUE"))
+    assert approved_training_requirement(snapshot, f"{DYN_PROVIDER}/{model}") == "TRUE"
+    # Only the frozen approved record for the exact id answers; another id
+    # yields no evidence rather than inheriting a neighbouring classification.
+    assert approved_training_requirement(snapshot, "other/never-approved") is None
+
+
+def test_r2b_static_classification_evidence_contract() -> None:
+    """The historical static classifier stays readable and fails closed.
+
+    Covers: D-0045 retained-behavior repair of
+    ``training_policy.static_training_requirement``; this is evidence
+    classification only, not a restore of training-based admission.
+    """
+    from saberops.training_policy import static_training_requirement
+
+    assert static_training_requirement(STATIC_TRAINING) == "TRUE"
+    assert static_training_requirement(STATIC_CLEAN) == "FALSE"
+    # The historical call sites also checked the bare model for known ids.
+    assert (
+        static_training_requirement(
+            WorkerCandidate(provider="custom", model="opencode/opencode/big-pickle")
+        )
+        == "TRUE"
+    )
+    # Unknown/custom ids keep no evidence so a Denied policy fails closed.
+    assert (
+        static_training_requirement(WorkerCandidate(provider="custom", model="no-evidence"))
+        == "UNKNOWN"
+    )
+    # These helpers remain evidence readers: nothing re-enables admission.
+    for candidate in (STATIC_TRAINING, STATIC_CLEAN):
+        assert is_training_permitted(candidate, training_allowed=False) is True

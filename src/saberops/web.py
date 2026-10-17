@@ -710,55 +710,6 @@ def _load_owner_bindings_safely() -> OwnerBindings:
         return OwnerBindings()
 
 
-def _exact_binding_for(
-    owner: OwnerBindings,
-    *,
-    provider: str,
-    model: str,
-    connection_id: str | None = None,
-    role: BindingRole | None = None,
-) -> Any | None:
-    """Return the exact registry binding for the requested identity, if any.
-
-    A raw provider/model string never synthesizes a binding: the lookup only
-    returns an entry that already exists in the canonical registry.
-
-    Identity must include the connection (the real account the
-    model is reachable through).  Two connections that expose the same
-    provider/model pair register distinct bindings; the Web / catalog seam
-    must not silently collapse them by returning the first registry
-    declaration.  When ``connection_id`` is supplied the lookup derives the
-    expected binding id through the canonical
-    ``connection/model/role`` materialization scheme
-    (``discovered-binding:<role>:<connection>:<model>``) and requires that
-    exact id to exist in :class:`BindingRegistry`.  When ``connection_id``
-    is absent the lookup falls back to the declaration-order match (the
-    historical behavior for non-discovered bindings) but still filters by
-    ``role`` when one is supplied.
-    """
-    wanted_provider = provider.strip().lower()
-    wanted_model = model.strip()
-    if not wanted_provider or not wanted_model:
-        return None
-    if connection_id:
-        cleaned_connection = connection_id.strip()
-        if cleaned_connection:
-            role_slug = (
-                role.value.lower() if role is not None else BindingRole.WORKER.value.lower()
-            )
-            expected_id = (
-                f"discovered-binding:{role_slug}:{cleaned_connection}:{wanted_model}"
-            )
-            return owner.registry.try_get(expected_id)
-    for binding in owner.registry.list_bindings():
-        if binding.provider != wanted_provider or binding.model != wanted_model:
-            continue
-        if role is not None and getattr(binding, "binding_role", None) is not role:
-            continue
-        return binding
-    return None
-
-
 def _http_get(
     url: str,
     headers: dict[str, str],

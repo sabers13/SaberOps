@@ -298,3 +298,39 @@ def test_ported_reviewer_selection_uses_injected_registry(
     result = service.set_reviewer_binding(reviewer.binding_id)
     assert result["selected_binding_id"] == reviewer.binding_id
     assert load_owner_bindings().reviewer_binding_id == reviewer.binding_id
+
+
+def test_structured_findings_accept_absent_optional_fields() -> None:
+    """The production findings protocol accepts omitted optional fields.
+
+    Covers: D-0045 retained-behavior repair of the surviving
+    ``review_policy._optional_string`` ``None`` branch through the live
+    ``parse_review_findings`` seam.  The payload is a real reviewer-shaped
+    answer; the parsed evidence semantics and computed disposition are
+    asserted, not the private helper call.
+    """
+    from saberops.review_policy import ReviewPolicyVerdict, parse_review_findings
+
+    answer = (
+        "VERDICT: PASS_WITH_BACKLOG\n"
+        "Review notes only.\n\n"
+        "```json\n"
+        '{"findings": [{"id": "N1", "classification": "N1", '
+        '"title": "Cosmetic naming", "severity": "low", '
+        '"invariant_or_requirement": "Names stay readable", '
+        '"failure_scenario": "None", '
+        '"evidence": "cosmetic only; non-blocking backlog note", '
+        '"minimum_correction": "Rename the local variable", '
+        '"repair_scope": "LOCAL_MECHANICAL"}]}\n'
+        "```\n"
+    )
+    parsed = parse_review_findings(answer)
+    assert parsed.verdict is ReviewPolicyVerdict.PASS_WITH_BACKLOG
+    assert parsed.summary == ""
+    assert len(parsed.findings) == 1
+    finding = parsed.findings[0]
+    # Absent optional fields are retained as ``None``; required evidence is intact.
+    assert finding.contract_reference is None
+    assert finding.code_location is None
+    assert finding.evidence == "cosmetic only; non-blocking backlog note"
+    assert finding.blocking is False

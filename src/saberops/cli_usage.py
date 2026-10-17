@@ -10,11 +10,8 @@ from __future__ import annotations
 import asyncio
 import json
 import math
-import sqlite3
 import tempfile
-from contextlib import closing
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
 from saberops.native_usage_panel import read_panel
@@ -162,34 +159,3 @@ def read_limits(executable: str, provider: str) -> list[dict[str, Any]]:
         return read_panel(executable, provider)
     with tempfile.TemporaryDirectory(prefix="saberops-usage-") as cwd:
         return asyncio.run(asyncio.wait_for(_native_limits(executable, provider, cwd), RPC_TIMEOUT))
-
-
-def _sql_activity(path: Path, provider: str) -> dict[str, Any] | None:
-    if not path.is_file():
-        return None
-    with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
-        db.execute("PRAGMA query_only=ON")
-        if provider == "opencode":
-            row = db.execute(
-                "SELECT count(*), sum(tokens_input), sum(tokens_output), "
-                "sum(tokens_cache_read) FROM session"
-            ).fetchone()
-        else:
-            # AggregateUsage already includes child agents; never sum both fields.
-            row = db.execute(
-                "SELECT count(*), "
-                "sum(json_extract(metadata_json,'$.aggregateUsage.inputTokens')), "
-                "sum(json_extract(metadata_json,'$.aggregateUsage.outputTokens')), "
-                "sum(json_extract(metadata_json,'$.aggregateUsage.cacheReadTokens')) "
-                "FROM sessions"
-            ).fetchone()
-    if row is None or not row[0]:
-        return None
-    return {
-        "sessions": row[0],
-        "input_tokens": numeric(row[1]),
-        "output_tokens": numeric(row[2]),
-        "cached_tokens": numeric(row[3]),
-        "source": "Local CLI session database",
-        "coverage": "Saved sessions on this computer",
-    }
