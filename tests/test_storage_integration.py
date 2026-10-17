@@ -17,6 +17,7 @@ import pytest
 
 from saberops.capacity.loop import _invoke_storage_maintenance, run_scheduler_loop
 from saberops.db import Database, DatabaseSchemaError
+from saberops.gate_runner import GateScratchMode
 from saberops.git import GitManager
 from saberops.models import Attempt, AttemptStatus, CheckResult, Run, RunStatus, Tier
 from saberops.sqlite_policy import SqliteBusyError
@@ -306,7 +307,7 @@ def test_scheduler_loop_runs_periodic_maintenance_on_its_cadence(
         now_fn=lambda: clock["t"],
         storage_maintenance=maintenance,
     )
-    assert calls == ["periodic"]
+    assert calls == ["startup", "periodic"]
 
 
 def test_maintenance_invocation_never_raises_into_the_loop() -> None:
@@ -325,23 +326,37 @@ def test_maintenance_invocation_never_raises_into_the_loop() -> None:
 def test_disk_low_maintenance_launches_no_workers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: ADR-0003 D4 -- DISK_LOW parks, and starts zero workers/gates."""
+    """Covers: ADR-0003 D4 -- DISK_LOW parks the real scheduler with zero launches."""
+    from saberops.storage_maintenance import MaintenanceTrigger
+
     repo = _repo(tmp_path)
     db = Database(tmp_path / "orch.db")
+    _seed_queued_job(db, repo)
     monkeypatch.setattr(
         "saberops.storage_maintenance._statvfs", lambda _p: (1 << 30, 100 << 30)
     )
     launched: list[str] = []
-    maintenance = StorageMaintenance(
+
+    def launcher(_job: object, _decision: object, run_id: str) -> None:
+        launched.append(run_id)
+
+    service = StorageMaintenance(
         db,
         repo_root=repo,
         now_fn=lambda: datetime(2026, 10, 17, 12, 0, tzinfo=UTC),
     )
-    result = maintenance.run("disk-low")  # type: ignore[arg-type]
-    assert result.infra_reason == "DISK_LOW"
+    result = run_scheduler_loop(
+        db,
+        once=True,
+        now_fn=lambda: datetime(2026, 10, 17, 12, 0, tzinfo=UTC),
+        run_launcher=launcher,
+        storage_maintenance=lambda trigger: service.run(MaintenanceTrigger(trigger)).infra_reason,
+        launch_guard=service.launch_guard_reason,
+    )
+    assert result is not None
+    assert result.ran is False
+    assert result.storage_infra_reason == "DISK_LOW"
     assert launched == []
-    assert result.applied == 0
-    assert result.telemetry["adaptive_admission"] == "inactive"
 
 
 def test_corrupt_or_unknown_database_is_never_adopted(tmp_path: Path) -> None:
@@ -442,3 +457,164 @@ def test_cli_cleanup_uses_guarded_route_and_never_prunes(
     registrations = GitManager.list_worktrees(repo)
     assert any(Path(reg.path).resolve() == prunable.resolve() for reg in registrations)
     assert any(reg.prunable for reg in registrations)
+
+
+# --------------------------------------------------------------------------
+# F1 -- launch ordering and the wired disk guard (zero launches on refusal)
+# --------------------------------------------------------------------------
+
+
+def _seed_queued_job(db: Database, repo: Path) -> str:
+    from saberops.jobs.models import Job, JobRequirements, JobState, WaitingReason
+    from saberops.jobs.store import insert_job
+
+    job = Job(
+        job_id="job1",
+        idempotency_key=None,
+        caller_id="owner",
+        repo=str(repo.resolve()),
+        base_ref="HEAD",
+        base_sha=GitManager.get_head_commit(repo),
+        goal="storage guard probe",
+        acceptance=None,
+        requirements=JobRequirements(),
+        state=JobState.QUEUED,
+        waiting_reason=WaitingReason.NEW,
+    )
+    insert_job(db, job)
+    return job.job_id
+
+
+def test_scheduler_parks_before_any_tick_on_disk_low(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: ADR-0003 D4 -- startup maintenance precedes the tick; zero launches."""
+    from saberops.jobs.models import JobState
+    from saberops.jobs.store import get_job
+    from saberops.storage_maintenance import MaintenanceTrigger, StorageMaintenance
+
+    repo = _repo(tmp_path)
+    db = Database(tmp_path / "orch.db")
+    job_id = _seed_queued_job(db, repo)
+    monkeypatch.setattr(
+        "saberops.storage_maintenance._statvfs", lambda _p: (1 << 30, 100 << 30)
+    )
+    launched: list[str] = []
+
+    def launcher(job: object, decision: object, run_id: str) -> None:
+        launched.append(run_id)
+
+    service = StorageMaintenance(
+        db, repo_root=repo, now_fn=lambda: datetime(2026, 10, 17, 12, 0, tzinfo=UTC)
+    )
+
+    def maintenance(trigger: str) -> str | None:
+        return service.run(MaintenanceTrigger(trigger)).infra_reason
+
+    result = run_scheduler_loop(
+        db,
+        once=True,
+        now_fn=lambda: datetime(2026, 10, 17, 12, 0, tzinfo=UTC),
+        storage_maintenance=maintenance,
+        launch_guard=service.launch_guard_reason,
+        run_launcher=launcher,
+    )
+    assert result is not None
+    assert result.ran is False
+    assert result.storage_infra_reason == "DISK_LOW"
+    assert launched == []
+    job = get_job(db, job_id)
+    assert job is not None and job.state is JobState.QUEUED and job.current_run_id is None
+    assert db.list_storage_events() == []
+
+
+def test_tick_launch_guard_blocks_dispatch_without_side_effects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: ADR-0003 D4 -- the per-tick guard blocks between maintenance passes."""
+    from saberops.capacity.loop import acquire_lease, release_lease, scheduler_tick
+    from saberops.jobs.models import JobState
+    from saberops.jobs.store import get_job
+
+    repo = _repo(tmp_path)
+    db = Database(tmp_path / "orch.db")
+    job_id = _seed_queued_job(db, repo)
+    launched: list[str] = []
+
+    def launcher(job: object, decision: object, run_id: str) -> None:
+        launched.append(run_id)
+
+    moment = datetime(2026, 10, 17, 12, 0, tzinfo=UTC)
+    lease = acquire_lease(db, "test-holder", ttl_seconds=60.0, now=moment)
+    assert lease is not None
+    try:
+        result = scheduler_tick(
+            db,
+            lease,
+            now=moment,
+            clock_fn=lambda: moment,
+            run_launcher=launcher,
+            launch_guard=lambda: "DISK_LOW",
+        )
+    finally:
+        release_lease(db, lease, now=moment)
+    assert result.ran is False
+    assert result.storage_infra_reason == "DISK_LOW"
+    assert launched == []
+    job = get_job(db, job_id)
+    assert job is not None and job.state is JobState.QUEUED
+
+
+def test_scheduler_proceeds_when_disk_is_healthy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: ADR-0003 D4 -- a healthy floor does not block the tick."""
+    from saberops.storage_maintenance import MaintenanceTrigger, StorageMaintenance
+
+    repo = _repo(tmp_path)
+    db = Database(tmp_path / "orch.db")
+    _seed_queued_job(db, repo)
+    monkeypatch.setattr(
+        "saberops.storage_maintenance._statvfs", lambda _p: (500 << 30, 1000 << 30)
+    )
+    ticked: list[int] = []
+    from saberops.capacity.loop import TickResult
+
+    def _fake_tick(*_args: object, **_kwargs: object) -> TickResult:
+        ticked.append(1)
+        return TickResult(ran=True)
+
+    monkeypatch.setattr("saberops.capacity.loop.scheduler_tick", _fake_tick)
+    service = StorageMaintenance(
+        db, repo_root=repo, now_fn=lambda: datetime(2026, 10, 17, 12, 0, tzinfo=UTC)
+    )
+    result = run_scheduler_loop(
+        db,
+        once=True,
+        now_fn=lambda: datetime(2026, 10, 17, 12, 0, tzinfo=UTC),
+        storage_maintenance=lambda trigger: service.run(MaintenanceTrigger(trigger)).infra_reason,
+        launch_guard=service.launch_guard_reason,
+    )
+    assert result is not None and result.ran is True
+    assert ticked == [1]
+
+
+def test_gate_runner_disk_guard_blocks_before_any_subprocess(tmp_path: Path) -> None:
+    """Covers: ADR-0003 D4 -- the real GateRunner hits the floor guard."""
+    from saberops.gate_runner import GateRunner, GateRunnerDiskLowError, GateRunnerRequest
+
+    repo = _repo(tmp_path)
+    request = GateRunnerRequest(
+        target_repo=repo,
+        gate_command="true",
+        timeout=30.0,
+        frozen_gate_scratch_mode=GateScratchMode.DISK,
+        candidate_sha="a" * 40,
+        expected_post_gate_sha="a" * 40,
+        evidence_dir=tmp_path / "evidence",
+    )
+    runner = GateRunner()
+    with pytest.raises(GateRunnerDiskLowError) as excinfo:
+        runner.run(request, disk_guard=lambda _path: "DISK_LOW")
+    assert excinfo.value.reason_code == "DISK_LOW"
+    assert not (tmp_path / "evidence").exists()

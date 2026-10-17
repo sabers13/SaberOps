@@ -961,24 +961,38 @@ class GitManager:
             )
 
     @staticmethod
-    def delete_checkpoint_ref(repo_path: Path | str, ref: str) -> None:
-        """Delete one engine-owned direct checkpoint ref.
+    def delete_checkpoint_ref(
+        repo_path: Path | str, ref: str, *, expected_sha: str | None = None
+    ) -> None:
+        """Delete one engine-owned direct checkpoint ref, optionally CAS-checked.
 
         Refuses a symbolic or otherwise non-direct ref so deletion can never
-        remove a user branch masquerading inside the checkpoint namespace.
+        remove a user branch masquerading inside the checkpoint namespace.  When
+        ``expected_sha`` is supplied the ref is deleted with
+        ``git update-ref -d <ref> <old>``, which succeeds only if the ref still
+        points at that exact commit -- so a ref moved between preview and apply
+        is refused rather than silently deleted.
         """
         if not ref.startswith(CHECKPOINT_REF_PREFIX) or _REF_DANGEROUS_RE.search(ref):
             raise CandidatePublicationError(f"Refusing to delete unsafe checkpoint ref {ref!r}")
         repo = Path(repo_path).resolve()
-        kind, _value = GitManager._checkpoint_ref_state(repo, ref)
+        kind, value = GitManager._checkpoint_ref_state(repo, ref)
         if kind == "symbolic":
             raise CandidatePublicationError(
                 f"Refusing to delete symbolic checkpoint ref {ref!r}"
             )
         if kind == "absent":
             return
+        if expected_sha is not None and value != expected_sha:
+            raise CandidatePublicationError(
+                f"Refusing to delete checkpoint ref {ref!r}: expected {expected_sha[:8]}, "
+                f"found {str(value)[:8]}"
+            )
+        cmd = ["git", "update-ref", "-d", ref]
+        if expected_sha is not None:
+            cmd.append(expected_sha)
         with _serialized_worktree_metadata_mutation(repo):
-            res = run_process(["git", "update-ref", "-d", ref], cwd=repo)
+            res = run_process(cmd, cwd=repo)
         if not res.passed:
             raise CandidatePublicationError(
                 f"Refusing/deletion failed for checkpoint ref {ref!r}: "

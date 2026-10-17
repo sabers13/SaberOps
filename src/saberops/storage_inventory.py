@@ -38,7 +38,13 @@ from typing import Final
 from saberops.candidate_lifecycle import project_candidate_state
 from saberops.db import Database
 from saberops.git import CHECKPOINT_REF_PREFIX, GitManager
-from saberops.models import TERMINAL_RUN_STATUSES, AttemptStatus, CandidateState, RunStatus
+from saberops.models import (
+    TERMINAL_RUN_STATUSES,
+    AttemptStatus,
+    CandidateState,
+    Run,
+    RunStatus,
+)
 from saberops.ownership import Liveness, probe_liveness
 from saberops.project import ProjectIdentityError, compute_project_identity
 from saberops.sqlite_policy import read_connection
@@ -216,6 +222,11 @@ class _JobFacts:
     waiting_reason: str | None
     current_run_id: str | None
     run_ids: tuple[str, ...]
+    updated_at: str | None = None
+
+    @property
+    def terminal(self) -> bool:
+        return self.state in ("SUCCEEDED", "FAILED", "CANCELLED")
 
 
 def _resolve_project_id(repo: Path) -> str | None:
@@ -254,7 +265,7 @@ def _read_job_facts(db: Database | None, *, limit: int = 5_000) -> tuple[_JobFac
             if exists is None:
                 return ()
             rows = conn.execute(
-                "SELECT job_id, state, waiting_reason, current_run_id, run_ids_json"
+                "SELECT job_id, state, waiting_reason, current_run_id, run_ids_json, updated_at"
                 " FROM jobs LIMIT ?",
                 (limit,),
             ).fetchall()
@@ -280,6 +291,7 @@ def _read_job_facts(db: Database | None, *, limit: int = 5_000) -> tuple[_JobFac
                 waiting_reason=(str(row["waiting_reason"]) if row["waiting_reason"] else None),
                 current_run_id=(str(row["current_run_id"]) if row["current_run_id"] else None),
                 run_ids=run_ids,
+                updated_at=(str(row["updated_at"]) if row["updated_at"] else None),
             )
         )
     return tuple(facts)
@@ -443,6 +455,8 @@ def build_inventory(
 
     job_facts = _read_job_facts(db)
     items: list[InventoryItem] = []
+    run_index: dict[str, Run] = {}
+    sha_index: dict[str, str] = {}
 
     # ---- relational provenance: runs, attempts, worktrees, branches --------
     known_worktrees: dict[str, InventoryItem] = {}
@@ -456,6 +470,7 @@ def build_inventory(
         assert db is not None
         if not _same_repo(run.target_repo, repo):
             continue
+        run_index[run.id] = run
         status = run.status if isinstance(run.status, RunStatus) else RunStatus(str(run.status))
         run_facts = _RunFacts(
             run_id=run.id,
@@ -512,6 +527,8 @@ def build_inventory(
                     "hardlinked_files": str(measure.hardlinked_files),
                 },
             )
+            if attempt.commit_sha and attempt_terminal:
+                sha_index.setdefault(attempt.commit_sha, run.id)
             items.append(item)
             known_worktrees[str(wt_path)] = item
 
@@ -609,19 +626,43 @@ def build_inventory(
 
     # ---- checkpoint refs ---------------------------------------------------
     ref_result = _list_checkpoint_refs(repo)
+    jobs_by_id = {fact.job_id: fact for fact in job_facts}
     for ref, sha in ref_result:
         job_id = ref[len(CHECKPOINT_REF_PREFIX):].split("/", 1)[0]
+        job = jobs_by_id.get(job_id)
+        if job is not None and job.terminal and job.updated_at:
+            ownership = OwnershipState.OWNED_TERMINAL
+            reason = f"checkpoint-job-{job.state.lower()}"
+            detail: dict[str, str] = {
+                "job_id": job_id,
+                "sha": sha,
+                "job_terminal": "1",
+                "terminal_at": job.updated_at,
+            }
+        elif job is not None and job.terminal:
+            # Terminal job with no recorded anchor: keep it, never guess a time.
+            ownership = OwnershipState.UNKNOWN
+            reason = "checkpoint-terminal-at-missing"
+            detail = {"job_id": job_id, "sha": sha, "job_terminal": "1", "terminal_at": ""}
+        elif job is not None:
+            ownership = OwnershipState.OWNED_LIVE
+            reason = "checkpoint-job-active"
+            detail = {"job_id": job_id, "sha": sha, "job_terminal": "0", "terminal_at": ""}
+        else:
+            ownership = OwnershipState.UNKNOWN
+            reason = "checkpoint-job-unknown"
+            detail = {"job_id": job_id, "sha": sha, "job_terminal": "0", "terminal_at": ""}
         items.append(
             InventoryItem(
                 artifact_class=ArtifactClass.CHECKPOINT_REF,
                 reference=ref,
                 identity=sha,
                 owner=job_id or None,
-                ownership=OwnershipState.UNKNOWN,
-                reason="checkpoint-ref",
+                ownership=ownership,
+                reason=reason,
                 size_bytes=0,
                 reclaimable_bytes=0,
-                detail={"job_id": job_id, "sha": sha},
+                detail=detail,
             )
         )
 
@@ -676,6 +717,28 @@ def build_inventory(
         )
     )
 
+    # ---- gate scratch ------------------------------------------------------
+    items.extend(
+        _discover_gate_scratch(
+            state_root=_resolve_state_root(state_root, owner_db_path),
+            max_entries=max_entries,
+            measure_bytes=measure_bytes,
+        )
+    )
+
+    # ---- run evidence ------------------------------------------------------
+    items.extend(
+        _discover_evidence(
+            db=db,
+            run_index=run_index,
+            sha_index=sha_index,
+            state_root=_resolve_state_root(state_root, owner_db_path),
+            owner_db_path=owner_db_path,
+            max_entries=max_entries,
+            measure_bytes=measure_bytes,
+        )
+    )
+
     items.sort(key=lambda item: (item.artifact_class.value, item.reference))
     return Inventory(
         generated_at=moment,
@@ -717,6 +780,256 @@ def _default_owner_db_path() -> Path:
     from saberops.paths import get_default_db_path
 
     return get_default_db_path()
+
+
+def _resolve_state_root(state_root: Path | str | None, owner_db_path: Path) -> Path:
+    if state_root is not None:
+        return Path(state_root).resolve()
+    from saberops.paths import saberops_state_dir
+
+    try:
+        return saberops_state_dir().resolve()
+    except Exception:  # pragma: no cover - defensive
+        return owner_db_path.parent.resolve()
+
+
+def _read_scratch_owner(directory: Path) -> dict[str, object] | None:
+    """Read a gate scratch owner record without importing the gate runner."""
+    import json as _json
+
+    try:
+        raw = (directory / ".saberops-scratch-owner.json").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        decoded = _json.loads(raw)
+    except ValueError:
+        return None
+    return decoded if isinstance(decoded, dict) else None
+
+
+_SCRATCH_PREFIX = "orchestrator-gate-"
+
+
+def _discover_gate_scratch(
+    *, state_root: Path, max_entries: int, measure_bytes: bool
+) -> list[InventoryItem]:
+    """Inventory engine-owned gate scratch directories under configured roots.
+
+    Only roots the engine itself owns are scanned, and only ``orchestrator-gate-*``
+    entries that carry an owner record are adopted.  External or unowned
+    directories are ignored (reported as out of scope), never guessed at from a
+    name or age.  Ownership follows the recorded process identity when present,
+    else a recorded PID; a missing/unreadable owner stays UNKNOWN.
+    """
+    roots: list[Path] = []
+    env_root = os.environ.get("SABEROPS_GATE_TMP")
+    if env_root:
+        roots.append(Path(env_root))
+    roots.append(state_root / "gate-tmp")
+    roots.append(Path("/dev/shm"))
+    seen: set[str] = set()
+    items: list[InventoryItem] = []
+    for root in roots:
+        if not root.is_dir():
+            continue
+        try:
+            entries = sorted(root.iterdir(), key=lambda entry: entry.name)
+        except OSError:
+            continue
+        for entry in entries:
+            if not entry.is_dir() or entry.is_symlink():
+                continue
+            if not entry.name.startswith(_SCRATCH_PREFIX):
+                continue
+            resolved = str(entry.resolve())
+            if resolved in seen or not _is_within(resolved, root):
+                continue
+            owner = _read_scratch_owner(entry)
+            if owner is None:
+                continue
+            seen.add(resolved)
+            consumers, ownership, reason = _scratch_ownership(owner)
+            measure = (
+                measure_path_bytes(entry, max_entries=max_entries)
+                if measure_bytes
+                else ByteMeasure(None, None, 0, False)
+            )
+            items.append(
+                InventoryItem(
+                    artifact_class=ArtifactClass.GATE_SCRATCH,
+                    reference=resolved,
+                    identity=resolved,
+                    owner=str(owner.get("pid")) if owner.get("pid") is not None else None,
+                    ownership=ownership,
+                    reason=reason,
+                    size_bytes=measure.apparent_bytes,
+                    reclaimable_bytes=measure.reclaimable_bytes,
+                    consumers=consumers,
+                    detail={"owner_record": "1", "hardlinked_files": str(measure.hardlinked_files)},
+                )
+            )
+    return items
+
+
+def _scratch_ownership(
+    owner: Mapping[str, object],
+) -> tuple[tuple[Consumer, ...], OwnershipState, str]:
+    from saberops.ownership import Liveness, ProcessIdentity, probe_liveness
+
+    identity_raw = owner.get("identity")
+    identity = None
+    if isinstance(identity_raw, Mapping):
+        identity = ProcessIdentity.from_dict(identity_raw)
+    if identity is None:
+        pid = owner.get("pid")
+        if not isinstance(pid, int):
+            return (
+                (
+                    Consumer(
+                        kind="scratch-owner",
+                        ref=str(owner),
+                        state="UNKNOWN",
+                        protected=True,
+                        reason="scratch-owner-unknown",
+                    ),
+                ),
+                OwnershipState.UNKNOWN,
+                "scratch-owner-unknown",
+            )
+        from saberops.ownership import ProcessIdentity as _PI
+
+        identity = _PI.for_pid(pid)
+        if identity is None:
+            # PID no longer running (or unreadable /proc) -> provably not the
+            # recorded process; treat as dead-owned disposable scratch.
+            return ((), OwnershipState.OWNED_TERMINAL, "scratch-owner-dead")
+    liveness = probe_liveness(identity)
+    if liveness is Liveness.LIVE:
+        return (
+            (
+                Consumer(
+                    kind="scratch-owner",
+                    ref=f"pid:{owner.get('pid')}",
+                    state="LIVE",
+                    protected=True,
+                    reason="scratch-owner-live",
+                ),
+            ),
+            OwnershipState.OWNED_LIVE,
+            "scratch-owner-live",
+        )
+    if liveness is Liveness.UNKNOWN:
+        return (
+            (
+                Consumer(
+                    kind="scratch-owner",
+                    ref=f"pid:{owner.get('pid')}",
+                    state="UNKNOWN",
+                    protected=True,
+                    reason="scratch-owner-unknown-liveness",
+                ),
+            ),
+            OwnershipState.UNKNOWN,
+            "scratch-owner-unknown",
+        )
+    return ((), OwnershipState.OWNED_TERMINAL, "scratch-owner-dead")
+
+
+def _is_within(path: str, root: Path) -> bool:
+    try:
+        return Path(path).resolve().is_relative_to(root.resolve())
+    except (OSError, ValueError):
+        return False
+
+
+def _discover_evidence(
+    *,
+    db: Database | None,
+    run_index: Mapping[str, Run],
+    sha_index: Mapping[str, str],
+    state_root: Path,
+    owner_db_path: Path,
+    max_entries: int,
+    measure_bytes: bool,
+) -> list[InventoryItem]:
+    """Inventory run evidence under engine-owned roots with verified provenance.
+
+    Roots scanned: the transcript directory next to the owner database and every
+    project ``gate-evidence/candidates/<sha>`` directory under the state root.
+    An entry is linked to a run only when its name is an exact run id or an exact
+    persisted candidate SHA; anything else stays UNKNOWN and is kept.  Terminal
+    status, acceptance, creation time and the terminal anchor come from the run
+    record, never from the directory name or mtime.
+    """
+    targets: list[tuple[Path, str]] = []
+    transcripts = owner_db_path.parent / "transcripts"
+    if transcripts.is_dir():
+        for entry in sorted(transcripts.iterdir(), key=lambda item: item.name):
+            if entry.is_symlink() or not entry.is_file():
+                continue
+            run_id = entry.stem
+            if run_id in run_index:
+                targets.append((entry, run_id))
+    projects = state_root / "projects"
+    if projects.is_dir():
+        for project in sorted(projects.iterdir(), key=lambda item: item.name):
+            candidates = project / "gate-evidence" / "candidates"
+            if not candidates.is_dir():
+                continue
+            for entry in sorted(candidates.iterdir(), key=lambda item: item.name):
+                if entry.is_symlink() or not entry.is_dir():
+                    continue
+                mapped_run_id = sha_index.get(entry.name)
+                if mapped_run_id is not None:
+                    targets.append((entry, mapped_run_id))
+
+    items: list[InventoryItem] = []
+    seen: set[str] = set()
+    for path, run_id in targets:
+        resolved = str(path.resolve())
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        run = run_index.get(run_id)
+        status = run.status if run is not None else None
+        terminal = bool(status in TERMINAL_RUN_STATUSES) if status is not None else False
+        ownership = OwnershipState.OWNED_TERMINAL if terminal else OwnershipState.UNKNOWN
+        accepted = False
+        if terminal and db is not None:
+            try:
+                accepted = project_candidate_state(db, run_id).state is CandidateState.ACCEPTED
+            except Exception:
+                accepted = False
+        measure = (
+            measure_path_bytes(path, max_entries=max_entries)
+            if measure_bytes
+            else ByteMeasure(None, None, 0, False)
+        )
+        items.append(
+            InventoryItem(
+                artifact_class=ArtifactClass.EVIDENCE,
+                reference=resolved,
+                identity=resolved,
+                owner=run_id,
+                ownership=ownership,
+                reason="evidence-run-terminal" if terminal else "evidence-run-active",
+                size_bytes=measure.apparent_bytes,
+                reclaimable_bytes=measure.reclaimable_bytes,
+                detail={
+                    "run_id": run_id,
+                    "run_status": status.value if status is not None else "",
+                    "run_accepted": "1" if accepted else "0",
+                    "compressed": "0",
+                    "created_at": (run.created_at if run is not None and run.created_at else ""),
+                    "terminal_at": (
+                        run.completed_at if run is not None and run.completed_at else ""
+                    ),
+                    "hardlinked_files": str(measure.hardlinked_files),
+                },
+            )
+        )
+    return items
 
 
 def _list_checkpoint_refs(repo: Path) -> tuple[tuple[str, str], ...]:

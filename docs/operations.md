@@ -151,12 +151,14 @@ identity, scoped policy, reason and estimated versus actual bytes).
 
 `orch cleanup <run-id>` is the compatibility route and delegates to the same
 guarded implementation, so it has the same protections and no prune/force
-escape. The scheduler runs bounded storage maintenance on startup and hourly,
-sweeps stale gate scratch, runs the owner-DB `VACUUM` at most weekly above 20 %
-free pages, and on `DISK_LOW` runs permitted GC then rechecks the actual
-filesystem; if space is still low or unknown it parks as typed INFRA and starts
-no worker or gate. The fixed `max(10 GB, 10 %)` floor stays effective on every
-path; adaptive admission is not activated. Full details:
+escape. The scheduler runs bounded storage maintenance on startup (before any
+tick) and hourly, consults a per-tick launch guard, sweeps only provably
+dead-owned gate scratch, runs the owner-DB `VACUUM` at most weekly above 20 %
+free pages, and — on a below-floor or unknown reading — runs permitted GC then
+rechecks the actual filesystem; if space is still low or unknown it parks as
+typed INFRA and starts no worker or gate. The fixed `max(10 GB, 10 %)` floor is
+enforced before every dispatch and on the gate path; adaptive admission is not
+activated. Full details:
 [docs/storage-lifecycle.md](storage-lifecycle.md).
 
 ## Capacity ledger inspection (`orch capacity show`)

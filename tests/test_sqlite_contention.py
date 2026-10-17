@@ -206,3 +206,140 @@ def test_is_busy_error_classification() -> None:
     assert is_busy_error(sqlite3.OperationalError("database table is locked"))
     assert not is_busy_error(sqlite3.OperationalError("no such table: nope"))
     assert not is_busy_error(RuntimeError("database is locked"))
+
+
+_DB_HOLD = textwrap.dedent(
+    """
+    import sqlite3, sys, time
+    path, hold = sys.argv[1], float(sys.argv[2])
+    conn = sqlite3.connect(path, timeout=30.0, isolation_level=None)
+    conn.execute("PRAGMA journal_mode = WAL;")
+    conn.execute("BEGIN IMMEDIATE")
+    conn.execute("UPDATE runs SET task = task WHERE 0")
+    print("LOCKED", flush=True)
+    time.sleep(hold)
+    conn.commit()
+    conn.close()
+    """
+)
+
+
+def _seed_run_db(tmp_path: Path) -> Path:
+    from saberops.db import Database
+    from saberops.models import Run, RunStatus, Tier
+
+    path = tmp_path / "orch.db"
+    db = Database(path)
+    db.create_run(
+        Run(
+            id="run1",
+            task="t",
+            target_repo=str(tmp_path),
+            base_commit="0" * 40,
+            tier=Tier.T1,
+            training_allowed=True,
+            gate_command="true",
+            status=RunStatus.COMPLETED,
+            created_at="2026-09-24T10:00:00+00:00",
+            completed_at="2026-09-24T10:00:00+00:00",
+        )
+    )
+    return path
+
+
+def test_real_database_write_is_a_typed_infra_error_under_contention(tmp_path: Path) -> None:
+    """Covers: ADR-0003 D7 -- an actual Database write raises typed INFRA, not a crash."""
+    from saberops.db import Database
+    from saberops.models import RunStatus
+
+    path = _seed_run_db(tmp_path)
+    db = Database(path)
+    child = subprocess.Popen(
+        [sys.executable, "-c", _DB_HOLD, str(path), "3.0"],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert child.stdout is not None
+        assert child.stdout.readline().strip() == "LOCKED"
+        started = time.monotonic()
+        with pytest.raises(SqliteBusyError) as excinfo:
+            with db.write_transaction(total_seconds=0.5) as conn:
+                conn.execute("UPDATE runs SET status = ? WHERE id = 'run1'", ("FAILED",))
+        assert excinfo.value.reason_code == "SQLITE_BUSY"
+        assert time.monotonic() - started < 5.0
+    finally:
+        child.wait(timeout=10)
+    # No partial write and reads stay available.
+    run_after = db.get_run("run1")
+    assert run_after is not None and run_after.status is RunStatus.COMPLETED
+
+
+def test_real_database_write_succeeds_once_after_release(tmp_path: Path) -> None:
+    """Covers: ADR-0003 D7 -- a lock released inside the budget commits exactly once."""
+    from saberops.db import Database
+    from saberops.models import RunStatus
+
+    path = _seed_run_db(tmp_path)
+    db = Database(path)
+    child = subprocess.Popen(
+        [sys.executable, "-c", _DB_HOLD, str(path), "0.3"],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert child.stdout is not None
+        assert child.stdout.readline().strip() == "LOCKED"
+        with db.write_transaction(total_seconds=20.0) as conn:
+            conn.execute("UPDATE runs SET status = 'FAILED' WHERE id = 'run1'")
+    finally:
+        child.wait(timeout=20)
+    run_after = db.get_run("run1")
+    assert run_after is not None and run_after.status is RunStatus.FAILED
+
+
+def test_capacity_store_write_is_a_typed_infra_error_under_contention(tmp_path: Path) -> None:
+    """Covers: ADR-0003 D7 -- capacity.store writes share the bounded write path."""
+    from saberops.capacity.store import ensure_tables, owner_write_connection
+    from saberops.db import Database
+
+    path = _seed_run_db(tmp_path)
+    db = Database(path)
+    ensure_tables(db)
+    child = subprocess.Popen(
+        [sys.executable, "-c", _DB_HOLD, str(path), "3.0"],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert child.stdout is not None
+        assert child.stdout.readline().strip() == "LOCKED"
+        with pytest.raises(SqliteBusyError):
+            with owner_write_connection(db, total_seconds=0.5) as conn:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS probe_marker (id INTEGER PRIMARY KEY)"
+                )
+    finally:
+        child.wait(timeout=10)
+
+
+def test_read_paths_are_not_blocked_by_a_writer(tmp_path: Path) -> None:
+    """Covers: ADR-0003 D7 -- reads take no write lock and stay available."""
+    from saberops.capacity.store import owner_connection
+    from saberops.db import Database
+
+    path = _seed_run_db(tmp_path)
+    db = Database(path)
+    child = subprocess.Popen(
+        [sys.executable, "-c", _DB_HOLD, str(path), "2.0"],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert child.stdout is not None
+        assert child.stdout.readline().strip() == "LOCKED"
+        assert db.get_run("run1") is not None
+        with owner_connection(db) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1
+    finally:
+        child.wait(timeout=10)

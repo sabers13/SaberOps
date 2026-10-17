@@ -11,7 +11,7 @@ import json
 import os
 import subprocess
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -24,6 +24,7 @@ from saberops.storage_gc import (
     GcCandidate,
     GcPolicy,
     GcPolicyError,
+    GcPreview,
     StorageAuditEvent,
     apply_gc,
     load_gc_policy,
@@ -638,3 +639,232 @@ def test_legacy_cleanup_refuses_running_run(tmp_path: Path) -> None:
     )
     with pytest.raises(RuntimeError, match="RUNNING"):
         retire_run_worktrees(db, repo_root=repo, run_id="run1")
+
+
+# --------------------------------------------------------------------------
+# F2 -- intent vs result vs failure audit semantics
+# --------------------------------------------------------------------------
+
+
+def test_intent_audit_failure_mutates_nothing_and_is_not_applied(tmp_path: Path) -> None:
+    """Covers: ADR-0003 Amendment 1 §4 -- no durable intent => no action/claim."""
+    repo = _repo(tmp_path)
+    db = Database(tmp_path / "orch.db")
+    wt = GitManager.get_default_worktree_base(repo) / "run1" / "a1"
+    GitManager.create_worktree(repo, "orch/run1/a1", wt)
+    _terminal_run(db, repo=repo, run_id="run1", wt=wt, branch="orch/run1/a1")
+    preview = preview_gc(build_inventory(db, repo_root=repo), policy=_approved())
+
+    def failing_intent(event: object) -> None:
+        if getattr(event, "phase", None) == "intent":
+            raise RuntimeError("intent cannot be persisted")
+
+    result = apply_gc(preview, preview.candidates, db=db, repo_root=repo, audit=failing_intent)
+    assert result.applied == ()
+    assert result.refused and result.refused[0].reason == "audit-intent-failed"
+    assert wt.exists()
+    assert GitManager.branch_tip(repo, "orch/run1/a1") is not None
+    assert db.list_storage_events() == []
+
+
+def test_result_audit_failure_after_action_is_uncertain_not_silent(tmp_path: Path) -> None:
+    """Covers: ADR-0003 Amendment 1 §4 -- action done + audit lost => uncertainty."""
+    repo = _repo(tmp_path)
+    db = Database(tmp_path / "orch.db")
+    wt = GitManager.get_default_worktree_base(repo) / "run1" / "a1"
+    GitManager.create_worktree(repo, "orch/run1/a1", wt)
+    _terminal_run(db, repo=repo, run_id="run1", wt=wt, branch="orch/run1/a1")
+    preview = preview_gc(build_inventory(db, repo_root=repo), policy=_approved())
+
+    def failing_result(event: object) -> None:
+        if getattr(event, "phase", None) == "result":
+            raise RuntimeError("audit result cannot be persisted")
+
+    result = apply_gc(preview, preview.candidates, db=db, repo_root=repo, audit=failing_result)
+    assert result.audit_uncertain is True
+    assert result.applied and result.applied[0].reason == "audit-uncertain"
+    # The worktree action did run; the loop stopped before the branch step.
+    assert not wt.exists()
+
+
+def test_refused_action_with_audit_failure_stays_refused(tmp_path: Path) -> None:
+    """Covers: ADR-0003 Amendment 1 §4 -- a refusal is never relabelled applied."""
+    repo = _repo(tmp_path)
+    db = Database(tmp_path / "orch.db")
+    wt = GitManager.get_default_worktree_base(repo) / "run1" / "a1"
+    GitManager.create_worktree(repo, "orch/run1/a1", wt)
+    (wt / "a.txt").write_text("dirty\n", encoding="utf-8")
+    item = _item(
+        ArtifactClass.ATTEMPT_WORKTREE,
+        str(wt.resolve()),
+        detail={"candidate_state": "REJECTED", "attempt_terminal": "1", "run_status": "COMPLETED"},
+    )
+    preview = preview_gc(_inventory(repo, (item,)), policy=_approved())
+
+    def failing_failure(event: object) -> None:
+        if getattr(event, "phase", None) == "failure":
+            raise RuntimeError("failure audit cannot be persisted")
+
+    result = apply_gc(preview, preview.candidates, db=db, repo_root=repo, audit=failing_failure)
+    assert result.applied == ()
+    assert result.refused and result.refused[0].reason == "audit-uncertain"
+    assert result.audit_uncertain is True
+    assert wt.exists()
+
+
+# --------------------------------------------------------------------------
+# F3 -- canonical preview authorization (action + authority attributes)
+# --------------------------------------------------------------------------
+
+
+def _preview_with_worktree(tmp_path: Path) -> tuple[Path, Database, Path, GcPreview]:
+    repo = _repo(tmp_path)
+    db = Database(tmp_path / "orch.db")
+    wt = GitManager.get_default_worktree_base(repo) / "run1" / "a1"
+    GitManager.create_worktree(repo, "orch/run1/a1", wt)
+    _terminal_run(db, repo=repo, run_id="run1", wt=wt, branch="orch/run1/a1")
+    preview = preview_gc(build_inventory(db, repo_root=repo), policy=_approved())
+    return repo, db, wt, preview
+
+
+def test_tampered_action_is_refused_not_executed(tmp_path: Path) -> None:
+    """Covers: ADR-0003 Amendment 1 §6 -- same class/ref/identity is not permission."""
+    repo, db, wt, preview = _preview_with_worktree(tmp_path)
+    original = preview.candidates[0]
+    forged = GcCandidate(
+        artifact_class=original.artifact_class,
+        action=GcAction.COMPRESS_EVIDENCE,
+        reference=original.reference,
+        identity=original.identity,
+        owner=original.owner,
+        reason=original.reason,
+        estimated_bytes=original.estimated_bytes,
+        reclaimable=original.reclaimable,
+        detail=original.detail,
+    )
+    _events, sink = _audit_sink()
+    result = apply_gc(preview, [forged], db=db, repo_root=repo, audit=sink)
+    assert result.applied == ()
+    assert result.refused[0].reason == "selection-widens-preview"
+    assert wt.exists()
+
+
+def test_tampered_detail_is_refused(tmp_path: Path) -> None:
+    """Covers: ADR-0003 Amendment 1 §6 -- authority-relevant data is pinned."""
+    repo, db, wt, preview = _preview_with_worktree(tmp_path)
+    original = preview.candidates[0]
+    forged = GcCandidate(
+        artifact_class=original.artifact_class,
+        action=original.action,
+        reference=original.reference,
+        identity=original.identity,
+        owner=original.owner,
+        reason=original.reason,
+        estimated_bytes=original.estimated_bytes,
+        reclaimable=original.reclaimable,
+        detail={**dict(original.detail), "candidate_state": "ACCEPTED"},
+    )
+    _events, sink = _audit_sink()
+    result = apply_gc(preview, [forged], db=db, repo_root=repo, audit=sink)
+    assert result.applied == ()
+    assert result.refused[0].reason == "selection-widens-preview"
+    assert wt.exists()
+
+
+def test_duplicate_selection_is_refused_once(tmp_path: Path) -> None:
+    """Covers: ADR-0003 Amendment 1 §6 -- a repeated target is not re-executed."""
+    repo, db, wt, preview = _preview_with_worktree(tmp_path)
+    candidate = preview.candidates[0]
+    _events, sink = _audit_sink()
+    result = apply_gc(preview, [candidate, candidate], db=db, repo_root=repo, audit=sink)
+    assert len(result.applied) == 1
+    assert any(outcome.reason == "duplicate-selection" for outcome in result.refused)
+    assert not wt.exists()
+
+
+# --------------------------------------------------------------------------
+# F7 -- safe evidence compressor
+# --------------------------------------------------------------------------
+
+
+def _evidence_item(repo: Path, path: Path, *, age_days: int) -> InventoryItem:
+    created = datetime(2026, 10, 17, 12, 0, tzinfo=UTC) - timedelta(days=age_days)
+    return _item(
+        ArtifactClass.EVIDENCE,
+        str(path.resolve()),
+        ownership=OwnershipState.OWNED_TERMINAL,
+        owner="run1",
+        size=100,
+        reclaimable=100,
+        detail={
+            "run_id": "run1",
+            "run_status": "COMPLETED",
+            "run_accepted": "0",
+            "compressed": "0",
+            "created_at": created.isoformat(),
+            "terminal_at": created.isoformat(),
+        },
+    )
+
+
+def test_evidence_compression_round_trips_and_is_atomic(tmp_path: Path) -> None:
+    """Covers: ADR-0003 D6 -- evidence compression preserves readable content."""
+    import tarfile
+
+    repo = _repo(tmp_path)
+    db = Database(tmp_path / "orch.db")
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "gate.log").write_text("gate output\nline two\n", encoding="utf-8")
+    (bundle / "receipt.json").write_text('{"ok": true}\n', encoding="utf-8")
+    item = _evidence_item(repo, bundle, age_days=30)
+    policy = _approved(allow_evidence_compression=True)
+    preview = preview_gc(
+        _inventory(repo, (item,)), policy=policy, owned_roots=(str(tmp_path),)
+    )
+    assert [c.action for c in preview.candidates] == [GcAction.COMPRESS_EVIDENCE]
+    _events, sink = _audit_sink()
+    result = apply_gc(preview, preview.candidates, db=db, repo_root=repo, audit=sink)
+    assert result.applied and result.applied[0].reason == "evidence-compressed"
+    assert not bundle.exists()
+    archive = tmp_path / "bundle.tar.gz"
+    assert archive.exists()
+    with tarfile.open(archive, "r:gz") as tar:
+        names = sorted(tar.getnames())
+        assert names == ["gate.log", "receipt.json"]
+        extracted = tar.extractfile("gate.log")
+        assert extracted is not None
+        assert extracted.read().decode() == "gate output\nline two\n"
+
+
+def test_evidence_compression_is_idempotent(tmp_path: Path) -> None:
+    """Covers: ADR-0003 D6 -- a repeated compression reports already-compressed."""
+    repo = _repo(tmp_path)
+    db = Database(tmp_path / "orch.db")
+    bundle = tmp_path / "bundle2"
+    bundle.mkdir()
+    (bundle / "a.log").write_text("x", encoding="utf-8")
+    (tmp_path / "bundle2.tar.gz").write_text("exists", encoding="utf-8")
+    item = _evidence_item(repo, bundle, age_days=30)
+    policy = _approved(allow_evidence_compression=True)
+    preview = preview_gc(
+        _inventory(repo, (item,)), policy=policy, owned_roots=(str(tmp_path),)
+    )
+    _events, sink = _audit_sink()
+    result = apply_gc(preview, preview.candidates, db=db, repo_root=repo, audit=sink)
+    assert result.applied and result.applied[0].reason == "already-compressed"
+    assert bundle.exists()
+
+
+def test_evidence_deletion_remains_held_without_anchor(tmp_path: Path) -> None:
+    """Covers: ADR-0003 Amendment 1 -- no evidence deletion without a settled anchor."""
+    repo = _repo(tmp_path)
+    bundle = tmp_path / "bundle3"
+    bundle.mkdir()
+    (bundle / "a.log").write_text("x", encoding="utf-8")
+    item = _evidence_item(repo, bundle, age_days=400)
+    policy = _approved(allow_evidence_deletion=True, evidence_anchor=None)
+    preview = preview_gc(
+        _inventory(repo, (item,)), policy=policy, owned_roots=(str(tmp_path),)
+    )
+    assert preview.candidates == ()

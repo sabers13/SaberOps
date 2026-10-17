@@ -70,7 +70,14 @@ from saberops.ownership import (
 )
 from saberops.quota import normalize_quota_observation
 from saberops.run_titles import clean_title, fallback_title, unique_title
-from saberops.sqlite_policy import BUSY_TIMEOUT_MS, immediate_transaction, write_connection
+from saberops.sqlite_policy import (
+    BUSY_TIMEOUT_MS,
+    SqliteBusyError,
+    bounded_write,
+    immediate_transaction,
+    is_busy_error,
+    write_connection,
+)
 from saberops.wake import notify_run
 
 DB_SCHEMA_VERSION: Final[int] = 1
@@ -276,6 +283,15 @@ class Database:
         try:
             with conn:
                 yield conn
+        except sqlite3.OperationalError as exc:
+            # D7: lock contention at a deferred write boundary is a typed INFRA
+            # park, never a raw crash. Non-contention errors (missing legacy
+            # table/column) keep their existing semantics.
+            if is_busy_error(exc):
+                raise SqliteBusyError(
+                    f"database write at {self.db_path.name}: database is locked"
+                ) from exc
+            raise
         finally:
             conn.close()
 
@@ -967,7 +983,7 @@ class Database:
 
     def create_run(self, run: Run) -> None:
         """Insert a new run together with its project/objective provenance."""
-        with self._get_connection() as conn:
+        with self.write_transaction() as conn:
             try:
                 conn.execute(
                     """
@@ -1330,7 +1346,7 @@ class Database:
         result_summary: str | None = None,
     ) -> None:
         """Update run status and completion details."""
-        with self._get_connection() as conn:
+        with self.write_transaction() as conn:
             conn.execute(
                 """
                 UPDATE runs
@@ -1343,8 +1359,7 @@ class Database:
 
     def set_run_title(self, run_id: str, title: str) -> None:
         """Persist a display label without modifying objective or execution state."""
-        with self._get_connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+        with self.write_transaction() as conn:
             self._save_run_title(conn, run_id, title)
             conn.commit()
 
@@ -1420,7 +1435,7 @@ class Database:
             payload["terminal_verdict"] = None
         json_str = json.dumps(payload)
         try:
-            with self._get_connection() as conn:
+            with self.write_transaction() as conn:
                 conn.execute(
                     "UPDATE runs SET review_state_json = ? WHERE id = ?",
                     (json_str, run_id),
@@ -1476,7 +1491,7 @@ class Database:
         """
         value: str | None = json_str if json_str is not None else None
         try:
-            with self._get_connection() as conn:
+            with self.write_transaction() as conn:
                 conn.execute(
                     "UPDATE runs SET review_risk_decision_json = ? WHERE id = ?",
                     (value, run_id),
@@ -1525,7 +1540,7 @@ class Database:
 
     def adopt_run_if_pending(self, run_id: str) -> bool:
         """Atomically transition a run from PENDING to RUNNING if and only if currently PENDING."""
-        with self._get_connection() as conn:
+        with self.write_transaction() as conn:
             cursor = conn.execute(
                 """
                 UPDATE runs
@@ -1544,7 +1559,7 @@ class Database:
         result_summary: str | None = None,
     ) -> bool:
         """Atomically transition a run to FAILED only if currently in a nonterminal status."""
-        with self._get_connection() as conn:
+        with self.write_transaction() as conn:
             cursor = conn.execute(
                 """
                 UPDATE runs
@@ -1644,8 +1659,7 @@ class Database:
         A half-token adopts nothing and falls back to ordinary contention.
         """
         now = current_iso_timestamp()
-        with self._get_connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+        with self.write_transaction() as conn:
             run_row = conn.execute(
                 "SELECT status, project_id, config_json FROM runs WHERE id = ?", (run_id,)
             ).fetchone()
@@ -1798,7 +1812,7 @@ class Database:
         Fenced by ``owner_id``/``generation`` so a superseded launcher can never
         redirect a newer owner's record.
         """
-        with self._get_connection() as conn:
+        with self.write_transaction() as conn:
             cursor = conn.execute(
                 """
                 UPDATE execution_owners
@@ -1873,8 +1887,7 @@ class Database:
         """
         now = current_iso_timestamp()
         reconciled: RunOwnerAction | None = None
-        with self._get_connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+        with self.write_transaction() as conn:
             existing_row = conn.execute(
                 """
                 SELECT * FROM owner_actions
@@ -2165,7 +2178,7 @@ class Database:
                 f"release_execution_owner for run '{run_id}' requires both owner_id and generation"
             )
         try:
-            with self._get_connection() as conn:
+            with self.write_transaction() as conn:
                 cursor = conn.execute(
                     """
                     UPDATE execution_owners
@@ -2249,8 +2262,7 @@ class Database:
         that was made about its predecessor.
         """
         now = current_iso_timestamp()
-        with self._get_connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+        with self.write_transaction() as conn:
             run_row = conn.execute("SELECT status FROM runs WHERE id = ?", (run_id,)).fetchone()
             if run_row is None:
                 conn.rollback()
@@ -2346,8 +2358,7 @@ class Database:
         written".
         """
         now = current_iso_timestamp()
-        with self._get_connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+        with self.write_transaction() as conn:
             run_row = conn.execute("SELECT status FROM runs WHERE id = ?", (run_id,)).fetchone()
             if run_row is None:
                 conn.rollback()
@@ -2410,8 +2421,7 @@ class Database:
         The cancelling agent's own identity is recorded so an abandoned
         cancellation can later be superseded instead of wedging the run.
         """
-        with self._get_connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+        with self.write_transaction() as conn:
             run_row = conn.execute("SELECT status FROM runs WHERE id = ?", (run_id,)).fetchone()
             if run_row is None or RunStatus(str(run_row["status"])) in TERMINAL_RUN_STATUSES:
                 conn.rollback()
@@ -2467,7 +2477,7 @@ class Database:
         generation: int,
     ) -> bool:
         """Undo a cancellation that could not proceed, mutating nothing else."""
-        with self._get_connection() as conn:
+        with self.write_transaction() as conn:
             cursor = conn.execute(
                 """
                 UPDATE execution_owners
@@ -2592,7 +2602,7 @@ class Database:
         attempt.project_id = project_id
         attempt.objective_id = objective_id
         attempt.base_sha = base_sha
-        with self._get_connection() as conn:
+        with self.write_transaction() as conn:
             try:
                 conn.execute(
                     """
@@ -2686,7 +2696,7 @@ class Database:
         interruption_reason: str | None = None,
     ) -> None:
         """Update attempt outcomes."""
-        with self._get_connection() as conn:
+        with self.write_transaction() as conn:
             conn.execute(
                 """
                 UPDATE attempts
@@ -2710,7 +2720,7 @@ class Database:
 
     def create_check(self, check: CheckResult) -> None:
         """Insert a gate check result."""
-        with self._get_connection() as conn:
+        with self.write_transaction() as conn:
             conn.execute(
                 """
                 INSERT INTO checks (
@@ -3326,7 +3336,7 @@ class Database:
     ) -> int:
         """Log an event and notify in-process listeners."""
         payload_str = json.dumps(payload) if payload is not None else None
-        with self._get_connection() as conn:
+        with self.write_transaction() as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO events (run_id, attempt_id, event_type, payload_json, created_at)
@@ -3385,8 +3395,7 @@ class Database:
         if not isinstance(candidate_sha, str) or not candidate_sha:
             raise ValueError("candidate_sha must be a non-empty string")
         payload_str = json.dumps({"candidate_sha": candidate_sha})
-        with self._get_connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+        with self.write_transaction() as conn:
             rows = conn.execute(
                 """
                 SELECT id, payload_json FROM events
@@ -5167,6 +5176,26 @@ class Database:
         with write_connection(self.db_path) as conn:
             with immediate_transaction(conn) as tx:
                 yield tx
+
+    @contextmanager
+    def write_transaction(
+        self, *, total_seconds: float = 30.0
+    ) -> Iterator[sqlite3.Connection]:
+        """Yield one bounded ``BEGIN IMMEDIATE`` write transaction (ADR-0003 D7).
+
+        This is the shared write path for the database's mutators: WAL, a 30 s
+        busy timeout narrowed to the remaining shared deadline, a single
+        ``BEGIN IMMEDIATE`` with bounded backoff, commit on clean exit and
+        rollback on any exception.  Lock exhaustion raises a typed
+        :class:`~saberops.sqlite_policy.SqliteBusyError` for the owning
+        scheduler/run boundary instead of a raw ``OperationalError`` crash.
+        Reads must keep using :meth:`_get_connection`, which never takes a write
+        lock.
+        """
+        if self._read_only:
+            raise DatabaseSchemaError("cannot take a write transaction on a read-only database")
+        with bounded_write(self.db_path, total_seconds=total_seconds) as conn:
+            yield conn
 
     def record_storage_event(
         self,

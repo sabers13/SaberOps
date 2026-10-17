@@ -47,6 +47,8 @@ __all__ = [
     "SqliteBusyError",
     "SqliteInfraError",
     "apply_write_pragmas",
+    "bounded_write",
+    "busy_error",
     "free_page_ratio",
     "immediate_transaction",
     "is_busy_error",
@@ -92,8 +94,13 @@ class StorageInfraError(RuntimeError):
             self.reason_code = reason_code
 
 
-class SqliteBusyError(StorageInfraError):
-    """``SQLITE_BUSY``/``database is locked`` persisted past the bounded budget."""
+class SqliteBusyError(StorageInfraError, sqlite3.OperationalError):
+    """``SQLITE_BUSY``/``database is locked`` persisted past the bounded budget.
+
+    Deliberately *also* a :class:`sqlite3.OperationalError`: it is a typed INFRA
+    park for new D7 callers, while existing handlers that already catch
+    ``OperationalError`` (and fail closed) keep working unchanged.
+    """
 
     reason_code = "SQLITE_BUSY"
 
@@ -239,6 +246,38 @@ def immediate_transaction(
         except sqlite3.Error:
             pass
         raise
+
+
+def busy_error(exc: BaseException, *, context: str) -> StorageInfraError:
+    """Map a raw SQLite error at an owning boundary to a typed storage error.
+
+    A lock/busy contention becomes :class:`SqliteBusyError` (a typed INFRA park);
+    anything else becomes :class:`SqliteInfraError`.  Used by owner boundaries so
+    existing mutators never crash the run owner with a raw ``OperationalError``.
+    """
+    if is_busy_error(exc):
+        return SqliteBusyError(f"{context}: database is locked")
+    return SqliteInfraError(f"{context}: {exc}")
+
+
+@contextmanager
+def bounded_write(
+    path: Path | str,
+    *,
+    total_seconds: float = WRITE_BUDGET_SECONDS,
+    connect_timeout: float = READ_CONNECT_TIMEOUT_SECONDS,
+) -> Iterator[sqlite3.Connection]:
+    """Open a bounded ``BEGIN IMMEDIATE`` write transaction in one call.
+
+    Combines :func:`write_connection` and :func:`immediate_transaction` so an
+    existing mutator can adopt the full D7 write policy with a single ``with``:
+    WAL, a 30 s busy timeout narrowed to the remaining shared deadline, one
+    ``BEGIN IMMEDIATE`` with bounded backoff, commit on success and rollback on
+    any exception.  Lock exhaustion raises :class:`SqliteBusyError`.
+    """
+    with write_connection(path, connect_timeout=connect_timeout) as conn:
+        with immediate_transaction(conn, total_seconds=total_seconds):
+            yield conn
 
 
 def free_page_ratio(path: Path | str) -> float:

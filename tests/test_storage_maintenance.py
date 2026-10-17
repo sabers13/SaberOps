@@ -309,8 +309,8 @@ def test_gate_scratch_sweep_removes_only_stale(tmp_path: Path) -> None:
     assert unrelated.exists()
 
 
-def test_gate_scratch_sweep_respects_age_for_unowned(tmp_path: Path) -> None:
-    """Covers: ADR-0003 D4 -- unowned scratch is removed only once aged out."""
+def test_gate_scratch_sweep_never_adopts_unowned_by_age(tmp_path: Path) -> None:
+    """Covers: ADR-0003 Amendment 1 §2 -- age/name is never removal authority."""
     from saberops.gate_runner import sweep_gate_scratch
 
     root = tmp_path / "shm"
@@ -318,9 +318,68 @@ def test_gate_scratch_sweep_respects_age_for_unowned(tmp_path: Path) -> None:
     unowned = root / "orchestrator-gate-unowned"
     unowned.mkdir()
     now = datetime.now(UTC)
-    assert sweep_gate_scratch(root, now=now, max_age=timedelta(hours=24)) == ()
+    assert sweep_gate_scratch(root, now=now) == ()
     assert unowned.exists()
-    later = now + timedelta(hours=48)
-    removed = sweep_gate_scratch(root, now=later, max_age=timedelta(hours=24))
-    assert str(unowned) in removed
-    assert not unowned.exists()
+    later = now + timedelta(days=30)
+    assert sweep_gate_scratch(root, now=later) == ()
+    assert unowned.exists()
+
+
+def test_gate_scratch_sweep_preserves_live_owner_regardless_of_age(tmp_path: Path) -> None:
+    """Covers: ADR-0003 Amendment 1 §2 -- a live owner is never swept by age."""
+    import os
+    import time
+
+    from saberops.gate_runner import sweep_gate_scratch
+
+    root = tmp_path / "shm"
+    root.mkdir()
+    live = root / "orchestrator-gate-live"
+    live.mkdir()
+    (live / ".saberops-scratch-owner.json").write_text(
+        json.dumps({"pid": os.getpid()}), encoding="utf-8"
+    )
+    old = time.time() - 60 * 60 * 48
+    os.utime(live, (old, old))
+    assert sweep_gate_scratch(root) == ()
+    assert live.exists()
+
+
+def test_gate_scratch_sweep_skips_symlink_entries(tmp_path: Path) -> None:
+    """Covers: ADR-0003 Amendment 1 §2 -- symlinked scratch is never followed."""
+    from saberops.gate_runner import sweep_gate_scratch
+
+    root = tmp_path / "shm"
+    root.mkdir()
+    external = tmp_path / "external"
+    external.mkdir()
+    (external / "sentinel.txt").write_text("keep\n", encoding="utf-8")
+    link = root / "orchestrator-gate-linked"
+    link.symlink_to(external, target_is_directory=True)
+    assert sweep_gate_scratch(root) == ()
+    assert external.exists() and (external / "sentinel.txt").exists()
+
+
+def test_gate_scratch_sweep_removes_pid_reuse_only_when_identity_dead(tmp_path: Path) -> None:
+    """Covers: ADR-0003 Amendment 1 §2 -- a reused PID is not a live owner."""
+    import os
+
+    from saberops.gate_runner import sweep_gate_scratch
+
+    root = tmp_path / "shm"
+    root.mkdir()
+    # A live PID recorded without a durable identity must NOT be swept.
+    bare_live = root / "orchestrator-gate-bare-live"
+    bare_live.mkdir()
+    (bare_live / ".saberops-scratch-owner.json").write_text(
+        json.dumps({"pid": os.getpid()}), encoding="utf-8"
+    )
+    # A dead PID (no identity) is provably not running and is disposable.
+    dead = root / "orchestrator-gate-dead"
+    dead.mkdir()
+    (dead / ".saberops-scratch-owner.json").write_text(
+        json.dumps({"pid": 999_999_999}), encoding="utf-8"
+    )
+    removed = sweep_gate_scratch(root)
+    assert bare_live.exists()
+    assert str(dead) in removed

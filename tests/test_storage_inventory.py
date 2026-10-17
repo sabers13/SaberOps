@@ -7,6 +7,7 @@ reclaimable-byte accounting for hard-linked/shared data).
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -287,3 +288,124 @@ def test_checkpoint_refs_are_enumerated_read_only(tmp_path: Path) -> None:
     assert len(checkpoints) == 1
     assert checkpoints[0].reference == "refs/saberops/checkpoints/job1/0"
     assert checkpoints[0].detail["job_id"] == "job1"
+
+
+# --------------------------------------------------------------------------
+# F4 -- gate scratch, evidence and checkpoint provenance
+# --------------------------------------------------------------------------
+
+
+def _scratch(root: Path, name: str, owner: dict[str, object]) -> Path:
+    directory = root / name
+    directory.mkdir(parents=True)
+    (directory / ".saberops-scratch-owner.json").write_text(
+        json.dumps(owner), encoding="utf-8"
+    )
+    return directory
+
+
+def test_gate_scratch_is_inventoried_with_owner_liveness(tmp_path: Path) -> None:
+    """Covers: ADR-0003 Amendment 1 §1 -- scratch is discovered from real records."""
+    import json as _json
+
+    repo = _repo(tmp_path)
+    db = Database(tmp_path / "orch.db")
+    state_root = tmp_path / "state"
+    scratch_root = state_root / "gate-tmp"
+    scratch_root.mkdir(parents=True)
+    dead = _scratch(scratch_root, "orchestrator-gate-dead", {"pid": 999_999_999})
+    live = _scratch(scratch_root, "orchestrator-gate-live", {"pid": os.getpid()})
+    unowned = scratch_root / "orchestrator-gate-unowned"
+    unowned.mkdir()
+    other = scratch_root / "not-scratch"
+    other.mkdir()
+    _ = _json
+
+    inventory = build_inventory(db, repo_root=repo, state_root=state_root)
+    scratch = {
+        item.reference: item
+        for item in inventory.by_class(ArtifactClass.GATE_SCRATCH)
+    }
+    assert str(dead.resolve()) in scratch
+    assert scratch[str(dead.resolve())].ownership is OwnershipState.OWNED_TERMINAL
+    assert str(live.resolve()) in scratch
+    live_item = scratch[str(live.resolve())]
+    assert live_item.ownership is OwnershipState.OWNED_LIVE and live_item.protected
+    assert str(unowned.resolve()) not in scratch
+    assert str(other.resolve()) not in scratch
+
+
+def test_evidence_is_inventoried_from_verified_provenance(tmp_path: Path) -> None:
+    """Covers: ADR-0003 Amendment 1 §1/§4 -- evidence linked to a real run record."""
+    repo = _repo(tmp_path)
+    db = Database(tmp_path / "orch.db")
+    base = GitManager.get_head_commit(repo)
+    wt = GitManager.get_default_worktree_base(repo) / "run1" / "a1"
+    GitManager.create_worktree(repo, "orch/run1/a1", wt)
+    _seed_run(
+        db, repo=repo, run_id="run1", status=RunStatus.COMPLETED,
+        worktree_path=wt, branch="orch/run1/a1",
+    )
+    transcripts = tmp_path / "transcripts"
+    transcripts.mkdir()
+    (transcripts / "run1.ansi").write_text("log\n", encoding="utf-8")
+    (transcripts / "unknown-run.ansi").write_text("log\n", encoding="utf-8")
+    state_root = tmp_path / "state"
+    candidate_dir = state_root / "projects" / "p1" / "gate-evidence" / "candidates" / base
+    candidate_dir.mkdir(parents=True)
+    (candidate_dir / "gate.log").write_text("ok\n", encoding="utf-8")
+
+    inventory = build_inventory(db, repo_root=repo, state_root=state_root)
+    evidence = {item.reference: item for item in inventory.by_class(ArtifactClass.EVIDENCE)}
+    transcript = evidence[str((transcripts / "run1.ansi").resolve())]
+    assert transcript.owner == "run1"
+    assert transcript.ownership is OwnershipState.OWNED_TERMINAL
+    assert transcript.detail["terminal_at"]
+    candidate = evidence[str(candidate_dir.resolve())]
+    assert candidate.owner == "run1"
+    assert str((transcripts / "unknown-run.ansi").resolve()) not in evidence
+
+
+def test_checkpoint_ref_links_to_terminal_job(tmp_path: Path) -> None:
+    """Covers: ADR-0003 D6 -- checkpoint refs get real job terminal provenance."""
+    from saberops.jobs.models import Job, JobRequirements, JobState
+    from saberops.jobs.store import insert_job
+
+    repo = _repo(tmp_path)
+    base = GitManager.get_head_commit(repo)
+    GitManager.anchor_checkpoint_ref(repo, "job1", 0, base)
+    db = Database(tmp_path / "orch.db")
+    insert_job(
+        db,
+        Job(
+            job_id="job1",
+            idempotency_key=None,
+            caller_id="owner",
+            repo=str(repo.resolve()),
+            base_ref="HEAD",
+            base_sha=base,
+            goal="g",
+            acceptance=None,
+            requirements=JobRequirements(),
+            state=JobState.SUCCEEDED,
+            created_at="2026-09-01T00:00:00+00:00",
+            updated_at="2026-09-20T00:00:00+00:00",
+        ),
+    )
+    inventory = build_inventory(db, repo_root=repo)
+    checkpoint = inventory.by_class(ArtifactClass.CHECKPOINT_REF)[0]
+    assert checkpoint.ownership is OwnershipState.OWNED_TERMINAL
+    assert checkpoint.detail["job_terminal"] == "1"
+    assert checkpoint.detail["terminal_at"]
+
+
+def test_checkpoint_ref_without_job_stays_unknown(tmp_path: Path) -> None:
+    """Covers: ADR-0003 D6 -- unlinked checkpoint refs fail closed to UNKNOWN."""
+    repo = _repo(tmp_path)
+    base = GitManager.get_head_commit(repo)
+    GitManager.anchor_checkpoint_ref(repo, "ghost", 0, base)
+    db = Database(tmp_path / "orch.db")
+    inventory = build_inventory(db, repo_root=repo)
+    checkpoint = inventory.by_class(ArtifactClass.CHECKPOINT_REF)[0]
+    assert checkpoint.ownership is OwnershipState.UNKNOWN
+    assert checkpoint.reason == "checkpoint-job-unknown"

@@ -3064,12 +3064,20 @@ def handle_gc(args: argparse.Namespace) -> int:
     }
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
+        if result.audit_uncertain:
+            return 1
     else:
         _print_gc_report(inventory, preview)
         print("─" * 60)
         print(f"[*] Applied {len(result.applied)} action(s); refused {len(result.refused)}.")
         for outcome in result.applied:
-            print(f"  ✓ {outcome.candidate.action.value}: {outcome.candidate.reference}")
+            if outcome.reason == "audit-uncertain":
+                print(
+                    f"  ! {outcome.candidate.action.value}: "
+                    f"{outcome.candidate.reference} (audit uncertain)"
+                )
+            else:
+                print(f"  ✓ {outcome.candidate.action.value}: {outcome.candidate.reference}")
         for outcome in result.refused:
             print(f"  ! kept {outcome.candidate.reference} [{outcome.reason}]")
         if result.audit_uncertain:
@@ -4152,15 +4160,14 @@ def handle_job_cancel(args: argparse.Namespace) -> int:
     return 0
 
 
-def _scheduler_storage_maintenance(
+def _scheduler_storage_callbacks(
     db: Database,
-) -> Any:
-    """Build the bounded GS-1 storage-maintenance callback for the scheduler.
+) -> tuple[Any, Any]:
+    """Build the GS-1 (maintenance, launch-guard) callbacks for the scheduler.
 
-    Returns ``None`` when the service cannot be constructed so the scheduler
-    keeps running without storage maintenance rather than crashing.  The
-    callback returns a typed infra reason (or ``None``) and never raises into
-    the loop.
+    On construction failure neither callback is ``None`` silently: the
+    maintenance callback degrades to a typed reason and the guard degrades to
+    the same, so mandatory storage checks are never quietly disabled.
     """
     try:
         from saberops.service import OrchestratorService
@@ -4170,12 +4177,21 @@ def _scheduler_storage_maintenance(
             repo_root=Path.cwd().resolve()
         )
     except Exception:
-        return None
+        def _degraded(_trigger: str) -> str | None:
+            return "STORAGE_MAINTENANCE_UNAVAILABLE"
 
-    def _callback(trigger: str) -> str | None:
+        def _guarded() -> str | None:
+            return "STORAGE_MAINTENANCE_UNAVAILABLE"
+
+        return _degraded, _guarded
+
+    def _maintenance(trigger: str) -> str | None:
         return service.run(MaintenanceTrigger(trigger)).infra_reason
 
-    return _callback
+    def _guard() -> str | None:
+        return service.launch_guard_reason()
+
+    return _maintenance, _guard
 
 
 def handle_scheduler_run(args: argparse.Namespace) -> int:
@@ -4199,13 +4215,15 @@ def handle_scheduler_run(args: argparse.Namespace) -> int:
         readiness_svc = None
 
     try:
+        storage_maintenance_cb, launch_guard_cb = _scheduler_storage_callbacks(db)
         result = run_scheduler_loop(
             db,
             tick_interval=interval,
             once=run_once,
             readiness_service=readiness_svc,
             max_concurrent_override=max_concurrent,
-            storage_maintenance=_scheduler_storage_maintenance(db),
+            storage_maintenance=storage_maintenance_cb,
+            launch_guard=launch_guard_cb,
         )
         if result is None or (not result.ran and result.reason in ("lease_held_by_other", "lost_lease")):
             reason = result.reason if result is not None else "lease_held_by_other"

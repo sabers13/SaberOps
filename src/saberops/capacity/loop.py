@@ -429,6 +429,7 @@ def scheduler_tick(
     background_min_pace: float = 4.0,
     clock_fn: Callable[[], datetime] | None = None,
     readiness_service: Any = None,
+    launch_guard: Callable[[], str | None] | None = None,
 ) -> TickResult:
     """Execute one complete scheduler tick.
 
@@ -449,6 +450,12 @@ def scheduler_tick(
        - Verify lease
        - Invoke run_launcher
        - On error or lost lease: compensate by requeueing and releasing reservation.
+
+    ``launch_guard`` (GS-1 / ADR-0003 D4) is consulted BEFORE any dispatch,
+    reservation or claim transition.  When it returns a typed reason the whole
+    tick parks with zero side effects -- no job leaves QUEUED, no ledger row is
+    booked and no launcher runs.  The fixed floor is the current guard; adaptive
+    admission stays inactive.
     """
     moment = _utcnow(now)
 
@@ -459,6 +466,13 @@ def scheduler_tick(
 
     if not check_lease(db, lease, now=_current_moment()):
         return TickResult(ran=False, reason="lost_lease")
+
+    if launch_guard is not None:
+        guard_reason = launch_guard()
+        if guard_reason is not None:
+            return TickResult(
+                ran=False, reason="storage_infra", storage_infra_reason=guard_reason
+            )
 
     status_fn = run_status or (lambda r_id: _lookup_run_status(db, r_id))
     # One status snapshot per tick: the fail-closed RUNNING guard, the RUNNING
@@ -930,15 +944,24 @@ def run_scheduler_loop(
     now_fn: Callable[[], datetime] | None = None,
     readiness_service: Any = None,
     storage_maintenance: Callable[[str], str | None] | None = None,
+    launch_guard: Callable[[], str | None] | None = None,
 ) -> TickResult | None:
     """Run the scheduler loop or a single tick (--once).
 
-    ``storage_maintenance`` (GS-1) is an optional bounded callable invoked once
-    at startup and at most once per :data:`saberops.storage_maintenance.
-    MAINTENANCE_INTERVAL`.  It receives the trigger name and returns a typed
-    storage/SQLite infra reason code (or ``None`` when healthy); the reason is
-    surfaced on :class:`TickResult` as an INFRA park.  It must not block the
-    tick beyond its own internal budget, and it never raises into the loop.
+    Ordering is safety-critical (ADR-0003 D4):
+
+    * Startup maintenance runs BEFORE any tick in both ``--once`` and continuous
+      modes.  When it reports a typed infra reason (disk low/unknown, storage
+      infra) the loop parks with zero side effects.
+    * Periodic maintenance runs at most once per
+      :data:`saberops.storage_maintenance.MAINTENANCE_INTERVAL`, before the tick;
+      a low reading parks the tick instead of dispatching.
+    * ``launch_guard`` is consulted inside every tick before any dispatch, so an
+      expensive launch is blocked even between maintenance passes.
+
+    ``storage_maintenance`` receives the trigger name and returns a typed
+    storage/SQLite infra reason code (or ``None`` when healthy).  Neither
+    callable may raise into the loop.
     """
     clean_holder = holder_id or f"sched_{uuid.uuid4().hex[:8]}"
     now = now_fn() if now_fn else _utcnow(None)
@@ -949,13 +972,26 @@ def run_scheduler_loop(
             return TickResult(ran=False, reason="lease_held_by_other")
         return None
 
-    next_maintenance: datetime | None = None
+    # Startup maintenance precedes any tick: a below-floor host must not launch
+    # work first and report infra afterwards.
+    startup_reason: str | None = None
     if storage_maintenance is not None:
-        next_maintenance = now + _storage_maintenance_interval()
+        startup_reason = _invoke_storage_maintenance(storage_maintenance, "startup")
+    if startup_reason is not None:
+        try:
+            return TickResult(
+                ran=False, reason="storage_infra", storage_infra_reason=startup_reason
+            )
+        finally:
+            release_lease(db, lease, now=now)
+
+    next_maintenance: datetime | None = (
+        now + _storage_maintenance_interval() if storage_maintenance is not None else None
+    )
 
     if once:
         try:
-            result = scheduler_tick(
+            return scheduler_tick(
                 db,
                 lease,
                 now=now,
@@ -969,12 +1005,8 @@ def run_scheduler_loop(
                 background_min_pace=background_min_pace,
                 clock_fn=now_fn,
                 readiness_service=readiness_service,
+                launch_guard=launch_guard,
             )
-            if storage_maintenance is not None:
-                reason = _invoke_storage_maintenance(storage_maintenance, "startup")
-                if reason is not None:
-                    result = replace(result, storage_infra_reason=reason)
-            return result
         finally:
             release_lease(db, lease, now=now)
 
@@ -991,12 +1023,16 @@ def run_scheduler_loop(
                 break
             lease = active_lease
 
-            storage_reason: str | None = None
             if storage_maintenance is not None and (
                 next_maintenance is None or now >= next_maintenance
             ):
                 storage_reason = _invoke_storage_maintenance(storage_maintenance, "periodic")
                 next_maintenance = now + _storage_maintenance_interval()
+                if storage_reason is not None:
+                    last_tick = TickResult(
+                        ran=False, reason="storage_infra", storage_infra_reason=storage_reason
+                    )
+                    break
 
             last_tick = scheduler_tick(
                 db,
@@ -1012,9 +1048,8 @@ def run_scheduler_loop(
                 background_min_pace=background_min_pace,
                 clock_fn=now_fn,
                 readiness_service=readiness_service,
+                launch_guard=launch_guard,
             )
-            if storage_reason is not None:
-                last_tick = replace(last_tick, storage_infra_reason=storage_reason)
             if not last_tick.ran:
                 break
 

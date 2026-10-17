@@ -31,6 +31,7 @@ Safety posture (ADR-0003 Amendment 1 and Amendment 2):
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -56,6 +57,7 @@ from saberops.storage_inventory import (
     storage_owned_roots,
 )
 from saberops.storage_lifecycle import (
+    EVIDENCE_COMPRESS_AFTER,
     Action,
     Artifact,
     AttemptWorktree,
@@ -328,7 +330,7 @@ def _to_planner_artifact(item: InventoryItem) -> Artifact | None:
             owner_state=owner_state,
             job_id=detail.get("job_id") or None,
             job_terminal=detail.get("job_terminal") == "1",
-            terminal_at=None,
+            terminal_at=_parse_iso(detail.get("terminal_at")),
             job_preempted=detail.get("preempted") == "1",
         )
     if item.artifact_class is ArtifactClass.WORKTREE_VENV:
@@ -350,15 +352,16 @@ def _to_planner_artifact(item: InventoryItem) -> Artifact | None:
             free_page_ratio=None,
         )
     if item.artifact_class is ArtifactClass.GATE_SCRATCH:
+        owner_dead = item.ownership is OwnershipState.OWNED_TERMINAL
         return GateScratch(
             artifact_id=item.reference,
             path=item.reference,
             owner=item.owner,
             owner_state=owner_state,
             size_bytes=item.size_bytes,
-            gate_finished=True,
-            gate_succeeded=detail.get("gate_succeeded") == "1",
-            is_newest_failed=detail.get("is_newest_failed") == "1",
+            gate_finished=owner_dead,
+            gate_succeeded=None,
+            is_newest_failed=None,
         )
     if item.artifact_class is ArtifactClass.EVIDENCE:
         return EvidenceBundle(
@@ -366,14 +369,24 @@ def _to_planner_artifact(item: InventoryItem) -> Artifact | None:
             path=item.reference,
             owner=item.owner,
             owner_state=owner_state,
-            run_terminal=True,
+            run_terminal=item.ownership is OwnershipState.OWNED_TERMINAL,
             run_accepted=detail.get("run_accepted") == "1",
-            created_at=None,
-            terminal_at=None,
-            compressed=False,
+            created_at=_parse_iso(detail.get("created_at")),
+            terminal_at=_parse_iso(detail.get("terminal_at")),
+            compressed=detail.get("compressed") == "1",
             size_bytes=item.size_bytes,
         )
     return None
+
+
+def _parse_iso(raw: str | None) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
 
 
 def preview_gc(
@@ -431,8 +444,10 @@ def preview_gc(
             candidate = _plan_venv_item(item, active_policy, owned_roots)
         elif item.artifact_class is ArtifactClass.OWNER_DB:
             candidate = _plan_owner_db_item(item, active_policy)
+        elif item.artifact_class is ArtifactClass.GATE_SCRATCH:
+            candidate = _plan_scratch_item(item, active_policy, owned_roots)
         elif item.artifact_class is ArtifactClass.EVIDENCE:
-            candidate = _plan_evidence_item(item, active_policy)
+            candidate = _plan_evidence_item(item, active_policy, owned_roots)
         else:
             candidate = None
 
@@ -584,10 +599,74 @@ def _plan_owner_db_item(item: InventoryItem, policy: GcPolicy) -> GcCandidate | 
     )
 
 
-def _plan_evidence_item(item: InventoryItem, policy: GcPolicy) -> GcCandidate | None:
-    if not policy.allow_evidence_deletion:
+def _plan_evidence_item(
+    item: InventoryItem, policy: GcPolicy, owned_roots: Sequence[str]
+) -> GcCandidate | None:
+    """Evidence: compression under explicit approval; deletion held by default.
+
+    Compression is non-destructive and gated by ``allow_evidence_compression``.
+    Deletion additionally requires a settled ``evidence_anchor`` and
+    ``allow_evidence_deletion``; otherwise the item is reported as held.
+    """
+    artifact = _to_planner_artifact(item)
+    if artifact is None:
         return None
-    if policy.evidence_anchor is None:
+    plan = plan_gc([artifact], now=datetime.now(UTC), owned_roots=owned_roots)
+    decision = plan.decisions[0]
+    if (
+        decision.action is Action.ELIGIBLE_DELETE
+        and policy.allow_evidence_deletion
+        and policy.evidence_anchor is not None
+    ):
+        return GcCandidate(
+            artifact_class=item.artifact_class,
+            action=GcAction.DELETE_PATH,
+            reference=item.reference,
+            identity=item.identity,
+            owner=item.owner,
+            reason=decision.reason,
+            estimated_bytes=item.reclaimable_bytes,
+            reclaimable=item.reclaimable_bytes is not None,
+            detail={**item.detail, "evidence_anchor": policy.evidence_anchor},
+        )
+    # Compression is anchored at creation and independent of the held deletion
+    # rule (ADR-0003 D6: compress after 7 days).
+    created_at = _parse_iso(item.detail.get("created_at"))
+    if (
+        policy.allow_evidence_compression
+        and not item.protected
+        and item.ownership is OwnershipState.OWNED_TERMINAL
+        and item.detail.get("compressed") != "1"
+        and created_at is not None
+        and datetime.now(UTC) >= created_at + EVIDENCE_COMPRESS_AFTER
+    ):
+        return GcCandidate(
+            artifact_class=item.artifact_class,
+            action=GcAction.COMPRESS_EVIDENCE,
+            reference=item.reference,
+            identity=item.identity,
+            owner=item.owner,
+            reason="evidence-compress-eligible",
+            estimated_bytes=item.reclaimable_bytes,
+            reclaimable=item.reclaimable_bytes is not None,
+            detail={**item.detail, "evidence_anchor": policy.evidence_anchor or ""},
+        )
+    return None
+
+
+def _plan_scratch_item(
+    item: InventoryItem, policy: GcPolicy, owned_roots: Sequence[str]
+) -> GcCandidate | None:
+    """Gate scratch: retire only a provably dead owner's scratch, under policy.
+
+    A live or unknown owner is never eligible here; the bounded scratch sweep is
+    the maintenance mechanism, and this path is the owner-authorized GC action.
+    """
+    if not policy.allow_scratch_deletion:
+        return None
+    if item.ownership is not OwnershipState.OWNED_TERMINAL or item.protected:
+        return None
+    if not _owned_roots_allow(item.reference, owned_roots):
         return None
     return GcCandidate(
         artifact_class=item.artifact_class,
@@ -595,11 +674,28 @@ def _plan_evidence_item(item: InventoryItem, policy: GcPolicy) -> GcCandidate | 
         reference=item.reference,
         identity=item.identity,
         owner=item.owner,
-        reason="evidence-eligible",
+        reason="scratch-owner-dead",
         estimated_bytes=item.reclaimable_bytes,
         reclaimable=item.reclaimable_bytes is not None,
         detail=item.detail,
     )
+
+
+def _owned_roots_allow(path: str, owned_roots: Sequence[str]) -> bool:
+    try:
+        resolved = Path(path).resolve()
+    except OSError:
+        return False
+    for root in owned_roots:
+        try:
+            root_path = Path(root).resolve()
+        except OSError:
+            continue
+        if root_path == resolved:
+            return False
+        if resolved.is_relative_to(root_path):
+            return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -675,23 +771,73 @@ def apply_gc(
             )
         return GcApplyResult(tuple(applied), tuple(refused), False)
 
-    previewed = {(c.artifact_class, c.reference, c.identity): c for c in preview.candidates}
+    # Canonical authorization: the selection must name exact previewed
+    # candidates, including the action and every authority-relevant attribute.
+    # Execution always uses the immutable previewed object, never the
+    # caller-supplied instance, so a forged or mutated selection cannot change
+    # what is executed.
+    previewed = {_candidate_key(c): c for c in preview.candidates}
     ordered = sorted(
         selection,
         key=lambda c: (_ACTION_ORDER[c.action], c.artifact_class.value, c.reference),
     )
+    seen: set[tuple[str, str, str, str, str]] = set()
     for candidate in ordered:
-        key = (candidate.artifact_class, candidate.reference, candidate.identity)
-        if key not in previewed:
+        key = _candidate_key(candidate)
+        canonical = previewed.get(key)
+        if canonical is None:
             refused.append(GcOutcome(candidate, "refused", "selection-widens-preview", None))
             continue
+        if key in seen:
+            refused.append(GcOutcome(canonical, "refused", "duplicate-selection", None))
+            continue
+        seen.add(key)
+        if (
+            canonical.artifact_class not in preview.scope_classes
+            or not preview.approved
+        ):
+            refused.append(GcOutcome(canonical, "refused", "policy-not-authorised", None))
+            continue
+        # Intent must be durable BEFORE any destructive call: if it is not,
+        # nothing is executed and no "applied" claim is made.
         try:
-            outcome = _execute_candidate(
-                candidate, preview, db=db, repo=repo, audit=audit, now=moment
+            _emit(
+                audit,
+                phase="intent",
+                candidate=canonical,
+                preview=preview,
+                reason=canonical.reason,
+                actual_bytes=None,
+                at=moment,
             )
         except _AuditFailure:
+            refused.append(GcOutcome(canonical, "refused", "audit-intent-failed", None))
+            break
+        outcome = _dispatch_action(canonical, preview=preview, db=db, repo=repo, now=moment)
+        phase = "result" if outcome.status == "applied" else "failure"
+        try:
+            _emit(
+                audit,
+                phase=phase,
+                candidate=canonical,
+                preview=preview,
+                reason=outcome.reason,
+                actual_bytes=outcome.actual_bytes,
+                at=moment,
+            )
+        except _AuditFailure:
+            # The action already ran (or was refused); only its audit result is
+            # missing. Tie the uncertainty to the actual outcome, never relabel
+            # a refusal as applied, and stop before touching another target.
             audit_uncertain = True
-            applied.append(GcOutcome(candidate, "applied", "audit-uncertain", None))
+            if outcome.status == "applied":
+                applied.append(
+                    GcOutcome(canonical, "applied", "audit-uncertain", outcome.actual_bytes)
+                )
+            else:
+                refused.append(
+                    GcOutcome(canonical, outcome.status, "audit-uncertain", outcome.actual_bytes)
+                )
             break
         if outcome.status == "applied":
             applied.append(outcome)
@@ -738,35 +884,61 @@ def _emit(
     )
 
 
-def _execute_candidate(
+def _dispatch_action(
     candidate: GcCandidate,
     preview: GcPreview,
     *,
     db: Database,
     repo: Path,
-    audit: AuditSink,
     now: datetime,
 ) -> GcOutcome:
-    _emit(audit, phase="intent", candidate=candidate, preview=preview, reason=candidate.reason,
-          actual_bytes=None, at=now)
+    """Execute one canonical previewed candidate. No audit side effects here."""
     if candidate.action is GcAction.REMOVE_WORKTREE:
-        result = _revalidate_and_remove_worktree(candidate, db=db, repo=repo, now=now)
-    elif candidate.action is GcAction.DELETE_BRANCH:
-        result = _revalidate_and_delete_branch(candidate, db=db, repo=repo)
-    elif candidate.action is GcAction.DELETE_CHECKPOINT_REF:
-        result = _revalidate_and_delete_checkpoint(candidate, db=db, repo=repo, now=now)
-    elif candidate.action is GcAction.DELETE_PATH:
-        result = _revalidate_and_delete_path(candidate, preview=preview, repo=repo)
-    elif candidate.action is GcAction.COMPRESS_EVIDENCE:
-        result = GcOutcome(candidate, "refused", "compression-requires-dedicated-policy", None)
-    elif candidate.action is GcAction.VACUUM_DB:
-        result = _revalidate_and_vacuum(candidate, db=db)
-    else:  # pragma: no cover - exhaustive enum
-        result = GcOutcome(candidate, "refused", "unknown-action", None)
-    phase = "result" if result.status == "applied" else "failure"
-    _emit(audit, phase=phase, candidate=candidate, preview=preview, reason=result.reason,
-          actual_bytes=result.actual_bytes, at=now)
-    return result
+        return _revalidate_and_remove_worktree(candidate, db=db, repo=repo, now=now)
+    if candidate.action is GcAction.DELETE_BRANCH:
+        return _revalidate_and_delete_branch(candidate, db=db, repo=repo)
+    if candidate.action is GcAction.DELETE_CHECKPOINT_REF:
+        return _revalidate_and_delete_checkpoint(candidate, db=db, repo=repo, now=now)
+    if candidate.action is GcAction.DELETE_PATH:
+        return _revalidate_and_delete_path(candidate, preview=preview, repo=repo)
+    if candidate.action is GcAction.COMPRESS_EVIDENCE:
+        return _revalidate_and_compress(candidate, preview=preview)
+    if candidate.action is GcAction.VACUUM_DB:
+        return _revalidate_and_vacuum(candidate, db=db)
+    return GcOutcome(candidate, "refused", "unknown-action", None)
+
+
+def _authority_digest(candidate: GcCandidate) -> str:
+    """Stable digest of every authority-relevant attribute of a candidate.
+
+    Included in the selection identity so a caller cannot keep a preview's
+    class/reference/identity while changing the operation or the data an
+    operation depends on (policy ref, run, branch tip, target ref...).
+    """
+    payload = json.dumps(
+        {
+            "action": candidate.action.value,
+            "artifact_class": candidate.artifact_class.value,
+            "reference": candidate.reference,
+            "identity": candidate.identity,
+            "owner": candidate.owner,
+            "reason": candidate.reason,
+            "estimated_bytes": candidate.estimated_bytes,
+            "detail": sorted((str(key), str(value)) for key, value in candidate.detail.items()),
+        },
+        sort_keys=True,
+    )
+    return sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _candidate_key(candidate: GcCandidate) -> tuple[str, str, str, str, str]:
+    return (
+        candidate.artifact_class.value,
+        candidate.action.value,
+        candidate.reference,
+        candidate.identity,
+        _authority_digest(candidate),
+    )
 
 
 def _is_under(path: Path, base: Path) -> bool:
@@ -884,11 +1056,129 @@ def _revalidate_and_delete_checkpoint(
     ref = candidate.reference
     if not ref.startswith(CHECKPOINT_REF_PREFIX):
         return GcOutcome(candidate, "refused", "invalid-ref", None)
+    expected_sha = candidate.detail.get("sha") or candidate.identity
     try:
-        GitManager.delete_checkpoint_ref(repo, ref)
+        GitManager.delete_checkpoint_ref(repo, ref, expected_sha=expected_sha)
     except Exception as exc:
         return GcOutcome(candidate, "refused", f"refusal:{exc}"[:200], None)
     return GcOutcome(candidate, "applied", "checkpoint-ref-deleted", 0)
+
+
+def _revalidate_and_compress(candidate: GcCandidate, *, preview: GcPreview) -> GcOutcome:
+    """Compress one evidence target in place, atomically and non-destructively.
+
+    Two layouts are supported:
+
+    * a regular file ``f`` is gzipped to ``f.gz`` (write temp, fsync, atomic
+      ``os.replace``) and only then is the original removed;
+    * a directory ``d`` is archived to ``d.tar.gz`` the same way.
+
+    A crash before the final remove leaves the archive and the source; a repeat
+    run sees the archive and reports ``already-compressed`` without duplicating
+    work, so the operation is idempotent. Readable content and file structure
+    are preserved. Deletion is a separate, still-held action.
+    """
+    path = Path(candidate.reference)
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return GcOutcome(candidate, "refused", "path-unresolvable", None)
+    if str(resolved) != candidate.reference:
+        return GcOutcome(candidate, "refused", "path-changed", None)
+    if str(resolved) == preview.repo_root:
+        return GcOutcome(candidate, "refused", "root-itself-protected", None)
+    if resolved.is_symlink():
+        return GcOutcome(candidate, "refused", "symlink-refused", None)
+    if not resolved.exists():
+        return GcOutcome(candidate, "applied", "already-missing", 0)
+
+    archive = _compress_evidence_path(resolved)
+    if archive is None:
+        return GcOutcome(candidate, "refused", "compression-unavailable", None)
+    if isinstance(archive, str):
+        return GcOutcome(candidate, "applied", archive, None)
+    freed = archive
+    return GcOutcome(candidate, "applied", "evidence-compressed", freed)
+
+
+def _compress_evidence_path(path: Path) -> int | str | None:
+    """Compress *path*; return freed bytes, or a status string, or ``None``.
+
+    ``"already-compressed"`` is returned when the archive already exists and the
+    source is gone.
+    """
+    import gzip
+    import tarfile
+    import tempfile
+
+    if path.is_dir():
+        archive_path = path.with_name(path.name + ".tar.gz")
+        if archive_path.exists() and not path.exists():  # pragma: no cover - defensive
+            return "already-compressed"
+        if archive_path.exists():
+            return "already-compressed"
+        measure = measure_path_bytes(path)
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{archive_path.name}.", suffix=".tmp", dir=str(path.parent)
+        )
+        os.close(fd)
+        tmp_path = Path(tmp_name)
+        try:
+            with tarfile.open(tmp_path, "w:gz") as tar:
+                for member in sorted(path.rglob("*"), key=lambda p: str(p)):
+                    tar.add(member, arcname=str(member.relative_to(path)))
+            _fsync_file(tmp_path)
+            os.replace(tmp_path, archive_path)
+            _fsync_dir(archive_path.parent)
+            shutil.rmtree(path)
+        except BaseException:
+            tmp_path.unlink(missing_ok=True)
+            raise
+        return measure.apparent_bytes if measure.apparent_bytes is not None else 0
+
+    if path.is_file():
+        archive_path = path.with_name(path.name + ".gz")
+        if archive_path.exists():
+            return "already-compressed"
+        before = path.stat().st_size
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{archive_path.name}.", suffix=".tmp", dir=str(path.parent)
+        )
+        tmp_path = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "wb") as raw, gzip.open(raw, "wb") as gz:
+                with path.open("rb") as src:
+                    shutil.copyfileobj(src, gz)
+            _fsync_file(tmp_path)
+            os.replace(tmp_path, archive_path)
+            _fsync_dir(archive_path.parent)
+            path.unlink()
+        except BaseException:
+            tmp_path.unlink(missing_ok=True)
+            raise
+        return before
+    return None
+
+
+def _fsync_file(path: Path) -> None:
+    try:
+        with path.open("rb") as handle:
+            os.fsync(handle.fileno())
+    except OSError:
+        pass
+
+
+def _fsync_dir(path: Path) -> None:
+    try:
+        fd = os.open(str(path), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 def _revalidate_and_delete_path(

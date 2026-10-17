@@ -130,8 +130,11 @@ def disk_ok(
 ) -> bool:
     """Return True when every path's filesystem is above today's fixed floor."""
     for path in paths:
+        anchor = _nearest_existing(path)
+        if anchor is None:
+            return False
         try:
-            usage = _statvfs(path)
+            usage = _statvfs(anchor)
         except OSError:
             return False
         if usage[0] < current_disk_floor_bytes(usage[1], minimum_gb):
@@ -145,6 +148,23 @@ def _statvfs(path: Path | str) -> tuple[int, int]:
 
     stat = os.statvfs(str(path))
     return stat.f_bavail * stat.f_frsize, stat.f_blocks * stat.f_frsize
+
+
+def _nearest_existing(path: Path | str) -> Path | None:
+    """Return *path* or its nearest existing ancestor, or ``None``.
+
+    A not-yet-created state directory must not be read as an *unknown* disk: its
+    capacity is the capacity of the filesystem that will hold it.
+    """
+    candidate = Path(path)
+    for _ in range(64):
+        if candidate.exists():
+            return candidate
+        parent = candidate.parent
+        if parent == candidate:
+            return None
+        candidate = parent
+    return None
 
 
 class StorageMaintenance:
@@ -183,8 +203,11 @@ class StorageMaintenance:
         free: int | None = None
         required: int | None = None
         for path in paths:
+            anchor = _nearest_existing(path)
+            if anchor is None:
+                return DiskAssessment(DiskState.UNKNOWN, None, None, resolved, "no-anchor")
             try:
-                free_bytes, total_bytes = _statvfs(path)
+                free_bytes, total_bytes = _statvfs(anchor)
             except OSError:
                 return DiskAssessment(DiskState.UNKNOWN, None, None, resolved, "statvfs-failed")
             needed = current_disk_floor_bytes(total_bytes, self._floor_gb)
@@ -235,13 +258,23 @@ class StorageMaintenance:
             inventory,
             policy=policy,
             policy_path=self._policy_path,
-            classes=(ArtifactClass.ATTEMPT_WORKTREE, ArtifactClass.LOCAL_BRANCH),
+            classes=(
+                ArtifactClass.ATTEMPT_WORKTREE,
+                ArtifactClass.LOCAL_BRANCH,
+                ArtifactClass.GATE_SCRATCH,
+            ),
         )
         applied = 0
         refused = 0
         ran_gc = False
         vacuumed = False
         within_budget = (self._clock() - started) < self._tick_budget
+
+        # A below-floor or unknown reading is remediated with bounded permitted
+        # GC and then re-measured, for every trigger -- not only the explicit
+        # DISK_LOW one.  Startup/periodic are where the floor actually gated a
+        # launch, so their assessment must propagate infra too.
+        low = disk_before.state is not DiskState.OK
 
         if lease_valid and policy.approved and preview.candidates and within_budget:
             result: GcApplyResult = apply_gc(
@@ -256,21 +289,23 @@ class StorageMaintenance:
             refused = len(result.refused)
             ran_gc = applied > 0
 
-        if lease_valid and policy.approved and policy.allow_vacuum:
+        if lease_valid and policy.approved and policy.allow_vacuum and within_budget:
             vacuumed = self._maybe_vacuum()
 
-        swept = self._sweep_gate_scratch()
+        swept: tuple[str, ...] = ()
+        if lease_valid and within_budget:
+            swept = self._sweep_gate_scratch(deadline=started + self._tick_budget)
+
         infra_reason: str | None = None
         disk_after: DiskAssessment | None = None
-        if trigger is MaintenanceTrigger.DISK_LOW:
-            if disk_before.state is DiskState.OK:
-                disk_after = disk_before
-            else:
-                disk_after = self.assess_disk(target_paths)
-                if disk_after.state is DiskState.LOW:
-                    infra_reason = "DISK_LOW"
-                elif disk_after.state is DiskState.UNKNOWN:
-                    infra_reason = "DISK_UNKNOWN"
+        if low:
+            disk_after = self.assess_disk(target_paths)
+            if disk_after.state is DiskState.LOW:
+                infra_reason = "DISK_LOW"
+            elif disk_after.state is DiskState.UNKNOWN:
+                infra_reason = "DISK_UNKNOWN"
+        elif trigger is MaintenanceTrigger.DISK_LOW:
+            disk_after = disk_before
 
         elapsed = self._clock() - started
         telemetry = {
@@ -310,10 +345,25 @@ class StorageMaintenance:
             raise DiskLowInfra("free space unknown; parking launch")
         return assessment
 
+    def launch_guard_reason(self, *, paths: Sequence[Path | str] | None = None) -> str | None:
+        """Return a typed infra reason when a launch must be parked, else None.
+
+        The non-raising form of :meth:`preflight_launch`, used by the scheduler
+        dispatch guard and the gate path so a below-floor or unknown reading
+        blocks the expensive launch before any side effect.
+        """
+        target = tuple(paths) if paths is not None else self.storage_paths()
+        assessment = self.assess_disk(target)
+        if assessment.state is DiskState.LOW:
+            return "DISK_LOW"
+        if assessment.state is DiskState.UNKNOWN:
+            return "DISK_UNKNOWN"
+        return None
+
     # -- gate scratch sweep -------------------------------------------------
 
-    def _sweep_gate_scratch(self) -> tuple[str, ...]:
-        """Sweep stale gate scratch whose owner PID is dead or aged out."""
+    def _sweep_gate_scratch(self, *, deadline: float | None = None) -> tuple[str, ...]:
+        """Sweep provably dead-owned gate scratch (bounded, policy-gated)."""
         from saberops.gate_runner import sweep_gate_scratch
 
         roots: list[Path] = []
@@ -326,7 +376,13 @@ class StorageMaintenance:
         for root in roots:
             if not root.is_dir():
                 continue
-            removed.extend(sweep_gate_scratch(root, now=self._now_fn()))
+            removed.extend(
+                sweep_gate_scratch(
+                    root,
+                    deadline=deadline,
+                    clock=self._clock,
+                )
+            )
         return tuple(removed)
 
     # -- vacuum ------------------------------------------------------------
