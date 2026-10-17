@@ -127,6 +127,38 @@ Dispatches atomically move jobs `QUEUED` → `RUNNING`, reserve ledger capacity,
 and reconcile terminal runs upon completion or failure. Run `--once` executes
 a single evaluation tick and exits cleanly.
 
+## Storage lifecycle (`orch gc`)
+
+`orch gc --dry-run [--class <c>] [--json] [--repo PATH] [--db PATH]` inventories
+the owned storage artifacts for a repository (attempt worktrees, engine local
+branches, checkpoint refs, gate scratch, worktree venvs, evidence and the owner
+database) and prints the exact scope a validated standing policy would make
+eligible together with the exclusions and reasons. A dry run is a true no-op:
+no database, WAL file, schema, directory or policy file is created and no write
+lock is taken. Ownership comes from real persisted run/attempt/candidate/
+execution-owner/job records; anything unexplained is kept as `UNKNOWN`.
+
+`orch gc --apply` executes only the exact previewed scope, revalidating every
+identity immediately before each action and refusing on any race (ownership
+change, symlink/root change, moved branch tip, live consumer, pending
+acceptance, dirty or uniquely-ignored content). `--apply` requires a standing
+owner policy at `$XDG_CONFIG_HOME/saberops/storage_gc.json`; without one it is
+refused. Retirement uses native `git worktree remove` (no force) and then
+`git branch -d` (no force) only — never `git worktree prune`, `git branch -D`,
+recursive deletion of an unverified path or a remote operation. Every action is
+audited in `storage_cleanup_events` (intent/result/failure with exact artifact
+identity, scoped policy, reason and estimated versus actual bytes).
+
+`orch cleanup <run-id>` is the compatibility route and delegates to the same
+guarded implementation, so it has the same protections and no prune/force
+escape. The scheduler runs bounded storage maintenance on startup and hourly,
+sweeps stale gate scratch, runs the owner-DB `VACUUM` at most weekly above 20 %
+free pages, and on `DISK_LOW` runs permitted GC then rechecks the actual
+filesystem; if space is still low or unknown it parks as typed INFRA and starts
+no worker or gate. The fixed `max(10 GB, 10 %)` floor stays effective on every
+path; adaptive admission is not activated. Full details:
+[docs/storage-lifecycle.md](storage-lifecycle.md).
+
 ## Capacity ledger inspection (`orch capacity show`)
 
 `orch capacity show [--json]` provides read-only inspection of the capacity

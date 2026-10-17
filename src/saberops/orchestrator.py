@@ -185,6 +185,8 @@ from saberops.routing_decision import (
     is_escalation_evidence,
 )
 from saberops.slicing import resolve_work_packages
+from saberops.storage_gc import retire_run_worktrees
+from saberops.storage_maintenance import database_audit_sink
 from saberops.telemetry import persist_worker_usage
 from saberops.terminal import get_transcript_path
 from saberops.tooling import (
@@ -8757,20 +8759,22 @@ class Orchestrator:
             )
 
     def cleanup_run(self, run_id: str) -> dict[str, list[str]]:
-        """Safely remove clean attempt worktrees for a completed or failed run.
+        """Guardedly retire clean attempt worktrees for a terminal run.
 
-        Refuses cleanup for running runs, external worktrees, or dirty worktrees.
-        Preserves candidate branches and database records.
+        Delegates to the shared guarded lifecycle service so the compatibility
+        route and ``orch gc`` enforce exactly the same checks: no repository-wide
+        ``git worktree prune``, no force, no deletion outside the resolved
+        worktree base, and dirty / symlinked / uniquely-ignored / actively-owned
+        worktrees are preserved.  Candidate branches and database records are
+        kept; immutable SHAs and evidence survive.
 
         Returns:
-            Dict containing 'removed', 'skipped_dirty', and 'skipped_missing' paths.
+            Dict containing 'removed', 'skipped_dirty', 'skipped_missing' and
+            'skipped_protected' paths.
         """
         run = self.db.get_run(run_id)
         if not run:
             raise ValueError(f"Run '{run_id}' not found")
-
-        if run.status == RunStatus.RUNNING:
-            raise RuntimeError(f"Cannot clean up run '{run_id}': status is RUNNING")
 
         # The repository always comes from the persisted run identity; the UI's
         # currently selected project can never retarget an existing run.
@@ -8779,59 +8783,13 @@ class Orchestrator:
         except ProvenanceError as exc:
             raise RuntimeError(f"Refusing cleanup for run '{run_id}': {exc}") from exc
 
-        base_wt_dir = (
-            self.worktree_base.resolve()
-            if self.worktree_base is not None
-            else GitManager.get_default_worktree_base(repo).resolve()
+        return retire_run_worktrees(
+            self.db,
+            repo_root=repo,
+            run_id=run_id,
+            worktree_base=self.worktree_base,
+            audit=database_audit_sink(self.db),
         )
-
-        attempts = self.db.get_attempts_for_run(run_id)
-        removed: list[str] = []
-        skipped_dirty: list[str] = []
-        skipped_missing: list[str] = []
-
-        for attempt in attempts:
-            if not attempt.worktree_path:
-                continue
-            wt_path = Path(attempt.worktree_path).resolve()
-            if not wt_path.exists():
-                skipped_missing.append(str(wt_path))
-                continue
-
-            # Verify path belongs to orchestrator worktree root
-            try:
-                is_subpath = wt_path.is_relative_to(base_wt_dir) and wt_path != base_wt_dir
-            except (ValueError, AttributeError):
-                is_subpath = False
-
-            if not is_subpath:
-                raise RuntimeError(
-                    f"Refusing cleanup: worktree '{wt_path}' does not belong "
-                    f"to orchestrator worktree root '{base_wt_dir}'"
-                )
-
-            # Check if worktree is clean
-            if not GitManager.is_clean(wt_path):
-                skipped_dirty.append(str(wt_path))
-                continue
-
-            # Safely remove clean worktree
-            GitManager.remove_worktree(
-                repo_path=repo,
-                worktree_path=wt_path,
-                force=False,
-                worktree_base=base_wt_dir,
-            )
-            removed.append(str(wt_path))
-
-        # Prune git worktree metadata
-        run_process(["git", "worktree", "prune"], cwd=repo)
-
-        return {
-            "removed": removed,
-            "skipped_dirty": skipped_dirty,
-            "skipped_missing": skipped_missing,
-        }
 
 
 def _run_configured_gate(

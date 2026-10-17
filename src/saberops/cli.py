@@ -80,6 +80,16 @@ from saberops.run_creation import (
 )
 from saberops.runtime import db_path_for_run, project_db_path_for_repo
 from saberops.service import OrchestratorService
+from saberops.storage_gc import (
+    GcPolicyError,
+    GcPreview,
+    apply_gc,
+    default_gc_policy_path,
+    load_gc_policy,
+    preview_gc,
+)
+from saberops.storage_inventory import ArtifactClass, Inventory, build_inventory
+from saberops.storage_maintenance import database_audit_sink
 from saberops.supervisor import RunSupervisor
 from saberops.tooling.context_cli import context_json, list_context_refs
 from saberops.tooling.contracts import FrozenToolContract, ToolManifestError
@@ -954,6 +964,51 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cleanup_parser.add_argument("run_id", type=str, help="Run identifier (e.g. run_abc123).")
     cleanup_parser.add_argument(
+        "--db",
+        type=str,
+        default=None,
+        help="Path to SQLite database.",
+    )
+
+    # orch gc [--dry-run|--apply] [--class ...] [--json]
+    gc_parser = subparsers.add_parser(
+        "gc",
+        help="Inventory owned storage artifacts and preview/apply the exact scoped GC.",
+    )
+    gc_mode = gc_parser.add_mutually_exclusive_group()
+    gc_mode.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview only: no schema creation, no write, no deletion (default).",
+    )
+    gc_mode.add_argument(
+        "--apply",
+        action="store_true",
+        help="Execute the exact previewed scope; requires a validated standing owner policy.",
+    )
+    gc_parser.add_argument(
+        "--class",
+        dest="artifact_class",
+        action="append",
+        default=None,
+        choices=[cls.value for cls in ArtifactClass],
+        help="Restrict to an artifact class (repeatable).",
+    )
+    gc_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    gc_parser.add_argument(
+        "--repo",
+        dest="project_repo",
+        type=str,
+        default=None,
+        help="Repository root to inventory (defaults to the current directory).",
+    )
+    gc_parser.add_argument(
+        "--policy",
+        type=str,
+        default=None,
+        help="Path to the standing GC policy file (defaults to the owner settings path).",
+    )
+    gc_parser.add_argument(
         "--db",
         type=str,
         default=None,
@@ -2831,6 +2886,198 @@ def handle_cleanup(args: argparse.Namespace) -> int:
     return 0
 
 
+def _gc_read_only_db(args: argparse.Namespace, repo: Path) -> Database | None:
+    """Open the most specific existing store read-only, or None when absent.
+
+    A dry run must not create a database, WAL file or schema, so a missing
+    store yields ``None`` and the inventory reports every Git artifact as
+    UNKNOWN/KEEP rather than adopting it.
+    """
+    explicit = _explicit_db(args)
+    candidates = (
+        [Path(explicit)]
+        if explicit is not None
+        else [Path(project_db_path_for_repo(repo)), Path(get_default_db_path())]
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return Database(candidate, read_only=True)
+    return None
+
+
+def _gc_inventory_payload(inventory: Inventory, preview: GcPreview) -> dict[str, Any]:
+    return {
+        "repo_root": inventory.repo_root,
+        "project_id": inventory.project_id,
+        "generated_at": inventory.generated_at.isoformat(),
+        "warnings": list(inventory.warnings),
+        "policy_ref": preview.policy_ref,
+        "approved": preview.approved,
+        "preview_id": preview.preview_id,
+        "candidates": [
+            {
+                "artifact_class": c.artifact_class.value,
+                "action": c.action.value,
+                "reference": c.reference,
+                "identity": c.identity,
+                "owner": c.owner,
+                "reason": c.reason,
+                "estimated_bytes": c.estimated_bytes,
+            }
+            for c in preview.candidates
+        ],
+        "exclusions": [
+            {
+                "artifact_class": e.artifact_class.value,
+                "reference": e.reference,
+                "reason": e.reason,
+            }
+            for e in preview.exclusions
+        ],
+        "estimated_reclaimable_bytes": preview.estimated_reclaimable_bytes,
+        "inventory": [
+            {
+                "artifact_class": item.artifact_class.value,
+                "reference": item.reference,
+                "identity": item.identity,
+                "owner": item.owner,
+                "ownership": item.ownership.value,
+                "reason": item.reason,
+                "size_bytes": item.size_bytes,
+                "reclaimable_bytes": item.reclaimable_bytes,
+            }
+            for item in inventory.items
+        ],
+    }
+
+
+def _print_gc_report(inventory: Inventory, preview: GcPreview) -> None:
+    print(f"[*] Storage inventory for {inventory.repo_root} ({len(inventory.items)} artifacts)")
+    for item in inventory.items:
+        size = "?" if item.size_bytes is None else str(item.size_bytes)
+        print(
+            f"  {item.artifact_class.value:<16} {item.ownership.value:<14} "
+            f"{size:>12}B  {item.reference}  [{item.reason}]"
+        )
+    for warning in inventory.warnings:
+        print(f"  ! {warning}")
+    print("─" * 60)
+    if preview.policy_ref is None:
+        print("[*] No validated standing owner policy: inventory/report only (nothing eligible).")
+    else:
+        print(f"[*] Standing policy: {preview.policy_ref}")
+    if preview.candidates:
+        print(f"[*] Eligible candidates ({len(preview.candidates)}):")
+        for candidate in preview.candidates:
+            size = "unknown" if candidate.estimated_bytes is None else str(candidate.estimated_bytes)
+            print(
+                f"  → {candidate.action.value}: {candidate.reference} "
+                f"[{candidate.reason}] est={size}B"
+            )
+    if preview.exclusions:
+        print(f"[*] Kept ({len(preview.exclusions)}), reasons:")
+        reasons: dict[str, int] = {}
+        for exclusion in preview.exclusions:
+            reasons[exclusion.reason] = reasons.get(exclusion.reason, 0) + 1
+        for reason, count in sorted(reasons.items()):
+            print(f"  · {reason}: {count}")
+
+
+def handle_gc(args: argparse.Namespace) -> int:
+    """Handle `orch gc [--dry-run|--apply] [--class ...] [--json]`."""
+    repo = (
+        Path(args.project_repo).resolve() if args.project_repo else Path.cwd().resolve()
+    )
+    if not repo.exists() or not GitManager.is_git_repo(repo):
+        print(f"[!] Not a Git repository: {repo}", file=sys.stderr)
+        return 1
+    classes: tuple[ArtifactClass, ...] | None = (
+        tuple(ArtifactClass(value) for value in args.artifact_class)
+        if args.artifact_class
+        else None
+    )
+    policy_path = Path(args.policy) if args.policy else default_gc_policy_path()
+    try:
+        policy = load_gc_policy(policy_path)
+    except GcPolicyError as exc:
+        print(f"[!] Invalid GC policy: {exc}", file=sys.stderr)
+        return 1
+    effective_policy_path = policy_path if policy_path.exists() else None
+
+    if not args.apply:
+        db = _gc_read_only_db(args, repo)
+        inventory = build_inventory(db, repo_root=repo)
+        preview = preview_gc(
+            inventory,
+            policy=policy,
+            policy_path=effective_policy_path,
+            classes=classes,
+        )
+        if args.json:
+            print(json.dumps(_gc_inventory_payload(inventory, preview), indent=2, sort_keys=True))
+        else:
+            _print_gc_report(inventory, preview)
+        return 0
+
+    if not policy.approved:
+        print(
+            "[!] Refusing --apply: no validated standing owner policy authorizes "
+            "destructive GC.",
+            file=sys.stderr,
+        )
+        return 1
+    db = db_for_repo(args, repo)
+    inventory = build_inventory(db, repo_root=repo)
+    preview = preview_gc(
+        inventory,
+        policy=policy,
+        policy_path=effective_policy_path,
+        classes=classes,
+    )
+    result = apply_gc(
+        preview,
+        preview.candidates,
+        db=db,
+        repo_root=repo,
+        audit=database_audit_sink(db),
+    )
+    payload = _gc_inventory_payload(inventory, preview)
+    payload["apply"] = {
+        "applied": [
+            {
+                "reference": outcome.candidate.reference,
+                "action": outcome.candidate.action.value,
+                "reason": outcome.reason,
+                "actual_bytes": outcome.actual_bytes,
+            }
+            for outcome in result.applied
+        ],
+        "refused": [
+            {
+                "reference": outcome.candidate.reference,
+                "action": outcome.candidate.action.value,
+                "reason": outcome.reason,
+            }
+            for outcome in result.refused
+        ],
+        "audit_uncertain": result.audit_uncertain,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        _print_gc_report(inventory, preview)
+        print("─" * 60)
+        print(f"[*] Applied {len(result.applied)} action(s); refused {len(result.refused)}.")
+        for outcome in result.applied:
+            print(f"  ✓ {outcome.candidate.action.value}: {outcome.candidate.reference}")
+        for outcome in result.refused:
+            print(f"  ! kept {outcome.candidate.reference} [{outcome.reason}]")
+        if result.audit_uncertain:
+            print("[!] Audit persistence failed after a completed action; reconcile required.")
+            return 1
+    return 0
+
+
 def handle_models(
     args: argparse.Namespace,
     *,
@@ -3905,6 +4152,32 @@ def handle_job_cancel(args: argparse.Namespace) -> int:
     return 0
 
 
+def _scheduler_storage_maintenance(
+    db: Database,
+) -> Any:
+    """Build the bounded GS-1 storage-maintenance callback for the scheduler.
+
+    Returns ``None`` when the service cannot be constructed so the scheduler
+    keeps running without storage maintenance rather than crashing.  The
+    callback returns a typed infra reason (or ``None``) and never raises into
+    the loop.
+    """
+    try:
+        from saberops.service import OrchestratorService
+        from saberops.storage_maintenance import MaintenanceTrigger, StorageMaintenance
+
+        service: StorageMaintenance = OrchestratorService(db=db).storage_maintenance(
+            repo_root=Path.cwd().resolve()
+        )
+    except Exception:
+        return None
+
+    def _callback(trigger: str) -> str | None:
+        return service.run(MaintenanceTrigger(trigger)).infra_reason
+
+    return _callback
+
+
 def handle_scheduler_run(args: argparse.Namespace) -> int:
     """Handle `orch scheduler run [--once] [--interval-seconds INT]`."""
     from saberops.capacity.loop import run_scheduler_loop
@@ -3932,6 +4205,7 @@ def handle_scheduler_run(args: argparse.Namespace) -> int:
             once=run_once,
             readiness_service=readiness_svc,
             max_concurrent_override=max_concurrent,
+            storage_maintenance=_scheduler_storage_maintenance(db),
         )
         if result is None or (not result.ran and result.reason in ("lease_held_by_other", "lost_lease")):
             reason = result.reason if result is not None else "lease_held_by_other"
@@ -3943,6 +4217,15 @@ def handle_scheduler_run(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
+
+        if result.storage_infra_reason is not None:
+            # Typed storage/SQLite INFRA: park, never a code failure, never a pass.
+            print(
+                f"[!] Storage infrastructure park: {result.storage_infra_reason} "
+                "(no worker or gate launched)",
+                file=sys.stderr,
+            )
+            return 3
 
         if getattr(args, "json", False):
             payload: list[dict[str, Any]] = []
@@ -4381,6 +4664,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         return handle_accept(args)
     elif args.command == "cleanup":
         return handle_cleanup(args)
+    elif args.command == "gc":
+        return handle_gc(args)
     elif args.command == "status":
         return handle_status(args)
     elif args.command == "plan":

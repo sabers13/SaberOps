@@ -70,6 +70,7 @@ from saberops.ownership import (
 )
 from saberops.quota import normalize_quota_observation
 from saberops.run_titles import clean_title, fallback_title, unique_title
+from saberops.sqlite_policy import BUSY_TIMEOUT_MS, immediate_transaction, write_connection
 from saberops.wake import notify_run
 
 DB_SCHEMA_VERSION: Final[int] = 1
@@ -271,7 +272,7 @@ class Database:
         conn.execute("PRAGMA foreign_keys = ON;")
         if not self._read_only:
             conn.execute("PRAGMA journal_mode = WAL;")
-        conn.execute("PRAGMA busy_timeout = 5000;")
+        conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS};")
         try:
             with conn:
                 yield conn
@@ -817,6 +818,33 @@ class Database:
                 );
                 CREATE INDEX IF NOT EXISTS idx_scope_expansions_run_id
                     ON scope_expansions(run_id);
+
+                CREATE TABLE IF NOT EXISTS storage_cleanup_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    at TEXT NOT NULL,
+                    phase TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    artifact_class TEXT NOT NULL,
+                    artifact_ref TEXT NOT NULL,
+                    artifact_identity TEXT NOT NULL,
+                    run_id TEXT,
+                    project_id TEXT,
+                    sha TEXT,
+                    policy_ref TEXT,
+                    reason TEXT NOT NULL,
+                    estimated_bytes INTEGER,
+                    actual_bytes INTEGER,
+                    detail_json TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_storage_cleanup_at
+                    ON storage_cleanup_events(at);
+                CREATE INDEX IF NOT EXISTS idx_storage_cleanup_ref
+                    ON storage_cleanup_events(artifact_ref);
+
+                CREATE TABLE IF NOT EXISTS storage_vacuum_state (
+                    scope TEXT PRIMARY KEY,
+                    last_vacuum_at TEXT NOT NULL
+                );
 
                 """
                 )
@@ -5120,3 +5148,122 @@ class Database:
             observed_at=str(row["observed_at"]),
             notes=str(row["notes"]) if row["notes"] is not None else None,
         )
+
+    # ------------------------------------------------------------------
+    # GS-1 storage lifecycle persistence (ADR-0003 D6/Amendment 1, D7)
+    #
+    # These tables are additive: ``DB_SCHEMA_VERSION`` stays 1 and the
+    # unknown/legacy-schema protection in ``_init_db`` is unchanged.  Every
+    # write uses the shared bounded D7 transaction policy so a busy lock
+    # becomes a typed ``SqliteBusyError`` instead of a crash or a duplicate
+    # launch.
+    # ------------------------------------------------------------------
+
+    @contextmanager
+    def storage_write_transaction(self) -> Iterator[sqlite3.Connection]:
+        """Yield one bounded ``BEGIN IMMEDIATE`` write transaction (D7)."""
+        if self._read_only:
+            raise DatabaseSchemaError("cannot take a write transaction on a read-only database")
+        with write_connection(self.db_path) as conn:
+            with immediate_transaction(conn) as tx:
+                yield tx
+
+    def record_storage_event(
+        self,
+        *,
+        at: str,
+        phase: str,
+        action: str,
+        artifact_class: str,
+        artifact_ref: str,
+        artifact_identity: str,
+        reason: str,
+        run_id: str | None = None,
+        project_id: str | None = None,
+        sha: str | None = None,
+        policy_ref: str | None = None,
+        estimated_bytes: int | None = None,
+        actual_bytes: int | None = None,
+        detail: dict[str, Any] | None = None,
+    ) -> int:
+        """Append one durable storage cleanup/audit event and return its id."""
+        payload = json.dumps(detail, sort_keys=True) if detail else None
+        with self.storage_write_transaction() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO storage_cleanup_events (
+                    at, phase, action, artifact_class, artifact_ref,
+                    artifact_identity, run_id, project_id, sha, policy_ref,
+                    reason, estimated_bytes, actual_bytes, detail_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    at,
+                    phase,
+                    action,
+                    artifact_class,
+                    artifact_ref,
+                    artifact_identity,
+                    run_id,
+                    project_id,
+                    sha,
+                    policy_ref,
+                    reason,
+                    estimated_bytes,
+                    actual_bytes,
+                    payload,
+                ),
+            )
+            return int(cursor.lastrowid or 0)
+
+    def list_storage_events(
+        self,
+        *,
+        limit: int = 1000,
+        run_id: str | None = None,
+        artifact_ref: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return storage cleanup/audit events, newest last."""
+        query = "SELECT * FROM storage_cleanup_events"
+        clauses: list[str] = []
+        params: list[Any] = []
+        if run_id is not None:
+            clauses.append("run_id = ?")
+            params.append(run_id)
+        if artifact_ref is not None:
+            clauses.append("artifact_ref = ?")
+            params.append(artifact_ref)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY id ASC LIMIT ?"
+        params.append(limit)
+        with self._get_connection() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_storage_vacuum_at(self, scope: str) -> datetime | None:
+        """Return the last recorded VACUUM time for ``scope``, if any."""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT last_vacuum_at FROM storage_vacuum_state WHERE scope = ?",
+                (scope,),
+            ).fetchone()
+        if row is None or not row["last_vacuum_at"]:
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(row["last_vacuum_at"]))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+    def record_storage_vacuum(self, scope: str, at: datetime) -> None:
+        """Persist the time of a completed owner-DB VACUUM for ``scope``."""
+        with self.storage_write_transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO storage_vacuum_state (scope, last_vacuum_at)
+                VALUES (?, ?)
+                ON CONFLICT(scope) DO UPDATE SET last_vacuum_at = excluded.last_vacuum_at
+                """,
+                (scope, at.isoformat()),
+            )

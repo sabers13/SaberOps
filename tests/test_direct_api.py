@@ -442,3 +442,60 @@ def test_model_catalog_store_override_pins_explicit_path(
     monkeypatch.delenv("ORCH_ACCESS_MODELS_STORE")
     default = _model_catalog_store()
     assert default.path == tmp_path / "state" / "saberops" / ModelCatalogStore.FILENAME
+
+
+def test_storage_audit_events_round_trip(tmp_path: Path) -> None:
+    """GS-1 storage audit persistence is additive and idempotent.
+
+    Covers: ADR-0003 D7 (bounded write transaction) and Amendment 1 §4
+    (durable audit with task/run/artifact identity, bytes and reason).
+    """
+    from saberops.db import DB_SCHEMA_VERSION, Database
+
+    db = Database(tmp_path / "orch.db")
+    assert DB_SCHEMA_VERSION == 1  # additive tables never bump the schema version
+    first = db.record_storage_event(
+        at="2026-10-17T12:00:00+00:00",
+        phase="intent",
+        action="remove-worktree",
+        artifact_class="attempt-worktree",
+        artifact_ref="/tmp/wt/a1",
+        artifact_identity="/tmp/wt/a1",
+        reason="worktree-terminal-eligible",
+        run_id="run1",
+        project_id="proj-1",
+        sha="a" * 40,
+        policy_ref="owner-file:1:/tmp/gc.json",
+        estimated_bytes=1024,
+        detail={"branch": "orch/run1/a1"},
+    )
+    second = db.record_storage_event(
+        at="2026-10-17T12:00:01+00:00",
+        phase="result",
+        action="remove-worktree",
+        artifact_class="attempt-worktree",
+        artifact_ref="/tmp/wt/a1",
+        artifact_identity="/tmp/wt/a1",
+        reason="worktree-removed",
+        run_id="run1",
+        estimated_bytes=1024,
+        actual_bytes=900,
+    )
+    assert second == first + 1
+
+    events = db.list_storage_events()
+    assert [event["phase"] for event in events] == ["intent", "result"]
+    assert events[0]["run_id"] == "run1" and events[0]["project_id"] == "proj-1"
+    assert events[0]["sha"] == "a" * 40
+    assert json.loads(events[0]["detail_json"]) == {"branch": "orch/run1/a1"}
+    assert db.list_storage_events(run_id="other") == []
+    assert len(db.list_storage_events(artifact_ref="/tmp/wt/a1")) == 2
+
+    # The record is durable across reopen, and the DB still opens at version 1.
+    reopened = Database(tmp_path / "orch.db")
+    assert len(reopened.list_storage_events()) == 2
+    assert reopened.get_storage_vacuum_at("owner") is None
+    reopened.record_storage_vacuum("owner", __import__("datetime").datetime(
+        2026, 10, 17, 12, 0, tzinfo=__import__("datetime").UTC
+    ))
+    assert reopened.get_storage_vacuum_at("owner") is not None

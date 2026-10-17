@@ -36,9 +36,9 @@ import os
 import shutil
 import tempfile
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Final
@@ -482,7 +482,143 @@ def _make_private_scratch(parent: Path) -> Path | None:
         # already has private mkdtemp defaults, so this is the
         # additional tightening.
         pass
+    write_scratch_owner(path)
     return path
+
+
+#: Owner record written inside every gate scratch directory (GS-1 lifecycle
+#: registration).  It lets a later sweep decide from real process liveness and
+#: age without guessing from the directory name.
+_SCRATCH_OWNER_FILENAME: Final = ".saberops-scratch-owner.json"
+_SCRATCH_PREFIX: Final = "orchestrator-gate-"
+
+
+def write_scratch_owner(
+    scratch: Path,
+    *,
+    repo: str | None = None,
+    started_at: str | None = None,
+) -> None:
+    """Record the owning process and start time inside a scratch directory.
+
+    Best-effort: a failure to write the owner record never blocks a gate run,
+    but it does mean a later sweep treats the directory as unowned (older than
+    the sweep age) rather than adopting it.
+    """
+    payload = {
+        "pid": os.getpid(),
+        "repo": repo,
+        "started_at": started_at
+        or datetime.now(UTC).isoformat(),
+    }
+    try:
+        (scratch / _SCRATCH_OWNER_FILENAME).write_text(
+            json.dumps(payload, sort_keys=True), encoding="utf-8"
+        )
+    except OSError:
+        return
+
+
+def read_scratch_owner(scratch: Path) -> dict[str, Any] | None:
+    """Read a scratch owner record, or ``None`` when absent/unreadable."""
+    try:
+        raw = (scratch / _SCRATCH_OWNER_FILENAME).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        decoded = json.loads(raw)
+    except ValueError:
+        return None
+    return decoded if isinstance(decoded, dict) else None
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return True
+    return True
+
+
+def sweep_gate_scratch(
+    root: Path | str,
+    *,
+    now: datetime | None = None,
+    max_age: timedelta = timedelta(hours=24),
+    liveness: Callable[[int], bool] | None = None,
+) -> tuple[str, ...]:
+    """Delete stale gate scratch directories under ``root`` only.
+
+    A directory is removed when its owner PID is provably dead or when it is
+    older than ``max_age``.  Directories without a readable owner record are
+    removed only once older than ``max_age`` (never merely for being present).
+    Nothing outside ``root`` is ever touched, and a directory that is not a
+    ``orchestrator-gate-*`` entry is ignored.
+    """
+    moment = now if now is not None else datetime.now(UTC)
+    base = Path(root)
+    if not base.is_dir():
+        return ()
+    alive = liveness if liveness is not None else _pid_alive
+    removed: list[str] = []
+    try:
+        entries = sorted(base.iterdir(), key=lambda p: p.name)
+    except OSError:
+        return ()
+    for entry in entries:
+        if not entry.is_dir() or not entry.name.startswith(_SCRATCH_PREFIX):
+            continue
+        owner = read_scratch_owner(entry)
+        stale = False
+        if owner is not None:
+            pid = owner.get("pid")
+            if isinstance(pid, int) and not alive(pid):
+                stale = True
+        if not stale:
+            try:
+                mtime = datetime.fromtimestamp(entry.stat().st_mtime, tz=UTC)
+            except OSError:
+                continue
+            if moment - mtime >= max_age:
+                stale = True
+        if not stale:
+            continue
+        try:
+            shutil.rmtree(entry, ignore_errors=False)
+        except OSError:
+            continue
+        removed.append(str(entry))
+    return tuple(removed)
+
+
+def disk_floor_ok(
+    paths: Sequence[Path | str], minimum_gb: float = 10.0
+) -> tuple[bool, str]:
+    """Assess the current fixed free-space floor without lowering any guard.
+
+    Delegates to the single storage-maintenance implementation of the existing
+    ``max(min_gb, 10 %)`` floor so the engine gate path and the developer gate
+    can never disagree about the effective reserve.
+    """
+    from saberops.storage_maintenance import current_disk_floor_bytes
+
+    for path in paths:
+        try:
+            stat = os.statvfs(str(path))
+        except OSError:
+            return False, f"statvfs-failed:{path}"
+        free = stat.f_bavail * stat.f_frsize
+        total = stat.f_blocks * stat.f_frsize
+        required = current_disk_floor_bytes(total, minimum_gb)
+        if free < required:
+            return False, f"below-floor:{path}:{free}<{required}"
+    return True, ""
 
 
 def preflight_ram_scratch(

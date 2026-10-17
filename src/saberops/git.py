@@ -309,6 +309,78 @@ def _serialized_worktree_metadata_mutation(repo_path: Path | str) -> Iterator[No
         os.close(fd)
 
 
+class BranchDeletionRefused(RuntimeError):
+    """Native ``git branch -d`` refused to delete a local branch.
+
+    A refusal is a safety outcome, never something to bypass: the branch is
+    still referenced by a worktree, is not reachable from the approved tip, or
+    was not fully merged.  The GC executor reports it and keeps the branch.
+    """
+
+
+@dataclass(frozen=True)
+class WorktreeRegistration:
+    """One ``git worktree list --porcelain`` entry (read-only registration)."""
+
+    path: str
+    head: str | None
+    branch: str | None
+    detached: bool
+    locked: bool
+    lock_reason: str | None
+    prunable: bool
+
+
+def parse_worktree_porcelain(text: str) -> tuple[WorktreeRegistration, ...]:
+    """Parse ``git worktree list --porcelain`` output deterministically.
+
+    Records are separated by blank lines; keys are ``worktree``, ``HEAD``,
+    ``branch``, ``detached``, ``locked [reason]`` and ``prunable [reason]``.
+    Unknown keys are ignored.  An entry with no ``worktree`` line is skipped
+    rather than guessed at.
+    """
+    entries: list[WorktreeRegistration] = []
+    current: dict[str, str] = {}
+    flags: set[str] = set()
+
+    def _flush() -> None:
+        path = current.get("worktree")
+        if not path:
+            return
+        branch_ref = current.get("branch")
+        entries.append(
+            WorktreeRegistration(
+                path=path,
+                head=current.get("HEAD"),
+                branch=branch_ref[len("refs/heads/"):] if branch_ref else None,
+                detached="detached" in flags,
+                locked="locked" in flags,
+                lock_reason=current.get("locked"),
+                prunable="prunable" in flags,
+            )
+        )
+
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip("\n")
+        if line.strip() == "":
+            _flush()
+            current = {}
+            flags = set()
+            continue
+        key, _, value = line.partition(" ")
+        if key in ("locked", "prunable"):
+            flags.add(key)
+            if value:
+                current[key] = value
+            continue
+        if value == "":
+            flags.add(key)
+            continue
+        current[key] = value
+    _flush()
+    return tuple(entries)
+
+
 class GitManager:
     """Operations for Git repositories and isolated worktrees."""
 
@@ -807,6 +879,111 @@ class GitManager:
             ):
                 out[index] = sha
         return out
+
+    @staticmethod
+    def list_worktrees(repo_path: Path | str) -> tuple[WorktreeRegistration, ...]:
+        """Enumerate every registered worktree of the repository (read-only)."""
+        repo = Path(repo_path).resolve()
+        res = run_process(["git", "worktree", "list", "--porcelain"], cwd=repo)
+        if not res.passed:
+            raise RuntimeError(
+                f"Failed to list git worktrees in {repo}: "
+                f"{redact_remote_secrets(res.stderr).strip()[:500]}"
+            )
+        return parse_worktree_porcelain(res.stdout)
+
+    @staticmethod
+    def list_local_branches(repo_path: Path | str) -> dict[str, str]:
+        """Return ``{branch_name: sha}`` for every local branch (read-only)."""
+        repo = Path(repo_path).resolve()
+        res = run_process(
+            [
+                "git",
+                "for-each-ref",
+                "--format=%(refname:short) %(objectname)",
+                "refs/heads/",
+            ],
+            cwd=repo,
+        )
+        if not res.passed:
+            raise RuntimeError(
+                f"Failed to list local branches in {repo}: "
+                f"{redact_remote_secrets(res.stderr).strip()[:500]}"
+            )
+        out: dict[str, str] = {}
+        for line in res.stdout.splitlines():
+            parts = line.strip().split()
+            if len(parts) != 2:
+                continue
+            name, sha = parts
+            if name and len(sha) == 40:
+                out[name] = sha
+        return out
+
+    @staticmethod
+    def branch_tip(repo_path: Path | str, branch: str) -> str | None:
+        """Return the commit SHA a local branch points at, or None if absent."""
+        repo = Path(repo_path).resolve()
+        res = run_process(
+            ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=repo
+        )
+        return res.stdout.strip() if res.passed and res.stdout.strip() else None
+
+    @staticmethod
+    def validate_local_branch_name(branch: object) -> str:
+        """Validate a local branch name with Git's own rules, failing closed."""
+        if not isinstance(branch, str) or not branch:
+            raise BranchDeletionRefused(f"invalid branch name: {str(branch)[:64]!r}")
+        if _REF_DANGEROUS_RE.search(branch) or branch.startswith("-"):
+            raise BranchDeletionRefused(f"unsafe branch name: {branch[:64]!r}")
+        return branch
+
+    @staticmethod
+    def delete_branch(repo_path: Path | str, branch: str, *, force: bool = False) -> None:
+        """Delete one local branch with native Git, refusing unless fully merged.
+
+        Defaults to ``git branch -d`` (no force): Git itself refuses a branch
+        that is not merged and a branch checked out in any worktree, and that
+        refusal is propagated unchanged.  ``force=True`` uses ``git branch -D``
+        and is only ever passed from a call path that has already independently
+        proven the exact approved reachability.  No remote branch or history
+        rewrite is involved.
+        """
+        name = GitManager.validate_local_branch_name(branch)
+        repo = Path(repo_path).resolve()
+        flag = "-D" if force else "-d"
+        with _serialized_worktree_metadata_mutation(repo):
+            res = run_process(["git", "branch", flag, name], cwd=repo)
+        if not res.passed:
+            raise BranchDeletionRefused(
+                f"Git refused to delete local branch '{name}' (exit {res.exit_code}): "
+                f"{redact_remote_secrets(res.stderr).strip()[:500]}"
+            )
+
+    @staticmethod
+    def delete_checkpoint_ref(repo_path: Path | str, ref: str) -> None:
+        """Delete one engine-owned direct checkpoint ref.
+
+        Refuses a symbolic or otherwise non-direct ref so deletion can never
+        remove a user branch masquerading inside the checkpoint namespace.
+        """
+        if not ref.startswith(CHECKPOINT_REF_PREFIX) or _REF_DANGEROUS_RE.search(ref):
+            raise CandidatePublicationError(f"Refusing to delete unsafe checkpoint ref {ref!r}")
+        repo = Path(repo_path).resolve()
+        kind, _value = GitManager._checkpoint_ref_state(repo, ref)
+        if kind == "symbolic":
+            raise CandidatePublicationError(
+                f"Refusing to delete symbolic checkpoint ref {ref!r}"
+            )
+        if kind == "absent":
+            return
+        with _serialized_worktree_metadata_mutation(repo):
+            res = run_process(["git", "update-ref", "-d", ref], cwd=repo)
+        if not res.passed:
+            raise CandidatePublicationError(
+                f"Refusing/deletion failed for checkpoint ref {ref!r}: "
+                f"{redact_remote_secrets(res.stderr).strip()[:500]}"
+            )
 
     @staticmethod
     def commit_exists(repo_path: Path | str, sha: str) -> bool:

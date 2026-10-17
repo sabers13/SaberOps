@@ -31,8 +31,14 @@ else:  # pragma: no cover - typing only
 
 @contextmanager
 def owner_connection(db: Database) -> Iterator[sqlite3.Connection]:
-    """Open the owner DB with the same pragmas as Database._get_connection."""
+    """Open the owner DB with the same pragmas and D7 timeout as the class.
+
+    The busy timeout is the shared :data:`saberops.sqlite_policy.BUSY_TIMEOUT_MS`
+    (ADR-0003 D7) rather than a second, weaker 5 s value, so this store cannot
+    become an under-protected write path beside the main database helper.
+    """
     from saberops.db import Database as _Db
+    from saberops.sqlite_policy import BUSY_TIMEOUT_MS
 
     owner: _Db = db.owner_db if hasattr(db, "owner_db") else db
     path: Path = owner.db_path
@@ -41,7 +47,7 @@ def owner_connection(db: Database) -> Iterator[sqlite3.Connection]:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
     conn.execute("PRAGMA journal_mode = WAL;")
-    conn.execute("PRAGMA busy_timeout = 5000;")
+    conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS};")
     try:
         with conn:
             yield conn
