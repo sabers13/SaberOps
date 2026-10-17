@@ -72,19 +72,6 @@ def prior_pct(window_id: str, bucket: SizeBucket | str) -> float:
     return _PRIORS[(_FALLBACK_WINDOW, b.value)]
 
 
-def infer_bucket(prompt_bytes: int, package_count: int) -> SizeBucket:
-    """Infer a size bucket when the job has no ``size_hint``.
-
-    Called at dispatch only (by M2-4b); nothing calls it in this lane
-    except tests.
-    """
-    if prompt_bytes < 8_192 and package_count <= 1:
-        return SizeBucket.S
-    if prompt_bytes >= 65_536 or package_count >= 4:
-        return SizeBucket.L
-    return SizeBucket.M
-
-
 @dataclass(frozen=True)
 class CostState:
     samples: int
@@ -164,7 +151,6 @@ __all__ = [
     "CostState",
     "CostEstimate",
     "prior_pct",
-    "infer_bucket",
     "update",
     "cost_estimate",
     "validate_route",

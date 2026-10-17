@@ -311,33 +311,6 @@ def _ordered_reviewer_candidates(
     return [candidate for candidate in base if _normalized_model(candidate.model) != model_key]
 
 
-def select_reviewer_ladder(
-    candidate_provider: str,
-    candidate_model: str,
-    registry: AdapterRegistry,
-    tier: Tier,
-    training_allowed: bool,
-) -> list[WorkerCandidate]:
-    """Build an ordered fallback ladder of reviewer candidates.
-
-    The ladder is keyed by the normalized implementer model basename (prefix- and
-    case-insensitive) and the run tier. It never includes the implementer itself,
-    drops data-policy-denied entries under the canonical data-policy decision (the
-    same decision worker dispatch and quota preflight reach), and only keeps
-    candidates whose provider adapter is currently available.
-    """
-    from saberops.training_policy import is_training_permitted
-
-    ladder: list[WorkerCandidate] = []
-    for candidate in _ordered_reviewer_candidates(candidate_provider, candidate_model, tier):
-        if not is_training_permitted(candidate, training_allowed):
-            continue
-        if not registry.is_available(candidate.provider):
-            continue
-        ladder.append(candidate)
-    return ladder
-
-
 def select_reviewer_ladder_unfiltered(
     candidate_provider: str,
     candidate_model: str,
@@ -345,10 +318,10 @@ def select_reviewer_ladder_unfiltered(
 ) -> list[WorkerCandidate]:
     """Build the ordered reviewer ladder including pre-dispatch-skippable entries.
 
-    Unlike :func:`select_reviewer_ladder`, this returns every candidate except
-    the implementer itself, leaving training-policy, availability, quota, and
-    transport exclusions to the dispatch loop so each is recorded as a skip
-    event with a machine-readable reason and none consumes a budget slot.
+    This returns every candidate except the implementer itself, leaving
+    training-policy, availability, quota, and transport exclusions to the
+    dispatch loop so each is recorded as a skip event with a machine-readable
+    reason and none consumes a budget slot.
     """
     return _ordered_reviewer_candidates(candidate_provider, candidate_model, tier)
 

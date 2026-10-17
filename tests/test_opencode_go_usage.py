@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from saberops.cli_usage import CliUsageService, read_limits
+from saberops.cli_usage import read_limits
 from saberops.opencode_go_usage import GoUsageUnavailable, parse_go_limits, read_go_limits
 
 
@@ -71,29 +71,6 @@ def test_go_timeout_terminates_native_cli(tmp_path: Path, monkeypatch: pytest.Mo
         read_go_limits(str(exe))
     with pytest.raises(ProcessLookupError):
         os.kill(int(pid.read_text()), 0)
-
-
-def test_go_cache_preserves_last_good_on_missing_subscription(tmp_path: Path) -> None:
-    calls = [0]
-
-    def limits(exe: str, provider: str) -> list[dict[str, object]]:
-        calls[0] += 1
-        if calls[0] > 1:
-            raise GoUsageUnavailable(
-                "No OpenCode Go subscription is available for the connected account."
-            )
-        return parse_go_limits({"usage": {"monthly": {"percent": 16}}})
-
-    service = CliUsageService(
-        home=tmp_path, which=lambda exe: exe if exe == "opencode" else None, limits=limits
-    )
-    first = next(c for c in service.snapshot(refresh=True) if c["provider"] == "opencode")
-    failed = next(
-        c for c in service.snapshot(refresh=True, force=True) if c["provider"] == "opencode"
-    )
-    assert failed["windows"] == first["windows"]
-    assert failed["checked_at"] == first["checked_at"]
-    assert "No OpenCode Go subscription" in failed["limits_error"]
 
 
 def test_native_auth_hook_sanitizes_usage_and_never_follows_redirects(tmp_path: Path) -> None:

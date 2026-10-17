@@ -293,15 +293,13 @@ def test_r2a_e_old_run_immutable(isolated_xdg: Path) -> None:
 
 
 def test_r2a_f_canonical_authorities(isolated_xdg: Path) -> None:
-    from saberops.project_settings import (
-        set_project_gate_scratch_mode,
-        set_project_review_policy,
-    )
+    from saberops.gate_runner import set_project_gate_scratch_policy
+    from saberops.project_settings import set_project_review_policy
 
     repo = _make_repo(isolated_xdg, "f-canonical")
     state_dir = _state_dir(repo)
     set_project_review_policy(repo, ReviewPolicyMode.ALWAYS_REQUIRED)
-    set_project_gate_scratch_mode(repo, GateScratchMode.RAM_REQUIRED)
+    set_project_gate_scratch_policy(repo, GateScratchMode.RAM_REQUIRED)
     set_project_gate_command(repo, "pytest -q")
 
     assert load_project_review_policy(repo) is ReviewPolicyMode.ALWAYS_REQUIRED
@@ -359,39 +357,42 @@ def test_r2a_g_detached_head_requires_explicit_branch(isolated_xdg: Path) -> Non
 
 
 def test_r2a_h_no_silent_make_gate(isolated_xdg: Path) -> None:
-    from saberops.run_creation import resolve_effective_gate_command
-
     repo = _make_repo(isolated_xdg, "h-silent")
     assert (repo / "Makefile").exists() is False
     with pytest.raises(RunCreationError, match="no gate configured"):
-        resolve_effective_gate_command(repo_path=repo, explicit_gate=None)
+        resolve_effective_run_config(RunRequest(task="t", repo_path=repo))
     with pytest.raises(RunCreationError, match="no gate configured"):
-        resolve_effective_gate_command(repo_path=repo, explicit_gate="   ")
+        resolve_effective_run_config(
+            RunRequest(task="t", repo_path=repo, gate_command="   ")
+        )
 
 
 def test_r2a_h_makefile_without_gate_target_still_fails(isolated_xdg: Path) -> None:
-    from saberops.run_creation import resolve_effective_gate_command
-
     repo = _make_repo(isolated_xdg, "h-nogate-target")
     (repo / "Makefile").write_text("test:\n\t@echo ok\n", encoding="utf-8")
     with pytest.raises(RunCreationError, match="no gate configured"):
-        resolve_effective_gate_command(repo_path=repo, explicit_gate=None)
+        resolve_effective_run_config(RunRequest(task="t", repo_path=repo))
 
 
 def test_r2a_h_positive_detection_only_with_gate_target(isolated_xdg: Path) -> None:
-    from saberops.run_creation import resolve_effective_gate_command
-
     repo = _make_repo(isolated_xdg, "h-detected")
     (repo / "Makefile").write_text("gate:\n\t@echo ok\n", encoding="utf-8")
-    assert resolve_effective_gate_command(repo_path=repo, explicit_gate=None) == "make gate"
+    assert (
+        resolve_effective_run_config(RunRequest(task="t", repo_path=repo)).gate_command
+        == "make gate"
+    )
     # Explicit project configuration still wins over detection.
     set_project_gate_command(repo, "pytest -q")
     assert (
-        resolve_effective_gate_command(repo_path=repo, explicit_gate=None) == "pytest -q"
+        resolve_effective_run_config(RunRequest(task="t", repo_path=repo)).gate_command
+        == "pytest -q"
     )
     # An explicit per-run gate wins over everything.
     assert (
-        resolve_effective_gate_command(repo_path=repo, explicit_gate="true") == "true"
+        resolve_effective_run_config(
+            RunRequest(task="t", repo_path=repo, gate_command="true")
+        ).gate_command
+        == "true"
     )
 
 

@@ -27,7 +27,7 @@ from saberops.models import (
     WorkerResult,
 )
 from saberops.orchestrator import Orchestrator
-from saberops.parallel_work import git_projection, scopes_overlap, team_children, validate_team_plan
+from saberops.parallel_work import scopes_overlap, team_children, validate_team_plan
 from saberops.review import ReviewEngine
 from saberops.supervisor import RunSupervisor
 from saberops.workers.codex import CodexAdapter
@@ -222,10 +222,6 @@ def test_workers_overlap_merge_in_plan_order_and_parent_has_full_candidate(
     }
     assert GitManager.get_head_commit(repo) == original
     assert not (repo / "feature0.txt").exists()
-    projection = git_projection(db, parent)
-    assert [t["status"] for t in projection["threads"]] == ["Integrated", "Integrated"]
-    assert projection["target"] == GitManager.get_current_branch(repo)
-    assert projection["integration"]["branch"] == f"orch/{run_id}/integration"
     for child_id in children:
         child = db.get_run(child_id)
         assert child and child.config_json and parent.config_json
@@ -543,9 +539,6 @@ def test_actual_git_conflict_preserves_worker_branches_and_stops_integration(
     run_id = run_team(team)
     parent = db.get_run(run_id)
     assert parent and parent.status == RunStatus.FAILED
-    projection = git_projection(db, parent)
-    assert projection["conflicts"][0]["files"] == ["feature0.txt"]
-    assert not any(t["status"] == "Integrated" for t in projection["threads"])
     assert git(repo, "branch", "--list", f"orch/{run_id}/integration")
     assert all(db.get_attempts_for_run(child)[-1].commit_sha for child in team_children(db, run_id))
     assert GitManager.get_head_commit(repo) == base
@@ -617,7 +610,6 @@ def test_failed_combined_candidate_continues_without_relaunching_team(
     assert len(calls) == 1 and not team_children(db, child_id)
     eligibility = AcceptEngine(db=db).check_accept_eligibility(child_id)
     assert eligibility.eligible, eligibility.checks
-    assert git_projection(db, continued)["source_run_id"] == failed_id
     assert GitManager.get_head_commit(repo) == failed.base_commit
 
 

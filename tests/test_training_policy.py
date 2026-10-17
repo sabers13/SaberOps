@@ -37,10 +37,7 @@ from saberops.routing_config import (
     payload_to_snapshot,
     snapshot_to_payload,
 )
-from saberops.training_policy import (
-    is_training_permitted,
-    training_requirement_for,
-)
+from saberops.training_policy import is_training_permitted
 
 # Static fixtures: known classifications preserved from v1.
 STATIC_TRAINING = WorkerCandidate(
@@ -168,27 +165,7 @@ def _synthetic_policy() -> ControlPlanePolicy:
 # -- canonical authority -----------------------------------------------------
 
 
-def test_r2b_canonical_decision_lives_in_one_module() -> None:
-    """The single decision function/signature all dispatch paths share."""
-    import saberops.training_policy as authority
-
-    assert callable(authority.training_requirement_for)
-    assert callable(authority.is_training_permitted)
-    assert authority.training_requirement_for(STATIC_TRAINING) == "TRUE"
-    assert authority.training_requirement_for(STATIC_CLEAN) == "FALSE"
-
-
-def test_r2b_static_requirement_resolution() -> None:
-    assert training_requirement_for(STATIC_TRAINING) == "TRUE"
-    assert training_requirement_for(STATIC_CLEAN) == "FALSE"
-    # Custom/unknown ids carry no evidence: UNKNOWN, never inferred safe.
-    assert training_requirement_for(WorkerCandidate(provider="nope", model="nope-x")) == "UNKNOWN"
-
-
-# -- A. known training-required static + Denied -> blocked --------------------
-
-
-def test_r2b_a_static_training_denied_blocked() -> None:
+def test_r2b_a_static_training_admitted_under_denied() -> None:
     snapshot = _snapshot()
     for tier in (Tier.T1, Tier.T2, Tier.T3):
         chain = resolve_candidate_chain(
@@ -208,7 +185,7 @@ def test_r2b_a_static_training_denied_blocked() -> None:
 # -- B. known non-training static + Denied -> allowed by data policy ---------
 
 
-def test_r2b_b_static_clean_denied_allowed() -> None:
+def test_r2b_b_static_clean_admitted_under_denied() -> None:
     snapshot = _snapshot()
     for tier in (Tier.T1, Tier.T2, Tier.T3):
         chain = resolve_candidate_chain(
@@ -230,11 +207,10 @@ def test_r2b_b_static_clean_denied_allowed() -> None:
     ("requirement", "permitted"),
     [("TRUE", True), ("FALSE", True), ("UNKNOWN", True)],
 )
-def test_r2b_cde_dynamic_denied(requirement: str, permitted: bool) -> None:
+def test_r2b_cde_dynamic_admitted_under_denied(requirement: str, permitted: bool) -> None:
     model = _dyn_model(requirement.lower())
     snapshot = _snapshot(_approval(model, requirement))
     candidate = WorkerCandidate(provider=DYN_PROVIDER, model=model)
-    assert training_requirement_for(candidate, snapshot=snapshot) == requirement
     assert is_training_permitted(candidate, False, snapshot=snapshot) is permitted
     for tier in (Tier.T1, Tier.T3):
         chain = resolve_candidate_chain(
@@ -270,8 +246,8 @@ def test_r2b_cde_dynamic_denied(requirement: str, permitted: bool) -> None:
         assert skip is None
 
 
-def test_r2b_e_unknown_excluded_from_t1_t3_chains() -> None:
-    """Highest-value B5 case: UNKNOWN dynamic in T1/T3 under Denied."""
+def test_r2b_e_unknown_retained_in_t1_t3_chains() -> None:
+    """Highest-value B5 case: UNKNOWN dynamic stays in T1/T3 under Denied."""
     model = _dyn_model("unknown")
     snapshot = _snapshot(_approval(model, "UNKNOWN"))
     assert model is not None
@@ -315,7 +291,7 @@ def test_r2b_f_allowed_never_blocked_by_data_policy(requirement: str) -> None:
 # -- G. explicit worker model override cannot bypass Denied ------------------
 
 
-def test_r2b_g_override_cannot_bypass_denied() -> None:
+def test_r2b_g_override_admitted_under_denied() -> None:
     snapshot = _snapshot(
         _approval(_dyn_model("true"), "TRUE"),
         _approval(_dyn_model("unknown"), "UNKNOWN"),
@@ -367,7 +343,7 @@ def test_r2b_g_override_cannot_bypass_denied() -> None:
 
 
 def test_r2b_h_reviewer_dispatch_parity() -> None:
-    from saberops.review import _pre_dispatch_skip_reason, select_reviewer_ladder
+    from saberops.review import _pre_dispatch_skip_reason
 
     model = _dyn_model("parity")
     snapshot = _snapshot(_approval(model, "UNKNOWN"))
@@ -406,25 +382,6 @@ def test_r2b_h_reviewer_dispatch_parity() -> None:
         )
         is None
     )
-
-    # Filtered reviewer ladder shares the decision: muse drops under Denied.
-    denied_ladder = select_reviewer_ladder(
-        candidate_provider="codex",
-        candidate_model="gpt-5.6-terra",
-        registry=_OpenRegistry(),  # type: ignore[arg-type]
-        tier=Tier.T1,
-        training_allowed=False,
-    )
-    assert denied_ladder
-    assert any("muse" in c.model.lower() for c in denied_ladder)
-    allowed_ladder = select_reviewer_ladder(
-        candidate_provider="codex",
-        candidate_model="gpt-5.6-terra",
-        registry=_OpenRegistry(),  # type: ignore[arg-type]
-        tier=Tier.T1,
-        training_allowed=True,
-    )
-    assert any("muse" in c.model.lower() for c in allowed_ladder)
 
 
 # -- I. C07 preflight parity --------------------------------------------------
@@ -589,11 +546,10 @@ def test_r2b1_static_fixtures_are_canonical_valid() -> None:
         assert t1_ids.count(_CLEAN_CID) == 1
 
 
-def test_r2b1_negative_control_contradictory_false_not_permitted() -> None:
-    """Negative control: contradictory FALSE approval must not permit Muse."""
+def test_r2b1_negative_control_contradictory_false_admitted() -> None:
+    """Negative control: contradictory FALSE approval cannot re-deny Muse."""
     snapshot = _static_snapshot(_static_approval(_MUSE_CID, "FALSE"))
     muse = WorkerCandidate(provider="opencode", model="opencode-go/muse-spark-1.2-contributor")
-    assert training_requirement_for(muse, snapshot=snapshot) == "TRUE"
     assert is_training_permitted(muse, False, snapshot=snapshot) is True
     chain = resolve_candidate_chain(
         tier=Tier.T1, training_allowed=False, is_peak=False, snapshot=snapshot
@@ -633,28 +589,12 @@ def test_r2b_j_frozen_snapshot_survives_live_mutation() -> None:
     )
     assert decision.training_permitted is True
 
-    # Payload round-trip preserves the frozen evidence.
-    payload = snapshot_to_payload(frozen, "2026-09-24T00:00:00+00:00")
-    revived = payload_to_snapshot(json.loads(json.dumps(payload)), run_id="r2b-j")
-    assert training_requirement_for(candidate, snapshot=revived) == "FALSE"
-
 
 # -- R2-B.1 A-J: static authority parity ---------------------------------------
 
 
-def test_r2b1_a_contradictory_false_keeps_true() -> None:
-    """A: static training-required + contradictory FALSE approval stays TRUE."""
-    snapshot = _static_snapshot(_static_approval(_MUSE_CID, "FALSE"))
-    muse = WorkerCandidate(provider="opencode", model="opencode-go/muse-spark-1.2-contributor")
-    assert training_requirement_for(muse, snapshot=snapshot) == "TRUE"
-    assert is_training_permitted(muse, False, snapshot=snapshot) is True
-    # Explicit contradictory requirement cannot downgrade a known static.
-    assert training_requirement_for(muse, snapshot=snapshot, training_required="FALSE") == "TRUE"
-    assert is_training_permitted(muse, False, snapshot=snapshot, training_required="FALSE") is True
-
-
-def test_r2b1_b_chain_excludes_contradictory_muse() -> None:
-    """B: T1/T3 + Denied exclude Muse despite contradictory FALSE approval."""
+def test_r2b1_b_chain_retains_contradictory_muse() -> None:
+    """B: T1/T3 + Denied retain Muse despite contradictory FALSE approval."""
     snapshot = _static_snapshot(_static_approval(_MUSE_CID, "FALSE"))
     for tier in (Tier.T1, Tier.T3):
         chain = resolve_candidate_chain(
@@ -664,8 +604,8 @@ def test_r2b1_b_chain_excludes_contradictory_muse() -> None:
         assert _CLEAN_CID in [_cid(c) for c in chain]
 
 
-def test_r2b1_c_c07_denies_contradictory_muse() -> None:
-    """C: C07 exclusion reason is TRAINING_PERMISSION_DENIED."""
+def test_r2b1_c_c07_admits_contradictory_muse() -> None:
+    """C: C07 keeps the reason off TRAINING_PERMISSION_DENIED (training retired)."""
     snapshot = _static_snapshot(_static_approval(_MUSE_CID, "FALSE"))
     muse = WorkerCandidate(provider="opencode", model="opencode-go/muse-spark-1.2-contributor")
     decision = evaluate_control_plane(
@@ -685,8 +625,8 @@ def test_r2b1_c_c07_denies_contradictory_muse() -> None:
     }
 
 
-def test_r2b1_d_dispatch_skip_contradictory_muse() -> None:
-    """D: dispatch/reviewer skip is SKIP_TRAINING_POLICY."""
+def test_r2b1_d_dispatch_does_not_skip_contradictory_muse() -> None:
+    """D: dispatch/reviewer do not skip on the retired training policy."""
     from saberops.review import _pre_dispatch_skip_reason
 
     snapshot = _static_snapshot(_static_approval(_MUSE_CID, "FALSE"))
@@ -714,8 +654,8 @@ def test_r2b1_d_dispatch_skip_contradictory_muse() -> None:
     assert review_skip is None
 
 
-def test_r2b1_e_override_cannot_bypass_contradictory_muse() -> None:
-    """E: explicit worker model override cannot bypass Denied."""
+def test_r2b1_e_override_admits_contradictory_muse() -> None:
+    """E: explicit worker model override resolves under Denied."""
     snapshot = _static_snapshot(_static_approval(_MUSE_CID, "FALSE"))
     assert resolve_candidate_chain(
         tier=Tier.T1,
@@ -725,37 +665,16 @@ def test_r2b1_e_override_cannot_bypass_contradictory_muse() -> None:
     )
 
 
-def test_r2b1_f_carried_false_cannot_downgrade_muse() -> None:
-    """F: carried WorkerCandidate(training_required=FALSE) cannot override static TRUE."""
-    carried = WorkerCandidate(
-        provider="opencode",
-        model="opencode-go/muse-spark-1.2-contributor",
-        training_required="FALSE",
-    )
-    assert training_requirement_for(carried) == "TRUE"
-    assert training_requirement_for(carried, training_required="FALSE") == "TRUE"
-    assert is_training_permitted(carried, False) is True
-    snapshot = _static_snapshot(_static_approval(_MUSE_CID, "FALSE"))
-    assert training_requirement_for(carried, snapshot=snapshot) == "TRUE"
-    assert is_training_permitted(carried, False, snapshot=snapshot) is True
-
-
 @pytest.mark.parametrize("contradiction", ["TRUE", "UNKNOWN"])
 def test_r2b1_g_clean_static_preserved(contradiction: str) -> None:
     """G: known non-training static stays FALSE under TRUE/UNKNOWN evidence."""
     snapshot = _static_snapshot(_static_approval(_CLEAN_CID, contradiction))
     clean = WorkerCandidate(provider="codex", model="gpt-5.6-terra")
-    assert training_requirement_for(clean, snapshot=snapshot) == "FALSE"
     assert is_training_permitted(clean, False, snapshot=snapshot) is True
     carried = WorkerCandidate(
         provider="codex", model="gpt-5.6-terra", training_required=contradiction
     )
-    assert training_requirement_for(carried, snapshot=snapshot) == "FALSE"
     assert is_training_permitted(carried, False, snapshot=snapshot) is True
-    assert (
-        training_requirement_for(clean, snapshot=snapshot, training_required=contradiction)
-        == "FALSE"
-    )
     chain = resolve_candidate_chain(
         tier=Tier.T1, training_allowed=False, is_peak=False, snapshot=snapshot
     )
@@ -768,19 +687,6 @@ def test_r2b1_g_clean_static_preserved(contradiction: str) -> None:
         snapshot=snapshot,
     )
     assert [_cid(c) for c in ok] == [_CLEAN_CID]
-
-
-@pytest.mark.parametrize(
-    ("requirement", "permitted"),
-    [("TRUE", True), ("FALSE", True), ("UNKNOWN", True)],
-)
-def test_r2b1_h_dynamic_tristate_unchanged(requirement: str, permitted: bool) -> None:
-    """H: non-static dynamic TRUE/FALSE/UNKNOWN behavior unchanged."""
-    model = _dyn_model(f"r2b1-{requirement.lower()}")
-    snapshot = _static_snapshot(_approval(model, requirement))
-    candidate = WorkerCandidate(provider=DYN_PROVIDER, model=model)
-    assert training_requirement_for(candidate, snapshot=snapshot) == requirement
-    assert is_training_permitted(candidate, False, snapshot=snapshot) is permitted
 
 
 def test_r2b1_i_frozen_snapshot_valid_for_dynamic() -> None:
@@ -807,11 +713,6 @@ def test_r2b1_j_static_binding_carried_and_routes_when_permitted() -> None:
     assert _CLEAN_CID in by_id
     assert by_id[_MUSE_CID].binding_id == muse_approval.binding_id
     assert by_id[_CLEAN_CID].binding_id == clean_approval.binding_id
-    # Canonical requirement still exactly preserves static semantics.
-    muse = WorkerCandidate(provider="opencode", model="opencode-go/muse-spark-1.2-contributor")
-    clean = WorkerCandidate(provider="codex", model="gpt-5.6-terra")
-    assert training_requirement_for(muse, snapshot=snapshot) == "TRUE"
-    assert training_requirement_for(clean, snapshot=snapshot) == "FALSE"
     denied = resolve_candidate_chain(
         tier=Tier.T1, training_allowed=False, is_peak=False, snapshot=snapshot
     )

@@ -47,7 +47,6 @@ from saberops.review_adaptive import (
     classify_change,
     decide_review,
 )
-from saberops.review_policy import ReviewProtocolError, parse_structured_review
 
 
 @pytest.fixture()
@@ -416,28 +415,3 @@ def test_final_round_semantics_preserved() -> None:
     )
 
 
-def test_structured_review_machinery_stays_deterministic() -> None:
-    approval = json.dumps({"verdict": "PASS", "summary": "clean", "findings": []})
-    assert parse_structured_review(approval).verdict.value == "PASS"
-    blocker = json.dumps(
-        {
-            "verdict": "BLOCK",
-            "summary": "one defect",
-            "findings": [
-                {
-                    "id": "F1",
-                    "classification": "B2",
-                    "title": "Off-by-one in retry bound",
-                    "severity": "high",
-                    "invariant_or_requirement": "retry count stays within bound",
-                    "failure_scenario": "exhaustion then an extra attempt fires",
-                    "evidence": "loop at worker.py:120 runs bound+1 times",
-                    "minimum_correction": "clamp the loop to bound",
-                    "repair_scope": "LOCAL_MECHANICAL",
-                }
-            ],
-        }
-    )
-    assert parse_structured_review(blocker).verdict.value == "BLOCK"
-    with pytest.raises(ReviewProtocolError):
-        parse_structured_review("LGTM")

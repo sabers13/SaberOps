@@ -1263,42 +1263,6 @@ def add_candidate_to_chain(
     return _revalidate_v3(data)
 
 
-def add_dynamic_candidate_to_chain(
-    payload: Mapping[str, Any],
-    *,
-    role: JobRole | str,
-    candidate: DynamicCandidate,
-    group: int | None = None,
-) -> dict[str, Any]:
-    """Register an owner approval and add its candidate to ``role``.
-
-    This is the dynamic-candidate analogue of
-    :func:`add_candidate_to_chain`: it records the non-secret approval
-    evidence under ``approved_candidates`` in the *same* canonical routing
-    document and adds the canonical ``provider/model`` identity.  The
-    whole document is then re-validated, so role semantics, ordering,
-    identity validity and training-denial rules stay authoritative.
-    Adding is idempotent; ordering is never rewritten.
-    """
-    data, key = _require_role_payload(payload, role)
-    approved = data.get(_APPROVED_TOP_KEY)
-    if not isinstance(approved, dict):
-        approved = {}
-        data[_APPROVED_TOP_KEY] = approved
-    approved[candidate.candidate_id] = candidate.to_dict()
-    chain = data["roles"][key]
-    for existing in chain:
-        if candidate.candidate_id in existing.get("routes", []):
-            return _revalidate_v3(data)
-    if group is None:
-        chain.append({"routes": [candidate.candidate_id]})
-    else:
-        if type(group) is not int or group < 1 or group > len(chain):
-            raise RoutingConfigError(f"unknown group {group!r} for role {key}")
-        chain[group - 1]["routes"].append(candidate.candidate_id)
-    return _revalidate_v3(data)
-
-
 def remove_candidate_from_chain(
     payload: Mapping[str, Any],
     *,

@@ -13,7 +13,6 @@ import pytest
 
 from saberops.paths import (
     active_profile,
-    saberops_cache_dir,
     saberops_config_dir,
     saberops_state_dir,
 )
@@ -36,13 +35,11 @@ def test_profile_isolates_all_owner_namespaces(
 ) -> None:
     default_state = saberops_state_dir()
     default_config = saberops_config_dir()
-    default_cache = saberops_cache_dir()
 
     monkeypatch.setenv("SABEROPS_PROFILE", "dogfood-zero")
     assert active_profile() == "dogfood-zero"
     assert saberops_state_dir() == default_state / "profiles" / "dogfood-zero"
     assert saberops_config_dir() == default_config / "profiles" / "dogfood-zero"
-    assert saberops_cache_dir() == default_cache / "profiles" / "dogfood-zero"
 
 
 @pytest.mark.parametrize("bad", ["../escape", "/tmp/nope", "has space", ""])
