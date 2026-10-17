@@ -67,6 +67,7 @@ classifier in `consumer`.  Until then the gap stays visible in the manifest's
 | --- | --- | --- | --- |
 | 2026-10-16 | codex `codex-cli 0.162.1`; claude `2.1.301 (Claude Code)`; opencode `opencode v2.0.29` | no drift (`check` exit 0; 3 `config_help` fixtures match) | y — `config_help` captured and owner-kept (D-0015); usage panels/JSON and exhaustion **not** refreshed: owner-declined 2026-10-16 (D-0016), recorded under `fake_only` |
 | 2026-10-17 | opencode `opencode v2.0.29` | not run (fixture edit only) | y — `opencode/opencode-v2.0.29/config_help.txt` re-captured token-free with `opencode serve --help` appended (Step 024/HV-2, authorized by the step prompt); the first three sections reproduced byte-for-byte |
+| 2026-10-17 | opencode `opencode v2.0.29` (sha256 `7e23471f…`, probe evidence in `LANE/probe-isolation/`) | `check` exit 0 on the committed manifest | fixup 1 (D-0040): five-site config/plugin isolation repair — `workers/opencode_isolation.py` (owned root + `OPENCODE_DISABLE_PROJECT_CONFIG=1` + inline `integration.use` denies), applied to the direct worker, the session server, first-use verification, the Go usage reader and the web model listing; refusals before launch use existing typed forms |
 
 ## 5. Findings
 

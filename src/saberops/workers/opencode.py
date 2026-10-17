@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import shutil
 from collections.abc import Callable
 from typing import Any
@@ -27,6 +26,10 @@ from saberops.workers.exhaustion import (
 from saberops.workers.instruction_compat import (
     InstructionCompatibility,
     instruction_compatibility_for_opencode_model,
+)
+from saberops.workers.opencode_isolation import (
+    OpenCodeIsolationUnavailable,
+    opencode_isolation,
 )
 
 __all__ = ["ORCH_PROMPT_ARG_LIMIT", "OpenCodeAdapter", "opencode_provider_id"]
@@ -114,6 +117,26 @@ class OpenCodeAdapter(WorkerAdapter):
         """
         return instruction_compatibility_for_opencode_model(model)
 
+    def _isolation_refusal(self, request: WorkerRequest, detail: str) -> WorkerResult:
+        """Return a typed pre-launch refusal when isolation cannot be built.
+
+        No process is launched.  This mirrors the existing provider-prefix and
+        binary-missing refusals: the selected provider cannot serve this turn
+        under the guaranteed isolation contract.
+        """
+        return WorkerResult(
+            provider=self.provider_name,
+            model=request.model,
+            status=AttemptStatus.FAILED,
+            summary=detail,
+            stdout="",
+            stderr=detail,
+            changed_paths=[],
+            has_changes=False,
+            error=detail,
+            outcome=DispatchOutcome.ELIGIBILITY_SKIP,
+        )
+
     def run(self, request: WorkerRequest) -> WorkerResult:
         """Dispatch task to OpenCode in the specified worktree."""
         if not self.is_available():
@@ -168,10 +191,11 @@ class OpenCodeAdapter(WorkerAdapter):
         # tests/fixtures/vendor_cli/opencode/opencode-v2.0.29/config_help.txt)
         # documents neither ``--dir`` nor ``--pure`` (HV-1 finding F1, fixed in
         # Step 024/HV-2).  The worktree is carried by the child ``cwd`` below --
-        # not by an argv flag -- and isolation is the hermetic child
-        # environment plus the pinned inline ``OPENCODE_CONFIG_CONTENT``, which
-        # outranks project and global config.  Do not re-add a flag that the
-        # installed CLI's help does not document.
+        # not by an argv flag -- and config/plugin isolation comes from
+        # ``workers/opencode_isolation.py``: a private config/home root, project
+        # and ancestor discovery disabled, ambient config selectors removed and
+        # inline deny policies.  Do not re-add a flag that the installed CLI's
+        # help does not document.
         cmd = [self.opencode_bin, "run"]
         if not use_stdin:
             cmd.append(request.task)
@@ -190,24 +214,32 @@ class OpenCodeAdapter(WorkerAdapter):
         # Hermetic child environment: provider API keys in the ambient
         # environment can never activate a provider unless SaberOps explicitly
         # supplied them in the request overlay.
-        kwargs["env"] = hermetic_env("opencode", request.env)
+        base_env = hermetic_env("opencode", request.env)
         kwargs["inherit_env"] = False
-        # Billing pinning: the inline config outranks project and global
-        # config files, and ``enabled_providers`` is an allowlist, so only
-        # the selected model provider can serve this turn.  This assignment
-        # runs after the hermetic projection, so a shell-provided
-        # OPENCODE_CONFIG_CONTENT (or OPENCODE_CONFIG path override, which
-        # never reaches the child at all) can never change billing.
-        kwargs["env"]["OPENCODE_CONFIG_CONTENT"] = json.dumps(
-            {"enabled_providers": [provider]}
-        )
+        # Refuse before launch when OpenCode cannot be isolated (for example a
+        # present system config directory that no supported switch can
+        # exclude).  Billing and deny pinning alone do not establish discovery
+        # isolation.
+        try:
+            isolation = opencode_isolation(base_env)
+        except OpenCodeIsolationUnavailable as exc:
+            return self._isolation_refusal(request, str(exc))
         if use_stdin:
             kwargs["input_text"] = request.task
-
-        # The generic autonomous execution seam: direct launch when no
-        # boundary is installed, kernel containment (or a typed
-        # fail-closed refusal) when one is.
-        res: ProcessResult = launch_worker_process(cmd, runner=self.runner, **kwargs)
+        # Billing pinning and isolation pinning both run after the hermetic
+        # projection and after any accepted overlay, so an ambient
+        # OPENCODE_CONFIG_CONTENT (or OPENCODE_CONFIG path override, which
+        # never reaches the child at all) can never change either.  The owned
+        # root lives until the child process has exited.
+        with isolation:
+            kwargs["env"] = isolation.env_for(
+                base_env,
+                config=isolation.config({"enabled_providers": [provider]}),
+            )
+            # The generic autonomous execution seam: direct launch when no
+            # boundary is installed, kernel containment (or a typed
+            # fail-closed refusal) when one is.
+            res: ProcessResult = launch_worker_process(cmd, runner=self.runner, **kwargs)
         transport_used = "stdin" if use_stdin else "argv"
 
         display_stdout, usage = parse_opencode_jsonl(res.stdout)

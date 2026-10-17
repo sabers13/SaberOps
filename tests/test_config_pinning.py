@@ -92,7 +92,9 @@ def test_opencode_run_pins_enabled_providers_and_drops_shell_config(
     assert result.status == AttemptStatus.SUCCESS
     child = _child(outfile)
     pinned = json.loads(child["env"]["OPENCODE_CONFIG_CONTENT"])
-    assert pinned == {"enabled_providers": ["opencode-go"]}
+    assert pinned["enabled_providers"] == ["opencode-go"]
+    assert {"action": "integration.use", "resource": "plugin:*",
+            "effect": "deny"} in pinned["policies"]
     for key in ("OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_MODEL"):
         assert key not in child["env"], f"shell {key} reached the opencode child"
     # The server username/password names pass the projection by design
@@ -102,12 +104,34 @@ def test_opencode_run_pins_enabled_providers_and_drops_shell_config(
     argv = child["argv"]
     # opencode v2.0.29 documents neither ``--pure`` nor ``--dir`` (HV-1 F1,
     # fixed in Step 024/HV-2).  The worktree now travels as the child ``cwd``
-    # (the documented directory mechanism) and isolation is the pinned inline
-    # ``OPENCODE_CONFIG_CONTENT`` asserted above -- never an argv flag.
+    # and discovery isolation is the owned private config/home root asserted
+    # below -- never an argv flag.
     assert argv[1] == "run"
     assert "--pure" not in argv and "--dir" not in argv
     assert argv[argv.index("--model") + 1] == MODEL
     assert Path(child["cwd"]).resolve() == tmp_path.resolve()
+    # The child environment is the isolation-owned root, not the ambient
+    # shell: project/ancestor discovery is disabled and ambient config
+    # selectors (OPENCODE_CONFIG/OPENCODE_CONFIG_DIR/OPENCODE_MODEL and a
+    # hostile project-disable value) never survive.
+    assert child["env"]["OPENCODE_DISABLE_PROJECT_CONFIG"] == "1"
+    assert "OPENCODE_CONFIG" not in child["env"]
+    assert "OPENCODE_CONFIG_DIR" not in child["env"]
+    assert "OPENCODE_MODEL" not in child["env"]
+    config_home = Path(child["env"]["XDG_CONFIG_HOME"])
+    home = Path(child["env"]["HOME"])
+    assert config_home != home
+    for directory in (config_home, home):
+        assert "saberops-opencode-isolation-" in str(directory)
+    # The owned root lives only for the dispatch: it is removed after the
+    # child exits (creation-time emptiness is covered by the helper tests).
+    assert not config_home.parent.exists()
+    inline = json.loads(child["env"]["OPENCODE_CONFIG_CONTENT"])
+    assert inline["enabled_providers"] == ["opencode-go"]
+    assert {"action": "integration.use", "resource": "plugin:*",
+            "effect": "deny"} in inline["policies"]
+    assert {"action": "integration.use", "resource": "mcp:*",
+            "effect": "deny"} in inline["policies"]
 
 
 def test_opencode_run_refuses_model_without_provider_prefix(

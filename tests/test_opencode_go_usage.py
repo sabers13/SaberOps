@@ -56,6 +56,60 @@ def test_native_go_wrapper_only_enumerates_models(tmp_path: Path) -> None:
     assert "hidden" not in json.dumps(rows)
 
 
+def test_go_usage_launch_uses_owned_isolation_root_with_exact_plugin_exception(
+    tmp_path: Path,
+) -> None:
+    """Covers: HV-2 go-usage isolation (deny-all plus exact owned plugin)."""
+    exe = tmp_path / "opencode"
+    trace = tmp_path / "trace"
+    exe.write_text(
+        "#!/usr/bin/env python3\nimport os,sys,json\n"
+        "env=dict(os.environ)\n"
+        f"open({str(trace)!r},'w').write(json.dumps({{'argv':sys.argv[1:],'env':env}}))\n"
+        "config=json.loads(env['OPENCODE_CONFIG_CONTENT'])\n"
+        "assert config['enabled_providers']==['opencode-go']\n"
+        "assert len(config['plugin'])==1\n"
+        "assert config['plugin'][0].endswith('opencode_go_usage.mjs')\n"
+        "policies={(p['resource'],p['effect']) for p in config['policies']}\n"
+        "assert ('plugin:*','deny') in policies\n"
+        "assert ('mcp:*','deny') in policies\n"
+        "uri=config['plugin'][0]\n"
+        f"open({str(tmp_path / 'saw.txt')!r},'w').write(uri)\n"
+        "with open(os.environ['SABEROPS_GO_USAGE_OUTPUT'],'w') as f:\n"
+        " json.dump({'usage':{'monthly':{'percent':16,"
+        "'resetsAt':'2030-01-01T00:00:00Z'}}},f)\n"
+    )
+    exe.chmod(0o755)
+    rows = read_go_limits(str(exe))
+    child = json.loads(trace.read_text())
+    assert child["argv"] == ["models", "opencode-go"]
+    env = child["env"]
+    assert env["OPENCODE_DISABLE_PROJECT_CONFIG"] == "1"
+    assert "OPENCODE_CONFIG" not in env and "OPENCODE_CONFIG_DIR" not in env
+    root = Path(env["XDG_CONFIG_HOME"]).parent
+    assert "saberops-opencode-isolation-" in str(root)
+    # The exact-allow exception names the resolved shipped plugin path, and the
+    # shipment itself is byte-identical to the committed plugin file.
+    uri = (tmp_path / "saw.txt").read_text()
+    assert uri.startswith("file://")
+    assert Path(uri.removeprefix("file://")).resolve() == (
+        Path(__file__).resolve().parents[1]
+        / "src/saberops/defaults/opencode_go_usage.mjs"
+    ).resolve()
+    inline = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+    exact = next(
+        p
+        for p in inline["policies"]
+        if p["resource"].startswith("plugin:") and p["resource"] != "plugin:*"
+    )
+    assert exact["effect"] == "allow"
+    assert inline["policies"].index(exact) > inline["policies"].index(
+        {"action": "integration.use", "resource": "plugin:*", "effect": "deny"}
+    )
+    assert not root.exists(), "owned root is removed after the reader exits"
+    assert rows[0]["remaining"] == 84
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX executable fixture")
 def test_go_timeout_terminates_native_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("saberops.opencode_go_usage.GO_TIMEOUT", 0.4)

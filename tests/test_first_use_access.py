@@ -48,10 +48,20 @@ def test_model_check_requires_completed_challenge_and_denies_tools(
             agent = config["agent"][argv[argv.index("--agent") + 1]]
             assert agent["permission"] == "deny" and agent["steps"] == 2
             # v2.0.29 documents neither ``--pure`` nor ``--dir`` (HV-1 F1,
-            # fixed in Step 024/HV-2): the directory is the child cwd and
-            # isolation is this deny-by-default inline config.
+            # fixed in Step 024/HV-2): the directory is the child cwd, ancestor
+            # discovery is disabled, and isolation is the owned private
+            # config/home root plus these deny-by-default permissions.
             assert "--pure" not in argv and "--dir" not in argv
             assert config["permission"] == "deny"
+            assert kwargs["inherit_env"] is False
+            assert kwargs["env"]["OPENCODE_DISABLE_PROJECT_CONFIG"] == "1"
+            assert "OPENCODE_CONFIG" not in kwargs["env"]
+            assert "OPENCODE_CONFIG_DIR" not in kwargs["env"]
+            root = Path(kwargs["env"]["XDG_CONFIG_HOME"]).parent
+            assert "saberops-opencode-isolation-" in str(root)
+            assert Path(kwargs["env"]["HOME"]).parent == root
+            assert {"action": "integration.use", "resource": "plugin:*",
+                    "effect": "deny"} in config["policies"]
             output = json.dumps({"type": "text", "part": {"text": challenge[0]}})
             if outcome != "partial":
                 output += '\n' + json.dumps({"type": "step_finish", "part": {"reason": "stop"}})
@@ -75,6 +85,37 @@ def test_model_check_requires_completed_challenge_and_denies_tools(
         "failure": "MODEL_CHECK_FAILED", "timeout": "MODEL_CHECK_TIMEOUT",
         "error": "MODEL_CHECK_UNCONFIRMED", "partial": "MODEL_CHECK_UNCONFIRMED",
     }[outcome]
+
+
+def test_opencode_model_check_refuses_without_inheriting_ambient_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: HV-2 first-use refusal (isolation unavailable, no spawn)."""
+    import saberops.model_access.model_verification as verification
+    from saberops.workers.opencode_isolation import OpenCodeIsolationUnavailable
+
+    monkeypatch.setenv("OPENCODE_CONFIG", "/tmp/hostile.json")
+    monkeypatch.setenv("OPENCODE_CONFIG_DIR", "/tmp/hostile-dir")
+    monkeypatch.setenv("OPENCODE_DISABLE_PROJECT_CONFIG", "0")
+
+    def fail(_env: object) -> object:
+        raise OpenCodeIsolationUnavailable(
+            "OpenCode system configuration is present"
+        )
+
+    monkeypatch.setattr(verification, "opencode_isolation", fail)
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str], **kwargs: Any) -> ProcessResult:
+        calls.append(argv)
+        raise AssertionError("must not launch when isolation is unavailable")
+
+    assert (
+        verify_native_model("/fake/cli", "opencode", "chosen-model", runner=runner)
+        == "MODEL_CHECK_FAILED"
+    )
+    assert calls == []
+    assert tmp_path.is_dir()
 
 
 def test_fresh_account_can_verify_before_any_task_and_survives_refresh(

@@ -15,7 +15,7 @@ import re
 import shutil
 import subprocess
 import threading
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -941,22 +941,37 @@ def _fetch_openai_compatible_models(
 _BACKEND_LIST_TIMEOUT_SECONDS = 15.0
 
 
-def _run_backend_listing(argv: list[str]) -> str:
+def _run_backend_listing(
+    argv: list[str], *, env: Mapping[str, str] | None = None
+) -> str:
     """Run one backend's supported model-list command (bounded, no secrets).
 
     The backend reads its own account session; Orchestrator passes no
     credential and captures only stdout.  A non-zero exit is classified and
     its stderr is never surfaced (it may carry session material).
+
+    ``env`` replaces the inherited environment when given; callers that pass
+    ``None`` keep the previous direct-inheritance behaviour.
     """
 
     try:
-        completed = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=_BACKEND_LIST_TIMEOUT_SECONDS,
-            check=False,
-        )
+        if env is not None:
+            completed = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                timeout=_BACKEND_LIST_TIMEOUT_SECONDS,
+                check=False,
+                env=dict(env),
+            )
+        else:
+            completed = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                timeout=_BACKEND_LIST_TIMEOUT_SECONDS,
+                check=False,
+            )
     except (OSError, subprocess.SubprocessError) as exc:
         raise ModelListingError(
             ConnectionTestReason.ENDPOINT_UNREACHABLE,
@@ -1059,7 +1074,36 @@ def _list_account_models(connection: ProviderConnection) -> list[str]:
         from saberops.model_access.native_listing import list_native_models
 
         return list_native_models(executable, descriptor.model_list_protocol)
-    stdout = _run_backend_listing([executable, *descriptor.model_list_argv])
+    if descriptor.backend == "opencode":
+        # Config/plugin isolation for the OpenCode listing launch: a private
+        # config/home root with project/ancestor discovery disabled (inline
+        # deny policies block every plugin, MCP server and skill), reusing
+        # the account/session data directory by path only.  Refuse in the
+        # existing typed form when isolation cannot be established; other
+        # backends keep their previous behaviour exactly.
+        from saberops.workers.env import hermetic_env
+        from saberops.workers.opencode_isolation import (
+            OpenCodeIsolationUnavailable,
+            opencode_isolation,
+        )
+
+        base_env = hermetic_env("opencode", {}, None)
+        try:
+            isolation = opencode_isolation(base_env)
+        except OpenCodeIsolationUnavailable as exc:
+            raise ModelListingError(
+                ConnectionTestReason.ENDPOINT_UNREACHABLE, str(exc)
+            ) from exc
+        with isolation:
+            listing_env = isolation.env_for(
+                base_env,
+                config=isolation.config({"enabled_providers": ["opencode"]}),
+            )
+            stdout = _run_backend_listing(
+                [executable, *descriptor.model_list_argv], env=listing_env
+            )
+    else:
+        stdout = _run_backend_listing([executable, *descriptor.model_list_argv])
     if descriptor.backend == "antigravity":
         # Native `agy models` emits exact ID<TAB>display name pairs.
         # Never interpret headers, errors or display names as executable IDs.

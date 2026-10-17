@@ -12,10 +12,16 @@ import json
 import tempfile
 import uuid
 from collections.abc import Callable
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
 from saberops.process import ProcessResult, run_process
+from saberops.workers.env import hermetic_env
+from saberops.workers.opencode_isolation import (
+    OpenCodeIsolationUnavailable,
+    opencode_isolation,
+)
 
 MODEL_CHECK_TIMEOUT = 45
 SUPPORTED_BACKENDS = frozenset({"opencode", "antigravity"})
@@ -67,16 +73,25 @@ def verify_native_model(
     with tempfile.TemporaryDirectory(prefix="saberops-model-check-") as directory:
         cwd = Path(directory)
         env: dict[str, str] = {}
+        # The opencode probe runs with config/plugin isolation: the parent
+        # environment is projected through the hermetic allowlist (ambient
+        # configuration selectors such as OPENCODE_CONFIG are dropped), then a
+        # private config/home root is created with project/ancestor discovery
+        # disabled.  Refuse before launch when isolation cannot be established
+        # instead of inheriting the ambient environment.  The antigravity
+        # probe is untouched: it is a different vendor CLI whose login session
+        # is not subject to the OpenCode discovery guarantee.
+        isolation: Any = None
+        base_env: dict[str, str] = {}
         if backend == "opencode":
             agent = "saberops-access-check"
-            # A dedicated agent overrides ambient build/plan permissions.
-            # The check runs in an empty temporary directory (the child
-            # ``cwd``), so no project config loads; the inline config below
-            # outranks the user's global config file.  The installed
-            # opencode v2.0.29 ``run --help`` documents no ``--dir`` or
-            # ``--pure`` flag (HV-1 F1, fixed in Step 024/HV-2), so the
-            # directory is the child ``cwd`` and isolation is this pinned
-            # inline config (deny-by-default permissions) rather than a flag.
+            # A dedicated agent overrides ambient build/plan permissions.  The
+            # check runs in an empty temporary directory (the child ``cwd``),
+            # with ancestor discovery disabled by the owned isolation root; the
+            # inline config below additionally denies plugins/MCP/skills.
+            # The installed opencode v2.0.29 ``run --help`` documents no
+            # ``--dir`` or ``--pure`` flag (HV-1 F1, fixed in Step 024/HV-2),
+            # so the directory is the child ``cwd``.
             access_config: dict[str, Any] = {
                 "permission": "deny", "share": "disabled",
                 # steps=1 injects OpenCode's final-step summary instruction
@@ -94,6 +109,14 @@ def verify_native_model(
             env["OPENCODE_CONFIG_CONTENT"] = json.dumps(access_config)
             argv = [executable, "run", prompt, "--model", model,
                     "--agent", agent, "--format", "json"]
+            base_env = hermetic_env("opencode", {}, None)
+            try:
+                isolation = opencode_isolation(base_env)
+                kwargs_env = isolation.env_for(
+                    base_env, config=isolation.config(access_config)
+                )
+            except OpenCodeIsolationUnavailable:
+                return "MODEL_CHECK_FAILED"
         else:
             agent = "saberops-access-" + uuid.uuid4().hex
             agents = cwd / ".agents" / "agents"
@@ -108,14 +131,19 @@ def verify_native_model(
             argv = [executable, "--print", prompt, "--model", model, "--agent", agent,
                     "--mode", "plan", "--sandbox", "--disable-slash-commands",
                     "--output-format", "json", "--print-timeout", f"{MODEL_CHECK_TIMEOUT}s"]
+            kwargs_env = env
         kwargs: dict[str, Any] = {
-            "cwd": cwd, "env": env, "timeout": MODEL_CHECK_TIMEOUT,
+            "cwd": cwd, "env": kwargs_env, "timeout": MODEL_CHECK_TIMEOUT,
+            # Never inherit the parent environment: only the child environment
+            # built here reaches the probe.
+            "inherit_env": False,
             # Streaming activates the existing process-group timeout/cleanup.
             "on_stdout": lambda _line: None, "on_stderr": lambda _line: None,
             "input_text": "",
         }
         try:
-            result = runner(argv, **kwargs)
+            with isolation if isolation is not None else nullcontext():
+                result = runner(argv, **kwargs)
         except (OSError, ValueError):
             return "MODEL_CHECK_FAILED"
     if result.timed_out:
