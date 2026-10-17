@@ -409,3 +409,40 @@ def test_checkpoint_ref_without_job_stays_unknown(tmp_path: Path) -> None:
     checkpoint = inventory.by_class(ArtifactClass.CHECKPOINT_REF)[0]
     assert checkpoint.ownership is OwnershipState.UNKNOWN
     assert checkpoint.reason == "checkpoint-job-unknown"
+
+
+def test_owned_caches_are_discovered_and_protected(tmp_path: Path) -> None:
+    """Covers: ADR-0003 D6 -- engine-owned caches are inventoried and kept."""
+    import subprocess as _subprocess
+
+    repo = _repo(tmp_path)
+    db = Database(tmp_path / "orch.db")
+    common = _subprocess.run(
+        ["git", "rev-parse", "--git-common-dir"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    common_path = Path(common) if Path(common).is_absolute() else repo / common
+    mypy_cache = common_path / "saberops-mypy-cache"
+    mypy_cache.mkdir(exist_ok=True)
+    (mypy_cache / "probe.txt").write_text("cache\n", encoding="utf-8")
+    test_map = common_path / "saberops-test-map"
+    test_map.mkdir(exist_ok=True)
+    (test_map / "probe.json").write_text("{}\n", encoding="utf-8")
+    state_root = tmp_path / "state"
+    state_cache = state_root / "cache"
+    state_cache.mkdir(parents=True)
+    (state_cache / "probe.txt").write_text("state\n", encoding="utf-8")
+    inventory = build_inventory(db, repo_root=repo, state_root=state_root)
+    caches = inventory.by_class(ArtifactClass.OWNED_CACHE)
+    by_ref = {item.reference: item for item in caches}
+    assert str(mypy_cache.resolve()) in by_ref
+    assert str(test_map.resolve()) in by_ref
+    assert str(state_cache.resolve()) in by_ref
+    for item in caches:
+        assert item.ownership is OwnershipState.OWNED_LIVE
+        assert item.protected is True
+        assert item.reason == "shared-engine-cache"
+        assert item.reclaimable_bytes is None

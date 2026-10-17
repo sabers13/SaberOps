@@ -79,6 +79,7 @@ class ArtifactClass(StrEnum):
     WORKTREE_VENV = "worktree-venv"
     EVIDENCE = "evidence"
     OWNER_DB = "owner-db"
+    OWNED_CACHE = "owned-cache"
 
 
 class OwnershipState(StrEnum):
@@ -739,6 +740,16 @@ def build_inventory(
         )
     )
 
+    # ---- engine-owned caches -------------------------------------------------
+    items.extend(
+        _discover_owned_caches(
+            repo=repo,
+            state_root=_resolve_state_root(state_root, owner_db_path),
+            max_entries=max_entries,
+            measure_bytes=measure_bytes,
+        )
+    )
+
     items.sort(key=lambda item: (item.artifact_class.value, item.reference))
     return Inventory(
         generated_at=moment,
@@ -1025,6 +1036,110 @@ def _discover_evidence(
                     "terminal_at": (
                         run.completed_at if run is not None and run.completed_at else ""
                     ),
+                    "hardlinked_files": str(measure.hardlinked_files),
+                },
+            )
+        )
+    return items
+
+
+#: Engine-owned cache directory names under the Git common dir.
+_OWNED_CACHE_DIR_NAMES: Final[tuple[str, ...]] = (
+    "saberops-mypy-cache",
+    "saberops-test-map",
+)
+
+
+def _git_common_dir(repo: Path) -> Path:
+    """Return the repository's Git common dir (read-only, no writes)."""
+    from saberops.process import run_process
+
+    result = run_process(["git", "rev-parse", "--git-common-dir"], cwd=repo)
+    if result.passed and result.stdout.strip():
+        common = Path(result.stdout.strip())
+        if not common.is_absolute():
+            common = repo / common
+        try:
+            return common.resolve()
+        except OSError:
+            return common
+    return (repo / ".git").resolve()
+
+
+def _discover_owned_caches(
+    *,
+    repo: Path,
+    state_root: Path,
+    max_entries: int,
+    measure_bytes: bool,
+) -> list[InventoryItem]:
+    """Inventory engine-owned package/test caches (never eligible for GC).
+
+    Scans ``<git_common_dir>/saberops-mypy-cache``,
+    ``<git_common_dir>/saberops-test-map`` and ``<state_root>/cache`` when
+    present on disk, skipping symlinks.  Each entry is reported as
+    ``OWNED_LIVE`` with a protected ``shared-engine-cache`` consumer so
+    ``orch gc --dry-run`` surfaces its bytes and protection reason while never
+    scheduling it for deletion.  Unreadable roots are reported as ``UNKNOWN``
+    (still protected) rather than guessed at.
+
+    Covers: ADR-0003 D6 (owned caches are inventoried and protected).
+    """
+    candidates: list[tuple[Path, str]] = []
+    try:
+        common = _git_common_dir(repo)
+    except Exception:
+        common = repo / ".git"
+    for name in _OWNED_CACHE_DIR_NAMES:
+        candidates.append((common / name, name))
+    candidates.append((state_root / "cache", "state-cache"))
+
+    items: list[InventoryItem] = []
+    seen: set[str] = set()
+    for path, cache_kind in candidates:
+        try:
+            if path.is_symlink():
+                continue
+            if not path.is_dir():
+                continue
+            resolved = str(path.resolve())
+        except OSError:
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        try:
+            readable = os.access(resolved, os.R_OK | os.X_OK)
+        except OSError:
+            readable = False
+        ownership = OwnershipState.OWNED_LIVE if readable else OwnershipState.UNKNOWN
+        state = "LIVE" if readable else "UNREADABLE"
+        measure = (
+            measure_path_bytes(path, max_entries=max_entries)
+            if measure_bytes
+            else ByteMeasure(None, None, 0, False)
+        )
+        items.append(
+            InventoryItem(
+                artifact_class=ArtifactClass.OWNED_CACHE,
+                reference=resolved,
+                identity=resolved,
+                owner="engine",
+                ownership=ownership,
+                reason="shared-engine-cache",
+                size_bytes=measure.apparent_bytes,
+                reclaimable_bytes=None,
+                consumers=(
+                    Consumer(
+                        kind="engine-cache",
+                        ref=resolved,
+                        state=state,
+                        protected=True,
+                        reason="shared-engine-cache",
+                    ),
+                ),
+                detail={
+                    "cache_kind": cache_kind,
                     "hardlinked_files": str(measure.hardlinked_files),
                 },
             )

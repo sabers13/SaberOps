@@ -268,7 +268,6 @@ class StorageMaintenance:
         refused = 0
         ran_gc = False
         vacuumed = False
-        within_budget = (self._clock() - started) < self._tick_budget
 
         # A below-floor or unknown reading is remediated with bounded permitted
         # GC and then re-measured, for every trigger -- not only the explicit
@@ -276,7 +275,9 @@ class StorageMaintenance:
         # launch, so their assessment must propagate infra too.
         low = disk_before.state is not DiskState.OK
 
-        if lease_valid and policy.approved and preview.candidates and within_budget:
+        if (self._clock() - started) < self._tick_budget and (
+            lease_valid and policy.approved and preview.candidates
+        ):
             result: GcApplyResult = apply_gc(
                 preview,
                 preview.candidates,
@@ -289,11 +290,21 @@ class StorageMaintenance:
             refused = len(result.refused)
             ran_gc = applied > 0
 
-        if lease_valid and policy.approved and policy.allow_vacuum and within_budget:
+        if (
+            (self._clock() - started) < self._tick_budget
+            and lease_valid
+            and policy.approved
+            and policy.allow_vacuum
+        ):
             vacuumed = self._maybe_vacuum()
 
         swept: tuple[str, ...] = ()
-        if lease_valid and within_budget:
+        if (
+            (self._clock() - started) < self._tick_budget
+            and lease_valid
+            and policy.approved
+            and policy.allow_scratch_deletion
+        ):
             swept = self._sweep_gate_scratch(deadline=started + self._tick_budget)
 
         infra_reason: str | None = None

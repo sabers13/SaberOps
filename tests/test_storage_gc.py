@@ -868,3 +868,81 @@ def test_evidence_deletion_remains_held_without_anchor(tmp_path: Path) -> None:
         _inventory(repo, (item,)), policy=policy, owned_roots=(str(tmp_path),)
     )
     assert preview.candidates == ()
+
+
+def test_owned_cache_is_excluded_and_forged_apply_refused(tmp_path: Path) -> None:
+    """Covers: ADR-0003 D6 -- owned caches surface bytes but never delete."""
+    repo = _repo(tmp_path)
+    db = Database(tmp_path / "orch.db")
+    cache = tmp_path / "saberops-mypy-cache"
+    cache.mkdir()
+    (cache / "probe.txt").write_text("cache\n", encoding="utf-8")
+    item = _item(
+        ArtifactClass.OWNED_CACHE,
+        str(cache.resolve()),
+        ownership=OwnershipState.OWNED_LIVE,
+        owner="engine",
+        reason="shared-engine-cache",
+        size=123,
+        reclaimable=None,
+        consumers=(
+            Consumer(
+                kind="engine-cache",
+                ref=str(cache.resolve()),
+                state="LIVE",
+                protected=True,
+                reason="shared-engine-cache",
+            ),
+        ),
+        detail={"cache_kind": "saberops-mypy-cache", "hardlinked_files": "0"},
+    )
+    policy = _approved()
+    preview = preview_gc(
+        _inventory(repo, (item,)), policy=policy, owned_roots=(str(tmp_path),)
+    )
+    assert preview.candidates == ()
+    assert any(
+        e.reference == str(cache.resolve()) and e.reason == "shared-cache-protected"
+        for e in preview.exclusions
+    )
+    forged = GcCandidate(
+        artifact_class=ArtifactClass.OWNED_CACHE,
+        action=GcAction.DELETE_PATH,
+        reference=str(cache.resolve()),
+        identity=str(cache.resolve()),
+        owner="engine",
+        reason="shared-engine-cache",
+        estimated_bytes=None,
+        reclaimable=False,
+        detail={"cache_kind": "saberops-mypy-cache"},
+    )
+    _events, sink = _audit_sink()
+    result = apply_gc(
+        preview, (forged,), db=db, repo_root=repo, audit=sink
+    )
+    assert result.applied == ()
+    assert cache.exists()
+    assert (cache / "probe.txt").exists()
+    # Even a preview that illegally contains an OWNED_CACHE candidate refuses.
+    from saberops.storage_gc import GcPreview as _GcPreview
+
+    poisoned = _GcPreview(
+        generated_at=preview.generated_at,
+        repo_root=preview.repo_root,
+        project_id=preview.project_id,
+        policy_ref=preview.policy_ref,
+        approved=True,
+        scope_classes=(ArtifactClass.OWNED_CACHE,),
+        candidates=(forged,),
+        exclusions=(),
+        estimated_reclaimable_bytes=0,
+        preview_id=preview.preview_id,
+    )
+    _events2, sink2 = _audit_sink()
+    poisoned_result = apply_gc(
+        poisoned, (forged,), db=db, repo_root=repo, audit=sink2
+    )
+    assert poisoned_result.applied == ()
+    assert poisoned_result.refused
+    assert poisoned_result.refused[0].reason == "shared-cache-protected"
+    assert cache.exists()

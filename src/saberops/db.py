@@ -2265,15 +2265,12 @@ class Database:
         with self.write_transaction() as conn:
             run_row = conn.execute("SELECT status FROM runs WHERE id = ?", (run_id,)).fetchone()
             if run_row is None:
-                conn.rollback()
                 return None
             if RunStatus(str(run_row["status"])) in TERMINAL_RUN_STATUSES:
-                conn.rollback()
                 return None
             if not self._fenced_owner_row(
                 conn, run_id, owner_id, generation, expected_owner_states
             ):
-                conn.rollback()
                 return None
 
             attempt_rows = conn.execute(
@@ -2361,22 +2358,18 @@ class Database:
         with self.write_transaction() as conn:
             run_row = conn.execute("SELECT status FROM runs WHERE id = ?", (run_id,)).fetchone()
             if run_row is None:
-                conn.rollback()
                 return None
             if RunStatus(str(run_row["status"])) != RunStatus.RUNNING:
-                conn.rollback()
                 return None
             if not self._fenced_owner_row(
                 conn, run_id, owner_id, generation, expected_owner_states
             ):
-                conn.rollback()
                 return None
             live = conn.execute(
                 "SELECT COUNT(*) AS n FROM attempts WHERE run_id = ? AND status IN (?, ?)",
                 (run_id, AttemptStatus.RUNNING.value, AttemptStatus.PENDING.value),
             ).fetchone()
             if int(live["n"] or 0) > 0:
-                conn.rollback()
                 return None
             conn.execute(
                 "UPDATE runs SET status = ?, result_summary = ?, completed_at = ? WHERE id = ?",
@@ -2424,20 +2417,16 @@ class Database:
         with self.write_transaction() as conn:
             run_row = conn.execute("SELECT status FROM runs WHERE id = ?", (run_id,)).fetchone()
             if run_row is None or RunStatus(str(run_row["status"])) in TERMINAL_RUN_STATUSES:
-                conn.rollback()
                 return False
             row = conn.execute(
                 "SELECT * FROM execution_owners WHERE run_id = ?", (run_id,)
             ).fetchone()
             if row is None:
-                conn.rollback()
                 return False
             incumbent = self._row_to_execution_owner(row)
             if incumbent.owner_id != owner_id or incumbent.generation != generation:
-                conn.rollback()
                 return False
             if incumbent.state not in ExecutionOwner.ACTIVE_STATES:
-                conn.rollback()
                 return False
             if incumbent.is_cancelling:
                 # Another cancellation already holds this generation; only take
@@ -2450,7 +2439,6 @@ class Database:
                     and incumbent.cancel_agent.start_ticks == agent.start_ticks
                 )
                 if agent_liveness is not Liveness.DEAD and not is_us:
-                    conn.rollback()
                     return False
             conn.execute(
                 """

@@ -424,6 +424,9 @@ def preview_gc(
         )
 
     for item in inventory.items:
+        if item.artifact_class is ArtifactClass.OWNED_CACHE:
+            _exclude(item, "shared-cache-protected")
+            continue
         if item.artifact_class not in selected:
             _exclude(item, "class-not-selected")
             continue
@@ -798,6 +801,11 @@ def apply_gc(
         ):
             refused.append(GcOutcome(canonical, "refused", "policy-not-authorised", None))
             continue
+        if canonical.artifact_class is ArtifactClass.OWNED_CACHE:
+            refused.append(
+                GcOutcome(canonical, "refused", "shared-cache-protected", None)
+            )
+            continue
         # Intent must be durable BEFORE any destructive call: if it is not,
         # nothing is executed and no "applied" claim is made.
         try:
@@ -893,6 +901,8 @@ def _dispatch_action(
     now: datetime,
 ) -> GcOutcome:
     """Execute one canonical previewed candidate. No audit side effects here."""
+    if candidate.artifact_class is ArtifactClass.OWNED_CACHE:
+        return GcOutcome(candidate, "refused", "shared-cache-protected", None)
     if candidate.action is GcAction.REMOVE_WORKTREE:
         return _revalidate_and_remove_worktree(candidate, db=db, repo=repo, now=now)
     if candidate.action is GcAction.DELETE_BRANCH:

@@ -383,3 +383,113 @@ def test_gate_scratch_sweep_removes_pid_reuse_only_when_identity_dead(tmp_path: 
     removed = sweep_gate_scratch(root)
     assert bare_live.exists()
     assert str(dead) in removed
+
+
+def test_maintenance_without_approved_policy_never_sweeps_dead_scratch(
+    tmp_path: Path,
+) -> None:
+    """Covers: ADR-0003 D4 / D6 -- unapproved policy never sweeps dead scratch."""
+    import json as _json
+
+    repo = _repo(tmp_path)
+    db = Database(tmp_path / "orch.db")
+    state_root = tmp_path / "state"
+    scratch_root = state_root / "gate-tmp"
+    scratch_root.mkdir(parents=True)
+    dead = scratch_root / "orchestrator-gate-dead"
+    dead.mkdir()
+    (dead / ".saberops-scratch-owner.json").write_text(
+        _json.dumps({"pid": 999_999_999}), encoding="utf-8"
+    )
+    # Absent standing policy: report-only, no sweep.
+    maintenance = StorageMaintenance(
+        db,
+        repo_root=repo,
+        policy_path=None,
+        state_root=state_root,
+        now_fn=lambda: datetime(2026, 10, 17, 12, 0, tzinfo=UTC),
+    )
+    result = maintenance.run(MaintenanceTrigger.PERIODIC)
+    assert result.telemetry["gate_scratch_swept"] == "0"
+    assert dead.exists()
+    # Explicit unapproved policy file: still no sweep.
+    denied = tmp_path / "denied.json"
+    denied.write_text(_json.dumps({"approved": False}), encoding="utf-8")
+    maintenance_denied = StorageMaintenance(
+        db,
+        repo_root=repo,
+        policy_path=denied,
+        state_root=state_root,
+        now_fn=lambda: datetime(2026, 10, 17, 12, 0, tzinfo=UTC),
+    )
+    result_denied = maintenance_denied.run(MaintenanceTrigger.PERIODIC)
+    assert result_denied.telemetry["gate_scratch_swept"] == "0"
+    assert dead.exists()
+
+
+def test_maintenance_exhausted_budget_skips_vacuum_and_sweep(tmp_path: Path) -> None:
+    """Covers: ADR-0003 D4 -- an expensive GC phase cannot spill past budget."""
+    import json as _json
+
+    repo = _repo(tmp_path)
+    db = Database(tmp_path / "orch.db")
+    wt = GitManager.get_default_worktree_base(repo) / "run1" / "a1"
+    GitManager.create_worktree(repo, "orch/run1/a1", wt)
+    _terminal_run(db, repo, "run1", wt, "orch/run1/a1")
+    policy_file = tmp_path / "gc.json"
+    policy_file.write_text(
+        _json.dumps(
+            {
+                "approved": True,
+                "allow_worktree_retirement": True,
+                "allow_vacuum": True,
+                "allow_scratch_deletion": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    state_root = tmp_path / "state"
+    (state_root / "gate-tmp").mkdir(parents=True)
+    budget = 20.0
+    clock_now = [0.0]
+
+    def _clock() -> float:
+        return clock_now[0]
+
+    maintenance = StorageMaintenance(
+        db,
+        repo_root=repo,
+        policy_path=policy_file,
+        state_root=state_root,
+        tick_budget_seconds=budget,
+        clock=_clock,
+        now_fn=lambda: datetime(2026, 10, 17, 12, 0, tzinfo=UTC),
+    )
+    calls = {"vacuum": 0, "sweep": 0}
+
+    def _fake_vacuum() -> bool:
+        calls["vacuum"] += 1
+        return True
+
+    def _fake_sweep(*, deadline: float | None = None) -> tuple[str, ...]:
+        calls["sweep"] += 1
+        return ()
+
+    maintenance._maybe_vacuum = _fake_vacuum  # type: ignore[method-assign]
+    maintenance._sweep_gate_scratch = _fake_sweep  # type: ignore[method-assign]
+
+    import unittest.mock as _mock
+
+    from saberops.storage_gc import apply_gc as _real_apply_gc
+
+    def _expensive_apply_gc(preview: object, selection: object, **kwargs: object) -> object:
+        clock_now[0] = budget + 5.0
+        return _real_apply_gc(preview, selection, **kwargs)  # type: ignore[arg-type]
+
+    with _mock.patch(
+        "saberops.storage_maintenance.apply_gc", side_effect=_expensive_apply_gc
+    ):
+        result = maintenance.run(MaintenanceTrigger.PERIODIC)
+    assert calls == {"vacuum": 0, "sweep": 0}
+    assert result.vacuumed is False
+    assert result.telemetry["gate_scratch_swept"] == "0"

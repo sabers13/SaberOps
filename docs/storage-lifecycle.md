@@ -25,11 +25,15 @@ age, a PID or an SHA that merely happens to be an ancestor of `main`:
 | run id / terminal time | links evidence and checkpoint refs to their terminal run/job |
 
 Inventoried classes: attempt worktrees, engine local branches, checkpoint refs,
-gate scratch, worktree venvs, run evidence and the owner database. Gate scratch
+gate scratch, worktree venvs, run evidence, the owner database and owned
+caches (`saberops-mypy-cache`, `saberops-test-map` under the Git common dir
+and `cache` under the state root). Gate scratch
 is adopted only from engine-owned scratch roots (the configured scratch root,
 the state `gate-tmp`, `/dev/shm`) and only when it carries an owner record; a
 directory is never adopted from its name or its age. Evidence is adopted only
-when its name is an exact run id or an exact persisted candidate SHA.
+when its name is an exact run id or an exact persisted candidate SHA. Owned
+caches are always reported as protected `shared-cache-protected` exclusions
+and are never scheduled for deletion.
 
 Anything the durable records cannot explain is `UNKNOWN` and is **kept** with a
 reason. A missing registration or a missing path is never justification to
@@ -138,7 +142,10 @@ Maintenance:
 * sweeps gate scratch only when the recorded owner is **provably dead** — a
   live owner, an unknown/unrecorded owner, a symlinked entry or a path that
   resolves outside the scratch root is never touched, and age/name is never
-  authority; the pass is bounded by the tick budget;
+  authority; the sweep additionally requires an approved standing policy with
+  `allow_scratch_deletion`, and the remaining tick budget is rechecked
+  dynamically before GC, vacuum and sweep so an expensive earlier phase cannot
+  spill into a later one after the budget is exhausted;
 * runs permitted worktree/branch/scratch retirement under a standing policy;
 * runs the owner-DB `VACUUM` at most weekly and only when the free-page ratio
   exceeds 20 %;
