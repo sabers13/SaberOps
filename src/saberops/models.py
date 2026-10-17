@@ -21,13 +21,19 @@ class RunStatus(StrEnum):
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     ORPHANED = "ORPHANED"
+    # ADR-0002 D8 (M2-5): quota-preempted run.  Terminal for the RUN, but
+    # NOT terminal for the owning JOB: the job returns to QUEUED with
+    # waiting_reason PREEMPTED and a verified resume capsule, and a later
+    # dispatch starts a NEW run.  Never an accepted candidate and never a
+    # success/failure verdict on the work itself.
+    PREEMPTED = "PREEMPTED"
 
 
 # A run in one of these statuses has reached its final outcome.  Terminal state
 # is monotonic: nothing -- reconciliation, cancellation, or a late worker -- may
 # move a run out of it, and no execution owner may be claimed for it again.
 TERMINAL_RUN_STATUSES: frozenset[RunStatus] = frozenset(
-    {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.ORPHANED}
+    {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.ORPHANED, RunStatus.PREEMPTED}
 )
 
 

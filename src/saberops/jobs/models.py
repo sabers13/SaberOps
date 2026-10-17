@@ -76,9 +76,13 @@ class Effort(StrEnum):
 NO_ROUTE_FOR_REQUIREMENTS = "NO_ROUTE_FOR_REQUIREMENTS"
 RUN_FAILED = "RUN_FAILED"
 RUN_MISSING = "RUN_MISSING"
+# ADR-0002 D8 (M2-5): the owning job exhausted its bounded preemption budget
+# (default 5).  Recorded on the JOB as the terminal failure reason when the
+# limit is reached instead of a silent 6th preemption.
+PREEMPTION_LIMIT = "PREEMPTION_LIMIT"
 
 FAILURE_REASONS: frozenset[str] = frozenset(
-    {NO_ROUTE_FOR_REQUIREMENTS, RUN_FAILED, RUN_MISSING}
+    {NO_ROUTE_FOR_REQUIREMENTS, RUN_FAILED, RUN_MISSING, PREEMPTION_LIMIT}
 )
 
 
@@ -362,6 +366,7 @@ __all__ = [
     "DISPATCHABLE_ROLES",
     "FAILURE_REASONS",
     "NO_ROUTE_FOR_REQUIREMENTS",
+    "PREEMPTION_LIMIT",
     "PRIORITY_ORDER",
     "RUN_FAILED",
     "RUN_MISSING",

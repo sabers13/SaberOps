@@ -10,7 +10,6 @@ from saberops.capacity.cost_model import (
     CostState,
     SizeBucket,
     cost_estimate,
-    infer_bucket,
     prior_pct,
     update,
     validate_route,
@@ -47,18 +46,6 @@ def test_priors_fallback_for_unknown_windows() -> None:
         assert prior_pct(window, SizeBucket.S) == 3.0
         assert prior_pct(window, SizeBucket.M) == 8.0
         assert prior_pct(window, SizeBucket.L) == 15.0
-
-
-def test_infer_bucket_boundaries() -> None:
-    assert infer_bucket(8_191, 1) is SizeBucket.S
-    assert infer_bucket(8_192, 1) is SizeBucket.M
-    assert infer_bucket(65_535, 1) is SizeBucket.M
-    assert infer_bucket(65_536, 1) is SizeBucket.L
-    assert infer_bucket(100, 1) is SizeBucket.S
-    assert infer_bucket(100, 2) is SizeBucket.M
-    assert infer_bucket(100, 3) is SizeBucket.M
-    assert infer_bucket(100, 4) is SizeBucket.L
-    assert infer_bucket(65_536, 4) is SizeBucket.L
 
 
 def test_ewma_updates() -> None:
@@ -108,4 +95,10 @@ def test_empty_route_rejected() -> None:
         validate_route("")
     with pytest.raises(ValueError):
         validate_route("   ")
+    with pytest.raises(ValueError):
+        validate_route("codex")
+    with pytest.raises(ValueError):
+        validate_route("codex/")
+    with pytest.raises(ValueError):
+        validate_route("/gpt-5")
     assert validate_route("codex/gpt-5") == "codex/gpt-5"

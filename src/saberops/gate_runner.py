@@ -35,8 +35,9 @@ import json
 import os
 import shutil
 import tempfile
+import time
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -482,7 +483,216 @@ def _make_private_scratch(parent: Path) -> Path | None:
         # already has private mkdtemp defaults, so this is the
         # additional tightening.
         pass
+    write_scratch_owner(path)
     return path
+
+
+#: Owner record written inside every gate scratch directory (GS-1 lifecycle
+#: registration).  It lets a later sweep decide from real process liveness and
+#: age without guessing from the directory name.
+_SCRATCH_OWNER_FILENAME: Final = ".saberops-scratch-owner.json"
+_SCRATCH_PREFIX: Final = "orchestrator-gate-"
+
+
+def write_scratch_owner(
+    scratch: Path,
+    *,
+    repo: str | None = None,
+    started_at: str | None = None,
+) -> None:
+    """Record the owning process incarnation and start time inside a scratch dir.
+
+    The durable :class:`~saberops.ownership.ProcessIdentity` (PID + boot id +
+    process start ticks) is stored, not a bare PID, so a later sweep can tell a
+    live owner from a reused PID.  Best-effort: a failure never blocks a gate
+    run, but a directory without a readable record is never adopted as
+    disposable by a sweep.
+    """
+    from saberops.ownership import ProcessIdentity
+
+    payload: dict[str, object] = {
+        "pid": os.getpid(),
+        "repo": repo,
+        "started_at": started_at or datetime.now(UTC).isoformat(),
+    }
+    identity = ProcessIdentity.for_self()
+    if identity is not None:
+        payload["identity"] = identity.to_dict()
+    try:
+        (scratch / _SCRATCH_OWNER_FILENAME).write_text(
+            json.dumps(payload, sort_keys=True), encoding="utf-8"
+        )
+    except OSError:
+        return
+
+
+def read_scratch_owner(scratch: Path) -> dict[str, Any] | None:
+    """Read a scratch owner record, or ``None`` when absent/unreadable."""
+    try:
+        raw = (scratch / _SCRATCH_OWNER_FILENAME).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        decoded = json.loads(raw)
+    except ValueError:
+        return None
+    return decoded if isinstance(decoded, dict) else None
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return True
+    return True
+
+
+def _scratch_owner_liveness(owner: dict[str, Any]) -> str:
+    """Classify a recorded scratch owner as ``LIVE`` / ``DEAD`` / ``UNKNOWN``.
+
+    A durable process identity is preferred (PID reuse safe).  A bare PID is
+    only trusted to prove *death*: a live PID may be a different process that
+    reused the number, so a bare-PID owner is never enough to authorize a sweep
+    while the PID is alive.
+    """
+    from saberops.ownership import Liveness, ProcessIdentity, probe_liveness
+
+    raw_identity = owner.get("identity")
+    if isinstance(raw_identity, dict):
+        identity = ProcessIdentity.from_dict(raw_identity)
+        if identity is not None:
+            liveness = probe_liveness(identity)
+            if liveness is Liveness.LIVE:
+                return "LIVE"
+            if liveness is Liveness.DEAD:
+                return "DEAD"
+            return "UNKNOWN"
+    pid = owner.get("pid")
+    if not isinstance(pid, int) or pid <= 0:
+        return "UNKNOWN"
+    if _pid_alive(pid):
+        return "LIVE"
+    return "DEAD"
+
+
+def sweep_gate_scratch(
+    root: Path | str,
+    *,
+    now: datetime | None = None,
+    liveness: Callable[[dict[str, Any]], str] | None = None,
+    deadline: float | None = None,
+    clock: Callable[[], float] | None = None,
+) -> tuple[str, ...]:
+    """Delete only *provably dead-owned* gate scratch directories under ``root``.
+
+    Safety contract (ADR-0003 Amendment 1 §2, review F5):
+
+    * a live owner is never swept, regardless of age;
+    * an unknown owner (no record, unreadable record, unknown liveness) is never
+      swept -- age and directory name are not authority;
+    * symlinked entries and entries that resolve outside ``root`` are skipped;
+    * the loop is bounded by ``deadline`` (a monotonic second) so one pass can
+      never monopolise the scheduler tick.
+
+    A directory is retired only when its recorded owner is provably dead.  Every
+    removal is the caller's responsibility to audit.
+    """
+    del now  # retained for API stability; age is not used as authority
+    moment_clock = clock if clock is not None else time.monotonic
+    classify = liveness if liveness is not None else _scratch_owner_liveness
+    base = Path(root)
+    if not base.is_dir():
+        return ()
+    try:
+        base_resolved = base.resolve()
+    except OSError:
+        return ()
+    removed: list[str] = []
+    try:
+        entries = sorted(base.iterdir(), key=lambda p: p.name)
+    except OSError:
+        return ()
+    for entry in entries:
+        if deadline is not None and moment_clock() >= deadline:
+            break
+        if not entry.name.startswith(_SCRATCH_PREFIX):
+            continue
+        if entry.is_symlink():
+            continue
+        try:
+            if not entry.is_dir():
+                continue
+            if not entry.resolve().is_relative_to(base_resolved):
+                continue
+        except OSError:
+            continue
+        owner = read_scratch_owner(entry)
+        if owner is None:
+            continue
+        if classify(owner) != "DEAD":
+            continue
+        try:
+            shutil.rmtree(entry, ignore_errors=False)
+        except OSError:
+            continue
+        removed.append(str(entry))
+    return tuple(removed)
+
+
+def disk_floor_ok(
+    paths: Sequence[Path | str], minimum_gb: float = 10.0
+) -> tuple[bool, str]:
+    """Assess the current fixed free-space floor without lowering any guard.
+
+    Delegates to the single storage-maintenance implementation of the existing
+    ``max(min_gb, 10 %)`` floor so the engine gate path and the developer gate
+    can never disagree about the effective reserve.
+    """
+    from saberops.storage_maintenance import _nearest_existing, current_disk_floor_bytes
+
+    for path in paths:
+        anchor = _nearest_existing(path)
+        if anchor is None:
+            return False, f"no-anchor:{path}"
+        try:
+            stat = os.statvfs(str(anchor))
+        except OSError:
+            return False, f"statvfs-failed:{path}"
+        free = stat.f_bavail * stat.f_frsize
+        total = stat.f_blocks * stat.f_frsize
+        required = current_disk_floor_bytes(total, minimum_gb)
+        if free < required:
+            return False, f"below-floor:{path}:{free}<{required}"
+    return True, ""
+
+
+class GateRunnerDiskLowError(GateRunnerInfrastructureError):
+    """The gate launch was blocked by the current free-space floor (ADR-0003 D4).
+
+    A typed INFRA block: no gate subprocess ran and no scratch was created.
+    """
+
+    reason_code = "DISK_LOW"
+
+
+def default_gate_disk_guard(target_repo: Path, *, minimum_gb: float = 10.0) -> str | None:
+    """Return a typed infra reason when the gate must not launch, else ``None``.
+
+    Uses the shared current-floor computation on the target repository's
+    filesystem.  Unknown (unreadable) capacity fails closed as ``DISK_UNKNOWN``.
+    """
+    ok, reason = disk_floor_ok([target_repo], minimum_gb)
+    if ok:
+        return None
+    if reason.startswith("statvfs-failed"):
+        return "DISK_UNKNOWN"
+    return "DISK_LOW"
 
 
 def preflight_ram_scratch(
@@ -893,6 +1103,7 @@ class GateRunner:
         request: GateRunnerRequest,
         *,
         post_gate_sha_resolver: Callable[[], tuple[str, bool]] | None = None,
+        disk_guard: Callable[[Path], str | None] | None = None,
     ) -> GateReceipt:
         """Execute exactly one gate command, producing a durable receipt.
 
@@ -922,6 +1133,16 @@ class GateRunner:
         if self._disabled:
             raise RuntimeError("Gate Runner has already executed; reuse is forbidden")
         self._disabled = True
+
+        # GS-1 / ADR-0003 D4: consult the current free-space floor BEFORE any
+        # backend choice, scratch creation or subprocess.  A below-floor or
+        # unknown reading is a typed INFRA block with zero launches.  The
+        # parameter exists so a caller can inject a bound guard; the default is
+        # the shared current floor, so production gates are always checked.
+        guard = disk_guard if disk_guard is not None else default_gate_disk_guard
+        guard_reason = guard(Path(request.target_repo))
+        if guard_reason is not None:
+            raise GateRunnerDiskLowError(f"gate launch blocked: {guard_reason}")
 
         target = Path(request.target_repo).expanduser().resolve()
         evidence_dir = Path(request.evidence_dir).expanduser().resolve()

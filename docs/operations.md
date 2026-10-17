@@ -72,15 +72,102 @@ run id is printed with `orch wait` / `orch status` hints.
 ## Worker routing policy
 
 Worker selection uses one ordered chain per role: WORKER, SURGEON and
-INTEGRATOR. Each chain is a list of fallback groups; until pacing lands,
-resolution flattens groups in order (one route per group is today's
-ordered fallback). The classifier still labels the run tier (a
-risk/telemetry label), but it no longer selects routes. Provider
-readiness, quota, capabilities, exact bindings and owner model enrollment
-still apply. Schema 3 routing files hold `roles` with `WORKER`,
-`SURGEON` and `INTEGRATOR` groups of `{"routes": [...]}`. ORCHESTRATOR
-and REVIEWER keep their existing ordered lists: see `orch orchestrator
+INTEGRATOR. Each chain is a list of fallback groups. Resolution evaluates
+fallback groups in order: the first fallback group containing an admitted
+candidate wins, and candidates within that winning group are prioritized
+by their intra-group binding-window pacing score:
+`pace = (remaining_pct - red_line_pct - reserve_pct - cost_estimate_pct) / max(hours_to_reset, 0.25)`.
+Ties break deterministically by original chain order, then by lower estimated
+cost. The classifier still labels the run tier (a risk/telemetry label), but
+it no longer selects routes. Provider readiness, quota, capabilities, exact
+bindings and owner model enrollment still apply. Schema 3 routing files hold
+`roles` with `WORKER`, `SURGEON` and `INTEGRATOR` groups of `{"routes": [...]}`.
+ORCHESTRATOR and REVIEWER keep their existing ordered lists: see `orch orchestrator
 show` and `orch reviewer show` (`orch routing show` points there too).
+
+## Pacing scheduler (`orch scheduler run`)
+
+`orch scheduler run [--once] [--interval-seconds INT] [--max-concurrent N]`
+runs the deterministic pacing scheduler loop (ADR-0002 D7). Queued jobs are
+scheduled in strict priority order: `URGENT` > `NORMAL` > `BACKGROUND`, with
+earliest deadline first, then FIFO by creation time. `BACKGROUND` jobs require
+binding-window pace >= 4.0 %/h.
+
+### Global aggregate concurrency ceiling (interim bridge)
+
+The scheduler enforces a ceiling on concurrently **RUNNING top-level jobs**.
+It counts durable RUNNING job state (including jobs with no
+`capacity_reservations` row) plus same-tick simulated starts, so two jobs from
+distinct pools both count against the same ceiling. Per-model turns inside an
+already-running job are *not* separate jobs and are never counted.
+
+The effective ceiling is the owner setting `concurrency.max_global` in the
+control-plane config, or the deterministic interim default **15** when the
+owner has not set it. The value is a positive integer; an invalid value (0,
+negative, boolean, string, or a `concurrency` block without `max_global`) fails
+closed at config load — it never degrades to unbounded.
+
+`--max-concurrent N` can only **lower** the effective ceiling for that run; it
+cannot raise it above the owner-configured value. Raising the ceiling is an
+owner config/UI change.
+
+**Scope limitation (honest):** this is aggregate admission only. It does **not**
+enforce the owner's project-aware policy of *3 concurrently active projects ×
+5 executing tasks per project*, because M2-4b has no durable registered project
+identity or wave-child task identity yet. That two-dimensional enforcement
+belongs to the wave executor (parent/child tasks), project registry, owner
+settings service, and the editable UI. Until then the status is:
+`GLOBAL AGGREGATE IMPLEMENTED / PROJECT-AWARE DIMENSIONS DEFERRED`. This
+ceiling is independent of, and does not replace, provider-pool maxima, quota
+red lines, billing posture, gate-slot or host limits.
+
+The scheduler uses a single-instance owner-DB lease (`capacity_scheduler_lease`)
+with fencing tokens to ensure exactly one scheduler instance dispatches at a time.
+Dispatches atomically move jobs `QUEUED` → `RUNNING`, reserve ledger capacity,
+and reconcile terminal runs upon completion or failure. Run `--once` executes
+a single evaluation tick and exits cleanly.
+
+## Storage lifecycle (`orch gc`)
+
+`orch gc --dry-run [--class <c>] [--json] [--repo PATH] [--db PATH]` inventories
+the owned storage artifacts for a repository (attempt worktrees, engine local
+branches, checkpoint refs, gate scratch, worktree venvs, evidence and the owner
+database) and prints the exact scope a validated standing policy would make
+eligible together with the exclusions and reasons. A dry run is a true no-op:
+no database, WAL file, schema, directory or policy file is created and no write
+lock is taken. Ownership comes from real persisted run/attempt/candidate/
+execution-owner/job records; anything unexplained is kept as `UNKNOWN`.
+
+`orch gc --apply` executes only the exact previewed scope, revalidating every
+identity immediately before each action and refusing on any race (ownership
+change, symlink/root change, moved branch tip, live consumer, pending
+acceptance, dirty or uniquely-ignored content). `--apply` requires a standing
+owner policy at `$XDG_CONFIG_HOME/saberops/storage_gc.json`; without one it is
+refused. Retirement uses native `git worktree remove` (no force) and then
+`git branch -d` (no force) only — never `git worktree prune`, `git branch -D`,
+recursive deletion of an unverified path or a remote operation. Every action is
+audited in `storage_cleanup_events` (intent/result/failure with exact artifact
+identity, scoped policy, reason and estimated versus actual bytes).
+
+`orch cleanup <run-id>` is the compatibility route and delegates to the same
+guarded implementation, so it has the same protections and no prune/force
+escape. The scheduler runs bounded storage maintenance on startup (before any
+tick) and hourly, consults a per-tick launch guard, sweeps only provably
+dead-owned gate scratch, runs the owner-DB `VACUUM` at most weekly above 20 %
+free pages, and — on a below-floor or unknown reading — runs permitted GC then
+rechecks the actual filesystem; if space is still low or unknown it parks as
+typed INFRA and starts no worker or gate. The fixed `max(10 GB, 10 %)` floor is
+enforced before every dispatch and on the gate path; adaptive admission is not
+activated. Full details:
+[docs/storage-lifecycle.md](storage-lifecycle.md).
+
+## Capacity ledger inspection (`orch capacity show`)
+
+`orch capacity show [--json]` provides read-only inspection of the capacity
+ledger snapshot across configured provider quota pools and binding windows.
+It reports remaining capacity estimates, active uncertainties, evidence sources
+(`OWNER`, `PROBE`, or `EXHAUSTION`), staleness flags, and any active exclusion
+reset times without creating or writing tables on read.
 
 Migration: schema 1 merges exactly as before, then migrates 2 → 3 with
 WORKER as the stable union of T2, T1 and T3 (T2 order first), SURGEON as

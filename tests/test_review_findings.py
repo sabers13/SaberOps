@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +36,36 @@ from saberops.workers.base import WorkerAdapter
 from saberops.workers.registry import AdapterRegistry
 
 PROVIDER = "opencode"
+
+
+def _write_synthetic_verified_postures(config_home: Path) -> None:
+    """Seed an isolated owner config with a verified posture for the synthetic
+    ``opencode`` candidate used by this module.
+
+    Covers: ADR-0002 D2 / WORKFLOW §7 authorized setup-only fixture migration.
+    Adds ONLY a synthetic provider/posture record needed to preserve the
+    module's historical control-flow assertions now that unverified routes
+    fail closed (F1); no assertion is changed and no real vendor receives an
+    attestation.
+    """
+    cfg_dir = config_home / "saberops"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    today_iso = datetime.now(UTC).date().isoformat()
+    cp_doc = {
+        "version": 2,
+        "providers": {"opencode": {"state": "ALLOWED"}},
+        "quota_pools": {},
+        "postures": {
+            "opencode": {
+                "class": "A",
+                "policy_urls": ["https://example.com/opencode-policy"],
+                "ttl_days": 90,
+                "verified_on": today_iso,
+                "note": "synthetic verified test posture for review findings",
+            }
+        },
+    }
+    (cfg_dir / "control_plane.json").write_text(json.dumps(cp_doc), encoding="utf-8")
 
 
 def finding(code: str, **overrides: str) -> dict[str, Any]:
@@ -144,6 +175,7 @@ def test_review_run_persists_findings_and_run_page_shows_them(
         monkeypatch.setenv(name, str(tmp_path / sub))
     monkeypatch.delenv("ORCH_BINDING_STORE", raising=False)
     monkeypatch.delenv("SABEROPS_PROFILE", raising=False)
+    _write_synthetic_verified_postures(tmp_path / "config")
     repo = tmp_path / "repo"
     repo.mkdir()
     for cmd in (["git", "init", "-b", "main"], ["git", "config", "user.email", "t@e.st"],

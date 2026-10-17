@@ -389,8 +389,25 @@ class OrchestratorService:
         return can_reject_candidate(self.db, run_id)
 
     def cleanup_run(self, run_id: str) -> dict[str, list[str]]:
-        """Safely clean up clean attempt worktrees for a run."""
+        """Guardedly retire this run's clean attempt worktrees (Step 008 / GS-1).
+
+        Delegates to the single guarded storage-lifecycle implementation so the
+        compatibility route and ``orch gc`` enforce identical protections and no
+        repository-wide prune.
+        """
         return self.orchestrator.cleanup_run(run_id=run_id)
+
+    def storage_maintenance(
+        self, *, repo_root: Path | str, policy_path: Path | None = None
+    ) -> Any:
+        """Return the bounded storage-maintenance service for ``repo_root``.
+
+        The single service-level seam the owner lifecycle and the scheduler use
+        to obtain storage maintenance; the Web never constructs it directly.
+        """
+        from saberops.storage_maintenance import StorageMaintenance
+
+        return StorageMaintenance(self.db, repo_root=repo_root, policy_path=policy_path)
 
     def list_models(self) -> dict[str, Any]:
         """Return the role routing chains and quota states."""
