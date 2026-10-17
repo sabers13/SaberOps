@@ -11,6 +11,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,50 @@ def repo(tmp_path: Path) -> Path:
     git(path, "add", ".")
     git(path, "-c", "user.name=Test", "-c", "user.email=test@localhost", "commit", "-m", "base")
     return path
+
+
+def _seed_verified_codex_posture(config_home: Path) -> None:
+    """Seed an isolated owner config with a verified class-A posture for the
+    synthetic ``codex`` provider this commit-verification run dispatches.
+
+    Covers: ADR-0002 D2 / WORKFLOW §7 authorized setup-only fixture migration,
+    following the accepted precedent in ``tests/test_continue_run.py``.  The run
+    dispatches a synthetic ``codex`` candidate with no matching posture record,
+    so the accepted M2-4b F1 admission seam rightfully fails the run
+    (POSTURE_UNVERIFIED) before the stubbed worker can commit.  This seeds ONLY
+    that synthetic provider identity plus the same packaged ``chatgpt-plus``
+    membership without ``overage_possible`` (the blank test DB carries no quota
+    evidence the historical fixture never provided).  No assertion, candidate,
+    gate, or run-status expectation changes, no real vendor receives an
+    attestation, and no production posture/admission/pool semantics are
+    touched.  ``verified_on`` is stamped at run time with a 90-day TTL so replay
+    never expires.
+    """
+    cfg_dir = config_home / "saberops"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    today_iso = datetime.now(UTC).date().isoformat()
+    cp_doc = {
+        "version": 2,
+        "providers": {"codex": {"state": "ALLOWED"}},
+        "quota_pools": {
+            "chatgpt-plus": {
+                "mode": "STRICT",
+                "red_line_pct": 15.0,
+                "members": ["codex", "opencode/openai/*"],
+                "overage_possible": False,
+            }
+        },
+        "postures": {
+            "codex": {
+                "class": "A",
+                "policy_urls": ["https://example.com/synthetic-test-posture"],
+                "ttl_days": 90,
+                "verified_on": today_iso,
+                "note": "synthetic verified test posture for native session commit fixtures",
+            }
+        },
+    }
+    (cfg_dir / "control_plane.json").write_text(json.dumps(cp_doc), encoding="utf-8")
 
 
 def live_identity() -> str:
@@ -161,6 +206,7 @@ def test_worker_committed_revision_is_the_verified_candidate(
 
     for key in ("XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
         monkeypatch.setenv(key, str(tmp_path / key))
+    _seed_verified_codex_posture(tmp_path / "XDG_CONFIG_HOME")
     for key in ("SABEROPS_PROFILE", "ORCH_BINDING_STORE"):
         monkeypatch.delenv(key, raising=False)
     committed: list[str] = []

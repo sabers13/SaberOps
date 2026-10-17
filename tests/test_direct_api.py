@@ -266,78 +266,6 @@ def test_completion_paths(endpoint: str, expected: str) -> None:
     assert completion_url(endpoint) == expected
 
 
-@pytest.mark.parametrize("target", ["T1", "T2", "T3", "reviewer", "orchestrator"])
-def test_api_routing_assignment_uses_the_exact_role(api: dict[str, Any], target: str) -> None:
-    from saberops.control_plane.binding_store import save_owner_bindings as _save_owner_bindings
-    from saberops.control_plane.bindings import BindingRole
-    from saberops.model_access import apply_discovery_result
-    from saberops.routing_config import (
-        DynamicCandidate,
-        add_dynamic_candidate_to_chain,
-        format_candidate_id,
-        load_effective_routing_payload,
-        save_user_routing,
-    )
-    from saberops.web import (
-        _load_catalog_safely,
-        _model_catalog_store,
-        _resolve_exact_binding,
-    )
-
-    result = _discover_connection(api["connection"], AdapterRegistry.default())
-    assert result.ok
-    store = _model_catalog_store()
-    store.save(apply_discovery_result(store.load(), result))
-    entry = _load_catalog_safely().try_get(
-        connection_id="local-api", provider="testapi",
-        backend="openai-compatible-api", model_id="test-model",
-    )
-    assert entry is not None and entry.is_discovery_verified
-    base_id = "discovered-binding:"
-    owner = _load_owner_bindings_safely()
-    registry = AdapterRegistry.default()
-    if target.startswith("T"):
-        exact = _resolve_exact_binding(
-            owner, registry, provider="testapi", model="test-model",
-            connection_id="local-api", role=BindingRole.WORKER,
-        )
-        assert exact is not None and exact.binding_id == base_id + "worker:local-api:test-model"
-        candidate_id = format_candidate_id("testapi", "test-model")
-        approval = DynamicCandidate(
-            candidate_id=candidate_id, provider="testapi", model="test-model",
-            connection_id="local-api", backend="openai-compatible-api",
-            binding_id=exact.binding_id,
-            discovery_status=entry.discovery_status.value,
-            execution_support=entry.execution_support.value,
-            training_required="UNKNOWN",
-            capabilities=tuple((n, s.value) for n, s in entry.capabilities),
-        )
-        payload = load_effective_routing_payload()
-        save_user_routing(add_dynamic_candidate_to_chain(
-            payload, role="WORKER", candidate=approval,
-        ))
-        worker_ids = [
-            cid
-            for group in load_effective_routing_payload()["roles"]["WORKER"]
-            for cid in group["routes"]
-        ]
-        assert "testapi/test-model" in worker_ids
-    else:
-        wanted = base_id + f"{target}:local-api:test-model"
-        binding = owner.registry.try_get(wanted)
-        assert binding is not None and binding.binding_role.value == target.upper()
-        order = owner.role_binding_ids(target)
-        assert wanted not in order
-        _save_owner_bindings(owner.with_role_order(target, (*order, wanted)))
-        owner = _load_owner_bindings_safely()
-        if target == "reviewer":
-            assert owner.reviewer_binding_id == wanted
-        else:
-            assert owner.policy is not None
-            assert wanted in repr(owner.policy)
-    assert all(call[2] is None for call in api["calls"])
-
-
 def test_api_adapter_never_replaces_native_subscription_registry(api: dict[str, Any]) -> None:
     from saberops.workers.claude import ClaudeCodeAdapter
 
@@ -434,3 +362,83 @@ def test_api_images_are_sent_as_visual_content(api: dict[str, Any]) -> None:
     assert content[1]['image_url']['url'].startswith('data:image/png;base64,')
     assert base64.b64decode(content[1]['image_url']['url'].split(',')[1]) == image.read_bytes()
     assert not any(tool['function']['name'] == 'write_file' for tool in api['calls'][0][2]['tools'])
+
+
+def _synthetic_catalog_model() -> Any:
+    """One synthetic, non-secret catalog entry (no provider/account call)."""
+    from saberops.model_access.connections import TriState
+    from saberops.model_access.discovery import DiscoveredModel, ExecutionSupport
+
+    return DiscoveredModel(
+        connection_id="local-catalog",
+        provider="testapi",
+        backend="openai-compatible-api",
+        model_id="test-model",
+        display_name="Test model",
+        discovery_status=TriState.TRUE,
+        execution_support=ExecutionSupport.SUPPORTED,
+        capabilities=(("tools", TriState.TRUE),),
+        discovered_at="2026-01-02T03:04:05+00:00",
+    )
+
+
+def test_model_catalog_digest_and_serialization_contract(tmp_path: Path) -> None:
+    """Catalog construction/serialization/digest identity is deterministic.
+
+    Covers: D-0045 retained-behavior repair of ``ModelCatalog.digest`` and
+    ``build_model_catalog`` (the deleted A35 test was their only cover).
+    Synthetic entries only; never a real account or provider.
+    """
+    from dataclasses import replace
+
+    from saberops.model_access.discovery import ModelCatalog, build_model_catalog
+
+    model = _synthetic_catalog_model()
+    plain = replace(model, model_id="test-model-2", discovered_at=None)
+    first = build_model_catalog((model, plain))
+    same = ModelCatalog(models=(model, plain))
+    assert first.to_dict() == same.to_dict()
+    assert model.digest == same.models[0].digest
+    assert len(model.digest) == 64
+
+    payload = first.to_dict()
+    serialized = json.dumps(payload)
+    assert "api_key" not in serialized.lower()
+    assert "credential" not in serialized.lower()
+    restored = ModelCatalog.from_mapping(payload)
+    assert restored == first
+    assert restored.models[0].digest == model.digest
+    # An entry with no discovery timestamp stays absent, not an empty string.
+    assert restored.models[1].discovered_at is None
+
+    # Digest identity follows observable content: a changed flag changes it.
+    assert replace(model, stale=True).digest != model.digest
+
+
+def test_model_catalog_store_override_pins_explicit_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``ORCH_ACCESS_MODELS_STORE`` pins the explicit store path.
+
+    Covers: D-0045 retained-behavior repair of ``web._model_catalog_store``'s
+    override path (the deleted A35 test was its only cover) and the concrete
+    default location under the owner state dir.
+    """
+    from saberops.model_access.discovery import ModelCatalogStore, build_model_catalog
+    from saberops.web import _model_catalog_store
+
+    explicit = tmp_path / "pinned" / "models.json"
+    monkeypatch.setenv("ORCH_ACCESS_MODELS_STORE", str(explicit))
+    store = _model_catalog_store()
+    assert isinstance(store, ModelCatalogStore)
+    assert store.path == explicit
+
+    catalog = build_model_catalog((_synthetic_catalog_model(),))
+    store.save(catalog)
+    assert store.path == explicit
+    assert store.load() == catalog
+
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.delenv("ORCH_ACCESS_MODELS_STORE")
+    default = _model_catalog_store()
+    assert default.path == tmp_path / "state" / "saberops" / ModelCatalogStore.FILENAME

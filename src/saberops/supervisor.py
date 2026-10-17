@@ -953,6 +953,14 @@ class RunSupervisor:
                 )
             return result
 
+        # R2: a run carrying a durable D8 transaction (decision or verified
+        # artifacts) must be finished by the preemption recovery path BEFORE
+        # generic orphan/recovery selection.  A run with no D8 receipt keeps
+        # the existing recovery/orphan decision unchanged.
+        preempt_result = self._recover_preemption_transaction(run, owner, dry_run=dry_run)
+        if preempt_result is not None:
+            return preempt_result
+
         if self._is_recovery_eligible(run, inspected_owner=owner):
             result["action"] = "recover"
             result["reason"] = "recovery_eligible"
@@ -1133,6 +1141,106 @@ class RunSupervisor:
                 else:
                     return False
             return self._launch_with_lock_held(run_id, config)
+
+    def _recover_preemption_transaction(
+        self, run: Run, owner: ExecutionOwner | None, *, dry_run: bool
+    ) -> dict[str, object] | None:
+        """Finish (or fail closed on) an interrupted D8 transaction (R2).
+
+        Called from :meth:`reconcile` only after the owner and worker have both
+        been proven DEAD and the run is non-terminal, so no live worker can be
+        mutated.  Returns a result dict when this run carries a D8 receipt;
+        returns ``None`` for an ordinary RUNNING run so the existing
+        recovery/orphan decision stays exactly as before.
+        """
+        from saberops import preemption
+
+        run_id = run.id
+        try:
+            job = preemption.find_job_for_run(self.db, run_id)
+        except Exception:
+            job = None
+        if job is None or job.current_run_id != run_id:
+            return None
+        try:
+            ledger_run = self.db.get_run(run_id)
+        except Exception:
+            ledger_run = None
+        if ledger_run is None or ledger_run.status != RunStatus.RUNNING:
+            return None
+        try:
+            txn = preemption.classify_preemption_transaction(
+                self.db, run_id=run_id, job=job, repo_path=job.repo
+            )
+        except Exception:
+            return None
+        if txn.state == "none":
+            return None
+        result: dict[str, object] = {
+            "run_id": run_id,
+            "status": run.status.value,
+            "owner_id": owner.owner_id if owner is not None else None,
+            "generation": owner.generation if owner is not None else None,
+            "preemption": txn.state,
+            "action": "none",
+        }
+        if txn.state == "blocked":
+            # A durable D8 receipt that does not verify is NEVER downgraded to
+            # generic orphaning or silently settled: retain state + charge and
+            # surface the exact cause for the owner.
+            result["reason"] = f"preemption_blocked:{txn.detail}"
+            if not dry_run:
+                try:
+                    self.db.record_event(
+                        run_id,
+                        "preemption_recovery_blocked",
+                        payload={"detail": txn.detail, "job_id": job.job_id},
+                    )
+                except Exception:
+                    pass
+            return result
+        result["reason"] = "interrupted_preemption_detected"
+        result["action"] = "preempt_recover"
+        if dry_run:
+            return result
+        outcome = preemption.finish_interrupted_preemption(
+            self.db,
+            run_id=run_id,
+            job=job,
+            repo_path=job.repo,
+            owner_id=owner.owner_id if owner is not None else None,
+            owner_generation=owner.generation if owner is not None else None,
+        )
+        if outcome.owned and outcome.status == RunStatus.PREEMPTED:
+            result["action"] = "preempt_recovered"
+            result["reason"] = outcome.detail
+            result["job_id"] = job.job_id
+            result["checkpoint_sha"] = outcome.checkpoint_sha
+            try:
+                self.db.record_event(
+                    run_id,
+                    "preemption_recovered",
+                    payload={
+                        "job_id": job.job_id,
+                        "detail": outcome.detail,
+                        "checkpoint_sha": outcome.checkpoint_sha,
+                        "owner_generation": owner.generation if owner else None,
+                    },
+                )
+            except Exception:
+                pass
+            return result
+        result["action"] = "none"
+        result["reason"] = f"preemption_recovery_pending:{outcome.detail}"
+        try:
+            self.db.record_event(
+                run_id,
+                "preemption_recovery_pending",
+                payload={"job_id": job.job_id, "detail": outcome.detail},
+            )
+        except Exception:
+            pass
+        return result
 
     def ensure_recovery_running(
         self,

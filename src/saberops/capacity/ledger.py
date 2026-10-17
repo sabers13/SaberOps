@@ -50,6 +50,28 @@ else:  # pragma: no cover - typing only
 
 OWNER_SOURCES = ("OWNER", "PROBE")
 
+#: Capacity tables that the debt accounting in
+#: :func:`post_observation_charges` depends on.  A DB is only a genuinely
+#: unconfigured owner DB (legacy graceful empty debt) when **none** of
+#: these exist; a schema that has some but not all of them is *partially*
+#: initialized and must fail closed rather than report zero debt.
+REQUIRED_CAPACITY_TABLES: frozenset[str] = frozenset(
+    {"capacity_observations", "capacity_reservations"}
+)
+
+
+def capacity_tables_present(conn: sqlite3.Connection) -> frozenset[str]:
+    """Return which of :data:`REQUIRED_CAPACITY_TABLES` exist in ``conn``.
+
+    Reads ``sqlite_master`` only.  Any database error propagates to the
+    caller, which is expected to fail closed (never coerce to "no tables").
+    """
+    rows = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table'"
+        " AND name IN ('capacity_observations', 'capacity_reservations')"
+    ).fetchall()
+    return frozenset(str(row[0]) for row in rows)
+
 
 @dataclass(frozen=True)
 class LedgerEstimate:
@@ -241,7 +263,7 @@ def record_owner_quota(
         if source == "PROBE":
             _learn_from_probe(
                 conn, pool_id, window_id, pct, reset_at,
-                observed_iso, moment,
+                observed_iso, moment, new_row_id=obs_id,
             )
         conn.commit()
     return QuotaState(
@@ -254,6 +276,44 @@ def record_owner_quota(
     )
 
 
+def record_probe_window_observation(
+    db: Database,
+    pool_id: str,
+    window_id: str,
+    remaining_pct: float,
+    reset_at: str | None,
+    *,
+    harness: str,
+    now: datetime | None = None,
+    evidence_ref: str | None = None,
+) -> str:
+    """Record a per-window probe observation in capacity_observations and fold into learning."""
+    pct = float(remaining_pct)
+    if not 0.0 <= pct <= 100.0:
+        raise ValueError("remaining_percent must be between 0 and 100")
+    moment = _utcnow(now)
+    observed_iso = moment.isoformat()
+    ensure_tables(db)
+    obs_id = f"obs_{uuid.uuid4().hex[:12]}"
+    with owner_connection(db) as conn:
+        conn.execute(
+            """
+            INSERT INTO capacity_observations (
+                id, pool_id, window_id, remaining_pct, reset_at, observed_at,
+                source, legacy_provider, legacy_pool, evidence_ref
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (obs_id, pool_id, window_id, pct, reset_at, observed_iso,
+             "PROBE", harness, None, evidence_ref),
+        )
+        _learn_from_probe(
+            conn, pool_id, window_id, pct, reset_at,
+            observed_iso, moment, new_row_id=obs_id,
+        )
+        conn.commit()
+    return obs_id
+
+
 def _learn_from_probe(
     conn: sqlite3.Connection,
     pool_id: str,
@@ -262,6 +322,7 @@ def _learn_from_probe(
     new_reset: str | None,
     new_observed_iso: str,
     moment: datetime,
+    new_row_id: str | None = None,
 ) -> None:
     """Fold one PROBE interval into the cost model (no sample or more).
 
@@ -280,16 +341,19 @@ def _learn_from_probe(
     previous: Mapping[str, Any] | None = None
     for row in rows:
         candidate = dict(row)
+        cand_id = str(candidate.get("id") or "")
+        if new_row_id is not None and cand_id == new_row_id:
+            continue
         if str(candidate.get("observed_at") or "") > new_observed_iso:
             continue
-        if str(candidate.get("id") or "") == "":
+        if cand_id == "":
             continue
-        # Skip the row just inserted above (same observed_at, newest id).
-        # The newest row overall is the one we just wrote; the previous
-        # sample is the first older one.
-        if previous is None and candidate.get("observed_at") == new_observed_iso:
-            # Ambiguous with the new row: disambiguate by id order is
-            # unreliable, so compare remaining/reset identity instead.
+        # Skip the row just inserted above if new_row_id not provided.
+        if (
+            new_row_id is None
+            and previous is None
+            and candidate.get("observed_at") == new_observed_iso
+        ):
             if float(cast(float, candidate.get("remaining_pct"))) == new_pct and (
                 (candidate.get("reset_at") or None) == (new_reset or None)
             ):
@@ -500,6 +564,114 @@ def release(db: Database, run_id: str, now: datetime | None = None) -> int:
         return int(cur.rowcount or 0)
 
 
+@dataclass(frozen=True)
+class ReservedDebt:
+    """One run's outstanding (RESERVED) capacity obligation.
+
+    ``job_id`` is the opaque owning job recorded at dispatch, or ``None`` for
+    a legacy row.  This is a *read model* only: the ledger never interprets
+    job state (cross-lane contract C2).
+    """
+
+    run_id: str
+    job_id: str | None
+    pool_windows: tuple[tuple[str, str], ...]
+
+
+def list_reserved_debts(
+    db: Database,
+    *,
+    limit: int = 200,
+    after_run_id: str | None = None,
+) -> list[ReservedDebt]:
+    """Deterministically page runs that still hold RESERVED capacity.
+
+    Ordered by ``run_id`` with an exclusive ``after_run_id`` cursor so a
+    caller scanning a large owner DB cannot permanently hide old debt behind
+    a fixed ``LIMIT``.  A non-positive ``limit`` is refused (fail closed).
+    """
+    if int(limit) < 1:
+        raise ValueError(f"limit must be >= 1; got {limit!r}")
+    ensure_tables(db)
+    out: list[ReservedDebt] = []
+    with owner_connection(db) as conn:
+        rows = conn.execute(
+            "SELECT run_id, job_id, pool_id, window_id FROM capacity_reservations"
+            " WHERE state = 'RESERVED' AND run_id > ?"
+            " ORDER BY run_id ASC, pool_id ASC, window_id ASC LIMIT ?",
+            (after_run_id or "", int(limit)),
+        ).fetchall()
+    by_run: dict[str, list[tuple[str, str]]] = {}
+    jobs: dict[str, str | None] = {}
+    for row in rows:
+        rid = str(row["run_id"])
+        jobs.setdefault(rid, str(row["job_id"]) if row["job_id"] is not None else None)
+        by_run.setdefault(rid, []).append((str(row["pool_id"]), str(row["window_id"])))
+    for rid in by_run:
+        out.append(
+            ReservedDebt(
+                run_id=rid,
+                job_id=jobs.get(rid),
+                pool_windows=tuple(by_run[rid]),
+            )
+        )
+    return out
+
+
+def release_terminal_debt(
+    db: Database,
+    *,
+    run_id: str,
+    job_id: str | None = None,
+    now: datetime | None = None,
+    lease_guard: Any | None = None,
+) -> int:
+    """Release one conclusively terminal run's RESERVED rows (idempotent).
+
+    This is the owner-authorised settlement write for old-run D8 debt.  It is
+    deliberately narrower than :func:`release`:
+
+    * a ``job_id`` guard (when given) keeps an unrelated job's rows with the
+      same ``run_id`` untouched, so the write can never free another job's
+      obligation;
+    * an optional ``lease_guard(conn) -> bool`` is evaluated *inside* the same
+      ``BEGIN IMMEDIATE`` transaction as the UPDATE, so a stale scheduler
+      holding an expired lease cannot commit a release (the callback returns
+      False and nothing is written);
+    * it only ever moves ``RESERVED`` rows to ``RELEASED`` -- never
+      ``SETTLED``, never a delete -- so observation-based charging stays
+      truthful.
+
+    Returns the number of rows released, or ``-1`` when the lease guard denied
+    the write (the caller must treat that as "nothing was settled").
+    """
+    rid = run_id.strip() if isinstance(run_id, str) else ""
+    if not rid:
+        return 0
+    moment = _utcnow(now)
+    ensure_tables(db)
+    where = "run_id = ? AND state = 'RESERVED'"
+    params: list[Any] = [rid]
+    if job_id is not None:
+        where += " AND job_id = ?"
+        params.append(job_id)
+    with owner_connection(db) as conn:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError:
+            return 0
+        if lease_guard is not None and not bool(lease_guard(conn)):
+            conn.rollback()
+            return -1
+        cur = conn.execute(
+            f"UPDATE capacity_reservations SET state = 'RELEASED', settled_at = ?"
+            f" WHERE {where}",
+            (moment.isoformat(), *params),
+        )
+        conn.commit()
+        return int(cur.rowcount or 0)
+
+
 def _default_window_kinds() -> dict[tuple[str, str], str]:
     """Resolve window kinds from the effective plan set.
 
@@ -586,7 +758,7 @@ def estimate(
 
     obs: dict[str, Any] | None = None
     try:
-        with owner_connection(db) as conn:
+        with _read_connection(db) as conn:
             obs = _latest_observation(conn, pool, window)
             if obs is None and window != "ALL":
                 obs = _latest_observation(conn, pool, "ALL")
@@ -658,7 +830,7 @@ def snapshot(db: Database, now: datetime) -> list[LedgerEstimate]:
     moment = _utcnow(now)
     keys: set[tuple[str, str]] = set()
     try:
-        with owner_connection(db) as conn:
+        with _read_connection(db) as conn:
             for row in conn.execute(
                 "SELECT DISTINCT pool_id, window_id FROM capacity_observations"
             ).fetchall():
@@ -687,17 +859,86 @@ def snapshot(db: Database, now: datetime) -> list[LedgerEstimate]:
     return out
 
 
+def post_observation_charges(
+    db: Database, now: datetime
+) -> dict[tuple[str, str], float]:
+    """Return map of (pool_id, window_id) -> total cost_pct of counted reservations/settled rows.
+
+    Fail-closed schema rule (ADR-0002 D2/D7, F2 follow-up): ``{}`` is only
+    returned when there is positive, authoritative proof that **every**
+    required capacity table is absent, i.e. a genuinely uninitialized owner
+    DB.  If the schema is partially initialized, if schema discovery itself
+    errors, or if any read fails, the underlying ``sqlite3`` error is
+    raised so the boundary converts it into a typed
+    ``QUOTA_EVIDENCE_REQUIRED`` denial instead of treating unknown
+    obligations as zero debt.
+    """
+    moment = _utcnow(now)
+    charges: dict[tuple[str, str], float] = {}
+    with _read_connection(db) as conn:
+        present = capacity_tables_present(conn)
+        missing = REQUIRED_CAPACITY_TABLES - present
+        if not present:
+            # Positive proof that no required capacity table exists: the
+            # legacy graceful "unconfigured, no debt" path.
+            return {}
+        if missing:
+            raise sqlite3.OperationalError(
+                "capacity schema partially initialized; missing required"
+                " tables: " + ", ".join(sorted(missing))
+            )
+        keys: set[tuple[str, str]] = set()
+        for row in conn.execute(
+            "SELECT DISTINCT pool_id, window_id FROM capacity_observations"
+        ).fetchall():
+            keys.add((str(row["pool_id"]), str(row["window_id"])))
+        for row in conn.execute(
+            "SELECT DISTINCT pool_id, window_id FROM capacity_reservations"
+            " WHERE state IN ('RESERVED', 'SETTLED')"
+        ).fetchall():
+            keys.add((str(row["pool_id"]), str(row["window_id"])))
+
+        for pool, window in keys:
+            obs = _latest_observation(conn, pool, window)
+            if obs is None and window != "ALL":
+                obs = _latest_observation(conn, pool, "ALL")
+            if obs is not None:
+                obs_reset_raw = obs.get("reset_at")
+                obs_reset = (
+                    parse_iso(obs_reset_raw)
+                    if isinstance(obs_reset_raw, str)
+                    else None
+                )
+                if obs_reset is not None and moment >= obs_reset:
+                    cutoff = obs_reset.isoformat()
+                else:
+                    cutoff = str(obs.get("observed_at") or "")
+            else:
+                cutoff = ""
+            counted = _counted_reservations(conn, pool, window, cutoff)
+            spent = sum(float(r.get("cost_pct") or 0.0) for r in counted)
+            charges[(pool, window)] = spent
+    return charges
+
+
 __all__ = [
     "LedgerEstimate",
     "PoolDraw",
+    "REQUIRED_CAPACITY_TABLES",
     "Reservation",
+    "ReservedDebt",
+    "capacity_tables_present",
     "record_owner_quota",
+    "record_probe_window_observation",
     "list_owner_quota",
     "get_owner_quota",
     "enable_owner_quota",
     "reserve",
     "settle",
     "release",
+    "list_reserved_debts",
+    "release_terminal_debt",
     "estimate",
     "snapshot",
+    "post_observation_charges",
 ]

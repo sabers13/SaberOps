@@ -18,8 +18,10 @@ Hermetic and offline: no provider, model, credential, or network access.
 
 from __future__ import annotations
 
+import json
 import subprocess
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -62,6 +64,40 @@ _R3E12_CONN_A = "r3e12-conn-a"
 _R3E12_CONN_B = "r3e12-conn-b"
 
 
+def _seed_verified_opencode_posture(config_home: Path) -> None:
+    """Seed an isolated owner config with a verified class-A posture for the
+    synthetic ``opencode`` reviewer provider these fixtures dispatch.
+
+    Covers: ADR-0002 D2 / WORKFLOW §7 authorized setup-only fixture migration.
+    The R3-E1.2 fixtures dispatch synthetic ``opencode`` reviewer candidates
+    with no matching posture record, so the accepted M2-4b F1 admission seam
+    rightfully returns ``REVIEW_UNAVAILABLE`` (POSTURE_UNVERIFIED).  This seeds
+    ONLY that synthetic provider identity in the isolated config; no assertion,
+    candidate, pool, or expected verdict changes, no real vendor receives an
+    attestation, and no production posture/admission/billing logic is touched.
+    ``verified_on`` is stamped at run time with a 90-day TTL so replay never
+    expires.
+    """
+    cfg_dir = config_home / "saberops"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    today_iso = datetime.now(UTC).date().isoformat()
+    cp_doc = {
+        "version": 2,
+        "providers": {"opencode": {"state": "ALLOWED"}},
+        "quota_pools": {},
+        "postures": {
+            "opencode": {
+                "class": "A",
+                "policy_urls": ["https://example.com/synthetic-test-posture"],
+                "ttl_days": 90,
+                "verified_on": today_iso,
+                "note": "synthetic verified test posture for R3-E1.2 reviewer fixtures",
+            }
+        },
+    }
+    (cfg_dir / "control_plane.json").write_text(json.dumps(cp_doc), encoding="utf-8")
+
+
 @pytest.fixture()
 def isolated_xdg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     state = tmp_path / "state"
@@ -75,6 +111,7 @@ def isolated_xdg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("XDG_CACHE_HOME", str(cache))
     monkeypatch.delenv("ORCH_BINDING_STORE", raising=False)
     monkeypatch.delenv("SABEROPS_PROFILE", raising=False)
+    _seed_verified_opencode_posture(config)
 
 
 class _R3E12ScriptedAdapter(WorkerAdapter):
@@ -164,6 +201,15 @@ def _seed_reviewable_run(
     control_plane_snapshot_json: str | None = None,
     control_plane_snapshot_digest: str | None = None,
 ) -> Run:
+    if control_plane_snapshot_json is None:
+        # Setup-only: bind the run to the isolated owner control plane (with the
+        # fixture's verified synthetic ``opencode`` posture) exactly as
+        # ``tests/test_r3e1_reviewer_dispatch_authority.py`` does, so reviewer
+        # dispatch is evaluated against the same frozen policy the fixture
+        # seeds.  No assertion or expected verdict changes.
+        frozen = freeze_control_plane_policy(load_control_plane_policy())
+        control_plane_snapshot_json = frozen.as_json()
+        control_plane_snapshot_digest = frozen.digest
     base = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
     ).stdout.strip()
@@ -379,3 +425,144 @@ def test_selected_reviewer_blocked_pool_refuses_with_zero_launch(
     assert skips[0].payload["reason"] == "quota_blocked"
     assert skips[0].payload["binding_id"] == binding_b
     assert db.get_dispatch_evidence_for_run("run_pool_b_blocked") == []
+
+
+def _seed_shared_membership_quota_policies(
+    pool_a: str, pool_b: str
+) -> tuple[str, str]:
+    """Declare BOTH pools over the identical reviewer route (declared shared scarcity).
+
+    Covers: ADR-0002 D1 route draws every member pool; binding does not discard
+    shared scarcity.
+    """
+    shared = (f"{_R3E12_PROVIDER}/{_R3E12_REVIEWER_MODEL}",)
+    set_quota_pool_policy(pool_a, members=shared)
+    set_quota_pool_policy(pool_b, members=shared)
+    frozen = freeze_control_plane_policy(load_control_plane_policy())
+    return frozen.as_json(), frozen.digest
+
+
+def test_shared_membership_blocked_member_pool_refuses_bound_reviewer(
+    isolated_xdg: None, tmp_path: Path
+) -> None:
+    """Covers: ADR-0002 D1 route draws every member pool; binding does not discard shared scarcity.
+
+    When both pools declare the same reviewer route as a member, pool A is a
+    declared shared-scarcity constraint on that route rather than an isolated
+    member-less sibling account.  Exhausting pool A (0%%) while pool B is at
+    100%% must therefore refuse bound reviewer B with ``quota_blocked`` and zero
+    launch.
+    """
+    _binding_a, binding_b, _pa, _pb, pool_a, pool_b = _seed_two_connection_reviewers()
+    snapshot_json, digest = _seed_shared_membership_quota_policies(pool_a, pool_b)
+    repo = _git_repo(tmp_path / "sibling-shared" / "repo")
+    db = Database(tmp_path / "sibling-shared" / "review.db")
+    _seed_reviewable_run(
+        db,
+        repo,
+        "run_pool_a_shared_blocked",
+        control_plane_snapshot_json=snapshot_json,
+        control_plane_snapshot_digest=digest,
+    )
+    db.set_quota(_R3E12_PROVIDER, pool_a, 0.0)
+    db.set_quota(_R3E12_PROVIDER, pool_b, 100.0)
+    _engine, call_log, result = _run_bound_reviewer(
+        db, "run_pool_a_shared_blocked", binding_b
+    )
+    assert result.verdict is ReviewVerdict.REVIEW_UNAVAILABLE
+    assert call_log == []
+    skips = db.get_events_by_type(
+        "run_pool_a_shared_blocked", "review_candidate_skipped"
+    )
+    assert len(skips) == 1
+    assert skips[0].payload is not None
+    assert skips[0].payload["reason"] == "quota_blocked"
+    assert skips[0].payload["binding_id"] == binding_b
+    assert db.get_dispatch_evidence_for_run("run_pool_a_shared_blocked") == []
+
+
+def test_admit_binding_pool_scope_matches_quota_decision(
+    isolated_xdg: None, tmp_path: Path
+) -> None:
+    """Covers: ADR-0002 D1/D7 ``admit()`` binding scope and provider-default non-fallback.
+
+    Direct seam check with the real binding-derived candidate and real quota
+    states (no dispatch):
+    1. Member-less sibling pool at 0%% -> admitted on own pool;
+    2. Bound with no member match -> synthesized provider default is not drawn
+       (assert ``drawn_pools``);
+    3. Own pool at 0%% -> refused;
+    4. Undeclared binding pool -> same outcome as ``quota_decision``.
+    """
+    from datetime import UTC, datetime
+
+    from saberops.capacity.admission import admit
+    from saberops.control_plane.plans import effective_quota_pools
+    from saberops.control_plane.quota_policy import quota_decision
+
+    now = datetime.now(UTC)
+    _binding_a, binding_b, _pa, _pb, pool_a, pool_b = _seed_two_connection_reviewers()
+    _snapshot_json, digest = _seed_quota_policy_pools(pool_a, pool_b)
+    policy = load_control_plane_policy()
+    assert freeze_control_plane_policy(policy).digest == digest
+    candidate = WorkerCandidate(
+        provider=_R3E12_PROVIDER,
+        model=_R3E12_REVIEWER_MODEL,
+        binding_id=binding_b,
+    )
+    repo = _git_repo(tmp_path / "admit-scope" / "repo")
+    db = Database(tmp_path / "admit-scope" / "review.db")
+    _seed_reviewable_run(db, repo, "run_admit_scope")
+
+    # 1. Member-less sibling pool exhausted, own pool healthy -> admitted on own
+    #    pool; bound with no member match never draws the provider default.
+    db.set_quota(_R3E12_PROVIDER, pool_a, 0.0)
+    db.set_quota(_R3E12_PROVIDER, pool_b, 100.0)
+    sibling_blocked = admit(
+        candidate,
+        now=now,
+        policy=policy,
+        quota_states=db.list_quota(),
+        binding_pool_id=pool_b,
+        requirements=None,
+    )
+    assert sibling_blocked.admitted is True
+    assert sibling_blocked.drawn_pools == (pool_b,)
+    assert _R3E12_PROVIDER not in sibling_blocked.drawn_pools
+
+    # 2. The candidate's OWN pool exhausted -> refused (binding pool decides).
+    db.set_quota(_R3E12_PROVIDER, pool_b, 0.0)
+    own_blocked = admit(
+        candidate,
+        now=now,
+        policy=policy,
+        quota_states=db.list_quota(),
+        binding_pool_id=pool_b,
+        requirements=None,
+    )
+    assert own_blocked.admitted is False
+    assert own_blocked.pool_id == pool_b
+    assert own_blocked.reason is not None and own_blocked.reason.startswith("RED_LINE")
+
+    # 3. Undeclared binding pool with no member match: provider default is not
+    #    drawn and outcome matches quota_decision(pool_id=...), even with a
+    #    provider-wide state at 0%.
+    db.set_quota(_R3E12_PROVIDER, _R3E12_PROVIDER, 0.0)
+    unknown_pool = "discovered-pool:no-such-connection"
+    states = db.list_quota()
+    pools = effective_quota_pools(policy)
+    canonical = quota_decision(
+        candidate, states, pool_policies=pools, pool_id=unknown_pool
+    )
+    unknown = admit(
+        candidate,
+        now=now,
+        policy=policy,
+        quota_states=states,
+        binding_pool_id=unknown_pool,
+        requirements=None,
+    )
+    assert unknown.admitted is canonical.eligible
+    assert unknown.drawn_pools == (unknown_pool,)
+    assert _R3E12_PROVIDER not in unknown.drawn_pools
+

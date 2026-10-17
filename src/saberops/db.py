@@ -2286,6 +2286,87 @@ class Database:
             "generation": generation,
         }
 
+    def terminalize_preemption_fenced(
+        self,
+        run_id: str,
+        *,
+        owner_id: str | None,
+        generation: int | None,
+        result_summary: str,
+        expected_owner_states: tuple[str, ...] = (ExecutionOwner.CLAIMED,),
+        completed_at: str | None = None,
+    ) -> dict[str, Any] | None:
+        """RUNNING -> PREEMPTED, fenced to one exact predecessor generation.
+
+        ADR-0002 D8 crash recovery needs a *narrower* terminal transition than
+        :meth:`terminalize_run_fenced`:
+
+        * the run must be exactly ``RUNNING`` (a terminal or PENDING run is
+          never re-decided here);
+        * the inspected owner generation must still be the active ``CLAIMED``
+          generation, so a newer owner that claimed the run while this decision
+          was being made is never orphaned or released;
+        * **no attempt may still be RUNNING/PENDING**: the D8 decision was
+          taken only after the attempt had already reached its durable
+          terminal (FAILED/QUOTA) state, so the ordinary "force-close an active
+          attempt" behaviour would be masking a live worker.  A live attempt
+          means the caller has not established quiescence, so this refuses
+          (returns ``None``, changing nothing) rather than terminalizing.
+
+        Returns the transition receipt, or ``None`` when any precondition
+        fails -- the caller must treat ``None`` as "no authority, nothing
+        written".
+        """
+        now = current_iso_timestamp()
+        with self._get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            run_row = conn.execute("SELECT status FROM runs WHERE id = ?", (run_id,)).fetchone()
+            if run_row is None:
+                conn.rollback()
+                return None
+            if RunStatus(str(run_row["status"])) != RunStatus.RUNNING:
+                conn.rollback()
+                return None
+            if not self._fenced_owner_row(
+                conn, run_id, owner_id, generation, expected_owner_states
+            ):
+                conn.rollback()
+                return None
+            live = conn.execute(
+                "SELECT COUNT(*) AS n FROM attempts WHERE run_id = ? AND status IN (?, ?)",
+                (run_id, AttemptStatus.RUNNING.value, AttemptStatus.PENDING.value),
+            ).fetchone()
+            if int(live["n"] or 0) > 0:
+                conn.rollback()
+                return None
+            conn.execute(
+                "UPDATE runs SET status = ?, result_summary = ?, completed_at = ? WHERE id = ?",
+                (RunStatus.PREEMPTED.value, result_summary, completed_at, run_id),
+            )
+            if owner_id is not None and generation is not None:
+                conn.execute(
+                    """
+                    UPDATE execution_owners
+                    SET state = ?, released_at = ?, release_reason = ?, cancel_agent_json = NULL
+                    WHERE run_id = ? AND owner_id = ? AND generation = ?
+                    """,
+                    (
+                        ExecutionOwner.RELEASED,
+                        now,
+                        "preempted",
+                        run_id,
+                        owner_id,
+                        generation,
+                    ),
+                )
+            conn.commit()
+        return {
+            "run_id": run_id,
+            "status": RunStatus.PREEMPTED.value,
+            "owner_id": owner_id,
+            "generation": generation,
+        }
+
     def begin_execution_cancellation(
         self,
         run_id: str,

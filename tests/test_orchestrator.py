@@ -44,8 +44,10 @@ event and the exact provider/model dispatch log.
 
 from __future__ import annotations
 
+import json
 import sys
 from collections.abc import Generator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -74,8 +76,73 @@ from saberops.workers.registry import AdapterRegistry
 def _isolate_xdg_config(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> Generator[None, None, None]:
+    """Covers: ADR-0002 D2 / WORKFLOW §7 authorized setup-only fixture migration
+    for synthetic h3 candidates.
+    """
     mpatch = pytest.MonkeyPatch()
     temp_dir = tmp_path_factory.mktemp("hermetic_xdg_config_h3")
+    cfg_dir = temp_dir / "saberops"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    today_iso = datetime.now(UTC).date().isoformat()
+    cp_doc = {
+        "version": 2,
+        "providers": {
+            "h3": {"state": "ALLOWED"},
+            "opencode": {"state": "ALLOWED"},
+            "codex": {"state": "ALLOWED"},
+            "antigravity": {"state": "ALLOWED"},
+        },
+        "quota_pools": {
+            "opencode-go": {"mode": "UNENFORCED", "overage_possible": False},
+            "opencode-zen": {"mode": "UNENFORCED", "overage_possible": False},
+            "chatgpt-plus": {"mode": "UNENFORCED", "overage_possible": False},
+        },
+        "postures": {
+            "h3": {
+                "class": "A",
+                "policy_urls": ["https://example.com/h3-policy"],
+                "ttl_days": 90,
+                "verified_on": today_iso,
+                "note": "synthetic verified test posture for h3 candidate characterization",
+            },
+            "opencode": {
+                "class": "A",
+                "policy_urls": ["https://example.com/opencode-policy"],
+                "ttl_days": 90,
+                "verified_on": today_iso,
+                "note": "synthetic verified test posture for reviewer ladder",
+            },
+            "opencode/opencode-go/*": {
+                "class": "A",
+                "policy_urls": ["https://example.com/opencode-go-policy"],
+                "ttl_days": 90,
+                "verified_on": today_iso,
+                "note": "synthetic verified test posture for reviewer ladder",
+            },
+            "opencode/opencode/*": {
+                "class": "C",
+                "policy_urls": ["https://example.com/opencode-zen-policy"],
+                "ttl_days": 90,
+                "verified_on": today_iso,
+                "note": "synthetic verified test posture for reviewer ladder",
+            },
+            "codex": {
+                "class": "A",
+                "policy_urls": ["https://example.com/codex-policy"],
+                "ttl_days": 90,
+                "verified_on": today_iso,
+                "note": "synthetic verified test posture for reviewer ladder",
+            },
+            "antigravity": {
+                "class": "A",
+                "policy_urls": ["https://example.com/antigravity-policy"],
+                "ttl_days": 90,
+                "verified_on": today_iso,
+                "note": "synthetic verified test posture for reviewer ladder",
+            },
+        },
+    }
+    (cfg_dir / "control_plane.json").write_text(json.dumps(cp_doc), encoding="utf-8")
     mpatch.setenv("XDG_CONFIG_HOME", str(temp_dir))
     yield
     mpatch.undo()

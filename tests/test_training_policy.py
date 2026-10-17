@@ -14,9 +14,16 @@ No real provider/model calls; no timing/thread tests.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
 import pytest
 
+from saberops.control_plane.plans import PlanSet, PostureRecord
+from saberops.control_plane.policy import (
+    ControlPlanePolicy,
+    ProviderPolicy,
+    ProviderPolicyState,
+)
 from saberops.control_plane.preflight import (
     TRAINING_PERMISSION_DENIED,
     evaluate_control_plane,
@@ -30,10 +37,7 @@ from saberops.routing_config import (
     payload_to_snapshot,
     snapshot_to_payload,
 )
-from saberops.training_policy import (
-    is_training_permitted,
-    training_requirement_for,
-)
+from saberops.training_policy import is_training_permitted
 
 # Static fixtures: known classifications preserved from v1.
 STATIC_TRAINING = WorkerCandidate(
@@ -106,30 +110,62 @@ def _cid(candidate: WorkerCandidate) -> str:
     return f"{candidate.provider}/{candidate.model}"
 
 
+def _synthetic_policy() -> ControlPlanePolicy:
+    """Isolated synthetic policy with verified class-A posture for the synthetic
+    providers these training-policy fixtures use.
+
+    Covers: ADR-0002 D2 / WORKFLOW §7 authorized setup-only fixture migration.
+    These fixtures dispatch synthetic ``dynacustom`` / ``opencode`` / ``codex``
+    candidates with no matching posture record, so the accepted M2-4b F1
+    admission seam rightfully returns ``quota_blocked``
+    (``POSTURE_UNVERIFIED``).  This seeds ONLY the synthetic identities the
+    fixtures use and neutralizes the packaged quota *membership* (these
+    candidates carry no quota evidence) so the decision under test stays the
+    training/data-policy one.  No assertion, candidate, or expected outcome
+    changes, no real vendor receives an attestation, and no production
+    admission, packaged policy or owner config is touched.  ``verified_on`` is
+    stamped at run time with a 90-day TTL so replay never expires.
+    """
+    from dataclasses import replace
+
+    from saberops.control_plane.plans import load_packaged_plans_raw, validate_plan_sections
+
+    today = datetime.now(UTC).date().isoformat()
+    providers = ("opencode", "codex", DYN_PROVIDER)
+    postures = {
+        provider: PostureRecord(
+            selector=provider,
+            posture_class="A",
+            policy_urls=("https://example.com/synthetic-test-posture",),
+            ttl_days=90,
+            verified_on=today,
+            note="synthetic verified test posture for R2-B training-policy fixtures",
+        )
+        for provider in providers
+    }
+    provider_policies = {
+        provider: ProviderPolicy(provider, ProviderPolicyState.ALLOWED)
+        for provider in providers
+    }
+    packaged = validate_plan_sections(
+        load_packaged_plans_raw(), "packaged plans", packaged=True
+    )
+    neutral_pools = {
+        pool_id: replace(plan, members=(), max_concurrent=None)
+        for pool_id, plan in packaged.pool_plans.items()
+    }
+    return ControlPlanePolicy(
+        provider_policies=provider_policies,
+        quota_pools={},
+        content_hash="r2b-synthetic-policy",
+        plans=PlanSet(pool_plans=neutral_pools, postures=postures),
+    )
+
+
 # -- canonical authority -----------------------------------------------------
 
 
-def test_r2b_canonical_decision_lives_in_one_module() -> None:
-    """The single decision function/signature all dispatch paths share."""
-    import saberops.training_policy as authority
-
-    assert callable(authority.training_requirement_for)
-    assert callable(authority.is_training_permitted)
-    assert authority.training_requirement_for(STATIC_TRAINING) == "TRUE"
-    assert authority.training_requirement_for(STATIC_CLEAN) == "FALSE"
-
-
-def test_r2b_static_requirement_resolution() -> None:
-    assert training_requirement_for(STATIC_TRAINING) == "TRUE"
-    assert training_requirement_for(STATIC_CLEAN) == "FALSE"
-    # Custom/unknown ids carry no evidence: UNKNOWN, never inferred safe.
-    assert training_requirement_for(WorkerCandidate(provider="nope", model="nope-x")) == "UNKNOWN"
-
-
-# -- A. known training-required static + Denied -> blocked --------------------
-
-
-def test_r2b_a_static_training_denied_blocked() -> None:
+def test_r2b_a_static_training_admitted_under_denied() -> None:
     snapshot = _snapshot()
     for tier in (Tier.T1, Tier.T2, Tier.T3):
         chain = resolve_candidate_chain(
@@ -149,7 +185,7 @@ def test_r2b_a_static_training_denied_blocked() -> None:
 # -- B. known non-training static + Denied -> allowed by data policy ---------
 
 
-def test_r2b_b_static_clean_denied_allowed() -> None:
+def test_r2b_b_static_clean_admitted_under_denied() -> None:
     snapshot = _snapshot()
     for tier in (Tier.T1, Tier.T2, Tier.T3):
         chain = resolve_candidate_chain(
@@ -171,11 +207,10 @@ def test_r2b_b_static_clean_denied_allowed() -> None:
     ("requirement", "permitted"),
     [("TRUE", True), ("FALSE", True), ("UNKNOWN", True)],
 )
-def test_r2b_cde_dynamic_denied(requirement: str, permitted: bool) -> None:
+def test_r2b_cde_dynamic_admitted_under_denied(requirement: str, permitted: bool) -> None:
     model = _dyn_model(requirement.lower())
     snapshot = _snapshot(_approval(model, requirement))
     candidate = WorkerCandidate(provider=DYN_PROVIDER, model=model)
-    assert training_requirement_for(candidate, snapshot=snapshot) == requirement
     assert is_training_permitted(candidate, False, snapshot=snapshot) is permitted
     for tier in (Tier.T1, Tier.T3):
         chain = resolve_candidate_chain(
@@ -188,6 +223,7 @@ def test_r2b_cde_dynamic_denied(requirement: str, permitted: bool) -> None:
         quota_states=[],
         training_allowed=False,
         routing_snapshot=snapshot,
+        policy=_synthetic_policy(),
     )
     assert decision.training_permitted is permitted
     if permitted:
@@ -203,14 +239,15 @@ def test_r2b_cde_dynamic_denied(requirement: str, permitted: bool) -> None:
         quota_states=[],
         prompt_bytes=10,
         explicit_override=False,
+        policy=_synthetic_policy(),
     )
     assert (skip is None) is permitted
     if not permitted:
         assert skip is None
 
 
-def test_r2b_e_unknown_excluded_from_t1_t3_chains() -> None:
-    """Highest-value B5 case: UNKNOWN dynamic in T1/T3 under Denied."""
+def test_r2b_e_unknown_retained_in_t1_t3_chains() -> None:
+    """Highest-value B5 case: UNKNOWN dynamic stays in T1/T3 under Denied."""
     model = _dyn_model("unknown")
     snapshot = _snapshot(_approval(model, "UNKNOWN"))
     assert model is not None
@@ -254,7 +291,7 @@ def test_r2b_f_allowed_never_blocked_by_data_policy(requirement: str) -> None:
 # -- G. explicit worker model override cannot bypass Denied ------------------
 
 
-def test_r2b_g_override_cannot_bypass_denied() -> None:
+def test_r2b_g_override_admitted_under_denied() -> None:
     snapshot = _snapshot(
         _approval(_dyn_model("true"), "TRUE"),
         _approval(_dyn_model("unknown"), "UNKNOWN"),
@@ -306,7 +343,10 @@ def test_r2b_g_override_cannot_bypass_denied() -> None:
 
 
 def test_r2b_h_reviewer_dispatch_parity() -> None:
-    from saberops.review import _pre_dispatch_skip_reason, select_reviewer_ladder
+    from saberops.review import (
+        _pre_dispatch_skip_reason,
+        select_reviewer_ladder_unfiltered,
+    )
 
     model = _dyn_model("parity")
     snapshot = _snapshot(_approval(model, "UNKNOWN"))
@@ -320,6 +360,7 @@ def test_r2b_h_reviewer_dispatch_parity() -> None:
             quota_states=[],
             prompt_bytes=10,
             explicit_override=False,
+            policy=_synthetic_policy(),
         )
         review_skip = _pre_dispatch_skip_reason(
             candidate=candidate,
@@ -328,6 +369,7 @@ def test_r2b_h_reviewer_dispatch_parity() -> None:
             routing_snapshot=snapshot,
             quota_states=[],
             prompt_bytes=10,
+            policy=_synthetic_policy(),
         )
         assert review_skip == worker_skip
     assert (
@@ -339,28 +381,26 @@ def test_r2b_h_reviewer_dispatch_parity() -> None:
             quota_states=[],
             prompt_bytes=10,
             explicit_override=False,
+            policy=_synthetic_policy(),
         )
         is None
     )
 
-    # Filtered reviewer ladder shares the decision: muse drops under Denied.
-    denied_ladder = select_reviewer_ladder(
+    # The live runtime ladder (``select_reviewer_ladder_unfiltered``) keeps the
+    # retained production order for a codex/gpt-5.6-terra implementer, excludes
+    # only the implementer, and keeps Muse as the first reviewer candidate.
+    ladder = select_reviewer_ladder_unfiltered(
         candidate_provider="codex",
         candidate_model="gpt-5.6-terra",
-        registry=_OpenRegistry(),  # type: ignore[arg-type]
         tier=Tier.T1,
-        training_allowed=False,
     )
-    assert denied_ladder
-    assert any("muse" in c.model.lower() for c in denied_ladder)
-    allowed_ladder = select_reviewer_ladder(
-        candidate_provider="codex",
-        candidate_model="gpt-5.6-terra",
-        registry=_OpenRegistry(),  # type: ignore[arg-type]
-        tier=Tier.T1,
-        training_allowed=True,
-    )
-    assert any("muse" in c.model.lower() for c in allowed_ladder)
+    assert [candidate.model for candidate in ladder] == [
+        "opencode-go/muse-spark-1.2-contributor",
+        "opencode-go/ox-alpha-free",
+        "opencode-go/deepseek-v4-pro",
+    ]
+    assert all(candidate.model != "gpt-5.6-terra" for candidate in ladder)
+    assert any("muse" in candidate.model.lower() for candidate in ladder)
 
 
 # -- I. C07 preflight parity --------------------------------------------------
@@ -376,6 +416,7 @@ def test_r2b_i_preflight_parity() -> None:
         quota_states=[],
         training_allowed=False,
         routing_snapshot=snapshot,
+        policy=_synthetic_policy(),
     )
     skip = evaluate_eligibility(
         candidate=candidate,
@@ -385,6 +426,7 @@ def test_r2b_i_preflight_parity() -> None:
         quota_states=[],
         prompt_bytes=10,
         explicit_override=False,
+        policy=_synthetic_policy(),
     )
     assert decision.eligible is True
     assert decision.exclusion_reason != TRAINING_PERMISSION_DENIED
@@ -523,11 +565,10 @@ def test_r2b1_static_fixtures_are_canonical_valid() -> None:
         assert t1_ids.count(_CLEAN_CID) == 1
 
 
-def test_r2b1_negative_control_contradictory_false_not_permitted() -> None:
-    """Negative control: contradictory FALSE approval must not permit Muse."""
+def test_r2b1_negative_control_contradictory_false_admitted() -> None:
+    """Negative control: contradictory FALSE approval cannot re-deny Muse."""
     snapshot = _static_snapshot(_static_approval(_MUSE_CID, "FALSE"))
     muse = WorkerCandidate(provider="opencode", model="opencode-go/muse-spark-1.2-contributor")
-    assert training_requirement_for(muse, snapshot=snapshot) == "TRUE"
     assert is_training_permitted(muse, False, snapshot=snapshot) is True
     chain = resolve_candidate_chain(
         tier=Tier.T1, training_allowed=False, is_peak=False, snapshot=snapshot
@@ -567,28 +608,12 @@ def test_r2b_j_frozen_snapshot_survives_live_mutation() -> None:
     )
     assert decision.training_permitted is True
 
-    # Payload round-trip preserves the frozen evidence.
-    payload = snapshot_to_payload(frozen, "2026-09-24T00:00:00+00:00")
-    revived = payload_to_snapshot(json.loads(json.dumps(payload)), run_id="r2b-j")
-    assert training_requirement_for(candidate, snapshot=revived) == "FALSE"
-
 
 # -- R2-B.1 A-J: static authority parity ---------------------------------------
 
 
-def test_r2b1_a_contradictory_false_keeps_true() -> None:
-    """A: static training-required + contradictory FALSE approval stays TRUE."""
-    snapshot = _static_snapshot(_static_approval(_MUSE_CID, "FALSE"))
-    muse = WorkerCandidate(provider="opencode", model="opencode-go/muse-spark-1.2-contributor")
-    assert training_requirement_for(muse, snapshot=snapshot) == "TRUE"
-    assert is_training_permitted(muse, False, snapshot=snapshot) is True
-    # Explicit contradictory requirement cannot downgrade a known static.
-    assert training_requirement_for(muse, snapshot=snapshot, training_required="FALSE") == "TRUE"
-    assert is_training_permitted(muse, False, snapshot=snapshot, training_required="FALSE") is True
-
-
-def test_r2b1_b_chain_excludes_contradictory_muse() -> None:
-    """B: T1/T3 + Denied exclude Muse despite contradictory FALSE approval."""
+def test_r2b1_b_chain_retains_contradictory_muse() -> None:
+    """B: T1/T3 + Denied retain Muse despite contradictory FALSE approval."""
     snapshot = _static_snapshot(_static_approval(_MUSE_CID, "FALSE"))
     for tier in (Tier.T1, Tier.T3):
         chain = resolve_candidate_chain(
@@ -598,8 +623,8 @@ def test_r2b1_b_chain_excludes_contradictory_muse() -> None:
         assert _CLEAN_CID in [_cid(c) for c in chain]
 
 
-def test_r2b1_c_c07_denies_contradictory_muse() -> None:
-    """C: C07 exclusion reason is TRAINING_PERMISSION_DENIED."""
+def test_r2b1_c_c07_admits_contradictory_muse() -> None:
+    """C: C07 keeps the reason off TRAINING_PERMISSION_DENIED (training retired)."""
     snapshot = _static_snapshot(_static_approval(_MUSE_CID, "FALSE"))
     muse = WorkerCandidate(provider="opencode", model="opencode-go/muse-spark-1.2-contributor")
     decision = evaluate_control_plane(
@@ -619,8 +644,8 @@ def test_r2b1_c_c07_denies_contradictory_muse() -> None:
     }
 
 
-def test_r2b1_d_dispatch_skip_contradictory_muse() -> None:
-    """D: dispatch/reviewer skip is SKIP_TRAINING_POLICY."""
+def test_r2b1_d_dispatch_does_not_skip_contradictory_muse() -> None:
+    """D: dispatch/reviewer do not skip on the retired training policy."""
     from saberops.review import _pre_dispatch_skip_reason
 
     snapshot = _static_snapshot(_static_approval(_MUSE_CID, "FALSE"))
@@ -633,6 +658,7 @@ def test_r2b1_d_dispatch_skip_contradictory_muse() -> None:
         quota_states=[],
         prompt_bytes=10,
         explicit_override=False,
+        policy=_synthetic_policy(),
     )
     assert skip is None
     review_skip = _pre_dispatch_skip_reason(
@@ -642,12 +668,13 @@ def test_r2b1_d_dispatch_skip_contradictory_muse() -> None:
         routing_snapshot=snapshot,
         quota_states=[],
         prompt_bytes=10,
+        policy=_synthetic_policy(),
     )
     assert review_skip is None
 
 
-def test_r2b1_e_override_cannot_bypass_contradictory_muse() -> None:
-    """E: explicit worker model override cannot bypass Denied."""
+def test_r2b1_e_override_admits_contradictory_muse() -> None:
+    """E: explicit worker model override resolves under Denied."""
     snapshot = _static_snapshot(_static_approval(_MUSE_CID, "FALSE"))
     assert resolve_candidate_chain(
         tier=Tier.T1,
@@ -657,37 +684,16 @@ def test_r2b1_e_override_cannot_bypass_contradictory_muse() -> None:
     )
 
 
-def test_r2b1_f_carried_false_cannot_downgrade_muse() -> None:
-    """F: carried WorkerCandidate(training_required=FALSE) cannot override static TRUE."""
-    carried = WorkerCandidate(
-        provider="opencode",
-        model="opencode-go/muse-spark-1.2-contributor",
-        training_required="FALSE",
-    )
-    assert training_requirement_for(carried) == "TRUE"
-    assert training_requirement_for(carried, training_required="FALSE") == "TRUE"
-    assert is_training_permitted(carried, False) is True
-    snapshot = _static_snapshot(_static_approval(_MUSE_CID, "FALSE"))
-    assert training_requirement_for(carried, snapshot=snapshot) == "TRUE"
-    assert is_training_permitted(carried, False, snapshot=snapshot) is True
-
-
 @pytest.mark.parametrize("contradiction", ["TRUE", "UNKNOWN"])
 def test_r2b1_g_clean_static_preserved(contradiction: str) -> None:
     """G: known non-training static stays FALSE under TRUE/UNKNOWN evidence."""
     snapshot = _static_snapshot(_static_approval(_CLEAN_CID, contradiction))
     clean = WorkerCandidate(provider="codex", model="gpt-5.6-terra")
-    assert training_requirement_for(clean, snapshot=snapshot) == "FALSE"
     assert is_training_permitted(clean, False, snapshot=snapshot) is True
     carried = WorkerCandidate(
         provider="codex", model="gpt-5.6-terra", training_required=contradiction
     )
-    assert training_requirement_for(carried, snapshot=snapshot) == "FALSE"
     assert is_training_permitted(carried, False, snapshot=snapshot) is True
-    assert (
-        training_requirement_for(clean, snapshot=snapshot, training_required=contradiction)
-        == "FALSE"
-    )
     chain = resolve_candidate_chain(
         tier=Tier.T1, training_allowed=False, is_peak=False, snapshot=snapshot
     )
@@ -700,19 +706,6 @@ def test_r2b1_g_clean_static_preserved(contradiction: str) -> None:
         snapshot=snapshot,
     )
     assert [_cid(c) for c in ok] == [_CLEAN_CID]
-
-
-@pytest.mark.parametrize(
-    ("requirement", "permitted"),
-    [("TRUE", True), ("FALSE", True), ("UNKNOWN", True)],
-)
-def test_r2b1_h_dynamic_tristate_unchanged(requirement: str, permitted: bool) -> None:
-    """H: non-static dynamic TRUE/FALSE/UNKNOWN behavior unchanged."""
-    model = _dyn_model(f"r2b1-{requirement.lower()}")
-    snapshot = _static_snapshot(_approval(model, requirement))
-    candidate = WorkerCandidate(provider=DYN_PROVIDER, model=model)
-    assert training_requirement_for(candidate, snapshot=snapshot) == requirement
-    assert is_training_permitted(candidate, False, snapshot=snapshot) is permitted
 
 
 def test_r2b1_i_frozen_snapshot_valid_for_dynamic() -> None:
@@ -739,14 +732,102 @@ def test_r2b1_j_static_binding_carried_and_routes_when_permitted() -> None:
     assert _CLEAN_CID in by_id
     assert by_id[_MUSE_CID].binding_id == muse_approval.binding_id
     assert by_id[_CLEAN_CID].binding_id == clean_approval.binding_id
-    # Canonical requirement still exactly preserves static semantics.
-    muse = WorkerCandidate(provider="opencode", model="opencode-go/muse-spark-1.2-contributor")
-    clean = WorkerCandidate(provider="codex", model="gpt-5.6-terra")
-    assert training_requirement_for(muse, snapshot=snapshot) == "TRUE"
-    assert training_requirement_for(clean, snapshot=snapshot) == "FALSE"
     denied = resolve_candidate_chain(
         tier=Tier.T1, training_allowed=False, is_peak=False, snapshot=snapshot
     )
     denied_ids = [_cid(c) for c in denied]
     assert _CLEAN_CID in denied_ids
     assert _MUSE_CID in denied_ids
+
+
+# -- K. Retained historical-evidence helpers (D-0045) -------------------------
+#
+# These exported helpers survive the approved cleanup because old frozen
+# snapshots still carry the tri-state vocabulary.  The tests below pin their
+# retained normalization/identity/classification contracts; they do NOT
+# re-enable training-based admission (``is_training_permitted`` stays True).
+
+
+def test_r2b_historical_requirement_normalization_contract() -> None:
+    """Retained tri-state normalization for historical evidence snapshots.
+
+    Covers: D-0045 retained-behavior repair of
+    ``training_policy.normalize_training_requirement``; no admission-policy
+    reversal.
+    """
+    from saberops.training_policy import normalize_training_requirement
+
+    assert normalize_training_requirement(None) is None
+    assert normalize_training_requirement(" true ") == "TRUE"
+    assert normalize_training_requirement("False") == "FALSE"
+    assert normalize_training_requirement("unknown") == "UNKNOWN"
+    # Unrecognized evidence falls through to the next rank, never guessed.
+    assert normalize_training_requirement("permitted?") is None
+    assert normalize_training_requirement("") is None
+
+
+def test_r2b_historical_candidate_identity_contract() -> None:
+    """Canonical ``provider/model`` identity used by retained evidence lookups.
+
+    Covers: D-0045 retained-behavior repair of
+    ``training_policy.candidate_id_of``.
+    """
+    from saberops.training_policy import candidate_id_of
+
+    assert (
+        candidate_id_of(WorkerCandidate(provider="codex", model="gpt-5.6-terra"))
+        == "codex/gpt-5.6-terra"
+    )
+    assert candidate_id_of(WorkerCandidate(provider="", model="solo-model")) == "solo-model"
+    # Historical callers already passing a slashed id keep it verbatim.
+    assert candidate_id_of(WorkerCandidate(provider="open/code", model="m")) == "open/code/m"
+    assert candidate_id_of(WorkerCandidate(provider="  codex  ", model="  m  ")) == "codex/m"
+
+
+def test_r2b_historical_approved_requirement_evidence_contract() -> None:
+    """Frozen approved evidence stays readable; absent evidence yields ``None``.
+
+    Covers: D-0045 retained-behavior repair of
+    ``training_policy.approved_training_requirement`` (old-snapshot
+    compatibility; reads only the frozen snapshot, never live state).
+    """
+    from saberops.training_policy import approved_training_requirement
+
+    assert approved_training_requirement(None, "codex/gpt-5.6-terra") is None
+    # A snapshot with no approvals carries no evidence for any id.
+    assert approved_training_requirement(_snapshot(), "codex/gpt-5.6-terra") is None
+
+    model = _dyn_model("hist-approved")
+    snapshot = _snapshot(_approval(model, "TRUE"))
+    assert approved_training_requirement(snapshot, f"{DYN_PROVIDER}/{model}") == "TRUE"
+    # Only the frozen approved record for the exact id answers; another id
+    # yields no evidence rather than inheriting a neighbouring classification.
+    assert approved_training_requirement(snapshot, "other/never-approved") is None
+
+
+def test_r2b_static_classification_evidence_contract() -> None:
+    """The historical static classifier stays readable and fails closed.
+
+    Covers: D-0045 retained-behavior repair of
+    ``training_policy.static_training_requirement``; this is evidence
+    classification only, not a restore of training-based admission.
+    """
+    from saberops.training_policy import static_training_requirement
+
+    assert static_training_requirement(STATIC_TRAINING) == "TRUE"
+    assert static_training_requirement(STATIC_CLEAN) == "FALSE"
+    # The historical call sites also checked the bare model for known ids.
+    assert (
+        static_training_requirement(
+            WorkerCandidate(provider="custom", model="opencode/opencode/big-pickle")
+        )
+        == "TRUE"
+    )
+    # Unknown/custom ids keep no evidence so a Denied policy fails closed.
+    assert (
+        static_training_requirement(WorkerCandidate(provider="custom", model="no-evidence"))
+        == "UNKNOWN"
+    )
+    # These helpers remain evidence readers: nothing re-enables admission.
+    for candidate in (STATIC_TRAINING, STATIC_CLEAN):
+        assert is_training_permitted(candidate, training_allowed=False) is True

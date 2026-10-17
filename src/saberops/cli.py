@@ -601,6 +601,17 @@ def _check_legacy_manager_state() -> DoctorFinding | None:
     return None
 
 
+def _positive_int_arg(value: str) -> int:
+    """argparse type for a strictly positive integer (used by --max-concurrent)."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(f"invalid integer value: {value!r}") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer (>= 1)")
+    return parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build CLI argument parser."""
     parser = argparse.ArgumentParser(
@@ -1544,6 +1555,52 @@ def build_parser() -> argparse.ArgumentParser:
     job_cancel.add_argument("job_id", type=str, help="Job identifier.")
     job_cancel.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
     job_cancel.add_argument("--json", action="store_true", help="JSON output")
+
+    # orch scheduler run [--once] [--interval-seconds INT]
+    scheduler_parser = subparsers.add_parser(
+        "scheduler",
+        help="Run the pacing scheduler loop (ADR-0002 D7).",
+    )
+    scheduler_sub = scheduler_parser.add_subparsers(
+        dest="scheduler_command", required=True
+    )
+    scheduler_run = scheduler_sub.add_parser("run", help="Run the pacing scheduler loop.")
+    scheduler_run.add_argument(
+        "--once", action="store_true", help="Run one scheduler tick and exit."
+    )
+    scheduler_run.add_argument(
+        "--interval-seconds",
+        type=float,
+        default=60.0,
+        help="Seconds between ticks (default: 60.0).",
+    )
+    scheduler_run.add_argument(
+        "--max-concurrent",
+        type=_positive_int_arg,
+        default=None,
+        metavar="N",
+        help=(
+            "Lower the effective owner global ceiling on concurrently RUNNING"
+            " top-level jobs for this run (aggregate admission only; cannot"
+            " raise the owner-configured ceiling)."
+        ),
+    )
+    scheduler_run.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
+    scheduler_run.add_argument("--json", action="store_true", help="JSON output")
+
+    # orch capacity show [--json]
+    capacity_parser = subparsers.add_parser(
+        "capacity",
+        help="Inspect ledger capacity pools and estimates (read-only).",
+    )
+    capacity_sub = capacity_parser.add_subparsers(
+        dest="capacity_command", required=True
+    )
+    capacity_show = capacity_sub.add_parser(
+        "show", help="Show capacity pools and ledger estimates."
+    )
+    capacity_show.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
+    capacity_show.add_argument("--json", action="store_true", help="JSON output")
 
     # orch retry|continue|try-worker
     retry_parser = subparsers.add_parser(
@@ -2674,7 +2731,24 @@ def handle_monitor(args: argparse.Namespace) -> int:
                 return 1
             print(render_monitor_frame(report))
             print("", flush=True)
-            if once or is_terminal_report(report):
+            # ADR-0002 D8 (M2-5) readout-only: a PREEMPTED run is terminal
+            # for the run, so the monitor must stop here.  The canonical
+            # set is authoritative; is_terminal_report() still enumerates
+            # the pre-D8 statuses (see the Step 001 report for the narrow
+            # unification proposal), so PREEMPTED is recognized from the
+            # report's own lifecycle status without duplicating any list.
+            lifecycle = report.get("lifecycle")
+            lifecycle_status = (
+                lifecycle.get("status") if isinstance(lifecycle, dict) else None
+            )
+            if (
+                once
+                or is_terminal_report(report)
+                or (
+                    isinstance(lifecycle_status, str)
+                    and lifecycle_status in {s.value for s in TERMINAL_RUN_STATUSES}
+                )
+            ):
                 return 0
             if deadline is not None and time.monotonic() >= deadline:
                 print(
@@ -3831,6 +3905,110 @@ def handle_job_cancel(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_scheduler_run(args: argparse.Namespace) -> int:
+    """Handle `orch scheduler run [--once] [--interval-seconds INT]`."""
+    from saberops.capacity.loop import run_scheduler_loop
+    from saberops.db import Database as _Database
+
+    db_path = getattr(args, "db", None)
+    db = _Database(db_path) if db_path else _Database()
+    run_once = bool(getattr(args, "once", False))
+    interval = float(getattr(args, "interval_seconds", 60.0) or 60.0)
+    max_concurrent = getattr(args, "max_concurrent", None)
+
+    readiness_svc: Any = None
+    try:
+        from saberops.model_access.readiness_service import ReadinessService
+        from saberops.project import owner_state_dir
+
+        readiness_svc = ReadinessService.for_owner_state(owner_state_dir())
+    except Exception:
+        readiness_svc = None
+
+    try:
+        result = run_scheduler_loop(
+            db,
+            tick_interval=interval,
+            once=run_once,
+            readiness_service=readiness_svc,
+            max_concurrent_override=max_concurrent,
+        )
+        if result is None or (not result.ran and result.reason in ("lease_held_by_other", "lost_lease")):
+            reason = result.reason if result is not None else "lease_held_by_other"
+            print(f"[!] Scheduler lease held by another instance ({reason})", file=sys.stderr)
+            return 2
+        if not result.ran and result.reason == "invalid_global_concurrency":
+            print(
+                "[!] Scheduler aborted: invalid global concurrency configuration",
+                file=sys.stderr,
+            )
+            return 2
+
+        if getattr(args, "json", False):
+            payload: list[dict[str, Any]] = []
+            if result is not None:
+                for d in result.decisions:
+                    job = getattr(d, "job", None)
+                    entry: dict[str, Any] = {
+                        "type": type(d).__name__,
+                        "job_id": job.job_id if job is not None else None,
+                    }
+                    pool_id = getattr(d, "pool_id", None)
+                    if pool_id is not None:
+                        entry["pool_id"] = str(pool_id)
+                    cand = getattr(d, "candidate", None)
+                    if cand is not None:
+                        entry["candidate"] = f"{cand.provider}/{cand.model}"
+                    reason = getattr(d, "reason", None)
+                    if reason is not None:
+                        entry["reason"] = str(reason)
+                    payload.append(entry)
+            print(json.dumps(payload, indent=2))
+        return 0
+    except Exception as exc:
+        print(f"[!] Scheduler loop failed: {exc}", file=sys.stderr)
+        return 1
+
+
+def handle_capacity_show(args: argparse.Namespace) -> int:
+    """Handle `orch capacity show [--json]` (read-only)."""
+    from dataclasses import asdict
+
+    from saberops.db import Database as _Database
+    from saberops.jobs.service import capacity as _capacity
+
+    db_path = getattr(args, "db", None)
+    # Open read-only to honour D5 lifecycle rule: create nothing, write nothing on read
+    db = _Database(db_path, read_only=True) if db_path else _Database(read_only=True)
+
+    try:
+        cap_view = _capacity(db)
+        if getattr(args, "json", False):
+            print(json.dumps(asdict(cap_view), indent=2))
+            return 0
+        print(f"Generated at : {cap_view.generated_at}")
+        print(f"Ledger wired : {cap_view.ledger_wired}")
+        if not cap_view.pools:
+            print("No capacity pools recorded.")
+            return 0
+        header = f"{'Pool':<18} {'Window':<8} {'Remaining':<12} {'Uncertainty':<12} {'Source':<10} {'Stale':<6} {'Excluded Until'}"
+        print(header)
+        print("-" * len(header))
+        for p in cap_view.pools:
+            rem = f"{p.remaining_est:.1f}%" if p.remaining_est is not None else "None"
+            unc = f"±{p.uncertainty:.1f}%" if p.uncertainty is not None else "0.0%"
+            src = p.source or "-"
+            stl = "yes" if p.stale else "no"
+            exc = p.excluded_until or "-"
+            print(
+                f"{p.pool_id:<18} {p.window_id:<8} {rem:<12} {unc:<12} {src:<10} {stl:<6} {exc}"
+            )
+        return 0
+    except Exception as exc:
+        print(f"[!] Capacity inspection failed: {exc}", file=sys.stderr)
+        return 1
+
+
 def handle_project_set_workflow(args: argparse.Namespace) -> int:
     """Handle `orch project set-workflow <preset> [--repo X]`."""
     from saberops.service import RunOperationError
@@ -4286,6 +4464,12 @@ def _dispatch(args: argparse.Namespace) -> int:
             return handle_job_list(args)
         elif args.job_command == "cancel":
             return handle_job_cancel(args)
+    elif args.command == "scheduler":
+        if args.scheduler_command == "run":
+            return handle_scheduler_run(args)
+    elif args.command == "capacity":
+        if args.capacity_command == "show":
+            return handle_capacity_show(args)
     elif args.command == "retry":
         return handle_retry(args)
     elif args.command == "continue":

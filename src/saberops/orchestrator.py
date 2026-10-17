@@ -24,6 +24,7 @@ from saberops.autonomous_runtime import (
     SupervisorAction,
     SupervisorStopReason,
 )
+from saberops.capacity.admission import order_candidates_for_role
 from saberops.config import (
     RunConfig,
     freeze_owner_binding_registry_payload,
@@ -1050,6 +1051,31 @@ def _reconstruct_frozen_worker_binding_registry(payload: Any | None) -> Any | No
         return binding_registry_from_mapping(payload)
     except Exception:  # noqa: BLE001 - corrupt frozen material must not launch
         return None
+
+
+def _current_executor_owner_token(db: Any, run_id: str) -> tuple[str | None, int | None]:
+    """Return ``(owner_id, generation)`` iff *this process* is the executor.
+
+    ADR-0002 D8 crash recovery binds a decision receipt to the exact executor
+    generation that made it, so the receipt must name the durable owner row
+    only when that row's recorded process incarnation **is this process**.
+    Looking up "whatever owner row happens to exist" would let a stale process
+    stamp its decision with another generation's identity, so anything not
+    positively adopted by this incarnation returns ``(None, None)`` -- an
+    unbound receipt that recovery refuses to promote (fail closed).
+    """
+    try:
+        owner = db.get_execution_owner(run_id)
+    except Exception:
+        return None, None
+    if owner is None or not owner.is_active:
+        return None, None
+    try:
+        if owner.identity != ProcessIdentity.for_self():
+            return None, None
+    except Exception:
+        return None, None
+    return owner.owner_id, int(owner.generation)
 
 
 class Orchestrator:
@@ -2692,7 +2718,14 @@ class Orchestrator:
             # other hard control-plane filter, so excluded candidates still
             # produce typed decision evidence and cannot be resurrected by
             # ranking or overrides.
-            candidates = list(base_candidates)
+            candidates = order_candidates_for_role(
+                role=current_role,
+                snapshot=routing_snapshot,
+                base_candidates=base_candidates,
+                policy=control_plane_policy,
+                quota_states=quota_states,
+                db=self.db,
+            )
             # Structured per-candidate skip evidence for this run: every
             # automatic candidate that cannot dispatch appends one
             # sanitized record (provider/model/binding, canonical skip
@@ -3217,7 +3250,14 @@ class Orchestrator:
                         provider_override=config.provider_override,
                         snapshot=routing_snapshot,
                     )
-                    candidates = list(base_candidates)
+                    candidates = order_candidates_for_role(
+                        role=current_role,
+                        snapshot=routing_snapshot,
+                        base_candidates=base_candidates,
+                        policy=control_plane_policy,
+                        quota_states=quota_states,
+                        db=self.db,
+                    )
                     selected_routing_context = routing_context_for_role(current_role)
                     self.db.record_event(
                         run_id,
@@ -3280,6 +3320,40 @@ class Orchestrator:
                     # drive method is never invoked here.
                     def _autonomous_stop(stop_summary: str, stop_reason: str) -> RunResult:
                         """Terminalize the run for a supervisor STOP (fail closed)."""
+                        if stop_reason == SupervisorStopReason.NO_ELIGIBLE_BINDING.value:
+                            # ADR-0002 D8 (M2-5): a durable job-owned run that
+                            # suffered genuine quota exhaustion with no
+                            # admitted fallback route parks (PREEMPTED +
+                            # requeue with resume capsule) instead of failing.
+                            # Standalone runs and non-quota stops decline
+                            # inside and keep this FAILED path unchanged.
+                            from saberops.preemption import complete_preemption
+
+                            _stop_owner_id, _stop_owner_gen = _current_executor_owner_token(
+                                self.db, run_id
+                            )
+                            preempted = complete_preemption(
+                                self.db,
+                                run_id=run_id,
+                                repo_path=str(repo),
+                                base_sha=base_commit,
+                                owner_id=_stop_owner_id,
+                                owner_generation=_stop_owner_gen,
+                                decision_ref=f"autonomous_stop:{stop_reason}",
+                            )
+                            if preempted.owned:
+                                assert preempted.status is not None
+                                return RunResult(
+                                    run_id=run_id,
+                                    passed=False,
+                                    status=preempted.status,
+                                    summary=preempted.summary,
+                                    target_repo=str(repo),
+                                    base_commit=base_commit,
+                                    attempts=attempts,
+                                    checks=checks,
+                                    reviews=reviews,
+                                )
                         now_stop = current_iso_timestamp()
                         self.db.update_run(
                             run_id=run_id,
@@ -4128,6 +4202,7 @@ class Orchestrator:
                         else True
                     ),
                     explicit_unknown_readiness=is_explicit,
+                    db=self.db,
                 )
                 # Keep the legacy string at this boundary for existing event
                 # consumers while persisting the authoritative typed decision
@@ -4176,6 +4251,7 @@ class Orchestrator:
                             if readiness_pre is not None
                             else True
                         ),
+                        db=self.db,
                     )
                 self.db.record_event(
                     run_id,
@@ -5418,7 +5494,14 @@ class Orchestrator:
                                     provider_override=config.provider_override,
                                     snapshot=routing_snapshot,
                                 )
-                                candidates = list(base_candidates)
+                                candidates = order_candidates_for_role(
+                                    role=current_role,
+                                    snapshot=routing_snapshot,
+                                    base_candidates=base_candidates,
+                                    policy=control_plane_policy,
+                                    quota_states=quota_states,
+                                    db=self.db,
+                                )
                                 selected_routing_context = routing_context_for_role(current_role)
                                 self.db.record_event(
                                     run_id,
@@ -5759,7 +5842,14 @@ class Orchestrator:
                                             for c in base_repair_candidates
                                             if c.provider not in blocked_repair_providers
                                         ]
-                                    repair_candidates = list(base_repair_candidates)
+                                    repair_candidates = order_candidates_for_role(
+                                        role=JobRole.WORKER,
+                                        snapshot=routing_snapshot,
+                                        base_candidates=base_repair_candidates,
+                                        policy=control_plane_policy,
+                                        quota_states=quota_states_rep,
+                                        db=self.db,
+                                    )
                                     selected_repair: (
                                         tuple[WorkerCandidate, WorkerAdapter] | None
                                     ) = None
@@ -5884,6 +5974,7 @@ class Orchestrator:
                                             readiness_state=rep_readiness_state,
                                             readiness_reason=rep_readiness_reason,
                                             readiness_executable_available=rep_executable,
+                                            db=self.db,
                                         )
                                         decision_rep = control_plane_decision(
                                             candidate=repair_candidate,
@@ -5902,6 +5993,7 @@ class Orchestrator:
                                             readiness_reason=rep_readiness_reason,
                                             readiness_executable_available=rep_executable,
                                             explicit_unknown_readiness=is_explicit_rep,
+                                            db=self.db,
                                         )
                                         self.db.record_event(
                                             run_id,
@@ -8466,6 +8558,42 @@ class Orchestrator:
                 summary = (
                     f"All {chain_attempt_count} attempt(s) failed to pass gate "
                     f"'{gate_command}'."
+                )
+            # ADR-0002 D8 (M2-5): quota-preemption owns this terminal outcome
+            # when the run suffered genuine quota exhaustion with no admitted
+            # fallback route and a durable job owns it.  The coordinator
+            # declines (owned=False) for ordinary gate failures, standalone
+            # runs, and non-quota exhaustion, leaving every assertion below
+            # -- including the plan-step failure marking -- untouched.  The
+            # hook sits BEFORE the plan-failure marking because a preempted
+            # run is parked, not failed: its plan steps stay exactly as they
+            # were for the resumed run to continue.
+            from saberops.preemption import complete_preemption as _complete_preemption
+
+            _chain_owner_id, _chain_owner_gen = _current_executor_owner_token(
+                self.db, run_id
+            )
+            _preemption = _complete_preemption(
+                self.db,
+                run_id=run_id,
+                repo_path=str(repo),
+                base_sha=base_commit,
+                owner_id=_chain_owner_id,
+                owner_generation=_chain_owner_gen,
+                decision_ref="end_of_chain",
+            )
+            if _preemption.owned:
+                assert _preemption.status is not None
+                return RunResult(
+                    run_id=run_id,
+                    passed=False,
+                    status=_preemption.status,
+                    summary=_preemption.summary,
+                    target_repo=str(repo),
+                    base_commit=base_commit,
+                    attempts=attempts,
+                    checks=checks,
+                    reviews=reviews,
                 )
             failed_step = next(
                 (

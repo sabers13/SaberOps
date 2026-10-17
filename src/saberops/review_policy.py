@@ -92,7 +92,7 @@ class StructuredFinding:
 
 
 class ParsedStructuredReview(NamedTuple):
-    """Result of :func:`parse_structured_review`; unpacks as a tuple."""
+    """Result of a strict structured-review parse; unpacks as a tuple."""
 
     verdict: ReviewPolicyVerdict
     summary: str
@@ -111,32 +111,6 @@ _REPAIR_SCOPE_ALIASES: dict[str, RepairScope] = {
 _POLICY_VERDICT_ALIASES: dict[str, ReviewPolicyVerdict] = {
     token.upper(): member for member in ReviewPolicyVerdict for token in (member.value, member.name)
 }
-
-_FENCED_JSON_PATTERN = re.compile(
-    r"```(?:[A-Za-z0-9_+-]+)?[ \t]*\r?\n?(?P<body>.*?)\r?\n?[ \t]*```",
-    re.DOTALL,
-)
-
-
-def _strip_code_fence(raw_text: str) -> str:
-    """Return the JSON body, tolerating one fenced code block amid prose.
-
-    The fence may carry any language tag (``json``, ``JSON``, ...); when the
-    whole payload is wrapped in prose, the first fenced block is extracted.
-    Text without a fence is returned unchanged so malformed payloads still
-    fail closed.
-    """
-    text = raw_text.strip()
-    match = _FENCED_JSON_PATTERN.search(text)
-    return match.group("body") if match is not None else text
-
-
-def _coerce_verdict(raw: object) -> ReviewPolicyVerdict:
-    token = str(raw).strip().upper()
-    member = _POLICY_VERDICT_ALIASES.get(token)
-    if member is None:
-        raise ReviewProtocolError(f"unknown verdict: {raw!r}")
-    return member
 
 
 def _coerce_classification(raw: object) -> FindingClassification:
@@ -218,67 +192,6 @@ def _parse_finding(item: object, index: int) -> StructuredFinding:
     )
 
 
-def parse_structured_review(
-    raw_text: str, *, is_final_round: bool = False
-) -> ParsedStructuredReview:
-    """Parse strict structured reviewer output into policy objects.
-
-    Accepts a strict JSON object with keys ``verdict``, ``summary``, and
-    ``findings`` (each finding carrying id, classification, title, severity,
-    contract_reference, invariant_or_requirement, code_location,
-    failure_scenario, evidence, minimum_correction, repair_scope). One fenced
-    code block with an optional language tag is tolerated, including when it
-    is embedded in surrounding prose. Anything else raises
-    :class:`ReviewProtocolError`. Every parsed finding must additionally pass
-    per-classification evidence validation (:func:`validate_finding_evidence`);
-    any reported violation raises :class:`ReviewProtocolError` naming it
-    before any disposition is computed, so structurally-valid-but-evidence-
-    invalid findings fail closed at this protocol boundary. The disposition
-    is always recomputed here; a raw verdict field that contradicts the
-    computed disposition fails closed.
-    """
-    candidate = _strip_code_fence(raw_text)
-    try:
-        data = json.loads(candidate)
-    except json.JSONDecodeError as exc:
-        raise ReviewProtocolError(f"malformed JSON in structured review: {exc}") from exc
-    if not isinstance(data, dict):
-        raise ReviewProtocolError("structured review payload must be a JSON object")
-    for key in ("verdict", "summary", "findings"):
-        if key not in data:
-            raise ReviewProtocolError(f"structured review missing required field: {key}")
-    verdict = _coerce_verdict(data["verdict"])
-    summary = data["summary"]
-    if not isinstance(summary, str):
-        raise ReviewProtocolError("field 'summary' must be a string")
-    raw_findings = data["findings"]
-    if not isinstance(raw_findings, list):
-        raise ReviewProtocolError("field 'findings' must be a list")
-    findings: list[StructuredFinding] = []
-    seen_ids: set[str] = set()
-    for index, item in enumerate(raw_findings):
-        finding = _parse_finding(item, index)
-        if finding.id in seen_ids:
-            raise ReviewProtocolError(f"duplicate finding id: {finding.id}")
-        seen_ids.add(finding.id)
-        findings.append(finding)
-    evidence_failures = [
-        f"'{finding.id}': {', '.join(violations)}"
-        for finding in findings
-        if (violations := validate_finding_evidence(finding))
-    ]
-    if evidence_failures:
-        raise ReviewProtocolError(
-            f"finding evidence validation failed: {'; '.join(evidence_failures)}"
-        )
-    disposition = compute_disposition(findings, is_final_round=is_final_round)
-    if verdict != disposition:
-        raise ReviewProtocolError(
-            f"contradictory review verdict: raw={verdict.value} computed={disposition.value}"
-        )
-    return ParsedStructuredReview(disposition, summary, tuple(findings), REVIEW_POLICY_VERSION)
-
-
 _JSON_FINDINGS_FENCE = re.compile(
     r"```(?:json|JSON)[ \t]*\r?\n(?P<body>.*?)\r?\n?[ \t]*```",
     re.DOTALL,
@@ -302,9 +215,8 @@ def parse_review_findings(
     ```json block holding ``{"findings": [...]}`` (``summary`` optional).
     The last such block is used. Every finding must parse and pass
     :func:`validate_finding_evidence`; otherwise :class:`ReviewProtocolError`
-    is raised and nothing is trusted. Unlike :func:`parse_structured_review`,
-    any ``verdict`` field is ignored rather than compared: the disposition is
-    always computed from the findings.
+    is raised and nothing is trusted. Any ``verdict`` field is ignored rather
+    than compared: the disposition is always computed from the findings.
     """
     blocks = list(_JSON_FINDINGS_FENCE.finditer(raw_text))
     if not blocks:

@@ -8,8 +8,10 @@ Hermetic and offline: no provider, model, credential, or network access.
 
 from __future__ import annotations
 
+import json
 import subprocess
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -51,12 +53,70 @@ _R3E1_CONNECTION = "r3e1-conn"
 
 @pytest.fixture()
 def isolated_xdg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Covers: ADR-0002 D2 / WORKFLOW §7 authorized setup-only fixture migration
+    for synthetic r3e1 candidates.
+    """
     state = tmp_path / "state"
     config = tmp_path / "config"
     cache = tmp_path / "cache"
     state.mkdir(parents=True)
     config.mkdir(parents=True)
     cache.mkdir(parents=True)
+    cfg_dir = config / "saberops"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    today_iso = datetime.now(UTC).date().isoformat()
+    cp_doc = {
+        "version": 2,
+        "providers": {
+            "opencode": {"state": "ALLOWED"},
+            "codex": {"state": "ALLOWED"},
+            "antigravity": {"state": "ALLOWED"},
+        },
+        "quota_pools": {
+            "opencode": {"mode": "UNENFORCED", "overage_possible": False},
+            "opencode-go": {"mode": "UNENFORCED", "overage_possible": False},
+            "opencode-zen": {"mode": "UNENFORCED", "overage_possible": False},
+            "chatgpt-plus": {"mode": "UNENFORCED", "overage_possible": False},
+        },
+        "postures": {
+            "opencode": {
+                "class": "A",
+                "policy_urls": ["https://example.com/opencode-policy"],
+                "ttl_days": 90,
+                "verified_on": today_iso,
+                "note": "synthetic verified test posture for r3e1 candidate characterization",
+            },
+            "opencode/opencode-go/*": {
+                "class": "A",
+                "policy_urls": ["https://example.com/opencode-go-policy"],
+                "ttl_days": 90,
+                "verified_on": today_iso,
+                "note": "synthetic verified test posture for r3e1 candidate characterization",
+            },
+            "opencode/opencode/*": {
+                "class": "C",
+                "policy_urls": ["https://example.com/opencode-zen-policy"],
+                "ttl_days": 90,
+                "verified_on": today_iso,
+                "note": "synthetic verified test posture for r3e1 candidate characterization",
+            },
+            "codex": {
+                "class": "A",
+                "policy_urls": ["https://example.com/codex-policy"],
+                "ttl_days": 90,
+                "verified_on": today_iso,
+                "note": "synthetic verified test posture for r3e1 candidate characterization",
+            },
+            "antigravity": {
+                "class": "A",
+                "policy_urls": ["https://example.com/antigravity-policy"],
+                "ttl_days": 90,
+                "verified_on": today_iso,
+                "note": "synthetic verified test posture for r3e1 candidate characterization",
+            },
+        },
+    }
+    (cfg_dir / "control_plane.json").write_text(json.dumps(cp_doc), encoding="utf-8")
     monkeypatch.setenv("XDG_STATE_HOME", str(state))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(config))
     monkeypatch.setenv("XDG_CACHE_HOME", str(cache))
@@ -152,6 +212,12 @@ def _seed_configured_reviewer() -> str:
 
 
 def _seed_reviewable_run(db: Database, repo: Path, run_id: str) -> Run:
+    """Covers: ADR-0002 D2 / WORKFLOW §7 authorized setup-only fixture migration
+    for synthetic r3e1 reviewable run.
+    """
+    from saberops.control_plane.policy import freeze_control_plane_policy, load_control_plane_policy
+
+    frozen = freeze_control_plane_policy(load_control_plane_policy())
     base = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
     ).stdout.strip()
@@ -165,6 +231,8 @@ def _seed_reviewable_run(db: Database, repo: Path, run_id: str) -> Run:
         gate_command="true",
         status=RunStatus.RUNNING,
         created_at=_R3E1_CREATED,
+        control_plane_snapshot_json=frozen.as_json(),
+        control_plane_snapshot_digest=frozen.digest,
     )
     db.create_run(run)
     db.create_attempt(

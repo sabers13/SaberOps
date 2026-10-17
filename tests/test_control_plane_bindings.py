@@ -32,6 +32,7 @@ from saberops.control_plane import (
     select_orch_binding,
     upsert_owner_binding,
 )
+from saberops.control_plane.binding_store import BindingStoreError
 from saberops.control_plane.bindings import resolve_execution_binding
 from saberops.model_access import (
     AccessStore,
@@ -45,7 +46,7 @@ from saberops.models import OrchBindingMode
 from saberops.project import owner_state_dir
 from saberops.routing_config import (
     DynamicCandidate,
-    add_dynamic_candidate_to_chain,
+    add_candidate_to_chain,
     format_candidate_id,
     load_effective_routing,
     load_effective_routing_payload,
@@ -58,6 +59,25 @@ _WORKER_MODEL = "b2-persist-worker-model"
 _ORCH_MODEL = "b2-persist-orch-model"
 _CONNECTION_ID = "opencode-account"
 _PROVIDER = "opencode"
+
+
+def _approve_and_add_candidate(
+    payload: dict[str, Any], *, role: str, candidate: DynamicCandidate
+) -> dict[str, Any]:
+    """Add an owner-approved discovered model through the production path.
+
+    The removed console helper (``add_dynamic_candidate_to_chain``) recorded
+    the approval in the canonical routing document and then added its identity.
+    This composes the same two production steps: the canonical
+    ``approved_candidates`` field plus :func:`add_candidate_to_chain`.
+    """
+    updated = dict(payload)
+    approved = dict(updated.get("approved_candidates") or {})
+    approved[candidate.candidate_id] = candidate.to_dict()
+    updated["approved_candidates"] = approved
+    return add_candidate_to_chain(
+        updated, role=role, candidate_id=candidate.candidate_id
+    )
 
 
 @pytest.fixture()
@@ -193,7 +213,7 @@ def test_c16b2_owner_workflow_persists_across_restart(
         approved_at=discovered_at,
     )
     payload = load_effective_routing_payload()
-    updated = add_dynamic_candidate_to_chain(
+    updated = _approve_and_add_candidate(
         payload, role="WORKER", candidate=approval
     )
     save_user_routing(updated)
@@ -218,7 +238,7 @@ def test_c16b2_owner_workflow_persists_across_restart(
         approved_at=discovered_at,
     )
     payload = load_effective_routing_payload()
-    payload = add_dynamic_candidate_to_chain(
+    payload = _approve_and_add_candidate(
         payload, role="WORKER", candidate=second_approval
     )
 
@@ -329,7 +349,7 @@ def _seed_two_routing_candidates() -> tuple[str, str]:
             approved_at=datetime.now(UTC).isoformat(),
         )
         save_user_routing(
-            add_dynamic_candidate_to_chain(
+            _approve_and_add_candidate(
                 load_effective_routing_payload(),
                 role="WORKER",
                 candidate=approval,
@@ -505,3 +525,44 @@ def test_c16b2_routing_move_route_reorders_canonical_chain(
             load_effective_routing_payload(), role="T9",
             group=1, direction="up",
         )
+
+
+# ---------------------------------------------------------------------------
+# Ported from the removed test_chat_quick_access.py role-routing checks: the
+# engine half of role-order append/reorder/remove/clear.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    state = tmp_path / "state"
+    config = tmp_path / "config"
+    cache = tmp_path / "cache"
+    for directory in (state, config, cache):
+        directory.mkdir(parents=True)
+    monkeypatch.setenv("XDG_STATE_HOME", str(state))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(cache))
+    monkeypatch.delenv("SABEROPS_PROFILE", raising=False)
+    monkeypatch.setenv("ORCH_BINDING_STORE", str(tmp_path / "bindings.json"))
+    monkeypatch.setenv("ORCH_ACCESS_STORE", str(tmp_path / "access.json"))
+    monkeypatch.setenv("ORCH_ACCESS_MODELS_STORE", str(tmp_path / "models.json"))
+    monkeypatch.setenv("ORCH_READINESS_STORE", str(tmp_path / "readiness.json"))
+    return tmp_path
+
+def test_ported_role_order_validation(isolated: Path) -> None:
+    """Ported engine half of test_role_routing_append_reorder_remove_and_chat_scope."""
+    owner = OwnerBindings()
+    updated = owner.with_role_order("reviewer", ("first", "second"))
+    assert updated.role_binding_ids("reviewer") == ("first", "second")
+    assert updated.reviewer_binding_id == "first"
+    assert updated.role_binding_ids("orchestrator") == ()
+    with pytest.raises(BindingStoreError):
+        owner.with_role_order("reviewer", ("dup", "dup"))
+    with pytest.raises(BindingStoreError):
+        owner.with_role_order("reviewer", ("",))
+    with pytest.raises(BindingStoreError):
+        owner.with_role_order("no-such-role", ("x",))
+    cleared = updated.with_role_order("reviewer", ())
+    assert cleared.role_binding_ids("reviewer") == ()
+    assert cleared.reviewer_binding_id is None

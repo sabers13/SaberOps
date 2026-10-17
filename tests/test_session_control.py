@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -331,6 +332,7 @@ def test_native_resume_keeps_readonly_permissions_and_frozen_environment(
     provider: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Covers: HV-2 isolation contract (opencode resume argv + pinned config)."""
     calls: list[tuple[list[str], dict[str, Any]]] = []
     monkeypatch.setattr("saberops.workers.codex.GitManager.get_changed_paths", lambda _: [])
 
@@ -378,7 +380,55 @@ def test_native_resume_keeps_readonly_permissions_and_frozen_environment(
         assert args[args.index("--tools") + 1] == "Read,Glob,Grep"
         assert args[args.index("--permission-mode") + 1] == "plan"
     else:
-        assert "--pure" in args and "--session" in args
+        # opencode v2.0.29 documents neither ``--pure`` nor ``--dir`` (HV-1 F1,
+        # fixed in Step 024/HV-2).  Isolation is the owned private config/home
+        # root (asserted in the env below) plus inline deny policies -- not an
+        # argv flag.
+        assert "--pure" not in args and "--dir" not in args
+        assert "--session" in args
+        assert kwargs["inherit_env"] is False
+        assert kwargs["env"]["OPENCODE_DISABLE_PROJECT_CONFIG"] == "1"
+        assert json.loads(kwargs["env"]["OPENCODE_CONFIG_CONTENT"]) == {
+            "enabled_providers": ["test"],
+            "policies": [
+                {"action": "integration.use", "resource": "plugin:*",
+                 "effect": "deny"},
+                {"action": "integration.use", "resource": "mcp:*",
+                 "effect": "deny"},
+                {"action": "integration.use", "resource": "skill:*",
+                 "effect": "deny"},
+            ],
+        }
+
+
+def test_opencode_direct_run_refuses_before_launch_when_isolation_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: HV-2 refusal before spawn (system config cannot be excluded)."""
+    import saberops.workers.opencode as opencode_adapter
+    from saberops.models import DispatchOutcome
+    from saberops.workers.opencode_isolation import OpenCodeIsolationUnavailable
+
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def runner(args: list[str], **kwargs: Any) -> ProcessResult:
+        calls.append((args, kwargs))
+        return ProcessResult(args, 0, "{}", "", 0.01)
+
+    def fail(_env: Any) -> Any:
+        raise OpenCodeIsolationUnavailable(
+            "OpenCode system configuration is present"
+        )
+
+    monkeypatch.setattr(opencode_adapter, "opencode_isolation", fail)
+    refused = OpenCodeAdapter(runner=runner).run(
+        WorkerRequest("Manual reply", tmp_path, "test/m")
+    )
+    assert refused.status == AttemptStatus.FAILED
+    assert refused.outcome == DispatchOutcome.ELIGIBILITY_SKIP
+    assert "system configuration" in (refused.error or "")
+    # Refusal happens before any process launch.
+    assert calls == []
 
 
 def test_only_successful_matching_orchestrator_session_is_reused(tmp_path: Path) -> None:
@@ -407,10 +457,55 @@ def test_only_successful_matching_orchestrator_session_is_reused(tmp_path: Path)
     assert resumes == [None, "native_12345678", None]
 
 
+def _seed_verified_codex_posture(config_home: Path) -> None:
+    """Seed an isolated owner config with a verified class-A posture for the
+    synthetic ``codex`` provider this orchestrator-dispatch run uses.
+
+    Covers: ADR-0002 D2 setup-only posture migration (D-0024), following the
+    accepted 0074109 precedent in ``tests/test_worker_hermetic_env.py``.  The run
+    dispatches a synthetic ``codex`` candidate with no matching posture record,
+    so the accepted M2-4b F1 admission seam rightfully skips it
+    (POSTURE_UNVERIFIED) and the manual-stop callback is never reached.  This
+    seeds ONLY that synthetic provider identity plus the same packaged
+    ``chatgpt-plus`` membership without ``overage_possible`` (the blank test DB
+    carries no quota evidence the historical fixture never provided).  No
+    assertion, candidate, or stop/retry expectation changes, no real vendor
+    receives an attestation, and no production posture/admission/pool semantics
+    are touched.  ``verified_on`` is stamped at run time with a 90-day TTL so
+    replay never expires.
+    """
+    cfg_dir = config_home / "saberops"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    today_iso = datetime.now(UTC).date().isoformat()
+    cp_doc = {
+        "version": 2,
+        "providers": {"codex": {"state": "ALLOWED"}},
+        "quota_pools": {
+            "chatgpt-plus": {
+                "mode": "STRICT",
+                "red_line_pct": 15.0,
+                "members": ["codex", "opencode/openai/*"],
+                "overage_possible": False,
+            }
+        },
+        "postures": {
+            "codex": {
+                "class": "A",
+                "policy_urls": ["https://example.com/synthetic-test-posture"],
+                "ttl_days": 90,
+                "verified_on": today_iso,
+                "note": "synthetic verified test posture for session-control fixtures",
+            }
+        },
+    }
+    (cfg_dir / "control_plane.json").write_text(json.dumps(cp_doc), encoding="utf-8")
+
+
 def test_manual_stop_terminalizes_run_before_gate_or_automatic_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Covers: ADR-0002 D2 setup-only posture migration (D-0024)."""
     from saberops.db import Database
     from saberops.models import RunStatus
     from saberops.orchestrator import Orchestrator
@@ -421,6 +516,7 @@ def test_manual_stop_terminalizes_run_before_gate_or_automatic_retry(
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.delenv("SABEROPS_PROFILE", raising=False)
     monkeypatch.delenv("ORCH_BINDING_STORE", raising=False)
+    _seed_verified_codex_posture(tmp_path / "config")
     calls: list[str] = []
     adapter = CodexAdapter(runner=lambda argv, **kwargs: ProcessResult(argv, 0, "", "", 0.01))
 
