@@ -319,6 +319,7 @@ def test_model_check_pins_checked_provider() -> None:
 
     def runner(argv: list[str], **kwargs: Any) -> ProcessResult:
         seen["config"] = json.loads(kwargs["env"]["OPENCODE_CONFIG_CONTENT"])
+        assert kwargs["inherit_env"] is False
         challenge = "SABEROPS_ACCESS_never"
         output = json.dumps({"type": "text", "part": {"text": challenge}})
         output += "\n" + json.dumps({"type": "step_finish", "part": {"reason": "stop"}})
@@ -337,6 +338,7 @@ def test_model_check_without_prefix_keeps_previous_behaviour() -> None:
 
     def runner(argv: list[str], **kwargs: Any) -> ProcessResult:
         seen["config"] = json.loads(kwargs["env"]["OPENCODE_CONFIG_CONTENT"])
+        assert kwargs["inherit_env"] is False
         return ProcessResult(argv, 1, "", "nope", 0.01)
 
     assert (

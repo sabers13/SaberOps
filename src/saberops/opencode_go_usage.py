@@ -104,6 +104,9 @@ def read_go_limits(executable: str) -> list[dict[str, Any]]:
             env["SABEROPS_GO_USAGE_OUTPUT"] = str(output)
             # Model enumeration initializes provider auth hooks without an
             # inference session, prompt, or change to the user's saved config.
+            # Popen is asynchronous: the owned root must stay alive through
+            # spawn, wait, timeout terminate/kill and final reap, and is only
+            # removed after the child is reaped (or when spawn itself fails).
             process = subprocess.Popen(
                 [executable, "models", "opencode-go"],
                 cwd=cwd,
@@ -113,29 +116,29 @@ def read_go_limits(executable: str) -> list[dict[str, Any]]:
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
             )
-        try:
-            process.wait(timeout=GO_TIMEOUT)
-        except subprocess.TimeoutExpired as exc:
-            raise GoUsageUnavailable("OpenCode Go quota query timed out.") from exc
-        finally:
-            if os.name == "posix":
-                try:
-                    os.killpg(process.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-            elif process.poll() is None:
-                process.terminate()
             try:
-                process.wait(timeout=1)
-            except subprocess.TimeoutExpired:
+                process.wait(timeout=GO_TIMEOUT)
+            except subprocess.TimeoutExpired as exc:
+                raise GoUsageUnavailable("OpenCode Go quota query timed out.") from exc
+            finally:
                 if os.name == "posix":
                     try:
-                        os.killpg(process.pid, signal.SIGKILL)
+                        os.killpg(process.pid, signal.SIGTERM)
                     except ProcessLookupError:
                         pass
-                else:
-                    process.kill()
-                process.wait()
+                elif process.poll() is None:
+                    process.terminate()
+                try:
+                    process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    if os.name == "posix":
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    else:
+                        process.kill()
+                    process.wait()
         if not output.is_file():
             raise GoUsageUnavailable(
                 "Connect OpenCode Go in the OpenCode CLI to read account limits."

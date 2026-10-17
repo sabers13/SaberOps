@@ -71,6 +71,11 @@ def test_model_check_requires_completed_challenge_and_denies_tools(
             definition = next((directory / ".agents/agents").glob("*.md")).read_text()
             assert "tools: []" in definition and "commandExecutionPolicy: off" in definition
             assert "--sandbox" in argv and argv[argv.index("--mode") + 1] == "plan"
+            # Antigravity keeps its pre-fixup contract: no inherit_env
+            # override, so run_process applies its default (inherit_env=True)
+            # and the login session resolves exactly as before.
+            assert "inherit_env" not in kwargs
+            assert kwargs["env"] == {}
             output = json.dumps({"status": "ERROR" if outcome == "error" else "SUCCESS",
                                  "response": challenge[0], "secret": "never-save"})
             if outcome == "partial":
@@ -116,6 +121,37 @@ def test_opencode_model_check_refuses_without_inheriting_ambient_env(
     )
     assert calls == []
     assert tmp_path.is_dir()
+
+
+def test_antigravity_model_check_keeps_inherited_login_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: HV-2 antigravity contract (effective inheritance, no vendor run)."""
+    import os
+
+    # Synthetic login-session prerequisites: visible to the real runner
+    # through run_process's default inheritance (no inherit_env override).
+    monkeypatch.setenv("SABEROPS_LOGIN_CANARY", "present-for-inheritance")
+    monkeypatch.setenv(
+        "PATH", "/synthetic-bin" + os.pathsep + os.environ.get("PATH", "")
+    )
+
+    def runner(argv: list[str], **kwargs: Any) -> ProcessResult:
+        assert argv[0] == "/fake/agy" and "--sandbox" in argv
+        # Pre-fixup contract restored: kwargs carries no inherit_env key, so
+        # run_process applies its default (True); the env overlay keeps its
+        # original empty shape.
+        assert "inherit_env" not in kwargs
+        assert kwargs["env"] == {}
+        assert os.environ["SABEROPS_LOGIN_CANARY"] == "present-for-inheritance"
+        assert os.environ["PATH"].split(os.pathsep)[0] == "/synthetic-bin"
+        assert Path(kwargs["cwd"]) != tmp_path and Path(kwargs["cwd"]).is_dir()
+        return ProcessResult(argv, 0, "", "", 0.01)
+
+    assert (
+        verify_native_model("/fake/agy", "antigravity", "m", runner=runner)
+        == "MODEL_CHECK_UNCONFIRMED"
+    )
 
 
 def test_fresh_account_can_verify_before_any_task_and_survives_refresh(

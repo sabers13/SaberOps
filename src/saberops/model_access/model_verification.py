@@ -79,8 +79,10 @@ def verify_native_model(
         # private config/home root is created with project/ancestor discovery
         # disabled.  Refuse before launch when isolation cannot be established
         # instead of inheriting the ambient environment.  The antigravity
-        # probe is untouched: it is a different vendor CLI whose login session
-        # is not subject to the OpenCode discovery guarantee.
+        # probe keeps its original contract (no inherit_env override, so the
+        # login session resolves exactly as before): it is a different vendor
+        # CLI whose login session is not subject to the OpenCode discovery
+        # guarantee.
         isolation: Any = None
         base_env: dict[str, str] = {}
         if backend == "opencode":
@@ -134,13 +136,16 @@ def verify_native_model(
             kwargs_env = env
         kwargs: dict[str, Any] = {
             "cwd": cwd, "env": kwargs_env, "timeout": MODEL_CHECK_TIMEOUT,
-            # Never inherit the parent environment: only the child environment
-            # built here reaches the probe.
-            "inherit_env": False,
             # Streaming activates the existing process-group timeout/cleanup.
             "on_stdout": lambda _line: None, "on_stderr": lambda _line: None,
             "input_text": "",
         }
+        if backend == "opencode":
+            # Only the OpenCode probe runs sealed: no parent environment
+            # inheritance, only the isolated child environment reaches it.
+            # Antigravity keeps its pre-fixup contract (inherit_env default),
+            # so its login session resolves exactly as before.
+            kwargs["inherit_env"] = False
         try:
             with isolation if isolation is not None else nullcontext():
                 result = runner(argv, **kwargs)
