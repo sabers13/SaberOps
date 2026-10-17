@@ -42,11 +42,12 @@ import tempfile
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Final, TextIO
+from typing import Any, Final, Protocol, TextIO
 
 from saberops.gate_history import (
     GateHistoryEntry,
@@ -1756,6 +1757,18 @@ def _acquire_one(paths: Sequence[Path], deadline: float) -> list[TextIO]:
         raise
 
 
+class GateSlotPoolProtocol(Protocol):
+    """Structural contract for the engine's host-gates slot pool.
+
+    Lets the executor accept the real file-lock pool or an equivalent test
+    double without importing a concrete implementation.
+    """
+
+    def heavy(self, *, wait: float | None = None) -> AbstractContextManager[None]: ...
+
+    def light(self, *, wait: float | None = None) -> AbstractContextManager[None]: ...
+
+
 class GateSlotPool:
     """The engine's ``host-gates`` local capacity pool (ADR-0003 D3).
 
@@ -1993,7 +2006,7 @@ class EngineGateExecutor:
     def __init__(
         self,
         *,
-        slot_pool: GateSlotPool | None = None,
+        slot_pool: GateSlotPoolProtocol | None = None,
         disk_check: Callable[..., str | None] | None = None,
     ) -> None:
         self._slot_pool = slot_pool
@@ -2405,6 +2418,7 @@ __all__ = [
     "GateScratchPreflightEvidence",
     "GateScratchPreflightResult",
     "GateSlotPool",
+    "GateSlotPoolProtocol",
     "GateSlotWaitTimeout",
     "_DEFAULT_SAFETY_FLOOR_BYTES",
     "_DEFAULT_TMPFS_CANDIDATE",

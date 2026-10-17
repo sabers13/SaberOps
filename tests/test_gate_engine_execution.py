@@ -28,6 +28,7 @@ from saberops.gate_profiles import (
 from saberops.gate_runner import (
     EngineGateExecutor,
     EngineGateRequest,
+    EngineGateResult,
     GateSlotPool,
     GateSlotWaitTimeout,
     host_disk_admission,
@@ -405,14 +406,29 @@ def test_orchestrator_seam_forwards(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     import saberops.orchestrator as orchestrator
 
     captured: dict[str, object] = {}
+    sentinel = EngineGateResult(
+        kind="G1",
+        producer="engine",
+        profile="fast",
+        outcome="PASS",
+        accepted=True,
+        reason="",
+        head_sha="h",
+        tests=1,
+        failed=(),
+        flaky=(),
+        wall_time=0.0,
+        history_path="",
+        outcome_path="",
+    )
 
     class _Recorder:
         def __init__(self, *args: object, **kwargs: object) -> None:
             captured["init"] = kwargs
 
-        def execute(self, request: EngineGateRequest) -> object:
+        def execute(self, request: EngineGateRequest) -> EngineGateResult:
             captured["request"] = request
-            return "sentinel"
+            return sentinel
 
     monkeypatch.setattr(orchestrator, "EngineGateExecutor", _Recorder)
     monkeypatch.setattr(orchestrator, "GateSlotPool", lambda common: "pool")
@@ -424,7 +440,7 @@ def test_orchestrator_seam_forwards(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         base="base",
         head_sha="head",
     )
-    assert result == "sentinel"
+    assert result is sentinel
     request = captured["request"]
     assert isinstance(request, EngineGateRequest)
     assert request.kind == "G1"

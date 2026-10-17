@@ -1179,13 +1179,13 @@ def _capture_runner(
     """Runner with ruff/mypy/pytest captured as recorded calls."""
     runner = _make_runner(repo, kind, tmp_path, monkeypatch)
     calls: list[tuple[str, list[str]]] = []
-    monkeypatch.setattr(runner, "command", lambda args, name, timeout=None: (0, ""))  # type: ignore[attr-defined]
+    monkeypatch.setattr(runner, "command", lambda args, name, timeout=None: (0, ""))
 
     def fake_pytest(name: str, args: list[str], budget: float | None = None) -> object:
         calls.append((name, list(args)))
         return g.Evidence(codes=[0], count=5)
 
-    monkeypatch.setattr(runner, "pytest", fake_pytest)  # type: ignore[attr-defined]
+    monkeypatch.setattr(runner, "pytest", fake_pytest)
     return runner, calls
 
 
@@ -1233,7 +1233,7 @@ def test_full_gate_reruns_only_failing_ids_serially(
     repo.mkdir()
     _init_main_repo(repo)
     runner = _make_runner(repo, "full", tmp_path, monkeypatch)
-    monkeypatch.setattr(runner, "command", lambda args, name, timeout=None: (0, ""))  # type: ignore[attr-defined]
+    monkeypatch.setattr(runner, "command", lambda args, name, timeout=None: (0, ""))
     calls: list[tuple[str, list[str]]] = []
 
     def fake_pytest(name: str, args: list[str], budget: float | None = None) -> object:
@@ -1244,7 +1244,7 @@ def test_full_gate_reruns_only_failing_ids_serially(
             )
         return g.Evidence(codes=[0], count=1, passed={"tests/test_a.py::test_x"})
 
-    monkeypatch.setattr(runner, "pytest", fake_pytest)  # type: ignore[attr-defined]
+    monkeypatch.setattr(runner, "pytest", fake_pytest)
     runner.run_checks("HEAD", [])  # type: ignore[attr-defined]
     assert [name for name, _ in calls] == ["parallel", "rerun"]
     assert calls[1][1] == ["-p", "no:xdist", "tests/test_a.py::test_x"]
@@ -1350,9 +1350,9 @@ def test_external_slot_env_skips_acquisition_without_blocking(
     _init_main_repo(repo)
     monkeypatch.setenv("SABEROPS_GATE_EXTERNAL_SLOT", "1")
     runner = _make_runner(repo, "full", tmp_path, monkeypatch)
-    monkeypatch.setattr(runner, "command", lambda args, name, timeout=None: (0, ""))  # type: ignore[attr-defined]
+    monkeypatch.setattr(runner, "command", lambda args, name, timeout=None: (0, ""))
     monkeypatch.setattr(
-        runner,  # type: ignore[attr-defined]
+        runner,
         "pytest",
         lambda name, args, budget=None: g.Evidence(codes=[0], count=2),
     )
