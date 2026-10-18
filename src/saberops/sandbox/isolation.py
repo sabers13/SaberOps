@@ -547,6 +547,18 @@ _GIT_REMOTE_WRITE_VERBS: Final[frozenset[str]] = frozenset(
     {"add", "remove", "rm", "rename", "set-url", "set-head", "set-branches",
      "prune", "update"}
 )
+#: ``git submodule`` verbs that write ``submodule.*`` entries into
+#: ``.git/config`` or mutate a submodule working tree (reads stay allowed).
+_GIT_SUBMODULE_WRITE_VERBS: Final[frozenset[str]] = frozenset(
+    {"add", "init", "update", "deinit", "sync", "set-url", "set-branch",
+     "absorbgitdirs"}
+)
+#: Options that write branch upstream configuration into ``.git/config``.
+_GIT_UPSTREAM_CONFIG_OPTIONS: Final[frozenset[str]] = frozenset(
+    {"--set-upstream", "--set-upstream-to", "--unset-upstream"}
+)
+#: Subcommands where the short ``-u`` form sets the upstream.
+_GIT_UPSTREAM_SHORT_SUBCOMMANDS: Final[frozenset[str]] = frozenset({"branch", "push"})
 #: Subcommands that accept ``--template`` / ``--config`` and could install hooks.
 _GIT_TEMPLATE_SUBCOMMANDS: Final[frozenset[str]] = frozenset({"init", "clone"})
 #: Options whose following bare token is data, not a path (commit messages,
@@ -556,6 +568,14 @@ _GIT_INLINE_DATA_OPTIONS: Final[frozenset[str]] = frozenset(
     {"-m", "--message", "--author", "--committer", "--grep",
      "--grep-reflog", "--format", "--pretty", "--date", "-S", "-n", "-o",
      "--output", "--subject", "--cleanup", "--reflog-message"}
+)
+
+
+#: Inherited environment variables that inject git configuration for the
+#: current process only; a worker must not inherit them (they can override
+#: ``core.hooksPath`` without touching any file).
+_GIT_CONFIG_INJECTION_ENV: Final[frozenset[str]] = frozenset(
+    {"GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS"}
 )
 
 
@@ -720,6 +740,18 @@ def git_invocation_analysis(
         return GitInvocationAnalysis(is_git=True, subcommand=None, allowed=True)
     subcommand = tokens[index]
     trailing = tokens[index + 1 :]
+    for token in trailing:
+        if token.split("=", 1)[0] in _GIT_UPSTREAM_CONFIG_OPTIONS:
+            return _refuse_git(
+                f"git {subcommand} {token.split('=', 1)[0]} writes branch upstream "
+                "configuration into .git/config",
+                subcommand,
+            )
+    if subcommand in _GIT_UPSTREAM_SHORT_SUBCOMMANDS and "-u" in trailing:
+        return _refuse_git(
+            f"git {subcommand} -u writes branch upstream configuration into .git/config",
+            subcommand,
+        )
     if subcommand in _GIT_FORBIDDEN_SUBCOMMANDS:
         return _refuse_git(f"git {subcommand} is not permitted for a worker", subcommand)
     if subcommand == "config":
@@ -729,6 +761,13 @@ def git_invocation_analysis(
         if verb in _GIT_REMOTE_WRITE_VERBS:
             return _refuse_git(
                 f"git remote {verb} rewrites the repository control surface", subcommand
+            )
+    if subcommand == "submodule":
+        verb = next((token for token in trailing if not token.startswith("-")), None)
+        if verb in _GIT_SUBMODULE_WRITE_VERBS:
+            return _refuse_git(
+                f"git submodule {verb} writes submodule configuration into .git/config",
+                subcommand,
             )
     if subcommand in _GIT_TEMPLATE_SUBCOMMANDS:
         for token in trailing:
@@ -796,6 +835,14 @@ def worker_session_env(
             WorkerIsolationReason.UNKNOWN_SESSION_AUTHORITY,
             f"{SESSION_AUTHORITY_ENV}={declared!r} is not a known session authority",
         )
+    # Drop inherited per-process git config injection (``GIT_CONFIG_COUNT`` /
+    # ``GIT_CONFIG_KEY_n`` / ``GIT_CONFIG_VALUE_n`` / ``GIT_CONFIG_PARAMETERS``).
+    # ``GIT_CONFIG_GLOBAL`` / ``GIT_CONFIG_SYSTEM`` are re-set below.
+    for key in list(source):
+        if key in _GIT_CONFIG_INJECTION_ENV or (
+            key.startswith("GIT_CONFIG_KEY_") or key.startswith("GIT_CONFIG_VALUE_")
+        ):
+            del source[key]
     if scratch_root is not None:
         if not os.path.isabs(scratch_root):
             raise WorkerIsolationViolation(

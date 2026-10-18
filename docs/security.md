@@ -93,6 +93,17 @@ Arguments that are data rather than paths (`git commit -m ...`,
 not this guard's business: they are governed by containment, the hardened
 environment and the effective `SandboxPolicy`.
 
+Scope note: the refused forms are the ones that can carry an arbitrary or
+safety-relevant key (`git config`, `-c`, `--config-env`, template hooks,
+`git remote`, `git branch -u`, `git push -u`, `git submodule add|init|...`).
+Ordinary workflow commands may still write git-owned branch metadata
+(`branch.<name>.remote` / `.merge`) through forms such as
+`git checkout -b <n> --track <remote>/<b>`; that cannot express `core.*`,
+`alias.*` or `core.hooksPath`, and under containment the underlying
+`.git/config` mask makes even it fail. `worker_session_env()` also drops
+inherited per-process config injection (`GIT_CONFIG_COUNT`,
+`GIT_CONFIG_KEY_n`, `GIT_CONFIG_VALUE_n`, `GIT_CONFIG_PARAMETERS`).
+
 **Kernel level.** `bwrap_mount_args_for_policy()` (the containment seam used
 by `saberops.process.run_sandboxed_process`) adds a read-only mask over
 `.git/config`, `.git/config.worktree` and `.git/hooks` for every contained

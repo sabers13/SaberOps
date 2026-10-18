@@ -314,6 +314,32 @@ def test_git_remote_mutations_are_refused(tmp_path: Path) -> None:
     ):
         reason = _reason_of(assert_git_command_allowed, argv, policy)
         assert reason is WorkerIsolationReason.FORBIDDEN_GIT_INVOCATION, argv
+    # Read-only remote inspection stays allowed.
+    assert git_invocation_analysis(["git", "remote", "-v"], policy).allowed
+
+
+def test_git_upstream_and_submodule_config_writes_are_refused(tmp_path: Path) -> None:
+    """Covers: M4 invariant -- every .git/config write path, not only `config`."""
+    policy = _policy(_worktree(tmp_path))
+    for argv in (
+        ["git", "branch", "-u", "origin/main"],
+        ["git", "branch", "--set-upstream-to=origin/main", "topic"],
+        ["git", "branch", "--unset-upstream"],
+        ["git", "push", "-u", "origin", "topic"],
+        ["git", "push", "--set-upstream", "origin", "topic"],
+        ["git", "submodule", "add", "https://evil.test/x.git", "vendor/x"],
+        ["git", "submodule", "init"],
+        ["git", "submodule", "update", "--init"],
+        ["git", "submodule", "absorbgitdirs"],
+    ):
+        reason = _reason_of(assert_git_command_allowed, argv, policy)
+        assert reason is WorkerIsolationReason.FORBIDDEN_GIT_INVOCATION, argv
+    for argv in (
+        ["git", "branch", "--list"],
+        ["git", "submodule", "status"],
+        ["git", "push", "origin", "topic"],
+    ):
+        assert git_invocation_analysis(argv, policy).allowed, argv
 
 
 def test_git_scope_escapes_are_refused(tmp_path: Path) -> None:
@@ -381,6 +407,30 @@ def test_worker_session_env_refuses_owner_escalation() -> None:
     assert reason is WorkerIsolationReason.WORKER_AUTHORITY_ESCALATION
     reason = _reason_of(worker_session_env, {SESSION_AUTHORITY_ENV: "superuser"})
     assert reason is WorkerIsolationReason.UNKNOWN_SESSION_AUTHORITY
+
+
+def test_worker_session_env_drops_inherited_git_config_injection() -> None:
+    """Covers: 'no ambient host configuration' -- per-process git injection."""
+    env = worker_session_env(
+        {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "core.hooksPath",
+            "GIT_CONFIG_VALUE_0": "/tmp/evil",
+            "GIT_CONFIG_PARAMETERS": "'core.hooksPath=/tmp/evil'",
+            "PATH": "/usr/bin",
+        }
+    )
+    for key in (
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_KEY_0",
+        "GIT_CONFIG_VALUE_0",
+        "GIT_CONFIG_PARAMETERS",
+    ):
+        assert key not in env
+    assert env["PATH"] == "/usr/bin"
+    # The hardening variables the seam sets are still present.
+    assert env["GIT_CONFIG_NOSYSTEM"] == "1"
+    assert env["GIT_CONFIG_GLOBAL"] == os.devnull
 
 
 # ---------------------------------------------------------------------------
