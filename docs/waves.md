@@ -7,6 +7,12 @@ the accepted-wave cleanup event consumed by Step 008 storage GC. It implements
 ADR-0004 §3 D2 and D4, §4 invariants 2, 3, 4 and 10, Amendment 3 (3x5), and
 Amendment 4 (cleanup eligibility).
 
+Step 011 / WX-2 adds the recovery seam to the same module: factual run-level
+handoffs on attempt completion, attempt failure and the long-worker observation,
+and lane quota preemption/auto-resume bridged to the existing M2-5 durable
+preemption protocol (ADR-0002 D8). It consumes WX-1's lane state machine without
+changing its existing contract.
+
 The module split mirrors the decision split: the engine does everything
 deterministic, models only supply lane code, a conflict resolution or named
 glue.
@@ -15,7 +21,7 @@ glue.
 |---|---|
 | `saberops.wave_models` | `Wave`, `Lane`, `WaveState`, `LaneState`, the two transition tables and (de)serialization |
 | `saberops.wave_admission` | the pure, fail-closed `admit_wave` decision |
-| `saberops.wave_executor` | worktrees, merges, one G3, state machine driving, cleanup emissions and the 3x5 wiring |
+| `saberops.wave_executor` | worktrees, merges, one G3, state machine driving, cleanup emissions, the 3x5 wiring, run-level handoffs and quota preemption/resume |
 | `saberops.orchestrator` | `admit_wave` / `execute_wave` entry points |
 
 ## The wave model
@@ -76,15 +82,19 @@ wave:  PLANNED -> RUNNING -> INTEGRATING -> GATED -> AWAITING_ACCEPT -> ACCEPTED
                           BLOCKED                  CANCELLED
 lane:  PLANNED -> RUNNING -> REVIEW -> FIX_UP_K -> RUNNING -> REVIEW
                                      -> REVIEWED_PROVISIONAL -> ACCEPTED
+                          \-> PREEMPTED -> RUNNING            (WX-2)
 ```
 
 `ACCEPTED` and `CANCELLED` are terminal for a wave; `ACCEPTED` is terminal for a
 lane. `BLOCKED` is a transient state that resumes into `RUNNING` (a cleared
-prerequisite, a resolved conflict, a fixed environment). The transitions live in
-`WAVE_ALLOWED_TRANSITIONS` / `LANE_ALLOWED_TRANSITIONS` and are applied only
-through `transition_wave` / `transition_lane`, which raise on any illegal move.
-The executor therefore cannot skip `GATED`, accept an ungated wave, or leave a
-terminal state by accident.
+prerequisite, a resolved conflict, a fixed environment). `PREEMPTED` is the
+WX-2 park: an executing lane whose attempt ended on quota exhaustion with no
+admitted fallback resumes into `RUNNING` once its parsed exclusion window
+expires. The transitions live in `WAVE_ALLOWED_TRANSITIONS` /
+`LANE_ALLOWED_TRANSITIONS` and are applied only through `transition_wave` /
+`transition_lane`, which raise on any illegal move. The executor therefore
+cannot skip `GATED`, accept an ungated wave, or leave a terminal state by
+accident.
 
 A blocked lane does not block the wave by itself: one lane failing is routed,
 never a wave failure (ADR-0004 invariant 4).
@@ -186,23 +196,78 @@ retirement and storage GC; Step 013 governs persistent policy and audit; Step 01
 exposes dry-run inventory and approval. A deleted local branch is never a deleted
 commit, evidence or remote branch.
 
+## Run-level handoffs (WX-2)
+
+Every attempt boundary leaves a factual handoff, built only from durable state
+and recorded events -- never from model memory and never as narration:
+
+* **attempt completion** -- `emit_attempt_handoff(..., succeeded=True)` records
+  the lane, the attempt id, the candidate SHA, artifacts and test counts;
+* **attempt failure** -- `succeeded=False` additionally records the failed
+  tests, repair suggestions and a **bounded repair route**: the lane's own
+  worker route while the fix-round budget permits, otherwise an explicit
+  `ESCALATE`, so a failed candidate can never open an unconstrained repair loop;
+* **long-worker observation** -- `observe_long_worker(...)` delegates the
+  existing t=300 transition (`RunSupervisor.observe_long_worker`) and records
+  the resulting health factually. Nothing polls, sleeps or calls a model; the
+  caller supplies the observation boundary.
+
+Each handoff carries a durable anchor (attempt id, candidate SHA or recorded
+event names); an unanchored attempt handoff is refused. `WaveHandoff` has a
+stable `as_payload()` and is emitted as `wave_attempt_handoff` /
+`wave_long_worker_handoff` through the same injected sink as every other wave
+event.
+
+## Quota preemption & auto-resume (WX-2 / M2-5)
+
+A wave lane (or unattended work) runs as a durable job. When its attempt ends on
+quota exhaustion **and no fallback model is admitted**, `preempt_lane(...)`:
+
+1. refuses if a fallback *is* admitted (that is ordinary fallback routing, not a
+   park) or if the attempt is not yet terminal (quota is never preempted
+   mid-attempt) or the lane is not executing;
+2. hands the durable facts to the injected M2-5 `QuotaPreemptionPort`, whose
+   default (`DatabaseQuotaPreemption`) captures the WIP checkpoint, anchors the
+   engine-owned checkpoint ref and returns the evidence-backed reset M2-5
+   parsed;
+3. moves the lane to `PREEMPTED` with a `LanePreemption` park record (checkpoint
+   ref/SHA, reset deadline, `not_before`, owning job, preemption count).
+
+`resume_preempted_lane(lane_id, now=...)` refuses before `not_before` and only
+then moves `PREEMPTED -> RUNNING` in the lane's own worktree, emitting
+`lane_resumed` with the lane's own worker route (`dispatch_model: main`), so the
+next dispatch returns to the main model once the exclusion window expires --
+never mid-attempt. When M2-5 has no evidence-backed reset the record carries
+`not_before=None` and the accepted probe/periodic wake decides; the engine never
+fabricates a deadline. A `PREEMPTED` lane occupies no child slot, exactly like
+`BLOCKED`/`REVIEW`.
+
 ## Orchestrator seam
 
 `Orchestrator.admit_wave(wave, target_head, posture_validator)` delegates to the
 pure admission decision, and `Orchestrator.execute_wave(wave, repo=...)` builds a
 `WaveExecutor` bound to the orchestrator's worktree base and its GS-2 engine gate
 executor, so a wave's single G3 runs through the same heavy-slot machinery as
-every other engine gate. Construction allocates nothing; `WaveExecutor.start()`
-is the first mutating call.
+every other engine gate. `execute_wave` also wires the WX-2 recovery defaults:
+the `observe_long_worker` transition is bound to this orchestrator's
+`RunSupervisor`, and quota preemption to `DatabaseQuotaPreemption` over the
+orchestrator's database; both remain injectable for hermetic callers.
+Construction allocates nothing; `WaveExecutor.start()` is the first mutating
+call.
 
 ## What this step does not do
 
-* It does not run a model. Routing rules, attribution, budgets as owner
-  questions and same-session repair resume are WX-2.
+* It does not run a model. Repair routing is delivered as a bounded handoff
+  field (`worker_route` while the fix budget permits, else `ESCALATE`);
+  attribution, budgets-as-owner-questions and the actual model dispatch remain
+  the Orchestrator's and later routing work.
 * It does not delete worktrees, branches or objects; it emits eligibility for
   Step 008.
 * It does not move `main`, push, or create the plan/registry objects owned by
   PL-1 and Step 015.
+* It does not re-implement M2-5: checkpoint capture, ref anchoring, capsule
+  persistence and reset parsing are delegated to `saberops.preemption` through
+  the injected port.
 * It does not supersede `parallel_work.execute_team` at runtime yet; the ADR
   retirement table and the caller switch belong to the integration that adopts
   the wave executor.

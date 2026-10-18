@@ -261,6 +261,21 @@ def test_transition_tables_cover_every_state() -> None:
         assert all(isinstance(target, LaneState) for target in lane_targets), lane_source
 
 
+def test_preempted_lane_parks_and_resumes() -> None:
+    """Covers: WX-2 (PREEMPTED park resumes into RUNNING; never terminal)."""
+    state = transition_lane(LaneState.RUNNING, LaneState.PREEMPTED)
+    assert state is LaneState.PREEMPTED
+    assert state in LANE_ALLOWED_TRANSITIONS
+    assert transition_lane(LaneState.PREEMPTED, LaneState.RUNNING) is LaneState.RUNNING
+    assert transition_lane(LaneState.PREEMPTED, LaneState.BLOCKED) is LaneState.BLOCKED
+    # A FIX_UP_K turn is executing work and may be parked too.
+    assert transition_lane(LaneState.FIX_UP_K, LaneState.PREEMPTED) is LaneState.PREEMPTED
+    # A parked lane is not terminal; an unexplored park is illegal.
+    assert not is_terminal_lane_state(LaneState.PREEMPTED)
+    assert not can_transition_lane(LaneState.PLANNED, LaneState.PREEMPTED)
+    assert not can_transition_lane(LaneState.PREEMPTED, LaneState.REVIEW)
+
+
 # -- serialization ----------------------------------------------------------
 
 

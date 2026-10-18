@@ -214,9 +214,13 @@ from saberops.wave_admission import (
 )
 from saberops.wave_admission import admit_wave as _admit_wave
 from saberops.wave_executor import (
+    DatabaseQuotaPreemption,
     DatabaseWaveEventSink,
     GateExecutorPort,
+    LongWorkerObserver,
     ProjectRegistry,
+    QuotaPreemptionPort,
+    SupervisorLongWorkerObserver,
     WaveEventSink,
     WaveExecutor,
     WaveGitPort,
@@ -8921,11 +8925,17 @@ class Orchestrator:
         integration_branch: str | None = None,
         integration_worktree: Path | str | None = None,
         slot_pool: GateSlotPool | None = None,
+        run_id: str | None = None,
+        long_worker_observer: LongWorkerObserver | None = None,
+        quota_preemption: QuotaPreemptionPort | None = None,
     ) -> WaveExecutor:
         """Build the deterministic wave executor for one admitted wave.
 
         Covers: ADR-0004 D2/D4 and Amendment 3 (the engine, and only the
-        engine, allocates worktrees, merges pinned SHAs and runs the one G3).
+        engine, allocates worktrees, merges pinned SHAs and runs the one G3),
+        plus the WX-2 recovery seams: the ``observe_long_worker`` transition is
+        wired to this orchestrator's ``RunSupervisor`` by default and quota
+        preemption to the M2-5 protocol over this orchestrator's database.
 
         The executor shares this orchestrator's worktree base and engine gate
         executor, so a wave's single G3 runs through the same GS-2 heavy-slot
@@ -8955,6 +8965,15 @@ class Orchestrator:
             if integration_worktree is not None
             else resolved_base / wave.wave_id / "integration"
         )
+        observer = long_worker_observer
+        if observer is None:
+            from saberops.supervisor import RunSupervisor
+
+            observer = SupervisorLongWorkerObserver(
+                RunSupervisor(
+                    db=self.db, registry=self.registry, worktree_base=resolved_base
+                )
+            )
         return WaveExecutor(
             wave,
             git=git or SubprocessWaveGit(),
@@ -8967,6 +8986,9 @@ class Orchestrator:
             project_id=project_id,
             integration_branch=integration_branch,
             integration_worktree=str(resolved_integration_wt),
+            run_id=run_id,
+            long_worker_observer=observer,
+            quota_preemption=quota_preemption or DatabaseQuotaPreemption(self.db),
         )
 
     def cleanup_run(self, run_id: str) -> dict[str, list[str]]:
