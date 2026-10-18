@@ -2752,11 +2752,14 @@ def handle_plan_validate(args: argparse.Namespace) -> int:
     try:
         store = _plan_store_for(args)
         if getattr(args, "all", False):
+            root_entries = (
+                sorted(entry.name for entry in store.root.iterdir() if entry.is_dir())
+                if store.root.is_dir()
+                else []
+            )
             targets = [
                 project_id
-                for project_id in sorted(
-                    entry.name for entry in store.root.iterdir() if entry.is_dir()
-                )
+                for project_id in root_entries
                 if store.active_version(project_id) is not None
             ]
             if not targets:
@@ -5445,7 +5448,7 @@ def main(argv: list[str] | None = None) -> int:
     # `orch plan show|validate ...` addresses the Step 015 plan store, while
     # `orch plan <run_id>` keeps its legacy run-plan contract. argparse cannot
     # mix an optional positional with subparsers (a run ID would be mistaken
-    # for a subcommand), so the store verbs live on the hidden `plan-store`
+    # for a subcommand), so the store verbs live on the `plan-store`
     # group and this shim rewrites only the exact `plan show|validate` prefix.
     # `orch plan --db X show` still means run ID "show" (escape hatch).
     if len(normalized) >= 2 and normalized[0] == "plan" and normalized[1] in ("show", "validate"):

@@ -64,7 +64,7 @@ validation and owner approval path.
   (`schedule_chained_waves`) and structured run summaries
   (`build_plan_run_report`) in `saberops.ready_frontier`, surfaced read-only
   via `orch project list|register|active` and `orch plan show|validate`
-  (store verbs live on the hidden `plan-store` group so legacy
+  (store verbs live on the `plan-store` command group so legacy
   `orch plan <run_id>` is byte-for-byte preserved). Still plan **data**,
   not dispatch: no lease, no worker launch, no slot admission.
 

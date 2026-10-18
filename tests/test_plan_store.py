@@ -622,6 +622,16 @@ def test_cli_plan_requires_run_id_or_subcommand() -> None:
     assert excinfo.value.code == 2
 
 
+def test_cli_plan_validate_all_empty_store_fails(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Covers: validating --all with no stored plans exits 2 without traceback."""
+    code, _, err = _cli(
+        "plan", "validate", "--all", "--store", str(tmp_path / "plans"), "--json", capsys=capsys
+    )
+    assert code == 2
+
+
 def test_cli_plan_legacy_run_id_still_works(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
