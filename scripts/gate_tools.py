@@ -48,6 +48,241 @@ CGROUP_MEMORY_MAX = "8G"
 _CGROUP_DISABLED = frozenset({"0", "off", "none", "false", "no"})
 _cgroup_cache: list[str] | None = None
 
+# --- D-0076: dynamic RAM-based slots, workers and the pre-admission guard ----
+# Slot counts and worker caps are derived from live memory instead of being
+# pinned.  Memory is read from /proc/meminfo with an os.sysconf fallback; no
+# third-party dependency and no product import is added here.  Explicit
+# environment knobs still win, so an owner can pin any value.
+SAFETY_FLOOR_GIB = 2.0
+LIGHT_SLOT_GIB = 1.0
+HEAVY_SLOT_GIB = 3.0
+WORKER_SESSION_GIB = 0.6
+MAX_LIGHT_SLOTS = 8
+DEFAULT_SLOT_WAIT = 3600.0
+HEAVY_DOUBLE_MIN_TOTAL_GIB = 32.0
+HEAVY_DOUBLE_MIN_AVAILABLE_GIB = 8.0
+HEAVY_DOUBLE_MIN_CORES = 12
+MEMORY_GUARD_ENV = "SABEROPS_GATE_MEMORY_GUARD"
+MIN_AVAILABLE_GB_ENV = "SABEROPS_GATE_MIN_AVAILABLE_GB"
+_MEMINFO_PATH = Path("/proc/meminfo")
+_GUARD_DISABLED = frozenset({"0", "off", "no", "false", "none"})
+
+
+def read_meminfo(path: Path = _MEMINFO_PATH) -> dict[str, int]:
+    """Parse ``/proc/meminfo`` into ``{field: bytes}``; empty when unreadable."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    values: dict[str, int] = {}
+    for line in text.splitlines():
+        key, sep, rest = line.partition(":")
+        if not sep:
+            continue
+        parts = rest.split()
+        if not parts:
+            continue
+        try:
+            values[key.strip()] = int(parts[0]) * 1024
+        except ValueError:
+            continue
+    return values
+
+
+def _sysconf_bytes(pages_key: str) -> int | None:
+    try:
+        pages = int(os.sysconf(pages_key))
+        size = int(os.sysconf("SC_PAGE_SIZE"))
+    except (ValueError, OSError, AttributeError):
+        return None
+    if pages <= 0 or size <= 0:
+        return None
+    return pages * size
+
+
+def total_memory_bytes() -> int | None:
+    """Total physical memory in bytes via ``/proc/meminfo`` then ``sysconf``."""
+    info = read_meminfo()
+    if "MemTotal" in info:
+        return info["MemTotal"]
+    return _sysconf_bytes("SC_PHYS_PAGES")
+
+
+def available_memory_bytes() -> int | None:
+    """Available memory in bytes via ``MemAvailable`` then a free-memory fallback."""
+    info = read_meminfo()
+    if "MemAvailable" in info:
+        return info["MemAvailable"]
+    if {"MemFree", "Buffers", "Cached"} <= set(info):
+        return info["MemFree"] + info["Buffers"] + info["Cached"]
+    return _sysconf_bytes("SC_AVPHYS_PAGES")
+
+
+def cpu_core_count() -> int:
+    return max(1, os.cpu_count() or 1)
+
+
+def dynamic_light_slots(
+    available_bytes: int | None = None, cpu_cores: int | None = None
+) -> int:
+    """``max(1, min(MAX_LIGHT_SLOTS, (MemAvailable - 2GiB) // 1GiB, cores // 2))``."""
+    available = available_memory_bytes() if available_bytes is None else available_bytes
+    cores = cpu_core_count() if cpu_cores is None else cpu_cores
+    if available is None:
+        return 1
+    usable = available - int(SAFETY_FLOOR_GIB * GB)
+    if usable <= 0:
+        return 1
+    by_ram = usable // int(LIGHT_SLOT_GIB * GB)
+    by_cpu = cores // 2
+    return max(1, min(MAX_LIGHT_SLOTS, by_ram, by_cpu))
+
+
+def dynamic_heavy_slots(
+    total_bytes: int | None = None,
+    available_bytes: int | None = None,
+    cpu_cores: int | None = None,
+) -> int:
+    """Return 1 by default, 2 only on a large, idle, many-core host (D-0076)."""
+    total = total_memory_bytes() if total_bytes is None else total_bytes
+    available = available_memory_bytes() if available_bytes is None else available_bytes
+    cores = cpu_core_count() if cpu_cores is None else cpu_cores
+    if total is None or available is None:
+        return 1
+    if (
+        total >= int(HEAVY_DOUBLE_MIN_TOTAL_GIB * GB)
+        and available >= int(HEAVY_DOUBLE_MIN_AVAILABLE_GIB * GB)
+        and cores >= HEAVY_DOUBLE_MIN_CORES
+    ):
+        return 2
+    return 1
+
+
+def dynamic_worker_count(
+    available_bytes: int | None = None, cpu_cores: int | None = None
+) -> int:
+    """``max(1, min(cpu_cores, int(MemAvailable // 0.6GiB)))`` (D-0076)."""
+    available = available_memory_bytes() if available_bytes is None else available_bytes
+    cores = cpu_core_count() if cpu_cores is None else cpu_cores
+    if available is None:
+        return min(cores, DEFAULT_GATE_WORKERS)
+    by_ram = int(available // int(WORKER_SESSION_GIB * GB))
+    return max(1, min(cores, by_ram))
+
+
+def memory_guard_enabled() -> bool:
+    return os.environ.get(MEMORY_GUARD_ENV, "1").strip().lower() not in _GUARD_DISABLED
+
+
+def heavy_gate_memory_floor_bytes() -> int:
+    """Live headroom a heavy gate needs before it may start (2 GiB + 3 GiB)."""
+    floor = int((SAFETY_FLOOR_GIB + HEAVY_SLOT_GIB) * GB)
+    raw = os.environ.get(MIN_AVAILABLE_GB_ENV, "").strip()
+    if not raw:
+        return floor
+    try:
+        override = float(raw)
+    except ValueError:
+        return floor
+    return max(0, int(override * GB))
+
+
+def wait_for_memory_budget(
+    floor_bytes: int,
+    *,
+    wait: float,
+    notify: Callable[[str], None] = print,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> bool:
+    """Soft-queue until available RAM clears ``floor_bytes``, bounded by ``wait``.
+
+    Returns True when the floor is satisfied (or memory cannot be read) and
+    False when the budget elapsed first.  It never turns unreadable memory into
+    a failure; the caller proceeds with its ordinary slot wait either way.
+    """
+    if floor_bytes <= 0:
+        return True
+    deadline = clock() + max(0.0, wait)
+    announced = False
+    while True:
+        available = available_memory_bytes()
+        if available is None or available >= floor_bytes:
+            return True
+        if not announced:
+            notify(
+                f"waiting for memory budget: available={available} bytes "
+                f"floor={floor_bytes} bytes"
+            )
+            announced = True
+        if clock() >= deadline:
+            return False
+        sleep(min(0.5, max(0.0, deadline - clock())))
+
+
+def resolve_slot_counts(
+    env: dict[str, str] | None = None,
+) -> tuple[int, int, float]:
+    """Return ``(heavy, light, wait)`` from the environment or live memory.
+
+    ``SABEROPS_GATE_SLOTS`` / ``SABEROPS_LANE_SLOTS`` / ``SABEROPS_GATE_SLOT_WAIT``
+    stay authoritative when set; otherwise heavy/light follow the D-0076 dynamic
+    policy.  A malformed value raises ``ValueError`` exactly as before.
+    """
+    environ = os.environ if env is None else env
+    heavy_raw = environ.get("SABEROPS_GATE_SLOTS", "").strip()
+    light_raw = environ.get("SABEROPS_LANE_SLOTS", "").strip()
+    wait_raw = environ.get("SABEROPS_GATE_SLOT_WAIT", "").strip()
+    wait = float(wait_raw) if wait_raw else DEFAULT_SLOT_WAIT
+    if wait < 0:
+        raise ValueError("slot wait must be >= 0")
+    if heavy_raw:
+        heavy = int(heavy_raw)
+        if heavy < 1:
+            raise ValueError("heavy slot count must be >= 1")
+    else:
+        heavy = dynamic_heavy_slots()
+    if light_raw:
+        light = int(light_raw)
+        if light < 1:
+            raise ValueError("light slot count must be >= 1")
+    else:
+        light = dynamic_light_slots()
+    return heavy, light, wait
+
+
+def purge_stale_slot_metadata(root: Path, indices: range) -> tuple[int, ...]:
+    """Unlink ``<index>.json`` whose recorded holder PID is provably dead.
+
+    Self-healing (D-0076): a process that died or was interrupted leaves its
+    ``<index>.json`` behind, producing a misleading "waiting for ... <dead pid>"
+    notice.  ``flock`` is released on process death, so a dead recorded PID
+    always means the metadata is phantom and can be removed immediately.
+    """
+    purged: list[int] = []
+    for index in indices:
+        meta = root / f"{index}.json"
+        try:
+            raw = meta.read_text()
+        except OSError:
+            continue
+        try:
+            record = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        pid = record.get("pid")
+        if not isinstance(pid, int) or isinstance(pid, bool) or alive(pid):
+            continue
+        try:
+            meta.unlink()
+        except OSError:
+            continue
+        purged.append(index)
+    return tuple(purged)
+
+
 # Evidence labels: kind + producer are part of the history ledger contract
 # (ADR-0004 D3).  ``kind`` classifies the lifecycle point; ``producer`` proves
 # the gate was run by the engine, never by a model during iteration (G0).
@@ -227,6 +462,7 @@ def slot(
     message: str = "waiting for full-gate slot: ",
     acquire_all: bool = False,
     slot_env: str = "SABEROPS_GATE_SLOTS",
+    drain_max: int | None = None,
 ) -> Iterator[None]:
     """flock releases on death; lane observers reserve all slots until entry.
 
@@ -235,11 +471,22 @@ def slot(
     wait for slots they do not hold, so there is no circular wait and no
     deadlock: lanes queue on heavy before taking light, and the full gate
     takes heavy before draining light.
+
+    ``drain_max`` extends an ``acquire_all`` hold to indices ``0..drain_max``
+    (the heavy-gate monopoly invariant, D-0076): the heavy gate drains *every
+    potential* light index, not merely the count this process computed, so a
+    lane that sized itself from a different memory reading cannot slip in.
+
+    ``<index>.json`` metadata whose recorded PID is dead is unlinked before any
+    wait notice is built, so a phantom holder is never displayed.
     """
     if count < 1:
         raise ValueError(f"{slot_env} must be positive")
+    lock_count = count
+    if acquire_all and drain_max is not None and drain_max + 1 > lock_count:
+        lock_count = drain_max + 1
     root.mkdir(parents=True, exist_ok=True)
-    handles: list[TextIO] = [(root / f"{i}.lock").open("a+") for i in range(count)]
+    handles: list[TextIO] = [(root / f"{i}.lock").open("a+") for i in range(lock_count)]
     acquired: list[TextIO] = []
     started = time.monotonic()
     next_notice = started
@@ -254,8 +501,8 @@ def slot(
                         break
                 except BlockingIOError:
                     pass
-            if (observe and len(acquired) == count) or (not observe and acquired):
-                if not observe and hold_all and len(acquired) < count:
+            if (observe and len(acquired) == lock_count) or (not observe and acquired):
+                if not observe and hold_all and len(acquired) < lock_count:
                     for handle in acquired:
                         fcntl.flock(handle, fcntl.LOCK_UN)
                     acquired.clear()
@@ -266,14 +513,17 @@ def slot(
                     fcntl.flock(handle, fcntl.LOCK_UN)
                 acquired.clear()
             if time.monotonic() >= next_notice:
-                holders = []
-                for i in range(count):
+                # Self-healing: drop provably dead metadata before showing it.
+                purge_stale_slot_metadata(root, range(lock_count))
+                holders: list[str] = []
+                for i in range(lock_count):
                     meta = root / f"{i}.json"
-                    if meta.exists():
-                        try:
-                            holders.append(meta.read_text())
-                        except FileNotFoundError:
-                            pass
+                    if not meta.exists():
+                        continue
+                    try:
+                        holders.append(meta.read_text())
+                    except FileNotFoundError:
+                        pass
                 notify(message + "; ".join(holders))
                 sys.stdout.flush()
                 next_notice = time.monotonic() + 60
@@ -281,6 +531,9 @@ def slot(
                 raise TimeoutError("SLOT_WAIT_TIMEOUT")
             time.sleep(min(0.1, max(0, wait - (time.monotonic() - started))))
         if not observe:
+            # We hold the lock(s): any metadata here is phantom.  Clear a dead
+            # holder's record before publishing our own (D-0076 self-healing).
+            purge_stale_slot_metadata(root, range(lock_count))
             for handle in acquired:
                 index = handles.index(handle)
                 (root / f"{index}.json").write_text(json.dumps(record))
@@ -629,9 +882,7 @@ def exclusive_cli(argv: list[str]) -> int:
     heavy_root = common / "saberops-gate-slots"
     light_root = common / "saberops-gate-light-slots"
     try:
-        heavy_count = int(os.environ.get("SABEROPS_GATE_SLOTS", "1"))
-        light_count = int(os.environ.get("SABEROPS_LANE_SLOTS", "2"))
-        wait = float(os.environ.get("SABEROPS_GATE_SLOT_WAIT", "3600"))
+        heavy_count, light_count, wait = resolve_slot_counts()
     except ValueError as error:
         print(f"INFRA SLOT_WAIT_TIMEOUT ({error})", flush=True)
         return 3
@@ -642,6 +893,8 @@ def exclusive_cli(argv: list[str]) -> int:
         "kind": "exclusive",
     }
     try:
+        if memory_guard_enabled():
+            wait_for_memory_budget(heavy_gate_memory_floor_bytes(), wait=wait)
         with slot(
             heavy_root,
             record,
@@ -658,6 +911,7 @@ def exclusive_cli(argv: list[str]) -> int:
                 acquire_all=True,
                 message="waiting for running lane checks: ",
                 slot_env="SABEROPS_LANE_SLOTS",
+                drain_max=MAX_LIGHT_SLOTS,
             ):
                 completed = subprocess.run(cmd, check=False)
                 return completed.returncode
@@ -929,10 +1183,13 @@ class Runner:
                 return self.run_checks(base, also)
             heavy_root = self.common / "saberops-gate-slots"
             light_root = self.common / "saberops-gate-light-slots"
-            heavy_count = int(os.environ.get("SABEROPS_GATE_SLOTS", "1"))
-            light_count = int(os.environ.get("SABEROPS_LANE_SLOTS", "2"))
-            wait = float(os.environ.get("SABEROPS_GATE_SLOT_WAIT", "3600"))
+            heavy_count, light_count, wait = resolve_slot_counts()
             if self.kind == "full":
+                # Pre-admission memory guard: the heavy gate is the memory-hungry
+                # run, so queue on live RAM (bounded by the slot wait) instead of
+                # racing the machine into OOM (D-0076).
+                if memory_guard_enabled():
+                    wait_for_memory_budget(heavy_gate_memory_floor_bytes(), wait=wait)
                 with slot(
                     heavy_root,
                     self.record,
@@ -949,6 +1206,7 @@ class Runner:
                         acquire_all=True,
                         message="waiting for running lane checks: ",
                         slot_env="SABEROPS_LANE_SLOTS",
+                        drain_max=MAX_LIGHT_SLOTS,
                     ):
                         return self.run_checks(base, also)
             with slot(
@@ -1005,7 +1263,7 @@ class Runner:
             # D-0061: ONE unified parallel pass; the serial tier is gone.  The
             # only serial execution left is the deterministic rerun of genuinely
             # failing node IDs (FLAKY_PASS evaluation per ADR-0003 D5).
-            workers = str(positive_int_env(SABEROPS_GATE_WORKERS_ENV, DEFAULT_GATE_WORKERS))
+            workers = str(positive_int_env(SABEROPS_GATE_WORKERS_ENV, dynamic_worker_count()))
             initial = self.pytest("parallel", ["-n", workers, "--dist", "worksteal"])
             self.test_count = initial.count
             if (

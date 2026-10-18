@@ -26,12 +26,14 @@ from saberops.gate_profiles import (
     GateProfileName,
 )
 from saberops.gate_runner import (
+    MAX_LIGHT_SLOTS,
     EngineGateExecutor,
     EngineGateRequest,
     EngineGateResult,
     GateSlotPool,
     GateSlotWaitTimeout,
     host_disk_admission,
+    resolve_slot_capacity,
 )
 from saberops.gate_scope import RetirementAction, RetirementEntry
 
@@ -351,6 +353,9 @@ def test_slot_pool_two_light_slots(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     """Covers: ADR-0003 D3 (light slots = 2 concurrent)."""
     common = tmp_path / "common"
     monkeypatch.setenv("SABEROPS_GATE_SLOT_WAIT", "5")
+    # Pin the light count: the D-0076 default is RAM-derived and this test
+    # asserts exactly two concurrent light slots.
+    monkeypatch.setenv("SABEROPS_LANE_SLOTS", "2")
     held: list[int] = []
     guard = threading.Lock()
     release = threading.Event()
@@ -453,6 +458,19 @@ def test_slot_pool_refuses_invalid_configuration(
     with pytest.raises(GateSlotWaitTimeout):
         with GateSlotPool(tmp_path / "c").light():
             pass
+
+
+def test_slot_pool_env_overrides_dynamic_capacity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: D-0076 (engine pool honours explicit knobs; drains the ceiling)."""
+    monkeypatch.setenv("SABEROPS_GATE_SLOTS", "2")
+    monkeypatch.setenv("SABEROPS_LANE_SLOTS", "3")
+    capacity = resolve_slot_capacity()
+    assert (capacity.heavy, capacity.light) == (2, 3)
+    assert capacity.source == "env"
+    # The heavy gate drains every potential light index, not just three.
+    assert capacity.drain_lock_count >= MAX_LIGHT_SLOTS + 1
 
 
 def test_engine_history_refuses_producer_after_append(tmp_path: Path) -> None:

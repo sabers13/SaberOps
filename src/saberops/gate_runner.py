@@ -1692,17 +1692,313 @@ class GateSlotWaitTimeout(RuntimeError):
     reason_code = "SLOT_WAIT_TIMEOUT"
 
 
-def _slot_counts() -> tuple[int, int, float]:
-    """Read heavy/light slot counts and the wait budget from the environment."""
+# ---------------------------------------------------------------------------
+# D-0076: dynamic RAM-based capacity (hermetic, zero extra dependencies)
+# ---------------------------------------------------------------------------
+#
+# Slot counts used to be static (``SABEROPS_GATE_SLOTS=1``,
+# ``SABEROPS_LANE_SLOTS=2``).  On a large host that throttles parallel
+# progress; on a small one it can drive the machine into OOM.  The dynamic
+# policy reads live memory from ``/proc/meminfo`` (``MemAvailable`` /
+# ``MemTotal``) with an ``os.sysconf`` fallback and derives the slot and worker
+# budgets from it.  Explicit environment knobs still win, so an owner can pin a
+# value when needed.
+
+GIB: Final[int] = 1024 ** 3
+
+#: Reserved for the OS, editor/UI and interactive shells before any slot is
+#: handed out.
+SAFETY_FLOOR_GIB: Final[float] = 2.0
+#: Memory cost of one light (G1/G2 lane) slot and one heavy (G3/main) slot.
+LIGHT_SLOT_GIB: Final[float] = 1.0
+HEAVY_SLOT_GIB: Final[float] = 3.0
+#: Per worker-session estimate used for pytest worker auto-scaling.
+WORKER_SESSION_GIB: Final[float] = 0.6
+
+#: Absolute ceiling on light slots; the heavy gate drains indices
+#: ``0..MAX_LIGHT_SLOTS`` so this is the monopoly-invariant bound.
+MAX_LIGHT_SLOTS: Final[int] = 8
+
+#: The heavy slot may double only on a large, otherwise-idle machine.
+HEAVY_DOUBLE_MIN_TOTAL_GIB: Final[float] = 32.0
+HEAVY_DOUBLE_MIN_AVAILABLE_GIB: Final[float] = 8.0
+HEAVY_DOUBLE_MIN_CORES: Final[int] = 12
+
+DEFAULT_SLOT_WAIT_SECONDS: Final[float] = 3600.0
+
+#: Pre-admission memory guard knobs.
+MEMORY_GUARD_ENV: Final[str] = "SABEROPS_GATE_MEMORY_GUARD"
+MIN_AVAILABLE_GB_ENV: Final[str] = "SABEROPS_GATE_MIN_AVAILABLE_GB"
+
+_MEMINFO_PATH: Final[Path] = Path("/proc/meminfo")
+_GUARD_DISABLED: Final[frozenset[str]] = frozenset({"0", "off", "no", "false", "none"})
+
+
+def read_meminfo(path: Path | str = _MEMINFO_PATH) -> dict[str, int]:
+    """Parse ``/proc/meminfo`` into ``{field: bytes}``; empty when unreadable.
+
+    ``/proc/meminfo`` reports kB values; each is multiplied by 1024 so every
+    number this module exposes is in bytes.
+    """
     try:
-        heavy = int(os.environ.get("SABEROPS_GATE_SLOTS", "1"))
-        light = int(os.environ.get("SABEROPS_LANE_SLOTS", "2"))
-        wait = float(os.environ.get("SABEROPS_GATE_SLOT_WAIT", "3600"))
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    values: dict[str, int] = {}
+    for line in text.splitlines():
+        key, sep, rest = line.partition(":")
+        if not sep:
+            continue
+        parts = rest.split()
+        if not parts:
+            continue
+        try:
+            values[key.strip()] = int(parts[0]) * 1024
+        except ValueError:
+            continue
+    return values
+
+
+def _sysconf_bytes(pages_key: str) -> int | None:
+    """Return ``SC_*_PAGES * SC_PAGE_SIZE`` bytes, or ``None`` on any failure."""
+    try:
+        pages = int(os.sysconf(pages_key))
+        size = int(os.sysconf("SC_PAGE_SIZE"))
+    except (ValueError, OSError, AttributeError):
+        return None
+    if pages <= 0 or size <= 0:
+        return None
+    return pages * size
+
+
+def total_memory_bytes() -> int | None:
+    """Total physical memory in bytes via ``/proc/meminfo`` then ``sysconf``."""
+    info = read_meminfo()
+    if "MemTotal" in info:
+        return info["MemTotal"]
+    return _sysconf_bytes("SC_PHYS_PAGES")
+
+
+def available_memory_bytes() -> int | None:
+    """Available memory in bytes via ``MemAvailable`` then a free-memory fallback."""
+    info = read_meminfo()
+    if "MemAvailable" in info:
+        return info["MemAvailable"]
+    if {"MemFree", "Buffers", "Cached"} <= info.keys():
+        return info["MemFree"] + info["Buffers"] + info["Cached"]
+    return _sysconf_bytes("SC_AVPHYS_PAGES")
+
+
+def cpu_core_count() -> int:
+    """Return the logical CPU count, clamped to at least one."""
+    return max(1, os.cpu_count() or 1)
+
+
+def dynamic_light_slots(
+    *,
+    available_bytes: int | None = None,
+    cpu_cores: int | None = None,
+) -> int:
+    """``max(1, min(MAX_LIGHT_SLOTS, (MemAvailable - 2GiB) // 1GiB, cores // 2))``."""
+    available = available_memory_bytes() if available_bytes is None else available_bytes
+    cores = cpu_core_count() if cpu_cores is None else cpu_cores
+    if available is None:
+        return 1
+    usable = available - int(SAFETY_FLOOR_GIB * GIB)
+    if usable <= 0:
+        return 1
+    by_ram = usable // int(LIGHT_SLOT_GIB * GIB)
+    by_cpu = cores // 2
+    return max(1, min(MAX_LIGHT_SLOTS, by_ram, by_cpu))
+
+
+def dynamic_heavy_slots(
+    *,
+    total_bytes: int | None = None,
+    available_bytes: int | None = None,
+    cpu_cores: int | None = None,
+) -> int:
+    """Return 1 by default, 2 only on a large, idle, many-core host (D-0076)."""
+    total = total_memory_bytes() if total_bytes is None else total_bytes
+    available = available_memory_bytes() if available_bytes is None else available_bytes
+    cores = cpu_core_count() if cpu_cores is None else cpu_cores
+    if total is None or available is None:
+        return 1
+    if (
+        total >= int(HEAVY_DOUBLE_MIN_TOTAL_GIB * GIB)
+        and available >= int(HEAVY_DOUBLE_MIN_AVAILABLE_GIB * GIB)
+        and cores >= HEAVY_DOUBLE_MIN_CORES
+    ):
+        return 2
+    return 1
+
+
+def dynamic_worker_count(
+    *,
+    available_bytes: int | None = None,
+    cpu_cores: int | None = None,
+) -> int:
+    """``max(1, min(cpu_cores, int(MemAvailable // 0.6GiB)))`` (D-0076)."""
+    available = available_memory_bytes() if available_bytes is None else available_bytes
+    cores = cpu_core_count() if cpu_cores is None else cpu_cores
+    if available is None:
+        return cores
+    by_ram = int(available // int(WORKER_SESSION_GIB * GIB))
+    return max(1, min(cores, by_ram))
+
+
+def memory_guard_enabled() -> bool:
+    """False when ``SABEROPS_GATE_MEMORY_GUARD`` explicitly disables the guard."""
+    return os.environ.get(MEMORY_GUARD_ENV, "1").strip().lower() not in _GUARD_DISABLED
+
+
+def heavy_gate_memory_floor_bytes() -> int:
+    """Live headroom a heavy gate needs before it may start (2 GiB + 3 GiB).
+
+    ``SABEROPS_GATE_MIN_AVAILABLE_GB`` overrides the floor in GiB.
+    """
+    floor = int((SAFETY_FLOOR_GIB + HEAVY_SLOT_GIB) * GIB)
+    raw = os.environ.get(MIN_AVAILABLE_GB_ENV, "").strip()
+    if not raw:
+        return floor
+    try:
+        override = float(raw)
+    except ValueError:
+        return floor
+    return max(0, int(override * GIB))
+
+
+def wait_for_memory_budget(
+    floor_bytes: int,
+    *,
+    wait: float,
+    notify: Callable[[str], None] | None = None,
+    clock: Callable[[], float] | None = None,
+    sleep: Callable[[float], None] | None = None,
+) -> bool:
+    """Soft-queue until available RAM clears ``floor_bytes``, bounded by ``wait``.
+
+    Returns ``True`` when the floor is satisfied (or memory cannot be read --
+    the guard never turns an unreadable ``/proc/meminfo`` into a failure) and
+    ``False`` when the budget elapsed while memory stayed below the floor.  It
+    is a queue, never an OOM crash: the caller then proceeds with its normal
+    slot wait.
+    """
+    if floor_bytes <= 0:
+        return True
+    moment = clock if clock is not None else time.monotonic
+    pause = sleep if sleep is not None else time.sleep
+    announce = notify if notify is not None else (lambda _message: None)
+    deadline = moment() + max(0.0, wait)
+    announced = False
+    while True:
+        available = available_memory_bytes()
+        if available is None or available >= floor_bytes:
+            return True
+        if not announced:
+            announce(
+                f"waiting for memory budget: available={available} bytes "
+                f"floor={floor_bytes} bytes"
+            )
+            announced = True
+        if moment() >= deadline:
+            return False
+        pause(min(0.5, max(0.0, deadline - moment())))
+
+
+def purge_stale_slot_metadata(root: Path | str, indices: Sequence[int]) -> tuple[int, ...]:
+    """Unlink ``<index>.json`` whose recorded holder PID is provably dead.
+
+    Self-healing (D-0076): a process that died or was interrupted leaves its
+    ``<index>.json`` behind, which then produces a misleading "waiting for ..."
+    notice naming a dead PID.  Because ``flock`` is released on process death,
+    a dead recorded PID always means the metadata is phantom, so it can be
+    removed immediately and the phantom display cleared.
+    """
+    base = Path(root)
+    purged: list[int] = []
+    for index in indices:
+        meta = base / f"{index}.json"
+        try:
+            raw = meta.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        try:
+            record = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        pid = record.get("pid")
+        if not isinstance(pid, int) or isinstance(pid, bool) or _pid_alive(pid):
+            continue
+        try:
+            meta.unlink()
+        except OSError:
+            continue
+        purged.append(index)
+    return tuple(purged)
+
+
+@dataclass(frozen=True)
+class SlotCapacity:
+    """Resolved heavy/light slot counts and the slot-wait budget."""
+
+    heavy: int
+    light: int
+    wait: float
+    source: str
+
+    @property
+    def drain_lock_count(self) -> int:
+        """Lock count the heavy gate must hold to drain every light index.
+
+        The heavy gate drains ``0..max(light, MAX_LIGHT_SLOTS)`` so a lane that
+        computed a different dynamic light count can never slip in.
+        """
+        return max(self.light, MAX_LIGHT_SLOTS + 1)
+
+
+def resolve_slot_capacity(env: Mapping[str, str] | None = None) -> SlotCapacity:
+    """Resolve slot counts from the environment or the dynamic D-0076 policy.
+
+    ``SABEROPS_GATE_SLOTS`` / ``SABEROPS_LANE_SLOTS`` / ``SABEROPS_GATE_SLOT_WAIT``
+    remain authoritative when set; otherwise heavy/light come from the live
+    memory policy.  A malformed value fails closed as
+    :class:`GateSlotWaitTimeout`, exactly as the previous static parser did.
+    """
+    environ = os.environ if env is None else env
+    source = "dynamic"
+    heavy_raw = environ.get("SABEROPS_GATE_SLOTS", "")
+    light_raw = environ.get("SABEROPS_LANE_SLOTS", "")
+    wait_raw = environ.get("SABEROPS_GATE_SLOT_WAIT", "")
+    try:
+        wait = float(wait_raw) if wait_raw.strip() else DEFAULT_SLOT_WAIT_SECONDS
     except ValueError as exc:
-        raise GateSlotWaitTimeout(f"invalid slot configuration: {exc}") from exc
-    if heavy < 1 or light < 1 or wait < 0:
-        raise GateSlotWaitTimeout("slot counts must be >= 1 and wait >= 0")
-    return heavy, light, wait
+        raise GateSlotWaitTimeout(f"invalid slot wait configuration: {exc}") from exc
+    if wait < 0:
+        raise GateSlotWaitTimeout("slot wait must be >= 0")
+    if heavy_raw.strip():
+        try:
+            heavy = int(heavy_raw)
+        except ValueError as exc:
+            raise GateSlotWaitTimeout(f"invalid heavy slot configuration: {exc}") from exc
+        if heavy < 1:
+            raise GateSlotWaitTimeout("heavy slot count must be >= 1")
+        source = "env"
+    else:
+        heavy = dynamic_heavy_slots()
+    if light_raw.strip():
+        try:
+            light = int(light_raw)
+        except ValueError as exc:
+            raise GateSlotWaitTimeout(f"invalid light slot configuration: {exc}") from exc
+        if light < 1:
+            raise GateSlotWaitTimeout("light slot count must be >= 1")
+        source = "env"
+    else:
+        light = dynamic_light_slots()
+    return SlotCapacity(heavy=heavy, light=light, wait=wait, source=source)
 
 
 def _acquire_all(paths: Sequence[Path], count: int, deadline: float) -> list[TextIO]:
@@ -1795,18 +2091,33 @@ class GateSlotPool:
 
     @contextlib.contextmanager
     def heavy(self, *, wait: float | None = None) -> Any:
-        """Hold the exclusive heavy slot and every light slot (drain)."""
-        heavy_count, light_count, default_wait = _slot_counts()
-        budget = default_wait if wait is None else wait
+        """Hold the exclusive heavy slot and every potential light slot (drain)."""
+        capacity = resolve_slot_capacity()
+        budget = capacity.wait if wait is None else wait
+        if memory_guard_enabled():
+            wait_for_memory_budget(
+                heavy_gate_memory_floor_bytes(), wait=budget, notify=print
+            )
         deadline = time.monotonic() + budget
+        heavy_indices = list(range(capacity.heavy))
+        light_indices = list(range(capacity.drain_lock_count))
+        purge_stale_slot_metadata(self.heavy_root, heavy_indices)
+        purge_stale_slot_metadata(self.light_root, light_indices)
         heavy = _acquire_all(
-            [self.heavy_root / f"{i}.lock" for i in range(heavy_count)], heavy_count, deadline
+            [self.heavy_root / f"{i}.lock" for i in heavy_indices],
+            capacity.heavy,
+            deadline,
         )
         try:
             light = _acquire_all(
-                [self.light_root / f"{i}.lock" for i in range(light_count)], light_count, deadline
+                [self.light_root / f"{i}.lock" for i in light_indices],
+                len(light_indices),
+                deadline,
             )
             try:
+                # We hold every exclusive lock, so any metadata here is phantom.
+                purge_stale_slot_metadata(self.heavy_root, heavy_indices)
+                purge_stale_slot_metadata(self.light_root, light_indices)
                 yield
             finally:
                 _release(light)
@@ -1816,20 +2127,30 @@ class GateSlotPool:
     @contextlib.contextmanager
     def light(self, *, wait: float | None = None) -> Any:
         """Wait for a free heavy slot, then hold exactly one light slot."""
-        heavy_count, light_count, default_wait = _slot_counts()
-        budget = default_wait if wait is None else wait
+        capacity = resolve_slot_capacity()
+        budget = capacity.wait if wait is None else wait
         deadline = time.monotonic() + budget
+        heavy_indices = list(range(capacity.heavy))
+        light_indices = list(range(capacity.light))
         # Observe the heavy slot: block until it is free, then release so the
         # order matches the developer gate (heavy before light, never both
-        # while waiting) and cannot deadlock against it.
+        # while waiting) and cannot deadlock against it.  The heavy gate drains
+        # every potential light index, so a free heavy slot also clears the
+        # light pool once we observe and drop it.
+        purge_stale_slot_metadata(self.heavy_root, heavy_indices)
         observed = _acquire_all(
-            [self.heavy_root / f"{i}.lock" for i in range(heavy_count)], heavy_count, deadline
+            [self.heavy_root / f"{i}.lock" for i in heavy_indices],
+            capacity.heavy,
+            deadline,
         )
         _release(observed)
+        purge_stale_slot_metadata(self.light_root, light_indices)
         light = _acquire_one(
-            [self.light_root / f"{i}.lock" for i in range(light_count)], deadline
+            [self.light_root / f"{i}.lock" for i in light_indices], deadline
         )
         try:
+            # We hold one light lock; any dead metadata in the pool is phantom.
+            purge_stale_slot_metadata(self.light_root, light_indices)
             yield
         finally:
             _release(light)
@@ -2649,6 +2970,11 @@ def _resolve_head(request: EngineGateRequest, common: Path) -> str:
 
 __all__ = [
     "GATE_SCRATCH_LABELS",
+    "GIB",
+    "HEAVY_SLOT_GIB",
+    "LIGHT_SLOT_GIB",
+    "MAX_LIGHT_SLOTS",
+    "SAFETY_FLOOR_GIB",
     "EngineGateExecutor",
     "EngineGateRequest",
     "EngineGateResult",
@@ -2667,18 +2993,31 @@ __all__ = [
     "GateSlotPool",
     "GateSlotPoolProtocol",
     "GateSlotWaitTimeout",
+    "SlotCapacity",
     "_DEFAULT_SAFETY_FLOOR_BYTES",
     "_DEFAULT_TMPFS_CANDIDATE",
     "_MIN_USABLE_BYTES",
+    "available_memory_bytes",
+    "cpu_core_count",
     "default_gate_disk_guard",
     "disk_floor_ok",
+    "dynamic_heavy_slots",
+    "dynamic_light_slots",
+    "dynamic_worker_count",
+    "heavy_gate_memory_floor_bytes",
     "host_disk_admission",
     "load_base_gate_definitions",
     "load_project_gate_scratch_policy",
     "load_project_gate_scratch_policy_for_state_dir",
+    "memory_guard_enabled",
     "preflight_ram_scratch",
     "project_policy_path",
+    "purge_stale_slot_metadata",
+    "read_meminfo",
+    "resolve_slot_capacity",
     "set_project_gate_scratch_policy",
     "sweep_gate_scratch",
+    "total_memory_bytes",
     "verify_gate_definitions",
+    "wait_for_memory_budget",
 ]
