@@ -2102,6 +2102,52 @@ def build_parser() -> argparse.ArgumentParser:
         help="Exact mode id: " + ", ".join(mode.value for mode in GateScratchMode) + ".",
     )
 
+    # orch mcp [serve|tools] --transport stdio
+    mcp_parser = subparsers.add_parser(
+        "mcp",
+        help="Expose the Orchestrator contract tools over MCP (stdio transport).",
+        description=(
+            "Serve the SaberOps Orchestrator contract tools (submit_job, get_job, "
+            "list_jobs, cancel_job, capacity, submit_wave, wave_status, read_evidence, "
+            "list_questions, answer_question, propose_config_change, list_proposals) "
+            "over the Model Context Protocol. Owner-only operations are never exposed."
+        ),
+    )
+    mcp_parser.add_argument(
+        "mcp_action",
+        nargs="?",
+        default="serve",
+        choices=["serve", "tools"],
+        help="serve the MCP server (default) or list the exposed tools.",
+    )
+    mcp_parser.add_argument(
+        "--transport",
+        type=str,
+        default="stdio",
+        choices=["stdio"],
+        help="Transport to serve (only stdio is implemented).",
+    )
+    mcp_parser.add_argument("--db", type=str, default=None, help="Owner database path.")
+    mcp_parser.add_argument(
+        "--lease", type=str, default=None, help="Orchestrator lease file path."
+    )
+    mcp_parser.add_argument(
+        "--ledger", type=str, default=None, help="Append-only event ledger path."
+    )
+    mcp_parser.add_argument(
+        "--questions-store", dest="questions_store", type=str, default=None
+    )
+    mcp_parser.add_argument(
+        "--config-ledger", dest="config_ledger", type=str, default=None
+    )
+    mcp_parser.add_argument(
+        "--cwd",
+        type=str,
+        default=None,
+        help="Base directory used to discover the .orch/.saberops evidence roots.",
+    )
+    mcp_parser.add_argument("--json", action="store_true", help="JSON output (tools).")
+
     return parser
 
 
@@ -4847,6 +4893,48 @@ def handle_capacity_show(args: argparse.Namespace) -> int:
         return 1
 
 
+def handle_mcp(args: argparse.Namespace) -> int:
+    """Handle `orch mcp [serve|tools]` (stdio MCP server for the D7 tools)."""
+    from saberops.mcp.protocol import McpServer
+    from saberops.mcp.stdio import build_server_context, serve_stdio
+
+    action = str(getattr(args, "mcp_action", "serve") or "serve")
+    transport = str(getattr(args, "transport", "stdio") or "stdio")
+    if transport != "stdio":
+        print(f"[!] unsupported MCP transport: {transport}", file=sys.stderr)
+        return 2
+    context = build_server_context(
+        db_path=getattr(args, "db", None),
+        lease_path=getattr(args, "lease", None),
+        ledger_path=getattr(args, "ledger", None),
+        questions_store=getattr(args, "questions_store", None),
+        config_ledger=getattr(args, "config_ledger", None),
+        cwd=getattr(args, "cwd", None),
+    )
+    if action == "tools":
+        # Read-only inspection: never acquires the writer lease.
+        server = McpServer(context, acquire_lease=False)
+        descriptors = server.registry.descriptors()
+        if getattr(args, "json", False):
+            print(json.dumps({"tools": descriptors}, indent=2, sort_keys=True))
+            return 0
+        for descriptor in descriptors:
+            print(f"{descriptor['name']:<22} {descriptor['description']}")
+        return 0
+    server = McpServer(context)
+    if not server.read_only:
+        print(
+            "[i] MCP writer lease acquired; owner-only operations stay unavailable.",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "[i] MCP read-only session: another Orchestrator holds the writer lease.",
+            file=sys.stderr,
+        )
+    return serve_stdio(server)
+
+
 def handle_project_set_workflow(args: argparse.Namespace) -> int:
     """Handle `orch project set-workflow <preset> [--repo X]`."""
     from saberops.service import RunOperationError
@@ -5331,6 +5419,8 @@ def _dispatch(args: argparse.Namespace) -> int:
     elif args.command == "capacity":
         if args.capacity_command == "show":
             return handle_capacity_show(args)
+    elif args.command == "mcp":
+        return handle_mcp(args)
     elif args.command == "retry":
         return handle_retry(args)
     elif args.command == "continue":
