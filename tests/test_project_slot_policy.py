@@ -16,6 +16,7 @@ import pytest
 from saberops.project_slot_policy import (
     DEFAULT_ACTIVE_PROJECT_LIMIT,
     DEFAULT_CHILD_SLOTS_PER_PROJECT_LIMIT,
+    OCCUPYING_SLOT_STATES,
     AdmissionReason,
     AdmissionStatus,
     ProjectSlotRecord,
@@ -29,6 +30,13 @@ from saberops.project_slot_policy import (
     default_slot_limits,
     evaluate_slot_admission,
 )
+from saberops.wave_executor import (
+    LANE_STATE_TO_SLOT_STATE,
+    MergeOutcome,
+    RecordingWaveEventSink,
+    WaveExecutor,
+)
+from saberops.wave_models import Lane, LaneState, Wave
 
 OWNER = "owner-1"
 
@@ -643,3 +651,120 @@ def test_non_slot_limits_object_denies_without_raising() -> None:
     assert decision.counts.derived_global_ceiling == 0
     assert decision.counts.project_limit == 0
     assert decision.counts.child_slots_per_project_limit == 0
+
+
+# ---------------------------------------------------------------------------
+# Wave-executor wiring (Step 010 / WX-1)
+#
+# The wave executor derives its slot records from the wave/lane model. These
+# tests pin the cross-module contract with the pure policy: which lane states
+# occupy a child slot, and that a wave wrapper plus N running children counts as
+# N children, never N+1.
+# ---------------------------------------------------------------------------
+
+
+class _NoopGit:
+    """Minimal eligible WaveGitPort: the admission tests never merge."""
+
+    def resolve_ref(self, repo: str, ref: str) -> str | None:
+        return None
+
+    def is_ancestor(self, repo: str, ancestor_sha: str, descendant_sha: str) -> bool:
+        return True
+
+    def allocate_worktree(self, repo: str, branch: str, path: str, start_point: str) -> str:
+        return path
+
+    def merge_no_ff(self, worktree: str, sha: str) -> MergeOutcome:
+        return MergeOutcome(ok=True)
+
+    def head_sha(self, worktree: str) -> str:
+        return "f" * 40
+
+
+def _executor(lane_count: int) -> WaveExecutor:
+    lanes = [
+        Lane(
+            lane_id=f"L{index}",
+            task_id=f"task-{index}",
+            prompt="work",
+            touches=[f"src/{index}.py"],
+            must_not_touch=[],
+            contracts=[],
+            retirement_table={},
+            worker_route="worker-chain",
+            reviewer_route="reviewer-chain",
+            effort="medium",
+        )
+        for index in range(1, lane_count + 1)
+    ]
+    wave = Wave(
+        wave_id="wave-1",
+        base_sha="a" * 40,
+        lanes=lanes,
+        merge_order=[lane.lane_id for lane in lanes],
+        named_glue=[],
+        budgets={},
+        target_branch="main",
+    )
+    return WaveExecutor(
+        wave,
+        git=_NoopGit(),
+        event_sink=RecordingWaveEventSink(),
+        repo="/repo",
+        worktree_base="/worktrees",
+        project_id="proj-A",
+        integration_worktree="/worktrees/wave-1/integration",
+    )
+
+
+def test_lane_state_occupancy_mapping_agrees_with_the_policy() -> None:
+    """Covers: ADR-0004 Amendment 3 + prompt contract 5 (3x5 occupancy mapping)."""
+    assert set(LANE_STATE_TO_SLOT_STATE) == set(LaneState)
+    occupying = {
+        lane_state
+        for lane_state, slot_state in LANE_STATE_TO_SLOT_STATE.items()
+        if slot_state in OCCUPYING_SLOT_STATES
+    }
+    assert occupying == {LaneState.RUNNING, LaneState.FIX_UP_K}
+    assert all(
+        isinstance(slot_state, SlotState) for slot_state in LANE_STATE_TO_SLOT_STATE.values()
+    )
+
+
+def test_wave_records_use_policy_kinds_and_never_double_count() -> None:
+    """Covers: ADR-0004 Amendment 3 + prompt contract 5 (wrappers take no slot)."""
+    executor = _executor(5)
+    executor.start()
+    for lane_id in ("L1", "L2", "L3", "L4"):
+        executor.start_lane(lane_id)
+    records = executor.slot_records("proj-A")
+    assert records[0].kind == SlotKind.WAVE_WRAPPER.value
+    assert records[0].state not in {state.value for state in OCCUPYING_SLOT_STATES}
+    assert [record.kind for record in records[1:]] == [SlotKind.CHILD_TASK.value] * 5
+    # The wave wrapper is not a child task, so four running children plus the
+    # wrapper still admit a fifth child.
+    decision = evaluate_slot_admission(
+        _request(_child("proj-A", 5)),
+        SlotSnapshot(
+            owner_id=OWNER,
+            source=SnapshotSource.OWNER_DB.value,
+            complete=True,
+            slots=tuple(records),
+        ),
+    )
+    assert decision.admitted is True
+    assert decision.counts.occupied_child_slots == 4
+    assert decision.counts.active_projects == 1
+
+
+def test_derived_wave_snapshot_enforces_the_fifth_child_boundary() -> None:
+    """Covers: ADR-0004 Amendment 3 (1x6 boundary through the wave executor)."""
+    executor = _executor(6)
+    executor.start()
+    for lane_id in ("L1", "L2", "L3", "L4", "L5"):
+        executor.start_lane(lane_id)
+    decision = executor.admit_child_lane("L6", owner_id="owner-1")
+    assert decision.status is AdmissionStatus.REJECTED
+    assert decision.reason is AdmissionReason.PROJECT_SLOT_LIMIT_REACHED
+    assert decision.counts.occupied_child_slots == 5
