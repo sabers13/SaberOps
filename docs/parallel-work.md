@@ -20,6 +20,67 @@ still have workers that dispatched, saved partial commits and failed checks.
 Outcome explanations include those worker results before later routing blockers.
 Failed worker commits remain partial work and do not become acceptable candidates.
 
+## Current capability versus target scheduler
+
+**CURRENT — implemented today.** `saberops.parallel_work.execute_team` runs
+**one** parallel team for one parent run: two to six coherent tasks executed by
+at most two, three or four local workers, on their own worktrees and branches,
+with dependency waves, an integration worktree, a stable-order merge into that
+integration branch, and one combined gate plus review on the assembled
+candidate. `saberops.planning.represent_independent_ready_work` and
+`ready_dependents` are the persisted *within-run* plan/package dependency
+authority: they perform dependency-state transitions against the run database.
+The bounded `fetch_initial_orchestrator_guidance` call is a short initial-goal
+advisor for the first worker, not a planner. Step 015 adds the plan-data
+layer beside it (`saberops.project.ProjectRegistry`,
+`saberops.project_scope.plan_store`, chained `schedule_chained_waves` and
+`build_plan_run_report` in `saberops.ready_frontier`, via
+`orch project list|register|active` and `orch plan show|validate`): versioned,
+tamper-evident plans with an explicit active revision, sequenced into waves
+and reported — still data, not dispatch. This is a single-run team
+executor, **not** a cross-project, continuously refilled scheduler.
+
+**TARGET — not yet implemented.** A deterministic, continuously refilled
+**cross-phase ready frontier across 3 active projects x 5 executing child tasks**
+(two independent, owner-adjustable **upper-bound limits**, not a quota or
+occupancy target), admitted only under an **owner-approved plan version** with
+stable project/task identity, **exactly one active implementation Worker lease
+per task**, hard START versus deferred INTEGRATE edges, exclusive write scopes,
+a shared per-filesystem storage reservation budget, lease fencing, exact-SHA evidence,
+one exclusive integration gate, and a UI that shows real ready/blocked/held
+reasons. A blocked early-phase dependency must not stop unrelated later-phase
+implementation **where beneficial** — but eligibility never obligates dispatch:
+sequential, one-task, and zero-wave outcomes are legitimate, and the runtime
+must never auto-create, split, or launch work to fill free slots. A ready task
+need not dispatch when cost, risk, or the owner plan says no. Semantic review
+covers **implementation Worker** candidates only; pure Integrator merges and
+bridge-test-only commits get **no automatic semantic review**, while substantive
+production glue returns to an accountable Worker for G1 and task-scoped review.
+That stage guard (trusted role/stage/task provenance, never prompt or
+branch-name inference, no phantom pending-REVIEW for Integrator work) is
+**TARGET runtime behavior, not yet wired**: the UI and status evidence must not
+present a phantom review blocker for integration-only artifacts. At every
+approved plan-run start and frontier-changing transition the target runtime
+deterministically recomputes the ready set under the frozen plan, selects the
+advantageous concurrent cohort, and starts each via atomic task-ID
+ownership/worktree reservation — readiness is dispatched, not merely
+displayed — without LLM per-slot decisions or invented costs. Every scan
+persists an audit (trigger, plan version, eligible/active/selected/held IDs
+with reasons, evidence versions, next trigger); the UI shows
+READY/SELECTED/RUNNING/HELD/INTEGRATION-BLOCKED separately. Manual operation
+follows the same check with owner-launched sessions: Orch states the scan
+conclusion and presents all selected pinned prompts together, never
+duplicating running Workers. The manual pre-run check is operative now;
+runtime enforcement is TARGET, not yet proven on main. Early pure *projections* (for example
+`saberops.ready_frontier`, a readiness/hold projection, and a project-child
+slot-admission projection) may land on unmerged branches; they compute nothing
+about live occupancy, hold no lease, dispatch nothing, and are never launch
+authority by themselves. The target behaviour is delivered by the existing
+project/plan, settings, wave-admission, session, UI, security and certification
+work, **not** by documentation. See
+[orchestrator-parallel-first.md](orchestrator-parallel-first.md) for the
+tracked Orchestrator policy and its current-versus-target section.
+
 ## Starting in an empty project
 
 Configure an executable project gate before starting the team. If the repository

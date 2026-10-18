@@ -318,6 +318,22 @@ class SandboxPolicy:
 GIT_INTERNAL_DENY: tuple[str, ...] = (".git/**",)
 GITHUB_DENY: tuple[str, ...] = (".github/**",)
 
+#: Git *integrity* paths a worker attempt may never mutate, expressed as
+#: repository-relative patterns.  ``GIT_INTERNAL_DENY`` denies the whole
+#: ``.git`` directory, which also forbids the ordinary commit/checkout
+#: writes a sandboxed worker legitimately performs.  These narrower
+#: patterns isolate exactly the repository control surface M4 protects --
+#: the local config and the hook directory -- while leaving refs,
+#: objects, the index and logs inside the granted scope.  They are
+#: deliberately directory/file shaped so the bwrap deny mask can overlay
+#: them without widening authority (see
+#: :func:`saberops.sandbox.enforcement.bwrap_mount_args_for_policy`).
+GIT_INTEGRITY_DENY: tuple[str, ...] = (
+    ".git/config",
+    ".git/config.worktree",
+    ".git/hooks/**",
+)
+
 
 def default_sandbox_policy(
     repo_root: str,
@@ -425,6 +441,7 @@ def grant_for_sandbox(
 
 __all__ = [
     "GIT_INTERNAL_DENY",
+    "GIT_INTEGRITY_DENY",
     "GITHUB_DENY",
     "NetworkPolicy",
     "ProcessPolicy",

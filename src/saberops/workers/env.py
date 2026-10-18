@@ -78,20 +78,22 @@ HARNESS_ENV_ADDITIONS: Mapping[str, tuple[str, ...]] = {
 #: Exact SaberOps-owned overlay names safe to forward to a native child.
 #: ``CLAUDE_CODE_DISABLE_FAST_MODE`` is set by ``workers/claude.py`` so the
 #: separately billed Fast mode can never be enabled for the selected
-#: subscription connection.  The three ``OPENCODE_*`` names are the only
-#: OpenCode server values SaberOps itself sets (see
-#: ``session_runtime.py``): the server username/password plus the inline
-#: server configuration the adapters build.  Every other ``OPENCODE_*`` name
-#: (``OPENCODE_CONFIG``, ``OPENCODE_CONFIG_DIR``, ``OPENCODE_MODEL``, ...)
-#: is dropped so ambient shell configuration can never change the
-#: provider/billing of a worker child; the OpenCode adapters overwrite
-#: ``OPENCODE_CONFIG_CONTENT`` with their own pinned value after building
-#: the environment.
+#: subscription connection.  The four ``OPENCODE_*`` names are the only
+#: OpenCode values SaberOps itself sets: the server username/password and the
+#: inline server configuration (see ``session_runtime.py``), plus the exact
+#: discovery switch pinned by ``workers/opencode_isolation.py``.  Every other
+#: ``OPENCODE_*`` name (``OPENCODE_CONFIG``, ``OPENCODE_CONFIG_DIR``,
+#: ``OPENCODE_MODEL``, ...) is dropped so ambient shell configuration can
+#: never change the provider/billing or the discovered configuration of a
+#: worker child; the OpenCode adapters overwrite ``OPENCODE_CONFIG_CONTENT``
+#: and the discovery switch with their own pinned values after building the
+#: environment.
 SABEROPS_OWNED_ENV_ALLOWLIST: tuple[str, ...] = (
     "CLAUDE_CODE_DISABLE_FAST_MODE",
     "OPENCODE_SERVER_PASSWORD",
     "OPENCODE_SERVER_USERNAME",
     "OPENCODE_CONFIG_CONTENT",
+    "OPENCODE_DISABLE_PROJECT_CONFIG",
 )
 
 #: SaberOps-owned overlay prefixes safe to forward to a native child.  The

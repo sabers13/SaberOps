@@ -1,0 +1,689 @@
+"""Contract test: two dispatch points share canonical admit() and score() (ADR-0002 D7).
+
+Verifies:
+1. Shared canonical admission and scoring policy across queued scheduler and in-run dispatch.
+2. Graceful degradation when capacity subsystem is unconfigured or tables do not exist.
+3. Cross-harness shared pool exhaustion rejects both routes at both dispatch points.
+4. Reviewer ladder maintains independent model family exclusion authority.
+5. In-run fallback groups order candidates by intra-group pacing score.
+"""
+
+from __future__ import annotations
+
+from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from saberops.capacity.admission import (
+    admit,
+    is_capacity_subsystem_configured,
+    order_candidates_for_role,
+)
+from saberops.capacity.ledger import record_owner_quota
+from saberops.capacity.scheduler import DispatchDecision, WaitDecision, schedule
+from saberops.capacity.store import (
+    ensure_tables as ensure_capacity_tables,
+)
+from saberops.control_plane.plans import (
+    PlanSet,
+    PoolMember,
+    PoolPlan,
+    PostureRecord,
+    Window,
+)
+from saberops.control_plane.policy import (
+    ControlPlanePolicy,
+    ProviderPolicy,
+    ProviderPolicyState,
+)
+from saberops.db import Database
+from saberops.dispatch import (
+    SKIP_QUOTA_BLOCKED,
+    evaluate_eligibility,
+)
+from saberops.jobs.models import (
+    Job,
+    JobRequirements,
+    JobRole,
+    JobState,
+    Priority,
+    WaitingReason,
+)
+from saberops.models import WorkerCandidate
+from saberops.routing_config import RoutingSnapshot
+
+_NOW = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
+
+
+def _make_candidate(provider: str, model: str, binding_id: str | None = None) -> WorkerCandidate:
+    return WorkerCandidate(provider=provider, model=model, binding_id=binding_id)
+
+
+def _make_policy(*, today_str: str = "2026-10-14") -> ControlPlanePolicy:
+    postures = {
+        "codex": PostureRecord("codex", "A", ttl_days=30, verified_on=today_str),
+        "openai": PostureRecord("openai", "A", ttl_days=30, verified_on=today_str),
+        "opencode": PostureRecord("opencode", "A", ttl_days=30, verified_on=today_str),
+    }
+    providers = {
+        name: ProviderPolicy(name, ProviderPolicyState.ALLOWED)
+        for name in ("codex", "openai", "opencode")
+    }
+    base_plans: dict[str, PoolPlan] = {
+        "chatgpt-plus": PoolPlan(
+            pool_id="chatgpt-plus",
+            members=(
+                PoolMember(route="codex", multiplier=1.0),
+                PoolMember(route="openai", multiplier=1.0),
+            ),
+            windows=(Window(id="5h", duration_min=300),),
+            mode="STRICT",
+            red_line_pct=10.0,
+            overage_possible=False,
+        ),
+        "opencode-go": PoolPlan(
+            pool_id="opencode-go",
+            members=(PoolMember(route="opencode", multiplier=1.0),),
+            windows=(Window(id="daily", duration_min=1440),),
+            mode="STRICT",
+            red_line_pct=15.0,
+            overage_possible=False,
+        ),
+    }
+    return ControlPlanePolicy(
+        provider_policies=providers,
+        quota_pools={},
+        content_hash="test-policy-hash",
+        plans=PlanSet(accounts={}, pool_plans=base_plans, postures=postures),
+    )
+
+
+def _make_job(
+    job_id: str,
+    *,
+    priority: Priority = Priority.NORMAL,
+    role: JobRole = JobRole.WORKER,
+    created_at: datetime = _NOW,
+) -> Job:
+    return Job(
+        job_id=job_id,
+        idempotency_key=None,
+        caller_id="owner",
+        repo="/tmp/repo",
+        base_ref="HEAD",
+        base_sha="abc123",
+        goal=f"goal for {job_id}",
+        acceptance=None,
+        requirements=JobRequirements(role=role),
+        priority=priority,
+        deadline=None,
+        not_before=None,
+        state=JobState.QUEUED,
+        waiting_reason=WaitingReason.NEW,
+        failure_reason=None,
+        current_run_id=None,
+        run_ids=(),
+        created_at=created_at.isoformat(),
+        updated_at=created_at.isoformat(),
+    )
+
+
+def _make_routes(
+    groups: tuple[tuple[WorkerCandidate, ...], ...],
+    *,
+    role: JobRole = JobRole.WORKER,
+) -> RoutingSnapshot:
+    return RoutingSnapshot(
+        schema_version=3,
+        source="memory",
+        source_path="",
+        content_hash="h1",
+        role_chains=((role.value, groups),),
+        pacing_metadata=((role.value, tuple(0 for _ in groups)),),
+    )
+
+
+@pytest.fixture()
+def owner_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Database:
+    cfg = tmp_path / "cfg"
+    state = tmp_path / "state"
+    cache = tmp_path / "cache"
+    cfg.mkdir()
+    state.mkdir()
+    cache.mkdir()
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(cfg))
+    monkeypatch.setenv("XDG_STATE_HOME", str(state))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(cache))
+    db_file = tmp_path / "owner.sqlite3"
+    db = Database(db_file)
+    ensure_capacity_tables(db)
+    return db
+
+
+class _AvailableAdapter:
+    def is_available(self) -> bool:
+        return True
+
+    def max_prompt_bytes(self) -> int | None:
+        return None
+
+
+def test_two_dispatch_points_share_canonical_admit_score(owner_db: Database) -> None:
+    """Covers: ADR-0002 D7 queued scheduler and in-run dispatch reach identical admission."""
+    now = _NOW
+    cand = _make_candidate("openai", "gpt-5")
+    policy = _make_policy()
+
+    # 1. 100% capacity: both dispatch points admit
+    record_owner_quota(
+        owner_db,
+        "openai",
+        "chatgpt-plus",
+        100.0,
+        (now + timedelta(hours=2)).isoformat(),
+        source="OWNER",
+        now=now,
+    )
+    from saberops.capacity.snapshot import effective_quota_states
+
+    quotas = effective_quota_states(owner_db, now=now)
+
+    # Dispatch point 1: pure schedule (scheduler)
+    job = _make_job("job_shared_1")
+    routes = _make_routes(((cand,),))
+    decisions = schedule(
+        now=now,
+        queued=[job],
+        running=[],
+        routing_snapshot=routes,
+        policy=policy,
+        quota_states=quotas,
+    )
+    assert len(decisions) == 1
+    assert isinstance(decisions[0], DispatchDecision)
+    assert decisions[0].candidate.provider == "openai"
+    assert decisions[0].candidate.model == "gpt-5"
+
+    # Dispatch point 2: in-run evaluate_eligibility
+    skip_reason = evaluate_eligibility(
+        candidate=cand,
+        adapter=_AvailableAdapter(),  # type: ignore[arg-type]
+        training_allowed=True,
+        quota_states=quotas,
+        prompt_bytes=500,
+        policy=policy,
+        db=owner_db,
+        now=now,
+    )
+    assert skip_reason is None
+
+    # Decision details match canonical admit
+    direct_admit = admit(
+        cand,
+        now=now,
+        policy=policy,
+        quota_states=quotas,
+        db=owner_db,
+    )
+    assert direct_admit.admitted is True
+    assert direct_admit.is_allowed is True
+    assert direct_admit.pool_id == "chatgpt-plus"
+
+
+def test_unconfigured_capacity_degrades_gracefully(tmp_path: Path) -> None:
+    """Covers: ADR-0002 D2/D7 posture fail-closed on blank DB;
+    unconfigured capacity grace for verified A/C only.
+    """
+    from saberops.control_plane.posture import (
+        POSTURE_ATTENDED_ONLY,
+        POSTURE_FORBIDDEN,
+        POSTURE_UNVERIFIED,
+    )
+    from saberops.dispatch import SKIP_QUOTA_BLOCKED
+
+    cand = _make_candidate("codex", "gpt-5.6-sol")
+    db_file = tmp_path / "blank.sqlite3"
+    blank_db = Database(db_file)
+
+    # When capacity tables do not exist
+    assert is_capacity_subsystem_configured(db=blank_db) is False
+
+    # 1. Unverified posture fails closed on both queued and in-run seams (F1 fix)
+    req = JobRequirements(role=JobRole.WORKER)
+    admit_queued = admit(
+        cand,
+        now=_NOW,
+        db=blank_db,
+        requirements=req,
+    )
+    assert admit_queued.admitted is False
+    assert admit_queued.is_allowed is False
+    assert admit_queued.reason == POSTURE_UNVERIFIED
+
+    skip_queued = evaluate_eligibility(
+        candidate=cand,
+        adapter=_AvailableAdapter(),  # type: ignore[arg-type]
+        training_allowed=True,
+        quota_states=[],
+        prompt_bytes=100,
+        db=blank_db,
+        now=_NOW,
+        requirements=req,
+    )
+    assert skip_queued == SKIP_QUOTA_BLOCKED
+
+    # Route with unverified posture record fails closed even attended on blank DB
+    unverified_policy = ControlPlanePolicy(
+        provider_policies={
+            "codex": ProviderPolicy("codex", ProviderPolicyState.ALLOWED),
+        },
+        quota_pools={},
+        content_hash="test-unv",
+        plans=PlanSet(
+            accounts={},
+            pool_plans={},
+            postures={"codex": PostureRecord("codex", "A", ttl_days=30, verified_on=None)},
+        ),
+    )
+    admit_in_run = admit(
+        cand,
+        now=_NOW,
+        db=blank_db,
+        policy=unverified_policy,
+    )
+    assert admit_in_run.admitted is False
+    assert admit_in_run.is_allowed is False
+    assert admit_in_run.reason == POSTURE_UNVERIFIED
+
+    skip_in_run = evaluate_eligibility(
+        candidate=cand,
+        policy=unverified_policy,
+        adapter=_AvailableAdapter(),  # type: ignore[arg-type]
+        training_allowed=True,
+        quota_states=[],
+        prompt_bytes=100,
+        db=blank_db,
+        now=_NOW,
+    )
+    assert skip_in_run == SKIP_QUOTA_BLOCKED
+
+    # 2. Attended-only (posture B) without override fails closed on blank DB
+    b_policy = ControlPlanePolicy(
+        provider_policies={
+            "codex": ProviderPolicy("codex", ProviderPolicyState.ALLOWED),
+        },
+        quota_pools={},
+        content_hash="test-b",
+        plans=PlanSet(
+            accounts={},
+            pool_plans={},
+            postures={"codex": PostureRecord("codex", "B", ttl_days=30, verified_on="2026-10-14")},
+        ),
+    )
+    admit_b = admit(cand, now=_NOW, db=blank_db, policy=b_policy)
+    assert admit_b.admitted is False
+    assert admit_b.reason == POSTURE_ATTENDED_ONLY
+
+    # 3. Forbidden (posture X) fails closed on blank DB
+    x_policy = ControlPlanePolicy(
+        provider_policies={
+            "codex": ProviderPolicy("codex", ProviderPolicyState.ALLOWED),
+        },
+        quota_pools={},
+        content_hash="test-x",
+        plans=PlanSet(
+            accounts={},
+            pool_plans={},
+            postures={"codex": PostureRecord("codex", "X", ttl_days=30, verified_on="2026-10-14")},
+        ),
+    )
+    admit_x = admit(cand, now=_NOW, db=blank_db, policy=x_policy)
+    assert admit_x.admitted is False
+    assert admit_x.reason == POSTURE_FORBIDDEN
+
+    # 4. Verified A/C route gracefully degrades with reason=unconfigured on blank DB
+    verified_policy = _make_policy()
+    admit_verified = admit(
+        cand,
+        now=_NOW,
+        db=blank_db,
+        policy=verified_policy,
+    )
+    assert admit_verified.admitted is True
+    assert admit_verified.is_allowed is True
+    assert admit_verified.reason == "unconfigured"
+
+    # In-run evaluate_eligibility returns None (eligible!) for verified route
+    skip_verified = evaluate_eligibility(
+        candidate=cand,
+        policy=verified_policy,
+        adapter=_AvailableAdapter(),  # type: ignore[arg-type]
+        training_allowed=True,
+        quota_states=[],
+        prompt_bytes=100,
+        db=blank_db,
+        now=_NOW,
+    )
+    assert skip_verified is None
+
+    # 5. Concurrency reason code mapping (F5 fix)
+    skip_global_concurrency = evaluate_eligibility(
+        candidate=cand,
+        policy=verified_policy,
+        adapter=_AvailableAdapter(),  # type: ignore[arg-type]
+        training_allowed=True,
+        quota_states=[],
+        prompt_bytes=100,
+        now=_NOW,
+        global_running=5,
+        max_global_concurrent=5,
+    )
+    assert skip_global_concurrency == SKIP_QUOTA_BLOCKED
+
+
+def test_exhausted_shared_pool_denies_across_harnesses_at_both_dispatch_points(
+    owner_db: Database,
+) -> None:
+    """Covers: ADR-0002 D7 quota exhaustion on shared pool denies all routes across harnesses."""
+    now = _NOW
+    policy = _make_policy()
+
+    # 0% capacity on chatgpt-plus pool
+    record_owner_quota(
+        owner_db,
+        "openai",
+        "chatgpt-plus",
+        0.0,
+        (now + timedelta(hours=3)).isoformat(),
+        source="OWNER",
+        now=now,
+    )
+    from saberops.capacity.snapshot import effective_quota_states
+
+    quotas = effective_quota_states(owner_db, now=now)
+
+    cand_codex = _make_candidate("codex", "gpt-5.6-sol")
+    cand_openai = _make_candidate("openai", "gpt-5")
+
+    # Dispatch point 1 (scheduler): job with both routes cannot dispatch
+    job = _make_job("job_exhausted_pool")
+    routes = _make_routes(((cand_codex, cand_openai),))
+    decisions = schedule(
+        now=now,
+        queued=[job],
+        running=[],
+        routing_snapshot=routes,
+        policy=policy,
+        quota_states=quotas,
+    )
+    assert len(decisions) == 1
+    assert isinstance(decisions[0], WaitDecision)
+
+    # Dispatch point 2 (in-run worker/continuation): both routes return SKIP_QUOTA_BLOCKED
+    skip_codex = evaluate_eligibility(
+        candidate=cand_codex,
+        adapter=None,
+        training_allowed=True,
+        quota_states=quotas,
+        prompt_bytes=100,
+        policy=policy,
+        db=owner_db,
+        now=now,
+    )
+    skip_openai = evaluate_eligibility(
+        candidate=cand_openai,
+        adapter=None,
+        training_allowed=True,
+        quota_states=quotas,
+        prompt_bytes=100,
+        policy=policy,
+        db=owner_db,
+        now=now,
+    )
+    assert skip_codex == SKIP_QUOTA_BLOCKED
+    assert skip_openai == SKIP_QUOTA_BLOCKED
+
+
+def test_reviewer_dispatch_preserves_model_family_exclusion() -> None:
+    """Covers: ADR-0002 D7 reviewer dispatch refuses candidates in the worker model family."""
+    from saberops.review import _pre_dispatch_skip_reason
+
+    worker = _make_candidate("codex", "gpt-5.6-sol")
+    rev_same_family = _make_candidate("openai", "gpt-5.6-terra")
+    rev_different_family = _make_candidate("opencode", "deepseek-v4-pro")
+
+    policy = _make_policy()
+
+    # Same model family -> refused with model_family_excluded
+    skip_same = _pre_dispatch_skip_reason(
+        candidate=rev_same_family,
+        adapter=None,
+        training_allowed=True,
+        quota_states=[],
+        prompt_bytes=100,
+        policy=policy,
+        worker_candidate=worker,
+    )
+    assert skip_same == "model_family_excluded"
+
+    # Different model family -> permitted
+    skip_diff = _pre_dispatch_skip_reason(
+        candidate=rev_different_family,
+        adapter=_AvailableAdapter(),  # type: ignore[arg-type]
+        training_allowed=True,
+        quota_states=[],
+        prompt_bytes=100,
+        policy=policy,
+        worker_candidate=worker,
+    )
+    # Since capacity is unconfigured, it degrades gracefully to None
+    assert skip_diff is None
+
+
+def test_order_candidates_for_role_intra_group_pacing(owner_db: Database) -> None:
+    """Covers: ADR-0002 D7 order_candidates_for_role orders by intra-group pacing score."""
+    now = _NOW
+    policy = _make_policy()
+
+    # 90% capacity on chatgpt-plus, 20% capacity on opencode-go
+    record_owner_quota(
+        owner_db,
+        "openai",
+        "chatgpt-plus",
+        90.0,
+        (now + timedelta(hours=2)).isoformat(),
+        source="OWNER",
+        now=now,
+    )
+    record_owner_quota(
+        owner_db,
+        "opencode",
+        "opencode-go",
+        20.0,
+        (now + timedelta(hours=2)).isoformat(),
+        source="OWNER",
+        now=now,
+    )
+    from saberops.capacity.snapshot import effective_quota_states
+
+    quotas = effective_quota_states(owner_db, now=now)
+
+    cand_open = _make_candidate("openai", "gpt-5")
+    cand_code = _make_candidate("opencode", "deepseek-v4-pro")
+
+    # Group has cand_code first, then cand_open
+    snapshot = _make_routes(((cand_code, cand_open),))
+    base = [cand_code, cand_open]
+
+    ordered = order_candidates_for_role(
+        JobRole.WORKER,
+        snapshot=snapshot,
+        base_candidates=base,
+        now=now,
+        policy=policy,
+        quota_states=quotas,
+        db=owner_db,
+    )
+    # Higher score (chatgpt-plus 90%) must be ordered before lower score (opencode-go 20%)
+    assert ordered[0].provider == "openai"
+    assert ordered[1].provider == "opencode"
+
+
+def test_in_run_dispatch_fails_closed_on_sqlite_reservation_read_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: ADR-0002 D7 in-run worker/repair/review fails closed on SQLite read error."""
+    import sqlite3
+
+    from saberops.control_plane.quota_policy import QUOTA_EVIDENCE_REQUIRED
+    from saberops.dispatch import control_plane_decision
+
+    now = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
+    cand = _make_candidate("openai", "gpt-5")
+    policy = _make_policy()
+    db = Database(tmp_path / "in_run_err.sqlite3")
+    ensure_capacity_tables(db)
+
+    record_owner_quota(
+        db,
+        "openai",
+        "chatgpt-plus",
+        50.0,
+        (now + timedelta(hours=2)).isoformat(),
+        source="OWNER",
+        now=now,
+    )
+    from saberops.capacity.snapshot import effective_quota_states
+
+    quotas = effective_quota_states(db, now=now)
+
+    # Monkeypatch conn.execute to simulate OperationalError during reservation reads
+    owner = db.owner_db
+    orig_conn = owner._get_connection
+
+    class FailingConn:
+        def __init__(self, real: Any) -> None:
+            self._real = real
+
+        def execute(self, sql: str, *args: Any, **kwargs: Any) -> Any:
+            if "capacity_reservations" in sql or "capacity_observations" in sql:
+                raise sqlite3.OperationalError("database is locked")
+            return self._real.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._real, name)
+
+    @contextmanager
+    def failing_get_conn() -> Any:
+        with orig_conn() as real:
+            yield FailingConn(real)
+
+    monkeypatch.setattr(owner, "_get_connection", failing_get_conn)
+
+    # 1. control_plane_decision at the boundary MUST return eligible=False
+    dec = control_plane_decision(
+        candidate=cand,
+        adapter=_AvailableAdapter(),  # type: ignore[arg-type]
+        training_allowed=True,
+        quota_states=quotas,
+        prompt_bytes=100,
+        policy=policy,
+        db=db,
+        now=now,
+    )
+    assert dec.eligible is False
+    assert dec.reason == QUOTA_EVIDENCE_REQUIRED
+    assert dec.exclusion_reason == QUOTA_EVIDENCE_REQUIRED
+
+    # 2. evaluate_eligibility at worker/repair seam MUST return SKIP_QUOTA_BLOCKED
+    reason = evaluate_eligibility(
+        candidate=cand,
+        adapter=_AvailableAdapter(),  # type: ignore[arg-type]
+        training_allowed=True,
+        quota_states=quotas,
+        prompt_bytes=100,
+        policy=policy,
+        db=db,
+        now=now,
+    )
+    assert reason == SKIP_QUOTA_BLOCKED
+
+
+def test_partial_capacity_schema_fails_closed_at_live_boundaries(
+    tmp_path: Path,
+) -> None:
+    """Covers: ADR-0002 D2/D7 a partially initialized capacity schema (some
+    required tables present, others missing) must fail closed with typed
+    QUOTA_EVIDENCE_REQUIRED at the live control_plane_decision boundary and
+    SKIP_QUOTA_BLOCKED at the worker/repair seam, never zero debt.
+    """
+    from saberops.capacity.store import owner_connection
+    from saberops.control_plane.quota_policy import QUOTA_EVIDENCE_REQUIRED
+    from saberops.dispatch import control_plane_decision
+
+    now = _NOW
+    cand = _make_candidate("openai", "gpt-5")
+    policy = _make_policy()
+
+    # Unverified posture would mask the capacity path, so use a verified route
+    # (posture A) for the candidate's provider.
+    db = Database(tmp_path / "partial_schema.sqlite3")
+    ensure_capacity_tables(db)
+    record_owner_quota(
+        db,
+        "openai",
+        "chatgpt-plus",
+        50.0,
+        (now + timedelta(hours=2)).isoformat(),
+        source="OWNER",
+        now=now,
+    )
+    from saberops.capacity.snapshot import effective_quota_states
+
+    quotas = effective_quota_states(db, now=now)
+
+    with owner_connection(db) as conn:
+        # Recorded debt in the reservations table, then lose observations:
+        # the schema is now partial, not unconfigured.
+        conn.execute(
+            "INSERT INTO capacity_reservations (id, run_id, job_id, route,"
+            " pool_id, window_id, multiplier, size_bucket, cost_pct, spread_pct,"
+            " state, total_tokens, created_at, settled_at) VALUES"
+            " ('res_partial', 'run_partial', 'job_partial', 'openai/gpt-5',"
+            " 'chatgpt-plus', '5h', 1.0, 'M', 42.0, 3.0, 'RESERVED', NULL,"
+            " '2026-10-14T03:00:00+00:00', NULL)"
+        )
+        conn.execute("DROP TABLE capacity_observations")
+        conn.commit()
+
+    # 1. Live in-run boundary fails closed with typed QUOTA_EVIDENCE_REQUIRED.
+    dec = control_plane_decision(
+        candidate=cand,
+        adapter=_AvailableAdapter(),  # type: ignore[arg-type]
+        training_allowed=True,
+        quota_states=quotas,
+        prompt_bytes=100,
+        policy=policy,
+        db=db,
+        now=now,
+    )
+    assert dec.eligible is False
+    assert dec.reason == QUOTA_EVIDENCE_REQUIRED
+    assert dec.exclusion_reason == QUOTA_EVIDENCE_REQUIRED
+
+    # 2. Worker/repair compatibility seam maps it to SKIP_QUOTA_BLOCKED.
+    reason = evaluate_eligibility(
+        candidate=cand,
+        adapter=_AvailableAdapter(),  # type: ignore[arg-type]
+        training_allowed=True,
+        quota_states=quotas,
+        prompt_bytes=100,
+        policy=policy,
+        db=db,
+        now=now,
+    )
+    assert reason == SKIP_QUOTA_BLOCKED
+
