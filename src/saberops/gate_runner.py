@@ -73,12 +73,19 @@ from saberops.gate_profiles import (
     resolve_profile,
 )
 from saberops.gate_scope import (
+    GateProtectionResult,
+    GateScopeError,
     RetirementCheck,
     RetirementEntry,
     ScopeCheck,
+    check_gate_protection,
     check_test_retirement,
     check_write_scope,
+    definition_digest,
+    gate_definition_mismatches,
     git_changed_files,
+    is_protected_gate_path,
+    normalize_path,
 )
 from saberops.models import GateScratchMode
 from saberops.process import ProcessResult, run_process, split_command
@@ -1922,6 +1929,169 @@ def _read_quarantine(repo: Path) -> frozenset[str]:
     )
 
 
+# ---------------------------------------------------------------------------
+# Gate protection: base-trusted gate definitions (GT-1)
+# ---------------------------------------------------------------------------
+
+
+def _git_bytes(repo: Path, args: Sequence[str], *, label: str) -> bytes:
+    """Run one read-only git command, failing closed on any error."""
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        check=False,
+        capture_output=True,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.decode("utf-8", "replace").strip()
+        raise GateRunnerInfrastructureError(
+            f"cannot {label} in {repo}: {detail or f'git exited {completed.returncode}'}"
+        )
+    return completed.stdout
+
+
+def load_base_gate_definitions(repo: Path | str, base: str) -> dict[str, str]:
+    """Load every protected gate definition **from the base SHA**.
+
+    The bytes come from the git object store at ``base`` (``git ls-tree`` +
+    ``git show``), never from the candidate working tree, so the engine can
+    compare "what the gate would have used" with "what the candidate would use"
+    without trusting the candidate's copies.
+
+    Any git failure is a typed infrastructure error, so an unreadable base is a
+    fail-closed block rather than a silent acceptance.
+    """
+    root = Path(repo).expanduser()
+    listing = _git_bytes(
+        root, ["ls-tree", "-r", "--name-only", base], label=f"list gate definitions at {base}"
+    ).decode("utf-8", "replace")
+    definitions: dict[str, str] = {}
+    for line in listing.splitlines():
+        raw = line.strip()
+        if not raw:
+            continue
+        try:
+            candidate = normalize_path(raw)
+        except GateScopeError:
+            continue
+        if not is_protected_gate_path(candidate):
+            continue
+        definitions[candidate] = _git_bytes(
+            root,
+            ["show", f"{base}:{candidate}"],
+            label=f"read {candidate} at {base}",
+        ).decode("utf-8", "replace")
+    return definitions
+
+
+def _candidate_worktree_gate_paths(repo: Path) -> tuple[str, ...]:
+    """Protected gate definitions with an uncommitted or untracked state.
+
+    ``git status --porcelain -z --untracked-files=all`` respects the ignore
+    rules and reports paths without quoting, so an untracked ``conftest.py``
+    cannot hide behind the branch diff.
+    """
+    listing = _git_bytes(
+        repo,
+        ["status", "--porcelain", "-z", "--untracked-files=all"],
+        label="list the candidate working tree",
+    ).decode("utf-8", "replace")
+    paths: list[str] = []
+    for entry in listing.split("\0"):
+        if len(entry) < 4 or entry[2] != " ":
+            continue
+        try:
+            candidate = normalize_path(entry[3:])
+        except GateScopeError:
+            continue
+        if is_protected_gate_path(candidate):
+            paths.append(candidate)
+    return tuple(sorted(set(paths)))
+
+
+def _read_worktree_definitions(repo: Path, paths: Sequence[str]) -> dict[str, str]:
+    """Read the candidate's working-tree bytes for each path that exists."""
+    definitions: dict[str, str] = {}
+    for path in paths:
+        try:
+            definitions[path] = (repo / path).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            # Deleted or unreadable: the base comparison reports it as a
+            # mismatch, which is the fail-closed direction.
+            continue
+    return definitions
+
+
+def verify_gate_definitions(
+    repo: Path | str,
+    base: str,
+    *,
+    changed_paths: Sequence[str] = (),
+    touches: Sequence[str] = (),
+) -> GateProtectionResult:
+    """Verify the candidate's gate definitions against the base SHA (GT-1).
+
+    Two deterministic sources feed one verdict:
+
+    1. the protected-path check over the candidate branch diff
+       (:func:`check_gate_protection`), and
+    2. a byte comparison against every gate definition loaded from ``base``,
+       including uncommitted and untracked working-tree changes.
+
+    A candidate whose definitions match the base byte-for-byte *is* running the
+    base definitions, so the gate it executes is the base-trusted gate.  Any
+    difference blocks: the gate cannot run under definitions the candidate
+    edited, and the block is an owner question, never a self-authorization.
+    """
+    root = Path(repo).expanduser()
+    verdict = check_gate_protection(changed_paths, touches)
+    tampered = set(verdict.tampered_paths)
+    detected = set(verdict.detected_by)
+    base_verified = False
+    candidate_definitions: dict[str, str] = {}
+    if base:
+        base_definitions = load_base_gate_definitions(root, base)
+        candidates = set(base_definitions)
+        for path in changed_paths:
+            try:
+                normalized = normalize_path(path)
+            except GateScopeError:
+                continue
+            if is_protected_gate_path(normalized):
+                candidates.add(normalized)
+        candidates.update(_candidate_worktree_gate_paths(root))
+        candidate_definitions = _read_worktree_definitions(root, sorted(candidates))
+        mismatched = gate_definition_mismatches(base_definitions, candidate_definitions)
+        tampered.update(mismatched)
+        base_verified = not mismatched
+        if mismatched:
+            detected.add("base-content")
+    if not tampered:
+        return GateProtectionResult(
+            is_protected=False,
+            base_sha=base,
+            base_verified=base_verified,
+            detected_by=tuple(sorted(detected)),
+        )
+    merged = check_gate_protection(sorted(tampered), touches)
+    return GateProtectionResult(
+        is_protected=True,
+        tampered_paths=merged.tampered_paths,
+        declared_paths=merged.declared_paths,
+        reason_code=merged.reason_code,
+        reason=merged.reason,
+        owner_question=merged.owner_question,
+        base_sha=base,
+        base_verified=base_verified,
+        detected_by=tuple(sorted(detected)),
+        digests=tuple(
+            (path, definition_digest(candidate_definitions[path]))
+            for path in merged.tampered_paths
+            if path in candidate_definitions
+        ),
+    )
+
+
 @dataclass(frozen=True)
 class EngineGateRequest:
     """Inputs to one engine-run, evidence-producing gate (ADR-0004 D3)."""
@@ -1969,6 +2139,7 @@ class EngineGateResult:
     outcome_path: str
     scope: ScopeCheck | None = None
     retirement: RetirementCheck | None = None
+    protection: GateProtectionResult | None = None
     findings: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
@@ -1991,6 +2162,8 @@ class EngineGateResult:
             payload["write_scope"] = self.scope.as_dict()
         if self.retirement is not None:
             payload["retirement"] = self.retirement.as_dict()
+        if self.protection is not None:
+            payload["gate_protection"] = self.protection.as_dict()
         return payload
 
 
@@ -1998,9 +2171,14 @@ class EngineGateExecutor:
     """Run one gate profile and record authoritative engine evidence.
 
     The engine (never a model) owns G1/G2/G3 execution: it takes the
-    ``host-gates`` slot, checks write scope and test retirement, enforces the
-    profile's wall budget, reads the profile's ``outcome.json``, projects the
-    decision fail-closed, and appends the engine history line.
+    ``host-gates`` slot, checks write scope, test retirement and gate
+    protection, enforces the profile's wall budget, reads the profile's
+    ``outcome.json``, projects the decision fail-closed, and appends the
+    engine history line.
+
+    Gate protection (GT-1) is checked before any command runs: the candidate's
+    gate definitions are loaded from the base SHA and compared with the
+    candidate tree, and any difference blocks the gate as an owner question.
     """
 
     def __init__(
@@ -2028,36 +2206,79 @@ class EngineGateExecutor:
         # --- deterministic pre-G1 checks (fail closed, no command runs) ----
         scope: ScopeCheck | None = None
         retirement: RetirementCheck | None = None
-        if kind in (GateKind.G1, GateKind.G2):
+        protection: GateProtectionResult | None = None
+        try:
+            changed_paths = self._changed_paths(request, repo)
+            if kind in (GateKind.G1, GateKind.G2):
+                scope, retirement = self._preflight_scope(request, repo, changed_paths, findings)
+        except Exception as exc:  # noqa: BLE001 - evidence must still be written
+            return self._record(
+                request, kind, profile, common, evidence_dir, started,
+                outcome="BLOCKED",
+                accepted=False,
+                reason=f"SCOPE_PREFLIGHT_ERROR: {exc}",
+                tests=0,
+                failed=(),
+                flaky=(),
+                scope=None,
+                retirement=None,
+                findings=(*findings, str(exc)),
+            )
+        if changed_paths is not None:
             try:
-                scope, retirement = self._preflight_scope(request, repo, findings)
-            except Exception as exc:  # noqa: BLE001 - evidence must still be written
-                return self._record(
-                    request, kind, profile, common, evidence_dir, started,
-                    outcome="BLOCKED",
-                    accepted=False,
-                    reason=f"SCOPE_PREFLIGHT_ERROR: {exc}",
-                    tests=0,
-                    failed=(),
-                    flaky=(),
-                    scope=None,
-                    retirement=None,
-                    findings=(*findings, str(exc)),
+                protection = verify_gate_definitions(
+                    repo,
+                    request.base,
+                    changed_paths=changed_paths,
+                    touches=request.touches,
                 )
-            blocked = self._scope_block(scope, retirement)
-            if blocked is not None:
+            except Exception as exc:  # noqa: BLE001 - evidence must still be written
+                # An unreadable base is fail-closed: the engine cannot show that
+                # the candidate's gate definitions are the base definitions.
                 return self._record(
                     request, kind, profile, common, evidence_dir, started,
                     outcome="BLOCKED",
                     accepted=False,
-                    reason=blocked,
+                    reason=f"GATE_PROTECTION_BLOCKED: GATE_BASE_UNVERIFIABLE: {exc}",
                     tests=0,
                     failed=(),
                     flaky=(),
                     scope=scope,
                     retirement=retirement,
-                    findings=(*findings, blocked),
+                    findings=(*findings, "GATE_BASE_UNVERIFIABLE", str(exc)),
                 )
+        if protection is not None and not protection.allowed:
+            # GT-1 / ADR-0004 D3: the candidate edited the definitions its own
+            # gate would load.  No command runs; the change is an owner question.
+            gate_block = f"GATE_PROTECTION_BLOCKED: {protection.reason}"
+            return self._record(
+                request, kind, profile, common, evidence_dir, started,
+                outcome="BLOCKED",
+                accepted=False,
+                reason=gate_block,
+                tests=0,
+                failed=(),
+                flaky=(),
+                scope=scope,
+                retirement=retirement,
+                protection=protection,
+                findings=(*findings, protection.reason_code, protection.owner_question),
+            )
+        blocked = self._scope_block(scope, retirement)
+        if blocked is not None:
+            return self._record(
+                request, kind, profile, common, evidence_dir, started,
+                outcome="BLOCKED",
+                accepted=False,
+                reason=blocked,
+                tests=0,
+                failed=(),
+                flaky=(),
+                scope=scope,
+                retirement=retirement,
+                protection=protection,
+                findings=(*findings, blocked),
+            )
 
         # --- host-disk admission (Step 008) --------------------------------
         if self._disk_check is None:
@@ -2079,6 +2300,7 @@ class EngineGateExecutor:
                 flaky=(),
                 scope=scope,
                 retirement=retirement,
+                protection=protection,
                 findings=(*findings, disk_reason),
             )
 
@@ -2102,6 +2324,7 @@ class EngineGateExecutor:
                 flaky=(),
                 scope=scope,
                 retirement=retirement,
+                protection=protection,
                 findings=(*findings, "SLOT_WAIT_TIMEOUT"),
             )
 
@@ -2134,21 +2357,42 @@ class EngineGateExecutor:
             flaky=decision.flaky,
             scope=scope,
             retirement=retirement,
+            protection=protection,
             findings=tuple(findings),
             wall=wall,
         )
 
     # -- helpers ------------------------------------------------------------
 
+    @staticmethod
+    def _changed_paths(
+        request: EngineGateRequest, repo: Path
+    ) -> tuple[str, ...] | None:
+        """The candidate's changed paths, or ``None`` when no diff is declared.
+
+        ``None`` means the caller declared neither ``changed_files`` nor a
+        ``base``, so there is no candidate diff to protect; real G1/G2/G3 runs
+        always declare one.
+        """
+        if request.changed_files:
+            return tuple(request.changed_files)
+        if request.base:
+            return git_changed_files(str(repo), request.base, request.head_sha or "HEAD")
+        return None
+
     def _preflight_scope(
-        self, request: EngineGateRequest, repo: Path, findings: list[str]
+        self,
+        request: EngineGateRequest,
+        repo: Path,
+        changed_paths: tuple[str, ...] | None,
+        findings: list[str],
     ) -> tuple[ScopeCheck | None, RetirementCheck | None]:
         scope: ScopeCheck | None = None
         retirement: RetirementCheck | None = None
         if request.touches or request.must_not_touch:
             changed = (
-                tuple(request.changed_files)
-                if request.changed_files
+                changed_paths
+                if changed_paths is not None
                 else git_changed_files(str(repo), request.base, request.head_sha or "HEAD")
             )
             scope = check_write_scope(changed, request.touches, request.must_not_touch)
@@ -2244,6 +2488,7 @@ class EngineGateExecutor:
         scope: ScopeCheck | None,
         retirement: RetirementCheck | None,
         findings: tuple[str, ...],
+        protection: GateProtectionResult | None = None,
         wall: float | None = None,
     ) -> EngineGateResult:
         wall = wall if wall is not None else round(time.monotonic() - started, 2)
@@ -2266,6 +2511,7 @@ class EngineGateExecutor:
             outcome_path=str(outcome_path),
             scope=scope,
             retirement=retirement,
+            protection=protection,
             findings=findings,
         )
         outcome_path.write_text(json.dumps(result.as_dict(), indent=2) + "\n", encoding="utf-8")
@@ -2406,6 +2652,7 @@ __all__ = [
     "EngineGateExecutor",
     "EngineGateRequest",
     "EngineGateResult",
+    "GateProtectionResult",
     "GateReceipt",
     "GateRunner",
     "GateRunnerDiskLowError",
@@ -2426,10 +2673,12 @@ __all__ = [
     "default_gate_disk_guard",
     "disk_floor_ok",
     "host_disk_admission",
+    "load_base_gate_definitions",
     "load_project_gate_scratch_policy",
     "load_project_gate_scratch_policy_for_state_dir",
     "preflight_ram_scratch",
     "project_policy_path",
     "set_project_gate_scratch_policy",
     "sweep_gate_scratch",
+    "verify_gate_definitions",
 ]

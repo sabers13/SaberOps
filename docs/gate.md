@@ -81,6 +81,59 @@ size and largest test directories). They are copied to the git common directory'
 `saberops-gate-last/` before cleanup. An explicit result directory survives cleanup;
 the default lives inside private scratch and is available in the copied evidence.
 
+## Gate tamper protection (GT-1)
+
+A candidate must never be able to change the gate that judges it. The engine
+therefore loads the **gate definitions from the base SHA** and compares them with
+the candidate tree before any gate command runs; a difference blocks the gate
+fail-closed as an owner question instead of producing a verdict.
+
+The protected definitions are:
+
+| Kind | Paths |
+| --- | --- |
+| Gate scripts / tooling | everything under `scripts/` (the named set: `gate-full.sh`, `gate-ui-fast.sh`, `gate-affected.sh`, `gate_tools.py`, `build_test_map.py`, `select_tests.py`, `test_hygiene.py`, plus the G1 runner `lane-check.sh`, `gate_lib.sh` and any future gate helper) |
+| Test infrastructure | every `conftest.py`, at the repository root, in `tests/` and in any subdirectory |
+| Gate configuration | `pyproject.toml` (`[tool.pytest.ini_options]`, `[tool.ruff]`, `[tool.mypy]`; the whole file is protected because the dev-dependency pins choose the tools the gate runs) and `.github/workflows/ci.yml` |
+
+Mechanism (`saberops.gate_scope`, `saberops.gate_runner`):
+
+- `check_gate_protection(changed_paths, touches)` is the pure path check over the
+  candidate diff, next to the existing write-scope and retirement checks.
+- `load_base_gate_definitions(repo, base)` reads the definitions from the git
+  object store at `base` (`git ls-tree` + `git show`), never from the candidate.
+- `verify_gate_definitions(repo, base, changed_paths=..., touches=...)` compares
+  those base bytes with the candidate working tree, including committed branch
+  changes, uncommitted edits and untracked files (`git status --untracked-files=all`),
+  so an added or deleted `conftest.py` counts as well. Byte-identical definitions
+  *are* the base definitions, so a gate that runs is a base-trusted gate.
+- `EngineGateExecutor` runs this before the host-disk admission and before the
+  gate slot, so a blocked candidate never starts a gate command. The result is
+  `outcome: BLOCKED`, `reason: GATE_PROTECTION_BLOCKED: GATE_PROTECTED_PATH_MUTATED:
+  <paths>`, and the same line is written to the engine history and `outcome.json`
+  (`gate_protection`, with the tampered paths, per-path digests and the base SHA).
+- `touches` is **evidence, not authorization**: a lane that declares a protected
+  path in its `Touches` is still blocked; the declaration is recorded in
+  `declared_paths` and named in the owner question.
+
+Owner escalation workflow:
+
+1. The block raises an owner question (ADR-0004 D6): accept the definition change
+   into the base SHA and re-run the gate against the new base, or reject the change.
+2. An accepted definition change reaches the base SHA through the normal owner
+   merge; the next gate then loads the new definition from that new base. A lane
+   cannot self-authorize the edit by declaring it, by weakening a test, or by
+   editing the runner that produced its evidence.
+3. INFRA conditions while reading the base (an unresolvable `base`, an unreadable
+   object) fail closed as `outcome: BLOCKED` with
+   `GATE_PROTECTION_BLOCKED: GATE_BASE_UNVERIFIABLE: <detail>`; the engine cannot
+   show that the candidate's definitions are the base definitions, so no verdict
+   is produced.
+
+A gate request that declares neither a `base` nor `changed_files` has no candidate
+diff to protect and records no protection verdict (`gate_protection` absent); real
+G1/G2/G3 runs always declare one.
+
 ## Resource knobs
 
 | Variable | Default | Effect |
