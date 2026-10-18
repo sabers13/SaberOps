@@ -55,6 +55,18 @@ validation and owner approval path.
   readiness projection such as `saberops.ready_frontier`). These are pure
   **projections**. They perform no dispatch, hold no lease and are not launch
   authority on their own.
+- Step 015 plan-data layer: `saberops.project.ProjectRegistry`
+  (explicit stable slugs, duplicate/malformed/inferred refusal, durable
+  3-active-project cap), `saberops.project_scope.plan_store`
+  (`PlanRevision`/`PlanStore`: immutable versions, SHA-256 tamper detection,
+  DAG validation, `plan_revisions_to_snapshot` adapter into the single
+  readiness authority), deterministic chained wave sequencing
+  (`schedule_chained_waves`) and structured run summaries
+  (`build_plan_run_report`) in `saberops.ready_frontier`, surfaced read-only
+  via `orch project list|register|active` and `orch plan show|validate`
+  (store verbs live on the hidden `plan-store` group so legacy
+  `orch plan <run_id>` is byte-for-byte preserved). Still plan **data**,
+  not dispatch: no lease, no worker launch, no slot admission.
 
 **Target — not yet live.** A deterministic, owner-approved plan with stable
 project/task IDs and a **continuously refilled cross-phase ready frontier**;

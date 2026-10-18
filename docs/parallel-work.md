@@ -31,7 +31,13 @@ candidate. `saberops.planning.represent_independent_ready_work` and
 `ready_dependents` are the persisted *within-run* plan/package dependency
 authority: they perform dependency-state transitions against the run database.
 The bounded `fetch_initial_orchestrator_guidance` call is a short initial-goal
-advisor for the first worker, not a planner. This is a single-run team
+advisor for the first worker, not a planner. Step 015 adds the plan-data
+layer beside it (`saberops.project.ProjectRegistry`,
+`saberops.project_scope.plan_store`, chained `schedule_chained_waves` and
+`build_plan_run_report` in `saberops.ready_frontier`, via
+`orch project list|register|active` and `orch plan show|validate`): versioned,
+tamper-evident plans with an explicit active revision, sequenced into waves
+and reported — still data, not dispatch. This is a single-run team
 executor, **not** a cross-project, continuously refilled scheduler.
 
 **TARGET — not yet implemented.** A deterministic, continuously refilled

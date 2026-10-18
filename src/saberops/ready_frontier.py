@@ -98,17 +98,23 @@ __all__ = [
     "FrontierSnapshot",
     "HeldTask",
     "EligibleTask",
+    "PlanRunReport",
     "PlanTask",
     "ProjectPlan",
     "ProjectionStatus",
     "READY_FRONTIER_VERSION",
     "REQUIRES_TRANSACTIONAL_VERIFICATION",
+    "ScheduledTask",
+    "ScheduledWave",
     "SnapshotSource",
     "TaskKind",
     "TaskRef",
     "TaskStatus",
+    "WaveScheduleError",
+    "build_plan_run_report",
     "default_frontier_limits",
     "project_ready_frontier",
+    "schedule_chained_waves",
 ]
 
 READY_FRONTIER_VERSION = "ready-frontier/1"
@@ -899,5 +905,368 @@ def project_ready_frontier(request: FrontierRequest) -> FrontierProjection:
             f"projected: {len(eligible)} eligible, {len(held)} held "
             f"(limits {request.limits.active_projects}x"
             f"{request.limits.child_slots_per_project})"
+        ),
+    )
+
+
+class WaveScheduleError(ValueError):
+    """Raised when a plan cannot be sequenced into executable waves."""
+
+
+#: Task statuses the wave scheduler treats as already satisfied.
+_SATISFIED_STATUSES: frozenset[str] = frozenset(
+    {TaskStatus.COMPLETED.value, TaskStatus.SKIPPED.value}
+)
+
+#: Task statuses the wave scheduler treats as schedulable work.
+_SCHEDULABLE_STATUSES: frozenset[str] = frozenset(
+    {TaskStatus.PENDING.value, TaskStatus.READY.value, TaskStatus.RUNNING.value}
+)
+
+
+@dataclass(frozen=True)
+class ScheduledTask:
+    """One task placed in a chained wave, with its stable identity."""
+
+    project_id: str
+    task_id: str
+    phase: str
+    title: str
+    running: bool = False
+
+    @property
+    def stable_ref(self) -> TaskRef:
+        """The immutable stable identity of this task."""
+        return TaskRef(project_id=self.project_id, task_id=self.task_id)
+
+
+@dataclass(frozen=True)
+class ScheduledWave:
+    """One executable wave: tasks that may run once earlier waves completed."""
+
+    index: int
+    tasks: tuple[ScheduledTask, ...] = ()
+
+
+def schedule_chained_waves(
+    projects: tuple[ProjectPlan, ...],
+    limits: FrontierLimits | None = None,
+) -> tuple[ScheduledWave, ...]:
+    """Derive the deterministic sequence of executable waves for stored plans.
+
+    Layering is topological over hard START edges: a task enters the first
+    wave after every wave holding its START dependencies, so completing wave
+    ``n`` unlocks wave ``n+1``. Deferred integration prerequisites never move
+    a task. Ordering inside a wave is by stable identity
+    ``(project_id, task_id)``; each wave honors the owner maxima (at most
+    ``active_projects`` distinct projects, at most ``child_slots_per_project``
+    tasks per project) by splitting an oversized layer into consecutive
+    waves. Already ``RUNNING`` tasks all sit in wave 0: they were admitted by
+    the live slot authority, so wave 0 reports underway work rather than
+    granting new admission.
+
+    Fail-closed: unknown statuses/kinds, missing dependency targets, START
+    cycles, conflicting duplicate rows, and any task stuck in
+    ``blocked`` / ``failed`` / ``owner_wait`` / ``resource_wait`` (which no
+    wave can execute) raise :class:`WaveScheduleError` naming the blocker.
+    The recovery path is a new plan revision. This function performs no I/O,
+    holds no lease and launches nothing.
+    """
+    bound = limits if limits is not None else default_frontier_limits()
+    if not _is_positive_int(bound.active_projects) or not _is_positive_int(
+        bound.child_slots_per_project
+    ):
+        raise WaveScheduleError("invalid wave limits: both maxima must be >= 1")
+
+    index: dict[TaskRef, PlanTask] = {}
+    for project in projects:
+        project_id = _clean_text(project.project_id)
+        if not project_id:
+            raise WaveScheduleError("wave input holds a project with no identity")
+        for task in project.tasks:
+            task_id = _clean_text(task.task_id)
+            if not task_id:
+                raise WaveScheduleError("wave input holds a task with no identity")
+            kind = _normalized(task.kind)
+            status = _normalized(task.status)
+            if kind != TaskKind.CHILD_TASK.value:
+                if kind not in _KIND_VALUES:
+                    raise WaveScheduleError(
+                        f"unknown task kind {task.kind!r} for {project_id}/{task_id}"
+                    )
+                continue
+            if status not in _STATUS_VALUES:
+                raise WaveScheduleError(
+                    f"unknown task status {task.status!r} for {project_id}/{task_id}"
+                )
+            ref = TaskRef(project_id=project_id, task_id=task_id)
+            row = PlanTask(
+                task_id=task_id,
+                phase=_clean_text(task.phase),
+                status=status,
+                kind=kind,
+                title=_clean_text(task.title),
+                start_dependencies=tuple(task.start_dependencies),
+                integration_prerequisites=tuple(task.integration_prerequisites),
+                owns=task.owns,
+            )
+            existing = index.get(ref)
+            if existing is not None and existing != row:
+                raise WaveScheduleError(
+                    f"conflicting duplicate wave row for {project_id}/{task_id}"
+                )
+            index[ref] = row
+
+    for ref, row in sorted(index.items(), key=lambda item: (item[0].project_id, item[0].task_id)):
+        for dep in row.start_dependencies:
+            if not dep.is_valid or dep not in index:
+                raise WaveScheduleError(
+                    f"task {ref.project_id}/{ref.task_id} depends on unknown "
+                    f"task {dep.project_id}/{dep.task_id}"
+                )
+    if _has_cycle(
+        {
+            ref: _ValidatedTask(
+                project_id=ref.project_id,
+                task_id=row.task_id,
+                phase=row.phase,
+                kind=row.kind,
+                status=row.status,
+                display_step=row.display_step,
+                title=row.title,
+                start_dependencies=row.start_dependencies,
+                integration_prerequisites=row.integration_prerequisites,
+                owns=row.owns,
+            )
+            for ref, row in index.items()
+        },
+        edges=lambda row: row.start_dependencies,
+    ):
+        raise WaveScheduleError("hard START dependencies contain a cycle")
+
+    schedulable: dict[TaskRef, PlanTask] = {}
+    for ref, row in index.items():
+        if row.status in _SATISFIED_STATUSES:
+            continue
+        if row.status not in _SCHEDULABLE_STATUSES:
+            raise WaveScheduleError(
+                f"task {ref.project_id}/{ref.task_id} is {row.status}: no wave "
+                "can execute it, resolve it in a new plan revision"
+            )
+        schedulable[ref] = row
+    for ref, row in sorted(
+        schedulable.items(), key=lambda item: (item[0].project_id, item[0].task_id)
+    ):
+        for dep in row.start_dependencies:
+            dep_row = index[dep]
+            if dep_row.status not in _SATISFIED_STATUSES and dep not in schedulable:
+                raise WaveScheduleError(
+                    f"task {ref.project_id}/{ref.task_id} is blocked by "
+                    f"{dep.project_id}/{dep.task_id} ({dep_row.status}): no wave "
+                    "can execute past it, resolve it in a new plan revision"
+                )
+
+    # Topological levels over the schedulable subgraph; satisfied tasks are
+    # level -1 (already done) and impose no wave.
+    level: dict[TaskRef, int] = {}
+
+    def task_level(ref: TaskRef) -> int:
+        if ref in level:
+            return level[ref]
+        deps = [
+            task_level(dep)
+            for dep in schedulable[ref].start_dependencies
+            if dep in schedulable
+        ]
+        level[ref] = (max(deps) + 1) if deps else 0
+        return level[ref]
+
+    for ref in sorted(schedulable, key=lambda item: (item.project_id, item.task_id)):
+        task_level(ref)
+
+    by_level: dict[int, list[TaskRef]] = {}
+    for ref, depth in level.items():
+        by_level.setdefault(depth, []).append(ref)
+
+    waves: list[ScheduledWave] = []
+    running = sorted(
+        (ref for ref, row in schedulable.items() if row.status == TaskStatus.RUNNING.value),
+        key=lambda item: (item.project_id, item.task_id),
+    )
+    if running:
+        waves.append(
+            ScheduledWave(
+                index=0,
+                tasks=tuple(
+                    ScheduledTask(
+                        project_id=ref.project_id,
+                        task_id=ref.task_id,
+                        phase=schedulable[ref].phase,
+                        title=schedulable[ref].title,
+                        running=True,
+                    )
+                    for ref in running
+                ),
+            )
+        )
+    for depth in sorted(by_level):
+        pending = [
+            ref
+            for ref in sorted(
+                by_level[depth], key=lambda item: (item.project_id, item.task_id)
+            )
+            if schedulable[ref].status != TaskStatus.RUNNING.value
+        ]
+        cursor = 0
+        while cursor < len(pending):
+            wave_projects: set[str] = set()
+            wave_counts: dict[str, int] = {}
+            chunk: list[TaskRef] = []
+            while cursor < len(pending):
+                ref = pending[cursor]
+                project_count = wave_counts.get(ref.project_id, 0)
+                new_project = ref.project_id not in wave_projects
+                if project_count >= bound.child_slots_per_project or (
+                    new_project and len(wave_projects) >= bound.active_projects
+                ):
+                    break
+                wave_projects.add(ref.project_id)
+                wave_counts[ref.project_id] = project_count + 1
+                chunk.append(ref)
+                cursor += 1
+            waves.append(
+                ScheduledWave(
+                    index=len(waves),
+                    tasks=tuple(
+                        ScheduledTask(
+                            project_id=ref.project_id,
+                            task_id=ref.task_id,
+                            phase=schedulable[ref].phase,
+                            title=schedulable[ref].title,
+                        )
+                        for ref in chunk
+                    ),
+                )
+            )
+    return tuple(waves)
+
+
+@dataclass(frozen=True)
+class HeldSummary:
+    """One held task with its ordered machine-readable hold reason codes."""
+
+    project_id: str
+    task_id: str
+    status: str
+    reason_codes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class PlanRunReport:
+    """Structured run summary for one plan version and one projection.
+
+    Sections mirror the projection exactly: ``eligible`` tasks that may
+    start, ``running`` tasks already underway, and ``held`` tasks with the
+    exact dependency reason codes that hold them. A denied projection still
+    reports (``status`` ``"DENIED"``) with the projection-level reason codes
+    and empty sections, so a report never masquerades a failed validation as
+    an empty ready set. ``generated_at`` is caller-supplied (no clock read).
+    """
+
+    plan_version: str
+    project_ids: tuple[str, ...]
+    generated_at: str
+    status: str
+    eligible: tuple[TaskRef, ...] = ()
+    running: tuple[TaskRef, ...] = ()
+    held: tuple[HeldSummary, ...] = ()
+    wave_count: int = 0
+    active_projects_limit: int = DEFAULT_ACTIVE_PROJECT_LIMIT
+    child_slots_limit: int = DEFAULT_CHILD_SLOTS_PER_PROJECT_LIMIT
+    detail: str = ""
+
+    def to_dict(self) -> dict[str, object]:
+        """Render as JSON-serializable evidence."""
+        return {
+            "plan_version": self.plan_version,
+            "project_ids": list(self.project_ids),
+            "generated_at": self.generated_at,
+            "status": self.status,
+            "eligible": [
+                {"project_id": ref.project_id, "task_id": ref.task_id}
+                for ref in self.eligible
+            ],
+            "running": [
+                {"project_id": ref.project_id, "task_id": ref.task_id}
+                for ref in self.running
+            ],
+            "held": [
+                {
+                    "project_id": item.project_id,
+                    "task_id": item.task_id,
+                    "status": item.status,
+                    "reason_codes": list(item.reason_codes),
+                }
+                for item in self.held
+            ],
+            "wave_count": self.wave_count,
+            "limits": {
+                "active_projects": self.active_projects_limit,
+                "child_slots_per_project": self.child_slots_limit,
+            },
+            "detail": self.detail,
+        }
+
+
+def build_plan_run_report(
+    projection: FrontierProjection,
+    *,
+    plan_version: str,
+    generated_at: str,
+    wave_count: int = 0,
+) -> PlanRunReport:
+    """Build a structured run summary from one frontier projection."""
+    version = plan_version.strip() or "unknown"
+    if not projection.projected:
+        return PlanRunReport(
+            plan_version=version,
+            project_ids=projection.project_order,
+            generated_at=generated_at,
+            status=projection.status.value,
+            wave_count=wave_count,
+            active_projects_limit=projection.limits.active_projects,
+            child_slots_limit=projection.limits.child_slots_per_project,
+            detail=f"denied: {', '.join(projection.reason_codes())}",
+        )
+    running = tuple(
+        task.stable_ref
+        for task in projection.held
+        if FrontierReason.TASK_RUNNING in task.reasons
+    )
+    held = tuple(
+        HeldSummary(
+            project_id=task.project_id,
+            task_id=task.task_id,
+            status=task.status,
+            reason_codes=task.reason_codes(),
+        )
+        for task in projection.held
+        if FrontierReason.TASK_RUNNING not in task.reasons
+    )
+    return PlanRunReport(
+        plan_version=version,
+        project_ids=projection.project_order,
+        generated_at=generated_at,
+        status=projection.status.value,
+        eligible=projection.eligible_refs(),
+        running=running,
+        held=held,
+        wave_count=wave_count,
+        active_projects_limit=projection.limits.active_projects,
+        child_slots_limit=projection.limits.child_slots_per_project,
+        detail=(
+            f"projected: {len(projection.eligible)} eligible, "
+            f"{len(running)} running, {len(held)} held "
+            f"(plan {version}, {wave_count} waves)"
         ),
     )
