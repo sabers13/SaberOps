@@ -177,6 +177,15 @@ def test_unknown_context_prefers_safe_new_session() -> None:
     assert decision.rotation_required is True
 
 
+def test_unknown_usage_without_resumable_session_starts_new() -> None:
+    """Covers: ADR-0004 D11 no session precedes UNKNOWN-usage handling."""
+    decision = decide_turn(_unknown_request(session_resumable=False))
+    assert decision.action is TurnAction.NEW_SESSION
+    assert decision.reason_code is ReasonCode.NEW_SESSION_NO_SESSION
+    assert decision.context_usage_known is False
+    assert decision.rotation_required is False
+
+
 def test_unknown_context_defer_policy_defers() -> None:
     """Covers: ADR-0004 D11 unknown usage may DEFER explicitly."""
     decision = decide_turn(
@@ -308,6 +317,20 @@ def test_mid_turn_never_returns_new_session(rotation_requested: bool) -> None:
         )
     )
     assert decision.action is not TurnAction.NEW_SESSION
+
+
+def test_owner_question_precedes_mid_turn_rotation_refusal() -> None:
+    """Covers: ADR-0004 D11 repeated failure escalates before turn-boundary rules."""
+    decision = decide_turn(
+        _request(
+            at_turn_boundary=False,
+            rotation_requested=True,
+            failed_attempts=MAX_FAILED_ATTEMPTS_BEFORE_OWNER_QUESTION,
+        )
+    )
+    assert decision.action is TurnAction.OWNER_QUESTION
+    assert decision.reason_code is ReasonCode.OWNER_QUESTION_REPEATED_FAILURE
+    assert decision.rotation_refused is False
 
 
 # --------------------------------------------------------------------------
@@ -601,6 +624,13 @@ def test_evidence_path_with_content_markers_rejected(bad: str) -> None:
         _request(evidence_paths=(bad,))
 
 
+@pytest.mark.parametrize("bad", ["lesson\nraw body", "a\rb", "a\x00b"])
+def test_notebook_entry_with_content_markers_rejected(bad: str) -> None:
+    """Covers: ADR-0004 D11 notebook entries are single-line facts, not content."""
+    with pytest.raises(TurnPolicyError):
+        _request(notebook=(bad,))
+
+
 def test_brief_never_embeds_evidence_content() -> None:
     """Covers: ADR-0004 D11 the brief carries references, not raw evidence."""
     decision = decide_turn(_request(evidence_paths=("reports/009.md",)))
@@ -613,6 +643,16 @@ def test_brief_never_embeds_evidence_content() -> None:
 def test_mandatory_brief_budget_blocks_turn() -> None:
     """Covers: ADR-0004 D11 oversized mandatory brief content blocks."""
     decision = decide_turn(_request(question="q" * (BRIEF_MAX_MANDATORY_CHARS + 1)))
+    assert decision.action is TurnAction.BLOCKED
+    assert decision.reason_code is ReasonCode.BLOCKED_BRIEF_BUDGET
+    assert decision.brief is None
+
+
+def test_mandatory_brief_budget_counts_pinned_wave_state() -> None:
+    """Covers: ADR-0004 D11 the pinned wave state is mandatory brief content."""
+    wave_chars = len(WAVE) + len(HEAD_A) + len(HEAD_B) + len("G3_PASS")
+    question = "q" * (BRIEF_MAX_MANDATORY_CHARS - wave_chars + 1)
+    decision = decide_turn(_request(question=question, wave_state=_wave()))
     assert decision.action is TurnAction.BLOCKED
     assert decision.reason_code is ReasonCode.BLOCKED_BRIEF_BUDGET
     assert decision.brief is None

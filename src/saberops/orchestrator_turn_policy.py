@@ -34,7 +34,8 @@ The frozen ADR-0004 D11 rules encoded here:
    input is truncated with disclosure or blocked, never summarised or inlined.
 6. All inputs are strictly validated; malformed identifiers, negative token
    counts, zero totals, impossible ratios, conflicting wave identity, unbounded
-   notebook/path lists and invalid SHA/outcome tags all fail closed.
+   notebook/path lists, embedded content markers in notebook entries or evidence
+   paths, and invalid SHA/outcome tags all fail closed.
 
 This module intentionally uses immutable dataclasses and no mutable module
 state so the same immutable input always yields byte-identical output.
@@ -236,17 +237,34 @@ def _validate_text_sequence(
     return tuple(validated)
 
 
+def _reject_content_markers(items: tuple[str, ...], label: str, message: str) -> tuple[str, ...]:
+    for index, item in enumerate(items):
+        if any(marker in item for marker in _CONTENT_MARKERS):
+            raise TurnPolicyError(f"{label}[{index}] {message}")
+    return items
+
+
 def _validate_path_sequence(
     value: object, label: str, max_items: int, max_item_length: int
 ) -> tuple[str, ...]:
     items = _validate_text_sequence(value, label, max_items, max_item_length)
-    for index, item in enumerate(items):
-        if any(marker in item for marker in _CONTENT_MARKERS):
-            raise TurnPolicyError(
-                f"{label}[{index}] must be a path reference only, not file content "
-                "(newlines and NUL are refused)"
-            )
-    return items
+    return _reject_content_markers(
+        items,
+        label,
+        "must be a path reference only, not file content (newlines and NUL are refused)",
+    )
+
+
+def _validate_notebook_sequence(
+    value: object, label: str, max_items: int, max_item_length: int
+) -> tuple[str, ...]:
+    items = _validate_text_sequence(value, label, max_items, max_item_length)
+    return _reject_content_markers(
+        items,
+        label,
+        "must be a single-line notebook entry, not embedded file content "
+        "(newlines, carriage returns and NUL are refused)",
+    )
 
 
 @dataclass(frozen=True)
@@ -478,7 +496,7 @@ class TurnRequest:
         object.__setattr__(
             self,
             "notebook",
-            _validate_text_sequence(
+            _validate_notebook_sequence(
                 self.notebook, "notebook", MAX_NOTEBOOK_ENTRIES, MAX_TEXT_ITEM_LENGTH
             ),
         )
@@ -571,10 +589,7 @@ def build_brief(request: TurnRequest) -> Brief:
     mandatory_chars = len(question) if question is not None else 0
     if wave is not None:
         mandatory_chars += (
-            len(wave.wave_id)
-            + len(wave.base_sha)
-            + len(wave.head_sha)
-            + len(wave.outcome_tag)
+            len(wave.wave_id) + len(wave.base_sha) + len(wave.head_sha) + len(wave.outcome_tag)
         )
     if mandatory_chars > BRIEF_MAX_MANDATORY_CHARS:
         raise BriefBudgetError(
@@ -585,9 +600,7 @@ def build_brief(request: TurnRequest) -> Brief:
     standing = _cap_sequence(
         request.standing_decisions, BRIEF_MAX_STANDING_DECISIONS, "standing_decisions", truncations
     )
-    notebook = _cap_sequence(
-        request.notebook, BRIEF_MAX_NOTEBOOK_ENTRIES, "notebook", truncations
-    )
+    notebook = _cap_sequence(request.notebook, BRIEF_MAX_NOTEBOOK_ENTRIES, "notebook", truncations)
     evidence = _cap_sequence(
         request.evidence_paths, BRIEF_MAX_EVIDENCE_PATHS, "evidence_paths", truncations
     )
@@ -783,9 +796,7 @@ def decide_turn(request: TurnRequest) -> TurnDecision:
             ReasonCode.BLOCKED_CONTEXT_UNKNOWN,
             rotation_required=False,
             brief=None,
-            explanation=(
-                "context usage is unknown and the caller forbids a new session; blocked",
-            ),
+            explanation=("context usage is unknown and the caller forbids a new session; blocked",),
         )
     return _decision_with_brief(
         request,
