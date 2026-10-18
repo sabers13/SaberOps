@@ -310,3 +310,69 @@ def test_css_restores_document_scroll_over_shared_viewport_lock() -> None:
         assert _overflow_y(eff) in ("auto", "scroll"), (
             f"{target} overflow-y not scrollable: {_overflow_y(eff)!r}"
         )
+
+
+# --- Step 019 full delivery: the wired onboarding surface ------------------
+
+ONBOARDING = REPO_ROOT / "src" / "saberops" / "templates" / "onboarding.html"
+ONBOARDING_CSS = REPO_ROOT / "src" / "saberops" / "static" / "css" / "onboarding.css"
+
+
+def test_onboarding_assets_exist_at_authorized_paths() -> None:
+    """Covers: UI-1 Touches list — wired onboarding template and stylesheet."""
+    assert ONBOARDING.is_file(), "missing onboarding.html"
+    assert ONBOARDING_CSS.is_file(), "missing onboarding.css"
+
+
+def test_onboarding_template_collects_no_secrets() -> None:
+    """Covers: UI-1 Section A — no credential capture anywhere on the page."""
+    text = _read(ONBOARDING).lower()
+    assert 'type="password"' not in text
+    assert "current-password" not in text and "new-password" not in text
+    for match in re.finditer(r"<input[^>]*>", text):
+        tag = match.group(0)
+        assert "password" not in tag and "secret" not in tag, tag
+        if "token" in tag:
+            assert 'name="csrf"' in tag, tag
+
+
+def test_onboarding_template_requires_csrf_and_owner_confirmation() -> None:
+    """Covers: UI-1 security — CSRF on every mutation and owner confirmation."""
+    text = _read(ONBOARDING)
+    forms = re.findall(
+        r'<form[^>]*method="post"[^>]*>.*?</form>', text, flags=re.S
+    )
+    assert len(forms) >= 5, "expected the wired mutation forms"
+    for form in forms:
+        assert 'name="csrf"' in form, form[:120]
+    for action in (
+        "/first-run/concurrency",
+        "/first-run/project/register",
+        "/first-run/storage/apply",
+    ):
+        form = next((f for f in forms if action in f), None)
+        assert form is not None, action
+        assert "owner_confirmed" in form or 'name="confirm"' in form, action
+    assert "Apply cleanup" in text
+
+
+def test_onboarding_css_reuses_tokens_and_is_responsive() -> None:
+    """Covers: UI-1 design — existing tokens, responsive, accessible."""
+    text = _read(ONBOARDING_CSS)
+    for token in ("var(--bg)", "var(--fg)", "var(--border)", "var(--accent)"):
+        assert token in text, f"new palette instead of token: {token}"
+    assert "@media" in text, "no responsive breakpoint"
+    assert "720px" in text, "no narrow-screen breakpoint"
+    assert ":focus-visible" in text, "no visible focus styling"
+    assert "prefers-reduced-motion" in text
+    assert "@import" not in text, "no new dependency via import"
+    assert "http://" not in text and "https://" not in text
+
+
+def test_onboarding_assets_have_no_absolute_urls() -> None:
+    """Covers: UI-1 — wired assets reference only local /static paths."""
+    for path in (ONBOARDING, ONBOARDING_CSS):
+        text = _read(path)
+        assert "http://" not in text, f"absolute URL in {path.name}"
+        assert "https://" not in text, f"absolute URL in {path.name}"
+

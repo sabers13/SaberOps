@@ -9,17 +9,23 @@ runs, reviews, accept, cleanup, and live SSE event streaming.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import os
+import platform
 import re
+import secrets
 import shutil
+import sqlite3
 import subprocess
+import sys
 import threading
 from collections.abc import AsyncGenerator, Callable, Mapping
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Annotated, Any
+from urllib.parse import quote
 
 from fastapi import (
     FastAPI,
@@ -36,7 +42,20 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from saberops import access_ops, plans_ops
 from saberops.accept import AcceptEngine
+from saberops.authority import label_for, load_authority_mode
+from saberops.config import (
+    MAX_CONCURRENT_TASKS,
+    MAX_WORKER_SESSIONS_PER_PROJECT,
+    ConfigError,
+    ConfigLedger,
+    approve_config_proposal,
+    config_ledger_path,
+    current_workflow_settings,
+    default_workflow_settings,
+    propose_config_change,
+)
 from saberops.control_plane import (
     BindingRole,
     BindingStoreError,
@@ -85,11 +104,57 @@ from saberops.owner_actions import (
     OwnerActionSupervisor,
     summarize_owner_actions,
 )
-from saberops.project import owner_state_dir
+from saberops.paths import saberops_state_dir
+from saberops.project import ProjectRegistry, owner_state_dir
+from saberops.project_mode import (
+    MODE_LABELS,
+    MODE_ORDER,
+    allowed_modes,
+    extract_project_mode_facts,
+    mode_rank,
+    mode_requirements,
+    preflight,
+    recommend_mode,
+    requires_owner_confirmation,
+)
+from saberops.questions import (
+    AnswerAuthority,
+    AskRole,
+    OwnerQuestionQueue,
+    QuestionError,
+    QuestionStatus,
+    is_due,
+    question_view,
+)
+from saberops.routing_config import load_effective_routing
 from saberops.run_titles import fallback_title
 from saberops.runtime import ProjectRuntime, ProjectRuntimeManager
 from saberops.service import OrchestratorService
+from saberops.storage_gc import (
+    GcPolicyError,
+    apply_gc,
+    default_gc_policy_path,
+    load_gc_policy,
+    preview_gc,
+)
+from saberops.storage_inventory import build_inventory
+from saberops.storage_maintenance import (
+    current_disk_floor_bytes,
+    database_audit_sink,
+    disk_ok,
+)
+from saberops.unattended import (
+    NEVER_DELEGABLE_KINDS,
+    NEVER_DELEGABLE_POLICY,
+    DecisionScope,
+    StandingDecision,
+)
 from saberops.wake import subscribe_run
+from saberops.wave_plan_optimizer import (
+    default_optimization_limits,
+    graph_from_revisions,
+    optimize_plan,
+)
 from saberops.workers.registry import AdapterRegistry
 
 _PACKAGE_DIR = Path(__file__).resolve().parent
@@ -1480,6 +1545,769 @@ def _is_private_web_path(path: str) -> bool:
     return True
 
 
+# ---------------------------------------------------------------------------
+# Step 019 (UI-1) — first-run onboarding surface.
+#
+# Read projections and owner-confirmed mutations for the complete first-run
+# UI: readiness diagnostics, honest vendor logins, connection/model discovery,
+# fail-closed posture, per-role routing, 3x5 concurrency, project entry modes,
+# plan/wave inspection, the question queue, unattended standing decisions and
+# the storage/Git lifecycle dry-run.  Every projection degrades to an honest
+# empty state and never raises into the request path; every mutation is gated
+# on a process-local CSRF token plus explicit owner confirmation.
+# ---------------------------------------------------------------------------
+
+_CSRF_TOKEN: str = secrets.token_urlsafe(32)
+
+_STATE_OK: frozenset[str] = frozenset({"READY", "OK", "EXPIRING", "TRUE"})
+_STATE_FAIL: frozenset[str] = frozenset(
+    {"NOT_READY", "UNVERIFIED", "EXPIRED", "FORBIDDEN", "FALSE"}
+)
+
+
+def _csrf_token() -> str:
+    """Return the process-local CSRF token for owner-confirmed mutations."""
+    return _CSRF_TOKEN
+
+
+def _csrf_valid(submitted: str) -> bool:
+    """Constant-time check of a submitted CSRF token."""
+    return bool(submitted) and hmac.compare_digest(submitted, _CSRF_TOKEN)
+
+
+def _pill_class(state: str) -> str:
+    """Map a backend state token to a presentation class (ok/warn/fail)."""
+    token = state.strip().upper()
+    if token in _STATE_OK:
+        return "ok"
+    if token in _STATE_FAIL:
+        return "fail"
+    return "warn"
+
+
+def _config_ledger() -> ConfigLedger:
+    """Return the owner configuration ledger (``ORCH_CONFIG_LEDGER`` override)."""
+    override = os.environ.get("ORCH_CONFIG_LEDGER", "").strip()
+    if override:
+        return ConfigLedger(Path(override).expanduser())
+    return ConfigLedger(config_ledger_path(saberops_state_dir()))
+
+
+def _question_queue() -> OwnerQuestionQueue:
+    """Return the durable owner-question queue (``ORCH_QUESTIONS_STORE`` override)."""
+    return OwnerQuestionQueue()
+
+
+def _gc_policy_path() -> Path:
+    """Resolve the owner GC standing policy path (``ORCH_GC_POLICY`` override)."""
+    override = os.environ.get("ORCH_GC_POLICY", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return default_gc_policy_path()
+
+
+def _unattended_store_path() -> Path:
+    """Resolve the standing-decisions document path (``ORCH_UNATTENDED_STORE``)."""
+    override = os.environ.get("ORCH_UNATTENDED_STORE", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return owner_state_dir() / "unattended-decisions.json"
+
+
+def _onboarding_notice(request: Request) -> str | None:
+    """Translate an onboarding success-redirect flag into a human notice."""
+    params = request.query_params
+    if params.get("concurrency_saved") == "1":
+        return "Concurrency configuration saved (owner-approved decision recorded)."
+    if params.get("discovered") == "1":
+        connection = params.get("connection") or "the connection"
+        return f"Model discovery ran for {connection}; the catalog is evidence only."
+    if params.get("posture_saved") == "1":
+        return "Posture attestation recorded for the selected route."
+    if params.get("project_registered") == "1":
+        return "Project registered (inactive until you activate it)."
+    if params.get("answered") == "1":
+        return "Owner answer recorded verbatim."
+    if params.get("deferred") == "1":
+        return "Question deferred; it resurfaces on the chosen date."
+    if params.get("gc_applied") == "1":
+        applied = params.get("applied") or "0"
+        refused = params.get("refused") or "0"
+        message = f"Cleanup applied: {applied} action(s); refused {refused}."
+        if params.get("audit_uncertain") == "1":
+            message += " Audit persistence was uncertain; reconcile before relying on the log."
+        return message
+    return None
+
+
+def _diagnostics_rows() -> list[dict[str, Any]]:
+    """Local-only readiness diagnostics; nothing here contacts the network."""
+    rows: list[dict[str, Any]] = []
+    py_ok = sys.version_info >= (3, 12)
+    rows.append(
+        {
+            "label": "Python runtime",
+            "state": "ok" if py_ok else "fail",
+            "detail": f"{platform.python_version()} (requires 3.12+)",
+            "fix": ""
+            if py_ok
+            else "Install Python 3.12 or newer, then recreate the virtual environment.",
+        }
+    )
+    git = shutil.which("git")
+    rows.append(
+        {
+            "label": "Git executable",
+            "state": "ok" if git else "fail",
+            "detail": git or "not found on PATH",
+            "fix": "" if git else "Install git, then reopen the terminal.",
+        }
+    )
+    rows.append(
+        {
+            "label": "SQLite library",
+            "state": "ok",
+            "detail": f"{sqlite3.sqlite_version} (bundled with Python)",
+            "fix": "",
+        }
+    )
+    try:
+        state_dir = owner_state_dir()
+        anchor = state_dir
+        while not anchor.exists() and anchor != anchor.parent:
+            anchor = anchor.parent
+        usage = shutil.disk_usage(anchor)
+        floor = current_disk_floor_bytes(usage.total)
+        ok = disk_ok([state_dir])
+        rows.append(
+            {
+                "label": "Disk free floor",
+                "state": "ok" if ok else "fail",
+                "detail": (
+                    f"{usage.free / float(1024 ** 3):.1f} GB free on {anchor}; "
+                    f"floor {floor / float(1024 ** 3):.1f} GB (10 GB or 10%)"
+                ),
+                "fix": "" if ok else "Free disk space before starting work.",
+            }
+        )
+    except Exception as exc:
+        rows.append(
+            {
+                "label": "Disk free floor",
+                "state": "warn",
+                "detail": f"unavailable: {exc.__class__.__name__}",
+                "fix": "Check that the state directory is readable.",
+            }
+        )
+    return rows
+
+
+def _vendor_login_rows() -> list[dict[str, Any]]:
+    """Official vendor CLI logins: installed/readiness evidence, never secrets."""
+    readiness: Any
+    try:
+        readiness = access_ops.readiness_store().load()
+    except Exception:
+        readiness = None
+    rows: list[dict[str, Any]] = []
+    for descriptor in ACCOUNT_BACKENDS:
+        evidence = (
+            readiness.try_get(descriptor.connection_id) if readiness is not None else None
+        )
+        state = evidence.state.value if evidence is not None else "UNKNOWN"
+        rows.append(
+            {
+                "connection_id": descriptor.connection_id,
+                "provider": descriptor.provider,
+                "backend": descriptor.backend,
+                "executable": descriptor.executable,
+                "installed": shutil.which(descriptor.executable) is not None,
+                "login_hint": f"{descriptor.executable} login",
+                "readiness_state": state,
+                "readiness_reason": evidence.reason if evidence is not None else "NO_EVIDENCE",
+                "observed_at": evidence.observed_at if evidence is not None else None,
+                "state_class": _pill_class(state),
+            }
+        )
+    return rows
+
+
+def _connection_rows() -> list[dict[str, Any]]:
+    """Owner model-access connections with readiness and catalog counts."""
+    try:
+        payload = access_ops.list_access_connections()
+    except Exception:
+        return []
+    rows: list[dict[str, Any]] = []
+    for row in payload.get("connections", []):
+        if not isinstance(row, dict):
+            continue
+        readiness = str(row.get("readiness_state") or "UNKNOWN")
+        rows.append(
+            {
+                "connection_id": row.get("connection_id"),
+                "provider": row.get("provider"),
+                "backend": row.get("backend"),
+                "protocol": row.get("protocol"),
+                "auth_mode": row.get("auth_mode"),
+                "credential_display": row.get("credential_display"),
+                "enabled": row.get("enabled"),
+                "account_backed": row.get("account_backed"),
+                "readiness_state": readiness,
+                "readiness_reason": row.get("readiness_reason"),
+                "observed_at": row.get("observed_at"),
+                "catalog_models": row.get("catalog_models"),
+                "state_class": _pill_class(readiness),
+            }
+        )
+    return rows
+
+
+def _model_rows() -> list[dict[str, Any]]:
+    """Discovered models with source and exact execution-support evidence."""
+    try:
+        catalog = access_ops.load_catalog_safely()
+    except Exception:
+        return []
+    rows: list[dict[str, Any]] = []
+    for model in catalog.list_models():
+        support = model.execution_support.value
+        rows.append(
+            {
+                "model_id": model.model_id,
+                "display_name": model.display_name,
+                "provider": model.provider,
+                "backend": model.backend,
+                "connection_id": model.connection_id,
+                "source": model.source.value,
+                "execution_support": support,
+                "stale": model.stale,
+                "discovered_at": model.discovered_at,
+                "auto_routing": model.is_execution_supported and not model.stale,
+                "state_class": _pill_class(support),
+            }
+        )
+    return rows
+
+
+def _posture_rows() -> list[dict[str, Any]]:
+    """Per-route billing posture; only verified routes may auto-route."""
+    try:
+        payload = plans_ops.show_postures(date.today())
+    except Exception:
+        return []
+    rows: list[dict[str, Any]] = []
+    for row in payload.get("postures", []):
+        if not isinstance(row, dict):
+            continue
+        status = str(row.get("status") or "UNVERIFIED")
+        rows.append(
+            {
+                "selector": row.get("selector"),
+                "posture_class": row.get("class"),
+                "verified_on": row.get("verified_on"),
+                "expires_on": row.get("expires_on"),
+                "status": status,
+                "auto_routing": status in ("OK", "EXPIRING"),
+                "state_class": _pill_class(status),
+            }
+        )
+    return rows
+
+
+def _role_binding_view() -> dict[str, Any]:
+    """Owner bindings grouped by semantic role, plus explicit selections."""
+    owner = _load_owner_bindings_safely()
+    roles: dict[str, list[dict[str, Any]]] = {
+        "worker": [],
+        "reviewer": [],
+        "orchestrator": [],
+    }
+    try:
+        for binding in owner.registry.list_bindings():
+            key = binding.binding_role.value.lower()
+            if key not in roles:
+                continue
+            roles[key].append(
+                {
+                    "binding_id": binding.binding_id,
+                    "provider": binding.provider,
+                    "model": binding.model,
+                    "backend": binding.backend.value,
+                    "quota_pool_id": binding.quota_pool_id,
+                    "verified_at": binding.verified_at,
+                }
+            )
+    except Exception:
+        pass
+    selected: dict[str, list[str]] = {"reviewer": [], "orchestrator": []}
+    for role in ("reviewer", "orchestrator"):
+        try:
+            selected[role] = list(owner.role_binding_ids(role))
+        except Exception:
+            selected[role] = []
+    return {
+        "roles": roles,
+        "selected_reviewer": selected["reviewer"],
+        "selected_orchestrator": selected["orchestrator"],
+    }
+
+
+def _role_chain_rows() -> list[dict[str, Any]]:
+    """Effective per-role routing chains (Worker / Integrator / Surgeon)."""
+    try:
+        snapshot = load_effective_routing()
+    except Exception:
+        return []
+    rows: list[dict[str, Any]] = []
+    for role, groups in snapshot.role_chains:
+        rows.append(
+            {
+                "role": role,
+                "groups": [
+                    [f"{candidate.provider}/{candidate.model}" for candidate in group]
+                    for group in groups
+                ],
+            }
+        )
+    return rows
+
+
+def _concurrency_view() -> dict[str, Any]:
+    """Effective 3-project x 5-task concurrency limits and their maxima."""
+    ledger = _config_ledger()
+    try:
+        settings = current_workflow_settings(ledger)
+    except Exception:
+        settings = default_workflow_settings()
+    try:
+        configured = ledger.tip_for("config") is not None
+    except Exception:
+        configured = False
+    return {
+        "active_projects": settings.max_concurrent_tasks,
+        "child_slots_per_project": settings.max_worker_sessions_per_project,
+        "max_active_projects": MAX_CONCURRENT_TASKS,
+        "max_child_slots": MAX_WORKER_SESSIONS_PER_PROJECT,
+        "derived_ceiling": (
+            settings.max_concurrent_tasks * settings.max_worker_sessions_per_project
+        ),
+        "gate_light_slots_max": settings.gate_light_slots_max,
+        "configured": configured,
+    }
+
+
+def _project_mode_view(repo_param: str) -> dict[str, Any]:
+    """Observed project-entry-mode facts, recommendation and preflight."""
+    modes = [
+        {
+            "value": mode.value,
+            "label": MODE_LABELS[mode],
+            "rank": mode_rank(mode),
+            "requires_owner_confirmation": requires_owner_confirmation(mode),
+            "requirements": [fact.value for fact in mode_requirements(mode)],
+        }
+        for mode in MODE_ORDER
+    ]
+    view: dict[str, Any] = {
+        "repo": repo_param,
+        "modes": modes,
+        "facts": None,
+        "recommended": None,
+        "allowed": [],
+        "preflight": None,
+        "error": None,
+    }
+    if not repo_param:
+        return view
+    path = Path(repo_param).expanduser()
+    if not path.exists():
+        view["error"] = f"path not found: {repo_param}"
+        return view
+    try:
+        facts = extract_project_mode_facts(path)
+        recommendation = recommend_mode(facts)
+        report = preflight(recommendation.mode, facts)
+        view["facts"] = facts.as_dict()
+        view["recommended"] = {
+            "mode": recommendation.mode.value,
+            "label": MODE_LABELS[recommendation.mode],
+            "confidence": recommendation.confidence,
+            "runner_up": (
+                recommendation.runner_up.value if recommendation.runner_up is not None else None
+            ),
+        }
+        view["allowed"] = [
+            {"value": mode.value, "label": MODE_LABELS[mode]} for mode in allowed_modes(facts)
+        ]
+        view["preflight"] = {
+            "mode": report.mode.value,
+            "ok": report.ok,
+            "blockers": [
+                {
+                    "code": blocker.code.value,
+                    "summary": blocker.summary,
+                    "fix": blocker.fix_command,
+                }
+                for blocker in report.blockers
+            ],
+            "warnings": list(report.warnings),
+        }
+    except Exception as exc:
+        view["error"] = f"{exc.__class__.__name__}: {exc}"
+    return view
+
+
+def _plans_view() -> dict[str, Any]:
+    """Effective plan registry (accounts, quota pools, postures, reserves)."""
+    try:
+        payload = plans_ops.show_plans()
+    except Exception as exc:
+        return {
+            "error": f"{exc.__class__.__name__}: {exc}",
+            "accounts": {},
+            "quota_pools": {},
+            "postures": {},
+            "reserves": [],
+        }
+    return {
+        "error": None,
+        "accounts": payload.get("accounts", {}),
+        "quota_pools": payload.get("quota_pools", {}),
+        "postures": payload.get("postures", {}),
+        "reserves": payload.get("reserves", []),
+    }
+
+
+def _optimizer_limits_view() -> dict[str, Any]:
+    """The wave optimizer's owner maxima and tuning knobs."""
+    try:
+        limits = default_optimization_limits()
+    except Exception:
+        return {}
+    return {
+        "active_projects": limits.active_projects,
+        "workers_per_project": limits.workers_per_project,
+        "heavy_gate_slots": limits.heavy_gate_slots,
+        "max_rounds": limits.max_rounds,
+        "min_gain": limits.min_gain,
+    }
+
+
+def _wave_view(project_id: str) -> dict[str, Any]:
+    """Dependency DAG and wave-optimization scores for a stored plan revision."""
+    view: dict[str, Any] = {
+        "project_id": project_id,
+        "available": False,
+        "error": None,
+        "limits": _optimizer_limits_view(),
+        "waves": [],
+        "task_count": 0,
+        "critical_path": None,
+        "makespan": None,
+        "parallelism": None,
+        "scope_overlap_count": 0,
+        "peak_workers": 0,
+        "revisions": [],
+    }
+    if not project_id:
+        return view
+    try:
+        from saberops.project_scope.plan_store import PlanStore
+
+        store = PlanStore()
+        view["revisions"] = list(store.list_revisions(project_id))
+        if store.active_version(project_id) is None:
+            view["error"] = "no active plan revision"
+            return view
+        revision = store.load_active(project_id)
+        graph = graph_from_revisions([revision])
+        result = optimize_plan(graph, limits=default_optimization_limits())
+        final = result.final_score
+        view.update(
+            {
+                "available": True,
+                "task_count": len(graph.nodes),
+                "waves": [
+                    {
+                        "index": wave.index,
+                        "tasks": [
+                            f"{ref.project_id}/{ref.task_id}" for ref in wave.tasks
+                        ],
+                    }
+                    for wave in final.waves
+                ],
+                "critical_path": final.critical_path,
+                "makespan": final.makespan,
+                "parallelism": final.parallelism,
+                "scope_overlap_count": final.scope_overlap_count,
+                "peak_workers": final.resource_demand.peak_workers,
+            }
+        )
+    except Exception as exc:
+        view["error"] = f"{exc.__class__.__name__}: {exc}"
+    return view
+
+
+def _question_rows() -> dict[str, Any]:
+    """Owner question queue: open/due questions first, then the full ledger."""
+    today = date.today()
+    try:
+        questions = _question_queue().questions()
+    except Exception as exc:
+        return {"error": f"{exc.__class__.__name__}: {exc}", "pending": [], "all": []}
+    pending: list[dict[str, Any]] = []
+    all_rows: list[dict[str, Any]] = []
+    for question in questions:
+        row = question_view(question, today)
+        row["state_class"] = _pill_class(question.status.value)
+        all_rows.append(row)
+        if question.status is QuestionStatus.OPEN or is_due(question, today):
+            pending.append(row)
+    return {"error": None, "pending": pending, "all": all_rows}
+
+
+def _standing_decision_rows() -> dict[str, Any]:
+    """Standing decisions with their expiration windows, read from durable state."""
+    path = _unattended_store_path()
+    view: dict[str, Any] = {
+        "path": str(path),
+        "present": False,
+        "rows": [],
+        "error": None,
+    }
+    if not path.exists():
+        return view
+    view["present"] = True
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        view["error"] = f"{exc.__class__.__name__}: {exc}"
+        return view
+    raw = payload.get("standing_decisions") if isinstance(payload, dict) else None
+    if not isinstance(raw, list):
+        view["error"] = "document has no standing_decisions list"
+        return view
+    now = datetime.now(UTC).isoformat()
+    rows: list[dict[str, Any]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            scope_raw = entry.get("scope")
+            if not isinstance(scope_raw, dict):
+                raise ValueError("scope must be a mapping")
+            scope = DecisionScope(
+                project_id=str(scope_raw.get("project_id") or ""),
+                task_id=str(scope_raw.get("task_id") or ""),
+                paths=tuple(str(item) for item in scope_raw.get("paths") or ()),
+            )
+            decision = StandingDecision(
+                standing_decision_id=str(entry.get("standing_decision_id") or ""),
+                scope=scope,
+                decision_key=str(entry.get("decision_key") or ""),
+                owner_words=str(entry.get("owner_words") or ""),
+                answered_by=str(entry.get("answered_by") or ""),
+                granted_at_turn=entry.get("granted_at_turn"),
+                ttl_turns=entry.get("ttl_turns"),
+                expires_at=entry.get("expires_at"),
+            )
+        except Exception as exc:
+            rows.append(
+                {
+                    "error": f"{exc.__class__.__name__}: {exc}",
+                    "state_class": "fail",
+                }
+            )
+            continue
+        live = decision.is_live(now=now, current_turn=0)
+        rows.append(
+            {
+                "standing_decision_id": decision.standing_decision_id,
+                "decision_key": decision.decision_key,
+                "project_id": decision.scope.project_id,
+                "task_id": decision.scope.task_id,
+                "owner_words": decision.owner_words,
+                "expires_at": decision.expires_at,
+                "ttl_turns": decision.ttl_turns,
+                "granted_at_turn": decision.granted_at_turn,
+                "live": live,
+                "state_class": "ok" if live else "warn",
+            }
+        )
+    view["rows"] = rows
+    return view
+
+
+def _never_delegable_rows() -> list[dict[str, Any]]:
+    """Decision kinds the engine may never decide without the owner."""
+    return [
+        {"kind": kind.value, "description": NEVER_DELEGABLE_POLICY[kind]}
+        for kind in NEVER_DELEGABLE_KINDS
+    ]
+
+
+def _authority_view() -> dict[str, Any]:
+    """The owner's current authority mode."""
+    try:
+        mode = load_authority_mode()
+        return {"mode": mode.value, "label": label_for(mode)}
+    except Exception as exc:
+        return {"mode": "UNKNOWN", "label": f"unavailable ({exc.__class__.__name__})"}
+
+
+def _storage_view(repo_param: str, db: Database) -> dict[str, Any]:
+    """Storage/Git lifecycle dry-run: retained, eligible and blocked artifacts."""
+    view: dict[str, Any] = {
+        "repo": repo_param,
+        "available": False,
+        "error": None,
+        "policy_ref": None,
+        "approved": False,
+        "preview_id": None,
+        "candidates": [],
+        "exclusions": [],
+        "estimated_reclaimable_bytes": None,
+        "inventory": [],
+        "warnings": [],
+    }
+    if not repo_param:
+        return view
+    repo = Path(repo_param).expanduser()
+    if not repo.exists():
+        view["error"] = f"path not found: {repo_param}"
+        return view
+    try:
+        policy_path = _gc_policy_path()
+        policy = load_gc_policy(policy_path)
+        effective_policy_path = policy_path if policy_path.exists() else None
+        inventory = build_inventory(db, repo_root=repo)
+        preview = preview_gc(
+            inventory, policy=policy, policy_path=effective_policy_path, classes=None
+        )
+    except GcPolicyError as exc:
+        view["error"] = f"GC policy invalid: {exc}"
+        return view
+    except Exception as exc:
+        view["error"] = f"{exc.__class__.__name__}: {exc}"
+        return view
+    view.update(
+        {
+            "available": True,
+            "policy_ref": preview.policy_ref,
+            "approved": preview.approved,
+            "preview_id": preview.preview_id,
+            "estimated_reclaimable_bytes": preview.estimated_reclaimable_bytes,
+            "warnings": list(inventory.warnings),
+            "candidates": [
+                {
+                    "artifact_class": candidate.artifact_class.value,
+                    "action": candidate.action.value,
+                    "reference": candidate.reference,
+                    "owner": candidate.owner,
+                    "reason": candidate.reason,
+                    "estimated_bytes": candidate.estimated_bytes,
+                    "reclaimable": candidate.reclaimable,
+                }
+                for candidate in preview.candidates
+            ],
+            "exclusions": [
+                {
+                    "artifact_class": exclusion.artifact_class.value,
+                    "reference": exclusion.reference,
+                    "reason": exclusion.reason,
+                }
+                for exclusion in preview.exclusions
+            ],
+            "inventory": [
+                {
+                    "artifact_class": item.artifact_class.value,
+                    "reference": item.reference,
+                    "ownership": item.ownership.value,
+                    "reason": item.reason,
+                    "size_bytes": item.size_bytes,
+                    "reclaimable_bytes": item.reclaimable_bytes,
+                }
+                for item in inventory.items[:200]
+            ],
+        }
+    )
+    return view
+
+
+def _first_run_required(service: OrchestratorService) -> bool:
+    """True only when the store holds no runs, bindings, projects or models.
+
+    Account-backed connections are static declarations that always exist, so
+    they never signal a configured install; discovered catalog models do.  Any
+    unreadable store returns ``False`` so an uncertain state never surprises the
+    owner by swapping the dashboard for the onboarding page.
+    """
+    try:
+        if service.list_runs(limit=1):
+            return False
+    except Exception:
+        return False
+    try:
+        if _load_owner_bindings_safely().registry.list_bindings():
+            return False
+    except Exception:
+        return False
+    try:
+        if ProjectRegistry().list_projects():
+            return False
+    except Exception:
+        return False
+    try:
+        if access_ops.load_catalog_safely().list_models():
+            return False
+    except Exception:
+        return False
+    return True
+
+
+def _onboarding_context(
+    service: OrchestratorService,
+    db: Database,
+    request: Request,
+    *,
+    error: str | None = None,
+    notice: str | None = None,
+) -> dict[str, Any]:
+    """Build the complete first-run onboarding context (never raises)."""
+    repo_param = (request.query_params.get("repo") or "").strip()
+    wave_project = (request.query_params.get("wave_project") or "").strip()
+    try:
+        runs = _run_rows(service.list_runs(limit=25))
+    except Exception:
+        runs = []
+    return {
+        "csrf_token": _CSRF_TOKEN,
+        "saberops_version": saberops_version(),
+        "error": error,
+        "notice": notice,
+        "diagnostics": _diagnostics_rows(),
+        "vendor_logins": _vendor_login_rows(),
+        "connections": _connection_rows(),
+        "models": _model_rows(),
+        "postures": _posture_rows(),
+        "role_bindings": _role_binding_view(),
+        "role_chains": _role_chain_rows(),
+        "concurrency": _concurrency_view(),
+        "project": _project_mode_view(repo_param),
+        "plans": _plans_view(),
+        "wave": _wave_view(wave_project),
+        "runs": runs,
+        "questions": _question_rows(),
+        "standing_decisions": _standing_decision_rows(),
+        "never_delegable": _never_delegable_rows(),
+        "authority": _authority_view(),
+        "storage": _storage_view(repo_param, db),
+        "repo_param": repo_param,
+        "wave_project": wave_project,
+    }
+
+
 def create_app(
     db_path: str | Path | None = None,
     repo_path: str | Path | None = None,
@@ -1531,10 +2359,12 @@ def create_app(
         applies to every private route -- dashboard, run pages, report /
         actions / event-stream reads, and the accept/reject POSTs -- so
         a missing Origin header (curl, DNS rebinding, old browser) can
-        never smuggle a foreign Host past the guard.  The pre-existing
-        Origin / sec-fetch-site checks on the mutation POSTs are kept
-        unchanged.  ``/health`` and ``/static/*`` stay open by design
-        (non-secret diagnostics and bundled assets).
+        never smuggle a foreign Host past the guard.  Every POST is treated
+        as a state mutation for the Origin / sec-fetch-site check, so the
+        first-run onboarding, question-queue and cleanup mutations are
+        covered exactly like the accept/reject POSTs.  ``/health`` and
+        ``/static/*`` stay open by design (non-secret diagnostics and
+        bundled assets).
         """
         path = request.url.path
         if _is_private_web_path(path) and not _host_header_allowed(request):
@@ -1542,10 +2372,7 @@ def create_app(
                 {"error": "Refuse request with untrusted Host header; use the local SaberOps page."},
                 status_code=403,
             )
-        mutation = request.method == "POST" and (
-            (path.startswith("/runs/") and path.endswith("/accept"))
-            or (path.startswith("/runs/") and path.endswith("/reject"))
-        )
+        mutation = request.method == "POST"
         origin = request.headers.get("origin")
         if mutation and (request.headers.get("sec-fetch-site") == "cross-site"
                          or (origin is not None and origin != str(request.base_url).rstrip("/"))):
@@ -1559,10 +2386,329 @@ def create_app(
 
     @app.get("/", response_class=HTMLResponse, name="dashboard")
     def dashboard(request: Request) -> HTMLResponse:
+        if _first_run_required(service):
+            # Fresh install: land directly on the first-run onboarding wizard
+            # instead of an empty run table.
+            return templates.TemplateResponse(
+                request,
+                "onboarding.html",
+                _onboarding_context(service, db, request),
+            )
         return templates.TemplateResponse(
             request,
             "dashboard.html",
             _dashboard_context(service, notice=_notice_from_query(request)),
+        )
+
+    def onboarding_page(
+        request: Request,
+        *,
+        error: str | None = None,
+        notice: str | None = None,
+        status_code: int = 200,
+    ) -> HTMLResponse:
+        """Render the first-run onboarding page (shared by GET and POST)."""
+        return templates.TemplateResponse(
+            request,
+            "onboarding.html",
+            _onboarding_context(service, db, request, error=error, notice=notice),
+            status_code=status_code,
+        )
+
+    @app.get("/first-run", response_class=HTMLResponse, name="first_run")
+    def first_run(request: Request) -> HTMLResponse:
+        """Complete first-run onboarding, routing, run and storage surface."""
+        return onboarding_page(request, notice=_onboarding_notice(request))
+
+    @app.post("/first-run/concurrency", name="save_concurrency")
+    def save_concurrency(
+        request: Request,
+        csrf: Annotated[str, Form()] = "",
+        active_projects: Annotated[str, Form()] = "",
+        child_slots_per_project: Annotated[str, Form()] = "",
+        owner_confirmed: Annotated[str, Form()] = "",
+    ) -> Response:
+        """Persist the owner-confirmed 3-project x 5-task concurrency limits.
+
+        The change is recorded as an immutable owner-approved decision in the
+        configuration ledger; the Web never edits the ledger entry directly.
+        """
+        if not _csrf_valid(csrf):
+            return onboarding_page(
+                request,
+                error="Refused: missing or invalid confirmation token.",
+                status_code=403,
+            )
+        if owner_confirmed != "yes":
+            return onboarding_page(
+                request,
+                error="Owner confirmation is required before saving concurrency limits.",
+                status_code=400,
+            )
+        try:
+            projects = int(active_projects)
+            slots = int(child_slots_per_project)
+        except ValueError:
+            return onboarding_page(
+                request, error="Concurrency limits must be whole numbers.", status_code=400
+            )
+        ledger = _config_ledger()
+        try:
+            base = current_workflow_settings(ledger)
+            proposal = propose_config_change(
+                base,
+                {
+                    "max_concurrent_tasks": projects,
+                    "max_worker_sessions_per_project": slots,
+                },
+                rationale="Owner-configured concurrency limits from the first-run UI.",
+                proposed_by="owner",
+            )
+            approve_config_proposal(proposal, ledger=ledger, approved_by="owner")
+        except ConfigError as exc:
+            return onboarding_page(
+                request, error=f"Concurrency not saved: {exc}", status_code=400
+            )
+        return RedirectResponse(url="/first-run?concurrency_saved=1", status_code=303)
+
+    @app.post("/first-run/discover", name="discover_models")
+    def discover_models(
+        request: Request,
+        csrf: Annotated[str, Form()] = "",
+        connection_id: Annotated[str, Form()] = "",
+    ) -> Response:
+        """Run bounded model discovery for one connection (evidence only)."""
+        if not _csrf_valid(csrf):
+            return onboarding_page(
+                request,
+                error="Refused: missing or invalid confirmation token.",
+                status_code=403,
+            )
+        wanted = connection_id.strip()
+        if not wanted:
+            return onboarding_page(
+                request, error="Choose a connection to discover.", status_code=400
+            )
+        try:
+            access_ops.discover_access_models(wanted)
+        except Exception as exc:
+            return onboarding_page(
+                request,
+                error=f"Discovery failed: {exc.__class__.__name__}: {exc}",
+                status_code=400,
+            )
+        return RedirectResponse(
+            url=f"/first-run?discovered=1&connection={quote(wanted)}", status_code=303
+        )
+
+    @app.post("/first-run/posture/verify", name="verify_posture_route")
+    def verify_posture_route(
+        request: Request,
+        csrf: Annotated[str, Form()] = "",
+        selector: Annotated[str, Form()] = "",
+        posture_class: Annotated[str, Form()] = "",
+        policy_urls: Annotated[str, Form()] = "",
+        note: Annotated[str, Form()] = "",
+    ) -> Response:
+        """Record the owner's attestation for one billing-posture selector."""
+        if not _csrf_valid(csrf):
+            return onboarding_page(
+                request,
+                error="Refused: missing or invalid confirmation token.",
+                status_code=403,
+            )
+        urls = tuple(line.strip() for line in policy_urls.splitlines() if line.strip())
+        try:
+            plans_ops.verify_posture(
+                selector.strip(), urls, note or None, posture_class.strip() or None, None
+            )
+        except plans_ops.PlansOperationError as exc:
+            return onboarding_page(
+                request, error=f"Posture not recorded: {exc}", status_code=400
+            )
+        return RedirectResponse(url="/first-run?posture_saved=1", status_code=303)
+
+    @app.post("/first-run/project/register", name="register_project")
+    def register_project(
+        request: Request,
+        csrf: Annotated[str, Form()] = "",
+        project_id: Annotated[str, Form()] = "",
+        display_name: Annotated[str, Form()] = "",
+        repository_root: Annotated[str, Form()] = "",
+        state_dir: Annotated[str, Form()] = "",
+        owner_confirmed: Annotated[str, Form()] = "",
+    ) -> Response:
+        """Register one project identity (explicit owner-confirmed values)."""
+        if not _csrf_valid(csrf):
+            return onboarding_page(
+                request,
+                error="Refused: missing or invalid confirmation token.",
+                status_code=403,
+            )
+        if owner_confirmed != "yes":
+            return onboarding_page(
+                request,
+                error="Owner confirmation is required before registering a project.",
+                status_code=400,
+            )
+        try:
+            ProjectRegistry().register(
+                project_id.strip(),
+                display_name.strip(),
+                repository_root.strip(),
+                state_dir.strip(),
+                active=False,
+            )
+        except Exception as exc:
+            return onboarding_page(
+                request, error=f"Project not registered: {exc}", status_code=400
+            )
+        return RedirectResponse(url="/first-run?project_registered=1", status_code=303)
+
+    @app.post("/questions/{question_id}/answer", name="answer_question")
+    def answer_question_route(
+        request: Request,
+        question_id: str,
+        csrf: Annotated[str, Form()] = "",
+        answer_text: Annotated[str, Form()] = "",
+        chosen_option: Annotated[str, Form()] = "",
+    ) -> Response:
+        """Record the owner's answer to one queued question, verbatim."""
+        if not _csrf_valid(csrf):
+            return onboarding_page(
+                request,
+                error="Refused: missing or invalid confirmation token.",
+                status_code=403,
+            )
+        if not answer_text.strip():
+            return onboarding_page(
+                request, error="An owner answer requires words.", status_code=400
+            )
+        try:
+            _question_queue().answer(
+                question_id,
+                words=answer_text,
+                authority=AnswerAuthority.OWNER,
+                answered_by="owner",
+                answered_by_role=AskRole.OWNER,
+                chosen_option=chosen_option.strip() or None,
+            )
+        except QuestionError as exc:
+            return onboarding_page(
+                request, error=f"Answer not recorded: {exc}", status_code=400
+            )
+        return RedirectResponse(url="/first-run?answered=1", status_code=303)
+
+    @app.post("/questions/{question_id}/defer", name="defer_question")
+    def defer_question_route(
+        request: Request,
+        question_id: str,
+        csrf: Annotated[str, Form()] = "",
+        until: Annotated[str, Form()] = "",
+        note: Annotated[str, Form()] = "",
+    ) -> Response:
+        """Defer one question until an explicit ISO date."""
+        if not _csrf_valid(csrf):
+            return onboarding_page(
+                request,
+                error="Refused: missing or invalid confirmation token.",
+                status_code=403,
+            )
+        try:
+            _question_queue().defer(
+                question_id,
+                until=until.strip(),
+                deferred_by="owner",
+                deferred_by_role=AskRole.OWNER,
+                note=note,
+            )
+        except QuestionError as exc:
+            return onboarding_page(
+                request, error=f"Question not deferred: {exc}", status_code=400
+            )
+        return RedirectResponse(url="/first-run?deferred=1", status_code=303)
+
+    @app.post("/first-run/storage/apply", name="apply_storage_cleanup")
+    def apply_storage_cleanup(
+        request: Request,
+        csrf: Annotated[str, Form()] = "",
+        repo: Annotated[str, Form()] = "",
+        preview_id: Annotated[str, Form()] = "",
+        confirm: Annotated[str, Form()] = "",
+    ) -> Response:
+        """Execute the previewed cleanup only under explicit owner confirmation.
+
+        Fail-closed: an unapproved standing policy refuses; the typed preview
+        id must match the freshly re-computed preview; every action is audited.
+        """
+        if not _csrf_valid(csrf):
+            return onboarding_page(
+                request,
+                error="Refused: missing or invalid confirmation token.",
+                status_code=403,
+            )
+        repo_path = Path(repo.strip()).expanduser()
+        if not repo.strip() or not repo_path.exists():
+            return onboarding_page(
+                request,
+                error="A valid repository path is required to apply cleanup.",
+                status_code=400,
+            )
+        try:
+            policy_path = _gc_policy_path()
+            policy = load_gc_policy(policy_path)
+            effective = policy_path if policy_path.exists() else None
+            inventory = build_inventory(db, repo_root=repo_path)
+            preview = preview_gc(
+                inventory, policy=policy, policy_path=effective, classes=None
+            )
+        except Exception as exc:
+            return onboarding_page(
+                request,
+                error=f"Cleanup preview failed: {exc.__class__.__name__}: {exc}",
+                status_code=400,
+            )
+        if not preview.approved:
+            return onboarding_page(
+                request,
+                error=(
+                    "Refused: no validated standing owner policy authorizes "
+                    "destructive cleanup."
+                ),
+                status_code=403,
+            )
+        if not preview.preview_id or confirm.strip() != preview.preview_id:
+            return onboarding_page(
+                request,
+                error="Owner confirmation required: type the exact preview id to apply cleanup.",
+                status_code=400,
+            )
+        if preview_id.strip() and preview_id.strip() != preview.preview_id:
+            return onboarding_page(
+                request,
+                error="The preview changed; refresh the dry-run before applying.",
+                status_code=409,
+            )
+        try:
+            result = apply_gc(
+                preview,
+                preview.candidates,
+                db=db,
+                repo_root=repo_path,
+                audit=database_audit_sink(db),
+            )
+        except Exception as exc:
+            return onboarding_page(
+                request,
+                error=f"Cleanup failed: {exc.__class__.__name__}: {exc}",
+                status_code=500,
+            )
+        applied = len(result.applied)
+        refused = len(result.refused)
+        uncertain = "&audit_uncertain=1" if result.audit_uncertain else ""
+        return RedirectResponse(
+            url=f"/first-run?gc_applied=1&applied={applied}&refused={refused}{uncertain}",
+            status_code=303,
         )
 
     @app.get("/runs/{run_id}", response_class=HTMLResponse, name="run_detail")
