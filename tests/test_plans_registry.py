@@ -559,3 +559,176 @@ def test_new_plans_change_the_digest() -> None:
     assert (
         freeze_control_plane_policy(v1).digest != freeze_control_plane_policy(v2).digest
     )
+
+
+# ---------------------------------------------------------------------------
+# owner global concurrency ceiling (D7 / F3)
+# ---------------------------------------------------------------------------
+
+
+def _concurrency_doc(max_global: object, *, base: dict[str, Any] | None = None) -> dict[str, Any]:
+    doc = _doc() if base is None else dict(base)
+    doc["concurrency"] = {"max_global": max_global}
+    return doc
+
+
+def test_concurrency_max_global_parsed_and_effective() -> None:
+    """Covers: ADR-0002 D7 / F3 owner concurrency.max_global is parsed and effective."""
+    from saberops.control_plane.policy import (
+        DEFAULT_MAX_GLOBAL_CONCURRENT,
+        effective_global_slot_limit,
+    )
+
+    assert DEFAULT_MAX_GLOBAL_CONCURRENT == 15
+    policy = _build(_concurrency_doc(3), "test")
+    assert policy.max_global_concurrent == 3
+    assert effective_global_slot_limit(policy) == 3
+
+
+def test_concurrency_absent_defaults_to_15() -> None:
+    """Covers: ADR-0002 D7 / F3 absent owner key resolves to the interim default 15."""
+    from saberops.control_plane.policy import effective_global_slot_limit
+
+    policy = _build({"version": 2, "providers": {}, "quota_pools": {}}, "test")
+    assert policy.max_global_concurrent is None
+    assert effective_global_slot_limit(policy) == 15
+
+
+@pytest.mark.parametrize("value", [1, 3, 15, 16, 40])
+def test_concurrency_positive_values_accepted(value: int) -> None:
+    """Covers: ADR-0002 D7 / F3 any positive integer owner cap is accepted (15 is
+    a default, not an unchangeable maximum).
+    """
+    policy = _build(_concurrency_doc(value), "test")
+    assert policy.max_global_concurrent == value
+
+
+@pytest.mark.parametrize("bad", [0, -1, True, False, "5", 1.5, None, [], {}])
+def test_concurrency_invalid_max_global_fails_closed(bad: object) -> None:
+    """Covers: ADR-0002 D7 / F3 invalid concurrency.max_global never degrades to
+    unbounded; config load raises instead.
+    """
+    with pytest.raises(ValueError, match=r"concurrency\.max_global"):
+        _build(_concurrency_doc(bad), "test")
+
+
+def test_concurrency_missing_max_global_field_fails_closed() -> None:
+    """Covers: ADR-0002 D7 / F3 a concurrency block without max_global is invalid."""
+    with pytest.raises(ValueError, match=r"concurrency\.max_global"):
+        _build(
+            {"version": 2, "providers": {}, "quota_pools": {}, "concurrency": {}},
+            "test",
+        )
+
+
+@pytest.mark.parametrize("bad", ["x", 5, [], True])
+def test_concurrency_block_wrong_type_fails_closed(bad: object) -> None:
+    """Covers: ADR-0002 D7 / F3 a non-object concurrency block is invalid."""
+    with pytest.raises(ValueError, match="concurrency must be an object"):
+        _build(
+            {
+                "version": 2,
+                "providers": {},
+                "quota_pools": {},
+                "concurrency": bad,
+            },
+            "test",
+        )
+
+
+def test_concurrency_explicit_null_is_treated_as_absent() -> None:
+    """Covers: ADR-0002 D7 / F3 an explicit JSON null concurrency block means
+    "unset" and resolves to the interim default (not an error, not unbounded).
+    """
+    from saberops.control_plane.policy import effective_global_slot_limit
+
+    policy = _build(
+        {"version": 2, "providers": {}, "quota_pools": {}, "concurrency": None},
+        "test",
+    )
+    assert policy.max_global_concurrent is None
+    assert effective_global_slot_limit(policy) == 15
+
+
+def test_concurrency_changes_content_hash_when_present() -> None:
+    """Covers: ADR-0002 D7 / F3 the owner key joins the digest only when present."""
+    doc = {"version": 1, "providers": {}, "quota_pools": {}}
+    without = _build(dict(doc), "test")
+    with_key = _build({**doc, "concurrency": {"max_global": 15}}, "test")
+    assert without.max_global_concurrent is None
+    assert with_key.content_hash != without.content_hash
+
+
+def test_concurrency_frozen_snapshot_round_trips() -> None:
+    """Covers: ADR-0002 D7 / F3 concurrency survives freeze/reconstruct with a
+    stable digest, and changes the frozen digest only when set.
+    """
+    plain = _build(_doc(), "test")
+    with_key = _build({**_doc(), "concurrency": {"max_global": 7}}, "test")
+
+    frozen = freeze_control_plane_policy(with_key)
+    revived = reconstruct_frozen_control_plane(frozen.as_json())
+    assert revived.digest == frozen.digest
+    assert revived.policy.max_global_concurrent == 7
+    # A document without the key keeps its own (different) digest.
+    assert frozen.digest != freeze_control_plane_policy(plain).digest
+
+
+def test_concurrency_survives_preserving_write(isolated_config: Path) -> None:
+    """Covers: ADR-0002 D7 / F3 owner concurrency block is preserved by a policy write."""
+    from saberops.paths import get_control_plane_config_path
+
+    _write_owner({**_doc(), "concurrency": {"max_global": 9}})
+    set_provider_policy("opencode", "ALLOWED")
+    policy = load_control_plane_policy()
+    assert policy.max_global_concurrent == 9
+    raw = json.loads(get_control_plane_config_path().read_text(encoding="utf-8"))
+    assert raw["concurrency"] == {"max_global": 9}
+
+
+def test_effective_global_slot_limit_override_lowers_only() -> None:
+    """Covers: ADR-0002 D7 / F3 the CLI override can only lower the effective cap."""
+    from saberops.control_plane.policy import effective_global_slot_limit
+
+    owner15 = _build(_concurrency_doc(15), "test")
+    owner40 = _build(_concurrency_doc(40), "test")
+    default = _build({"version": 2, "providers": {}, "quota_pools": {}}, "test")
+
+    assert effective_global_slot_limit(owner15, override=1) == 1
+    assert effective_global_slot_limit(owner15, override=20) == 15
+    assert effective_global_slot_limit(owner40, override=20) == 20
+    assert effective_global_slot_limit(owner40) == 40
+    assert effective_global_slot_limit(default, override=3) == 3
+
+    with pytest.raises(ValueError, match="max-concurrent override"):
+        effective_global_slot_limit(owner15, override=0)
+    with pytest.raises(ValueError, match="max-concurrent override"):
+        effective_global_slot_limit(owner15, override=-1)
+    with pytest.raises(ValueError, match="max-concurrent override"):
+        effective_global_slot_limit(owner15, override=True)
+
+
+def test_effective_global_slot_limit_injected_lowers_only() -> None:
+    """Covers: ADR-0002 D7 / F3 an injected programmatic limit is lowering-only
+    and cannot raise admission above the owner cap.
+    """
+    from saberops.control_plane.policy import effective_global_slot_limit
+
+    owner3 = _build(_concurrency_doc(3), "test")
+    owner15 = _build(_concurrency_doc(15), "test")
+    default = _build({"version": 2, "providers": {}, "quota_pools": {}}, "test")
+
+    # Owner cap of 3 always wins over a larger injected limit.
+    assert effective_global_slot_limit(owner3, injected=99) == 3
+    assert effective_global_slot_limit(owner3, injected=1) == 1
+    # The 15 default is the authority when the owner set no key.
+    assert effective_global_slot_limit(default, injected=7) == 7
+    assert effective_global_slot_limit(default, injected=99) == 15
+    # Minimum of owner, CLI override and injection.
+    assert effective_global_slot_limit(owner15, override=5, injected=2) == 2
+    assert effective_global_slot_limit(owner15, override=2, injected=99) == 2
+    assert effective_global_slot_limit(owner15, override=99, injected=99) == 15
+
+    for bad in (0, -1, True, False, "3", 1.5):
+        with pytest.raises(ValueError, match="injected global slot limit"):
+            effective_global_slot_limit(owner15, injected=bad)  # type: ignore[arg-type]

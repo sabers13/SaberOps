@@ -25,6 +25,7 @@ from saberops.model_access import (
     build_access_registry,
     default_account_connections,
 )
+from saberops.model_access.discovery import ModelListingError
 from saberops.models import ProviderReadiness
 from saberops.paths import get_user_routing_path, owner_state_dir
 from saberops.web import _list_account_models, initialize_account_readiness
@@ -232,6 +233,105 @@ def test_antigravity_model_discovery_preserves_native_ids_without_verifying_logi
         .try_get("antigravity-google-account")
         is None
     )
+
+
+def test_opencode_model_listing_launches_inside_owned_isolation(
+    owner_state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: HV-2 listing isolation (OpenCode launch wiring + failure form)."""
+    import json as _json
+
+    from saberops import web as _web
+
+    seen: dict[str, Any] = {}
+
+    def listing(
+        argv: list[str], *, env: dict[str, str] | None = None
+    ) -> str:
+        seen["argv"] = argv
+        assert env is not None, "OpenCode listing must not inherit the parent env"
+        seen["env_keys"] = sorted(env)
+        seen["config"] = _json.loads(env["OPENCODE_CONFIG_CONTENT"])
+        return "upstream/model\n"
+
+    monkeypatch.setattr(
+        "shutil.which", lambda name: "/fake/opencode" if name == "opencode" else None
+    )
+    monkeypatch.setattr(_web, "_run_backend_listing", listing)
+    registry = AccessStore(owner_state / AccessStore.FILENAME).load()
+    assert _list_account_models(registry.get("opencode-account")) == ["upstream/model"]
+    assert seen["argv"] == ["/fake/opencode", "models"]
+    env = seen["env_keys"]
+    assert isinstance(env, list)
+    for key in (
+        "OPENCODE_DISABLE_PROJECT_CONFIG",
+        "OPENCODE_CONFIG_CONTENT",
+        "XDG_CONFIG_HOME",
+        "HOME",
+        "XDG_DATA_HOME",
+    ):
+        assert key in env, f"isolation key {key} missing from OpenCode listing env"
+    assert seen["config"]["enabled_providers"] == ["opencode"]
+    assert {
+        "action": "integration.use",
+        "resource": "plugin:*",
+        "effect": "deny",
+    } in seen["config"]["policies"]
+
+
+def test_opencode_model_listing_refusal_keeps_typed_failure(
+    owner_state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: HV-2 listing refusal (isolation unavailable, no spawn)."""
+    import saberops.workers.opencode_isolation as isolation_module
+    from saberops import web as _web
+    from saberops.model_access.connections import ConnectionTestReason
+    from saberops.workers.opencode_isolation import OpenCodeIsolationUnavailable
+
+    def fail(_env: object) -> object:
+        raise OpenCodeIsolationUnavailable(
+            "OpenCode system configuration is present"
+        )
+
+    monkeypatch.setattr(isolation_module, "opencode_isolation", fail)
+    monkeypatch.setattr(
+        "shutil.which", lambda name: "/fake/opencode" if name == "opencode" else None
+    )
+
+    def listing(argv: list[str], **kwargs: object) -> str:
+        raise AssertionError("must not launch when isolation is unavailable")
+
+    monkeypatch.setattr(_web, "_run_backend_listing", listing)
+    registry = AccessStore(owner_state / AccessStore.FILENAME).load()
+    with pytest.raises(ModelListingError) as excinfo:
+        _list_account_models(registry.get("opencode-account"))
+    assert excinfo.value.reason in (
+        ConnectionTestReason.ENDPOINT_UNREACHABLE,
+        ConnectionTestReason.CONFIG_INVALID,
+    )
+
+
+def test_non_opencode_listing_keeps_previous_direct_behaviour(
+    owner_state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: HV-2 shared listing (other backends unchanged)."""
+    from saberops import web as _web
+
+    seen: dict[str, object] = {}
+
+    def listing(argv: list[str], **kwargs: object) -> str:
+        seen["argv"] = argv
+        seen["kwargs"] = kwargs
+        return "gemini-pro-high\tGemini Pro (High)\n"
+
+    monkeypatch.setattr("shutil.which", lambda name: "/fake/agy" if name == "agy" else None)
+    monkeypatch.setattr(_web, "_run_backend_listing", listing)
+    registry = AccessStore(owner_state / AccessStore.FILENAME).load()
+    assert _list_account_models(registry.get("antigravity-google-account")) == [
+        "gemini-pro-high"
+    ]
+    assert seen["argv"] == ["/fake/agy", "models"]
+    assert seen["kwargs"] == {}, "non-OpenCode backends pass no isolation env"
 
 
 @pytest.mark.parametrize("change", ["disabled", "removed", "expired"])

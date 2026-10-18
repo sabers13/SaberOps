@@ -620,12 +620,16 @@ def load_effective_plan_set() -> tuple[PlanSet, dict[str, Any]]:
     return plans, sources
 
 
-def effective_quota_pools(policy: ControlPlanePolicy) -> dict[str, QuotaPoolPolicy]:
+def effective_quota_pools(
+    policy: ControlPlanePolicy,
+    *,
+    activate_overage: bool = False,
+) -> dict[str, QuotaPoolPolicy]:
     """Resolve membership without changing the owner policy or frozen digests.
 
     Owner quota entries win by id. Packaged plans supply otherwise missing
     pools; owner plan data travels with the supplied policy, never a live read.
-    Overage evidence enforcement remains deferred to M2-4b.
+    Overage evidence enforcement activates when activate_overage is True.
     """
     plans = validate_plan_sections(load_packaged_plans_raw(), "packaged plans", packaged=True)
     pool_plans = dict(plans.pool_plans)
@@ -636,11 +640,15 @@ def effective_quota_pools(policy: ControlPlanePolicy) -> dict[str, QuotaPoolPoli
             members=tuple(member.route for member in plan.members),
             mode=QuotaPoolMode(plan.mode),
             red_line_pct=plan.red_line_pct,
+            overage_possible=plan.overage_possible if activate_overage else False,
         )
         for pool_id, plan in pool_plans.items()
     }
     pools.update({
-        pool_id: replace(pool, overage_possible=False)
+        pool_id: replace(
+            pool,
+            overage_possible=pool.overage_possible if activate_overage else False,
+        )
         for pool_id, pool in policy.quota_pools.items()
     })
     return pools

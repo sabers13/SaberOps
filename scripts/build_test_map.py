@@ -30,7 +30,15 @@ rcfile is temporary; the repo's own coverage settings are left alone).
 
 Usage:
     python scripts/build_test_map.py [--repo PATH] [--map DIR] [--no-subprocesses]
+        [--no-slot]
     python scripts/build_test_map.py --from-data PATH/TO/.coverage --build-seconds S
+
+The full suite runs once under coverage.py with pytest-xdist
+(``-n <SABEROPS_MAP_WORKERS|SABEROPS_GATE_WORKERS|4> --dist worksteal``);
+``parallel = true`` plus ``coverage combine`` merge the per-worker shard
+contexts.  The run holds the exclusive heavy-gate slot (via
+``scripts/gate_tools.py exclusive``) so it never competes with another gate;
+``--no-slot`` skips that for recovery/seed runs only.
 """
 
 from __future__ import annotations
@@ -52,6 +60,73 @@ MAP_DIRNAME = "saberops-test-map"
 MAP_META = "meta.json"
 MAP_FILES = "files"
 MAP_VERSION = 2
+
+# D-0061: a conservative default cap keeps coverage-map peak RAM in the
+# owner-declared ~1.8-2.4 GiB band instead of the uncapped serial/8-worker run.
+DEFAULT_MAP_WORKERS = 4
+SABEROPS_MAP_WORKERS_ENV = "SABEROPS_MAP_WORKERS"
+SABEROPS_GATE_WORKERS_ENV = "SABEROPS_GATE_WORKERS"
+
+
+def positive_int_env(name: str, default: int) -> int:
+    """Return a positive int from ``name``; malformed values keep the cap."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        print(f"warning: {name}={raw!r} is not an integer; using {default}", flush=True)
+        return default
+    if value < 1:
+        print(f"warning: {name}={raw!r} must be >= 1; using {default}", flush=True)
+        return default
+    return value
+
+
+def map_workers() -> int:
+    """Worker count for the coverage suite: map knob, then gate knob, then cap."""
+    if os.environ.get(SABEROPS_MAP_WORKERS_ENV, "").strip():
+        return positive_int_env(SABEROPS_MAP_WORKERS_ENV, DEFAULT_MAP_WORKERS)
+    return positive_int_env(SABEROPS_GATE_WORKERS_ENV, DEFAULT_MAP_WORKERS)
+
+
+def suite_command(python: str, rcfile: Path, plugin_module: str, workers: int) -> list[str]:
+    """The parallel coverage suite argv (xdist worksteal, shared contexts).
+
+    ``parallel = true`` plus ``coverage combine`` merge the per-worker shard
+    contexts, so a single xdist run replaces the old single-process serial run.
+    """
+    return [
+        python,
+        "-m",
+        "coverage",
+        "run",
+        f"--rcfile={rcfile}",
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "-p",
+        plugin_module,
+        "-n",
+        str(workers),
+        "--dist",
+        "worksteal",
+    ]
+
+
+def exclusive_command(python: str, command: list[str]) -> list[str]:
+    """Wrap ``command`` in the canonical exclusive heavy-gate slot.
+
+    Reuses ``scripts/gate_tools.py exclusive`` so the map build takes exactly
+    the full gate's heavy slot (and drains all light slots) instead of running
+    the suite while another gate is live (D-0061 item 3).
+    """
+    tools = Path(__file__).resolve().parent / "gate_tools.py"
+    return [python, str(tools), "exclusive", "--", *command]
+
 
 # Imported automatically by every Python child that inherits our PYTHONPATH entry.
 # process_startup() is a no-op unless COVERAGE_PROCESS_START points at an rcfile,
@@ -295,6 +370,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="do not set COVERAGE_PROCESS_START/sitecustomize for test children",
     )
     parser.add_argument(
+        "--no-slot",
+        action="store_true",
+        help="skip the exclusive heavy-gate slot (recovery/seeding only)",
+    )
+    parser.add_argument(
         "--from-data",
         default=None,
         help=("reuse an existing combined coverage data file instead of running "
@@ -369,11 +449,19 @@ def main(argv: list[str] | None = None) -> int:
         node_ids = collect_node_ids(python, repo)
         print(f"collected {len(node_ids)} test node IDs")
 
-        print("--- full suite under coverage (serial; xdist would shard contexts) ---")
+        workers = map_workers()
+        print(
+            f"--- full suite under coverage (parallel, -n {workers} --dist worksteal; "
+            "xdist shards merged by coverage combine) ---"
+        )
         started = time.monotonic()
+        suite_cmd = suite_command(python, rcfile, PLUGIN_MODULE, workers)
+        if args.no_slot:
+            print("exclusive heavy-gate slot: disabled by --no-slot")
+        else:
+            suite_cmd = exclusive_command(sys.executable, suite_cmd)
         suite = subprocess.run(
-            [python, "-m", "coverage", "run", f"--rcfile={rcfile}", "-m", "pytest", "-q",
-             "-p", "no:cacheprovider", "-p", PLUGIN_MODULE],
+            suite_cmd,
             cwd=repo,
             check=False,
             env=env,

@@ -321,8 +321,8 @@ connection-level semantics and freshness; no model entitlement is fabricated.
 ### Chat quick access and orchestrator selection
 
 The sidebar footer opens a compact workspace menu with Settings, Providers,
-Routing and an expandable usage summary. The summary uses the quota page's
-CliUsageService cache and native CLI observation paths. It shows each provider's
+Routing and an expandable usage summary. The summary uses the quota page's cached limit observations and native CLI
+observation paths. It shows each provider's
 most limited reported window first; expanding a provider shows all reported
 windows, reset times, source and observation time. Unavailable readings stay
 explicit. Opening usage can refresh metadata; it never starts model inference,

@@ -107,13 +107,13 @@ a moved checkout has stale virtual-environment activation paths or tool shebangs
 The fast wrapper uses installed Jinja2/pytest and the available Node.js executable;
 it installs nothing. It compiles all current templates without importing the
 backend, runs `node --check` on the three application JavaScript files, and runs
-only these existing test node IDs from `tests/test_c16c2_console.py`:
+only these existing test node IDs from `tests/test_web.py`:
 
-- `test_c16c2_dashboard_renders_approved_shell`: renders the real dashboard and
+- `test_c16c2_dashboard_lists_runs_with_kept_tokens`: renders the real dashboard and
   checks shell hooks, CSS/JS links, navigation, and absence of prototype controls.
-- `test_c16c2_run_detail_renders_inspector_and_actions`: renders seeded running and
+- `test_c16c2_run_detail_renders_status_evidence_and_actions`: renders seeded running and
   completed runs; checks tabs and action links without executing those actions.
-- `test_c16c2_missing_run_keeps_shell`: verifies the 404 page keeps the shared shell.
+- `test_c16c2_missing_run_keeps_minimal_page`: verifies the 404 page keeps the shared shell.
 - `test_c16c2_console_assets_are_served`: verifies all application CSS/JS assets
   return HTTP 200 with nonempty content.
 
@@ -128,7 +128,7 @@ the smallest existing affected GET/render checks by exact node ID, e.g.:
 
 ```bash
 bash scripts/gate-ui-fast.sh \
-  tests/test_c16c2_console.py::test_c16c2_owner_pages_keep_forms
+  tests/test_web.py::test_c16c2_owner_pages_keep_forms
 ```
 
 That existing test seeds routing test state and GET-renders access, routing, and

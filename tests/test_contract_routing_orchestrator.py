@@ -7,8 +7,10 @@ one capability escalation).
 
 from __future__ import annotations
 
+import json
 import sys
 from collections.abc import Generator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -19,13 +21,22 @@ from saberops.config import resolve_run_config
 from saberops.continuation import prepare_continuation
 from saberops.db import Database
 from saberops.git import GitManager
-from saberops.jobs.models import JobRole
+from saberops.jobs import store
+from saberops.jobs.models import (
+    Job,
+    JobRequirements,
+    JobRole,
+    JobState,
+    Priority,
+    WaitingReason,
+)
 from saberops.models import (
     AttemptStatus,
     DispatchOutcome,
     RunStatus,
     Tier,
     WorkerCandidate,
+    WorkerInterruptionReason,
     WorkerRequest,
     WorkerResult,
 )
@@ -36,11 +47,42 @@ from saberops.workers.base import WorkerAdapter
 from saberops.workers.registry import AdapterRegistry
 
 
+def _write_synthetic_verified_postures(config_home: Path) -> None:
+    """Seed an isolated owner config with a verified posture for the synthetic
+    ``h3`` candidate used by this module.
+
+    Covers: ADR-0002 D2 / WORKFLOW §7 authorized setup-only fixture migration.
+    This adds ONLY a synthetic provider/posture record needed to preserve the
+    module's historical control-flow assertions now that unverified routes
+    fail closed (F1); no assertion or expected behaviour is changed and no real
+    vendor receives an attestation.
+    """
+    cfg_dir = config_home / "saberops"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    today_iso = datetime.now(UTC).date().isoformat()
+    cp_doc = {
+        "version": 2,
+        "providers": {"h3": {"state": "ALLOWED"}},
+        "quota_pools": {},
+        "postures": {
+            "h3": {
+                "class": "A",
+                "policy_urls": ["https://example.com/h3-policy"],
+                "ttl_days": 90,
+                "verified_on": today_iso,
+                "note": "synthetic verified test posture for role-chain contract",
+            }
+        },
+    }
+    (cfg_dir / "control_plane.json").write_text(json.dumps(cp_doc), encoding="utf-8")
+
+
 def _isolate_xdg_config(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> Generator[None, None, None]:
     mpatch = pytest.MonkeyPatch()
     temp_dir = tmp_path_factory.mktemp("hermetic_xdg_config_role_contract")
+    _write_synthetic_verified_postures(temp_dir)
     mpatch.setenv("XDG_CONFIG_HOME", str(temp_dir))
     mpatch.setenv("XDG_STATE_HOME", str(temp_dir))
     yield
@@ -488,6 +530,7 @@ def test_schema2_frozen_snapshot_continuation_keeps_bytes_and_worker_chain(
         monkeypatch.setenv(key, str(tmp_path / key))
     for key in ("SABEROPS_PROFILE", "ORCH_BINDING_STORE"):
         monkeypatch.delenv(key, raising=False)
+    _write_synthetic_verified_postures(tmp_path / "XDG_CONFIG_HOME")
     repo = tmp_path / "project"
     _init_repo(repo)
     db = Database(tmp_path / "project-state" / "runs.db")
@@ -659,3 +702,325 @@ def test_escalation_is_per_package_and_worker_chain_returns_next_package(
         "WORKER",
     ]
 
+
+
+def _quota_exhausted_action(provider: str, model: str) -> Any:
+    """Script a genuine plan-quota interruption with unknown reset (D8 trigger)."""
+
+    def _action(request: WorkerRequest) -> WorkerResult:
+        return WorkerResult(
+            provider=provider,
+            model=request.model,
+            status=AttemptStatus.FAILED,
+            summary="Synthetic plan quota exhausted with unknown reset",
+            stdout="",
+            stderr="",
+            changed_paths=[],
+            has_changes=False,
+            error="synthetic quota exhausted",
+            outcome=DispatchOutcome.PROVIDER_OR_RUNTIME_FAILURE,
+            interruption_reason=WorkerInterruptionReason.QUOTA_EXHAUSTED,
+            quota_reset_at=None,
+            quota_reset_confidence="UNKNOWN",
+            execution_quiescent=True,
+        )
+
+    return _action
+
+
+def _owning_job(db: Database, repo: Path, base: str, job_id: str, run_id: str) -> None:
+    store.insert_job(
+        db,
+        Job(
+            job_id=job_id,
+            idempotency_key=None,
+            caller_id="owner",
+            repo=str(repo),
+            base_ref="HEAD",
+            base_sha=base,
+            goal="fix typo in readme",
+            acceptance=None,
+            requirements=JobRequirements(role=JobRole.WORKER),
+            priority=Priority.NORMAL,
+            state=JobState.QUEUED,
+            waiting_reason=WaitingReason.NEW,
+            created_at=datetime.now(UTC).isoformat(),
+            updated_at=datetime.now(UTC).isoformat(),
+            request_digest="digest-" + job_id,
+        ),
+        now=datetime.now(UTC),
+    )
+    store.mark_dispatched(db, job_id, run_id, now=datetime.now(UTC))
+
+
+def test_quota_exhausted_job_run_preempts_with_resume_capsule(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """Covers: ADR-0002 D8 trigger end to end (quota + no admitted fallback group).
+
+    A durable job-owned run whose only fallback-group candidate reports
+    genuine QUOTA_EXHAUSTED ends PREEMPTED (terminal for the run, not the
+    job): the job returns to QUEUED/PREEMPTED with a verified checkpoint ref
+    and a factual resume capsule, parked with explicit uncertainty because
+    the reset is UNKNOWN.
+    """
+    repo = tmp_path / "repo"
+    base = _init_repo(repo)
+    log: list[str] = []
+    calls: list[str] = []
+    worker = ScriptedWorker("h3", {"m1": _quota_exhausted_action("h3", "m1")}, log)
+    monkeypatch.setattr(
+        "saberops.orchestrator.resolve_candidate_chain",
+        _role_keyed_chain([WorkerCandidate("h3", "m1")], [], calls),
+    )
+    db = Database(tmp_path / "orch.db")
+    orch = Orchestrator(db=db, registry=AdapterRegistry([worker]), worktree_base=tmp_path / "wt")
+    config = resolve_run_config(
+        task="fix typo in readme",
+        target_repo=repo,
+        gate_command=_passing_gate(),
+        publish_candidate=False,
+    )
+    # Own the run at mint time, mirroring production order (the scheduler
+    # creates the job before the run exists; here the job is attached the
+    # moment _run_core mints the run identity, before any quota signal).
+    from saberops.provenance import mint_run_provenance as _real_mint
+
+    _owned: list[str] = []
+
+    def _mint_and_own(mint_repo: Any, mint_task: str) -> Any:
+        provenance = _real_mint(mint_repo, mint_task)
+        if not _owned:
+            _owning_job(db, repo, base, "job1", provenance.run_id)
+            _owned.append(provenance.run_id)
+        return provenance
+
+    monkeypatch.setattr(
+        "saberops.orchestrator.mint_run_provenance", _mint_and_own
+    )
+
+    result = orch.run(config=config, is_peak=False)
+    run_id = result.run_id
+
+    assert result.status == RunStatus.PREEMPTED
+    assert db.get_run(run_id) is not None
+    assert db.get_run(run_id).status == RunStatus.PREEMPTED  # type: ignore[union-attr]
+    job = store.get_job(db, "job1")
+    assert job is not None
+    assert job.state == JobState.QUEUED
+    assert job.waiting_reason == WaitingReason.PREEMPTED
+    assert job.preemptions == 1
+    assert job.resume_from is not None
+    assert job.resume_from.run_id == run_id
+    # Unknown reset parks with explicit uncertainty: no fabricated ETA.
+    assert job.not_before is None
+    assert GitManager.get_ref_commit(
+        repo, "refs/saberops/checkpoints/job1/0"
+    ) == job.resume_from.checkpoint_sha
+    capsule = db.get_handoff(job.resume_from.handoff_id)
+    assert capsule is not None and capsule.run_id == run_id
+    # The run's own ladder recorded genuine quota evidence: the exact
+    # contract the coordinator consumes.  A single-candidate chain breaks
+    # on exhaustion before a skip is recorded, so there is deliberately no
+    # no_eligible_candidate event here -- every launched attempt dying of
+    # quota IS the exhausted shape (see the coordinator's second rule).
+    assert not _events_by_type(db.get_events(run_id), "no_eligible_candidate")
+    assert _events_by_type(db.get_events(run_id), "quota_exhaustion_recorded")
+    assert _events_by_type(db.get_events(run_id), "worker_interrupted")
+    assert _events_by_type(db.get_events(run_id), "preemption_committed")
+    assert _events_by_type(db.get_events(run_id), "run_preempted")
+
+
+def test_quota_exhausted_multi_candidate_chain_records_no_eligible(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """Covers: ADR-0002 D8 multi-fallback shape records the ladder verdict.
+
+    Every fallback-group candidate reports quota: the ladder records a
+    ``no_eligible_candidate`` event (the coordinator's first rule) and the
+    job-owned run preempts.
+    """
+    repo = tmp_path / "repo"
+    base = _init_repo(repo)
+    log: list[str] = []
+    calls: list[str] = []
+    worker = ScriptedWorker(
+        "h3",
+        {
+            "m1": _quota_exhausted_action("h3", "m1"),
+            "m2": _quota_exhausted_action("h3", "m2"),
+        },
+        log,
+    )
+    monkeypatch.setattr(
+        "saberops.orchestrator.resolve_candidate_chain",
+        _role_keyed_chain(
+            [WorkerCandidate("h3", "m1"), WorkerCandidate("h3", "m2")], [], calls
+        ),
+    )
+    db = Database(tmp_path / "orch.db")
+    orch = Orchestrator(db=db, registry=AdapterRegistry([worker]), worktree_base=tmp_path / "wt")
+    config = resolve_run_config(
+        task="fix typo in readme",
+        target_repo=repo,
+        gate_command=_passing_gate(),
+        publish_candidate=False,
+    )
+    from saberops.provenance import mint_run_provenance as _real_mint
+
+    _owned: list[str] = []
+
+    def _mint_and_own(mint_repo: Any, mint_task: str) -> Any:
+        provenance = _real_mint(mint_repo, mint_task)
+        if not _owned:
+            _owning_job(db, repo, base, "job1", provenance.run_id)
+            _owned.append(provenance.run_id)
+        return provenance
+
+    monkeypatch.setattr(
+        "saberops.orchestrator.mint_run_provenance", _mint_and_own
+    )
+
+    result = orch.run(config=config, is_peak=False)
+
+    assert result.status == RunStatus.PREEMPTED
+    assert _events_by_type(db.get_events(result.run_id), "no_eligible_candidate")
+    job = store.get_job(db, "job1")
+    assert job is not None and job.preemptions == 1
+    assert job.resume_from is not None
+
+
+def test_mixed_quota_gate_failure_and_skip_chain_does_not_preempt(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """Covers: ADR-0002 D8 F1 -- the real 3-candidate mixed-chain ladder shape.
+
+    Chain ``[A/h3/m1 -> QUOTA_EXHAUSTED]`` then ``[B/h4/m2 -> admitted, gate
+    FAILED]`` then ``[C/h3/m3 -> skipped as quota-blocked]``.  The production
+    ladder records a durable ``no_eligible_candidate`` event (it both launched
+    and skipped candidates) and a genuine quota attempt, but B was admitted and
+    failed the deterministic gate.  The run's true verdict is a gate failure:
+    the job-owned run must stay FAILED (never PREEMPTED) and the job must not
+    be requeued.
+    """
+    repo = tmp_path / "repo"
+    base = _init_repo(repo)
+    # The module fixture only verifies ``h3``; this regression needs a second,
+    # independently admitted provider so candidate B can actually be launched.
+    # Scope an isolated owner config (h3 + h4) to this test only.
+    cfg = tmp_path / "xdg_cfg"
+    _write_synthetic_verified_postures(cfg)
+    cp_path = cfg / "saberops" / "control_plane.json"
+    cp_doc = json.loads(cp_path.read_text(encoding="utf-8"))
+    cp_doc["providers"]["h4"] = {"state": "ALLOWED"}
+    cp_doc["postures"]["h4"] = {
+        "class": "A",
+        "policy_urls": ["https://example.com/h4-policy"],
+        "ttl_days": 90,
+        "verified_on": datetime.now(UTC).date().isoformat(),
+        "note": "synthetic verified posture for the mixed-chain F1 regression",
+    }
+    cp_path.write_text(json.dumps(cp_doc), encoding="utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(cfg))
+    monkeypatch.setenv("XDG_STATE_HOME", str(cfg))
+    log: list[str] = []
+    calls: list[str] = []
+    worker_h3 = ScriptedWorker("h3", {"m1": _quota_exhausted_action("h3", "m1")}, log)
+    worker_h4 = ScriptedWorker(
+        "h4", {"m2": _success_with_file("h4", "m2", "candidate.txt", "x\n")}, log
+    )
+    monkeypatch.setattr(
+        "saberops.orchestrator.resolve_candidate_chain",
+        _role_keyed_chain(
+            [
+                WorkerCandidate("h3", "m1"),
+                WorkerCandidate("h4", "m2"),
+                WorkerCandidate("h3", "m3"),
+            ],
+            [],
+            calls,
+        ),
+    )
+    db = Database(tmp_path / "orch.db")
+    orch = Orchestrator(
+        db=db,
+        registry=AdapterRegistry([worker_h3, worker_h4]),
+        worktree_base=tmp_path / "wt",
+    )
+    config = resolve_run_config(
+        task="fix typo in readme",
+        target_repo=repo,
+        # B writes candidate.txt but never ok.txt, so the deterministic gate
+        # fails on an admitted candidate (a real GATE_FAILURE, not quota).
+        gate_command=_ok_gate(),
+        publish_candidate=False,
+    )
+    from saberops.provenance import mint_run_provenance as _real_mint
+
+    _owned: list[str] = []
+
+    def _mint_and_own(mint_repo: Any, mint_task: str) -> Any:
+        provenance = _real_mint(mint_repo, mint_task)
+        if not _owned:
+            _owning_job(db, repo, base, "job1", provenance.run_id)
+            _owned.append(provenance.run_id)
+        return provenance
+
+    monkeypatch.setattr("saberops.orchestrator.mint_run_provenance", _mint_and_own)
+
+    result = orch.run(config=config, is_peak=False)
+    run_id = result.run_id
+
+    # The production ladder really produced the F1 shape: mixed-chain evidence
+    # plus an admitted, gate-failing candidate.
+    assert _events_by_type(db.get_events(run_id), "no_eligible_candidate")
+    assert _events_by_type(db.get_events(run_id), "quota_exhaustion_recorded")
+    assert _events_by_type(db.get_events(run_id), "gate_failed")
+    attempts = db.get_attempts_for_run(run_id)
+    quota = WorkerInterruptionReason.QUOTA_EXHAUSTED.value
+    assert any(a.interruption_reason == quota for a in attempts)
+    assert any(
+        a.interruption_reason != quota and a.status == AttemptStatus.FAILED
+        for a in attempts
+    )
+
+    # F1: the truthful FAILED outcome must remain -- no preemption, no requeue.
+    assert result.status == RunStatus.FAILED
+    assert db.get_run(run_id) is not None
+    assert db.get_run(run_id).status == RunStatus.FAILED  # type: ignore[union-attr]
+    job = store.get_job(db, "job1")
+    assert job is not None
+    assert job.state == JobState.RUNNING
+    assert job.waiting_reason != WaitingReason.PREEMPTED
+    assert job.preemptions == 0
+    assert job.resume_from is None
+    assert not _events_by_type(db.get_events(run_id), "run_preempted")
+    assert not _events_by_type(db.get_events(run_id), "preemption_committed")
+    assert GitManager.list_checkpoint_refs(repo, "job1") == {}
+
+
+def test_quota_exhausted_standalone_run_keeps_failed_behavior(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """Covers: ADR-0002 D8 standalone runs keep truthful failure (keep-compat)."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    log: list[str] = []
+    calls: list[str] = []
+    worker = ScriptedWorker("h3", {"m1": _quota_exhausted_action("h3", "m1")}, log)
+    monkeypatch.setattr(
+        "saberops.orchestrator.resolve_candidate_chain",
+        _role_keyed_chain([WorkerCandidate("h3", "m1")], [], calls),
+    )
+    db = Database(tmp_path / "orch.db")
+    orch = Orchestrator(db=db, registry=AdapterRegistry([worker]), worktree_base=tmp_path / "wt")
+    config = resolve_run_config(
+        task="fix typo in readme",
+        target_repo=repo,
+        gate_command=_passing_gate(),
+        publish_candidate=False,
+    )
+    result = orch.run(config=config, is_peak=False)
+    assert result.status == RunStatus.FAILED
+    assert db.get_run(result.run_id) is not None
+    assert db.get_run(result.run_id).status == RunStatus.FAILED  # type: ignore[union-attr]

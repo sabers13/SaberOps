@@ -10,10 +10,11 @@ through exact worker identity, and the deterministic lifecycle result.
 
 from __future__ import annotations
 
+import json
 import sys
 from collections.abc import Generator
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -486,7 +487,52 @@ def _ready_readiness_service(tmp_path: Path) -> ReadinessService:
     return service
 
 
-def test_worker_success_and_passing_gate_reaches_completed_state(tmp_path: Path) -> None:
+def _seed_verified_worker_posture(config_home: Path) -> None:
+    """Seed an isolated owner config with a verified Class-A posture for the
+    fake adapter's exact candidate identity used by the lifecycle test.
+
+    Covers: ADR-0002 D2 / WORKFLOW §7 — explicitly authorized SETUP-ONLY
+    fixture addition (orchestrator disposition `orch-f561e-disposition.md`,
+    finding B1). This adds ONLY a synthetic, test-only policy record for the
+    deterministic fake route; no production default, packaged policy, existing
+    assertion, test name, skip marker or workflow semantics are changed, and no
+    real vendor receives an attestation.
+    """
+    cfg_dir = config_home / "saberops"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    today_iso = datetime.now(UTC).date().isoformat()
+    cp_doc = {
+        "version": 2,
+        "providers": {"opencode": {"state": "ALLOWED"}},
+        # Test-only UNENFORCED pools so the fake adapter's routes need no
+        # capacity evidence; mirrors the authorized fixture pattern used by
+        # the other migrated suites. No production/packaged policy is touched.
+        "quota_pools": {
+            "opencode-go": {"mode": "UNENFORCED", "overage_possible": False},
+            "opencode-zen": {"mode": "UNENFORCED", "overage_possible": False},
+        },
+        "postures": {
+            # Provider identity of the deterministic fake adapter
+            # (`_MockWorker.provider_name == "opencode"`), covering the
+            # packaged WORKER chain head and the reviewer ladder candidates
+            # that the same fake adapter serves.
+            "opencode": {
+                "class": "A",
+                "policy_urls": ["https://example.com/opencode-policy"],
+                "ttl_days": 90,
+                "verified_on": today_iso,
+                "note": "synthetic verified test posture for lifecycle fake worker",
+            }
+        },
+    }
+    (cfg_dir / "control_plane.json").write_text(json.dumps(cp_doc), encoding="utf-8")
+
+
+def test_worker_success_and_passing_gate_reaches_completed_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
+    _seed_verified_worker_posture(tmp_path / "xdg-config")
     repo = tmp_path / "repo"
     _init_repo(repo)
     db = Database(tmp_path / "orch.db")

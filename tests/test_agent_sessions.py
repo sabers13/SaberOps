@@ -114,3 +114,20 @@ def test_stale_active_session_after_restart_is_not_shown_as_live(tmp_path: Path)
             'session_id': 1, 'process_group_id': 1})}))
     assert read_sessions(tmp_path, 'x')[0]['state'] == 'INTERRUPTED'
     assert json.loads((folder / f'{sid}.json').read_text())['state'] == 'ACTIVE'
+
+
+# ---------------------------------------------------------------------------
+# Ported from the removed test_native_access.py checks: cline session-id
+# parsing (the copilot half is obsolete).
+# ---------------------------------------------------------------------------
+
+
+def test_ported_cline_session_id_parsing() -> None:
+    """Ported cline half of test_additional_provider_session_ids_are_captured."""
+    from saberops.agent_sessions import _native_id
+
+    assert (
+        _native_id(json.dumps({"type": "run_result", "sessionId": "native_session123"}), "cline")
+        == "native_session123"
+    )
+    assert _native_id(json.dumps({"type": "other"}), "cline") is None

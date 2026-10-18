@@ -30,19 +30,63 @@ accepted identity-binding invariant.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
+import time
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Protocol, TextIO
 
+from saberops.gate_history import (
+    GateHistoryEntry,
+    GateKind,
+    GateProducer,
+)
+from saberops.gate_history import (
+    append_entry as append_gate_history,
+)
+from saberops.gate_history import (
+    history_path as gate_history_path,
+)
+from saberops.gate_outcome_projection import (
+    GateEvidence,
+    GateRole,
+    ProjectedDecisionKind,
+    project_gate_outcome,
+)
+from saberops.gate_profiles import (
+    GateProfile,
+    GateProfileError,
+    GateProfileName,
+    resolve_profile,
+)
+from saberops.gate_scope import (
+    GateProtectionResult,
+    GateScopeError,
+    RetirementCheck,
+    RetirementEntry,
+    ScopeCheck,
+    check_gate_protection,
+    check_test_retirement,
+    check_write_scope,
+    definition_digest,
+    gate_definition_mismatches,
+    git_changed_files,
+    is_protected_gate_path,
+    normalize_path,
+)
 from saberops.models import GateScratchMode
 from saberops.process import ProcessResult, run_process, split_command
 from saberops.project import (
@@ -482,7 +526,216 @@ def _make_private_scratch(parent: Path) -> Path | None:
         # already has private mkdtemp defaults, so this is the
         # additional tightening.
         pass
+    write_scratch_owner(path)
     return path
+
+
+#: Owner record written inside every gate scratch directory (GS-1 lifecycle
+#: registration).  It lets a later sweep decide from real process liveness and
+#: age without guessing from the directory name.
+_SCRATCH_OWNER_FILENAME: Final = ".saberops-scratch-owner.json"
+_SCRATCH_PREFIX: Final = "orchestrator-gate-"
+
+
+def write_scratch_owner(
+    scratch: Path,
+    *,
+    repo: str | None = None,
+    started_at: str | None = None,
+) -> None:
+    """Record the owning process incarnation and start time inside a scratch dir.
+
+    The durable :class:`~saberops.ownership.ProcessIdentity` (PID + boot id +
+    process start ticks) is stored, not a bare PID, so a later sweep can tell a
+    live owner from a reused PID.  Best-effort: a failure never blocks a gate
+    run, but a directory without a readable record is never adopted as
+    disposable by a sweep.
+    """
+    from saberops.ownership import ProcessIdentity
+
+    payload: dict[str, object] = {
+        "pid": os.getpid(),
+        "repo": repo,
+        "started_at": started_at or datetime.now(UTC).isoformat(),
+    }
+    identity = ProcessIdentity.for_self()
+    if identity is not None:
+        payload["identity"] = identity.to_dict()
+    try:
+        (scratch / _SCRATCH_OWNER_FILENAME).write_text(
+            json.dumps(payload, sort_keys=True), encoding="utf-8"
+        )
+    except OSError:
+        return
+
+
+def read_scratch_owner(scratch: Path) -> dict[str, Any] | None:
+    """Read a scratch owner record, or ``None`` when absent/unreadable."""
+    try:
+        raw = (scratch / _SCRATCH_OWNER_FILENAME).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        decoded = json.loads(raw)
+    except ValueError:
+        return None
+    return decoded if isinstance(decoded, dict) else None
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return True
+    return True
+
+
+def _scratch_owner_liveness(owner: dict[str, Any]) -> str:
+    """Classify a recorded scratch owner as ``LIVE`` / ``DEAD`` / ``UNKNOWN``.
+
+    A durable process identity is preferred (PID reuse safe).  A bare PID is
+    only trusted to prove *death*: a live PID may be a different process that
+    reused the number, so a bare-PID owner is never enough to authorize a sweep
+    while the PID is alive.
+    """
+    from saberops.ownership import Liveness, ProcessIdentity, probe_liveness
+
+    raw_identity = owner.get("identity")
+    if isinstance(raw_identity, dict):
+        identity = ProcessIdentity.from_dict(raw_identity)
+        if identity is not None:
+            liveness = probe_liveness(identity)
+            if liveness is Liveness.LIVE:
+                return "LIVE"
+            if liveness is Liveness.DEAD:
+                return "DEAD"
+            return "UNKNOWN"
+    pid = owner.get("pid")
+    if not isinstance(pid, int) or pid <= 0:
+        return "UNKNOWN"
+    if _pid_alive(pid):
+        return "LIVE"
+    return "DEAD"
+
+
+def sweep_gate_scratch(
+    root: Path | str,
+    *,
+    now: datetime | None = None,
+    liveness: Callable[[dict[str, Any]], str] | None = None,
+    deadline: float | None = None,
+    clock: Callable[[], float] | None = None,
+) -> tuple[str, ...]:
+    """Delete only *provably dead-owned* gate scratch directories under ``root``.
+
+    Safety contract (ADR-0003 Amendment 1 §2, review F5):
+
+    * a live owner is never swept, regardless of age;
+    * an unknown owner (no record, unreadable record, unknown liveness) is never
+      swept -- age and directory name are not authority;
+    * symlinked entries and entries that resolve outside ``root`` are skipped;
+    * the loop is bounded by ``deadline`` (a monotonic second) so one pass can
+      never monopolise the scheduler tick.
+
+    A directory is retired only when its recorded owner is provably dead.  Every
+    removal is the caller's responsibility to audit.
+    """
+    del now  # retained for API stability; age is not used as authority
+    moment_clock = clock if clock is not None else time.monotonic
+    classify = liveness if liveness is not None else _scratch_owner_liveness
+    base = Path(root)
+    if not base.is_dir():
+        return ()
+    try:
+        base_resolved = base.resolve()
+    except OSError:
+        return ()
+    removed: list[str] = []
+    try:
+        entries = sorted(base.iterdir(), key=lambda p: p.name)
+    except OSError:
+        return ()
+    for entry in entries:
+        if deadline is not None and moment_clock() >= deadline:
+            break
+        if not entry.name.startswith(_SCRATCH_PREFIX):
+            continue
+        if entry.is_symlink():
+            continue
+        try:
+            if not entry.is_dir():
+                continue
+            if not entry.resolve().is_relative_to(base_resolved):
+                continue
+        except OSError:
+            continue
+        owner = read_scratch_owner(entry)
+        if owner is None:
+            continue
+        if classify(owner) != "DEAD":
+            continue
+        try:
+            shutil.rmtree(entry, ignore_errors=False)
+        except OSError:
+            continue
+        removed.append(str(entry))
+    return tuple(removed)
+
+
+def disk_floor_ok(
+    paths: Sequence[Path | str], minimum_gb: float = 10.0
+) -> tuple[bool, str]:
+    """Assess the current fixed free-space floor without lowering any guard.
+
+    Delegates to the single storage-maintenance implementation of the existing
+    ``max(min_gb, 10 %)`` floor so the engine gate path and the developer gate
+    can never disagree about the effective reserve.
+    """
+    from saberops.storage_maintenance import _nearest_existing, current_disk_floor_bytes
+
+    for path in paths:
+        anchor = _nearest_existing(path)
+        if anchor is None:
+            return False, f"no-anchor:{path}"
+        try:
+            stat = os.statvfs(str(anchor))
+        except OSError:
+            return False, f"statvfs-failed:{path}"
+        free = stat.f_bavail * stat.f_frsize
+        total = stat.f_blocks * stat.f_frsize
+        required = current_disk_floor_bytes(total, minimum_gb)
+        if free < required:
+            return False, f"below-floor:{path}:{free}<{required}"
+    return True, ""
+
+
+class GateRunnerDiskLowError(GateRunnerInfrastructureError):
+    """The gate launch was blocked by the current free-space floor (ADR-0003 D4).
+
+    A typed INFRA block: no gate subprocess ran and no scratch was created.
+    """
+
+    reason_code = "DISK_LOW"
+
+
+def default_gate_disk_guard(target_repo: Path, *, minimum_gb: float = 10.0) -> str | None:
+    """Return a typed infra reason when the gate must not launch, else ``None``.
+
+    Uses the shared current-floor computation on the target repository's
+    filesystem.  Unknown (unreadable) capacity fails closed as ``DISK_UNKNOWN``.
+    """
+    ok, reason = disk_floor_ok([target_repo], minimum_gb)
+    if ok:
+        return None
+    if reason.startswith("statvfs-failed"):
+        return "DISK_UNKNOWN"
+    return "DISK_LOW"
 
 
 def preflight_ram_scratch(
@@ -893,6 +1146,7 @@ class GateRunner:
         request: GateRunnerRequest,
         *,
         post_gate_sha_resolver: Callable[[], tuple[str, bool]] | None = None,
+        disk_guard: Callable[[Path], str | None] | None = None,
     ) -> GateReceipt:
         """Execute exactly one gate command, producing a durable receipt.
 
@@ -922,6 +1176,16 @@ class GateRunner:
         if self._disabled:
             raise RuntimeError("Gate Runner has already executed; reuse is forbidden")
         self._disabled = True
+
+        # GS-1 / ADR-0003 D4: consult the current free-space floor BEFORE any
+        # backend choice, scratch creation or subprocess.  A below-floor or
+        # unknown reading is a typed INFRA block with zero launches.  The
+        # parameter exists so a caller can inject a bound guard; the default is
+        # the shared current floor, so production gates are always checked.
+        guard = disk_guard if disk_guard is not None else default_gate_disk_guard
+        guard_reason = guard(Path(request.target_repo))
+        if guard_reason is not None:
+            raise GateRunnerDiskLowError(f"gate launch blocked: {guard_reason}")
 
         target = Path(request.target_repo).expanduser().resolve()
         evidence_dir = Path(request.evidence_dir).expanduser().resolve()
@@ -1395,10 +1659,1004 @@ def _persist_receipt(
             tmp.unlink(missing_ok=True)
 
 
+# ---------------------------------------------------------------------------
+# Engine-run gates: host-gates slots, disk admission, profiles, history
+# ---------------------------------------------------------------------------
+
+#: Gate kinds that take the exclusive heavy slot and drain every light slot.
+_HEAVY_GATE_KINDS: Final[frozenset[GateKind]] = frozenset(
+    {GateKind.G3, GateKind.MAIN_GATE, GateKind.MANUAL}
+)
+
+#: Raw gate words mapped to their developer-gate exit codes (docs/gate.md).
+_WORD_EXIT: Final[dict[str, int]] = {
+    "PASS": 0,
+    "FLAKY_PASS": 0,
+    "FAIL": 1,
+    "TIMEOUT": 1,
+    "INFRA": 3,
+}
+
+_GATE_ROLE_BY_KIND: Final[dict[GateKind, GateRole]] = {
+    GateKind.G1: GateRole.G1,
+    GateKind.G2: GateRole.G2,
+    GateKind.G3: GateRole.G3,
+    GateKind.MAIN_GATE: GateRole.G3,
+    GateKind.MANUAL: GateRole.G3,
+}
+
+
+class GateSlotWaitTimeout(RuntimeError):
+    """The host-gates slot could not be acquired within the wait budget."""
+
+    reason_code = "SLOT_WAIT_TIMEOUT"
+
+
+def _slot_counts() -> tuple[int, int, float]:
+    """Read heavy/light slot counts and the wait budget from the environment."""
+    try:
+        heavy = int(os.environ.get("SABEROPS_GATE_SLOTS", "1"))
+        light = int(os.environ.get("SABEROPS_LANE_SLOTS", "2"))
+        wait = float(os.environ.get("SABEROPS_GATE_SLOT_WAIT", "3600"))
+    except ValueError as exc:
+        raise GateSlotWaitTimeout(f"invalid slot configuration: {exc}") from exc
+    if heavy < 1 or light < 1 or wait < 0:
+        raise GateSlotWaitTimeout("slot counts must be >= 1 and wait >= 0")
+    return heavy, light, wait
+
+
+def _acquire_all(paths: Sequence[Path], count: int, deadline: float) -> list[TextIO]:
+    """Acquire ``count`` exclusive flocks from ``paths`` before ``deadline``."""
+    handles: list[TextIO] = []
+    for path in paths[:count]:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handles.append(path.open("a+"))
+    try:
+        while True:
+            acquired: list[TextIO] = []
+            for handle in handles:
+                try:
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired.append(handle)
+                except BlockingIOError:
+                    pass
+            if len(acquired) == count:
+                return handles
+            for handle in acquired:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+            if time.monotonic() >= deadline:
+                raise GateSlotWaitTimeout("host-gates slot wait exceeded")
+            time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+    except BaseException:
+        for handle in handles:
+            handle.close()
+        raise
+
+
+def _release(handles: Sequence[TextIO]) -> None:
+    for handle in handles:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+
+def _acquire_one(paths: Sequence[Path], deadline: float) -> list[TextIO]:
+    """Acquire exactly one exclusive flock from the ``paths`` pool."""
+    handles: list[TextIO] = []
+    for path in paths:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handles.append(path.open("a+"))
+    try:
+        while True:
+            for handle in handles:
+                try:
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    return [handle]
+                except BlockingIOError:
+                    pass
+            if time.monotonic() >= deadline:
+                raise GateSlotWaitTimeout("host-gates slot wait exceeded")
+            time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+    except BaseException:
+        for handle in handles:
+            handle.close()
+        raise
+
+
+class GateSlotPoolProtocol(Protocol):
+    """Structural contract for the engine's host-gates slot pool.
+
+    Lets the executor accept the real file-lock pool or an equivalent test
+    double without importing a concrete implementation.
+    """
+
+    def heavy(self, *, wait: float | None = None) -> AbstractContextManager[None]: ...
+
+    def light(self, *, wait: float | None = None) -> AbstractContextManager[None]: ...
+
+
+class GateSlotPool:
+    """The engine's ``host-gates`` local capacity pool (ADR-0003 D3).
+
+    Uses exactly the heavy/light flock files the developer gate uses, so an
+    engine gate and a shell gate never run past each other:
+
+    * heavy (``saberops-gate-slots``, default 1) -- exclusive, held for the
+      whole of G3 / main-gate runs, which then drain every light slot;
+    * light (``saberops-gate-light-slots``, default 2) -- held by G1/G2 runs,
+      which wait for a free heavy slot (observe) before taking one light.
+    """
+
+    def __init__(self, common_dir: Path | str) -> None:
+        self.common = Path(common_dir)
+        self.heavy_root = self.common / "saberops-gate-slots"
+        self.light_root = self.common / "saberops-gate-light-slots"
+
+    @contextlib.contextmanager
+    def heavy(self, *, wait: float | None = None) -> Any:
+        """Hold the exclusive heavy slot and every light slot (drain)."""
+        heavy_count, light_count, default_wait = _slot_counts()
+        budget = default_wait if wait is None else wait
+        deadline = time.monotonic() + budget
+        heavy = _acquire_all(
+            [self.heavy_root / f"{i}.lock" for i in range(heavy_count)], heavy_count, deadline
+        )
+        try:
+            light = _acquire_all(
+                [self.light_root / f"{i}.lock" for i in range(light_count)], light_count, deadline
+            )
+            try:
+                yield
+            finally:
+                _release(light)
+        finally:
+            _release(heavy)
+
+    @contextlib.contextmanager
+    def light(self, *, wait: float | None = None) -> Any:
+        """Wait for a free heavy slot, then hold exactly one light slot."""
+        heavy_count, light_count, default_wait = _slot_counts()
+        budget = default_wait if wait is None else wait
+        deadline = time.monotonic() + budget
+        # Observe the heavy slot: block until it is free, then release so the
+        # order matches the developer gate (heavy before light, never both
+        # while waiting) and cannot deadlock against it.
+        observed = _acquire_all(
+            [self.heavy_root / f"{i}.lock" for i in range(heavy_count)], heavy_count, deadline
+        )
+        _release(observed)
+        light = _acquire_one(
+            [self.light_root / f"{i}.lock" for i in range(light_count)], deadline
+        )
+        try:
+            yield
+        finally:
+            _release(light)
+
+
+def host_disk_admission(
+    target_repo: Path | str,
+    *,
+    estimate_bytes: int,
+    minimum_gb: float = 10.0,
+) -> str | None:
+    """Return a typed infra reason when the gate must not launch, else ``None``.
+
+    Two layers, both deterministic:
+
+    1. the shared current free-space floor (ADR-0003 D4) is always enforced;
+    2. when the storage ledger is available, the gate's declared estimate is
+       admitted through ``host-disk`` (Step 008 admission).  An ``EXCEEDED``
+       decision blocks; an ``UNAVAILABLE`` ledger stays advisory because the
+       floor in (1) already fails closed.
+    """
+    reason = default_gate_disk_guard(Path(target_repo), minimum_gb=minimum_gb)
+    if reason is not None:
+        return reason
+    if estimate_bytes <= 0:
+        return None
+    try:
+        from saberops.storage_budget import (
+            Attribution,
+            EstimateComponent,
+            EstimateSource,
+            LedgerConfig,
+            StorageEstimate,
+            StorageLedger,
+        )
+    except ImportError:  # pragma: no cover - defensive
+        return None
+    repo = Path(target_repo).expanduser()
+    if not repo.is_dir():
+        return "DISK_UNKNOWN"
+    try:
+        estimate = StorageEstimate(
+            components=(
+                EstimateComponent(
+                    path=str(repo),
+                    remaining_growth_bytes=int(estimate_bytes),
+                    label="engine-gate",
+                ),
+            ),
+            source=EstimateSource.CONSERVATIVE_FALLBACK,
+            sample_count=0,
+            confidence=1.0,
+            conservative_fallback=True,
+            attribution=Attribution.OWNED,
+            reason="engine gate admission",
+        )
+        with StorageLedger(LedgerConfig()) as ledger:
+            decision = ledger.assess(estimate)
+    except Exception:
+        # An unreadable/absent ledger stays advisory: the floor above is the
+        # deterministic guard and must never be silently bypassed.
+        return None
+    outcome = getattr(decision, "outcome", None)
+    if getattr(outcome, "value", str(outcome)) == "EXCEEDED":
+        return f"DISK_ADMISSION_EXCEEDED:{getattr(decision, 'reason_code', '')}"
+    return None
+
+
+def _read_test_sources(repo: Path, paths: Sequence[str], *, head: str) -> dict[str, str]:
+    """Read ``path -> source`` for the given paths at ``head`` (empty on miss)."""
+    sources: dict[str, str] = {}
+    for path in paths:
+        completed = subprocess.run(
+            ["git", "show", f"{head}:{path}"],
+            cwd=repo,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode == 0:
+            sources[path] = completed.stdout
+    return sources
+
+
+def _read_quarantine(repo: Path) -> frozenset[str]:
+    path = repo / "tests/quarantine.txt"
+    if not path.exists():
+        return frozenset()
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return frozenset()
+    return frozenset(
+        line.strip()
+        for line in text.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    )
+
+
+# ---------------------------------------------------------------------------
+# Gate protection: base-trusted gate definitions (GT-1)
+# ---------------------------------------------------------------------------
+
+
+def _git_bytes(repo: Path, args: Sequence[str], *, label: str) -> bytes:
+    """Run one read-only git command, failing closed on any error."""
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        check=False,
+        capture_output=True,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.decode("utf-8", "replace").strip()
+        raise GateRunnerInfrastructureError(
+            f"cannot {label} in {repo}: {detail or f'git exited {completed.returncode}'}"
+        )
+    return completed.stdout
+
+
+def load_base_gate_definitions(repo: Path | str, base: str) -> dict[str, str]:
+    """Load every protected gate definition **from the base SHA**.
+
+    The bytes come from the git object store at ``base`` (``git ls-tree`` +
+    ``git show``), never from the candidate working tree, so the engine can
+    compare "what the gate would have used" with "what the candidate would use"
+    without trusting the candidate's copies.
+
+    Any git failure is a typed infrastructure error, so an unreadable base is a
+    fail-closed block rather than a silent acceptance.
+    """
+    root = Path(repo).expanduser()
+    listing = _git_bytes(
+        root, ["ls-tree", "-r", "--name-only", base], label=f"list gate definitions at {base}"
+    ).decode("utf-8", "replace")
+    definitions: dict[str, str] = {}
+    for line in listing.splitlines():
+        raw = line.strip()
+        if not raw:
+            continue
+        try:
+            candidate = normalize_path(raw)
+        except GateScopeError:
+            continue
+        if not is_protected_gate_path(candidate):
+            continue
+        definitions[candidate] = _git_bytes(
+            root,
+            ["show", f"{base}:{candidate}"],
+            label=f"read {candidate} at {base}",
+        ).decode("utf-8", "replace")
+    return definitions
+
+
+def _candidate_worktree_gate_paths(repo: Path) -> tuple[str, ...]:
+    """Protected gate definitions with an uncommitted or untracked state.
+
+    ``git status --porcelain -z --untracked-files=all`` respects the ignore
+    rules and reports paths without quoting, so an untracked ``conftest.py``
+    cannot hide behind the branch diff.
+    """
+    listing = _git_bytes(
+        repo,
+        ["status", "--porcelain", "-z", "--untracked-files=all"],
+        label="list the candidate working tree",
+    ).decode("utf-8", "replace")
+    paths: list[str] = []
+    for entry in listing.split("\0"):
+        if len(entry) < 4 or entry[2] != " ":
+            continue
+        try:
+            candidate = normalize_path(entry[3:])
+        except GateScopeError:
+            continue
+        if is_protected_gate_path(candidate):
+            paths.append(candidate)
+    return tuple(sorted(set(paths)))
+
+
+def _read_worktree_definitions(repo: Path, paths: Sequence[str]) -> dict[str, str]:
+    """Read the candidate's working-tree bytes for each path that exists."""
+    definitions: dict[str, str] = {}
+    for path in paths:
+        try:
+            definitions[path] = (repo / path).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            # Deleted or unreadable: the base comparison reports it as a
+            # mismatch, which is the fail-closed direction.
+            continue
+    return definitions
+
+
+def verify_gate_definitions(
+    repo: Path | str,
+    base: str,
+    *,
+    changed_paths: Sequence[str] = (),
+    touches: Sequence[str] = (),
+) -> GateProtectionResult:
+    """Verify the candidate's gate definitions against the base SHA (GT-1).
+
+    Two deterministic sources feed one verdict:
+
+    1. the protected-path check over the candidate branch diff
+       (:func:`check_gate_protection`), and
+    2. a byte comparison against every gate definition loaded from ``base``,
+       including uncommitted and untracked working-tree changes.
+
+    A candidate whose definitions match the base byte-for-byte *is* running the
+    base definitions, so the gate it executes is the base-trusted gate.  Any
+    difference blocks: the gate cannot run under definitions the candidate
+    edited, and the block is an owner question, never a self-authorization.
+    """
+    root = Path(repo).expanduser()
+    verdict = check_gate_protection(changed_paths, touches)
+    tampered = set(verdict.tampered_paths)
+    detected = set(verdict.detected_by)
+    base_verified = False
+    candidate_definitions: dict[str, str] = {}
+    if base:
+        base_definitions = load_base_gate_definitions(root, base)
+        candidates = set(base_definitions)
+        for path in changed_paths:
+            try:
+                normalized = normalize_path(path)
+            except GateScopeError:
+                continue
+            if is_protected_gate_path(normalized):
+                candidates.add(normalized)
+        candidates.update(_candidate_worktree_gate_paths(root))
+        candidate_definitions = _read_worktree_definitions(root, sorted(candidates))
+        mismatched = gate_definition_mismatches(base_definitions, candidate_definitions)
+        tampered.update(mismatched)
+        base_verified = not mismatched
+        if mismatched:
+            detected.add("base-content")
+    if not tampered:
+        return GateProtectionResult(
+            is_protected=False,
+            base_sha=base,
+            base_verified=base_verified,
+            detected_by=tuple(sorted(detected)),
+        )
+    merged = check_gate_protection(sorted(tampered), touches)
+    return GateProtectionResult(
+        is_protected=True,
+        tampered_paths=merged.tampered_paths,
+        declared_paths=merged.declared_paths,
+        reason_code=merged.reason_code,
+        reason=merged.reason,
+        owner_question=merged.owner_question,
+        base_sha=base,
+        base_verified=base_verified,
+        detected_by=tuple(sorted(detected)),
+        digests=tuple(
+            (path, definition_digest(candidate_definitions[path]))
+            for path in merged.tampered_paths
+            if path in candidate_definitions
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class EngineGateRequest:
+    """Inputs to one engine-run, evidence-producing gate (ADR-0004 D3)."""
+
+    target_repo: Path
+    kind: GateKind | str
+    evidence_dir: Path
+    base: str = ""
+    head_sha: str = ""
+    requested_profile: GateProfileName | str | None = None
+    state_dir: Path | None = None
+    touches: tuple[str, ...] = ()
+    must_not_touch: tuple[str, ...] = ()
+    retirement: tuple[RetirementEntry, ...] = ()
+    changed_files: tuple[str, ...] = ()
+    base_test_sources: Mapping[str, str] | None = None
+    head_test_sources: Mapping[str, str] | None = None
+    disk_estimate_bytes: int = 0
+    slot_wait: float | None = None
+    extra_env: Mapping[str, str] = field(default_factory=dict)
+
+    def resolved_kind(self) -> GateKind:
+        try:
+            return self.kind if isinstance(self.kind, GateKind) else GateKind(self.kind)
+        except ValueError as exc:
+            raise GateProfileError(f"unknown gate kind {self.kind!r}") from exc
+
+
+@dataclass(frozen=True)
+class EngineGateResult:
+    """Authoritative result of one engine-run gate."""
+
+    kind: str
+    producer: str
+    profile: str
+    outcome: str
+    accepted: bool
+    reason: str
+    head_sha: str
+    tests: int
+    failed: tuple[str, ...]
+    flaky: tuple[str, ...]
+    wall_time: float
+    history_path: str
+    outcome_path: str
+    scope: ScopeCheck | None = None
+    retirement: RetirementCheck | None = None
+    protection: GateProtectionResult | None = None
+    findings: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "kind": self.kind,
+            "producer": self.producer,
+            "profile": self.profile,
+            "outcome": self.outcome,
+            "accepted": self.accepted,
+            "reason": self.reason,
+            "head_sha": self.head_sha,
+            "counts": {"tests": self.tests, "failed": len(self.failed), "flaky": len(self.flaky)},
+            "failed": list(self.failed),
+            "flaky": list(self.flaky),
+            "wall_time": self.wall_time,
+            "history_path": self.history_path,
+            "findings": list(self.findings),
+        }
+        if self.scope is not None:
+            payload["write_scope"] = self.scope.as_dict()
+        if self.retirement is not None:
+            payload["retirement"] = self.retirement.as_dict()
+        if self.protection is not None:
+            payload["gate_protection"] = self.protection.as_dict()
+        return payload
+
+
+class EngineGateExecutor:
+    """Run one gate profile and record authoritative engine evidence.
+
+    The engine (never a model) owns G1/G2/G3 execution: it takes the
+    ``host-gates`` slot, checks write scope, test retirement and gate
+    protection, enforces the profile's wall budget, reads the profile's
+    ``outcome.json``, projects the decision fail-closed, and appends the
+    engine history line.
+
+    Gate protection (GT-1) is checked before any command runs: the candidate's
+    gate definitions are loaded from the base SHA and compared with the
+    candidate tree, and any difference blocks the gate as an owner question.
+    """
+
+    def __init__(
+        self,
+        *,
+        slot_pool: GateSlotPoolProtocol | None = None,
+        disk_check: Callable[..., str | None] | None = None,
+    ) -> None:
+        self._slot_pool = slot_pool
+        self._disk_check = disk_check
+
+    def execute(self, request: EngineGateRequest) -> EngineGateResult:
+        kind = request.resolved_kind()
+        repo = Path(request.target_repo).expanduser().resolve()
+        evidence_dir = Path(request.evidence_dir).expanduser().resolve()
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        common = _git_common_dir(repo)
+        profiles = _load_profiles(request.state_dir)
+        profile = resolve_profile(
+            kind, requested=request.requested_profile, profiles=profiles
+        )
+        started = time.monotonic()
+        findings: list[str] = []
+
+        # --- deterministic pre-G1 checks (fail closed, no command runs) ----
+        scope: ScopeCheck | None = None
+        retirement: RetirementCheck | None = None
+        protection: GateProtectionResult | None = None
+        try:
+            changed_paths = self._changed_paths(request, repo)
+            if kind in (GateKind.G1, GateKind.G2):
+                scope, retirement = self._preflight_scope(request, repo, changed_paths, findings)
+        except Exception as exc:  # noqa: BLE001 - evidence must still be written
+            return self._record(
+                request, kind, profile, common, evidence_dir, started,
+                outcome="BLOCKED",
+                accepted=False,
+                reason=f"SCOPE_PREFLIGHT_ERROR: {exc}",
+                tests=0,
+                failed=(),
+                flaky=(),
+                scope=None,
+                retirement=None,
+                findings=(*findings, str(exc)),
+            )
+        if changed_paths is not None:
+            try:
+                protection = verify_gate_definitions(
+                    repo,
+                    request.base,
+                    changed_paths=changed_paths,
+                    touches=request.touches,
+                )
+            except Exception as exc:  # noqa: BLE001 - evidence must still be written
+                # An unreadable base is fail-closed: the engine cannot show that
+                # the candidate's gate definitions are the base definitions.
+                return self._record(
+                    request, kind, profile, common, evidence_dir, started,
+                    outcome="BLOCKED",
+                    accepted=False,
+                    reason=f"GATE_PROTECTION_BLOCKED: GATE_BASE_UNVERIFIABLE: {exc}",
+                    tests=0,
+                    failed=(),
+                    flaky=(),
+                    scope=scope,
+                    retirement=retirement,
+                    findings=(*findings, "GATE_BASE_UNVERIFIABLE", str(exc)),
+                )
+        if protection is not None and not protection.allowed:
+            # GT-1 / ADR-0004 D3: the candidate edited the definitions its own
+            # gate would load.  No command runs; the change is an owner question.
+            gate_block = f"GATE_PROTECTION_BLOCKED: {protection.reason}"
+            return self._record(
+                request, kind, profile, common, evidence_dir, started,
+                outcome="BLOCKED",
+                accepted=False,
+                reason=gate_block,
+                tests=0,
+                failed=(),
+                flaky=(),
+                scope=scope,
+                retirement=retirement,
+                protection=protection,
+                findings=(*findings, protection.reason_code, protection.owner_question),
+            )
+        blocked = self._scope_block(scope, retirement)
+        if blocked is not None:
+            return self._record(
+                request, kind, profile, common, evidence_dir, started,
+                outcome="BLOCKED",
+                accepted=False,
+                reason=blocked,
+                tests=0,
+                failed=(),
+                flaky=(),
+                scope=scope,
+                retirement=retirement,
+                protection=protection,
+                findings=(*findings, blocked),
+            )
+
+        # --- host-disk admission (Step 008) --------------------------------
+        if self._disk_check is None:
+            disk_reason = host_disk_admission(
+                repo, estimate_bytes=request.disk_estimate_bytes
+            )
+        else:
+            disk_reason = self._disk_check(
+                repo, estimate_bytes=request.disk_estimate_bytes
+            )
+        if disk_reason is not None:
+            return self._record(
+                request, kind, profile, common, evidence_dir, started,
+                outcome="INFRA",
+                accepted=False,
+                reason=f"INFRA {disk_reason}",
+                tests=0,
+                failed=(),
+                flaky=(),
+                scope=scope,
+                retirement=retirement,
+                protection=protection,
+                findings=(*findings, disk_reason),
+            )
+
+        # --- host-gates slot + profile execution ---------------------------
+        pool = self._slot_pool or GateSlotPool(common)
+        try:
+            if kind in _HEAVY_GATE_KINDS:
+                with pool.heavy(wait=request.slot_wait):
+                    process = self._run_profile(request, kind, profile, repo, evidence_dir)
+            else:
+                with pool.light(wait=request.slot_wait):
+                    process = self._run_profile(request, kind, profile, repo, evidence_dir)
+        except GateSlotWaitTimeout as exc:
+            return self._record(
+                request, kind, profile, common, evidence_dir, started,
+                outcome="INFRA",
+                accepted=False,
+                reason=f"INFRA SLOT_WAIT_TIMEOUT ({exc})",
+                tests=0,
+                failed=(),
+                flaky=(),
+                scope=scope,
+                retirement=retirement,
+                protection=protection,
+                findings=(*findings, "SLOT_WAIT_TIMEOUT"),
+            )
+
+        # --- read the profile's outcome.json and project the decision ------
+        artifact = _newest_outcome_artifact(evidence_dir)
+        evidence = _evidence_from_artifact(
+            artifact,
+            repo=repo,
+            kind=kind,
+            process=process,
+            reason_disk=disk_reason,
+        )
+        decision = project_gate_outcome(evidence)
+        wall = round(time.monotonic() - started, 2)
+        outcome_word = (
+            "INFRA"
+            if decision.decision is ProjectedDecisionKind.INFRA
+            else decision.decision.value
+        )
+        if decision.decision is ProjectedDecisionKind.BLOCKED:
+            outcome_word = "BLOCKED"
+            findings.append(decision.reason)
+        return self._record(
+            request, kind, profile, common, evidence_dir, started,
+            outcome=outcome_word,
+            accepted=decision.accepted,
+            reason=decision.reason,
+            tests=evidence.tests_ran or 0,
+            failed=decision.failed,
+            flaky=decision.flaky,
+            scope=scope,
+            retirement=retirement,
+            protection=protection,
+            findings=tuple(findings),
+            wall=wall,
+        )
+
+    # -- helpers ------------------------------------------------------------
+
+    @staticmethod
+    def _changed_paths(
+        request: EngineGateRequest, repo: Path
+    ) -> tuple[str, ...] | None:
+        """The candidate's changed paths, or ``None`` when no diff is declared.
+
+        ``None`` means the caller declared neither ``changed_files`` nor a
+        ``base``, so there is no candidate diff to protect; real G1/G2/G3 runs
+        always declare one.
+        """
+        if request.changed_files:
+            return tuple(request.changed_files)
+        if request.base:
+            return git_changed_files(str(repo), request.base, request.head_sha or "HEAD")
+        return None
+
+    def _preflight_scope(
+        self,
+        request: EngineGateRequest,
+        repo: Path,
+        changed_paths: tuple[str, ...] | None,
+        findings: list[str],
+    ) -> tuple[ScopeCheck | None, RetirementCheck | None]:
+        scope: ScopeCheck | None = None
+        retirement: RetirementCheck | None = None
+        if request.touches or request.must_not_touch:
+            changed = (
+                changed_paths
+                if changed_paths is not None
+                else git_changed_files(str(repo), request.base, request.head_sha or "HEAD")
+            )
+            scope = check_write_scope(changed, request.touches, request.must_not_touch)
+            findings.extend(scope.as_dict()["out_of_scope"])  # type: ignore[arg-type]
+        base_sources = dict(request.base_test_sources or {})
+        head_sources = dict(request.head_test_sources or {})
+        if request.retirement or base_sources or head_sources:
+            retirement = check_test_retirement(base_sources, head_sources, request.retirement)
+        return scope, retirement
+
+    @staticmethod
+    def _scope_block(scope: ScopeCheck | None, retirement: RetirementCheck | None) -> str | None:
+        if scope is not None and not scope.allowed:
+            return f"WRITE_SCOPE_VIOLATION: {scope.reason}"
+        if retirement is not None and not retirement.allowed:
+            return f"TEST_RETIREMENT_VIOLATION: {retirement.reason}"
+        return None
+
+    def _run_profile(
+        self,
+        request: EngineGateRequest,
+        kind: GateKind,
+        profile: GateProfile,
+        repo: Path,
+        evidence_dir: Path,
+    ) -> ProcessResult | None:
+        result_dir = evidence_dir / "result"
+        result_dir.mkdir(parents=True, exist_ok=True)
+        env = {
+            "SABEROPS_GATE_KIND": kind.value,
+            "SABEROPS_GATE_PRODUCER": GateProducer.ENGINE.value,
+            "SABEROPS_GATE_PROFILE": profile.name.value,
+            "SABEROPS_GATE_LABEL": kind.value,
+            # The engine already holds the host-gates slot, and it owns the
+            # single history line; the child must not re-acquire or duplicate.
+            "SABEROPS_GATE_EXTERNAL_SLOT": "1",
+            "SABEROPS_GATE_NO_HISTORY": "1",
+            "SABEROPS_GATE_RESULT_DIR": str(result_dir),
+            **dict(request.extra_env),
+        }
+        selector_nodes: list[str] = []
+        if profile.selector_command:
+            selector_nodes = self._run_selector(profile, repo, env)
+        deadline = time.monotonic() + profile.wall_budget_seconds
+        last: ProcessResult | None = None
+        for command in profile.render_commands(
+            repo=str(repo),
+            base=request.base,
+            head=request.head_sha or "HEAD",
+            result_dir=str(result_dir),
+            python=os.environ.get("SABEROPS_GATE_PYTHON", sys.executable),
+            selector_nodes=selector_nodes,
+        ):
+            if not command:
+                continue
+            remaining = max(1.0, deadline - time.monotonic())
+            last = run_process(command, cwd=repo, env=env, timeout=remaining)
+            if last.exit_code != 0 or last.launch_failed or last.timed_out:
+                break
+        return last
+
+    @staticmethod
+    def _run_selector(profile: GateProfile, repo: Path, env: Mapping[str, str]) -> list[str]:
+        assert profile.selector_command is not None
+        selector = split_command(profile.selector_command)
+        if not selector:
+            return []
+        completed = subprocess.run(
+            selector,
+            cwd=repo,
+            env={**os.environ, **env},
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        return [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+
+    def _record(
+        self,
+        request: EngineGateRequest,
+        kind: GateKind,
+        profile: GateProfile,
+        common: Path,
+        evidence_dir: Path,
+        started: float,
+        *,
+        outcome: str,
+        accepted: bool,
+        reason: str,
+        tests: int,
+        failed: Sequence[str],
+        flaky: Sequence[str],
+        scope: ScopeCheck | None,
+        retirement: RetirementCheck | None,
+        findings: tuple[str, ...],
+        protection: GateProtectionResult | None = None,
+        wall: float | None = None,
+    ) -> EngineGateResult:
+        wall = wall if wall is not None else round(time.monotonic() - started, 2)
+        head_sha = _resolve_head(request, common)
+        ledger = gate_history_path(common)
+        outcome_path = evidence_dir / "engine-outcome.json"
+        result = EngineGateResult(
+            kind=kind.value,
+            producer=GateProducer.ENGINE.value,
+            profile=profile.name.value,
+            outcome=outcome,
+            accepted=accepted,
+            reason=reason,
+            head_sha=head_sha,
+            tests=int(tests),
+            failed=tuple(sorted(failed)),
+            flaky=tuple(sorted(flaky)),
+            wall_time=wall,
+            history_path=str(ledger),
+            outcome_path=str(outcome_path),
+            scope=scope,
+            retirement=retirement,
+            protection=protection,
+            findings=findings,
+        )
+        outcome_path.write_text(json.dumps(result.as_dict(), indent=2) + "\n", encoding="utf-8")
+        try:
+            append_gate_history(
+                ledger,
+                GateHistoryEntry(
+                    kind=kind,
+                    producer=GateProducer.ENGINE.value,
+                    head_sha=head_sha,
+                    worktree=str(Path(request.target_repo).expanduser()),
+                    outcome=outcome,
+                    reason=reason,
+                    tests=int(tests),
+                    failed=tuple(sorted(failed)),
+                    flaky=tuple(sorted(flaky)),
+                    wall_time=wall,
+                    profile=profile.name.value,
+                    label=kind.value,
+                ),
+            )
+        except OSError as exc:
+            print(f"warning: could not append engine gate history: {exc}", flush=True)
+        return result
+
+
+def _git_common_dir(repo: Path) -> Path:
+    completed = subprocess.run(
+        ["git", "rev-parse", "--git-common-dir"],
+        cwd=repo,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        raise GateRunnerInfrastructureError(
+            f"cannot resolve git common dir for {repo}: {completed.stderr.strip()}"
+        )
+    raw = completed.stdout.strip()
+    return (repo / raw).resolve() if not Path(raw).is_absolute() else Path(raw)
+
+
+def _load_profiles(state_dir: Path | None) -> Mapping[GateProfileName, GateProfile]:
+    from saberops.gate_profiles import default_profiles, load_profiles
+
+    return load_profiles(state_dir) if state_dir is not None else default_profiles()
+
+
+def _newest_outcome_artifact(evidence_dir: Path) -> dict[str, Any] | None:
+    candidates = sorted(
+        evidence_dir.rglob("outcome.json"),
+        key=lambda path: path.stat().st_mtime if path.exists() else 0.0,
+    )
+    for path in reversed(candidates):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict):
+            return data
+    return None
+
+
+def _evidence_from_artifact(
+    artifact: Mapping[str, Any] | None,
+    *,
+    repo: Path,
+    kind: GateKind,
+    process: ProcessResult | None,
+    reason_disk: str | None,
+) -> GateEvidence:
+    role = _GATE_ROLE_BY_KIND[kind]
+    quarantine = _read_quarantine(repo)
+    if artifact is None:
+        if process is not None and process.timed_out:
+            return GateEvidence(
+                raw_outcome="TIMEOUT",
+                exit_code=1,
+                reason="profile wall budget exceeded",
+                has_provenance=True,
+                role=role,
+            )
+        return GateEvidence(
+            raw_outcome="INFRA",
+            exit_code=3,
+            reason=reason_disk or "GATE_ARTIFACT_MISSING",
+            has_provenance=True,
+            role=role,
+        )
+    word = str(artifact.get("outcome", ""))
+    exit_code = _WORD_EXIT.get(word)
+    if process is not None and process.timed_out:
+        word, exit_code = "TIMEOUT", 1
+    failed = _string_tuple(artifact.get("failed"))
+    flaky = _string_tuple(artifact.get("flaky"))
+    checks_ok = artifact.get("checks_ok")
+    counts = artifact.get("counts")
+    tests_ran: int | None = None
+    if isinstance(counts, Mapping):
+        raw_tests = counts.get("tests")
+        if isinstance(raw_tests, int) and not isinstance(raw_tests, bool):
+            tests_ran = raw_tests
+    selected = artifact.get("selected")
+    return GateEvidence(
+        raw_outcome=word,
+        exit_code=exit_code if exit_code is not None else 3,
+        reason=str(artifact.get("reason", "")),
+        failed=failed,
+        flaky=flaky,
+        quarantined=quarantine,
+        checks_ok=checks_ok if isinstance(checks_ok, bool) else None,
+        selected_nonempty=selected if isinstance(selected, bool) else True,
+        tests_ran=tests_ran,
+        has_provenance=True,
+        producer=GateProducer.ENGINE.value,
+        role=role,
+    )
+
+
+def _string_tuple(value: object) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(sorted(str(item) for item in value))
+
+
+def _resolve_head(request: EngineGateRequest, common: Path) -> str:
+    if request.head_sha:
+        return request.head_sha
+    repo = Path(request.target_repo).expanduser()
+    completed = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=False, capture_output=True, text=True
+    )
+    return completed.stdout.strip() if completed.returncode == 0 else ""
+
+
 __all__ = [
     "GATE_SCRATCH_LABELS",
+    "EngineGateExecutor",
+    "EngineGateRequest",
+    "EngineGateResult",
+    "GateProtectionResult",
     "GateReceipt",
     "GateRunner",
+    "GateRunnerDiskLowError",
+    "GateRunnerInfrastructureError",
     "GateRunnerRequest",
     "GateScratchBackend",
     "GateScratchMode",
@@ -1406,12 +2664,21 @@ __all__ = [
     "GateScratchPreflightError",
     "GateScratchPreflightEvidence",
     "GateScratchPreflightResult",
+    "GateSlotPool",
+    "GateSlotPoolProtocol",
+    "GateSlotWaitTimeout",
     "_DEFAULT_SAFETY_FLOOR_BYTES",
     "_DEFAULT_TMPFS_CANDIDATE",
     "_MIN_USABLE_BYTES",
+    "default_gate_disk_guard",
+    "disk_floor_ok",
+    "host_disk_admission",
+    "load_base_gate_definitions",
     "load_project_gate_scratch_policy",
     "load_project_gate_scratch_policy_for_state_dir",
     "preflight_ram_scratch",
     "project_policy_path",
     "set_project_gate_scratch_policy",
+    "sweep_gate_scratch",
+    "verify_gate_definitions",
 ]

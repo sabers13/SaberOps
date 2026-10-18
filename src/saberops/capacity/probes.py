@@ -306,6 +306,22 @@ def handle_probe_result(
                 pass
         except Exception:
             pass
+        for pool_id in pools:
+            try:
+                from saberops.capacity.ledger import record_probe_window_observation
+
+                record_probe_window_observation(
+                    db,
+                    pool_id=pool_id,
+                    window_id=window_id,
+                    remaining_pct=float(remaining),
+                    reset_at=reset.isoformat() if reset else None,
+                    harness=harness,
+                    now=moment,
+                    evidence_ref=run_id,
+                )
+            except Exception:
+                pass
         if remaining <= 0:
             for pool_id in pools:
                 try:
@@ -353,6 +369,13 @@ def handle_probe_result(
                     )
                 except Exception:
                     pass
+    except Exception:
+        pass
+
+    try:
+        from saberops.capacity.loop import wake_scheduler
+
+        wake_scheduler()
     except Exception:
         pass
 

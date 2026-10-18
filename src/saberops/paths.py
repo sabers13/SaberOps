@@ -75,14 +75,6 @@ def config_home() -> Path:
     return Path.home() / ".config"
 
 
-def cache_home() -> Path:
-    """Return the XDG cache base (``$XDG_CACHE_HOME`` or ``~/.cache``)."""
-    xdg = os.environ.get("XDG_CACHE_HOME", "")
-    if xdg and xdg.strip():
-        return Path(xdg.strip()).expanduser()
-    return Path.home() / ".cache"
-
-
 def saberops_state_dir() -> Path:
     """Return the canonical public state directory for the active profile."""
     return _profiled_app_dir(state_home(), STATE_APP_DIR)
@@ -91,11 +83,6 @@ def saberops_state_dir() -> Path:
 def saberops_config_dir() -> Path:
     """Return the canonical public config directory for the active profile."""
     return _profiled_app_dir(config_home(), CONFIG_APP_DIR)
-
-
-def saberops_cache_dir() -> Path:
-    """Return the canonical public cache directory for the active profile."""
-    return _profiled_app_dir(cache_home(), CACHE_APP_DIR)
 
 
 def owner_state_dir() -> Path:

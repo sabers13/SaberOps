@@ -15,7 +15,7 @@ import re
 import shutil
 import subprocess
 import threading
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -58,9 +58,7 @@ from saberops.model_access import (
     AccessStore,
     ConnectionTestReason,
     ExecutionSupport,
-    ModelCatalog,
     ModelCatalogStore,
-    ModelCatalogStoreError,
     ModelDiscoveryResult,
     ModelListingError,
     ModelSource,
@@ -162,7 +160,9 @@ _TIERS = ("T1", "T2", "T3")
 
 _DEFAULT_GATE_COMMAND = "make gate"
 
-TERMINAL_EVENT_TYPES: frozenset[str] = frozenset({"run_completed", "run_failed", "run_exception"})
+TERMINAL_EVENT_TYPES: frozenset[str] = frozenset(
+    {"run_completed", "run_failed", "run_exception", "run_preempted"}
+)
 
 #: Owner-action event types that must reach the run-page EventSource even
 #: after the run itself is terminal (manual Review / Accept happens on an
@@ -691,14 +691,6 @@ def _model_catalog_store() -> ModelCatalogStore:
     return ModelCatalogStore(owner_state_dir() / ModelCatalogStore.FILENAME)
 
 
-def _load_catalog_safely() -> ModelCatalog:
-    """Load the last-observed catalog, degrading to empty on corrupt state."""
-    try:
-        return _model_catalog_store().load()
-    except ModelCatalogStoreError:
-        return ModelCatalog()
-
-
 def _binding_store() -> OwnerBindingStore:
     """Return the owner binding store (overridable for tests).
 
@@ -716,99 +708,6 @@ def _load_owner_bindings_safely() -> OwnerBindings:
         return _binding_store().load()
     except BindingStoreError:
         return OwnerBindings()
-
-
-def _exact_binding_for(
-    owner: OwnerBindings,
-    *,
-    provider: str,
-    model: str,
-    connection_id: str | None = None,
-    role: BindingRole | None = None,
-) -> Any | None:
-    """Return the exact registry binding for the requested identity, if any.
-
-    A raw provider/model string never synthesizes a binding: the lookup only
-    returns an entry that already exists in the canonical registry.
-
-    Identity must include the connection (the real account the
-    model is reachable through).  Two connections that expose the same
-    provider/model pair register distinct bindings; the Web / catalog seam
-    must not silently collapse them by returning the first registry
-    declaration.  When ``connection_id`` is supplied the lookup derives the
-    expected binding id through the canonical
-    ``connection/model/role`` materialization scheme
-    (``discovered-binding:<role>:<connection>:<model>``) and requires that
-    exact id to exist in :class:`BindingRegistry`.  When ``connection_id``
-    is absent the lookup falls back to the declaration-order match (the
-    historical behavior for non-discovered bindings) but still filters by
-    ``role`` when one is supplied.
-    """
-    wanted_provider = provider.strip().lower()
-    wanted_model = model.strip()
-    if not wanted_provider or not wanted_model:
-        return None
-    if connection_id:
-        cleaned_connection = connection_id.strip()
-        if cleaned_connection:
-            role_slug = (
-                role.value.lower() if role is not None else BindingRole.WORKER.value.lower()
-            )
-            expected_id = (
-                f"discovered-binding:{role_slug}:{cleaned_connection}:{wanted_model}"
-            )
-            return owner.registry.try_get(expected_id)
-    for binding in owner.registry.list_bindings():
-        if binding.provider != wanted_provider or binding.model != wanted_model:
-            continue
-        if role is not None and getattr(binding, "binding_role", None) is not role:
-            continue
-        return binding
-    return None
-
-
-def _resolve_exact_binding(
-    owner: OwnerBindings,
-    registry: AdapterRegistry,
-    *,
-    provider: str,
-    model: str,
-    connection_id: str | None = None,
-    role: BindingRole | None = None,
-) -> Any | None:
-    """Resolve the exact binding for a model through the real resolver.
-
-    Returns the binding only when an exact registry entry exists AND
-    :func:`resolve_execution_binding` succeeds against the real adapter;
-    otherwise ``None`` (no provider/model fallback, no synthesized identity).
-
-    The lookup accepts an explicit ``connection_id`` and
-    ``role`` so the same provider/model pair reached through two
-    different connections (or a WORKER-role / ORCHESTRATOR-role split)
-    resolves to its own exact binding rather than the first registry
-    declaration.
-    """
-    binding = _exact_binding_for(
-        owner,
-        provider=provider,
-        model=model,
-        connection_id=connection_id,
-        role=role,
-    )
-    if binding is None:
-        return None
-    adapter = registry.get(binding.provider)
-    if adapter is None:
-        return None
-    try:
-        resolve_execution_binding(
-            registry=owner.registry,
-            binding_id=binding.binding_id,
-            adapter=adapter,
-        )
-    except BindingResolutionError:
-        return None
-    return binding
 
 
 def _http_get(
@@ -939,22 +838,37 @@ def _fetch_openai_compatible_models(
 _BACKEND_LIST_TIMEOUT_SECONDS = 15.0
 
 
-def _run_backend_listing(argv: list[str]) -> str:
+def _run_backend_listing(
+    argv: list[str], *, env: Mapping[str, str] | None = None
+) -> str:
     """Run one backend's supported model-list command (bounded, no secrets).
 
     The backend reads its own account session; Orchestrator passes no
     credential and captures only stdout.  A non-zero exit is classified and
     its stderr is never surfaced (it may carry session material).
+
+    ``env`` replaces the inherited environment when given; callers that pass
+    ``None`` keep the previous direct-inheritance behaviour.
     """
 
     try:
-        completed = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=_BACKEND_LIST_TIMEOUT_SECONDS,
-            check=False,
-        )
+        if env is not None:
+            completed = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                timeout=_BACKEND_LIST_TIMEOUT_SECONDS,
+                check=False,
+                env=dict(env),
+            )
+        else:
+            completed = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                timeout=_BACKEND_LIST_TIMEOUT_SECONDS,
+                check=False,
+            )
     except (OSError, subprocess.SubprocessError) as exc:
         raise ModelListingError(
             ConnectionTestReason.ENDPOINT_UNREACHABLE,
@@ -1057,7 +971,36 @@ def _list_account_models(connection: ProviderConnection) -> list[str]:
         from saberops.model_access.native_listing import list_native_models
 
         return list_native_models(executable, descriptor.model_list_protocol)
-    stdout = _run_backend_listing([executable, *descriptor.model_list_argv])
+    if descriptor.backend == "opencode":
+        # Config/plugin isolation for the OpenCode listing launch: a private
+        # config/home root with project/ancestor discovery disabled (inline
+        # deny policies block every plugin, MCP server and skill), reusing
+        # the account/session data directory by path only.  Refuse in the
+        # existing typed form when isolation cannot be established; other
+        # backends keep their previous behaviour exactly.
+        from saberops.workers.env import hermetic_env
+        from saberops.workers.opencode_isolation import (
+            OpenCodeIsolationUnavailable,
+            opencode_isolation,
+        )
+
+        base_env = hermetic_env("opencode", {}, None)
+        try:
+            isolation = opencode_isolation(base_env)
+        except OpenCodeIsolationUnavailable as exc:
+            raise ModelListingError(
+                ConnectionTestReason.ENDPOINT_UNREACHABLE, str(exc)
+            ) from exc
+        with isolation:
+            listing_env = isolation.env_for(
+                base_env,
+                config=isolation.config({"enabled_providers": ["opencode"]}),
+            )
+            stdout = _run_backend_listing(
+                [executable, *descriptor.model_list_argv], env=listing_env
+            )
+    else:
+        stdout = _run_backend_listing([executable, *descriptor.model_list_argv])
     if descriptor.backend == "antigravity":
         # Native `agy models` emits exact ID<TAB>display name pairs.
         # Never interpret headers, errors or display names as executable IDs.
@@ -1763,7 +1706,7 @@ def create_app(
         persisted_run = db.get_run(run_id)
         terminal_persisted = (
             persisted_run is not None
-            and persisted_run.status in (RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.ORPHANED)
+            and persisted_run.status in TERMINAL_RUN_STATUSES
         ) or any(event.event_type in TERMINAL_EVENT_TYPES for event in persisted)
         # A terminal run with an active post-run owner action
         # (Review / Accept) keeps a usable live stream so queued/started/
@@ -1801,7 +1744,7 @@ def create_app(
             terminal_initial = (
                 initial_run is not None
                 and initial_run.status
-                in (RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.ORPHANED)
+                in TERMINAL_RUN_STATUSES
             ) or any(event.event_type in TERMINAL_EVENT_TYPES for event in initial_events)
             if terminal_initial and not _owner_actions_stream_active(db, run_id):
                 for ev in initial_events:
@@ -1860,7 +1803,7 @@ def create_app(
                     is_terminal = (
                         run is not None
                         and run.status
-                        in (RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.ORPHANED)
+                        in TERMINAL_RUN_STATUSES
                     ) or any(ev.event_type in TERMINAL_EVENT_TYPES for ev in db.get_events(run_id))
                     if is_terminal and not _owner_actions_stream_active(db, run_id):
                         # Terminal events are durable before this check.  End immediately

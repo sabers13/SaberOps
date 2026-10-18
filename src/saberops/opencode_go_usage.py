@@ -63,55 +63,82 @@ def parse_go_limits(payload: Any) -> list[dict[str, Any]]:
 
 def read_go_limits(executable: str) -> list[dict[str, Any]]:
     from saberops.workers.env import hermetic_env
+    from saberops.workers.opencode_isolation import (
+        OpenCodeIsolationUnavailable,
+        opencode_isolation,
+        opencode_isolation_policies,
+    )
 
     plugin = Path(__file__).parent / "defaults/opencode_go_usage.mjs"
     with tempfile.TemporaryDirectory(prefix="saberops-go-usage-") as cwd:
         output = Path(cwd) / "usage.json"
         child_base = hermetic_env("opencode-go", None)
-        env = {
-            **child_base,
-            "SABEROPS_GO_USAGE_OUTPUT": str(output),
-            "OPENCODE_CONFIG_CONTENT": json.dumps(
-                {
-                    "plugin": [plugin.resolve().as_uri()],
-                    "enabled_providers": ["opencode-go"],
-                }
-            ),
-        }
-        # Model enumeration initializes provider auth hooks without an
-        # inference session, prompt, or change to the user's saved config.
-        process = subprocess.Popen(
-            [executable, "models", "opencode-go"],
-            cwd=cwd,
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        # Config/plugin isolation for the quota reader: a private config/home
+        # root with project/ancestor discovery disabled (inline deny policies
+        # block every plugin, MCP server and skill), except SaberOps' own
+        # shipped usage plugin, which is allowed by its exact resolved path
+        # as the last policy so the loader still runs it.  Refuse before
+        # launch when isolation cannot be established.
         try:
-            process.wait(timeout=GO_TIMEOUT)
-        except subprocess.TimeoutExpired as exc:
-            raise GoUsageUnavailable("OpenCode Go quota query timed out.") from exc
-        finally:
-            if os.name == "posix":
-                try:
-                    os.killpg(process.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-            elif process.poll() is None:
-                process.terminate()
+            isolation = opencode_isolation(child_base)
+        except OpenCodeIsolationUnavailable as exc:
+            raise GoUsageUnavailable(
+                "OpenCode account usage cannot be isolated on this host."
+            ) from exc
+        with isolation:
+            plugin_path = str(plugin.resolve())
+            base_config = {
+                "plugin": [plugin.resolve().as_uri()],
+                "enabled_providers": ["opencode-go"],
+            }
+            inline = isolation.config(base_config, deny_integrations=False)
+            inline["policies"] = [
+                *opencode_isolation_policies(),
+                {
+                    "action": "integration.use",
+                    "resource": f"plugin:{plugin_path}",
+                    "effect": "allow",
+                },
+            ]
+            env = isolation.env_for(child_base, config=inline)
+            env["SABEROPS_GO_USAGE_OUTPUT"] = str(output)
+            # Model enumeration initializes provider auth hooks without an
+            # inference session, prompt, or change to the user's saved config.
+            # Popen is asynchronous: the owned root must stay alive through
+            # spawn, wait, timeout terminate/kill and final reap, and is only
+            # removed after the child is reaped (or when spawn itself fails).
+            process = subprocess.Popen(
+                [executable, "models", "opencode-go"],
+                cwd=cwd,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
             try:
-                process.wait(timeout=1)
-            except subprocess.TimeoutExpired:
+                process.wait(timeout=GO_TIMEOUT)
+            except subprocess.TimeoutExpired as exc:
+                raise GoUsageUnavailable("OpenCode Go quota query timed out.") from exc
+            finally:
                 if os.name == "posix":
                     try:
-                        os.killpg(process.pid, signal.SIGKILL)
+                        os.killpg(process.pid, signal.SIGTERM)
                     except ProcessLookupError:
                         pass
-                else:
-                    process.kill()
-                process.wait()
+                elif process.poll() is None:
+                    process.terminate()
+                try:
+                    process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    if os.name == "posix":
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    else:
+                        process.kill()
+                    process.wait()
         if not output.is_file():
             raise GoUsageUnavailable(
                 "Connect OpenCode Go in the OpenCode CLI to read account limits."

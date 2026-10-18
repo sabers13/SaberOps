@@ -28,9 +28,100 @@ HISTORY_FILENAME = "full.jsonl"
 GATE_LABEL_ENV = "SABEROPS_GATE_LABEL"
 DEFAULT_GATE_LABEL = "manual"
 
+# --- D-0061: bounded RAM / single parallel pass -----------------------------
+# A conservative worker cap keeps peak gate RAM on this 8-core / 15 GiB host
+# inside the owner-declared band (~1.1-1.5 GiB for normal gates, ~1.8-2.4 GiB
+# for coverage-map builds) instead of the uncapped ``auto`` (8 workers).
+DEFAULT_GATE_WORKERS = 4
+DEFAULT_LANE_WORKERS = 2
+SABEROPS_GATE_WORKERS_ENV = "SABEROPS_GATE_WORKERS"
+SABEROPS_LANE_WORKERS_ENV = "SABEROPS_LANE_WORKERS"
+
+# Optional cgroup isolation: a gate's whole process tree is moved into a
+# transient user scope with MemoryHigh/MemoryMax so an out-of-memory spike in a
+# gate can never take down interactive ``session.slice``/``dbus.service``
+# (GNOME Wayland, opencode).  Enabled by default when ``systemd-run`` is
+# usable; ``SABEROPS_GATE_CGROUP=0|off|none`` disables it explicitly.
+SABEROPS_GATE_CGROUP_ENV = "SABEROPS_GATE_CGROUP"
+CGROUP_MEMORY_HIGH = "6G"
+CGROUP_MEMORY_MAX = "8G"
+_CGROUP_DISABLED = frozenset({"0", "off", "none", "false", "no"})
+_cgroup_cache: list[str] | None = None
+
+# Evidence labels: kind + producer are part of the history ledger contract
+# (ADR-0004 D3).  ``kind`` classifies the lifecycle point; ``producer`` proves
+# the gate was run by the engine, never by a model during iteration (G0).
+KIND_ENV = "SABEROPS_GATE_KIND"
+PRODUCER_ENV = "SABEROPS_GATE_PRODUCER"
+PROFILE_ENV = "SABEROPS_GATE_PROFILE"
+KNOWN_KINDS = frozenset({"G1", "G2", "G3", "main-gate", "manual"})
+DEFAULT_PRODUCER = "developer"
+ENGINE_PRODUCER = "engine"
+
 
 def git(repo: Path, *args: str) -> str:
     return subprocess.check_output(["git", *args], cwd=repo, text=True).strip()
+
+
+def positive_int_env(name: str, default: int) -> int:
+    """Return a positive integer from ``name``, else the bounded ``default``.
+
+    Malformed or non-positive values are ignored (with a warning) rather than
+    disabling the cap: a bad knob must never restore uncapped parallelism.
+    """
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        print(f"warning: {name}={raw!r} is not an integer; using {default}", flush=True)
+        return default
+    if value < 1:
+        print(f"warning: {name}={raw!r} must be >= 1; using {default}", flush=True)
+        return default
+    return value
+
+
+def cgroup_prefix() -> list[str]:
+    """Return the ``systemd-run --user --scope`` prefix, or ``[]`` when unsafe.
+
+    The decision is probed once and cached: only a systemd-run that can
+    actually start a transient scope is used, so an environment without a
+    usable user manager (containers, no dbus) silently keeps the plain spawn
+    path instead of failing the gate.
+    """
+    global _cgroup_cache
+    if _cgroup_cache is not None:
+        return _cgroup_cache
+    _cgroup_cache = []
+    raw = os.environ.get(SABEROPS_GATE_CGROUP_ENV)
+    if raw is not None and raw.strip().lower() in _CGROUP_DISABLED:
+        return _cgroup_cache
+    runner = shutil.which("systemd-run")
+    if runner is None:
+        return _cgroup_cache
+    prefix = [
+        runner,
+        "--user",
+        "--scope",
+        "--quiet",
+        "--collect",
+        "-p",
+        f"MemoryHigh={CGROUP_MEMORY_HIGH}",
+        "-p",
+        f"MemoryMax={CGROUP_MEMORY_MAX}",
+        "--",
+    ]
+    try:
+        probe = subprocess.run(
+            [*prefix, "true"], capture_output=True, text=True, timeout=10, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return _cgroup_cache
+    if probe.returncode == 0:
+        _cgroup_cache = prefix
+    return _cgroup_cache
 
 
 def size(path: Path) -> int:
@@ -614,11 +705,45 @@ class Runner:
         self.peak = 0
         self.test_count = 0
         self.heavy: list[tuple[int, str]] = []
+        # D-0061: isolate the whole gate child tree in a bounded transient
+        # cgroup scope (when available) so a gate OOM cannot kill the session.
+        self.cgroup = cgroup_prefix()
         self.stop_monitor = threading.Event()
         self.monitor = threading.Thread(target=self.measure_loop, daemon=True)
         self.monitor.start()
+        # Engine-evidence context (kind/producer/profile) is filled in by
+        # run_checks; defaults keep direct/legacy calls honest.
+        self.checks_ok = True
+        self.selected = False
         for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
             signal.signal(sig, self.interrupt)
+
+    def history_kind(self) -> str:
+        """Lifecycle kind recorded in the history ledger (ADR-0004 D3)."""
+        explicit = os.environ.get(KIND_ENV, "").strip()
+        if explicit in KNOWN_KINDS:
+            return explicit
+        if self.kind == "lane":
+            return "G1"
+        label = os.environ.get(GATE_LABEL_ENV, DEFAULT_GATE_LABEL)
+        return label if label == "main-gate" else "manual"
+
+    def producer(self) -> str:
+        """Evidence producer; engine-run gates record ``engine``."""
+        return os.environ.get(PRODUCER_ENV, "").strip() or DEFAULT_PRODUCER
+
+    def profile_name(self) -> str:
+        """Gate profile this run corresponds to (ADR-0003 D2)."""
+        explicit = os.environ.get(PROFILE_ENV, "").strip()
+        if explicit:
+            return explicit
+        kind = self.history_kind()
+        if kind in ("G1", "G2"):
+            return "fast"
+        if kind == "full":
+            return "full"
+        return "full" if self.kind == "full" else "fast"
+
 
     def interrupt(self, signum: int, frame: Any) -> None:
         if self.child is not None and self.child.poll() is None:
@@ -657,7 +782,7 @@ class Runner:
         # A file avoids pipe deadlocks and survives interruptions.
         with logfile.open("w") as output:
             self.child = subprocess.Popen(
-                args,
+                [*self.cgroup, *args],
                 cwd=self.repo,
                 stdout=output,
                 stderr=subprocess.STDOUT,
@@ -734,14 +859,22 @@ class Runner:
             "head_sha": git(self.repo, "rev-parse", "HEAD"),
             "peak_bytes": self.peak,
             "heavy_dirs": self.heavy,
+            "kind": self.history_kind(),
+            "producer": self.producer(),
+            "profile": self.profile_name(),
+            "checks_ok": self.checks_ok,
+            "selected": self.selected,
         }
         (self.result / "outcome.json").write_text(json.dumps(payload, indent=2) + "\n")
-        if self.kind == "full":
+        if self.kind == "full" and os.environ.get("SABEROPS_GATE_NO_HISTORY") != "1":
             entry: dict[str, Any] = {
                 "ts": datetime.now(UTC).isoformat(timespec="seconds"),
                 "head_sha": payload["head_sha"],
                 "worktree": str(self.repo),
                 "label": os.environ.get(GATE_LABEL_ENV, DEFAULT_GATE_LABEL),
+                "kind": self.history_kind(),
+                "producer": self.producer(),
+                "profile": self.profile_name(),
                 "outcome": outcome,
                 "reason": reason,
                 "tests": count,
@@ -786,6 +919,14 @@ class Runner:
             minimum = float(os.environ.get("SABEROPS_GATE_MIN_FREE_GB", "10"))
             if not disk_ok([self.root, self.repo], minimum):
                 return self.finish(("INFRA", "DISK_LOW", 3, [], []), 0)
+            if os.environ.get("SABEROPS_GATE_EXTERNAL_SLOT") == "1":
+                # The engine already holds the host-gates slot for this run;
+                # re-acquiring would deadlock against our own flock.
+                print(
+                    "host-gates slot held by the calling engine; skipping acquisition",
+                    flush=True,
+                )
+                return self.run_checks(base, also)
             heavy_root = self.common / "saberops-gate-slots"
             light_root = self.common / "saberops-gate-light-slots"
             heavy_count = int(os.environ.get("SABEROPS_GATE_SLOTS", "1"))
@@ -857,33 +998,16 @@ class Runner:
         types, _ = self.command(
             [self.python, "-m", "mypy", "--strict", "--cache-dir", cache, "src", "tests"], "mypy"
         )
+        self.checks_ok = lint == 0 and types == 0
         initial = Evidence()
         rerun = None
         if self.kind == "full":
-            for name, args in [
-                (
-                    "parallel",
-                    [
-                        "-m",
-                        "not serial",
-                        "-n",
-                        os.environ.get("SABEROPS_GATE_WORKERS", "auto"),
-                        "--dist",
-                        "worksteal",
-                    ],
-                ),
-                ("serial", ["-m", "serial", "-p", "no:xdist"]),
-            ]:
-                part = self.pytest(name, args)
-                initial.codes += part.codes
-                initial.log += part.log
-                initial.failed.update(part.failed)
-                initial.cases.update(part.cases)
-                initial.passed.update(part.passed)
-                initial.count += part.count
-                self.test_count = initial.count
-                if evaluate(part)[0] == "INFRA":
-                    break
+            # D-0061: ONE unified parallel pass; the serial tier is gone.  The
+            # only serial execution left is the deterministic rerun of genuinely
+            # failing node IDs (FLAKY_PASS evaluation per ADR-0003 D5).
+            workers = str(positive_int_env(SABEROPS_GATE_WORKERS_ENV, DEFAULT_GATE_WORKERS))
+            initial = self.pytest("parallel", ["-n", workers, "--dist", "worksteal"])
+            self.test_count = initial.count
             if (
                 initial.failed
                 and all(c in (0, 1, 5) for c in initial.codes)
@@ -891,9 +1015,16 @@ class Runner:
             ):
                 rerun = self.pytest("rerun", ["-p", "no:xdist", *sorted(initial.failed)])
         elif targets:
+            self.selected = True
+            # D-0061: lane checks run in parallel too.  One target stays in a
+            # single process; more than one uses bounded xdist workers.
+            args = [*targets]
+            if len(targets) > 1:
+                workers = str(positive_int_env(SABEROPS_LANE_WORKERS_ENV, DEFAULT_LANE_WORKERS))
+                args = ["-n", workers, "--dist", "worksteal", *targets]
             initial = self.pytest(
                 "lane",
-                [*(["-n", "4"] if len(targets) > 150 else ["-p", "no:xdist"]), *targets],
+                args,
                 float(os.environ.get("SABEROPS_LANE_TIMEOUT", "1200")),
             )
         self.test_count = initial.count

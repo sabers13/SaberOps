@@ -37,6 +37,10 @@ from saberops.session_control import ControlConflict, SessionControls
 from saberops.session_journal import SessionJournal
 from saberops.telemetry import parse_opencode_jsonl
 from saberops.workers.env import hermetic_env
+from saberops.workers.opencode_isolation import (
+    OpenCodeIsolationUnavailable,
+    opencode_isolation,
+)
 
 
 class SessionRuntimeError(RuntimeError):
@@ -103,6 +107,7 @@ class AgentSessionRuntime:
         self.client_password = secrets.token_urlsafe(32)
         self.native_id: str | None = None
         self.request: WorkerRequest | None = None
+        self.isolation: Any = None
         self.last_message: dict[str, Any] = {}
         self.has_turn = False
         self.turn_lock = threading.Lock()
@@ -150,8 +155,19 @@ class AgentSessionRuntime:
         env.update(
             OPENCODE_SERVER_PASSWORD=self.password,
             OPENCODE_SERVER_USERNAME="opencode",
-            OPENCODE_CONFIG_CONTENT=json.dumps(config),
         )
+        base_env = hermetic_env("opencode", env)
+        # Config/plugin isolation for the server's lifetime: a private
+        # config/home root (project/ancestor discovery disabled, ambient
+        # config selectors removed, inline deny policies).  The worktree is
+        # still the child ``cwd``.  Refuse before launch when isolation cannot
+        # be established; billing/permission pinning alone is not enough.
+        try:
+            isolation = opencode_isolation(base_env)
+        except OpenCodeIsolationUnavailable as exc:
+            raise SessionRuntimeError(str(exc)) from exc
+        child_env = isolation.env_for(base_env, config=isolation.config(config))
+        self.isolation = isolation
         # Native CLI remains responsible for credential selection; no provider tokens copied.
         started = time.monotonic()
         startup_buffer = ""
@@ -168,13 +184,21 @@ class AgentSessionRuntime:
 
         def serve() -> None:
             try:
+                # No ``--pure``: the installed opencode v2.0.29 ``serve --help``
+                # (committed at
+                # tests/fixtures/vendor_cli/opencode/opencode-v2.0.29/config_help.txt)
+                # documents no such flag (HV-1 F1, fixed in Step 024/HV-2).
+                # Config/plugin isolation comes from ``child_env`` (a private
+                # config/home root owned until the server stops); the worktree
+                # is the child ``cwd`` and the per-request ``?directory=``
+                # query parameter (see ``api``).
                 self.process_result = launch_worker_process(
-                    [binary, "serve", "--pure", "--hostname", "127.0.0.1", "--port", "0"],
+                    [binary, "serve", "--hostname", "127.0.0.1", "--port", "0"],
                     cwd=request.worktree_path,
                     # Hermetic child environment: only safe runtime variables
                     # plus the explicit request overlay (including the injected
                     # OPENCODE_SERVER_* values) reach the OpenCode server.
-                    env=hermetic_env("opencode", env),
+                    env=child_env,
                     inherit_env=False,
                     inherit_env_exclude=request.inherit_env_exclude,
                     timeout=request.timeout_seconds,
@@ -192,10 +216,15 @@ class AgentSessionRuntime:
         context = copy_context()  # Preserve autonomous authority on the launch thread.
         self.thread = threading.Thread(target=lambda: context.run(serve), daemon=True)
         self.thread.start()
-        while not self.ready.wait(0.05):
-            if time.monotonic() - started >= min(20, request.timeout_seconds):
-                raise SessionRuntimeError("Provider server startup timed out")
+        try:
+            while not self.ready.wait(0.05):
+                if time.monotonic() - started >= min(20, request.timeout_seconds):
+                    raise SessionRuntimeError("Provider server startup timed out")
+        except BaseException:
+            self.close()
+            raise
         if not self.endpoint or self.failure or not self.thread.is_alive():
+            self.close()
             raise SessionRuntimeError("Provider server could not start")
         deadline = started + min(20, request.timeout_seconds)
         while True:
@@ -782,6 +811,11 @@ class AgentSessionRuntime:
             safe = True
         if self.events_thread:
             self.events_thread.join(3)
+        # The owned config/home root lives through the whole server lifetime
+        # and is removed on shutdown (normal, error, cancellation or close).
+        owned, self.isolation = self.isolation, None
+        if owned is not None:
+            owned.close()
         self.publish({"native_attach_ready": False})
         return safe
 
