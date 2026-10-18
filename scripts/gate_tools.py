@@ -246,6 +246,9 @@ def resolve_slot_counts(
         light = int(light_raw)
         if light < 1:
             raise ValueError("light slot count must be >= 1")
+        # Clamp to the documented ceiling so the usable light indices can never
+        # exceed the index range the heavy gate drains (D-0076 invariant).
+        light = min(light, MAX_LIGHT_SLOTS)
     else:
         light = dynamic_light_slots()
     return heavy, light, wait

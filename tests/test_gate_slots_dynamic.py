@@ -258,6 +258,36 @@ def test_gate_tools_resolve_slot_counts_dynamic_and_env(
         gt.resolve_slot_counts({"SABEROPS_LANE_SLOTS": "lots"})
 
 
+def test_configured_light_slots_above_ceiling_are_clamped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Covers: D-0076 (a light count above MAX_LIGHT_SLOTS cannot outrun the drain)."""
+    capacity = resolve_slot_capacity({"SABEROPS_LANE_SLOTS": "16"})
+    assert capacity.light == MAX_LIGHT_SLOTS
+    # The drain covers 0..max(light, MAX_LIGHT_SLOTS), so the usable light
+    # indices can never exceed the drained range.
+    assert capacity.drain_lock_count >= max(capacity.light, MAX_LIGHT_SLOTS) + 1
+    assert gt.resolve_slot_counts({"SABEROPS_LANE_SLOTS": "16"})[1] == gt.MAX_LIGHT_SLOTS
+
+
+def test_heavy_drain_covers_clamped_ceiling_indices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: D-0076 (heavy hold still spans 0..MAX_LIGHT_SLOTS when pinned high)."""
+    monkeypatch.setenv("SABEROPS_GATE_MEMORY_GUARD", "0")
+    monkeypatch.setenv("SABEROPS_GATE_SLOTS", "1")
+    monkeypatch.setenv("SABEROPS_LANE_SLOTS", "16")
+    common = tmp_path / "common"
+    with GateSlotPool(common).heavy():
+        for index in range(MAX_LIGHT_SLOTS + 1):
+            handle = (common / "saberops-gate-light-slots" / f"{index}.lock").open("a+")
+            try:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                handle.close()
+
+
 # ---------------------------------------------------------------------------
 # Pre-admission memory guard
 # ---------------------------------------------------------------------------

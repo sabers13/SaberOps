@@ -852,10 +852,17 @@ class ConfigDecision:
             "rationale",
             "approved_by",
             "decision_id",
+            "version",
         )
         missing = [name for name in required if name not in data]
         if missing:
             raise ConfigError(f"config decision entry missing keys: {missing}")
+        version = data["version"]
+        if type(version) is not int or version != CONFIG_LEDGER_SCHEMA_VERSION:
+            raise ConfigError(
+                f"config decision version must be integer {CONFIG_LEDGER_SCHEMA_VERSION}, "
+                f"got {version!r}"
+            )
         value = data["value"]
         if not isinstance(value, dict):
             raise ConfigError("config decision 'value' must be a JSON object")
@@ -1098,6 +1105,22 @@ def validate_cleanup_policy(policy: Mapping[str, Any]) -> None:
         raise ConfigError("cleanup policy 'subjects' must contain non-empty strings")
 
 
+def cleanup_decision_kind(cleanup_kind: str) -> str:
+    """Return the ledger ``kind`` that scopes one Git/storage cleanup subject.
+
+    Git and storage cleanup policies keep **independent** supersedes chains: a
+    new ``storage`` approval must never mark an active ``git`` approval
+    superseded, and vice versa.  Encoding the subject in the ``kind``
+    (``cleanup:git`` / ``cleanup:storage``) is what gives each subject its own
+    chain head, instead of one shared ``cleanup`` chain.
+    """
+    if cleanup_kind not in _CLEANUP_KINDS:
+        raise ConfigError(
+            f"cleanup kind must be one of {sorted(_CLEANUP_KINDS)}, got {cleanup_kind!r}"
+        )
+    return f"cleanup:{cleanup_kind}"
+
+
 def record_cleanup_decision(
     *,
     ledger: ConfigLedger,
@@ -1106,12 +1129,18 @@ def record_cleanup_decision(
     approved_by: str,
     created_at: str | None = None,
 ) -> ConfigDecision:
-    """Record an owner-approved Git/storage cleanup policy in the ledger."""
+    """Record an owner-approved Git/storage cleanup policy in the ledger.
+
+    Each cleanup subject (``git`` / ``storage``) is recorded under its own
+    ledger ``kind`` (see :func:`cleanup_decision_kind`), so approving a storage
+    policy never supersedes an independently approved Git policy.
+    """
     validate_cleanup_policy(policy)
+    cleanup_kind = str(policy["kind"])
     return record_decision(
         ledger=ledger,
-        kind="cleanup",
-        subject=str(policy["kind"]),
+        kind=cleanup_decision_kind(cleanup_kind),
+        subject=cleanup_kind,
         value=dict(policy),
         rationale=rationale,
         approved_by=approved_by,
@@ -1155,6 +1184,7 @@ __all__ = [
     "ConfigProposal",
     "WorkflowSettings",
     "approve_config_proposal",
+    "cleanup_decision_kind",
     "config_ledger_path",
     "current_workflow_settings",
     "default_workflow_settings",

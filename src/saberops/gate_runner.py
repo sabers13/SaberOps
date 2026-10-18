@@ -1953,10 +1953,11 @@ class SlotCapacity:
     def drain_lock_count(self) -> int:
         """Lock count the heavy gate must hold to drain every light index.
 
-        The heavy gate drains ``0..max(light, MAX_LIGHT_SLOTS)`` so a lane that
-        computed a different dynamic light count can never slip in.
+        The heavy gate drains ``0..max(light, MAX_LIGHT_SLOTS)`` so a lane can
+        never acquire an index the heavy gate has not drained, whichever light
+        count that lane computed.
         """
-        return max(self.light, MAX_LIGHT_SLOTS + 1)
+        return max(self.light, MAX_LIGHT_SLOTS) + 1
 
 
 def resolve_slot_capacity(env: Mapping[str, str] | None = None) -> SlotCapacity:
@@ -1995,6 +1996,11 @@ def resolve_slot_capacity(env: Mapping[str, str] | None = None) -> SlotCapacity:
             raise GateSlotWaitTimeout(f"invalid light slot configuration: {exc}") from exc
         if light < 1:
             raise GateSlotWaitTimeout("light slot count must be >= 1")
+        # An explicit light count above the documented ceiling would be usable
+        # beyond the index range the heavy gate drains, so it is clamped to
+        # MAX_LIGHT_SLOTS; the drained and usable bounds can then never
+        # disagree (a lane can never use an index the heavy gate skips).
+        light = min(light, MAX_LIGHT_SLOTS)
         source = "env"
     else:
         light = dynamic_light_slots()

@@ -314,6 +314,67 @@ def test_cleanup_policy_requires_a_valid_owner_approved_shape(tmp_path: Path) ->
         approved_by="owner",
         created_at="2026-02-01T00:00:00Z",
     )
-    assert decision.kind == "cleanup"
-    assert ledger.tip_for("cleanup") == decision
+    assert decision.kind == "cleanup:storage"
+    assert ledger.tip_for("cleanup:storage") == decision
     assert ledger.tip_for("config") is None
+
+
+def test_git_and_storage_cleanup_chains_are_independent(tmp_path: Path) -> None:
+    """Covers: CFG-1 (a storage approval never supersedes an active git policy)."""
+    ledger = _ledger(tmp_path)
+    git = record_cleanup_decision(
+        ledger=ledger,
+        policy={"kind": "git", "ttl_days": 14, "subjects": ["refs/saberops/checkpoints/"]},
+        rationale="owner approved the git checkpoint cleanup",
+        approved_by="owner",
+        created_at="2026-02-01T00:00:00Z",
+    )
+    storage = record_cleanup_decision(
+        ledger=ledger,
+        policy={"kind": "storage", "ttl_days": 30, "subjects": ["saberops-gate-last"]},
+        rationale="owner approved the storage cleanup",
+        approved_by="owner",
+        created_at="2026-02-02T00:00:00Z",
+    )
+    # Each subject keeps its own head; approving storage did not supersede git.
+    assert ledger.tip_for("cleanup:git") == git
+    assert ledger.tip_for("cleanup:storage") == storage
+    assert git.supersedes is None and storage.supersedes is None
+    assert ledger.superseded_ids() == frozenset()
+    # A later git approval supersedes only the git head, not the storage head.
+    git2 = record_cleanup_decision(
+        ledger=ledger,
+        policy={"kind": "git", "ttl_days": 21, "subjects": ["refs/saberops/checkpoints/"]},
+        rationale="owner tightened the git cleanup window",
+        approved_by="owner",
+        created_at="2026-02-03T00:00:00Z",
+    )
+    assert git2.supersedes == git.decision_id
+    assert ledger.tip_for("cleanup:git") == git2
+    assert ledger.tip_for("cleanup:storage") == storage
+
+
+def test_config_decision_version_is_validated_on_read(tmp_path: Path) -> None:
+    """Covers: CFG-1 (a non-v1 ledger entry fails closed on read)."""
+    ledger = _ledger(tmp_path)
+    decision = approve_config_proposal(
+        propose_config_change(
+            default_workflow_settings(),
+            {"max_concurrent_tasks": 2},
+            rationale="r",
+            proposed_by="orch",
+        ),
+        ledger=ledger,
+        approved_by="owner",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    payload = decision.as_dict()
+    payload["version"] = 2
+    ledger.path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="version"):
+        ledger.entries()
+    missing = decision.as_dict()
+    del missing["version"]
+    ledger.path.write_text(json.dumps(missing, sort_keys=True) + "\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="version"):
+        ledger.entries()

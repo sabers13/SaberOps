@@ -7,7 +7,13 @@ decision in an append-only ledger. The implementation is
 
 ## Workflow settings
 
-`WorkflowSettings` (in `saberops.config`) is the validated central policy:
+`WorkflowSettings` (in `saberops.config`) is the centralized **declarative**
+policy for workflow settings: it defines the canonical values, their validation
+rules, and the frozen snapshot/hash that the audit ledger records. It is the
+single declared source of truth for these settings; runtime consumers adopt it
+incrementally (the gate-slot, retention and wave layers still read their own
+frozen constants until a follow-up step imports them from here — see
+"Adoption" below).
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
@@ -95,4 +101,18 @@ holder. See [gate.md](gate.md#dynamic-ram-capacity-and-self-healing-slots-d-0076
 A `ConfigDecision` carries both the settings snapshot (`value`) and its
 `frozen_hash`. Reconstruction re-derives the settings from the snapshot and
 re-checks the hash, so a hand-edited `config-decisions.jsonl` cannot silently
-change an accepted configuration; it raises `ConfigError` instead.
+change an accepted configuration; it raises `ConfigError` instead. Ledger entries
+are schema-versioned (`version == 1`); a missing or mismatched `version` is
+rejected on read, mirroring `WorkflowSettings.from_dict`.
+
+## Adoption (current state)
+
+`WorkflowSettings` and `ConfigLedger` are defined here and fully unit-tested, but
+they have **no runtime consumer yet**: no `src/` or `scripts/` module reads them.
+The values they declare are still mirrored by the operative frozen constants in
+`saberops.storage_lifecycle` (retention windows and the failed-scratch cap) and by
+`MAX_LIGHT_SLOTS` in `saberops.gate_runner` / `scripts/gate_tools.py`. That
+mirroring is unavoidable inside this step's Touches (those modules were not
+authorized) and is deliberate: a follow-up step can import the constants from one
+module and delete the duplicates once the owner wires the ledger into the runtime.
+Until then this module is the *declared* policy, not yet the single live source.
