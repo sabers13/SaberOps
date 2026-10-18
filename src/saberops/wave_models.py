@@ -12,7 +12,9 @@ deterministic state machines the wave executor drives:
 * :class:`WaveState` -- ``PLANNED -> RUNNING -> INTEGRATING -> GATED ->
   AWAITING_ACCEPT -> ACCEPTED`` with ``BLOCKED`` / ``CANCELLED`` escapes.
 * :class:`LaneState` -- ``PLANNED -> RUNNING -> REVIEW -> FIX_UP_K /
-  REVIEWED_PROVISIONAL -> ACCEPTED`` with ``BLOCKED`` escapes.
+  REVIEWED_PROVISIONAL -> ACCEPTED`` with ``BLOCKED`` escapes and a
+  ``PREEMPTED`` park that resumes into ``RUNNING`` once its exclusion window
+  expires (WX-2 quota preemption, M2-5 bridge).
 
 The models perform no I/O, spawn no process, read no clock and call no model.
 The state machines are exposed as total functions over the enums so both the
@@ -34,6 +36,7 @@ import json
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
@@ -47,6 +50,7 @@ __all__ = [
     "WAVE_ALLOWED_TRANSITIONS",
     "WAVE_TERMINAL_STATES",
     "Lane",
+    "LanePreemption",
     "LaneState",
     "Wave",
     "WaveModelError",
@@ -95,6 +99,10 @@ class LaneState(StrEnum):
     REVIEWED_PROVISIONAL = "REVIEWED_PROVISIONAL"
     ACCEPTED = "ACCEPTED"
     BLOCKED = "BLOCKED"
+    #: WX-2 quota preemption: the lane's attempt was interrupted by quota
+    #: exhaustion with no admitted fallback model, its WIP is anchored under a
+    #: checkpoint ref, and the lane parks until the parsed reset window expires.
+    PREEMPTED = "PREEMPTED"
 
 
 #: Deterministic wave transition table. ``ACCEPTED``/``CANCELLED`` are terminal;
@@ -124,11 +132,14 @@ WAVE_ALLOWED_TRANSITIONS: Mapping[WaveState, frozenset[WaveState]] = {
 }
 
 #: Deterministic lane transition table. ``ACCEPTED`` is terminal; ``BLOCKED``
-#: may resume into ``RUNNING`` with the same worktree and session.
+#: may resume into ``RUNNING`` with the same worktree and session. ``PREEMPTED``
+#: parks an executing lane whose attempt ended on quota exhaustion with no
+#: admitted fallback (WX-2): it resumes into ``RUNNING`` only after its exclusion
+#: window expires (never mid-attempt) or blocks for the owner.
 LANE_ALLOWED_TRANSITIONS: Mapping[LaneState, frozenset[LaneState]] = {
     LaneState.PLANNED: frozenset({LaneState.RUNNING, LaneState.BLOCKED}),
     LaneState.RUNNING: frozenset(
-        {LaneState.REVIEW, LaneState.BLOCKED, LaneState.ACCEPTED}
+        {LaneState.REVIEW, LaneState.BLOCKED, LaneState.ACCEPTED, LaneState.PREEMPTED}
     ),
     LaneState.REVIEW: frozenset(
         {
@@ -138,13 +149,14 @@ LANE_ALLOWED_TRANSITIONS: Mapping[LaneState, frozenset[LaneState]] = {
         }
     ),
     LaneState.FIX_UP_K: frozenset(
-        {LaneState.RUNNING, LaneState.REVIEW, LaneState.BLOCKED}
+        {LaneState.RUNNING, LaneState.REVIEW, LaneState.BLOCKED, LaneState.PREEMPTED}
     ),
     LaneState.REVIEWED_PROVISIONAL: frozenset(
         {LaneState.ACCEPTED, LaneState.FIX_UP_K, LaneState.BLOCKED}
     ),
     LaneState.ACCEPTED: frozenset(),
     LaneState.BLOCKED: frozenset({LaneState.RUNNING}),
+    LaneState.PREEMPTED: frozenset({LaneState.RUNNING, LaneState.BLOCKED}),
 }
 
 WAVE_TERMINAL_STATES: frozenset[WaveState] = frozenset(
@@ -242,6 +254,17 @@ def _require_scope_list(value: object, field_name: str) -> list[str]:
 
 def _is_sha(value: object) -> bool:
     return isinstance(value, str) and bool(_SHA_RE.fullmatch(value))
+
+
+def _is_aware_iso(value: object) -> bool:
+    """True when ``value`` is a timezone-aware ISO-8601 instant string."""
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        instant = datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    return instant.tzinfo is not None
 
 
 @dataclass(frozen=True)
@@ -385,6 +408,117 @@ def _require_str_map(value: object, field_name: str) -> dict[str, str]:
             raise WaveModelError(f"{field_name}[{key!r}] must be a non-empty string")
         result[key] = item
     return result
+
+
+@dataclass(frozen=True)
+class LanePreemption:
+    """Durable park record for one quota-preempted lane (WX-2 / M2-5 bridge).
+
+    Built only from durable state recorded by the M2-5 preemption protocol: the
+    anchored checkpoint ref and SHA the lane resumes from, the reset deadline
+    parsed by M2-5 (only EXACT/PARSED observations qualify), the derived
+    ``not_before`` exclusion instant and the owning durable job. ``job_id``,
+    ``reset_deadline`` and ``not_before`` may be ``None`` (explicit uncertainty,
+    never a guessed timestamp); every non-``None`` instant must be a
+    timezone-aware ISO-8601 string so a resume decision can never compare a
+    naive clock against an aware deadline.
+    """
+
+    lane_id: str
+    checkpoint_ref: str
+    checkpoint_sha: str
+    reason: str
+    preemptions: int = 1
+    job_id: str | None = None
+    reset_deadline: str | None = None
+    not_before: str | None = None
+
+    def __post_init__(self) -> None:
+        problems = self.problems()
+        if problems:
+            raise WaveModelError("; ".join(problems))
+
+    def problems(self) -> list[str]:
+        """Return deterministic structural problems; empty means valid."""
+        problems: list[str] = []
+        for name, text in (
+            ("lane_id", self.lane_id),
+            ("checkpoint_ref", self.checkpoint_ref),
+            ("reason", self.reason),
+        ):
+            if not isinstance(text, str) or not text.strip():
+                problems.append(f"{name} must be a non-empty string")
+        if not _is_sha(self.checkpoint_sha):
+            problems.append("checkpoint_sha must be a full lowercase hex commit SHA")
+        if (
+            isinstance(self.preemptions, bool)
+            or not isinstance(self.preemptions, int)
+            or self.preemptions < 1
+        ):
+            problems.append("preemptions must be a positive integer")
+        if self.job_id is not None and (
+            not isinstance(self.job_id, str) or not self.job_id.strip()
+        ):
+            problems.append("job_id must be a non-empty string when set")
+        for name, instant in (
+            ("reset_deadline", self.reset_deadline),
+            ("not_before", self.not_before),
+        ):
+            if instant is None:
+                continue
+            if not _is_aware_iso(instant):
+                problems.append(f"{name} must be a timezone-aware ISO-8601 instant")
+        return problems
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable mapping (deterministic key order)."""
+        return {
+            "lane_id": self.lane_id,
+            "checkpoint_ref": self.checkpoint_ref,
+            "checkpoint_sha": self.checkpoint_sha,
+            "reason": self.reason,
+            "preemptions": self.preemptions,
+            "job_id": self.job_id,
+            "reset_deadline": self.reset_deadline,
+            "not_before": self.not_before,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: object) -> LanePreemption:
+        """Build one preemption record from a mapping, validating every field."""
+        if not isinstance(payload, Mapping):
+            raise WaveModelError("lane preemption payload must be a mapping")
+        for name in ("job_id", "reset_deadline", "not_before"):
+            value = payload.get(name)
+            if value is not None and not isinstance(value, str):
+                raise WaveModelError(f"{name} must be a string or null")
+        preemptions = payload.get("preemptions", 1)
+        if isinstance(preemptions, bool) or not isinstance(preemptions, int):
+            raise WaveModelError("preemptions must be an integer")
+        return cls(
+            lane_id=_require_str(payload.get("lane_id"), "lane_id"),
+            checkpoint_ref=_require_str(payload.get("checkpoint_ref"), "checkpoint_ref"),
+            checkpoint_sha=_require_str(payload.get("checkpoint_sha"), "checkpoint_sha"),
+            reason=_require_str(payload.get("reason"), "reason"),
+            preemptions=preemptions,
+            job_id=payload.get("job_id"),
+            reset_deadline=payload.get("reset_deadline"),
+            not_before=payload.get("not_before"),
+        )
+
+    def exclusion_expired(self, now: datetime) -> bool:
+        """True when the lane may be dispatched again at ``now``.
+
+        ``now`` must be timezone-aware. With no evidence-backed ``not_before``
+        the exclusion window is unproven, so the method reports expired and the
+        caller's accepted probe/periodic wake decides -- never a fabricated
+        delay the engine cannot justify.
+        """
+        if now.tzinfo is None:
+            raise WaveModelError("now must be a timezone-aware datetime")
+        if self.not_before is None:
+            return True
+        return now.astimezone(UTC) >= datetime.fromisoformat(self.not_before)
 
 
 @dataclass(frozen=True)

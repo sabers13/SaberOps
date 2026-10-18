@@ -7,6 +7,13 @@ fails the wave by itself) and 10 (budgets), Amendment 3 (3 projects x 5 child
 tasks), Amendment 4 (accepted-wave cleanup eligibility) and Amendment 7
 (concurrency limits are maxima, never targets).
 
+Also covers WX-2 recovery (this module is the deterministic seam):
+run-level handoffs on attempt completion, attempt failure and the long-worker
+observation; and quota preemption/auto-resume for a lane, bridging the existing
+M2-5 durable preemption protocol (``saberops.preemption``) without duplicating
+its decisions. Handoffs and park records are built only from durable state and
+events passed in; nothing here polls, sleeps, calls a model or guesses a reset.
+
 Division of labour
 ------------------
 Everything here is deterministic: the engine allocates worktrees, merges pinned
@@ -27,8 +34,9 @@ calls. :class:`SubprocessWaveGit` is the default real Git port.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -50,6 +58,7 @@ from saberops.project_slot_policy import (
     evaluate_slot_admission,
 )
 from saberops.wave_models import (
+    LanePreemption,
     LaneState,
     Wave,
     WaveModelError,
@@ -59,22 +68,31 @@ from saberops.wave_models import (
 )
 
 __all__ = [
+    "EVENT_ATTEMPT_HANDOFF",
     "EVENT_GLUE_REQUIRED",
     "EVENT_INTEGRATION_STARTED",
     "EVENT_LANE_ACCEPTED",
     "EVENT_LANE_BLOCKED",
+    "EVENT_LANE_PREEMPTED",
+    "EVENT_LANE_RESUMED",
     "EVENT_LANE_REVIEWED_PROVISIONAL",
     "EVENT_LANE_STARTED",
+    "EVENT_LONG_WORKER_HANDOFF",
     "EVENT_WAVE_ACCEPTED",
     "EVENT_WAVE_AWAITING_ACCEPT",
     "EVENT_WAVE_BLOCKED",
     "EVENT_WAVE_GATED",
     "EVENT_WAVE_INTEGRATED_AND_CLOSED",
     "EVENT_WAVE_STARTED",
+    "HANDOFF_ATTEMPT_COMPLETED",
+    "HANDOFF_ATTEMPT_FAILED",
+    "HANDOFF_LONG_WORKER",
     "INTEGRATOR_ROLE",
     "LANE_STATE_TO_SLOT_STATE",
+    "REPAIR_ESCALATE",
     "CleanupEligibility",
     "CleanupObject",
+    "DatabaseQuotaPreemption",
     "DatabaseWaveEventSink",
     "EventRecorder",
     "GateExecutorPort",
@@ -82,16 +100,22 @@ __all__ = [
     "IntegrationReport",
     "IntegrationStep",
     "LaneRun",
+    "LongWorkerObserver",
     "MergeOutcome",
     "ProjectRegistry",
+    "QuotaPreemptionPort",
+    "QuotaPreemptionReceipt",
+    "QuotaPreemptionRequest",
     "RecordingWaveEventSink",
     "SubprocessWaveGit",
+    "SupervisorLongWorkerObserver",
     "WaveClosureEvent",
     "WaveExecutor",
     "WaveExecutorError",
     "WaveBudgetExceeded",
     "WaveEventSink",
     "WaveGitPort",
+    "WaveHandoff",
 ]
 
 #: Engine role for the Integrator dispatch: merge conflicts and named glue only.
@@ -109,6 +133,26 @@ EVENT_LANE_STARTED = "lane_started"
 EVENT_LANE_REVIEWED_PROVISIONAL = "lane_reviewed_provisional"
 EVENT_LANE_ACCEPTED = "lane_accepted"
 EVENT_LANE_BLOCKED = "lane_blocked"
+#: WX-2 recovery events.
+EVENT_LANE_PREEMPTED = "lane_preempted"
+EVENT_LANE_RESUMED = "lane_resumed"
+EVENT_ATTEMPT_HANDOFF = "wave_attempt_handoff"
+EVENT_LONG_WORKER_HANDOFF = "wave_long_worker_handoff"
+
+#: Handoff kinds (WX-2): one per attempt completion/failure and the t=300
+#: long-worker observation.
+HANDOFF_ATTEMPT_COMPLETED = "attempt_completed"
+HANDOFF_ATTEMPT_FAILED = "attempt_failed"
+HANDOFF_LONG_WORKER = "long_worker"
+_HANDOFF_KINDS = frozenset(
+    {HANDOFF_ATTEMPT_COMPLETED, HANDOFF_ATTEMPT_FAILED, HANDOFF_LONG_WORKER}
+)
+
+#: Repair route when the fix-round budget is spent: the owner must decide.
+REPAIR_ESCALATE = "ESCALATE"
+
+#: Default preemption reason: quota exhausted with no admitted fallback model.
+PREEMPTION_REASON = "quota_exhausted_no_admitted_fallback"
 
 #: Cleanup-eligibility statuses (Amendment 4).
 STATUS_ELIGIBLE = "ELIGIBLE_CLEANUP"
@@ -122,9 +166,9 @@ _NON_OCCUPYING = SlotState.BLOCKED.value
 #: Lane lifecycle -> child-slot occupancy (ADR-0004 Amendment 3).
 #:
 #: A lane executes only while RUNNING or in a FIX_UP_K turn; REVIEW,
-#: REVIEWED_PROVISIONAL, PLANNED and BLOCKED are waiting states that consume no
-#: slot, and ACCEPTED is terminal. This is what keeps 3x5 a *ceiling*: review
-#: and owner-wait time never occupy execution capacity.
+#: REVIEWED_PROVISIONAL, PLANNED, BLOCKED and PREEMPTED are waiting states that
+#: consume no slot, and ACCEPTED is terminal. This is what keeps 3x5 a *ceiling*:
+#: review, preemption and owner-wait time never occupy execution capacity.
 LANE_STATE_TO_SLOT_STATE: Mapping[LaneState, SlotState] = {
     LaneState.PLANNED: SlotState.QUEUED,
     LaneState.RUNNING: SlotState.EXECUTING,
@@ -133,6 +177,7 @@ LANE_STATE_TO_SLOT_STATE: Mapping[LaneState, SlotState] = {
     LaneState.REVIEWED_PROVISIONAL: SlotState.BLOCKED,
     LaneState.ACCEPTED: SlotState.TERMINAL,
     LaneState.BLOCKED: SlotState.BLOCKED,
+    LaneState.PREEMPTED: SlotState.BLOCKED,
 }
 
 _SHA_HEX = set("0123456789abcdef")
@@ -156,6 +201,35 @@ def _require_sha(value: object, field_name: str) -> str:
     if not _is_sha(value):
         raise WaveExecutorError(f"{field_name} must be a full lowercase hex commit SHA")
     return str(value)
+
+
+def _require_nonempty_str(value: object, field_name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise WaveExecutorError(f"{field_name} must be a non-empty string")
+    return value
+
+
+def _require_aware_iso(value: object, field_name: str) -> str | None:
+    """Validate a timezone-aware ISO-8601 instant, allowing explicit ``None``."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise WaveExecutorError(f"{field_name} must be a timezone-aware ISO-8601 instant")
+    try:
+        instant = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise WaveExecutorError(
+            f"{field_name} must be a timezone-aware ISO-8601 instant"
+        ) from exc
+    if instant.tzinfo is None:
+        raise WaveExecutorError(f"{field_name} must be timezone-aware")
+    return value
+
+
+def _require_count(value: object, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise WaveExecutorError(f"{field_name} must be a non-negative integer")
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +292,31 @@ class ProjectRegistry(Protocol):
     def resolve_project_id(self, repo: str) -> str | None: ...
 
 
+class LongWorkerObserver(Protocol):
+    """The t=300 long-worker observation transition (WX-2 wiring seam).
+
+    Matches :meth:`saberops.supervisor.RunSupervisor.observe_long_worker`
+    exactly: it persists the deterministic observation and returns a health
+    verdict. It polls nothing and sleeps nowhere.
+    """
+
+    def observe_long_worker(
+        self,
+        run_id: str,
+        *,
+        terminal_event_exists: bool,
+        recent_activity: bool,
+        timed_out: bool = False,
+        stalled: bool = False,
+    ) -> object: ...
+
+
+class QuotaPreemptionPort(Protocol):
+    """Durable quota-preemption seam for one lane (M2-5 bridge)."""
+
+    def preempt(self, request: QuotaPreemptionRequest) -> QuotaPreemptionReceipt: ...
+
+
 class RecordingWaveEventSink:
     """In-memory sink: records events in order. Used by tests and dry runs."""
 
@@ -253,6 +352,79 @@ class DatabaseWaveEventSink:
 
     def emit(self, event_type: str, payload: dict[str, Any]) -> None:
         self._recorder.record_event(self._run_id, event_type, payload=payload)
+
+
+class SupervisorLongWorkerObserver:
+    """Adapt :class:`RunSupervisor` to the executor's long-worker port.
+
+    The engine never imports the process-launching supervisor at module load;
+    it is handed an already-constructed supervisor and calls only its existing
+    persisting observation transition, so the durable supervision row, the
+    ``manager_suspended``/``manager_attention_required`` events and the
+    ``create_handoffs`` checkpoint all stay the single source of truth.
+    """
+
+    def __init__(self, supervisor: object) -> None:
+        observe = getattr(supervisor, "observe_long_worker", None)
+        if not callable(observe):
+            raise WaveExecutorError("supervisor must expose observe_long_worker(...)")
+        self._observe: Callable[..., object] = observe
+
+    def observe_long_worker(
+        self,
+        run_id: str,
+        *,
+        terminal_event_exists: bool,
+        recent_activity: bool,
+        timed_out: bool = False,
+        stalled: bool = False,
+    ) -> object:
+        return self._observe(
+            run_id,
+            terminal_event_exists=terminal_event_exists,
+            recent_activity=recent_activity,
+            timed_out=timed_out,
+            stalled=stalled,
+        )
+
+
+class DatabaseQuotaPreemption:
+    """Default :class:`QuotaPreemptionPort` over the M2-5 preemption protocol.
+
+    Delegates every decision to :mod:`saberops.preemption`: it parks the lane's
+    durable run (capturing the WIP checkpoint, anchoring the engine-owned
+    checkpoint ref and persisting the factual resume capsule) and then reads
+    back the reset instant M2-5 parsed. It never guesses a deadline, never
+    fabricates a checkpoint and never resumes anything by itself.
+    """
+
+    def __init__(self, db: object) -> None:
+        self._db = db
+
+    def preempt(self, request: QuotaPreemptionRequest) -> QuotaPreemptionReceipt:
+        from saberops.preemption import complete_preemption, quota_reset_eta
+
+        outcome = complete_preemption(
+            self._db,
+            run_id=request.run_id,
+            repo_path=request.repo,
+            job_id=request.job_id,
+            worktree_path=request.worktree,
+            base_sha=request.base_sha,
+        )
+        if not outcome.owned:
+            raise WaveExecutorError(f"quota preemption was not owned: {outcome.detail}")
+        if not outcome.checkpoint_sha or not outcome.checkpoint_ref:
+            raise WaveExecutorError("preemption produced no anchored checkpoint")
+        return QuotaPreemptionReceipt(
+            checkpoint_sha=outcome.checkpoint_sha,
+            checkpoint_ref=outcome.checkpoint_ref,
+            preemptions=outcome.preemptions or 1,
+            job_id=outcome.job.job_id if outcome.job is not None else request.job_id,
+            reset_deadline=quota_reset_eta(self._db, request.run_id),
+            not_before=outcome.not_before,
+            handoff_id=outcome.handoff_id,
+        )
 
 
 class SubprocessWaveGit:
@@ -309,6 +481,166 @@ class SubprocessWaveGit:
 # ---------------------------------------------------------------------------
 # Records and reports
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class WaveHandoff:
+    """One factual run-level handoff (WX-2).
+
+    Every field is an observation the caller already holds durably: identities,
+    SHAs, recorded event names and test counts. The record is deliberately
+    *not* free-form model prose and carries no inferred outcome; a consumer
+    resumes from the durable run/checkpoint, not from this text.
+    """
+
+    kind: str
+    run_id: str
+    wave_id: str
+    lane_id: str
+    summary: str
+    created_at: str
+    attempt_id: str | None = None
+    candidate_sha: str | None = None
+    artifacts: tuple[str, ...] = ()
+    tests_passed: int | None = None
+    tests_failed: int | None = None
+    failed_tests: tuple[str, ...] = ()
+    repair_suggestions: tuple[str, ...] = ()
+    repair_route: str | None = None
+    escalate: bool = False
+    checkpoint_ref: str | None = None
+    health: str | None = None
+    health_reason: str | None = None
+    source_events: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        problems = self.problems()
+        if problems:
+            raise WaveExecutorError("; ".join(problems))
+
+    def problems(self) -> list[str]:
+        """Return deterministic structural problems; empty means valid."""
+        problems: list[str] = []
+        if self.kind not in _HANDOFF_KINDS:
+            problems.append(f"kind must be one of {sorted(_HANDOFF_KINDS)}")
+        for name, text in (
+            ("run_id", self.run_id),
+            ("wave_id", self.wave_id),
+            ("lane_id", self.lane_id),
+            ("summary", self.summary),
+            ("created_at", self.created_at),
+        ):
+            if not isinstance(text, str) or not text.strip():
+                problems.append(f"{name} must be a non-empty string")
+        for name, count in (
+            ("tests_passed", self.tests_passed),
+            ("tests_failed", self.tests_failed),
+        ):
+            if count is not None and (
+                isinstance(count, bool) or not isinstance(count, int) or count < 0
+            ):
+                problems.append(f"{name} must be a non-negative integer when set")
+        for name, optional in (
+            ("attempt_id", self.attempt_id),
+            ("candidate_sha", self.candidate_sha),
+            ("repair_route", self.repair_route),
+            ("checkpoint_ref", self.checkpoint_ref),
+            ("health", self.health),
+            ("health_reason", self.health_reason),
+        ):
+            if optional is not None and (
+                not isinstance(optional, str) or not optional.strip()
+            ):
+                problems.append(f"{name} must be a non-empty string when set")
+        if self.candidate_sha is not None and not _is_sha(self.candidate_sha):
+            problems.append("candidate_sha must be a full lowercase hex commit SHA")
+        if self.kind != HANDOFF_LONG_WORKER and not (
+            self.attempt_id or self.candidate_sha or self.source_events
+        ):
+            problems.append(
+                "an attempt handoff needs a durable anchor "
+                "(attempt_id, candidate_sha or source_events)"
+            )
+        return problems
+
+    def as_payload(self) -> dict[str, Any]:
+        """Return the JSON-serializable event payload (deterministic key order)."""
+        return {
+            "kind": self.kind,
+            "run_id": self.run_id,
+            "wave_id": self.wave_id,
+            "lane_id": self.lane_id,
+            "summary": self.summary,
+            "created_at": self.created_at,
+            "attempt_id": self.attempt_id,
+            "candidate_sha": self.candidate_sha,
+            "artifacts": list(self.artifacts),
+            "tests_passed": self.tests_passed,
+            "tests_failed": self.tests_failed,
+            "failed_tests": list(self.failed_tests),
+            "repair_suggestions": list(self.repair_suggestions),
+            "repair_route": self.repair_route,
+            "escalate": self.escalate,
+            "checkpoint_ref": self.checkpoint_ref,
+            "health": self.health,
+            "health_reason": self.health_reason,
+            "source_events": list(self.source_events),
+        }
+
+
+@dataclass(frozen=True)
+class QuotaPreemptionRequest:
+    """Durable facts handed to the M2-5 preemption protocol for one lane."""
+
+    run_id: str
+    lane_id: str
+    repo: str
+    base_sha: str
+    job_id: str | None = None
+    worktree: str | None = None
+    reason: str = PREEMPTION_REASON
+
+    def __post_init__(self) -> None:
+        _require_nonempty_str(self.run_id, "run_id")
+        _require_nonempty_str(self.lane_id, "lane_id")
+        _require_nonempty_str(self.repo, "repo")
+        _require_sha(self.base_sha, "base_sha")
+        _require_nonempty_str(self.reason, "reason")
+        if self.job_id is not None:
+            _require_nonempty_str(self.job_id, "job_id")
+        if self.worktree is not None:
+            _require_nonempty_str(self.worktree, "worktree")
+
+
+@dataclass(frozen=True)
+class QuotaPreemptionReceipt:
+    """Verified artifacts returned by :class:`QuotaPreemptionPort`."""
+
+    checkpoint_sha: str
+    checkpoint_ref: str
+    preemptions: int = 1
+    job_id: str | None = None
+    reset_deadline: str | None = None
+    not_before: str | None = None
+    handoff_id: str | None = None
+
+    def __post_init__(self) -> None:
+        _require_sha(self.checkpoint_sha, "checkpoint_sha")
+        _require_nonempty_str(self.checkpoint_ref, "checkpoint_ref")
+        if (
+            isinstance(self.preemptions, bool)
+            or not isinstance(self.preemptions, int)
+            or self.preemptions < 1
+        ):
+            raise WaveExecutorError("preemptions must be a positive integer")
+        _require_aware_iso(self.reset_deadline, "reset_deadline")
+        _require_aware_iso(self.not_before, "not_before")
+        for name, value in (
+            ("job_id", self.job_id),
+            ("handoff_id", self.handoff_id),
+        ):
+            if value is not None:
+                _require_nonempty_str(value, name)
 
 
 @dataclass(frozen=True)
@@ -458,6 +790,9 @@ class WaveExecutor:
         project_id: str | None = None,
         integration_branch: str | None = None,
         integration_worktree: str | None = None,
+        run_id: str | None = None,
+        long_worker_observer: LongWorkerObserver | None = None,
+        quota_preemption: QuotaPreemptionPort | None = None,
     ) -> None:
         if not isinstance(wave, Wave):
             raise WaveExecutorError("wave must be a Wave")
@@ -472,6 +807,9 @@ class WaveExecutor:
         self._project_id = project_id
         self._integration_branch = integration_branch or f"orch/{wave.wave_id}/integration"
         self._integration_worktree = integration_worktree
+        self._run_id = run_id or wave.wave_id
+        self._observer = long_worker_observer
+        self._preemption_port = quota_preemption
         self._state = WaveState.PLANNED
         self._lanes: dict[str, LaneRun] = {
             lane.lane_id: LaneRun(
@@ -483,12 +821,18 @@ class WaveExecutor:
         self._glue_attested: set[str] = set()
         self._g3_runs = 0
         self._wave_head: str | None = None
+        self._preemptions: dict[str, LanePreemption] = {}
 
     # -- read-only views ---------------------------------------------------
 
     @property
     def wave(self) -> Wave:
         return self._wave
+
+    @property
+    def run_id(self) -> str:
+        """The durable run identity handoffs and observations attach to."""
+        return self._run_id
 
     @property
     def wave_state(self) -> WaveState:
@@ -651,6 +995,243 @@ class WaveExecutor:
     def lane_resume(self, lane_id: str) -> LaneRun:
         """BLOCKED -> RUNNING in the lane's own worktree."""
         return self._set_lane(lane_id, LaneState.RUNNING)
+
+    # -- run-level handoffs (WX-2) -----------------------------------------
+
+    def emit_attempt_handoff(
+        self,
+        lane_id: str,
+        *,
+        succeeded: bool,
+        summary: str,
+        attempt_id: str | None = None,
+        candidate_sha: str | None = None,
+        source_events: Sequence[str] = (),
+        artifacts: Sequence[str] = (),
+        tests_passed: int | None = None,
+        tests_failed: int | None = None,
+        failed_tests: Sequence[str] = (),
+        repair_suggestions: Sequence[str] = (),
+        created_at: str | None = None,
+    ) -> WaveHandoff:
+        """Emit a factual handoff for one finished lane attempt.
+
+        Covers: WX-2 (handoffs on attempt completion and failure). The record
+        is assembled only from the durable anchors the caller holds -- the
+        attempt id, candidate SHA, recorded event names and test counts -- so a
+        continuation worker resumes from persisted state, never model memory.
+        A failure additionally carries a bounded repair route: the lane's own
+        worker route while the fix-round budget permits, otherwise an explicit
+        ``ESCALATE`` so a failed candidate can never open an unconstrained
+        repair loop.
+        """
+        run = self.lane_run(lane_id)
+        lane = self._wave.lane_by_id(lane_id)
+        summary = _require_nonempty_str(summary, "summary")
+        if candidate_sha is not None:
+            candidate_sha = _require_sha(candidate_sha, "candidate_sha")
+        for name, value in (
+            ("tests_passed", tests_passed),
+            ("tests_failed", tests_failed),
+        ):
+            if value is not None:
+                _require_count(value, name)
+        kind = HANDOFF_ATTEMPT_COMPLETED if succeeded else HANDOFF_ATTEMPT_FAILED
+        repair_route: str | None = None
+        escalate = False
+        if not succeeded:
+            limit = self._wave.budget("fix_rounds", 2)
+            escalate = run.fix_rounds >= limit
+            repair_route = REPAIR_ESCALATE if escalate else lane.worker_route
+        handoff = WaveHandoff(
+            kind=kind,
+            run_id=self._run_id,
+            wave_id=self._wave.wave_id,
+            lane_id=lane_id,
+            summary=summary,
+            created_at=created_at or self._now_iso(),
+            attempt_id=attempt_id,
+            candidate_sha=candidate_sha,
+            artifacts=tuple(artifacts),
+            tests_passed=tests_passed,
+            tests_failed=tests_failed,
+            failed_tests=tuple(failed_tests),
+            repair_suggestions=tuple(repair_suggestions),
+            repair_route=repair_route,
+            escalate=escalate,
+            source_events=tuple(source_events),
+        )
+        self._emit(EVENT_ATTEMPT_HANDOFF, handoff.as_payload())
+        return handoff
+
+    def observe_long_worker(
+        self,
+        lane_id: str,
+        *,
+        terminal_event_exists: bool,
+        recent_activity: bool,
+        timed_out: bool = False,
+        stalled: bool = False,
+        health_reason: str | None = None,
+        created_at: str | None = None,
+        source_events: Sequence[str] = ("supervisor_observation",),
+    ) -> WaveHandoff:
+        """Persist the t=300 long-worker observation and emit its handoff.
+
+        Covers: WX-2 (the existing ``observe_long_worker`` transition wired into
+        production). Delegates the durable supervision transition to the
+        injected observer -- the run supervisor -- and records the resulting
+        health as a factual handoff. Nothing here polls, sleeps or calls a
+        model; the observation boundary is the caller's.
+        """
+        self.lane_run(lane_id)
+        if self._observer is None:
+            raise WaveExecutorError("no long-worker observer is configured")
+        outcome = self._observer.observe_long_worker(
+            self._run_id,
+            terminal_event_exists=terminal_event_exists,
+            recent_activity=recent_activity,
+            timed_out=timed_out,
+            stalled=stalled,
+        )
+        health = str(getattr(outcome, "value", outcome))
+        handoff = WaveHandoff(
+            kind=HANDOFF_LONG_WORKER,
+            run_id=self._run_id,
+            wave_id=self._wave.wave_id,
+            lane_id=lane_id,
+            summary=f"long-worker observation: {health}",
+            created_at=created_at or self._now_iso(),
+            health=health,
+            health_reason=health_reason,
+            source_events=tuple(source_events),
+        )
+        self._emit(EVENT_LONG_WORKER_HANDOFF, handoff.as_payload())
+        return handoff
+
+    # -- quota preemption & auto-resume (WX-2 / M2-5) ----------------------
+
+    def lane_preemption(self, lane_id: str) -> LanePreemption | None:
+        """Return the durable park record for one lane, if it is parked."""
+        self.lane_run(lane_id)
+        return self._preemptions.get(lane_id)
+
+    def preempt_lane(
+        self,
+        lane_id: str,
+        *,
+        attempt_terminal: bool,
+        fallback_admitted: bool,
+        repo: str | None = None,
+        job_id: str | None = None,
+        worktree: str | None = None,
+        base_sha: str | None = None,
+        reason: str = PREEMPTION_REASON,
+    ) -> LanePreemption:
+        """Park an executing lane on quota exhaustion with no admitted fallback.
+
+        Covers: WX-2 + ADR-0002 D8 / M2-5. The lane must be executing and its
+        attempt must already have ended -- quota is never preempted mid-attempt.
+        A quota signal with an admitted fallback model is not a preemption and is
+        refused, so ordinary fallback routing continues. The injected M2-5 port
+        captures and anchors the checkpoint, parses the reset deadline and
+        returns the owning durable job; the lane then moves to ``PREEMPTED``
+        with the exact park record, and ``resume_preempted_lane`` returns it to
+        the main route once the exclusion window has expired.
+        """
+        run = self.lane_run(lane_id)
+        if self._preemption_port is None:
+            raise WaveExecutorError("no quota preemption port is configured")
+        if fallback_admitted:
+            raise WaveExecutorError(
+                f"lane {lane_id!r} has an admitted fallback; a quota signal is not a preemption"
+            )
+        if not attempt_terminal:
+            raise WaveExecutorError(
+                f"lane {lane_id!r} attempt is not terminal; never preempt mid-attempt"
+            )
+        if LANE_STATE_TO_SLOT_STATE[run.state] not in OCCUPYING_SLOT_STATES:
+            raise WaveExecutorError(
+                f"lane {lane_id!r} is not executing in state {run.state.value}"
+            )
+        request = QuotaPreemptionRequest(
+            run_id=self._run_id,
+            lane_id=lane_id,
+            repo=repo if repo is not None else self._repo,
+            base_sha=base_sha if base_sha is not None else self._wave.base_sha,
+            job_id=job_id,
+            worktree=worktree if worktree is not None else run.worktree,
+            reason=reason,
+        )
+        receipt = self._preemption_port.preempt(request)
+        record = LanePreemption(
+            lane_id=lane_id,
+            checkpoint_ref=receipt.checkpoint_ref,
+            checkpoint_sha=receipt.checkpoint_sha,
+            reason=reason,
+            preemptions=receipt.preemptions,
+            job_id=receipt.job_id,
+            reset_deadline=receipt.reset_deadline,
+            not_before=receipt.not_before,
+        )
+        self._set_lane(lane_id, LaneState.PREEMPTED)
+        self._preemptions[lane_id] = record
+        self._emit(
+            EVENT_LANE_PREEMPTED,
+            {
+                "wave_id": self._wave.wave_id,
+                "run_id": self._run_id,
+                **record.as_dict(),
+            },
+        )
+        return record
+
+    def resume_preempted_lane(self, lane_id: str, *, now: datetime) -> LaneRun:
+        """``PREEMPTED -> RUNNING`` once the exclusion window has expired.
+
+        Covers: WX-2 (the next dispatch returns to the main model after the
+        parsed reset, never mid-attempt). Refuses before ``not_before`` so a
+        parked lane can never be dispatched early. The lane resumes into its own
+        worktree and the emitted event names the lane's own worker route, which
+        is the main model the next dispatch uses.
+        """
+        run = self.lane_run(lane_id)
+        if run.state is not LaneState.PREEMPTED:
+            raise WaveExecutorError(
+                f"lane {lane_id!r} is not PREEMPTED (state {run.state.value})"
+            )
+        record = self._preemptions.get(lane_id)
+        if record is None:
+            raise WaveExecutorError(f"lane {lane_id!r} has no durable park record")
+        if now.tzinfo is None:
+            raise WaveExecutorError("now must be a timezone-aware datetime")
+        if not record.exclusion_expired(now):
+            raise WaveExecutorError(
+                f"lane {lane_id!r} exclusion window has not expired "
+                f"(not_before {record.not_before})"
+            )
+        resumed = self._set_lane(lane_id, LaneState.RUNNING)
+        route = self._wave.lane_by_id(lane_id).worker_route
+        self._emit(
+            EVENT_LANE_RESUMED,
+            {
+                "wave_id": self._wave.wave_id,
+                "run_id": self._run_id,
+                "lane_id": lane_id,
+                "worker_route": route,
+                "job_id": record.job_id,
+                "checkpoint_ref": record.checkpoint_ref,
+                "checkpoint_sha": record.checkpoint_sha,
+                "not_before": record.not_before,
+                "dispatch_model": "main",
+            },
+        )
+        return resumed
+
+    def _now_iso(self) -> str:
+        from saberops.db import current_iso_timestamp
+
+        return current_iso_timestamp()
 
     # -- integration -------------------------------------------------------
 
