@@ -1384,6 +1384,102 @@ def _notice_from_query(request: Request) -> str | None:
     return None
 
 
+_LOOPBACK_HOST_NAMES = frozenset({"127.0.0.1", "localhost", "::1"})
+_SYNTHETIC_TEST_HOST = "testserver"
+
+
+def _parse_host_header(raw: str) -> tuple[str, int | None] | None:
+    """Split a Host header value into ``(hostname, port)``.
+
+    Returns ``None`` when the value is malformed.  Hostname comparison is
+    the caller's job; this helper only enforces Host grammar (RFC 9110
+    §7.2 shape: optional ``[v6]`` brackets, at most one numeric port).
+    """
+    value = raw.strip()
+    if not value or "@" in value or " " in value or "\t" in value:
+        return None
+    if value.startswith("["):
+        end = value.find("]")
+        if end <= 1:
+            return None
+        hostname = value[1:end].lower()
+        rest = value[end + 1 :]
+        if not rest:
+            return hostname, None
+        if not rest.startswith(":") or len(rest) < 2:
+            return None
+        port_text = rest[1:]
+        if not port_text.isdigit():
+            return None
+        port = int(port_text)
+        if not 1 <= port <= 65535:
+            return None
+        return hostname, port
+    if value.count(":") > 1:
+        # Unbracketed IPv6 (e.g. ``::1``) is never a valid Host value.
+        return None
+    if ":" in value:
+        hostname, _, port_text = value.partition(":")
+        if not hostname or not port_text or not port_text.isdigit():
+            return None
+        port = int(port_text)
+        if not 1 <= port <= 65535:
+            return None
+        return hostname.lower(), port
+    return value.lower(), None
+
+
+def _host_header_allowed(request: Request) -> bool:
+    """Check the request Host header against the local-only allowlist.
+
+    Trusted Host values name this loopback server directly
+    (``127.0.0.1`` / ``localhost`` / ``[::1]``, optional port).  A
+    ``testserver`` Host is accepted only inside a synthetic ASGI test
+    scope whose server name is itself ``testserver`` (Starlette
+    TestClient default); the same Host value arriving at a real
+    loopback server is foreign and refused, so there is no production
+    bypass.  ``X-Forwarded-Host`` and similar proxy headers are never
+    consulted.  When the Host carries an explicit port and the ASGI
+    server port is known, the ports must match.
+    """
+    raws = request.headers.getlist("host")
+    if len(raws) != 1:
+        return False
+    parsed = _parse_host_header(raws[0])
+    if parsed is None:
+        return False
+    hostname, port = parsed
+    scope_server = request.scope.get("server")
+    server_host: str | None = None
+    server_port: int | None = None
+    if isinstance(scope_server, (list, tuple)) and len(scope_server) == 2:
+        if isinstance(scope_server[0], str):
+            server_host = scope_server[0].lower()
+        if isinstance(scope_server[1], int):
+            server_port = scope_server[1]
+    if hostname == _SYNTHETIC_TEST_HOST:
+        if server_host != _SYNTHETIC_TEST_HOST:
+            return False
+    elif hostname not in _LOOPBACK_HOST_NAMES:
+        return False
+    if port is not None and server_port is not None and port != server_port:
+        return False
+    return True
+
+
+def _is_private_web_path(path: str) -> bool:
+    """Paths whose responses may carry owner run data or mutate state.
+
+    ``/health`` reports non-secret install identity for diagnostics and
+    ``/static/*`` serves bundled assets; everything else (dashboard,
+    run pages, report/actions/streams JSON, accept/reject POSTs, API
+    docs) requires a trusted Host header.
+    """
+    if path == "/health" or path == "/static" or path.startswith("/static/"):
+        return False
+    return True
+
+
 def create_app(
     db_path: str | Path | None = None,
     repo_path: str | Path | None = None,
@@ -1428,12 +1524,24 @@ def create_app(
 
     @app.middleware("http")
     async def _origin_guard(request: Request, call_next: Callable[..., Any]) -> Response:
-        """Refuse cross-site/foreign-origin POSTs to the accept/reject actions.
+        """Refuse untrusted-Host requests and cross-site/foreign-origin writes.
 
         Host/Origin headers never choose what the actions do; a foreign
-        origin fails closed.  Read-only GETs pass through untouched.
+        Host or a foreign origin fails closed.  The Host allowlist
+        applies to every private route -- dashboard, run pages, report /
+        actions / event-stream reads, and the accept/reject POSTs -- so
+        a missing Origin header (curl, DNS rebinding, old browser) can
+        never smuggle a foreign Host past the guard.  The pre-existing
+        Origin / sec-fetch-site checks on the mutation POSTs are kept
+        unchanged.  ``/health`` and ``/static/*`` stay open by design
+        (non-secret diagnostics and bundled assets).
         """
         path = request.url.path
+        if _is_private_web_path(path) and not _host_header_allowed(request):
+            return JSONResponse(
+                {"error": "Refuse request with untrusted Host header; use the local SaberOps page."},
+                status_code=403,
+            )
         mutation = request.method == "POST" and (
             (path.startswith("/runs/") and path.endswith("/accept"))
             or (path.startswith("/runs/") and path.endswith("/reject"))

@@ -72,7 +72,11 @@ from saberops.owner_actions import (
     OWNER_ACTION_FAILED_EVENT,
     OWNER_ACTION_QUEUED_EVENT,
     OWNER_ACTION_STARTED_EVENT,
+    OWNER_AUTHORITY_REQUIRED_REASON,
     OWNER_PROCESS_DEAD_REASON,
+    OWNER_TRANSPORT_NOT_LOOPBACK_REASON,
+    OwnerActionAuthority,
+    OwnerActionAuthorityError,
     OwnerActionKind,
     OwnerActionState,
     OwnerActionSupervisor,
@@ -81,11 +85,13 @@ from saberops.owner_actions import (
     build_owner_action_argv,
     current_candidate_sha,
     effective_action_state,
+    require_owner_action_authority,
     run_accept_action_child,
     run_review_action_child,
     summarize_owner_actions,
 )
 from saberops.ownership import ProcessIdentity, current_boot_id
+from saberops.sandbox.isolation import SESSION_AUTHORITY_ENV, SessionAuthority
 from saberops.service import OrchestratorService
 from saberops.web import _owner_actions_stream_active, create_app
 
@@ -1811,5 +1817,266 @@ def test_transcript_persistence_failure_launches_nothing(
     assert _event_ids(db, "run-tf1", OWNER_ACTION_STARTED_EVENT) == []
     assert _event_ids(db, "run-tf1", OWNER_ACTION_COMPLETED_EVENT) == []
     assert len(_event_ids(db, "run-tf1", OWNER_ACTION_FAILED_EVENT)) == 2
+
+
+# --- 6. Owner authority: workers cannot claim or execute owner actions (M4) ----
+
+
+class _NeverPopen:
+    """Popen fake that fails the test if a launch is ever attempted."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.calls += 1
+        raise AssertionError("no owner-action child may launch from a refused session")
+
+
+def test_require_owner_action_authority_accepts_owner_and_loopback() -> None:
+    """Covers: M4 owner authority contract + retained loopback allowlist."""
+    resolved = require_owner_action_authority()
+    assert resolved.session is SessionAuthority.OWNER
+    explicit = require_owner_action_authority(
+        OwnerActionAuthority(session=SessionAuthority.OWNER, transport_host="127.0.0.1:8765")
+    )
+    assert explicit.transport_host == "127.0.0.1:8765"
+
+
+def test_require_owner_action_authority_refuses_worker_and_unknown() -> None:
+    """Covers: M4 'owner-only actions fail closed for an automated worker'."""
+    with pytest.raises(OwnerActionAuthorityError) as worker_info:
+        require_owner_action_authority(
+            OwnerActionAuthority(session=SessionAuthority.WORKER)
+        )
+    assert worker_info.value.reason == OWNER_AUTHORITY_REQUIRED_REASON
+    with pytest.raises(OwnerActionAuthorityError) as env_info:
+        require_owner_action_authority(env={SESSION_AUTHORITY_ENV: "worker"})
+    assert env_info.value.reason == OWNER_AUTHORITY_REQUIRED_REASON
+    # An unknown marker is never silently treated as owner.
+    with pytest.raises(OwnerActionAuthorityError) as unknown_info:
+        require_owner_action_authority(env={SESSION_AUTHORITY_ENV: "root"})
+    assert unknown_info.value.reason == OWNER_AUTHORITY_REQUIRED_REASON
+
+
+def test_require_owner_action_authority_refuses_non_loopback_transport() -> None:
+    """Covers: 'retain and extend the loopback Host allowlist guard'."""
+    for hostile in ("evil.test", "evil.test:8765", "192.168.1.5:8765", "testserver"):
+        with pytest.raises(OwnerActionAuthorityError) as info:
+            require_owner_action_authority(
+                OwnerActionAuthority(
+                    session=SessionAuthority.OWNER, transport_host=hostile
+                )
+            )
+        assert info.value.reason == OWNER_TRANSPORT_NOT_LOOPBACK_REASON, hostile
+
+
+def test_worker_authority_supervisor_refuses_without_claiming(
+    tmp_path: Path, popen: _CountingPopen
+) -> None:
+    """Covers: M4 'worker cannot mutate owner state or launch authority work'."""
+    db = _db(tmp_path)
+    _seed_run(db, "run-auth1")
+    _gate_pass(db, "run-auth1", "run-auth1-a1", 1, _SHA_A)
+    supervisor = OwnerActionSupervisor(
+        db,
+        popen_factory=popen,
+        authority=OwnerActionAuthority(session=SessionAuthority.WORKER),
+    )
+
+    for request in (supervisor.request_review, supervisor.request_accept):
+        with pytest.raises(OwnerActionAuthorityError) as info:
+            request(run_id="run-auth1", candidate_sha=_SHA_A, target_repo=str(tmp_path))
+        assert info.value.reason == OWNER_AUTHORITY_REQUIRED_REASON
+
+    # Nothing was claimed, nothing was launched, no owner event was written.
+    assert db.list_owner_actions("run-auth1") == []
+    assert popen.call_count == 0
+    for event in (
+        OWNER_ACTION_QUEUED_EVENT,
+        OWNER_ACTION_STARTED_EVENT,
+        OWNER_ACTION_COMPLETED_EVENT,
+        OWNER_ACTION_FAILED_EVENT,
+    ):
+        assert _event_ids(db, "run-auth1", event) == []
+
+
+def test_worker_env_marker_blocks_owner_action_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: M4 fail-closed on the worker session authority marker."""
+    db = _db(tmp_path)
+    _seed_run(db, "run-auth2")
+    monkeypatch.setenv(SESSION_AUTHORITY_ENV, "worker")
+    never = _NeverPopen()
+    supervisor = OwnerActionSupervisor(db, popen_factory=never)
+
+    with pytest.raises(OwnerActionAuthorityError) as info:
+        supervisor.request_accept(
+            run_id="run-auth2", candidate_sha=_SHA_A, target_repo=str(tmp_path)
+        )
+
+    assert info.value.reason == OWNER_AUTHORITY_REQUIRED_REASON
+    assert never.calls == 0
+    assert db.list_owner_actions("run-auth2") == []
+
+
+def test_unknown_env_marker_blocks_owner_action_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: M4 unknown session authority never defaults to owner."""
+    db = _db(tmp_path)
+    _seed_run(db, "run-auth3")
+    monkeypatch.setenv(SESSION_AUTHORITY_ENV, "superuser")
+    supervisor = OwnerActionSupervisor(db, popen_factory=_NeverPopen())
+
+    with pytest.raises(OwnerActionAuthorityError) as info:
+        supervisor.request_review(
+            run_id="run-auth3", candidate_sha=_SHA_A, target_repo=str(tmp_path)
+        )
+
+    assert info.value.reason == OWNER_AUTHORITY_REQUIRED_REASON
+    assert db.list_owner_actions("run-auth3") == []
+
+
+def test_owner_authority_supervisor_still_launches(
+    tmp_path: Path, popen: _CountingPopen
+) -> None:
+    """Covers: M4 preserves the legitimate owner claim + detached launch."""
+    db = _db(tmp_path)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _seed_run(db, "run-auth4", repo=str(repo))
+    _gate_pass(db, "run-auth4", "run-auth4-a1", 1, _SHA_A)
+    supervisor = OwnerActionSupervisor(
+        db,
+        popen_factory=popen,
+        authority=OwnerActionAuthority(
+            session=SessionAuthority.OWNER, transport_host="127.0.0.1:8765"
+        ),
+    )
+
+    launch = supervisor.request_review(
+        run_id="run-auth4", candidate_sha=_SHA_A, target_repo=str(repo)
+    )
+
+    assert launch.launched is True
+    assert popen.call_count == 1
+    stored = db.get_owner_action(launch.action.action_id)
+    assert stored is not None
+    assert stored.state is OwnerActionState.QUEUED
+
+
+def test_detached_child_refuses_and_mutates_nothing_in_a_worker_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, popen: _CountingPopen
+) -> None:
+    """Covers: M4 'worker attempt to execute an owner action blocks immediately'."""
+    db = _db(tmp_path)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _seed_run(db, "run-auth5", repo=str(repo))
+    _gate_pass(db, "run-auth5", "run-auth5-a1", 1, _SHA_A)
+    # Owner session claims the action (the legitimate path).
+    launch = OwnerActionSupervisor(db, popen_factory=popen).request_review(
+        run_id="run-auth5", candidate_sha=_SHA_A, target_repo=str(repo)
+    )
+    claimed = db.get_owner_action(launch.action.action_id)
+    assert claimed is not None and claimed.state is OwnerActionState.QUEUED
+
+    review_calls: list[str] = []
+
+    def _forbidden_factory(_db: Database) -> Any:
+        review_calls.append("factory")
+        raise AssertionError("a worker session must never reach Review authority")
+
+    # A worker session tries to execute the claimed action.
+    monkeypatch.setenv(SESSION_AUTHORITY_ENV, "worker")
+    code = run_review_action_child(
+        db=db,
+        action_id=launch.action.action_id,
+        expected_candidate_sha=_SHA_A,
+        run_id="run-auth5",
+        service_factory=_forbidden_factory,
+    )
+
+    assert code == 1
+    assert review_calls == []
+    # Owner state is untouched: still QUEUED, no terminal receipt, and the
+    # only SSE event is the owner's own claim -- the worker attempt added none.
+    after = db.get_owner_action(launch.action.action_id)
+    assert after is not None
+    assert after.state is OwnerActionState.QUEUED
+    assert after.reason is None
+    assert db.get_reviews_for_run("run-auth5") == []
+    assert len(_event_ids(db, "run-auth5", OWNER_ACTION_QUEUED_EVENT)) == 1
+    assert _event_ids(db, "run-auth5", OWNER_ACTION_STARTED_EVENT) == []
+    assert _event_ids(db, "run-auth5", OWNER_ACTION_COMPLETED_EVENT) == []
+    assert _event_ids(db, "run-auth5", OWNER_ACTION_FAILED_EVENT) == []
+
+
+def test_detached_accept_child_refuses_in_a_worker_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, popen: _CountingPopen
+) -> None:
+    """Covers: M4 'worker cannot reach Accept authority / repository mutation'."""
+    db = _db(tmp_path)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _seed_run(db, "run-auth6", repo=str(repo))
+    _gate_pass(db, "run-auth6", "run-auth6-a1", 1, _SHA_A)
+    launch = OwnerActionSupervisor(db, popen_factory=popen).request_accept(
+        run_id="run-auth6", candidate_sha=_SHA_A, target_repo=str(repo)
+    )
+
+    class _NeverAcceptService:
+        """Factory that fails the test if Accept authority work is reached."""
+
+        def __call__(self, _db: Database) -> Any:
+            raise AssertionError("a worker session must never reach Accept authority")
+
+    monkeypatch.setenv(SESSION_AUTHORITY_ENV, "worker")
+    code = run_accept_action_child(
+        db=db,
+        action_id=launch.action.action_id,
+        expected_candidate_sha=_SHA_A,
+        run_id="run-auth6",
+        service_factory=_NeverAcceptService(),
+    )
+
+    assert code == 1
+    after = db.get_owner_action(launch.action.action_id)
+    assert after is not None and after.state is OwnerActionState.QUEUED
+    assert db.get_events_by_type("run-auth6", "run_accepted") == []
+    assert _event_ids(db, "run-auth6", OWNER_ACTION_STARTED_EVENT) == []
+
+
+def test_owner_session_child_still_executes_review(
+    tmp_path: Path, popen: _CountingPopen
+) -> None:
+    """Covers: M4 keeps the owner's detached Review authority path working."""
+    db = _db(tmp_path)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _seed_run(db, "run-auth7", repo=str(repo))
+    _gate_pass(db, "run-auth7", "run-auth7-a1", 1, _SHA_A)
+    launch = OwnerActionSupervisor(db, popen_factory=popen).request_review(
+        run_id="run-auth7", candidate_sha=_SHA_A, target_repo=str(repo)
+    )
+
+    service = _StubReviewService(db)
+    code = run_review_action_child(
+        db=db,
+        action_id=launch.action.action_id,
+        expected_candidate_sha=_SHA_A,
+        run_id="run-auth7",
+        service_factory=lambda _db: service,
+    )
+
+    assert code == 0
+    assert len(service.review_calls) == 1
+    assert service.review_calls[0]["run_id"] == "run-auth7"
+    after = db.get_owner_action(launch.action.action_id)
+    assert after is not None and after.state is OwnerActionState.SUCCEEDED
+    assert _event_ids(db, "run-auth7", OWNER_ACTION_STARTED_EVENT) != []
+    assert _event_ids(db, "run-auth7", OWNER_ACTION_COMPLETED_EVENT) != []
 
 
