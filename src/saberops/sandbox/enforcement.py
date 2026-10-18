@@ -96,7 +96,7 @@ from saberops.sandbox.grants import (
     SandboxContractError,
     ToolGrant,
 )
-from saberops.sandbox.policy import SandboxPolicy
+from saberops.sandbox.policy import GIT_INTEGRITY_DENY, SandboxPolicy
 
 
 class SandboxEnforcementError(SandboxContractError):
@@ -576,6 +576,128 @@ def empty_mask_dir() -> str:
     return _empty_mask_dir
 
 
+_empty_mask_file: str | None = None
+
+
+def empty_mask_file() -> str:
+    """Return a process-wide empty file used to mask a denied *file*.
+
+    A regular-file deny target (``.git/config``) cannot be overlaid with
+    an empty directory: bind-mounting a directory over a file fails, so a
+    dedicated empty file is created once per process.  The child reads an
+    empty file and any write fails with ``EROFS``.
+    """
+    global _empty_mask_file
+    if _empty_mask_file is None:
+        import tempfile
+
+        handle, candidate = tempfile.mkstemp(prefix="orch-sandbox-mask-file-")
+        os.close(handle)
+        _empty_mask_file = candidate
+    return _empty_mask_file
+
+
+def git_integrity_mask_targets(repo_root: str) -> tuple[str, ...]:
+    """Return the absolute git control-surface paths the BWRAP seam masks.
+
+    A sandboxed worker may commit, check out and inspect, but it may
+    never rewrite the repository control surface.  These are the
+    repository-relative patterns of
+    :data:`saberops.sandbox.policy.GIT_INTEGRITY_DENY` resolved against
+    ``repo_root``: the local config and the hook directory.
+
+    Returned only when ``<repo_root>/.git`` is a real directory.  In a
+    linked worktree ``.git`` is a *file* naming a gitdir elsewhere, so
+    these paths cannot exist there and the corresponding commands are
+    governed by the deterministic argv guard in
+    :mod:`saberops.sandbox.isolation`.  Masking is deny-wins: it can only
+    remove authority, never add it.
+    """
+    root_real = os.path.realpath(repo_root)
+    git_dir = os.path.join(root_real, ".git")
+    if os.path.islink(git_dir) or not os.path.isdir(git_dir):
+        return ()
+    targets: list[str] = []
+    for pattern in GIT_INTEGRITY_DENY:
+        if pattern.endswith("/**"):
+            targets.append(os.path.join(root_real, pattern[: -len("/**")]))
+        elif not _pattern_has_wildcard(pattern):
+            targets.append(os.path.join(root_real, pattern))
+    return tuple(sorted(set(targets)))
+
+
+def _mask_target_is_mountable(target: str) -> bool:
+    """Return True iff a deny mask can be placed at ``target``.
+
+    A target whose nearest existing ancestor is a non-directory can never
+    exist as a path component (the kernel answers ``ENOTDIR`` for every
+    access below it), so there is nothing to overlay and the mask is
+    skipped.  This is a narrowing decision only: it never exposes a path
+    that could otherwise be created.
+    """
+    if os.path.lexists(target):
+        return True
+    parent = os.path.dirname(target)
+    while parent and parent != os.sep and not os.path.lexists(parent):
+        parent = os.path.dirname(parent)
+    if not parent or parent == os.sep:
+        return True
+    return os.path.isdir(parent)
+
+
+def _mask_source_for(target: str, *, file_shaped: bool) -> str:
+    """Return the empty source a deny mask overlays on ``target``.
+
+    A regular-file target needs the empty *file* source (binding a
+    directory over a file fails); everything else uses the empty
+    directory source, which also preemptively masks a not-yet-existing
+    directory target.
+    """
+    if file_shaped:
+        return empty_mask_file()
+    if os.path.lexists(target) and not os.path.isdir(target):
+        return empty_mask_file()
+    return empty_mask_dir()
+
+
+def _deny_mask_args(policy: SandboxPolicy) -> list[str]:
+    """Return the ``--ro-bind`` mount arguments enforcing every deny mask.
+
+    Combines the policy's own deny masks with the git control-surface
+    targets of :func:`git_integrity_mask_targets`, deduplicated, skipping
+    targets that can never exist (see :func:`_mask_target_is_mountable`)
+    and choosing a file or directory mask source by target shape.
+    """
+    root_real = os.path.realpath(policy.repo_root)
+    # Git control-surface targets carry their shape (file vs directory) so a
+    # not-yet-existing ``.git/config`` is masked with an empty *file* rather
+    # than an empty directory (which would make git read EISDIR).
+    masks: dict[str, bool] = {}
+    for pattern in GIT_INTEGRITY_DENY:
+        if pattern.endswith("/**"):
+            masks[os.path.join(root_real, pattern[: -len("/**")])] = False
+        elif not _pattern_has_wildcard(pattern):
+            masks[os.path.join(root_real, pattern)] = True
+    for target in deny_mask_paths(policy):
+        masks.setdefault(target, False)
+    # Drop a target already covered by another mask (a policy that denies all
+    # of ``.git/**`` already masks the git control surface; re-mounting inside
+    # an already read-only empty mask would be redundant and can fail to
+    # create its mount point).  Deny-wins minimality: only the outer survives.
+    ordered = sorted(masks)
+    minimal = [
+        target
+        for target in ordered
+        if not any(target != outer and _is_covered(target, outer) for outer in ordered)
+    ]
+    args: list[str] = []
+    for target in minimal:
+        if not _mask_target_is_mountable(target):
+            continue
+        args += ["--ro-bind", _mask_source_for(target, file_shaped=masks[target]), target]
+    return args
+
+
 def bwrap_mount_args_for_policy(policy: SandboxPolicy) -> list[str]:
     """Return the bwrap mount arguments enforcing ``policy`` at the kernel.
 
@@ -601,7 +723,14 @@ def bwrap_mount_args_for_policy(policy: SandboxPolicy) -> list[str]:
       repository bind.
     * deny masks: one ``--ro-bind <empty> <denied>`` per path from
       :func:`deny_mask_paths` (deny wins, including preemptively for
-      denied paths that do not exist on the host yet).
+      denied paths that do not exist on the host yet), plus the
+      repository git control-surface targets of
+      :func:`git_integrity_mask_targets` (``.git/config`` and
+      ``.git/hooks``) whenever ``.git`` is a real directory.  A denied
+      regular *file* is masked with an empty file rather than an empty
+      directory; a target whose nearest existing ancestor is not a
+      directory is skipped because the kernel already answers
+      ``ENOTDIR`` below it.
     """
     if policy.network.mode != "DENY":
         raise SandboxEnforcementError(
@@ -660,9 +789,7 @@ def bwrap_mount_args_for_policy(policy: SandboxPolicy) -> list[str]:
                         args += ["--ro-bind", readable_path, readable_path]
                     elif os.path.lexists(readable_path):
                         args += ["--ro-bind", readable_path, readable_path]
-    mask_source = empty_mask_dir()
-    for masked in deny_mask_paths(policy):
-        args += ["--ro-bind", mask_source, masked]
+    args += _deny_mask_args(policy)
     return args
 
 
@@ -1447,8 +1574,10 @@ __all__ = [
     "bwrap_mount_args_for_policy",
     "deny_mask_paths",
     "empty_mask_dir",
+    "empty_mask_file",
     "ensure_sandbox_bind_dirs",
     "filesystem_containment_available",
+    "git_integrity_mask_targets",
     "policy_is_mutating",
     "policy_is_repo_writable",
     "preflight_as_dict",
