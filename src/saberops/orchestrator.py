@@ -207,6 +207,21 @@ from saberops.validation_policy import (
     VALIDATION_POLICY_TEXT,
     verification_contract,
 )
+from saberops.wave_admission import (
+    AncestryChecker,
+    RoutePostureValidator,
+    WaveAdmissionDecision,
+)
+from saberops.wave_admission import admit_wave as _admit_wave
+from saberops.wave_executor import (
+    DatabaseWaveEventSink,
+    GateExecutorPort,
+    ProjectRegistry,
+    WaveEventSink,
+    WaveExecutor,
+    WaveGitPort,
+)
+from saberops.wave_models import Wave
 from saberops.workers.base import WorkerAdapter
 from saberops.workers.registry import AdapterRegistry
 
@@ -8861,6 +8876,97 @@ class Orchestrator:
             must_not_touch=must_not_touch,
             changed_files=changed_files,
             disk_estimate_bytes=disk_estimate_bytes,
+        )
+
+    # -- wave execution seam (Step 010 / WX-1) -----------------------------
+
+    def admit_wave(
+        self,
+        wave: Wave,
+        target_head: str,
+        posture_validator: RoutePostureValidator,
+        *,
+        repo: Path | str | None = None,
+        ancestry_checker: AncestryChecker | None = None,
+    ) -> WaveAdmissionDecision:
+        """Deterministic, fail-closed admission decision for one wave.
+
+        Covers: ADR-0004 D2 (admission) and §4 invariant 2.
+
+        Delegates to the pure :func:`saberops.wave_admission.admit_wave`. The
+        caller supplies the route-posture predicate from the owner-state
+        service; the repository defaults to this orchestrator's current
+        project only when one is bound, otherwise ancestry must be supplied.
+        """
+        return _admit_wave(
+            wave,
+            target_head,
+            posture_validator,
+            repo=repo,
+            ancestry_checker=ancestry_checker,
+        )
+
+    def execute_wave(
+        self,
+        wave: Wave,
+        *,
+        repo: Path | str,
+        worktree_base: Path | str | None = None,
+        git: WaveGitPort | None = None,
+        event_sink: WaveEventSink | None = None,
+        gate_executor: GateExecutorPort | None = None,
+        evidence_dir: Path | str | None = None,
+        project_registry: ProjectRegistry | None = None,
+        project_id: str | None = None,
+        integration_branch: str | None = None,
+        integration_worktree: Path | str | None = None,
+        slot_pool: GateSlotPool | None = None,
+    ) -> WaveExecutor:
+        """Build the deterministic wave executor for one admitted wave.
+
+        Covers: ADR-0004 D2/D4 and Amendment 3 (the engine, and only the
+        engine, allocates worktrees, merges pinned SHAs and runs the one G3).
+
+        The executor shares this orchestrator's worktree base and engine gate
+        executor, so a wave's single G3 runs through the same GS-2 heavy-slot
+        machinery as every other engine gate. Construction allocates nothing;
+        :meth:`WaveExecutor.start` is the first mutating call.
+        """
+        from saberops.wave_executor import SubprocessWaveGit
+
+        resolved_repo = Path(repo).expanduser().resolve()
+        base = (
+            Path(worktree_base)
+            if worktree_base is not None
+            else self.worktree_base or GitManager.get_default_worktree_base(resolved_repo)
+        )
+        resolved_base = Path(base).expanduser().resolve()
+        resolved_gate = gate_executor or EngineGateExecutor(
+            slot_pool=slot_pool or GateSlotPool(_common_dir_for(resolved_repo))
+        )
+        resolved_sink = event_sink or DatabaseWaveEventSink(self.db, wave.wave_id)
+        resolved_evidence = (
+            Path(evidence_dir)
+            if evidence_dir is not None
+            else resolved_base / wave.wave_id / "evidence"
+        )
+        resolved_integration_wt = (
+            Path(integration_worktree)
+            if integration_worktree is not None
+            else resolved_base / wave.wave_id / "integration"
+        )
+        return WaveExecutor(
+            wave,
+            git=git or SubprocessWaveGit(),
+            event_sink=resolved_sink,
+            repo=str(resolved_repo),
+            worktree_base=str(resolved_base),
+            gate_executor=resolved_gate,
+            evidence_dir=str(resolved_evidence),
+            project_registry=project_registry,
+            project_id=project_id,
+            integration_branch=integration_branch,
+            integration_worktree=str(resolved_integration_wt),
         )
 
     def cleanup_run(self, run_id: str) -> dict[str, list[str]]:
