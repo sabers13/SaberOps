@@ -8,6 +8,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from saberops.capacity.cost_model import SizeBucket
 from saberops.capacity.ledger import (
     PoolDraw,
@@ -453,6 +455,62 @@ def test_l10_no_samples_for_all_keys_or_owner(tmp_path: Path) -> None:
     assert _cost_rows(db2) == {}
 
 
+def test_l10_learn_from_probe_per_window_and_row_id(tmp_path: Path) -> None:
+    """Covers: ADR-0002 D5/W2 #9 and #10 per-window probe observation and row ID skip."""
+    from saberops.capacity.ledger import record_probe_window_observation
+
+    db = _db(tmp_path)
+    t0 = _T0
+    t1 = t0 + timedelta(minutes=10)
+    t2 = t0 + timedelta(minutes=20)
+    t3 = t0 + timedelta(minutes=30)
+
+    obs1 = record_probe_window_observation(
+        db,
+        pool_id="chatgpt-plus",
+        window_id="5h",
+        remaining_pct=70.0,
+        reset_at=None,
+        harness="codex",
+        now=t0,
+    )
+    assert obs1.startswith("obs_")
+
+    obs2 = record_probe_window_observation(
+        db,
+        pool_id="chatgpt-plus",
+        window_id="5h",
+        remaining_pct=70.0,
+        reset_at=None,
+        harness="codex",
+        now=t1,
+    )
+    assert obs2 != obs1
+
+    reserve(
+        db,
+        run_id="run-p1",
+        route="openai/gpt-5",
+        draws=[PoolDraw("chatgpt-plus", "5h")],
+        size_bucket=SizeBucket.M,
+        now=t2,
+    )
+    assert settle(db, "run-p1", total_tokens=2000, now=t2) == 1
+
+    obs3 = record_probe_window_observation(
+        db,
+        pool_id="chatgpt-plus",
+        window_id="5h",
+        remaining_pct=65.0,
+        reset_at=None,
+        harness="codex",
+        now=t3,
+    )
+    assert obs3 != obs2
+    rows = _cost_rows(db)
+    assert rows[("openai/gpt-5", "chatgpt-plus", "5h", "M")] == (1, 5.0)
+
+
 # L13: the legacy policy surface is gone; the vocabulary stays.
 def test_l13_legacy_policy_deleted() -> None:
     import saberops.quota as quota
@@ -462,3 +520,184 @@ def test_l13_legacy_policy_deleted() -> None:
                  "CODEX_WEEKLY_POOL"):
         assert not hasattr(quota, name), name
     assert callable(quota.normalize_quota_observation)
+
+
+def test_post_observation_charges_raises_operational_error_on_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: ADR-0002 D7 / F2 fail-closed reservation read on sqlite OperationalError."""
+    from contextlib import contextmanager
+    from typing import Any
+
+    from saberops.capacity.ledger import post_observation_charges
+    from saberops.capacity.store import ensure_tables
+
+    db = _db(tmp_path)
+    ensure_tables(db)
+    now = datetime(2026, 10, 15, 12, 0, 0, tzinfo=UTC)
+
+    owner = db.owner_db
+    orig_conn = owner._get_connection
+
+    class FailingConn:
+        def __init__(self, real: Any) -> None:
+            self._real = real
+
+        def execute(self, *args: Any, **kwargs: Any) -> Any:
+            raise sqlite3.OperationalError("database is locked")
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._real, name)
+
+    @contextmanager
+    def failing_get_conn() -> Any:
+        with orig_conn() as real:
+            yield FailingConn(real)
+
+    monkeypatch.setattr(owner, "_get_connection", failing_get_conn)
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        post_observation_charges(db, now)
+
+
+def test_post_observation_charges_returns_empty_when_tables_absent(tmp_path: Path) -> None:
+    """Covers: ADR-0002 D7 graceful empty charges when capacity tables do not exist."""
+    from saberops.capacity.ledger import post_observation_charges
+
+    # Fresh DB without ensure_tables: capacity_observations does not exist
+    db = _db(tmp_path, name="unconfigured.db")
+    now = datetime(2026, 10, 15, 12, 0, 0, tzinfo=UTC)
+
+    charges = post_observation_charges(db, now)
+    assert charges == {}
+
+
+def test_post_observation_charges_preserves_cutoff_and_reset_semantics(tmp_path: Path) -> None:
+    """Covers: ADR-0002 D5/D7 no double charge before observation and window roll reset."""
+    from saberops.capacity.ledger import (
+        post_observation_charges,
+        record_probe_window_observation,
+    )
+    from saberops.capacity.store import ensure_tables
+
+    db = _db(tmp_path)
+    ensure_tables(db)
+
+    t0 = datetime(2026, 10, 15, 4, 0, tzinfo=UTC)
+    t1 = datetime(2026, 10, 15, 4, 30, tzinfo=UTC)
+    t_reset = datetime(2026, 10, 15, 9, 0, tzinfo=UTC)
+    t_after_reset = datetime(2026, 10, 15, 9, 30, tzinfo=UTC)
+
+    # Observation at t0
+    record_probe_window_observation(
+        db,
+        "p1",
+        "5h",
+        remaining_pct=80.0,
+        harness="test",
+        reset_at=t_reset.isoformat(),
+        now=t0,
+    )
+
+    # Reservation before observation (t0 - 10m): must NOT be charged
+    reserve(
+        db,
+        run_id="run_old",
+        job_id="job_old",
+        route="p1/m1",
+        draws=[PoolDraw("p1", "5h", 1.0)],
+        size_bucket="M",
+        now=t0 - timedelta(minutes=10),
+    )
+
+    # Reservation after observation (t1): MUST be charged
+    reserve(
+        db,
+        run_id="run_new",
+        job_id="job_new",
+        route="p1/m1",
+        draws=[PoolDraw("p1", "5h", 1.0)],
+        size_bucket="M",
+        now=t1,
+    )
+
+    # Before reset: charges must include run_new (8.0%) but not run_old
+    charges_mid = post_observation_charges(db, t1 + timedelta(minutes=5))
+    assert charges_mid.get(("p1", "5h")) == 8.0
+
+    # After reset: window rolled; run_new was before reset, so charges must reset to 0.0
+    charges_rolled = post_observation_charges(db, t_after_reset)
+    assert charges_rolled.get(("p1", "5h")) == 0.0
+
+
+def test_post_observation_charges_partial_schema_reservations_only_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """Covers: ADR-0002 D2/D7 partial capacity schema (reservations present,
+    observations missing) must never be reported as zero debt.
+    """
+    from saberops.capacity.ledger import post_observation_charges
+    from saberops.capacity.store import ensure_tables, owner_connection
+
+    db = _db(tmp_path, name="partial_res_only.db")
+    ensure_tables(db)
+    now = datetime(2026, 10, 15, 12, 0, 0, tzinfo=UTC)
+    with owner_connection(db) as conn:
+        # Active debt recorded, then the observations table is lost, leaving
+        # a partially initialized capacity schema.
+        conn.execute(
+            "INSERT INTO capacity_reservations (id, run_id, job_id, route,"
+            " pool_id, window_id, multiplier, size_bucket, cost_pct, spread_pct,"
+            " state, total_tokens, created_at, settled_at) VALUES"
+            " ('res_1', 'run_1', 'job_1', 'p1/m1', 'p1', '5h', 1.0, 'M', 42.0,"
+            " 3.0, 'RESERVED', NULL, '2026-10-15T03:00:00+00:00', NULL)"
+        )
+        conn.execute("DROP TABLE capacity_observations")
+        conn.commit()
+
+    with pytest.raises(sqlite3.OperationalError, match="partially initialized"):
+        post_observation_charges(db, now)
+
+
+def test_post_observation_charges_partial_schema_observations_only_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """Covers: ADR-0002 D2/D7 reversed partial schema (observations present,
+    reservations missing) also fails closed rather than reporting zero debt.
+    """
+    from saberops.capacity.ledger import (
+        post_observation_charges,
+        record_probe_window_observation,
+    )
+    from saberops.capacity.store import ensure_tables, owner_connection
+
+    db = _db(tmp_path, name="partial_obs_only.db")
+    ensure_tables(db)
+    now = datetime(2026, 10, 15, 12, 0, 0, tzinfo=UTC)
+    record_probe_window_observation(
+        db, "p1", "5h", remaining_pct=50.0, harness="test", reset_at=None, now=now
+    )
+    with owner_connection(db) as conn:
+        conn.execute("DROP TABLE capacity_reservations")
+        conn.commit()
+
+    with pytest.raises(sqlite3.OperationalError, match="partially initialized"):
+        post_observation_charges(db, now)
+
+
+def test_capacity_tables_present_reports_required_subset(tmp_path: Path) -> None:
+    """Covers: ADR-0002 D2/D7 schema discovery distinguishes absent from partial."""
+    from saberops.capacity.ledger import (
+        REQUIRED_CAPACITY_TABLES,
+        capacity_tables_present,
+    )
+    from saberops.capacity.store import ensure_tables, owner_connection
+
+    unconfigured = _db(tmp_path, name="unconfigured_scan.db")
+    with owner_connection(unconfigured) as conn:
+        assert capacity_tables_present(conn) == frozenset()
+
+    full = _db(tmp_path, name="full_scan.db")
+    ensure_tables(full)
+    with owner_connection(full) as conn:
+        assert capacity_tables_present(conn) == REQUIRED_CAPACITY_TABLES
+

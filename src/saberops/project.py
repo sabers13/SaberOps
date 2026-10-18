@@ -44,6 +44,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -438,3 +439,265 @@ def objective_id_for(project_id: str, task: str) -> str:
     """
     digest = hashlib.sha256(f"{project_id}\n{task.strip()}".encode()).hexdigest()
     return f"obj_{digest[:OBJECTIVE_ID_LENGTH]}"
+
+
+#: Stable slug format for explicitly registered Step 015 project IDs:
+#: lowercase letters, digits and interior dashes only.
+PROJECT_ID_PATTERN = r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?"
+_PROJECT_ID_RE = re.compile(f"^{PROJECT_ID_PATTERN}$")
+
+#: Registry format version for ``project-registry.json``.
+PROJECT_REGISTRY_VERSION = 1
+
+#: File name of the stable project registry under the owner state dir.
+PROJECT_REGISTRY_FILE = "project-registry.json"
+
+
+class ProjectRegistrationError(ValueError):
+    """Raised when a stable project registration is invalid or refused."""
+
+
+class ProjectCapError(ProjectRegistrationError):
+    """Raised when activating a project would exceed the active-project cap."""
+
+
+@dataclass(frozen=True)
+class RegisteredProject:
+    """One explicitly registered stable project (Step 015 / PL-1).
+
+    Unlike :class:`ProjectIdentity` (derived from a repository checkout),
+    a registered project carries an explicit owner-chosen slug
+    ``project_id`` plus a display name. Registration never infers identity
+    from a directory name or the current working directory: every field is
+    required and validated, so an unauthenticated caller cannot mint a
+    project by merely pointing at a path.
+    """
+
+    project_id: str
+    display_name: str
+    repository_root: str
+    state_root: str
+    active: bool = False
+
+    def as_dict(self) -> dict[str, object]:
+        """Serialize for durable storage in the project registry."""
+        return {
+            "project_id": self.project_id,
+            "display_name": self.display_name,
+            "repository_root": self.repository_root,
+            "state_root": self.state_root,
+            "active": self.active,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> RegisteredProject:
+        """Reconstruct from a persisted mapping, validating every field."""
+        if not isinstance(data, dict):
+            raise ProjectRegistrationError("registered project record must be a mapping")
+        slug = _require_project_id(data.get("project_id"))
+        display_name = data.get("display_name")
+        repository_root = data.get("repository_root")
+        state_root = data.get("state_root")
+        if not isinstance(display_name, str) or not display_name.strip():
+            raise ProjectRegistrationError("display_name must be a non-empty string")
+        if not isinstance(repository_root, str) or not repository_root.strip():
+            raise ProjectRegistrationError("repository_root must be a non-empty path")
+        if not isinstance(state_root, str) or not state_root.strip():
+            raise ProjectRegistrationError("state_root must be a non-empty path")
+        active = data.get("active", False)
+        if not isinstance(active, bool):
+            raise ProjectRegistrationError("active flag must be a boolean")
+        return cls(
+            project_id=slug,
+            display_name=display_name.strip(),
+            repository_root=repository_root,
+            state_root=state_root,
+            active=active,
+        )
+
+
+def _require_project_id(value: Any) -> str:
+    """Validate an explicit stable project slug, refusing inference."""
+    if not isinstance(value, str) or not value:
+        raise ProjectRegistrationError(
+            "project_id is required: directory-inferred or empty identities are refused"
+        )
+    if _PROJECT_ID_RE.fullmatch(value) is None:
+        raise ProjectRegistrationError(
+            f"malformed project_id {value!r}: use 1-64 lowercase letters, digits, "
+            "and interior dashes only"
+        )
+    return value
+
+
+def default_project_registry_path() -> Path:
+    """Return the canonical stable project-registry file location."""
+    return owner_state_dir() / PROJECT_REGISTRY_FILE
+
+
+class ProjectRegistry:
+    """Durable file-backed registry of stable projects (Step 015 / PL-1).
+
+    The registry persists ``{project_id: RegisteredProject}`` as JSON with
+    atomic writes and enforces the owner-approved cap of
+    ``DEFAULT_ACTIVE_PROJECT_LIMIT`` concurrently active projects,
+    consistent with ``saberops.project_slot_policy``. Reads tolerate a
+    missing file (empty registry) but fail closed on corrupt content.
+    """
+
+    def __init__(self, path: Path | str | None = None) -> None:
+        self._path = Path(path) if path is not None else default_project_registry_path()
+
+    @property
+    def path(self) -> Path:
+        """Filesystem location of the backing registry document."""
+        return self._path
+
+    def _load(self) -> dict[str, RegisteredProject]:
+        raw = _read_text(self._path)
+        if raw is None:
+            return {}
+        try:
+            data = json.loads(raw)
+        except (TypeError, ValueError) as exc:
+            raise ProjectRegistrationError(
+                f"project registry {self._path} is corrupt: {exc}"
+            ) from exc
+        if not isinstance(data, dict) or not isinstance(data.get("projects"), dict):
+            raise ProjectRegistrationError(
+                f"project registry {self._path} has an unrecognized shape"
+            )
+        projects: dict[str, RegisteredProject] = {}
+        for key, record in data["projects"].items():
+            project = RegisteredProject.from_dict(record)
+            if project.project_id != key:
+                raise ProjectRegistrationError(
+                    f"project registry key {key!r} mismatches record id "
+                    f"{project.project_id!r}"
+                )
+            projects[key] = project
+        return projects
+
+    def _save(self, projects: dict[str, RegisteredProject]) -> None:
+        payload = {
+            "version": PROJECT_REGISTRY_VERSION,
+            "projects": {key: item.as_dict() for key, item in sorted(projects.items())},
+        }
+        text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = self._path.with_name(f".{self._path.name}.tmp-{os.getpid()}")
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(tmp_path, self._path)
+
+    def register(
+        self,
+        project_id: str,
+        display_name: str,
+        repository_root: str | Path,
+        state_root: str | Path,
+        *,
+        active: bool = False,
+    ) -> RegisteredProject:
+        """Register one stable project with fully explicit identity.
+
+        Every argument is required: ``project_id`` must be a valid slug and
+        is never derived from ``repository_root``. ``repository_root`` must
+        already exist as a directory. Duplicate IDs are refused. When
+        ``active`` is true the active-project cap is enforced before writing.
+        """
+        slug = _require_project_id(project_id)
+        if not isinstance(display_name, str) or not display_name.strip():
+            raise ProjectRegistrationError(
+                "display_name is required: refusing an unnamed registration"
+            )
+        repo = str(repository_root or "").strip()
+        state = str(state_root or "").strip()
+        if not repo or not state:
+            raise ProjectRegistrationError(
+                "repository_root and state_root are both required"
+            )
+        if not Path(repo).is_dir():
+            raise ProjectRegistrationError(
+                f"repository_root {repo!r} does not exist or is not a directory"
+            )
+        projects = self._load()
+        if slug in projects:
+            raise ProjectRegistrationError(f"duplicate project_id {slug!r}")
+        if active and sum(1 for item in projects.values() if item.active) >= (
+            _active_project_limit()
+        ):
+            raise ProjectCapError(
+                f"cannot activate {slug!r}: already at the active-project cap "
+                f"({_active_project_limit()})"
+            )
+        project = RegisteredProject(
+            project_id=slug,
+            display_name=display_name.strip(),
+            repository_root=repo,
+            state_root=state,
+            active=bool(active),
+        )
+        projects[slug] = project
+        self._save(projects)
+        return project
+
+    def get(self, project_id: str) -> RegisteredProject | None:
+        """Return the registered project, or ``None`` when unknown."""
+        return self._load().get(project_id)
+
+    def list_projects(self) -> tuple[RegisteredProject, ...]:
+        """Return all registered projects in stable ID order."""
+        return tuple(sorted(self._load().values(), key=lambda item: item.project_id))
+
+    def active_projects(self) -> tuple[RegisteredProject, ...]:
+        """Return the currently active projects in stable ID order."""
+        return tuple(item for item in self.list_projects() if item.active)
+
+    def activate(self, project_id: str) -> RegisteredProject:
+        """Mark a registered project active, enforcing the 3-project cap."""
+        projects = self._load()
+        current = projects.get(project_id)
+        if current is None:
+            raise ProjectRegistrationError(f"unknown project_id {project_id!r}")
+        if not current.active and sum(1 for item in projects.values() if item.active) >= (
+            _active_project_limit()
+        ):
+            raise ProjectCapError(
+                f"cannot activate {project_id!r}: already at the active-project cap "
+                f"({_active_project_limit()})"
+            )
+        updated = RegisteredProject(
+            project_id=current.project_id,
+            display_name=current.display_name,
+            repository_root=current.repository_root,
+            state_root=current.state_root,
+            active=True,
+        )
+        projects[project_id] = updated
+        self._save(projects)
+        return updated
+
+    def deactivate(self, project_id: str) -> RegisteredProject:
+        """Mark a registered project inactive, freeing one active slot."""
+        projects = self._load()
+        current = projects.get(project_id)
+        if current is None:
+            raise ProjectRegistrationError(f"unknown project_id {project_id!r}")
+        updated = RegisteredProject(
+            project_id=current.project_id,
+            display_name=current.display_name,
+            repository_root=current.repository_root,
+            state_root=current.state_root,
+            active=False,
+        )
+        projects[project_id] = updated
+        self._save(projects)
+        return updated
+
+
+def _active_project_limit() -> int:
+    """Return the owner-approved concurrently-active-project cap (3)."""
+    from saberops.ready_frontier import DEFAULT_ACTIVE_PROJECT_LIMIT
+
+    return DEFAULT_ACTIVE_PROJECT_LIMIT

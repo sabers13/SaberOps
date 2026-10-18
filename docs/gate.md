@@ -8,11 +8,21 @@ Zero targets skips pytest, while lint and types still run. This evidence makes a
 lane provisional; it does not certify integration.
 
 The integrator merges all lanes and runs **one** `bash scripts/gate-full.sh
-[--result-dir DIR]`. The full gate holds a shared slot during lint, types, both
-pytest passes, reruns and cleanup. The first pass runs `not serial` with xdist
-worksteal; the second runs `serial` without xdist. Both retain `--durations=20`.
-Every failure identified in JUnit is rerun once without xdist, unless infrastructure
-or collection errors prevent a meaningful rerun. No tests are excluded by quarantine.
+[--result-dir DIR]`. The full gate holds a shared slot during lint, types, the
+pytest pass, reruns and cleanup. There is **one** pytest pass: the whole suite
+runs in parallel with bounded xdist worksteal (`SABEROPS_GATE_WORKERS`, default
+derived from live RAM as `max(1, min(cores, MemAvailable // 0.6 GiB))`, D-0076);
+the separate serial tier was removed (`D-0061`). Every failure identified in
+JUnit is rerun once serially without xdist (`-p no:xdist`) and only those node
+IDs, which is what `FLAKY_PASS` evaluates. No tests are excluded by quarantine.
+Each gate child tree is wrapped in a transient `systemd-run --user --scope`
+(`MemoryHigh=6G`, `MemoryMax=8G`) when available, so a gate cannot drive the
+host out of memory or take down the interactive session; set
+`SABEROPS_GATE_CGROUP=0` to disable the wrapper. The engine-run history line
+records `kind` (`G1|G2|G3|main-gate|manual`), `producer` (`engine` for
+authoritative engine runs) and `profile` alongside the existing fields.
+`outcome.json` additionally records `kind`, `producer`, `profile`, `checks_ok`
+and `selected`.
 
 On failures, run:
 
@@ -72,6 +82,59 @@ size and largest test directories). They are copied to the git common directory'
 `saberops-gate-last/` before cleanup. An explicit result directory survives cleanup;
 the default lives inside private scratch and is available in the copied evidence.
 
+## Gate tamper protection (GT-1)
+
+A candidate must never be able to change the gate that judges it. The engine
+therefore loads the **gate definitions from the base SHA** and compares them with
+the candidate tree before any gate command runs; a difference blocks the gate
+fail-closed as an owner question instead of producing a verdict.
+
+The protected definitions are:
+
+| Kind | Paths |
+| --- | --- |
+| Gate scripts / tooling | everything under `scripts/` (the named set: `gate-full.sh`, `gate-ui-fast.sh`, `gate-affected.sh`, `gate_tools.py`, `build_test_map.py`, `select_tests.py`, `test_hygiene.py`, plus the G1 runner `lane-check.sh`, `gate_lib.sh` and any future gate helper) |
+| Test infrastructure | every `conftest.py`, at the repository root, in `tests/` and in any subdirectory |
+| Gate configuration | `pyproject.toml` (`[tool.pytest.ini_options]`, `[tool.ruff]`, `[tool.mypy]`; the whole file is protected because the dev-dependency pins choose the tools the gate runs) and `.github/workflows/ci.yml` |
+
+Mechanism (`saberops.gate_scope`, `saberops.gate_runner`):
+
+- `check_gate_protection(changed_paths, touches)` is the pure path check over the
+  candidate diff, next to the existing write-scope and retirement checks.
+- `load_base_gate_definitions(repo, base)` reads the definitions from the git
+  object store at `base` (`git ls-tree` + `git show`), never from the candidate.
+- `verify_gate_definitions(repo, base, changed_paths=..., touches=...)` compares
+  those base bytes with the candidate working tree, including committed branch
+  changes, uncommitted edits and untracked files (`git status --untracked-files=all`),
+  so an added or deleted `conftest.py` counts as well. Byte-identical definitions
+  *are* the base definitions, so a gate that runs is a base-trusted gate.
+- `EngineGateExecutor` runs this before the host-disk admission and before the
+  gate slot, so a blocked candidate never starts a gate command. The result is
+  `outcome: BLOCKED`, `reason: GATE_PROTECTION_BLOCKED: GATE_PROTECTED_PATH_MUTATED:
+  <paths>`, and the same line is written to the engine history and `outcome.json`
+  (`gate_protection`, with the tampered paths, per-path digests and the base SHA).
+- `touches` is **evidence, not authorization**: a lane that declares a protected
+  path in its `Touches` is still blocked; the declaration is recorded in
+  `declared_paths` and named in the owner question.
+
+Owner escalation workflow:
+
+1. The block raises an owner question (ADR-0004 D6): accept the definition change
+   into the base SHA and re-run the gate against the new base, or reject the change.
+2. An accepted definition change reaches the base SHA through the normal owner
+   merge; the next gate then loads the new definition from that new base. A lane
+   cannot self-authorize the edit by declaring it, by weakening a test, or by
+   editing the runner that produced its evidence.
+3. INFRA conditions while reading the base (an unresolvable `base`, an unreadable
+   object) fail closed as `outcome: BLOCKED` with
+   `GATE_PROTECTION_BLOCKED: GATE_BASE_UNVERIFIABLE: <detail>`; the engine cannot
+   show that the candidate's definitions are the base definitions, so no verdict
+   is produced.
+
+A gate request that declares neither a `base` nor `changed_files` has no candidate
+diff to protect and records no protection verdict (`gate_protection` absent); real
+G1/G2/G3 runs always declare one.
+
 ## Resource knobs
 
 | Variable | Default | Effect |
@@ -80,26 +143,78 @@ the default lives inside private scratch and is available in the copied evidence
 | SABEROPS_GATE_MIN_FREE_GB | 10 | Minimum free GiB; 10% filesystem floor also applies |
 | SABEROPS_GATE_KEEP_FAILED_GB | 2 | Total retained failed scratch cap in GiB |
 | SABEROPS_GATE_KEEP | unset | `1` bypasses exit cleanup |
-| SABEROPS_GATE_SLOTS | 1 | Concurrent full gates in this repository's git common directory |
-| SABEROPS_LANE_SLOTS | 2 | Concurrent lane/fix checks holding light slots |
+| SABEROPS_GATE_SLOTS | dynamic | Concurrent full gates in this repository's git common directory (heavy slots) |
+| SABEROPS_LANE_SLOTS | dynamic | Concurrent lane/fix checks holding light slots |
 | SABEROPS_GATE_SLOT_WAIT | 3600 | Slot wait deadline in seconds |
-| SABEROPS_GATE_WORKERS | auto | xdist worker count in full parallel pass |
+| SABEROPS_GATE_WORKERS | dynamic | xdist worker count: `max(1, min(cores, MemAvailable // 0.6 GiB))` |
+| SABEROPS_LANE_WORKERS | 2 | xdist worker count for lane/fix checks with >1 target |
+| SABEROPS_GATE_CGROUP | unset | `0`/`off` disables the `systemd-run` memory scope |
+| SABEROPS_GATE_MEMORY_GUARD | unset | `0`/`off` disables the heavy-gate RAM pre-admission guard |
+| SABEROPS_GATE_MIN_AVAILABLE_GB | 5 | Heavy-gate guard floor in GiB (2 GiB safety + 3 GiB heavy) |
+| SABEROPS_GATE_KIND | derived | History `kind`: `G1`/`G2`/`G3`/`main-gate`/`manual` |
+| SABEROPS_GATE_PRODUCER | developer | Evidence producer; the engine sets `engine` |
+| SABEROPS_GATE_PROFILE | derived | Gate profile: `fast`/`acceptance`/`full` |
+| SABEROPS_GATE_EXTERNAL_SLOT | unset | `1` = caller already holds host-gates slots |
+| SABEROPS_GATE_NO_HISTORY | unset | `1` = the engine writes the single history line |
 | SABEROPS_LANE_TIMEOUT | 1200 | Whole lane pytest budget in seconds |
+| SABEROPS_MAP_WORKERS | dynamic | xdist worker count for `build_test_map.py` |
 | MYPY_CACHE_DIR | `<git-common-dir>/saberops-mypy-cache` | Shared incremental type cache |
 
 A slot uses an OS flock, automatically released when its owner dies. The heavy pool
-(`saberops-gate-slots`, `SABEROPS_GATE_SLOTS`, default 1) is exclusive: a full gate
-holds the heavy slot and then drains all light slots, holding them for the whole
-run. The light pool (`saberops-gate-light-slots`, `SABEROPS_LANE_SLOTS`, default 2,
-must be >= 1) is for lane checks (G1) and fix checks (G2). A lane first waits while
-a full gate holds the heavy slot, then acquires one light slot and holds it for the
-whole run (lint, types, tests). Waiting prints `waiting for full-gate slot:`,
-`waiting for lane slot:`, or `waiting for running lane checks:` with holder pid,
-worktree and start time immediately and once per minute; exceeding
-`SABEROPS_GATE_SLOT_WAIT` is `INFRA SLOT_WAIT_TIMEOUT`. Because the full gate
-always takes heavy before light and a lane never waits for heavy while holding
-light, new lanes queue behind a draining full gate and the order cannot deadlock.
-More than 150 lane target arguments use four xdist workers.
+(`saberops-gate-slots`, `SABEROPS_GATE_SLOTS`, dynamic default 1) is exclusive: a
+full gate holds the heavy slot and then drains **every potential** light index
+`0..MAX_LIGHT_SLOTS` (`MAX_LIGHT_SLOTS = 8`), holding them for the whole
+run. The light pool (`saberops-gate-light-slots`, `SABEROPS_LANE_SLOTS`, dynamic
+default, must be >= 1) is for lane checks (G1) and fix checks (G2). A lane first
+waits while a full gate holds the heavy slot, then acquires one light slot and
+holds it for the whole run (lint, types, tests). Waiting prints `waiting for
+full-gate slot:`, `waiting for lane slot:`, or `waiting for running lane
+checks:` with holder pid, worktree and start time immediately and once per
+minute; exceeding `SABEROPS_GATE_SLOT_WAIT` is `INFRA SLOT_WAIT_TIMEOUT`. Because
+the full gate always takes heavy before light and a lane never waits for heavy
+while holding light, new lanes queue behind a draining full gate and the order
+cannot deadlock. Lane checks run in parallel with bounded workers
+(`SABEROPS_LANE_WORKERS`, default 2) whenever more than one target is selected; a
+single target stays in one process. The engine holds the same heavy/light slots
+for its own G1/G2/G3 runs and passes `SABEROPS_GATE_EXTERNAL_SLOT=1` to the child
+so the child never re-acquires (which would self-deadlock). The engine also passes
+`SABEROPS_GATE_NO_HISTORY=1` and appends the single authoritative history line
+itself.
+
+### Dynamic RAM capacity and self-healing slots (D-0076)
+
+Slot counts and the worker cap are derived from live memory instead of being
+pinned. Both the product pool (`saberops.gate_runner`) and the developer gate
+(`scripts/gate_tools.py`) read `/proc/meminfo` (`MemAvailable`, `MemTotal`) and
+fall back to `os.sysconf` when it is missing; no extra dependency is added.
+
+- Safety floor `2.0 GiB` is reserved for the OS, editor/UI and shells.
+- Light slot cost `1.0 GiB`; heavy slot cost `3.0 GiB`.
+- Light slots: `max(1, min(MAX_LIGHT_SLOTS, (MemAvailable - 2 GiB) // 1 GiB,
+  cpu_cores // 2))`.
+- Heavy slots: `1`, or `2` when `MemTotal >= 32 GiB` **and** `MemAvailable >=
+  8 GiB` **and** `cpu_cores >= 12`.
+- Worker auto-scaling: `max(1, min(cpu_cores, MemAvailable // 0.6 GiB))`.
+
+Explicit knobs (`SABEROPS_GATE_SLOTS`, `SABEROPS_LANE_SLOTS`,
+`SABEROPS_GATE_WORKERS`) stay authoritative; a malformed value still fails closed
+as `INFRA SLOT_WAIT_TIMEOUT`. Before a heavy gate starts, the pre-admission
+memory guard soft-queues while available RAM is below the floor (default
+`5 GiB = 2 GiB safety + 3 GiB heavy`, override with
+`SABEROPS_GATE_MIN_AVAILABLE_GB`), bounded by `SABEROPS_GATE_SLOT_WAIT`, so the
+host queues instead of crashing into OOM; unreadable memory never blocks a gate.
+A recorded `<index>.json` whose pid is dead is unlinked immediately and is never
+shown in a wait notice (`os.kill(pid, 0)`), so a process that died or was
+interrupted cannot leave a phantom "waiting for ..." holder behind.
+
+### Wave consolidation test-map policy
+
+Rebuilding the coverage map runs the whole suite under coverage (~10 minutes)
+while holding the exclusive heavy slot. In a multi-lane wave, intermediate lane
+gates run `scripts/build_test_map.py --reuse-if-current` (a no-op once the map
+covers HEAD) and the map is rebuilt once at the consolidation barrier with
+`--wave-barrier`; concurrent integrators therefore stop serializing on redundant
+map builds. `--wave-barrier` alone is the historical always-rebuild behaviour.
 
 Each run creates `<worktree>-<UTC timestamp>-<pid>/owner.json`, and each pytest pass
 owns a separate basetemp under it. Startup sweeps owned runs with dead pids or age over
@@ -116,11 +231,13 @@ reports INTERRUPTED. SIGKILL leaves an owned orphan for the next sweep.
 
 `pytest-timeout` enforces 180 seconds per test. Longer timeouts need a measured
 reason next to an explicit `@pytest.mark.timeout(N)`. Markers `serial` and `slow`
-are registered and strict marker validation is enabled. Timing/process-control
-modules `test_session_control.py` and `test_parallel_work.py` run serially because
-ADR-0003 records contention failures and successful serial reruns. Additional marks
-require evidence; no test logic is changed. Plain pytest retains only failed tmp_path
-directories, with a retention count of one.
+are registered and strict marker validation is enabled. The timing/process-control
+modules `test_session_control.py` and `test_parallel_work.py` keep their `serial`
+marker as documentation, but there is no serial tier: they run in the single
+bounded parallel pass and, if they flake, are rerun once serially with just their
+node IDs (a still-flaky unquarantined test fails the full gate per D5). Additional
+marks require evidence; no test logic is changed. Plain pytest retains only failed
+tmp_path directories, with a retention count of one.
 
 `tests/quarantine.txt` contains exact node IDs, one per line; blank lines and comments
 are ignored. The initial file is empty. Only owner-approved entries belong there.

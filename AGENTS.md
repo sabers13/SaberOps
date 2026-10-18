@@ -5,6 +5,58 @@ The product, authority, security, and engineering rules in [README.md](README.md
 LLMs advise; deterministic software decides. Workflow adoption does not change
 execution authority, provenance, isolation, acceptance, or release requirements.
 
+## Orchestrator benefit-first policy (repository-tracked)
+
+This entry applies to any **Orchestrator** session (planning, reviewing
+evidence, routing work) with access to this repository. It is an
+Orchestrator-specific instruction; it does not change the frontend, security, or
+engineering rules below, and it never overwrites safety instructions. It does
+not authorize an autonomous engine: LLMs advise; deterministic software decides.
+
+1. Before drafting any plan, read the tracked policy
+   [docs/orchestrator-parallel-first.md](docs/orchestrator-parallel-first.md),
+   then [docs/parallel-work.md](docs/parallel-work.md). Optimize expected
+   elapsed time to **owner-accepted integrated output**, not concurrent Worker
+   count: account for critical path, setup/context, coordination, review/rework,
+   G1/G3, and merge overhead before declaring parallelism worthwhile.
+2. Plan the **fewest coherent tasks** reasonably needed — each one meaningful,
+   independently finishable deliverable with clear acceptance criteria. Compare a
+   simple/sequential plan against any parallel split; parallelize only when
+   conservative expected net time saved outweighs overhead and risk. A ready task
+   is **eligible**, never automatically obligated to dispatch.
+3. **ONE implementation Worker owns each task**, including its fixes. Review
+   findings return to that same Worker/session/branch. A failed Worker is
+   replaced by one fenced single-owner handoff, never duplicated in parallel.
+   Material task split/merge needs an owner-approved plan revision.
+4. **Waves are optional**: zero, one, or several tasks are all legitimate.
+   Sequential, one-task, and zero-wave plans are valid when that is the
+   credible fastest/safest path. Never invent work to fill free slots.
+5. Honor **3 active projects x 5 executing child tasks as owner-adjustable
+   upper-bound limits** (not a quota or occupancy target). The runtime may run
+   1 of 15 allowed tasks. Eligibility never equals obligation to dispatch.
+6. Worker implementation candidates receive G0/G1 plus one task-scoped
+   independent review. **Pure Integrator merges, bridge-test-only commits, and
+   post-G3 looks get no automatic semantic review**; material production
+   glue/behavior changes found at integration go back to an accountable Worker
+   for G1 and task-scoped review. The exclusive integration gate (G3) and owner
+   acceptance stay binding. Do not globally weaken Worker risk-adaptive review.
+7. **Before every run, check the roadmap for parallel work.** On each
+   owner-launched session and on start/finish/block/unblock/approval/capacity
+   events, scan readiness across ALL phases and projects against live branches,
+   worktrees, leases, and evidence — never dated notes or phase order alone.
+   Select safe, beneficial, already-approved concurrent tasks (disjoint scopes,
+   one Worker lease each, within 3x5 maxima) and present ALL selected pinned
+   prompts together with the scan conclusion (eligible/held reasons, selected
+   sessions); never duplicate an already-running Worker. If no credible net
+   benefit, stay sequential and record why. Empty slots never justify a new
+   task.
+
+This entry defers to owner-authorized policies and to deterministic software
+decisions. It grants the Orchestrator no authority to implement source, dispatch
+workers, merge, push, or move the target branch, and reading it does **not**
+activate a scheduler — see "Current capability versus target" in the policy
+document.
+
 ## Frontend workflow
 
 ### Precedence and skills
@@ -107,13 +159,13 @@ a moved checkout has stale virtual-environment activation paths or tool shebangs
 The fast wrapper uses installed Jinja2/pytest and the available Node.js executable;
 it installs nothing. It compiles all current templates without importing the
 backend, runs `node --check` on the three application JavaScript files, and runs
-only these existing test node IDs from `tests/test_c16c2_console.py`:
+only these existing test node IDs from `tests/test_web.py`:
 
-- `test_c16c2_dashboard_renders_approved_shell`: renders the real dashboard and
+- `test_c16c2_dashboard_lists_runs_with_kept_tokens`: renders the real dashboard and
   checks shell hooks, CSS/JS links, navigation, and absence of prototype controls.
-- `test_c16c2_run_detail_renders_inspector_and_actions`: renders seeded running and
+- `test_c16c2_run_detail_renders_status_evidence_and_actions`: renders seeded running and
   completed runs; checks tabs and action links without executing those actions.
-- `test_c16c2_missing_run_keeps_shell`: verifies the 404 page keeps the shared shell.
+- `test_c16c2_missing_run_keeps_minimal_page`: verifies the 404 page keeps the shared shell.
 - `test_c16c2_console_assets_are_served`: verifies all application CSS/JS assets
   return HTTP 200 with nonempty content.
 
@@ -128,7 +180,7 @@ the smallest existing affected GET/render checks by exact node ID, e.g.:
 
 ```bash
 bash scripts/gate-ui-fast.sh \
-  tests/test_c16c2_console.py::test_c16c2_owner_pages_keep_forms
+  tests/test_web.py::test_c16c2_owner_pages_keep_forms
 ```
 
 That existing test seeds routing test state and GET-renders access, routing, and

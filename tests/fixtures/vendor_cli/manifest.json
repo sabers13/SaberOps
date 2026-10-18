@@ -1,0 +1,177 @@
+{
+  "version": 1,
+  "fixtures": [
+    {
+      "vendor": "codex",
+      "cli": "codex",
+      "cli_version": "codex-cli 0.162.1",
+      "captured_on": "2026-10-16",
+      "kind": "config_help",
+      "source": "real-capture",
+      "redacted": true,
+      "file": "codex/codex-cli-0.162.1/config_help.txt",
+      "consumer": "saberops.workers.codex:CodexAdapter",
+      "expect": {
+        "flags": [
+          "--cd",
+          "--ephemeral",
+          "--ignore-user-config",
+          "--image",
+          "--json",
+          "--model",
+          "--sandbox",
+          "--skip-git-repo-check",
+          "-c",
+          "exec",
+          "resume"
+        ]
+      },
+      "provenance": "Installed CLI on the HV-1 host, 2026-10-16: `codex --version`, `codex --help`, `codex exec --help`, `codex resume --help` (token-free, owner-kept D-0015)."
+    },
+    {
+      "vendor": "claude",
+      "cli": "claude",
+      "cli_version": "2.1.301 (Claude Code)",
+      "captured_on": "2026-10-16",
+      "kind": "config_help",
+      "source": "real-capture",
+      "redacted": true,
+      "file": "claude/2.1.301-claude-code/config_help.txt",
+      "consumer": "saberops.workers.claude:ClaudeCodeAdapter",
+      "expect": {
+        "flags": [
+          "--allowedTools",
+          "--include-partial-messages",
+          "--input-format",
+          "--mcp-config",
+          "--model",
+          "--no-session-persistence",
+          "--output-format",
+          "--permission-mode",
+          "--print",
+          "--resume",
+          "--setting-sources",
+          "--settings",
+          "--strict-mcp-config",
+          "--tools",
+          "--verbose",
+          "auth",
+          "--json",
+          "status"
+        ]
+      },
+      "provenance": "Installed CLI on the HV-1 host, 2026-10-16: `claude --version`, `claude --help`, `claude auth --help` (token-free, owner-kept D-0015)."
+    },
+    {
+      "vendor": "opencode",
+      "cli": "opencode",
+      "cli_version": "opencode v2.0.29",
+      "captured_on": "2026-10-16",
+      "kind": "config_help",
+      "source": "real-capture",
+      "redacted": true,
+      "file": "opencode/opencode-v2.0.29/config_help.txt",
+      "consumer": "saberops.workers.opencode:OpenCodeAdapter",
+      "expect": {
+        "flags": [
+          "--agent",
+          "--format",
+          "--hostname",
+          "--model",
+          "--port",
+          "--session",
+          "models",
+          "run",
+          "serve"
+        ]
+      },
+      "provenance": "Installed CLI on the HV-1 host, 2026-10-16: `opencode --version`, `opencode --help`, `opencode run --help`, `opencode models --help` (token-free, owner-kept D-0015). HV-1 finding F1: the v2.0.29 help has no --pure/--dir. Step 024 (HV-2): the capture was extended token-free with `opencode serve --help` so the serve site's flags (--hostname/--port) are covered, and the F1 flags were removed from the adapters."
+    }
+  ],
+  "fake_only": [
+    {
+      "vendor": "codex",
+      "kind": "usage_json",
+      "consumer": "saberops.cli_usage.parse_limits",
+      "reason": "No owner-supplied raw rateLimitsByLimitId payload; read_limits only returns parsed rows. Owner-declined 2026-10-16 (D-0016)."
+    },
+    {
+      "vendor": "codex",
+      "kind": "usage_json",
+      "consumer": "saberops.capacity.probes.duration_to_window",
+      "reason": "Consumes the parse_limits duration field; no real windowed-duration payload committed (owner-declined 2026-10-16, D-0016)."
+    },
+    {
+      "vendor": "claude",
+      "kind": "usage_panel",
+      "consumer": "saberops.native_usage_panel.parse_panel",
+      "reason": "No real /usage panel text: read_panel returns parsed rows only. Owner-declined 2026-10-16 (D-0016)."
+    },
+    {
+      "vendor": "claude",
+      "kind": "usage_panel",
+      "consumer": "saberops.capacity.probes.parse_claude_reset_text",
+      "reason": "No real panel reset_text committed; owner-declined 2026-10-16 (D-0016)."
+    },
+    {
+      "vendor": "opencode",
+      "kind": "usage_json",
+      "consumer": "saberops.opencode_go_usage.parse_go_limits",
+      "reason": "No real OpenCode Go usage JSON: read_go_limits returns parsed rows only. Owner-declined 2026-10-16 (D-0016)."
+    },
+    {
+      "vendor": "codex",
+      "kind": "exhaustion",
+      "consumer": "saberops.workers.exhaustion.classify_codex",
+      "reason": "No owner-supplied exhaustion log (owner-declined 2026-10-16, D-0016); third-party lead in .orch/R-001/findings.md (harness-cli-normalizer #325 / codex #43337 dual error+turn.failed envelope) is covered as a constant in tests/test_plan_exhaustion.py."
+    },
+    {
+      "vendor": "claude",
+      "kind": "exhaustion",
+      "consumer": "saberops.workers.exhaustion.classify_claude",
+      "reason": "No owner-supplied exhaustion log (owner-declined 2026-10-16, D-0016); third-party leads in .orch/R-001/findings.md (rhei #451 session-limit prose, thirdshift #587 usage_limit_reached JSON) are covered as constants in tests/test_plan_exhaustion.py."
+    },
+    {
+      "vendor": "opencode",
+      "kind": "exhaustion",
+      "consumer": "saberops.workers.exhaustion.classify_opencode",
+      "reason": "No owner-supplied exhaustion log (owner-declined 2026-10-16, D-0016); third-party leads in .orch/R-001/findings.md (coforge PR #749 Zen pool quota, relevo #616 ClinePass weekly limit) are covered as constants in tests/test_plan_exhaustion.py."
+    },
+    {
+      "vendor": "antigravity",
+      "kind": "usage_panel",
+      "consumer": "saberops.native_usage_panel.parse_panel",
+      "reason": "No installed Antigravity CLI on this host; stays fake-only per the HV-1 prompt."
+    },
+    {
+      "vendor": "antigravity",
+      "kind": "usage_json",
+      "consumer": "saberops.workers.exhaustion.parse_antigravity_usage",
+      "reason": "No installed Antigravity CLI on this host; the R-001 /usage capture is truncated (remaining_fraction 0.31...) so it cannot be a byte-exact fixture."
+    },
+    {
+      "vendor": "antigravity",
+      "kind": "exhaustion",
+      "consumer": "saberops.workers.exhaustion.classify_antigravity",
+      "reason": "PROVISIONAL text rule; no installed CLI to confirm the RESOURCE_EXHAUSTED/AGY_ERROR wording."
+    },
+    {
+      "vendor": "antigravity",
+      "kind": "config_help",
+      "consumer": "saberops.workers.antigravity:AntigravityAdapter",
+      "reason": "No installed Antigravity CLI on this host."
+    },
+    {
+      "vendor": "cline",
+      "kind": "exhaustion",
+      "consumer": "saberops.workers.exhaustion.classify_cline",
+      "reason": "PROVISIONAL text-only rule; no verified exact Cline CLI limit signal and no installed CLI."
+    },
+    {
+      "vendor": "cline",
+      "kind": "config_help",
+      "consumer": "saberops.workers.cline:ClineAdapter",
+      "reason": "No installed Cline CLI on this host."
+    }
+  ]
+}

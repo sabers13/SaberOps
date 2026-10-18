@@ -143,6 +143,67 @@ def validate_candidate_sha(sha: object) -> str:
     return sha
 
 
+# Engine-owned WIP checkpoint refs (ADR-0002 D8, M2-5):
+# ``refs/saberops/checkpoints/<job_id>/<n>``.  Anchoring the preemption
+# checkpoint under this exact namespace keeps the WIP commit reachable
+# after worktree retirement plus ``git gc``.  The ref is engine-owned and
+# never a branch: nothing ever checks it out, merges it, or pushes it, and
+# it is never deleted before the approved retention window (ADR-0003 D6).
+CHECKPOINT_REF_PREFIX: Final = "refs/saberops/checkpoints/"
+
+# Job identities admitted into a checkpoint ref name.  The ref is built by
+# exact interpolation of a validated job_id and a bounded integer index --
+# never by embedding caller-supplied ref text -- so symlink/ref injection
+# (``..``, ``@{``, ``:``, whitespace, control characters) cannot smuggle an
+# unrelated user ref or branch into the update.
+_JOB_ID_RE: Final = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+# Upper bound for the monotonic per-job checkpoint index.  The preemption
+# bound (default 5) makes this unreachable in normal operation; the cap
+# exists so a malformed index can never spray unbounded refs.
+MAX_CHECKPOINT_INDEX: Final = 64
+
+# Expected-old sentinel for a create-only checkpoint ref transaction: the
+# all-zero object id means "this exact ref must not exist yet".  Combined with
+# ``git update-ref --no-deref`` it turns anchoring into an atomic
+# create-or-nothing compare-and-swap instead of an unconditional overwrite, so
+# a ref (or symbolic ref) injected at the allocated name can never be silently
+# replaced.
+_NULL_OID: Final = "0" * 40
+
+
+def validate_checkpoint_ref(job_id: object, index: object) -> str:
+    """Build the exact engine-owned checkpoint ref for a job, failing closed.
+
+    Only ``refs/saberops/checkpoints/<job_id>/<n>`` with a validated
+    job_id and a bounded integer ``n`` is ever produced.  Any other shape
+    -- including a caller-supplied full ref, a negative/oversized index,
+    or a job_id outside ``[A-Za-z0-9_-]{1,64}`` -- raises instead of
+    touching Git.
+    """
+    if not isinstance(job_id, str) or not _JOB_ID_RE.match(job_id):
+        raise CandidatePublicationError(
+            "Refusing checkpoint ref: job_id must match "
+            f"[A-Za-z0-9_-]{{1,64}}, got {str(job_id)[:64]!r}"
+        )
+    if isinstance(index, bool) or not isinstance(index, int):
+        raise CandidatePublicationError(
+            "Refusing checkpoint ref: index must be an int, "
+            f"got {str(index)[:64]!r}"
+        )
+    if not 0 <= index <= MAX_CHECKPOINT_INDEX:
+        raise CandidatePublicationError(
+            "Refusing checkpoint ref: index out of bounds "
+            f"[0, {MAX_CHECKPOINT_INDEX}], got {index!r}"
+        )
+    ref = f"{CHECKPOINT_REF_PREFIX}{job_id}/{index}"
+    if _REF_DANGEROUS_RE.search(ref):
+        raise CandidatePublicationError(
+            f"Refusing checkpoint ref: unsafe characters in {ref!r}"
+        )
+    return ref
+
+
 class WorktreeMetadataLockError(RuntimeError):
     """Repository worktree-metadata serialization could not be established.
 
@@ -246,6 +307,78 @@ def _serialized_worktree_metadata_mutation(repo_path: Path | str) -> Iterator[No
                 pass
     finally:
         os.close(fd)
+
+
+class BranchDeletionRefused(RuntimeError):
+    """Native ``git branch -d`` refused to delete a local branch.
+
+    A refusal is a safety outcome, never something to bypass: the branch is
+    still referenced by a worktree, is not reachable from the approved tip, or
+    was not fully merged.  The GC executor reports it and keeps the branch.
+    """
+
+
+@dataclass(frozen=True)
+class WorktreeRegistration:
+    """One ``git worktree list --porcelain`` entry (read-only registration)."""
+
+    path: str
+    head: str | None
+    branch: str | None
+    detached: bool
+    locked: bool
+    lock_reason: str | None
+    prunable: bool
+
+
+def parse_worktree_porcelain(text: str) -> tuple[WorktreeRegistration, ...]:
+    """Parse ``git worktree list --porcelain`` output deterministically.
+
+    Records are separated by blank lines; keys are ``worktree``, ``HEAD``,
+    ``branch``, ``detached``, ``locked [reason]`` and ``prunable [reason]``.
+    Unknown keys are ignored.  An entry with no ``worktree`` line is skipped
+    rather than guessed at.
+    """
+    entries: list[WorktreeRegistration] = []
+    current: dict[str, str] = {}
+    flags: set[str] = set()
+
+    def _flush() -> None:
+        path = current.get("worktree")
+        if not path:
+            return
+        branch_ref = current.get("branch")
+        entries.append(
+            WorktreeRegistration(
+                path=path,
+                head=current.get("HEAD"),
+                branch=branch_ref[len("refs/heads/"):] if branch_ref else None,
+                detached="detached" in flags,
+                locked="locked" in flags,
+                lock_reason=current.get("locked"),
+                prunable="prunable" in flags,
+            )
+        )
+
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip("\n")
+        if line.strip() == "":
+            _flush()
+            current = {}
+            flags = set()
+            continue
+        key, _, value = line.partition(" ")
+        if key in ("locked", "prunable"):
+            flags.add(key)
+            if value:
+                current[key] = value
+            continue
+        if value == "":
+            flags.add(key)
+            continue
+        current[key] = value
+    _flush()
+    return tuple(entries)
 
 
 class GitManager:
@@ -562,6 +695,319 @@ class GitManager:
                 f"{redact_remote_secrets(result.stderr).strip()[:500]}"
             )
         return target
+
+    @staticmethod
+    def _checkpoint_ref_state(repo: Path, ref: str) -> tuple[str, str | None]:
+        """Classify *ref* WITHOUT ever dereferencing a symbolic ref.
+
+        Returns ``("absent", None)`` when the exact ref does not exist,
+        ``("symbolic", <referent>)`` when it is a symbolic ref (including a
+        dangling one), and ``("direct", <commit-sha>)`` when it is a direct ref
+        that resolves to a commit object.
+
+        ``git symbolic-ref`` is consulted first on purpose: ``for-each-ref``
+        reports a symbolic ref's *dereferenced* object name (and omits a
+        dangling one entirely), and ``rev-parse`` follows the symlink.  Either
+        would let an injected ref laundering a user branch masquerade as an
+        engine checkpoint anchor, so classification must never follow it.
+        """
+        symbolic = run_process(["git", "symbolic-ref", "--quiet", ref], cwd=repo)
+        if symbolic.exit_code == 0:
+            return ("symbolic", symbolic.stdout.strip() or None)
+        if symbolic.exit_code != 1:
+            raise CandidatePublicationError(
+                f"Refusing checkpoint: cannot classify ref '{ref}': "
+                f"{redact_remote_secrets(symbolic.stderr).strip()[:500]}"
+            )
+        resolved = run_process(
+            ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+            cwd=repo,
+        )
+        if resolved.passed and resolved.stdout.strip():
+            return ("direct", resolved.stdout.strip())
+        return ("absent", None)
+
+    @staticmethod
+    def anchor_checkpoint_ref(
+        repo_path: Path | str, job_id: str, index: int, sha: str
+    ) -> str:
+        """Anchor a verified checkpoint SHA under the engine-owned ref, safely.
+
+        Writes exactly ``refs/saberops/checkpoints/<job_id>/<n>`` (see
+        :func:`validate_checkpoint_ref`) as a *direct* ref using an atomic
+        create-only compare-and-swap::
+
+            git update-ref --no-deref <ref> <sha> <all-zero-oid>
+
+        which Git accepts only when the exact ref name does not already exist.
+        This replaces the previous unconditional ``git update-ref <ref> <sha>``,
+        under which an injected ref at the allocated name was silently
+        overwritten and a symbolic ref was transparently followed into an
+        unrelated user branch.
+
+        Properties, all fail-closed and with no partial mutation:
+
+        - the target must be a commit object resolving to the exact ``sha``;
+        - a symbolic ref at the name is refused (never dereferenced, never
+          rewritten), including a dangling one;
+        - a pre-existing *direct* ref at the name with a different SHA is
+          refused and left untouched;
+        - a pre-existing *direct* ref with the identical SHA is reused
+          idempotently -- reuse is never permission to overwrite;
+        - a concurrent create between classification and the update loses the
+          compare-and-swap and raises;
+        - the anchor is re-read (direct kind, exact SHA) before being reported
+          durable.
+
+        Raises:
+            CandidatePublicationError: malformed job/index/SHA, a missing or
+                non-commit target, or a symbolic / otherwise non-direct ref.
+            GitRefRaceError: the create-only compare-and-swap lost a race with
+                a concurrent writer that installed or changed the ref.
+        """
+        ref = validate_checkpoint_ref(job_id, index)
+        target = validate_candidate_sha(sha)
+        repo = Path(repo_path).resolve()
+
+        exists = run_process(
+            ["git", "rev-parse", "--verify", "--quiet", f"{target}^{{commit}}"],
+            cwd=repo,
+        )
+        if not exists.passed or exists.stdout.strip() != target:
+            raise CandidatePublicationError(
+                f"Refusing checkpoint: target {target[:8]} does not resolve to "
+                "that exact commit object"
+            )
+
+        kind, current = GitManager._checkpoint_ref_state(repo, ref)
+        if kind == "symbolic":
+            raise CandidatePublicationError(
+                f"Refusing checkpoint: '{ref}' is a symbolic ref to "
+                f"{str(current)[:64]!r}; engine checkpoint refs must be direct"
+            )
+        if kind == "direct":
+            if current == target:
+                return ref
+            raise GitRefRaceError(
+                f"Refusing checkpoint: '{ref}' already anchors "
+                f"{str(current)[:8]}, not {target[:8]}; refusing to overwrite"
+            )
+
+        created = run_process(
+            ["git", "update-ref", "--no-deref", ref, target, _NULL_OID], cwd=repo
+        )
+        if not created.passed:
+            raise GitRefRaceError(
+                f"Refusing checkpoint: create-only update of '{ref}' failed: "
+                f"{redact_remote_secrets(created.stderr).strip()[:500]}"
+            )
+        kind, current = GitManager._checkpoint_ref_state(repo, ref)
+        if kind != "direct" or current != target:
+            raise CandidatePublicationError(
+                f"Refusing checkpoint: ref '{ref}' did not settle as a durable "
+                f"direct anchor (kind={kind!r}, value={str(current)[:64]!r})"
+            )
+        return ref
+
+    @staticmethod
+    def read_checkpoint_ref(
+        repo_path: Path | str, job_id: str, index: int
+    ) -> str | None:
+        """Read one engine-owned direct checkpoint ref, or None when absent.
+
+        A symbolic ref at the name is never dereferenced: an injected symlink
+        must never be reported as a verified checkpoint anchor, so it fails
+        closed with :class:`CandidatePublicationError` rather than returning
+        the referent branch's commit.
+        """
+        ref = validate_checkpoint_ref(job_id, index)
+        kind, value = GitManager._checkpoint_ref_state(Path(repo_path).resolve(), ref)
+        if kind == "symbolic":
+            raise CandidatePublicationError(
+                f"Refusing checkpoint read: '{ref}' is a symbolic ref to "
+                f"{str(value)[:64]!r}, not a direct anchor"
+            )
+        return value if kind == "direct" else None
+
+    @staticmethod
+    def list_checkpoint_refs(repo_path: Path | str, job_id: str) -> dict[int, str]:
+        """List ``{index: sha}`` for every direct checkpoint ref owned by *job_id*.
+
+        The listing is fail-closed: any symbolic ref inside the job's checkpoint
+        namespace raises instead of being dereferenced into a plausible-looking
+        anchor, so a symlink injection can never be reused -- or reported -- as
+        a durable direct checkpoint ref.
+        """
+        if not isinstance(job_id, str) or not _JOB_ID_RE.match(job_id):
+            raise CandidatePublicationError(
+                "Refusing checkpoint listing: job_id must match "
+                f"[A-Za-z0-9_-]{{1,64}}, got {str(job_id)[:64]!r}"
+            )
+        repo = Path(repo_path).resolve()
+        pattern = f"{CHECKPOINT_REF_PREFIX}{job_id}/"
+        result = run_process(
+            [
+                "git",
+                "for-each-ref",
+                "--format=%(refname) %(objectname) %(symref)",
+                pattern,
+            ],
+            cwd=repo,
+        )
+        if not result.passed:
+            raise CandidatePublicationError(
+                "Checkpoint listing failed: "
+                f"{redact_remote_secrets(result.stderr).strip()[:500]}"
+            )
+        out: dict[int, str] = {}
+        for line in result.stdout.splitlines():
+            parts = line.strip().split()
+            if len(parts) < 2 or not parts[0].startswith(pattern):
+                continue
+            refname, sha = parts[0], parts[1]
+            if len(parts) >= 3:
+                raise CandidatePublicationError(
+                    f"Refusing checkpoint listing: '{refname}' is a symbolic ref "
+                    f"to '{parts[2]}'; engine checkpoint refs must be direct"
+                )
+            try:
+                index = int(refname[len(pattern):])
+            except ValueError:
+                continue
+            if 0 <= index <= MAX_CHECKPOINT_INDEX and re.fullmatch(
+                r"[0-9a-f]{40}", sha
+            ):
+                out[index] = sha
+        return out
+
+    @staticmethod
+    def list_worktrees(repo_path: Path | str) -> tuple[WorktreeRegistration, ...]:
+        """Enumerate every registered worktree of the repository (read-only)."""
+        repo = Path(repo_path).resolve()
+        res = run_process(["git", "worktree", "list", "--porcelain"], cwd=repo)
+        if not res.passed:
+            raise RuntimeError(
+                f"Failed to list git worktrees in {repo}: "
+                f"{redact_remote_secrets(res.stderr).strip()[:500]}"
+            )
+        return parse_worktree_porcelain(res.stdout)
+
+    @staticmethod
+    def list_local_branches(repo_path: Path | str) -> dict[str, str]:
+        """Return ``{branch_name: sha}`` for every local branch (read-only)."""
+        repo = Path(repo_path).resolve()
+        res = run_process(
+            [
+                "git",
+                "for-each-ref",
+                "--format=%(refname:short) %(objectname)",
+                "refs/heads/",
+            ],
+            cwd=repo,
+        )
+        if not res.passed:
+            raise RuntimeError(
+                f"Failed to list local branches in {repo}: "
+                f"{redact_remote_secrets(res.stderr).strip()[:500]}"
+            )
+        out: dict[str, str] = {}
+        for line in res.stdout.splitlines():
+            parts = line.strip().split()
+            if len(parts) != 2:
+                continue
+            name, sha = parts
+            if name and len(sha) == 40:
+                out[name] = sha
+        return out
+
+    @staticmethod
+    def branch_tip(repo_path: Path | str, branch: str) -> str | None:
+        """Return the commit SHA a local branch points at, or None if absent."""
+        repo = Path(repo_path).resolve()
+        res = run_process(
+            ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=repo
+        )
+        return res.stdout.strip() if res.passed and res.stdout.strip() else None
+
+    @staticmethod
+    def validate_local_branch_name(branch: object) -> str:
+        """Validate a local branch name with Git's own rules, failing closed."""
+        if not isinstance(branch, str) or not branch:
+            raise BranchDeletionRefused(f"invalid branch name: {str(branch)[:64]!r}")
+        if _REF_DANGEROUS_RE.search(branch) or branch.startswith("-"):
+            raise BranchDeletionRefused(f"unsafe branch name: {branch[:64]!r}")
+        return branch
+
+    @staticmethod
+    def delete_branch(repo_path: Path | str, branch: str, *, force: bool = False) -> None:
+        """Delete one local branch with native Git, refusing unless fully merged.
+
+        Defaults to ``git branch -d`` (no force): Git itself refuses a branch
+        that is not merged and a branch checked out in any worktree, and that
+        refusal is propagated unchanged.  ``force=True`` uses ``git branch -D``
+        and is only ever passed from a call path that has already independently
+        proven the exact approved reachability.  No remote branch or history
+        rewrite is involved.
+        """
+        name = GitManager.validate_local_branch_name(branch)
+        repo = Path(repo_path).resolve()
+        flag = "-D" if force else "-d"
+        with _serialized_worktree_metadata_mutation(repo):
+            res = run_process(["git", "branch", flag, name], cwd=repo)
+        if not res.passed:
+            raise BranchDeletionRefused(
+                f"Git refused to delete local branch '{name}' (exit {res.exit_code}): "
+                f"{redact_remote_secrets(res.stderr).strip()[:500]}"
+            )
+
+    @staticmethod
+    def delete_checkpoint_ref(
+        repo_path: Path | str, ref: str, *, expected_sha: str | None = None
+    ) -> None:
+        """Delete one engine-owned direct checkpoint ref, optionally CAS-checked.
+
+        Refuses a symbolic or otherwise non-direct ref so deletion can never
+        remove a user branch masquerading inside the checkpoint namespace.  When
+        ``expected_sha`` is supplied the ref is deleted with
+        ``git update-ref -d <ref> <old>``, which succeeds only if the ref still
+        points at that exact commit -- so a ref moved between preview and apply
+        is refused rather than silently deleted.
+        """
+        if not ref.startswith(CHECKPOINT_REF_PREFIX) or _REF_DANGEROUS_RE.search(ref):
+            raise CandidatePublicationError(f"Refusing to delete unsafe checkpoint ref {ref!r}")
+        repo = Path(repo_path).resolve()
+        kind, value = GitManager._checkpoint_ref_state(repo, ref)
+        if kind == "symbolic":
+            raise CandidatePublicationError(
+                f"Refusing to delete symbolic checkpoint ref {ref!r}"
+            )
+        if kind == "absent":
+            return
+        if expected_sha is not None and value != expected_sha:
+            raise CandidatePublicationError(
+                f"Refusing to delete checkpoint ref {ref!r}: expected {expected_sha[:8]}, "
+                f"found {str(value)[:8]}"
+            )
+        cmd = ["git", "update-ref", "-d", ref]
+        if expected_sha is not None:
+            cmd.append(expected_sha)
+        with _serialized_worktree_metadata_mutation(repo):
+            res = run_process(cmd, cwd=repo)
+        if not res.passed:
+            raise CandidatePublicationError(
+                f"Refusing/deletion failed for checkpoint ref {ref!r}: "
+                f"{redact_remote_secrets(res.stderr).strip()[:500]}"
+            )
+
+    @staticmethod
+    def commit_exists(repo_path: Path | str, sha: str) -> bool:
+        """Return True iff *sha* resolves to an existing commit object."""
+        target = validate_candidate_sha(sha)
+        res = run_process(
+            ["git", "cat-file", "-e", f"{target}^{{commit}}"],
+            cwd=Path(repo_path).resolve(),
+        )
+        return res.passed
 
     @staticmethod
     def sync_index_worktree(repo_path: Path | str) -> None:

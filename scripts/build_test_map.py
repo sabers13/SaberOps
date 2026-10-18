@@ -30,7 +30,20 @@ rcfile is temporary; the repo's own coverage settings are left alone).
 
 Usage:
     python scripts/build_test_map.py [--repo PATH] [--map DIR] [--no-subprocesses]
+        [--no-slot] [--wave-barrier] [--reuse-if-current]
     python scripts/build_test_map.py --from-data PATH/TO/.coverage --build-seconds S
+
+Wave consolidation policy (D-0076 item 3): in a multi-lane wave, intermediate
+lane gates run with ``--reuse-if-current`` (a no-op once the map covers HEAD)
+and the map is rebuilt once at the consolidation barrier with ``--wave-barrier``,
+so concurrent integrators do not each monopolise the heavy slot.
+
+The full suite runs once under coverage.py with pytest-xdist
+(``-n <SABEROPS_MAP_WORKERS|SABEROPS_GATE_WORKERS|4> --dist worksteal``);
+``parallel = true`` plus ``coverage combine`` merge the per-worker shard
+contexts.  The run holds the exclusive heavy-gate slot (via
+``scripts/gate_tools.py exclusive``) so it never competes with another gate;
+``--no-slot`` skips that for recovery/seed runs only.
 """
 
 from __future__ import annotations
@@ -52,6 +65,203 @@ MAP_DIRNAME = "saberops-test-map"
 MAP_META = "meta.json"
 MAP_FILES = "files"
 MAP_VERSION = 2
+
+# D-0061: a conservative default cap keeps coverage-map peak RAM in the
+# owner-declared ~1.8-2.4 GiB band instead of the uncapped serial/8-worker run.
+DEFAULT_MAP_WORKERS = 4
+SABEROPS_MAP_WORKERS_ENV = "SABEROPS_MAP_WORKERS"
+SABEROPS_GATE_WORKERS_ENV = "SABEROPS_GATE_WORKERS"
+
+
+def positive_int_env(name: str, default: int) -> int:
+    """Return a positive int from ``name``; malformed values keep the cap."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        print(f"warning: {name}={raw!r} is not an integer; using {default}", flush=True)
+        return default
+    if value < 1:
+        print(f"warning: {name}={raw!r} must be >= 1; using {default}", flush=True)
+        return default
+    return value
+
+
+def map_workers() -> int:
+    """Worker count for the coverage suite: map knob, then gate knob, then RAM.
+
+    The final fallback is the D-0076 worker auto-scaling
+    (``max(1, min(cores, MemAvailable // 0.6 GiB))``) so the map build sizes
+    itself to the live machine; an explicit env knob still wins.
+    """
+    if os.environ.get(SABEROPS_MAP_WORKERS_ENV, "").strip():
+        return positive_int_env(SABEROPS_MAP_WORKERS_ENV, DEFAULT_MAP_WORKERS)
+    if os.environ.get(SABEROPS_GATE_WORKERS_ENV, "").strip():
+        return positive_int_env(SABEROPS_GATE_WORKERS_ENV, DEFAULT_MAP_WORKERS)
+    return dynamic_worker_count()
+
+
+#: Per worker-session memory estimate used by the D-0076 auto-scaling formula.
+WORKER_SESSION_GIB = 0.6
+_MEMINFO_PATH = Path("/proc/meminfo")
+
+
+def _read_meminfo_bytes() -> dict[str, int]:
+    """Parse ``/proc/meminfo`` into ``{field: bytes}``; empty when unreadable."""
+    try:
+        text = _MEMINFO_PATH.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    values: dict[str, int] = {}
+    for line in text.splitlines():
+        key, sep, rest = line.partition(":")
+        if not sep:
+            continue
+        parts = rest.split()
+        if not parts:
+            continue
+        try:
+            values[key.strip()] = int(parts[0]) * 1024
+        except ValueError:
+            continue
+    return values
+
+
+def available_memory_bytes() -> int | None:
+    """Available memory in bytes via ``MemAvailable`` then an ``sysconf`` fallback."""
+    info = _read_meminfo_bytes()
+    if "MemAvailable" in info:
+        return info["MemAvailable"]
+    try:
+        pages = int(os.sysconf("SC_AVPHYS_PAGES"))
+        size = int(os.sysconf("SC_PAGE_SIZE"))
+    except (ValueError, OSError, AttributeError):
+        return None
+    return pages * size if pages > 0 and size > 0 else None
+
+
+def cpu_core_count() -> int:
+    return max(1, os.cpu_count() or 1)
+
+
+def dynamic_worker_count(
+    available_bytes: int | None = None, cpu_cores: int | None = None
+) -> int:
+    """``max(1, min(cpu_cores, int(MemAvailable // 0.6GiB)))`` (D-0076).
+
+    An unreadable ``/proc/meminfo`` keeps the conservative ``DEFAULT_MAP_WORKERS``
+    cap instead of restoring uncapped parallelism.
+    """
+    available = available_memory_bytes() if available_bytes is None else available_bytes
+    cores = cpu_core_count() if cpu_cores is None else cpu_cores
+    if available is None:
+        return min(cores, DEFAULT_MAP_WORKERS)
+    by_ram = int(available // int(WORKER_SESSION_GIB * 1024**3))
+    return max(1, min(cores, by_ram))
+
+
+# ---------------------------------------------------------------------------
+# Wave consolidation test-map policy (D-0076 item 3)
+# ---------------------------------------------------------------------------
+#
+# Rebuilding the coverage map runs the whole suite under coverage (~10 minutes)
+# while holding the exclusive heavy slot.  In a multi-lane wave that is wasteful
+# and serializes concurrent integrators.  Policy: intermediate lane gates call
+# ``--reuse-if-current`` (a no-op when the existing map already covers HEAD) and
+# the map is rebuilt once, at the wave consolidation barrier, with
+# ``--wave-barrier``.
+
+
+def map_commit(map_dir: Path) -> str:
+    """Return the commit sha the existing map was built from, or ``""``."""
+    try:
+        data = json.loads((map_dir / MAP_META).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    commit = data.get("commit") if isinstance(data, dict) else None
+    return commit if isinstance(commit, str) else ""
+
+
+def map_is_current(map_dir: Path, repo: Path, head: str) -> bool:
+    """True when the existing map's build commit is an ancestor of ``head``.
+
+    That is exactly the selector's own freshness rule, so a map this reports as
+    current is one ``scripts/select_tests.py`` will trust rather than fall back
+    from.
+    """
+    commit = map_commit(map_dir)
+    if not commit:
+        return False
+    completed = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", commit, head],
+        cwd=repo,
+        check=False,
+        capture_output=True,
+    )
+    return completed.returncode == 0
+
+
+def wave_barrier_decision(
+    map_dir: Path,
+    repo: Path,
+    head: str,
+    *,
+    wave_barrier: bool,
+    reuse_if_current: bool,
+) -> str:
+    """Return ``"rebuild"`` or ``"reuse"`` for one map invocation.
+
+    ``--wave-barrier`` always rebuilds (it *is* the single consolidated build).
+    ``--reuse-if-current`` skips the rebuild when the map already covers HEAD,
+    which is what makes an intermediate lane invocation a cheap no-op instead of
+    a redundant heavy-slot monopoly.  Without either flag the historical
+    behaviour (always rebuild) is preserved.
+    """
+    if wave_barrier:
+        return "rebuild"
+    if reuse_if_current and map_is_current(map_dir, repo, head):
+        return "reuse"
+    return "rebuild"
+
+
+def suite_command(python: str, rcfile: Path, plugin_module: str, workers: int) -> list[str]:
+    """The parallel coverage suite argv (xdist worksteal, shared contexts).
+
+    ``parallel = true`` plus ``coverage combine`` merge the per-worker shard
+    contexts, so a single xdist run replaces the old single-process serial run.
+    """
+    return [
+        python,
+        "-m",
+        "coverage",
+        "run",
+        f"--rcfile={rcfile}",
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "-p",
+        plugin_module,
+        "-n",
+        str(workers),
+        "--dist",
+        "worksteal",
+    ]
+
+
+def exclusive_command(python: str, command: list[str]) -> list[str]:
+    """Wrap ``command`` in the canonical exclusive heavy-gate slot.
+
+    Reuses ``scripts/gate_tools.py exclusive`` so the map build takes exactly
+    the full gate's heavy slot (and drains all light slots) instead of running
+    the suite while another gate is live (D-0061 item 3).
+    """
+    tools = Path(__file__).resolve().parent / "gate_tools.py"
+    return [python, str(tools), "exclusive", "--", *command]
+
 
 # Imported automatically by every Python child that inherits our PYTHONPATH entry.
 # process_startup() is a no-op unless COVERAGE_PROCESS_START points at an rcfile,
@@ -295,6 +505,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="do not set COVERAGE_PROCESS_START/sitecustomize for test children",
     )
     parser.add_argument(
+        "--no-slot",
+        action="store_true",
+        help="skip the exclusive heavy-gate slot (recovery/seeding only)",
+    )
+    parser.add_argument(
+        "--wave-barrier",
+        action="store_true",
+        help=("this invocation is the wave consolidation barrier: the single "
+              "intended test-map rebuild for the wave"),
+    )
+    parser.add_argument(
+        "--reuse-if-current",
+        action="store_true",
+        help=("skip the rebuild when the existing map already covers HEAD "
+              "(the no-op path for intermediate lane gates)"),
+    )
+    parser.add_argument(
         "--from-data",
         default=None,
         help=("reuse an existing combined coverage data file instead of running "
@@ -322,6 +549,22 @@ def main(argv: list[str] | None = None) -> int:
     commit = _git(repo, "rev-parse", "HEAD")
     map_dir = Path(args.map) if args.map else default_map_dir(repo)
     with_subprocesses = not args.no_subprocesses
+
+    if args.wave_barrier:
+        print("wave consolidation barrier: single test-map rebuild for this wave")
+    decision = wave_barrier_decision(
+        map_dir,
+        repo,
+        commit,
+        wave_barrier=args.wave_barrier,
+        reuse_if_current=args.reuse_if_current,
+    )
+    if decision == "reuse":
+        print(
+            f"map {map_dir} already covers HEAD {commit[:12]} "
+            "(reuse-if-current); skipping rebuild"
+        )
+        return 0
 
     if args.from_data:
         if args.build_seconds is None:
@@ -369,11 +612,19 @@ def main(argv: list[str] | None = None) -> int:
         node_ids = collect_node_ids(python, repo)
         print(f"collected {len(node_ids)} test node IDs")
 
-        print("--- full suite under coverage (serial; xdist would shard contexts) ---")
+        workers = map_workers()
+        print(
+            f"--- full suite under coverage (parallel, -n {workers} --dist worksteal; "
+            "xdist shards merged by coverage combine) ---"
+        )
         started = time.monotonic()
+        suite_cmd = suite_command(python, rcfile, PLUGIN_MODULE, workers)
+        if args.no_slot:
+            print("exclusive heavy-gate slot: disabled by --no-slot")
+        else:
+            suite_cmd = exclusive_command(sys.executable, suite_cmd)
         suite = subprocess.run(
-            [python, "-m", "coverage", "run", f"--rcfile={rcfile}", "-m", "pytest", "-q",
-             "-p", "no:cacheprovider", "-p", PLUGIN_MODULE],
+            suite_cmd,
             cwd=repo,
             check=False,
             env=env,

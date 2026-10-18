@@ -31,8 +31,14 @@ else:  # pragma: no cover - typing only
 
 @contextmanager
 def owner_connection(db: Database) -> Iterator[sqlite3.Connection]:
-    """Open the owner DB with the same pragmas as Database._get_connection."""
+    """Open the owner DB with the same pragmas and D7 timeout as the class.
+
+    The busy timeout is the shared :data:`saberops.sqlite_policy.BUSY_TIMEOUT_MS`
+    (ADR-0003 D7) rather than a second, weaker 5 s value, so this store cannot
+    become an under-protected write path beside the main database helper.
+    """
     from saberops.db import Database as _Db
+    from saberops.sqlite_policy import BUSY_TIMEOUT_MS, SqliteBusyError, is_busy_error
 
     owner: _Db = db.owner_db if hasattr(db, "owner_db") else db
     path: Path = owner.db_path
@@ -41,17 +47,44 @@ def owner_connection(db: Database) -> Iterator[sqlite3.Connection]:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
     conn.execute("PRAGMA journal_mode = WAL;")
-    conn.execute("PRAGMA busy_timeout = 5000;")
+    conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS};")
     try:
         with conn:
             yield conn
+    except sqlite3.OperationalError as exc:
+        if is_busy_error(exc):
+            raise SqliteBusyError(
+                f"capacity store write at {path.name}: database is locked"
+            ) from exc
+        raise
     finally:
         conn.close()
 
 
+@contextmanager
+def owner_write_connection(
+    db: Database, *, total_seconds: float = 30.0
+) -> Iterator[sqlite3.Connection]:
+    """Open a bounded ``BEGIN IMMEDIATE`` write transaction on the owner DB.
+
+    ADR-0003 D7: WAL, a 30 s busy timeout narrowed to one shared deadline, a
+    single bounded ``BEGIN IMMEDIATE`` with backoff, commit on success and
+    rollback on failure.  Lock exhaustion raises a typed ``SqliteBusyError`` for
+    the owning scheduler/run boundary rather than a raw ``OperationalError``.
+    """
+    from saberops.db import Database as _Db
+    from saberops.sqlite_policy import bounded_write
+
+    owner: _Db = db.owner_db if hasattr(db, "owner_db") else db
+    path: Path = owner.db_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with bounded_write(path, total_seconds=total_seconds) as conn:
+        yield conn
+
+
 def ensure_tables(db: Database) -> None:
     """Create capacity tables idempotently."""
-    with owner_connection(db) as conn:
+    with owner_write_connection(db) as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS capacity_exclusions (
@@ -152,6 +185,17 @@ def ensure_tables(db: Database) -> None:
                 ON capacity_reservations (pool_id, window_id, state)
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS capacity_scheduler_lease (
+                lease_name TEXT PRIMARY KEY,
+                holder_id TEXT NOT NULL,
+                acquired_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                fencing_token INTEGER NOT NULL DEFAULT 1
+            )
+            """
+        )
         conn.commit()
 
 
@@ -202,7 +246,7 @@ def upsert_exclusion(
         next_probe_iso = _iso(backoff_next_probe(moment, 0, window))
     elif confidence == "HINT" and until_iso is None:
         next_probe_iso = _iso(backoff_next_probe(moment, 0, window))
-    with owner_connection(db) as conn:
+    with owner_write_connection(db) as conn:
         if scope is None:
             rows = conn.execute(
                 "SELECT * FROM capacity_exclusions WHERE pool_id = ? AND window_id = ?"
@@ -297,27 +341,35 @@ def list_active_exclusions(
     db: Database, *, now: datetime | None = None
 ) -> list[dict[str, object]]:
     """Return active + PROBE_DUE exclusions, expiring EXACT/PARSED inline."""
-    ensure_tables(db)
+    owner: Database = db.owner_db if hasattr(db, "owner_db") else db
+    is_ro = bool(getattr(owner, "read_only", False) or getattr(db, "read_only", False))
+    if not is_ro:
+        ensure_tables(db)
     moment = _utcnow(now)
-    with owner_connection(db) as conn:
-        rows = conn.execute(
-            "SELECT * FROM capacity_exclusions WHERE cleared_at IS NULL"
-            " ORDER BY created_at ASC, id ASC"
-        ).fetchall()
+    with owner._get_connection() as conn:
+        try:
+            rows = conn.execute(
+                "SELECT * FROM capacity_exclusions WHERE cleared_at IS NULL"
+                " ORDER BY created_at ASC, id ASC"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []
         result: list[dict[str, object]] = []
         for row in rows:
             exc = dict(row)
             state = exclusion_state(exc, moment)
             if state == "EXPIRED":
-                conn.execute(
-                    "UPDATE capacity_exclusions SET cleared_at = ?, cleared_by = ?"
-                    " WHERE id = ?",
-                    (moment.isoformat(), "EXPIRED", exc["id"]),
-                )
+                if not is_ro:
+                    conn.execute(
+                        "UPDATE capacity_exclusions SET cleared_at = ?, cleared_by = ?"
+                        " WHERE id = ?",
+                        (moment.isoformat(), "EXPIRED", exc["id"]),
+                    )
                 continue
             if state in ("ACTIVE", "PROBE_DUE"):
                 result.append(exc)
-        conn.commit()
+        if not is_ro:
+            conn.commit()
         return result
 
 
@@ -327,7 +379,7 @@ def clear_exclusion(
     """Mark one exclusion cleared."""
     ensure_tables(db)
     moment = _utcnow(now)
-    with owner_connection(db) as conn:
+    with owner_write_connection(db) as conn:
         conn.execute(
             "UPDATE capacity_exclusions SET cleared_at = ?, cleared_by = ?"
             " WHERE id = ? AND cleared_at IS NULL",
@@ -343,7 +395,7 @@ def clear_pool_exclusions(
     """Clear active exclusions for one pool (optionally one window)."""
     ensure_tables(db)
     moment = _utcnow(now)
-    with owner_connection(db) as conn:
+    with owner_write_connection(db) as conn:
         if window_id is None:
             cur = conn.execute(
                 "UPDATE capacity_exclusions SET cleared_at = ?, cleared_by = ?"
@@ -366,7 +418,7 @@ def bump_probe_attempt(
     """Increment probe attempts and recompute next_probe_at (UNKNOWN backoff)."""
     ensure_tables(db)
     moment = _utcnow(now)
-    with owner_connection(db) as conn:
+    with owner_write_connection(db) as conn:
         row = conn.execute(
             "SELECT * FROM capacity_exclusions WHERE id = ?", (exclusion_id,)
         ).fetchone()
@@ -391,7 +443,7 @@ def record_probe_run(
     """Persist one probe run for rate limiting."""
     ensure_tables(db)
     moment = _utcnow(now)
-    with owner_connection(db) as conn:
+    with owner_write_connection(db) as conn:
         conn.execute(
             "INSERT INTO capacity_probe_runs (harness, started_at, ok, error_code)"
             " VALUES (?, ?, ?, ?)",
@@ -433,6 +485,7 @@ def probe_allowed(
 
 __all__ = [
     "owner_connection",
+    "owner_write_connection",
     "ensure_tables",
     "upsert_exclusion",
     "list_active_exclusions",
