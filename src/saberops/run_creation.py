@@ -135,36 +135,6 @@ def _resolve_gate_from_settings(
     raise RunCreationError(GATE_REQUIRED_MESSAGE)
 
 
-def resolve_effective_gate_command(
-    *,
-    repo_path: Path | str,
-    explicit_gate: str | None,
-    settings: ProjectSettings | None = None,
-) -> str:
-    """Resolve the effective gate command or raise :class:`RunCreationError`.
-
-    Precedence: explicit per-run gate > persisted project gate >
-    narrow deterministic detection (Makefile ``gate:`` target).
-    There is deliberately no silent ``make gate`` fallback: when none
-    of the three yields a gate, creation fails before any
-    worker/model execution with an actionable message.
-
-    When ``settings`` is supplied, that immutable snapshot is used
-    directly; otherwise the persisted project settings are loaded once
-    for this standalone call.
-    """
-    if settings is not None:
-        snapshot = settings
-    else:
-        try:
-            snapshot = load_project_settings(repo_path)
-        except ProjectSettingsError as exc:
-            raise RunCreationError(str(exc)) from exc
-    return _resolve_gate_from_settings(
-        repo_path=repo_path, explicit_gate=explicit_gate, settings=snapshot
-    )
-
-
 def _resolve_training_from_settings(
     *,
     repo_path: Path | str,
@@ -454,7 +424,6 @@ __all__ = [
     "RunCreationError",
     "RunRequest",
     "effective_policy_summary",
-    "resolve_effective_gate_command",
     "resolve_effective_gate_scratch_mode",
     "resolve_effective_review_policy_mode",
     "resolve_effective_run_config",

@@ -70,6 +70,14 @@ from saberops.ownership import (
 )
 from saberops.quota import normalize_quota_observation
 from saberops.run_titles import clean_title, fallback_title, unique_title
+from saberops.sqlite_policy import (
+    BUSY_TIMEOUT_MS,
+    SqliteBusyError,
+    bounded_write,
+    immediate_transaction,
+    is_busy_error,
+    write_connection,
+)
 from saberops.wake import notify_run
 
 DB_SCHEMA_VERSION: Final[int] = 1
@@ -271,10 +279,19 @@ class Database:
         conn.execute("PRAGMA foreign_keys = ON;")
         if not self._read_only:
             conn.execute("PRAGMA journal_mode = WAL;")
-        conn.execute("PRAGMA busy_timeout = 5000;")
+        conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS};")
         try:
             with conn:
                 yield conn
+        except sqlite3.OperationalError as exc:
+            # D7: lock contention at a deferred write boundary is a typed INFRA
+            # park, never a raw crash. Non-contention errors (missing legacy
+            # table/column) keep their existing semantics.
+            if is_busy_error(exc):
+                raise SqliteBusyError(
+                    f"database write at {self.db_path.name}: database is locked"
+                ) from exc
+            raise
         finally:
             conn.close()
 
@@ -818,6 +835,33 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_scope_expansions_run_id
                     ON scope_expansions(run_id);
 
+                CREATE TABLE IF NOT EXISTS storage_cleanup_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    at TEXT NOT NULL,
+                    phase TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    artifact_class TEXT NOT NULL,
+                    artifact_ref TEXT NOT NULL,
+                    artifact_identity TEXT NOT NULL,
+                    run_id TEXT,
+                    project_id TEXT,
+                    sha TEXT,
+                    policy_ref TEXT,
+                    reason TEXT NOT NULL,
+                    estimated_bytes INTEGER,
+                    actual_bytes INTEGER,
+                    detail_json TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_storage_cleanup_at
+                    ON storage_cleanup_events(at);
+                CREATE INDEX IF NOT EXISTS idx_storage_cleanup_ref
+                    ON storage_cleanup_events(artifact_ref);
+
+                CREATE TABLE IF NOT EXISTS storage_vacuum_state (
+                    scope TEXT PRIMARY KEY,
+                    last_vacuum_at TEXT NOT NULL
+                );
+
                 """
                 )
                 # Additive, non-destructive migration for databases created before the
@@ -939,7 +983,7 @@ class Database:
 
     def create_run(self, run: Run) -> None:
         """Insert a new run together with its project/objective provenance."""
-        with self._get_connection() as conn:
+        with self.write_transaction() as conn:
             try:
                 conn.execute(
                     """
@@ -1302,7 +1346,7 @@ class Database:
         result_summary: str | None = None,
     ) -> None:
         """Update run status and completion details."""
-        with self._get_connection() as conn:
+        with self.write_transaction() as conn:
             conn.execute(
                 """
                 UPDATE runs
@@ -1315,8 +1359,7 @@ class Database:
 
     def set_run_title(self, run_id: str, title: str) -> None:
         """Persist a display label without modifying objective or execution state."""
-        with self._get_connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+        with self.write_transaction() as conn:
             self._save_run_title(conn, run_id, title)
             conn.commit()
 
@@ -1392,7 +1435,7 @@ class Database:
             payload["terminal_verdict"] = None
         json_str = json.dumps(payload)
         try:
-            with self._get_connection() as conn:
+            with self.write_transaction() as conn:
                 conn.execute(
                     "UPDATE runs SET review_state_json = ? WHERE id = ?",
                     (json_str, run_id),
@@ -1448,7 +1491,7 @@ class Database:
         """
         value: str | None = json_str if json_str is not None else None
         try:
-            with self._get_connection() as conn:
+            with self.write_transaction() as conn:
                 conn.execute(
                     "UPDATE runs SET review_risk_decision_json = ? WHERE id = ?",
                     (value, run_id),
@@ -1497,7 +1540,7 @@ class Database:
 
     def adopt_run_if_pending(self, run_id: str) -> bool:
         """Atomically transition a run from PENDING to RUNNING if and only if currently PENDING."""
-        with self._get_connection() as conn:
+        with self.write_transaction() as conn:
             cursor = conn.execute(
                 """
                 UPDATE runs
@@ -1516,7 +1559,7 @@ class Database:
         result_summary: str | None = None,
     ) -> bool:
         """Atomically transition a run to FAILED only if currently in a nonterminal status."""
-        with self._get_connection() as conn:
+        with self.write_transaction() as conn:
             cursor = conn.execute(
                 """
                 UPDATE runs
@@ -1616,8 +1659,7 @@ class Database:
         A half-token adopts nothing and falls back to ordinary contention.
         """
         now = current_iso_timestamp()
-        with self._get_connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+        with self.write_transaction() as conn:
             run_row = conn.execute(
                 "SELECT status, project_id, config_json FROM runs WHERE id = ?", (run_id,)
             ).fetchone()
@@ -1770,7 +1812,7 @@ class Database:
         Fenced by ``owner_id``/``generation`` so a superseded launcher can never
         redirect a newer owner's record.
         """
-        with self._get_connection() as conn:
+        with self.write_transaction() as conn:
             cursor = conn.execute(
                 """
                 UPDATE execution_owners
@@ -1845,8 +1887,7 @@ class Database:
         """
         now = current_iso_timestamp()
         reconciled: RunOwnerAction | None = None
-        with self._get_connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+        with self.write_transaction() as conn:
             existing_row = conn.execute(
                 """
                 SELECT * FROM owner_actions
@@ -2137,7 +2178,7 @@ class Database:
                 f"release_execution_owner for run '{run_id}' requires both owner_id and generation"
             )
         try:
-            with self._get_connection() as conn:
+            with self.write_transaction() as conn:
                 cursor = conn.execute(
                     """
                     UPDATE execution_owners
@@ -2221,19 +2262,15 @@ class Database:
         that was made about its predecessor.
         """
         now = current_iso_timestamp()
-        with self._get_connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+        with self.write_transaction() as conn:
             run_row = conn.execute("SELECT status FROM runs WHERE id = ?", (run_id,)).fetchone()
             if run_row is None:
-                conn.rollback()
                 return None
             if RunStatus(str(run_row["status"])) in TERMINAL_RUN_STATUSES:
-                conn.rollback()
                 return None
             if not self._fenced_owner_row(
                 conn, run_id, owner_id, generation, expected_owner_states
             ):
-                conn.rollback()
                 return None
 
             attempt_rows = conn.execute(
@@ -2286,6 +2323,82 @@ class Database:
             "generation": generation,
         }
 
+    def terminalize_preemption_fenced(
+        self,
+        run_id: str,
+        *,
+        owner_id: str | None,
+        generation: int | None,
+        result_summary: str,
+        expected_owner_states: tuple[str, ...] = (ExecutionOwner.CLAIMED,),
+        completed_at: str | None = None,
+    ) -> dict[str, Any] | None:
+        """RUNNING -> PREEMPTED, fenced to one exact predecessor generation.
+
+        ADR-0002 D8 crash recovery needs a *narrower* terminal transition than
+        :meth:`terminalize_run_fenced`:
+
+        * the run must be exactly ``RUNNING`` (a terminal or PENDING run is
+          never re-decided here);
+        * the inspected owner generation must still be the active ``CLAIMED``
+          generation, so a newer owner that claimed the run while this decision
+          was being made is never orphaned or released;
+        * **no attempt may still be RUNNING/PENDING**: the D8 decision was
+          taken only after the attempt had already reached its durable
+          terminal (FAILED/QUOTA) state, so the ordinary "force-close an active
+          attempt" behaviour would be masking a live worker.  A live attempt
+          means the caller has not established quiescence, so this refuses
+          (returns ``None``, changing nothing) rather than terminalizing.
+
+        Returns the transition receipt, or ``None`` when any precondition
+        fails -- the caller must treat ``None`` as "no authority, nothing
+        written".
+        """
+        now = current_iso_timestamp()
+        with self.write_transaction() as conn:
+            run_row = conn.execute("SELECT status FROM runs WHERE id = ?", (run_id,)).fetchone()
+            if run_row is None:
+                return None
+            if RunStatus(str(run_row["status"])) != RunStatus.RUNNING:
+                return None
+            if not self._fenced_owner_row(
+                conn, run_id, owner_id, generation, expected_owner_states
+            ):
+                return None
+            live = conn.execute(
+                "SELECT COUNT(*) AS n FROM attempts WHERE run_id = ? AND status IN (?, ?)",
+                (run_id, AttemptStatus.RUNNING.value, AttemptStatus.PENDING.value),
+            ).fetchone()
+            if int(live["n"] or 0) > 0:
+                return None
+            conn.execute(
+                "UPDATE runs SET status = ?, result_summary = ?, completed_at = ? WHERE id = ?",
+                (RunStatus.PREEMPTED.value, result_summary, completed_at, run_id),
+            )
+            if owner_id is not None and generation is not None:
+                conn.execute(
+                    """
+                    UPDATE execution_owners
+                    SET state = ?, released_at = ?, release_reason = ?, cancel_agent_json = NULL
+                    WHERE run_id = ? AND owner_id = ? AND generation = ?
+                    """,
+                    (
+                        ExecutionOwner.RELEASED,
+                        now,
+                        "preempted",
+                        run_id,
+                        owner_id,
+                        generation,
+                    ),
+                )
+            conn.commit()
+        return {
+            "run_id": run_id,
+            "status": RunStatus.PREEMPTED.value,
+            "owner_id": owner_id,
+            "generation": generation,
+        }
+
     def begin_execution_cancellation(
         self,
         run_id: str,
@@ -2301,24 +2414,19 @@ class Database:
         The cancelling agent's own identity is recorded so an abandoned
         cancellation can later be superseded instead of wedging the run.
         """
-        with self._get_connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+        with self.write_transaction() as conn:
             run_row = conn.execute("SELECT status FROM runs WHERE id = ?", (run_id,)).fetchone()
             if run_row is None or RunStatus(str(run_row["status"])) in TERMINAL_RUN_STATUSES:
-                conn.rollback()
                 return False
             row = conn.execute(
                 "SELECT * FROM execution_owners WHERE run_id = ?", (run_id,)
             ).fetchone()
             if row is None:
-                conn.rollback()
                 return False
             incumbent = self._row_to_execution_owner(row)
             if incumbent.owner_id != owner_id or incumbent.generation != generation:
-                conn.rollback()
                 return False
             if incumbent.state not in ExecutionOwner.ACTIVE_STATES:
-                conn.rollback()
                 return False
             if incumbent.is_cancelling:
                 # Another cancellation already holds this generation; only take
@@ -2331,7 +2439,6 @@ class Database:
                     and incumbent.cancel_agent.start_ticks == agent.start_ticks
                 )
                 if agent_liveness is not Liveness.DEAD and not is_us:
-                    conn.rollback()
                     return False
             conn.execute(
                 """
@@ -2358,7 +2465,7 @@ class Database:
         generation: int,
     ) -> bool:
         """Undo a cancellation that could not proceed, mutating nothing else."""
-        with self._get_connection() as conn:
+        with self.write_transaction() as conn:
             cursor = conn.execute(
                 """
                 UPDATE execution_owners
@@ -2483,7 +2590,7 @@ class Database:
         attempt.project_id = project_id
         attempt.objective_id = objective_id
         attempt.base_sha = base_sha
-        with self._get_connection() as conn:
+        with self.write_transaction() as conn:
             try:
                 conn.execute(
                     """
@@ -2577,7 +2684,7 @@ class Database:
         interruption_reason: str | None = None,
     ) -> None:
         """Update attempt outcomes."""
-        with self._get_connection() as conn:
+        with self.write_transaction() as conn:
             conn.execute(
                 """
                 UPDATE attempts
@@ -2601,7 +2708,7 @@ class Database:
 
     def create_check(self, check: CheckResult) -> None:
         """Insert a gate check result."""
-        with self._get_connection() as conn:
+        with self.write_transaction() as conn:
             conn.execute(
                 """
                 INSERT INTO checks (
@@ -3217,7 +3324,7 @@ class Database:
     ) -> int:
         """Log an event and notify in-process listeners."""
         payload_str = json.dumps(payload) if payload is not None else None
-        with self._get_connection() as conn:
+        with self.write_transaction() as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO events (run_id, attempt_id, event_type, payload_json, created_at)
@@ -3276,8 +3383,7 @@ class Database:
         if not isinstance(candidate_sha, str) or not candidate_sha:
             raise ValueError("candidate_sha must be a non-empty string")
         payload_str = json.dumps({"candidate_sha": candidate_sha})
-        with self._get_connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+        with self.write_transaction() as conn:
             rows = conn.execute(
                 """
                 SELECT id, payload_json FROM events
@@ -5039,3 +5145,142 @@ class Database:
             observed_at=str(row["observed_at"]),
             notes=str(row["notes"]) if row["notes"] is not None else None,
         )
+
+    # ------------------------------------------------------------------
+    # GS-1 storage lifecycle persistence (ADR-0003 D6/Amendment 1, D7)
+    #
+    # These tables are additive: ``DB_SCHEMA_VERSION`` stays 1 and the
+    # unknown/legacy-schema protection in ``_init_db`` is unchanged.  Every
+    # write uses the shared bounded D7 transaction policy so a busy lock
+    # becomes a typed ``SqliteBusyError`` instead of a crash or a duplicate
+    # launch.
+    # ------------------------------------------------------------------
+
+    @contextmanager
+    def storage_write_transaction(self) -> Iterator[sqlite3.Connection]:
+        """Yield one bounded ``BEGIN IMMEDIATE`` write transaction (D7)."""
+        if self._read_only:
+            raise DatabaseSchemaError("cannot take a write transaction on a read-only database")
+        with write_connection(self.db_path) as conn:
+            with immediate_transaction(conn) as tx:
+                yield tx
+
+    @contextmanager
+    def write_transaction(
+        self, *, total_seconds: float = 30.0
+    ) -> Iterator[sqlite3.Connection]:
+        """Yield one bounded ``BEGIN IMMEDIATE`` write transaction (ADR-0003 D7).
+
+        This is the shared write path for the database's mutators: WAL, a 30 s
+        busy timeout narrowed to the remaining shared deadline, a single
+        ``BEGIN IMMEDIATE`` with bounded backoff, commit on clean exit and
+        rollback on any exception.  Lock exhaustion raises a typed
+        :class:`~saberops.sqlite_policy.SqliteBusyError` for the owning
+        scheduler/run boundary instead of a raw ``OperationalError`` crash.
+        Reads must keep using :meth:`_get_connection`, which never takes a write
+        lock.
+        """
+        if self._read_only:
+            raise DatabaseSchemaError("cannot take a write transaction on a read-only database")
+        with bounded_write(self.db_path, total_seconds=total_seconds) as conn:
+            yield conn
+
+    def record_storage_event(
+        self,
+        *,
+        at: str,
+        phase: str,
+        action: str,
+        artifact_class: str,
+        artifact_ref: str,
+        artifact_identity: str,
+        reason: str,
+        run_id: str | None = None,
+        project_id: str | None = None,
+        sha: str | None = None,
+        policy_ref: str | None = None,
+        estimated_bytes: int | None = None,
+        actual_bytes: int | None = None,
+        detail: dict[str, Any] | None = None,
+    ) -> int:
+        """Append one durable storage cleanup/audit event and return its id."""
+        payload = json.dumps(detail, sort_keys=True) if detail else None
+        with self.storage_write_transaction() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO storage_cleanup_events (
+                    at, phase, action, artifact_class, artifact_ref,
+                    artifact_identity, run_id, project_id, sha, policy_ref,
+                    reason, estimated_bytes, actual_bytes, detail_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    at,
+                    phase,
+                    action,
+                    artifact_class,
+                    artifact_ref,
+                    artifact_identity,
+                    run_id,
+                    project_id,
+                    sha,
+                    policy_ref,
+                    reason,
+                    estimated_bytes,
+                    actual_bytes,
+                    payload,
+                ),
+            )
+            return int(cursor.lastrowid or 0)
+
+    def list_storage_events(
+        self,
+        *,
+        limit: int = 1000,
+        run_id: str | None = None,
+        artifact_ref: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return storage cleanup/audit events, newest last."""
+        query = "SELECT * FROM storage_cleanup_events"
+        clauses: list[str] = []
+        params: list[Any] = []
+        if run_id is not None:
+            clauses.append("run_id = ?")
+            params.append(run_id)
+        if artifact_ref is not None:
+            clauses.append("artifact_ref = ?")
+            params.append(artifact_ref)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY id ASC LIMIT ?"
+        params.append(limit)
+        with self._get_connection() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_storage_vacuum_at(self, scope: str) -> datetime | None:
+        """Return the last recorded VACUUM time for ``scope``, if any."""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT last_vacuum_at FROM storage_vacuum_state WHERE scope = ?",
+                (scope,),
+            ).fetchone()
+        if row is None or not row["last_vacuum_at"]:
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(row["last_vacuum_at"]))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+    def record_storage_vacuum(self, scope: str, at: datetime) -> None:
+        """Persist the time of a completed owner-DB VACUUM for ``scope``."""
+        with self.storage_write_transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO storage_vacuum_state (scope, last_vacuum_at)
+                VALUES (?, ?)
+                ON CONFLICT(scope) DO UPDATE SET last_vacuum_at = excluded.last_vacuum_at
+                """,
+                (scope, at.isoformat()),
+            )

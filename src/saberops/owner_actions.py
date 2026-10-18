@@ -25,6 +25,12 @@ primitive that makes both operations safe for real dogfooding:
   a provably dead RUNNING action without a terminal receipt projects
   UNCERTAIN; UNKNOWN liveness fails closed for duplicate launch; an
   UNCERTAIN Accept is never replayed automatically.
+* Owner authority -- claiming or executing an owner action requires owner
+  session authority (M4).  :func:`require_owner_action_authority` fails
+  closed when the session authority marker says ``worker`` (or carries an
+  unknown value), and refuses a claimed transport origin that is not
+  loopback, extending the local Web Host allowlist into the durable-action
+  layer.  A worker session can neither claim nor execute an owner action.
 
 Actual Review and Accept authority stays in the existing service/engine
 paths: the child delegates to ``OrchestratorService.review_run`` /
@@ -37,8 +43,9 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -46,6 +53,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
 from saberops.ownership import Liveness, ProcessIdentity, probe_liveness
+from saberops.sandbox.isolation import (
+    SessionAuthority,
+    WorkerIsolationViolation,
+    loopback_host_allowed,
+    resolve_session_authority,
+)
 
 if TYPE_CHECKING:
     from saberops.db import Database
@@ -64,9 +77,13 @@ __all__ = [
     "OWNER_ACTION_QUEUED_EVENT",
     "OWNER_ACTION_STARTED_EVENT",
     "OWNER_ACTION_UNCERTAIN_EVENT",
+    "OWNER_AUTHORITY_REQUIRED_REASON",
     "OWNER_PROCESS_DEAD_REASON",
+    "OWNER_TRANSPORT_NOT_LOOPBACK_REASON",
     "REVIEW_CHILD_TIMEOUT_DEFAULT",
     "ACTIVE_OWNER_ACTION_STATES",
+    "OwnerActionAuthority",
+    "OwnerActionAuthorityError",
     "OwnerActionKind",
     "OwnerActionLaunch",
     "OwnerActionState",
@@ -81,6 +98,7 @@ __all__ = [
     "is_action_effectively_active",
     "new_owner_action_id",
     "owner_action_transcript_path",
+    "require_owner_action_authority",
     "run_accept_action_child",
     "run_review_action_child",
     "summarize_owner_actions",
@@ -116,6 +134,83 @@ OWNER_ACTION_UNCERTAIN_EVENT: Final[str] = "owner_action_uncertain"
 
 #: Upper bound for persisted result/error evidence (bounded, secret-free).
 _ACTION_TEXT_BOUND: Final[int] = 2000
+
+#: Typed reason when owner authority is required but the session is not the owner.
+OWNER_AUTHORITY_REQUIRED_REASON: Final[str] = "OWNER_AUTHORITY_REQUIRED"
+#: Typed reason when a claimed owner-action transport origin is not loopback.
+OWNER_TRANSPORT_NOT_LOOPBACK_REASON: Final[str] = "OWNER_TRANSPORT_NOT_LOOPBACK"
+
+
+class OwnerActionAuthorityError(RuntimeError):
+    """Fail-closed refusal: the caller may not claim or execute an owner action.
+
+    Carries a typed :attr:`reason` (never prose parsing) so the Web layer,
+    the CLI and the tests can branch deterministically on
+    ``OWNER_AUTHORITY_REQUIRED`` / ``OWNER_TRANSPORT_NOT_LOOPBACK``.
+    """
+
+    def __init__(self, reason: str, detail: str) -> None:
+        super().__init__(f"{reason}: {detail}")
+        self.reason = reason
+        self.detail = detail
+
+
+@dataclass(frozen=True)
+class OwnerActionAuthority:
+    """The authority one caller claims for one owner action.
+
+    ``session`` is the resolved session authority; ``transport_host`` is
+    the origin the request claims, checked against the local-only allowlist
+    when present.  Passing ``None`` where an authority is expected means
+    "resolve from the ambient environment": the owner Web UI, the ``orch``
+    CLI and the test process are owner by default, while a worker session
+    fails closed.
+    """
+
+    session: SessionAuthority
+    transport_host: str | None = None
+
+
+def require_owner_action_authority(
+    authority: OwnerActionAuthority | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
+    transport_host: str | None = None,
+) -> OwnerActionAuthority:
+    """Fail closed unless the caller holds owner session authority.
+
+    Raises :class:`OwnerActionAuthorityError` with the typed
+    ``OWNER_AUTHORITY_REQUIRED`` reason when the session authority marker
+    says ``worker`` (or carries an unknown value), and with
+    ``OWNER_TRANSPORT_NOT_LOOPBACK`` when the claimed ``transport_host`` is
+    not an acceptable local-only Host value.  Returns the resolved
+    authority so callers can carry it forward as evidence.
+    """
+    resolved = authority
+    if resolved is None:
+        try:
+            resolved = OwnerActionAuthority(
+                session=resolve_session_authority(env),
+                transport_host=transport_host,
+            )
+        except WorkerIsolationViolation as exc:
+            raise OwnerActionAuthorityError(
+                OWNER_AUTHORITY_REQUIRED_REASON, exc.detail
+            ) from exc
+    if resolved.session is not SessionAuthority.OWNER:
+        raise OwnerActionAuthorityError(
+            OWNER_AUTHORITY_REQUIRED_REASON,
+            "owner actions require owner session authority; this session is "
+            f"{resolved.session.value!r}",
+        )
+    if resolved.transport_host is not None and not loopback_host_allowed(
+        resolved.transport_host
+    ):
+        raise OwnerActionAuthorityError(
+            OWNER_TRANSPORT_NOT_LOOPBACK_REASON,
+            f"owner-action transport host {resolved.transport_host!r} is not loopback",
+        )
+    return resolved
 
 
 class OwnerActionKind(StrEnum):
@@ -370,11 +465,17 @@ class OwnerActionSupervisor:
         self,
         db: Database,
         popen_factory: Callable[..., Any] | None = None,
+        *,
+        authority: OwnerActionAuthority | None = None,
     ) -> None:
         self.db = db
         self._popen_factory: Callable[..., Any] = (
             popen_factory if popen_factory is not None else subprocess.Popen
         )
+        # ``None`` means "resolve from the ambient session authority": an
+        # owner Web UI / CLI / test process is owner by default, while a
+        # worker session fails closed at the first claim.
+        self.authority = authority
 
     def request_review(
         self, *, run_id: str, candidate_sha: str, target_repo: str
@@ -401,6 +502,9 @@ class OwnerActionSupervisor:
     def _request(
         self, *, kind: OwnerActionKind, run_id: str, candidate_sha: str, target_repo: str
     ) -> OwnerActionLaunch:
+        # Owner authority is required before anything else: a worker session
+        # can neither claim an action row nor detach an authority child.
+        require_owner_action_authority(self.authority)
         action, created = self.db.claim_owner_action(
             action_id=new_owner_action_id(),
             run_id=run_id,
@@ -724,6 +828,25 @@ def _fence_child_candidate(db: Database, *, action: RunOwnerAction) -> str | Non
     return CANDIDATE_CHANGED_REASON
 
 
+def _refuse_child_without_owner_authority(*, kind: OwnerActionKind) -> bool:
+    """Return True when a detached child must refuse for lack of authority.
+
+    The check runs *before* the persisted action row is read and persists
+    nothing: a worker session attempting to execute an owner action blocks
+    immediately and cannot mutate owner state.  A legitimate child inherits
+    the owner launcher's environment (no worker marker) and passes.
+    """
+    try:
+        require_owner_action_authority(env=os.environ)
+    except OwnerActionAuthorityError as exc:
+        print(
+            f"[!] refusing detached {kind.value} child: {exc.reason}: {exc.detail}",
+            file=sys.stderr,
+        )
+        return True
+    return False
+
+
 def run_review_action_child(
     *,
     db: Database,
@@ -740,6 +863,8 @@ def run_review_action_child(
     authority resolved inside the service) -> persist terminal state.
     Returns a process exit code (0 on SUCCEEDED).
     """
+    if _refuse_child_without_owner_authority(kind=OwnerActionKind.REVIEW):
+        return 1
     action, refusal = _check_child_action(
         db,
         action_id=action_id,
@@ -808,6 +933,8 @@ def run_accept_action_child(
     canonical eligibility and gate authority immediately before mutation)
     -> persist terminal state.  Returns a process exit code (0 on SUCCEEDED).
     """
+    if _refuse_child_without_owner_authority(kind=OwnerActionKind.ACCEPT):
+        return 1
     action, refusal = _check_child_action(
         db,
         action_id=action_id,

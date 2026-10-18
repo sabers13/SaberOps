@@ -1153,3 +1153,345 @@ def test_name_map_has_no_nightly_in_renamed_files() -> None:
         assert "nightly" not in text.lower(), f"{path} still names the old gate"
 
 
+# ---------------------------------------------------------------------------
+# D-0061: single parallel pass, bounded workers, cgroup isolation
+# ---------------------------------------------------------------------------
+
+
+def load_map_script() -> ModuleType:
+    """Load scripts/build_test_map.py as a module (parallel argv helpers)."""
+    spec = importlib.util.spec_from_file_location(
+        "build_test_map", Path(__file__).resolve().parents[1] / "scripts/build_test_map.py"
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+m = load_map_script()
+
+
+def _capture_runner(
+    repo: Path, kind: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[object, list[tuple[str, list[str]]]]:
+    """Runner with ruff/mypy/pytest captured as recorded calls."""
+    runner = _make_runner(repo, kind, tmp_path, monkeypatch)
+    calls: list[tuple[str, list[str]]] = []
+    monkeypatch.setattr(runner, "command", lambda args, name, timeout=None: (0, ""))
+
+    def fake_pytest(name: str, args: list[str], budget: float | None = None) -> object:
+        calls.append((name, list(args)))
+        return g.Evidence(codes=[0], count=5)
+
+    monkeypatch.setattr(runner, "pytest", fake_pytest)
+    return runner, calls
+
+
+def test_full_gate_is_one_parallel_pass_without_serial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: D-0061 (no serial pass; single bounded xdist worksteal run)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_main_repo(repo)
+    monkeypatch.delenv("SABEROPS_GATE_WORKERS", raising=False)
+    # D-0076: the worker default is RAM-derived; pin it for determinism
+    # (2.4 GiB / 0.6 GiB = 4 workers on 8 cores).
+    monkeypatch.setattr(g, "available_memory_bytes", lambda: int(2.4 * g.GB))
+    monkeypatch.setattr(g, "cpu_core_count", lambda: 8)
+    runner, calls = _capture_runner(repo, "full", tmp_path, monkeypatch)
+    code = runner.run_checks("HEAD", [])  # type: ignore[attr-defined]
+    assert code == 0
+    assert [name for name, _ in calls] == ["parallel"]
+    args = calls[0][1]
+    assert args[:2] == ["-n", "4"], args
+    assert "--dist" in args and args[args.index("--dist") + 1] == "worksteal"
+    assert "-p" not in args and "no:xdist" not in args
+    assert "-m" not in args  # no marker exclusion: every test runs in one pass
+
+
+def test_gate_workers_cap_from_env_and_malformed_falls_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: D-0061 (SABEROPS_GATE_WORKERS cap; malformed keeps the cap)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_main_repo(repo)
+    monkeypatch.setenv("SABEROPS_GATE_WORKERS", "3")
+    runner, calls = _capture_runner(repo, "full", tmp_path, monkeypatch)
+    runner.run_checks("HEAD", [])  # type: ignore[attr-defined]
+    assert calls[0][1][:2] == ["-n", "3"]
+    # D-0076: a malformed knob falls back to the RAM-derived default.
+    monkeypatch.setattr(g, "available_memory_bytes", lambda: int(2.4 * g.GB))
+    monkeypatch.setattr(g, "cpu_core_count", lambda: 8)
+    monkeypatch.setenv("SABEROPS_GATE_WORKERS", "auto")
+    runner2, calls2 = _capture_runner(repo, "full", tmp_path, monkeypatch)
+    runner2.run_checks("HEAD", [])  # type: ignore[attr-defined]
+    assert calls2[0][1][:2] == ["-n", "4"]
+
+
+def test_full_gate_reruns_only_failing_ids_serially(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: ADR-0003 D5 (deterministic serial rerun only for failures)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_main_repo(repo)
+    runner = _make_runner(repo, "full", tmp_path, monkeypatch)
+    monkeypatch.setattr(runner, "command", lambda args, name, timeout=None: (0, ""))
+    calls: list[tuple[str, list[str]]] = []
+
+    def fake_pytest(name: str, args: list[str], budget: float | None = None) -> object:
+        calls.append((name, list(args)))
+        if name == "parallel":
+            return g.Evidence(
+                codes=[1], count=5, failed={"tests/test_a.py::test_x": "broken"}
+            )
+        return g.Evidence(codes=[0], count=1, passed={"tests/test_a.py::test_x"})
+
+    monkeypatch.setattr(runner, "pytest", fake_pytest)
+    runner.run_checks("HEAD", [])  # type: ignore[attr-defined]
+    assert [name for name, _ in calls] == ["parallel", "rerun"]
+    assert calls[1][1] == ["-p", "no:xdist", "tests/test_a.py::test_x"]
+
+
+def test_lane_checks_run_parallel_when_multiple_targets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: D-0061 (lane checks no longer fall back to serial)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_main_repo(repo)
+    monkeypatch.delenv("SABEROPS_LANE_WORKERS", raising=False)
+    runner, calls = _capture_runner(repo, "lane", tmp_path, monkeypatch)
+    monkeypatch.setattr(g, "lane_targets", lambda repo, changed, also: ["a", "b"])
+    runner.run_checks("HEAD", [])  # type: ignore[attr-defined]
+    assert calls[0][1][:4] == ["-n", "2", "--dist", "worksteal"]
+    assert calls[0][1][4:] == ["a", "b"]
+    assert "no:xdist" not in calls[0][1]
+
+
+def test_lane_single_target_stays_single_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: one lane target needs no xdist startup."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_main_repo(repo)
+    runner, calls = _capture_runner(repo, "lane", tmp_path, monkeypatch)
+    monkeypatch.setattr(g, "lane_targets", lambda repo, changed, also: ["only"])
+    runner.run_checks("HEAD", [])  # type: ignore[attr-defined]
+    assert calls[0][1] == ["only"]
+
+
+def test_positive_int_env() -> None:
+    """Covers: D-0061 (worker knobs are always positive integers)."""
+    import os as _os
+
+    previous = _os.environ.get("SABEROPS_TEST_WORKERS")
+    try:
+        _os.environ.pop("SABEROPS_TEST_WORKERS", None)
+        assert g.positive_int_env("SABEROPS_TEST_WORKERS", 4) == 4
+        _os.environ["SABEROPS_TEST_WORKERS"] = "6"
+        assert g.positive_int_env("SABEROPS_TEST_WORKERS", 4) == 6
+        _os.environ["SABEROPS_TEST_WORKERS"] = "auto"
+        assert g.positive_int_env("SABEROPS_TEST_WORKERS", 4) == 4
+        _os.environ["SABEROPS_TEST_WORKERS"] = "0"
+        assert g.positive_int_env("SABEROPS_TEST_WORKERS", 4) == 4
+    finally:
+        if previous is None:
+            _os.environ.pop("SABEROPS_TEST_WORKERS", None)
+        else:
+            _os.environ["SABEROPS_TEST_WORKERS"] = previous
+
+
+def test_cgroup_prefix_disabled_by_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Covers: D-0061 (cgroup isolation can be disabled explicitly)."""
+    monkeypatch.setattr(g, "_cgroup_cache", None)
+    monkeypatch.setenv("SABEROPS_GATE_CGROUP", "0")
+    assert g.cgroup_prefix() == []
+
+
+def test_cgroup_prefix_used_when_probe_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Covers: D-0061 (systemd-run scope wraps the gate child tree)."""
+    class _Probe:
+        returncode = 0
+
+    monkeypatch.setattr(g, "_cgroup_cache", None)
+    monkeypatch.delenv("SABEROPS_GATE_CGROUP", raising=False)
+    monkeypatch.setattr(g.shutil, "which", lambda name: "/usr/bin/systemd-run")
+    monkeypatch.setattr(g.subprocess, "run", lambda *a, **k: _Probe())
+    prefix = g.cgroup_prefix()
+    assert prefix[:5] == [
+        "/usr/bin/systemd-run",
+        "--user",
+        "--scope",
+        "--quiet",
+        "--collect",
+    ]
+    assert f"MemoryHigh={g.CGROUP_MEMORY_HIGH}" in prefix
+    assert f"MemoryMax={g.CGROUP_MEMORY_MAX}" in prefix
+    assert prefix[-1] == "--"
+
+
+def test_cgroup_prefix_probe_failure_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Covers: D-0061 (no usable user manager -> plain spawn, never a failure)."""
+    class _Probe:
+        returncode = 1
+
+    monkeypatch.setattr(g, "_cgroup_cache", None)
+    monkeypatch.delenv("SABEROPS_GATE_CGROUP", raising=False)
+    monkeypatch.setattr(g.shutil, "which", lambda name: "/usr/bin/systemd-run")
+    monkeypatch.setattr(g.subprocess, "run", lambda *a, **k: _Probe())
+    assert g.cgroup_prefix() == []
+
+
+def test_external_slot_env_skips_acquisition_without_blocking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: engine holds host-gates; child must not re-acquire (no deadlock)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_main_repo(repo)
+    monkeypatch.setenv("SABEROPS_GATE_EXTERNAL_SLOT", "1")
+    runner = _make_runner(repo, "full", tmp_path, monkeypatch)
+    monkeypatch.setattr(runner, "command", lambda args, name, timeout=None: (0, ""))
+    monkeypatch.setattr(
+        runner,
+        "pytest",
+        lambda name, args, budget=None: g.Evidence(codes=[0], count=2),
+    )
+    common = runner.common  # type: ignore[attr-defined]
+    heavy = common / "saberops-gate-slots"
+    started = time.monotonic()
+    with g.slot(heavy, {"pid": os.getpid()}, 1, 5):
+        code = runner.execute("HEAD", [])  # type: ignore[attr-defined]
+    # The held heavy slot would have blocked acquisition; returning proves bypass.
+    assert code == 0
+    assert time.monotonic() - started < 5
+
+
+def test_no_history_env_suppresses_engine_managed_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: engine owns the single history line (no duplicate child line)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_main_repo(repo)
+    monkeypatch.setenv("SABEROPS_GATE_NO_HISTORY", "1")
+    runner = _make_runner(repo, "full", tmp_path, monkeypatch)
+    code = runner.finish(("PASS", "", 0, [], []), 3)  # type: ignore[attr-defined]
+    assert code == 0
+    assert not g.history_path(runner.common).exists()  # type: ignore[attr-defined]
+
+
+def test_outcome_json_carries_kind_producer_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: ADR-0004 D3 (outcome.json kind/producer/profile/checks_ok)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_main_repo(repo)
+    monkeypatch.setenv("SABEROPS_GATE_KIND", "G3")
+    monkeypatch.setenv("SABEROPS_GATE_PRODUCER", "engine")
+    runner = _make_runner(repo, "full", tmp_path, monkeypatch)
+    runner.checks_ok = True  # type: ignore[attr-defined]
+    runner.finish(("PASS", "", 0, [], []), 4)  # type: ignore[attr-defined]
+    payload = json.loads((runner.result / "outcome.json").read_text())  # type: ignore[attr-defined]
+    assert payload["kind"] == "G3"
+    assert payload["producer"] == "engine"
+    assert payload["profile"] == "full"
+    assert payload["checks_ok"] is True
+    entry = json.loads(g.history_path(runner.common).read_text().splitlines()[-1])  # type: ignore[attr-defined]
+    assert entry["kind"] == "G3" and entry["producer"] == "engine"
+
+
+# ---------------------------------------------------------------------------
+# D-0061: coverage test-map build runs parallel under the exclusive slot
+# ---------------------------------------------------------------------------
+
+
+def test_map_suite_command_is_parallel() -> None:
+    """Covers: D-0061 (map build uses xdist worksteal, not a serial run)."""
+    command = m.suite_command("/py", Path("/rc"), "plugin", 4)
+    assert command[:3] == ["/py", "-m", "coverage"]
+    assert "-n" in command and command[command.index("-n") + 1] == "4"
+    assert "--dist" in command and command[command.index("--dist") + 1] == "worksteal"
+    assert "-p" in command and "plugin" in command
+
+
+def test_map_workers_env_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Covers: D-0061/D-0076 (map knob, then gate knob, then RAM-derived default)."""
+    monkeypatch.delenv("SABEROPS_MAP_WORKERS", raising=False)
+    monkeypatch.delenv("SABEROPS_GATE_WORKERS", raising=False)
+    # Pin the memory reading so the RAM-derived default is deterministic.
+    monkeypatch.setattr(m, "available_memory_bytes", lambda: int(2.4 * 1024**3))
+    monkeypatch.setattr(m, "cpu_core_count", lambda: 8)
+    assert m.map_workers() == 4
+    monkeypatch.setenv("SABEROPS_GATE_WORKERS", "3")
+    assert m.map_workers() == 3
+    monkeypatch.setenv("SABEROPS_MAP_WORKERS", "2")
+    assert m.map_workers() == 2
+    monkeypatch.setenv("SABEROPS_MAP_WORKERS", "nonsense")
+    assert m.map_workers() == 4
+
+
+def test_map_exclusive_wraps_the_canonical_slot(tmp_path: Path) -> None:
+    """Covers: D-0061 item 3 (map build holds the exclusive heavy-gate slot)."""
+    command = m.exclusive_command("/py", ["/py", "-m", "coverage", "run"])
+    assert Path(command[1]).name == "gate_tools.py"
+    assert command[2:4] == ["exclusive", "--"]
+    assert command[4:] == ["/py", "-m", "coverage", "run"]
+
+
+def test_map_wave_barrier_policy(tmp_path: Path) -> None:
+    """Covers: D-0076 item 3 (reuse-if-current no-op; wave-barrier rebuilds)."""
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_main_repo(repo)
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    map_dir = tmp_path / "map"
+    map_dir.mkdir()
+    # No map yet -> nothing to reuse.
+    assert m.map_commit(map_dir) == ""
+    assert m.map_is_current(map_dir, repo, head) is False
+    # A map built from HEAD is current for HEAD.
+    (map_dir / m.MAP_META).write_text(json.dumps({"commit": head}))
+    assert m.map_commit(map_dir) == head
+    assert m.map_is_current(map_dir, repo, head) is True
+    assert (
+        m.wave_barrier_decision(
+            map_dir, repo, head, wave_barrier=False, reuse_if_current=True
+        )
+        == "reuse"
+    )
+    # The consolidation barrier always rebuilds, even when a reuse flag is set.
+    assert (
+        m.wave_barrier_decision(
+            map_dir, repo, head, wave_barrier=True, reuse_if_current=True
+        )
+        == "rebuild"
+    )
+    # Without either flag the historical always-rebuild behaviour is preserved.
+    assert (
+        m.wave_barrier_decision(
+            map_dir, repo, head, wave_barrier=False, reuse_if_current=False
+        )
+        == "rebuild"
+    )
+    # A map whose build commit is not an ancestor of HEAD is stale -> rebuild.
+    (map_dir / m.MAP_META).write_text(json.dumps({"commit": "0" * 40}))
+    assert m.map_is_current(map_dir, repo, head) is False
+    assert (
+        m.wave_barrier_decision(
+            map_dir, repo, head, wave_barrier=False, reuse_if_current=True
+        )
+        == "rebuild"
+    )
+
+
+

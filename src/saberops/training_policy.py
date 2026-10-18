@@ -91,37 +91,6 @@ def static_training_requirement(candidate: Any) -> TrainingRequirement:
     return REQUIREMENT_UNKNOWN
 
 
-def training_requirement_for(
-    candidate: Any,
-    *,
-    snapshot: Any | None = None,
-    training_required: str | None = None,
-) -> TrainingRequirement:
-    """Return the canonical frozen training requirement for a candidate.
-
-    Precedence: a known static v1 classification (``TRUE`` or
-    ``FALSE``) is authoritative and returned exactly before any
-    dynamic/carried value that could contradict it.  Frozen dynamic
-    evidence (explicit requirement, carried
-    :attr:`WorkerCandidate.training_required`, snapshot approval) is
-    consulted only when the identity has no known static
-    classification; otherwise ``UNKNOWN`` (fail closed under Denied).
-    """
-    static = static_training_requirement(candidate)
-    if static != REQUIREMENT_UNKNOWN:
-        return static
-    explicit = normalize_training_requirement(training_required)
-    if explicit is not None:
-        return explicit
-    carried = normalize_training_requirement(getattr(candidate, "training_required", None))
-    if carried is not None:
-        return carried
-    approved = approved_training_requirement(snapshot, candidate_id_of(candidate))
-    if approved is not None:
-        return approved
-    return REQUIREMENT_UNKNOWN
-
-
 def is_training_permitted(
     candidate: Any | TrainingRequirement | str | None,
     training_allowed: bool,
@@ -158,5 +127,4 @@ __all__ = [
     "normalize_training_requirement",
     "static_training_requirement",
     "training_excluded",
-    "training_requirement_for",
 ]

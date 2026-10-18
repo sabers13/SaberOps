@@ -14,7 +14,7 @@ import sys
 import time
 import tomllib
 from dataclasses import dataclass
-from datetime import UTC
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -65,6 +65,19 @@ from saberops.project import (
     ProjectStateConflictError,
     owner_state_dir,
 )
+from saberops.questions import (
+    STANDING_RULE_THRESHOLD,
+    AnswerAuthority,
+    AskRole,
+    DecisionClass,
+    Escalation,
+    OwnerQuestion,
+    OwnerQuestionQueue,
+    QuestionError,
+    QuestionRequest,
+    QuestionStatus,
+    question_view,
+)
 from saberops.review_adaptive import ReviewPolicyError
 from saberops.routing_config import (
     RoutingConfigError,
@@ -80,6 +93,16 @@ from saberops.run_creation import (
 )
 from saberops.runtime import db_path_for_run, project_db_path_for_repo
 from saberops.service import OrchestratorService
+from saberops.storage_gc import (
+    GcPolicyError,
+    GcPreview,
+    apply_gc,
+    default_gc_policy_path,
+    load_gc_policy,
+    preview_gc,
+)
+from saberops.storage_inventory import ArtifactClass, Inventory, build_inventory
+from saberops.storage_maintenance import database_audit_sink
 from saberops.supervisor import RunSupervisor
 from saberops.tooling.context_cli import context_json, list_context_refs
 from saberops.tooling.contracts import FrozenToolContract, ToolManifestError
@@ -601,6 +624,17 @@ def _check_legacy_manager_state() -> DoctorFinding | None:
     return None
 
 
+def _positive_int_arg(value: str) -> int:
+    """argparse type for a strictly positive integer (used by --max-concurrent)."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(f"invalid integer value: {value!r}") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer (>= 1)")
+    return parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build CLI argument parser."""
     parser = argparse.ArgumentParser(
@@ -943,6 +977,51 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cleanup_parser.add_argument("run_id", type=str, help="Run identifier (e.g. run_abc123).")
     cleanup_parser.add_argument(
+        "--db",
+        type=str,
+        default=None,
+        help="Path to SQLite database.",
+    )
+
+    # orch gc [--dry-run|--apply] [--class ...] [--json]
+    gc_parser = subparsers.add_parser(
+        "gc",
+        help="Inventory owned storage artifacts and preview/apply the exact scoped GC.",
+    )
+    gc_mode = gc_parser.add_mutually_exclusive_group()
+    gc_mode.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview only: no schema creation, no write, no deletion (default).",
+    )
+    gc_mode.add_argument(
+        "--apply",
+        action="store_true",
+        help="Execute the exact previewed scope; requires a validated standing owner policy.",
+    )
+    gc_parser.add_argument(
+        "--class",
+        dest="artifact_class",
+        action="append",
+        default=None,
+        choices=[cls.value for cls in ArtifactClass],
+        help="Restrict to an artifact class (repeatable).",
+    )
+    gc_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    gc_parser.add_argument(
+        "--repo",
+        dest="project_repo",
+        type=str,
+        default=None,
+        help="Repository root to inventory (defaults to the current directory).",
+    )
+    gc_parser.add_argument(
+        "--policy",
+        type=str,
+        default=None,
+        help="Path to the standing GC policy file (defaults to the owner settings path).",
+    )
+    gc_parser.add_argument(
         "--db",
         type=str,
         default=None,
@@ -1465,6 +1544,250 @@ def build_parser() -> argparse.ArgumentParser:
     )
     posture_verify.add_argument("--json", action="store_true", help="JSON output")
 
+    # orch questions ask|list|show|answer|defer|moot|diverge|divergences|
+    # standing-rules|audit (Q-1 owner question queue).
+    questions_parser = subparsers.add_parser(
+        "questions",
+        help="Owner question queue: ask, answer (verbatim), defer, moot and report (Q-1).",
+    )
+    questions_sub = questions_parser.add_subparsers(dest="questions_command", required=True)
+
+    def _add_store_arg(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument(
+            "--store",
+            type=str,
+            default=None,
+            help=(
+                "Path to the question document (default: "
+                "$XDG_STATE_HOME/saberops/questions.json)."
+            ),
+        )
+
+    questions_ask = questions_sub.add_parser(
+        "ask",
+        help="Raise one keyed question with its five-part escalation.",
+    )
+    questions_ask.add_argument("--key", type=str, required=True, help="Idempotency key.")
+    questions_ask.add_argument("--subject", type=str, required=True, help="The question.")
+    questions_ask.add_argument(
+        "--kind", type=str, required=True, help="Question kind (groups standing rules)."
+    )
+    questions_ask.add_argument(
+        "--decision-class",
+        dest="decision_class",
+        type=str,
+        required=True,
+        choices=[item.value for item in DecisionClass],
+        help="Decision class; the answerable authority is derived from it.",
+    )
+    questions_ask.add_argument(
+        "--role",
+        type=str,
+        required=True,
+        choices=[item.value for item in AskRole],
+        help="Role raising the question.",
+    )
+    questions_ask.add_argument(
+        "--by", dest="raised_by", type=str, required=True, help="Actor raising it."
+    )
+    questions_ask.add_argument("--scope", type=str, default=None, help="Scope it belongs to.")
+    questions_ask.add_argument("--run-id", dest="run_id", type=str, default=None)
+    questions_ask.add_argument(
+        "--blocks",
+        action="append",
+        default=[],
+        metavar="SCOPE",
+        help="What the question blocks; repeat for multiple.",
+    )
+    questions_ask.add_argument(
+        "--option",
+        dest="options",
+        action="append",
+        default=[],
+        metavar="OPTION",
+        help="An allowed answer option; repeat for multiple.",
+    )
+    questions_ask.add_argument("--default-option", dest="default_option", type=str, default=None)
+    questions_ask.add_argument(
+        "--supersedes", type=str, default=None, help="Question id/key this one supersedes."
+    )
+    questions_ask.add_argument(
+        "--requirement", type=str, required=True, help="Escalation 1/5: forcing requirement."
+    )
+    questions_ask.add_argument(
+        "--expansion",
+        dest="proposed_expansion",
+        type=str,
+        required=True,
+        help="Escalation 2/5: proposed expansion.",
+    )
+    questions_ask.add_argument(
+        "--smallest",
+        dest="smallest_compliant",
+        type=str,
+        required=True,
+        help="Escalation 3/5: smallest compliant option.",
+    )
+    questions_ask.add_argument(
+        "--consequences",
+        type=str,
+        required=True,
+        help="Escalation 4/5: concrete consequences.",
+    )
+    questions_ask.add_argument(
+        "--recommendation",
+        type=str,
+        required=True,
+        help="Escalation 5/5: Orchestrator recommendation.",
+    )
+    questions_ask.add_argument("--json", action="store_true", help="JSON output")
+    _add_store_arg(questions_ask)
+
+    questions_list = questions_sub.add_parser("list", help="List questions with their status.")
+    questions_list.add_argument(
+        "--status",
+        type=str,
+        default=None,
+        choices=[item.value for item in QuestionStatus],
+        help="Restrict to one status.",
+    )
+    questions_list.add_argument(
+        "--as-of",
+        dest="as_of",
+        type=str,
+        default=None,
+        help="Reference date YYYY-MM-DD (default: today) for deferred resurfacing.",
+    )
+    questions_list.add_argument("--run-id", dest="run_id", type=str, default=None)
+    questions_list.add_argument("--json", action="store_true", help="JSON output")
+    _add_store_arg(questions_list)
+
+    questions_show = questions_sub.add_parser("show", help="Show one question in full.")
+    questions_show.add_argument("ref", type=str, help="Question key or id.")
+    questions_show.add_argument(
+        "--as-of", dest="as_of", type=str, default=None, help="Reference date YYYY-MM-DD."
+    )
+    questions_show.add_argument("--json", action="store_true", help="JSON output")
+    _add_store_arg(questions_show)
+
+    questions_answer = questions_sub.add_parser(
+        "answer", help="Answer a question, storing the owner's exact words."
+    )
+    questions_answer.add_argument("ref", type=str, help="Question key or id.")
+    questions_answer.add_argument(
+        "--words", type=str, required=True, help="The owner's exact words (stored verbatim)."
+    )
+    questions_answer.add_argument(
+        "--authority",
+        type=str,
+        default="owner",
+        choices=["owner", "orchestrator"],
+        help="Answer authority (default: owner).",
+    )
+    questions_answer.add_argument("--by", dest="answered_by", type=str, default=None)
+    questions_answer.add_argument(
+        "--role", type=str, default=None, choices=[item.value for item in AskRole]
+    )
+    questions_answer.add_argument("--chosen-option", dest="chosen_option", type=str, default=None)
+    questions_answer.add_argument(
+        "--evidence", type=str, default=None, help="Required for an Orchestrator-alone answer."
+    )
+    questions_answer.add_argument(
+        "--rejected-alternative",
+        dest="rejected_alternative",
+        type=str,
+        default=None,
+        help="Required for an Orchestrator-alone answer.",
+    )
+    questions_answer.add_argument("--json", action="store_true", help="JSON output")
+    _add_store_arg(questions_answer)
+
+    questions_defer = questions_sub.add_parser(
+        "defer", help="Defer a question until a date; it resurfaces then."
+    )
+    questions_defer.add_argument("ref", type=str, help="Question key or id.")
+    questions_defer.add_argument("--until", type=str, required=True, help="Resurface date YYYY-MM-DD.")
+    questions_defer.add_argument("--by", dest="deferred_by", type=str, default="owner")
+    questions_defer.add_argument(
+        "--role",
+        type=str,
+        default="OWNER",
+        choices=[AskRole.OWNER.value, AskRole.ORCHESTRATOR.value],
+    )
+    questions_defer.add_argument("--note", type=str, default="")
+    questions_defer.add_argument("--json", action="store_true", help="JSON output")
+    _add_store_arg(questions_defer)
+
+    questions_moot = questions_sub.add_parser(
+        "moot", help="Close a question as moot on explicit evidence."
+    )
+    questions_moot.add_argument("ref", type=str, help="Question key or id.")
+    questions_moot.add_argument(
+        "--evidence", type=str, required=True, help="Evidence proving the question is moot."
+    )
+    questions_moot.add_argument("--by", dest="closed_by", type=str, default="owner")
+    questions_moot.add_argument(
+        "--role",
+        type=str,
+        default=AskRole.OWNER.value,
+        choices=[
+            AskRole.OWNER.value,
+            AskRole.ORCHESTRATOR.value,
+            AskRole.ENGINE.value,
+        ],
+    )
+    questions_moot.add_argument("--json", action="store_true", help="JSON output")
+    _add_store_arg(questions_moot)
+
+    questions_diverge = questions_sub.add_parser(
+        "diverge", help="Record a conflicting later record (never auto-closes)."
+    )
+    questions_diverge.add_argument("ref", type=str, help="Question key or id.")
+    questions_diverge.add_argument(
+        "--reason",
+        type=str,
+        required=True,
+        choices=[
+            "DIFFERENT_WORDS",
+            "DIFFERENT_OPTION",
+            "ANSWER_AFTER_MOOT",
+            "MOOT_AFTER_ANSWER",
+            "DIFFERENT_EVIDENCE",
+        ],
+    )
+    questions_diverge.add_argument("--words", type=str, required=True)
+    questions_diverge.add_argument("--by", dest="recorded_by", type=str, required=True)
+    questions_diverge.add_argument(
+        "--role", type=str, required=True, choices=[item.value for item in AskRole]
+    )
+    questions_diverge.add_argument("--chosen-option", dest="chosen_option", type=str, default=None)
+    questions_diverge.add_argument("--note", type=str, default="")
+    questions_diverge.add_argument("--json", action="store_true", help="JSON output")
+    _add_store_arg(questions_diverge)
+
+    questions_divergences = questions_sub.add_parser(
+        "divergences", help="Report every divergent record."
+    )
+    questions_divergences.add_argument("ref", type=str, nargs="?", default=None)
+    questions_divergences.add_argument("--json", action="store_true", help="JSON output")
+    _add_store_arg(questions_divergences)
+
+    questions_standing = questions_sub.add_parser(
+        "standing-rules",
+        help="Propose CFG-1 standing rules from repeated same-kind owner answers.",
+    )
+    questions_standing.add_argument(
+        "--threshold", type=int, default=STANDING_RULE_THRESHOLD, help="Repeat count (default: 3)."
+    )
+    questions_standing.add_argument("--json", action="store_true", help="JSON output")
+    _add_store_arg(questions_standing)
+
+    questions_audit = questions_sub.add_parser(
+        "audit", help="Audit list of every Orchestrator-alone decision."
+    )
+    questions_audit.add_argument("--json", action="store_true", help="JSON output")
+    _add_store_arg(questions_audit)
+
     # orch job submit|get|list|cancel (M2-3 job queue; each command calls
     # exactly one service function in saberops.jobs.service).
     job_parser = subparsers.add_parser(
@@ -1544,6 +1867,52 @@ def build_parser() -> argparse.ArgumentParser:
     job_cancel.add_argument("job_id", type=str, help="Job identifier.")
     job_cancel.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
     job_cancel.add_argument("--json", action="store_true", help="JSON output")
+
+    # orch scheduler run [--once] [--interval-seconds INT]
+    scheduler_parser = subparsers.add_parser(
+        "scheduler",
+        help="Run the pacing scheduler loop (ADR-0002 D7).",
+    )
+    scheduler_sub = scheduler_parser.add_subparsers(
+        dest="scheduler_command", required=True
+    )
+    scheduler_run = scheduler_sub.add_parser("run", help="Run the pacing scheduler loop.")
+    scheduler_run.add_argument(
+        "--once", action="store_true", help="Run one scheduler tick and exit."
+    )
+    scheduler_run.add_argument(
+        "--interval-seconds",
+        type=float,
+        default=60.0,
+        help="Seconds between ticks (default: 60.0).",
+    )
+    scheduler_run.add_argument(
+        "--max-concurrent",
+        type=_positive_int_arg,
+        default=None,
+        metavar="N",
+        help=(
+            "Lower the effective owner global ceiling on concurrently RUNNING"
+            " top-level jobs for this run (aggregate admission only; cannot"
+            " raise the owner-configured ceiling)."
+        ),
+    )
+    scheduler_run.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
+    scheduler_run.add_argument("--json", action="store_true", help="JSON output")
+
+    # orch capacity show [--json]
+    capacity_parser = subparsers.add_parser(
+        "capacity",
+        help="Inspect ledger capacity pools and estimates (read-only).",
+    )
+    capacity_sub = capacity_parser.add_subparsers(
+        dest="capacity_command", required=True
+    )
+    capacity_show = capacity_sub.add_parser(
+        "show", help="Show capacity pools and ledger estimates."
+    )
+    capacity_show.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
+    capacity_show.add_argument("--json", action="store_true", help="JSON output")
 
     # orch retry|continue|try-worker
     retry_parser = subparsers.add_parser(
@@ -1732,6 +2101,52 @@ def build_parser() -> argparse.ArgumentParser:
         choices=[mode.value for mode in GateScratchMode],
         help="Exact mode id: " + ", ".join(mode.value for mode in GateScratchMode) + ".",
     )
+
+    # orch mcp [serve|tools] --transport stdio
+    mcp_parser = subparsers.add_parser(
+        "mcp",
+        help="Expose the Orchestrator contract tools over MCP (stdio transport).",
+        description=(
+            "Serve the SaberOps Orchestrator contract tools (submit_job, get_job, "
+            "list_jobs, cancel_job, capacity, submit_wave, wave_status, read_evidence, "
+            "list_questions, answer_question, propose_config_change, list_proposals) "
+            "over the Model Context Protocol. Owner-only operations are never exposed."
+        ),
+    )
+    mcp_parser.add_argument(
+        "mcp_action",
+        nargs="?",
+        default="serve",
+        choices=["serve", "tools"],
+        help="serve the MCP server (default) or list the exposed tools.",
+    )
+    mcp_parser.add_argument(
+        "--transport",
+        type=str,
+        default="stdio",
+        choices=["stdio"],
+        help="Transport to serve (only stdio is implemented).",
+    )
+    mcp_parser.add_argument("--db", type=str, default=None, help="Owner database path.")
+    mcp_parser.add_argument(
+        "--lease", type=str, default=None, help="Orchestrator lease file path."
+    )
+    mcp_parser.add_argument(
+        "--ledger", type=str, default=None, help="Append-only event ledger path."
+    )
+    mcp_parser.add_argument(
+        "--questions-store", dest="questions_store", type=str, default=None
+    )
+    mcp_parser.add_argument(
+        "--config-ledger", dest="config_ledger", type=str, default=None
+    )
+    mcp_parser.add_argument(
+        "--cwd",
+        type=str,
+        default=None,
+        help="Base directory used to discover the .orch/.saberops evidence roots.",
+    )
+    mcp_parser.add_argument("--json", action="store_true", help="JSON output (tools).")
 
     return parser
 
@@ -2674,7 +3089,24 @@ def handle_monitor(args: argparse.Namespace) -> int:
                 return 1
             print(render_monitor_frame(report))
             print("", flush=True)
-            if once or is_terminal_report(report):
+            # ADR-0002 D8 (M2-5) readout-only: a PREEMPTED run is terminal
+            # for the run, so the monitor must stop here.  The canonical
+            # set is authoritative; is_terminal_report() still enumerates
+            # the pre-D8 statuses (see the Step 001 report for the narrow
+            # unification proposal), so PREEMPTED is recognized from the
+            # report's own lifecycle status without duplicating any list.
+            lifecycle = report.get("lifecycle")
+            lifecycle_status = (
+                lifecycle.get("status") if isinstance(lifecycle, dict) else None
+            )
+            if (
+                once
+                or is_terminal_report(report)
+                or (
+                    isinstance(lifecycle_status, str)
+                    and lifecycle_status in {s.value for s in TERMINAL_RUN_STATUSES}
+                )
+            ):
                 return 0
             if deadline is not None and time.monotonic() >= deadline:
                 print(
@@ -2754,6 +3186,206 @@ def handle_cleanup(args: argparse.Namespace) -> int:
         for path in res["skipped_missing"]:
             print(f"  - {path}")
 
+    return 0
+
+
+def _gc_read_only_db(args: argparse.Namespace, repo: Path) -> Database | None:
+    """Open the most specific existing store read-only, or None when absent.
+
+    A dry run must not create a database, WAL file or schema, so a missing
+    store yields ``None`` and the inventory reports every Git artifact as
+    UNKNOWN/KEEP rather than adopting it.
+    """
+    explicit = _explicit_db(args)
+    candidates = (
+        [Path(explicit)]
+        if explicit is not None
+        else [Path(project_db_path_for_repo(repo)), Path(get_default_db_path())]
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return Database(candidate, read_only=True)
+    return None
+
+
+def _gc_inventory_payload(inventory: Inventory, preview: GcPreview) -> dict[str, Any]:
+    return {
+        "repo_root": inventory.repo_root,
+        "project_id": inventory.project_id,
+        "generated_at": inventory.generated_at.isoformat(),
+        "warnings": list(inventory.warnings),
+        "policy_ref": preview.policy_ref,
+        "approved": preview.approved,
+        "preview_id": preview.preview_id,
+        "candidates": [
+            {
+                "artifact_class": c.artifact_class.value,
+                "action": c.action.value,
+                "reference": c.reference,
+                "identity": c.identity,
+                "owner": c.owner,
+                "reason": c.reason,
+                "estimated_bytes": c.estimated_bytes,
+            }
+            for c in preview.candidates
+        ],
+        "exclusions": [
+            {
+                "artifact_class": e.artifact_class.value,
+                "reference": e.reference,
+                "reason": e.reason,
+            }
+            for e in preview.exclusions
+        ],
+        "estimated_reclaimable_bytes": preview.estimated_reclaimable_bytes,
+        "inventory": [
+            {
+                "artifact_class": item.artifact_class.value,
+                "reference": item.reference,
+                "identity": item.identity,
+                "owner": item.owner,
+                "ownership": item.ownership.value,
+                "reason": item.reason,
+                "size_bytes": item.size_bytes,
+                "reclaimable_bytes": item.reclaimable_bytes,
+            }
+            for item in inventory.items
+        ],
+    }
+
+
+def _print_gc_report(inventory: Inventory, preview: GcPreview) -> None:
+    print(f"[*] Storage inventory for {inventory.repo_root} ({len(inventory.items)} artifacts)")
+    for item in inventory.items:
+        size = "?" if item.size_bytes is None else str(item.size_bytes)
+        print(
+            f"  {item.artifact_class.value:<16} {item.ownership.value:<14} "
+            f"{size:>12}B  {item.reference}  [{item.reason}]"
+        )
+    for warning in inventory.warnings:
+        print(f"  ! {warning}")
+    print("─" * 60)
+    if preview.policy_ref is None:
+        print("[*] No validated standing owner policy: inventory/report only (nothing eligible).")
+    else:
+        print(f"[*] Standing policy: {preview.policy_ref}")
+    if preview.candidates:
+        print(f"[*] Eligible candidates ({len(preview.candidates)}):")
+        for candidate in preview.candidates:
+            size = "unknown" if candidate.estimated_bytes is None else str(candidate.estimated_bytes)
+            print(
+                f"  → {candidate.action.value}: {candidate.reference} "
+                f"[{candidate.reason}] est={size}B"
+            )
+    if preview.exclusions:
+        print(f"[*] Kept ({len(preview.exclusions)}), reasons:")
+        reasons: dict[str, int] = {}
+        for exclusion in preview.exclusions:
+            reasons[exclusion.reason] = reasons.get(exclusion.reason, 0) + 1
+        for reason, count in sorted(reasons.items()):
+            print(f"  · {reason}: {count}")
+
+
+def handle_gc(args: argparse.Namespace) -> int:
+    """Handle `orch gc [--dry-run|--apply] [--class ...] [--json]`."""
+    repo = (
+        Path(args.project_repo).resolve() if args.project_repo else Path.cwd().resolve()
+    )
+    if not repo.exists() or not GitManager.is_git_repo(repo):
+        print(f"[!] Not a Git repository: {repo}", file=sys.stderr)
+        return 1
+    classes: tuple[ArtifactClass, ...] | None = (
+        tuple(ArtifactClass(value) for value in args.artifact_class)
+        if args.artifact_class
+        else None
+    )
+    policy_path = Path(args.policy) if args.policy else default_gc_policy_path()
+    try:
+        policy = load_gc_policy(policy_path)
+    except GcPolicyError as exc:
+        print(f"[!] Invalid GC policy: {exc}", file=sys.stderr)
+        return 1
+    effective_policy_path = policy_path if policy_path.exists() else None
+
+    if not args.apply:
+        db = _gc_read_only_db(args, repo)
+        inventory = build_inventory(db, repo_root=repo)
+        preview = preview_gc(
+            inventory,
+            policy=policy,
+            policy_path=effective_policy_path,
+            classes=classes,
+        )
+        if args.json:
+            print(json.dumps(_gc_inventory_payload(inventory, preview), indent=2, sort_keys=True))
+        else:
+            _print_gc_report(inventory, preview)
+        return 0
+
+    if not policy.approved:
+        print(
+            "[!] Refusing --apply: no validated standing owner policy authorizes "
+            "destructive GC.",
+            file=sys.stderr,
+        )
+        return 1
+    db = db_for_repo(args, repo)
+    inventory = build_inventory(db, repo_root=repo)
+    preview = preview_gc(
+        inventory,
+        policy=policy,
+        policy_path=effective_policy_path,
+        classes=classes,
+    )
+    result = apply_gc(
+        preview,
+        preview.candidates,
+        db=db,
+        repo_root=repo,
+        audit=database_audit_sink(db),
+    )
+    payload = _gc_inventory_payload(inventory, preview)
+    payload["apply"] = {
+        "applied": [
+            {
+                "reference": outcome.candidate.reference,
+                "action": outcome.candidate.action.value,
+                "reason": outcome.reason,
+                "actual_bytes": outcome.actual_bytes,
+            }
+            for outcome in result.applied
+        ],
+        "refused": [
+            {
+                "reference": outcome.candidate.reference,
+                "action": outcome.candidate.action.value,
+                "reason": outcome.reason,
+            }
+            for outcome in result.refused
+        ],
+        "audit_uncertain": result.audit_uncertain,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        if result.audit_uncertain:
+            return 1
+    else:
+        _print_gc_report(inventory, preview)
+        print("─" * 60)
+        print(f"[*] Applied {len(result.applied)} action(s); refused {len(result.refused)}.")
+        for outcome in result.applied:
+            if outcome.reason == "audit-uncertain":
+                print(
+                    f"  ! {outcome.candidate.action.value}: "
+                    f"{outcome.candidate.reference} (audit uncertain)"
+                )
+            else:
+                print(f"  ✓ {outcome.candidate.action.value}: {outcome.candidate.reference}")
+        for outcome in result.refused:
+            print(f"  ! kept {outcome.candidate.reference} [{outcome.reason}]")
+        if result.audit_uncertain:
+            print("[!] Audit persistence failed after a completed action; reconcile required.")
+            return 1
     return 0
 
 
@@ -3690,6 +4322,286 @@ def handle_posture_verify(args: argparse.Namespace) -> int:
     return 0
 
 
+def _questions_queue(args: argparse.Namespace) -> OwnerQuestionQueue:
+    """Resolve the question document the command should act on."""
+    return OwnerQuestionQueue(getattr(args, "store", None))
+
+
+def _questions_fail(exc: Exception) -> int:
+    print(f"[!] {exc}", file=sys.stderr)
+    return 1
+
+
+def _questions_reference_date(raw: str | None) -> date:
+    """Resolve the reference date for deferred resurfacing (default: today)."""
+    if raw is None or not str(raw).strip():
+        return datetime.now(UTC).date()
+    return date.fromisoformat(str(raw).strip())
+
+
+def _print_question(question: OwnerQuestion, *, as_json: bool) -> int:
+    view = question_view(question)
+    if as_json:
+        print(json.dumps(view, sort_keys=True))
+        return 0
+    print(f"Question : {view['question_id']} ({view['key']}) [{view['status']}]")
+    print(f"Subject  : {view['subject']}")
+    print(f"Class    : {view['decision_class']} — answerable by {view['answerable_by']}")
+    print(f"Raised   : {view['raised_by_role']} {view['raised_by']} at {view['raised_at']}")
+    if view["scope"] or view["run_id"]:
+        print(f"Scope    : {view['scope'] or '-'} run {view['run_id'] or '-'}")
+    if view["blocks"]:
+        print(f"Blocks   : {', '.join(view['blocks'])}")
+    if view["defer_until"]:
+        print(f"Deferred : until {view['defer_until']}")
+    if view["answer"] is not None:
+        answer = view["answer"]
+        print(f"Answer   : {answer['words']}")
+        print(f"Authority: {answer['authority']} ({answer['answered_by']})")
+    if view["moot_evidence"]:
+        print(f"Moot     : {view['moot_evidence']}")
+    if view["divergence_count"]:
+        print(f"Divergent: {view['divergence_count']} record(s) — reported, not auto-closed")
+    return 0
+
+
+def handle_questions_ask(args: argparse.Namespace) -> int:
+    """Handle `orch questions ask` (raises one keyed escalatable question)."""
+    try:
+        request = QuestionRequest(
+            key=str(args.key),
+            subject=str(args.subject),
+            kind=str(args.kind),
+            decision_class=DecisionClass(str(args.decision_class)),
+            raised_by_role=AskRole(str(args.role)),
+            raised_by=str(args.raised_by),
+            escalation=Escalation(
+                requirement=str(args.requirement),
+                proposed_expansion=str(args.proposed_expansion),
+                smallest_compliant=str(args.smallest_compliant),
+                consequences=str(args.consequences),
+                recommendation=str(args.recommendation),
+            ),
+            scope=args.scope,
+            run_id=args.run_id,
+            blocks=tuple(str(item) for item in args.blocks),
+            options=tuple(str(item) for item in args.options),
+            default_option=args.default_option,
+            supersedes=args.supersedes,
+        )
+        question = _questions_queue(args).ask(request)
+    except QuestionError as exc:
+        return _questions_fail(exc)
+    return _print_question(question, as_json=bool(args.json))
+
+
+def handle_questions_list(args: argparse.Namespace) -> int:
+    """Handle `orch questions list`."""
+    try:
+        as_of = _questions_reference_date(args.as_of)
+        queue = _questions_queue(args)
+        questions = queue.questions(status=args.status, run_id=args.run_id)
+        views = [question_view(question, as_of) for question in questions]
+    except (QuestionError, ValueError) as exc:
+        return _questions_fail(exc)
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "as_of": as_of.isoformat(),
+                    "questions": views,
+                    "pending": [
+                        view["question_id"]
+                        for view in views
+                        if view["status"] == QuestionStatus.OPEN.value or view["due"]
+                    ],
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+    if not views:
+        print("No questions.")
+        return 0
+    for view in views:
+        marker = "DUE" if view["due"] else view["status"]
+        print(
+            f"{view['question_id']}  {marker:<9} {view['decision_class']:<32} "
+            f"{view['key']}  {view['subject']}"
+        )
+    return 0
+
+
+def handle_questions_show(args: argparse.Namespace) -> int:
+    """Handle `orch questions show REF`."""
+    try:
+        as_of = _questions_reference_date(args.as_of)
+        question = _questions_queue(args).get(str(args.ref))
+    except (QuestionError, ValueError) as exc:
+        return _questions_fail(exc)
+    if question is None:
+        print(f"[!] unknown question: {args.ref!r}", file=sys.stderr)
+        return 1
+    if args.as_of and not args.json:
+        print(f"Reference date: {as_of.isoformat()}")
+    return _print_question(question, as_json=bool(args.json))
+
+
+def handle_questions_answer(args: argparse.Namespace) -> int:
+    """Handle `orch questions answer REF --words ...` (verbatim owner words)."""
+    authority = AnswerAuthority(str(args.authority).strip().upper())
+    role_raw = getattr(args, "role", None)
+    role = (
+        AskRole(str(role_raw))
+        if role_raw
+        else (
+            AskRole.OWNER
+            if authority is AnswerAuthority.OWNER
+            else AskRole.ORCHESTRATOR
+        )
+    )
+    actor = str(args.answered_by) if args.answered_by else (
+        "owner" if authority is AnswerAuthority.OWNER else ""
+    )
+    if not actor:
+        print(
+            "[!] --by is required for an Orchestrator answer (the actor is audited)",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        question = _questions_queue(args).answer(
+            str(args.ref),
+            words=str(args.words),
+            authority=authority,
+            answered_by=actor,
+            answered_by_role=role,
+            chosen_option=args.chosen_option,
+            evidence=args.evidence,
+            rejected_alternative=args.rejected_alternative,
+        )
+    except QuestionError as exc:
+        return _questions_fail(exc)
+    return _print_question(question, as_json=bool(args.json))
+
+
+def handle_questions_defer(args: argparse.Namespace) -> int:
+    """Handle `orch questions defer REF --until DATE`."""
+    try:
+        question = _questions_queue(args).defer(
+            str(args.ref),
+            until=str(args.until),
+            deferred_by=str(args.deferred_by),
+            deferred_by_role=AskRole(str(args.role)),
+            note=str(args.note or ""),
+        )
+    except QuestionError as exc:
+        return _questions_fail(exc)
+    return _print_question(question, as_json=bool(args.json))
+
+
+def handle_questions_moot(args: argparse.Namespace) -> int:
+    """Handle `orch questions moot REF --evidence ...` (evidence-backed close)."""
+    try:
+        question = _questions_queue(args).mark_moot(
+            str(args.ref),
+            evidence=str(args.evidence),
+            closed_by=str(args.closed_by),
+            closed_by_role=AskRole(str(args.role)),
+        )
+    except QuestionError as exc:
+        return _questions_fail(exc)
+    return _print_question(question, as_json=bool(args.json))
+
+
+def handle_questions_diverge(args: argparse.Namespace) -> int:
+    """Handle `orch questions diverge REF ...` (records a conflict)."""
+    from saberops.questions import DivergenceReason
+
+    try:
+        question = _questions_queue(args).record_divergence(
+            str(args.ref),
+            reason=DivergenceReason(str(args.reason)),
+            words=str(args.words),
+            recorded_by=str(args.recorded_by),
+            recorded_by_role=AskRole(str(args.role)),
+            chosen_option=args.chosen_option,
+            note=str(args.note or ""),
+        )
+    except QuestionError as exc:
+        return _questions_fail(exc)
+    return _print_question(question, as_json=bool(args.json))
+
+
+def handle_questions_divergences(args: argparse.Namespace) -> int:
+    """Handle `orch questions divergences [REF]` (reported, never auto-closed)."""
+    try:
+        reports = _questions_queue(args).divergences(args.ref)
+    except QuestionError as exc:
+        return _questions_fail(exc)
+    if args.json:
+        print(json.dumps([report.to_mapping() for report in reports], sort_keys=True))
+        return 0
+    if not reports:
+        print("No divergent records.")
+        return 0
+    for report in reports:
+        record = report.record
+        print(
+            f"{record.recorded_at}  {report.question_id} [{report.status.value}]  "
+            f"{record.reason.value}  {record.words}"
+        )
+    return 0
+
+
+def handle_questions_standing_rules(args: argparse.Namespace) -> int:
+    """Handle `orch questions standing-rules` (proposals for CFG-1)."""
+    try:
+        proposals = _questions_queue(args).standing_rule_proposals(int(args.threshold))
+    except QuestionError as exc:
+        return _questions_fail(exc)
+    if args.json:
+        print(
+            json.dumps(
+                {"threshold": int(args.threshold), "proposals": [p.to_mapping() for p in proposals]},
+                sort_keys=True,
+            )
+        )
+        return 0
+    if not proposals:
+        print("No standing-rule proposal yet.")
+        return 0
+    print("Standing-rule proposals for CFG-1 (proposals only; nothing is applied):")
+    for proposal in proposals:
+        print(
+            f"  {proposal.kind} x{proposal.occurrences} -> {proposal.chosen_answer} "
+            f"({', '.join(proposal.question_ids)})"
+        )
+    return 0
+
+
+def handle_questions_audit(args: argparse.Namespace) -> int:
+    """Handle `orch questions audit` (every Orchestrator-alone decision)."""
+    try:
+        decisions = _questions_queue(args).orchestrator_alone_decisions()
+    except QuestionError as exc:
+        return _questions_fail(exc)
+    if args.json:
+        print(json.dumps([item.to_mapping() for item in decisions], sort_keys=True))
+        return 0
+    if not decisions:
+        print("No Orchestrator-alone decision recorded.")
+        return 0
+    for item in decisions:
+        print(
+            f"{item.answered_at}  {item.question_id}  {item.decision_class.value}  "
+            f"{item.words}"
+        )
+        print(f"    evidence : {item.evidence}")
+        print(f"    rejected : {item.rejected_alternative}")
+    return 0
+
+
 def _job_payload(job: object) -> dict[str, Any]:
     from saberops.jobs.models import Job as _Job
 
@@ -3829,6 +4741,198 @@ def handle_job_cancel(args: argparse.Namespace) -> int:
     print(f"State      : {result.job.state.value}")
     print(f"Cancelled  : {'yes' if result.cancelled else 'no'}")
     return 0
+
+
+def _scheduler_storage_callbacks(
+    db: Database,
+) -> tuple[Any, Any]:
+    """Build the GS-1 (maintenance, launch-guard) callbacks for the scheduler.
+
+    On construction failure neither callback is ``None`` silently: the
+    maintenance callback degrades to a typed reason and the guard degrades to
+    the same, so mandatory storage checks are never quietly disabled.
+    """
+    try:
+        from saberops.service import OrchestratorService
+        from saberops.storage_maintenance import MaintenanceTrigger, StorageMaintenance
+
+        service: StorageMaintenance = OrchestratorService(db=db).storage_maintenance(
+            repo_root=Path.cwd().resolve()
+        )
+    except Exception:
+        def _degraded(_trigger: str) -> str | None:
+            return "STORAGE_MAINTENANCE_UNAVAILABLE"
+
+        def _guarded() -> str | None:
+            return "STORAGE_MAINTENANCE_UNAVAILABLE"
+
+        return _degraded, _guarded
+
+    def _maintenance(trigger: str) -> str | None:
+        return service.run(MaintenanceTrigger(trigger)).infra_reason
+
+    def _guard() -> str | None:
+        return service.launch_guard_reason()
+
+    return _maintenance, _guard
+
+
+def handle_scheduler_run(args: argparse.Namespace) -> int:
+    """Handle `orch scheduler run [--once] [--interval-seconds INT]`."""
+    from saberops.capacity.loop import run_scheduler_loop
+    from saberops.db import Database as _Database
+
+    db_path = getattr(args, "db", None)
+    db = _Database(db_path) if db_path else _Database()
+    run_once = bool(getattr(args, "once", False))
+    interval = float(getattr(args, "interval_seconds", 60.0) or 60.0)
+    max_concurrent = getattr(args, "max_concurrent", None)
+
+    readiness_svc: Any = None
+    try:
+        from saberops.model_access.readiness_service import ReadinessService
+        from saberops.project import owner_state_dir
+
+        readiness_svc = ReadinessService.for_owner_state(owner_state_dir())
+    except Exception:
+        readiness_svc = None
+
+    try:
+        storage_maintenance_cb, launch_guard_cb = _scheduler_storage_callbacks(db)
+        result = run_scheduler_loop(
+            db,
+            tick_interval=interval,
+            once=run_once,
+            readiness_service=readiness_svc,
+            max_concurrent_override=max_concurrent,
+            storage_maintenance=storage_maintenance_cb,
+            launch_guard=launch_guard_cb,
+        )
+        if result is None or (not result.ran and result.reason in ("lease_held_by_other", "lost_lease")):
+            reason = result.reason if result is not None else "lease_held_by_other"
+            print(f"[!] Scheduler lease held by another instance ({reason})", file=sys.stderr)
+            return 2
+        if not result.ran and result.reason == "invalid_global_concurrency":
+            print(
+                "[!] Scheduler aborted: invalid global concurrency configuration",
+                file=sys.stderr,
+            )
+            return 2
+
+        if result.storage_infra_reason is not None:
+            # Typed storage/SQLite INFRA: park, never a code failure, never a pass.
+            print(
+                f"[!] Storage infrastructure park: {result.storage_infra_reason} "
+                "(no worker or gate launched)",
+                file=sys.stderr,
+            )
+            return 3
+
+        if getattr(args, "json", False):
+            payload: list[dict[str, Any]] = []
+            if result is not None:
+                for d in result.decisions:
+                    job = getattr(d, "job", None)
+                    entry: dict[str, Any] = {
+                        "type": type(d).__name__,
+                        "job_id": job.job_id if job is not None else None,
+                    }
+                    pool_id = getattr(d, "pool_id", None)
+                    if pool_id is not None:
+                        entry["pool_id"] = str(pool_id)
+                    cand = getattr(d, "candidate", None)
+                    if cand is not None:
+                        entry["candidate"] = f"{cand.provider}/{cand.model}"
+                    reason = getattr(d, "reason", None)
+                    if reason is not None:
+                        entry["reason"] = str(reason)
+                    payload.append(entry)
+            print(json.dumps(payload, indent=2))
+        return 0
+    except Exception as exc:
+        print(f"[!] Scheduler loop failed: {exc}", file=sys.stderr)
+        return 1
+
+
+def handle_capacity_show(args: argparse.Namespace) -> int:
+    """Handle `orch capacity show [--json]` (read-only)."""
+    from dataclasses import asdict
+
+    from saberops.db import Database as _Database
+    from saberops.jobs.service import capacity as _capacity
+
+    db_path = getattr(args, "db", None)
+    # Open read-only to honour D5 lifecycle rule: create nothing, write nothing on read
+    db = _Database(db_path, read_only=True) if db_path else _Database(read_only=True)
+
+    try:
+        cap_view = _capacity(db)
+        if getattr(args, "json", False):
+            print(json.dumps(asdict(cap_view), indent=2))
+            return 0
+        print(f"Generated at : {cap_view.generated_at}")
+        print(f"Ledger wired : {cap_view.ledger_wired}")
+        if not cap_view.pools:
+            print("No capacity pools recorded.")
+            return 0
+        header = f"{'Pool':<18} {'Window':<8} {'Remaining':<12} {'Uncertainty':<12} {'Source':<10} {'Stale':<6} {'Excluded Until'}"
+        print(header)
+        print("-" * len(header))
+        for p in cap_view.pools:
+            rem = f"{p.remaining_est:.1f}%" if p.remaining_est is not None else "None"
+            unc = f"±{p.uncertainty:.1f}%" if p.uncertainty is not None else "0.0%"
+            src = p.source or "-"
+            stl = "yes" if p.stale else "no"
+            exc = p.excluded_until or "-"
+            print(
+                f"{p.pool_id:<18} {p.window_id:<8} {rem:<12} {unc:<12} {src:<10} {stl:<6} {exc}"
+            )
+        return 0
+    except Exception as exc:
+        print(f"[!] Capacity inspection failed: {exc}", file=sys.stderr)
+        return 1
+
+
+def handle_mcp(args: argparse.Namespace) -> int:
+    """Handle `orch mcp [serve|tools]` (stdio MCP server for the D7 tools)."""
+    from saberops.mcp.protocol import McpServer
+    from saberops.mcp.stdio import build_server_context, serve_stdio
+
+    action = str(getattr(args, "mcp_action", "serve") or "serve")
+    transport = str(getattr(args, "transport", "stdio") or "stdio")
+    if transport != "stdio":
+        print(f"[!] unsupported MCP transport: {transport}", file=sys.stderr)
+        return 2
+    context = build_server_context(
+        db_path=getattr(args, "db", None),
+        lease_path=getattr(args, "lease", None),
+        ledger_path=getattr(args, "ledger", None),
+        questions_store=getattr(args, "questions_store", None),
+        config_ledger=getattr(args, "config_ledger", None),
+        cwd=getattr(args, "cwd", None),
+    )
+    if action == "tools":
+        # Read-only inspection: never acquires the writer lease.
+        server = McpServer(context, acquire_lease=False)
+        descriptors = server.registry.descriptors()
+        if getattr(args, "json", False):
+            print(json.dumps({"tools": descriptors}, indent=2, sort_keys=True))
+            return 0
+        for descriptor in descriptors:
+            print(f"{descriptor['name']:<22} {descriptor['description']}")
+        return 0
+    server = McpServer(context)
+    if not server.read_only:
+        print(
+            "[i] MCP writer lease acquired; owner-only operations stay unavailable.",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "[i] MCP read-only session: another Orchestrator holds the writer lease.",
+            file=sys.stderr,
+        )
+    return serve_stdio(server)
 
 
 def handle_project_set_workflow(args: argparse.Namespace) -> int:
@@ -4203,6 +5307,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         return handle_accept(args)
     elif args.command == "cleanup":
         return handle_cleanup(args)
+    elif args.command == "gc":
+        return handle_gc(args)
     elif args.command == "status":
         return handle_status(args)
     elif args.command == "plan":
@@ -4277,6 +5383,27 @@ def _dispatch(args: argparse.Namespace) -> int:
             return handle_posture_show(args)
         elif args.posture_command == "verify":
             return handle_posture_verify(args)
+    elif args.command == "questions":
+        if args.questions_command == "ask":
+            return handle_questions_ask(args)
+        elif args.questions_command == "list":
+            return handle_questions_list(args)
+        elif args.questions_command == "show":
+            return handle_questions_show(args)
+        elif args.questions_command == "answer":
+            return handle_questions_answer(args)
+        elif args.questions_command == "defer":
+            return handle_questions_defer(args)
+        elif args.questions_command == "moot":
+            return handle_questions_moot(args)
+        elif args.questions_command == "diverge":
+            return handle_questions_diverge(args)
+        elif args.questions_command == "divergences":
+            return handle_questions_divergences(args)
+        elif args.questions_command == "standing-rules":
+            return handle_questions_standing_rules(args)
+        elif args.questions_command == "audit":
+            return handle_questions_audit(args)
     elif args.command == "job":
         if args.job_command == "submit":
             return handle_job_submit(args)
@@ -4286,6 +5413,14 @@ def _dispatch(args: argparse.Namespace) -> int:
             return handle_job_list(args)
         elif args.job_command == "cancel":
             return handle_job_cancel(args)
+    elif args.command == "scheduler":
+        if args.scheduler_command == "run":
+            return handle_scheduler_run(args)
+    elif args.command == "capacity":
+        if args.capacity_command == "show":
+            return handle_capacity_show(args)
+    elif args.command == "mcp":
+        return handle_mcp(args)
     elif args.command == "retry":
         return handle_retry(args)
     elif args.command == "continue":

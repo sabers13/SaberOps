@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One integration gate: owned scratch, slot, parallel/serial tiers and JUnit evidence.
+# One integration gate: owned scratch, host-gates slot, one bounded parallel pass and JUnit evidence.
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 gate_python=python

@@ -8,6 +8,7 @@ Nothing in this lane dispatches. The scheduler (M2-4b) will call
 from saberops.jobs.models import (
     DISPATCHABLE_ROLES,
     NO_ROUTE_FOR_REQUIREMENTS,
+    PREEMPTION_LIMIT,
     RUN_FAILED,
     RUN_MISSING,
     SIZE_HINTS,
@@ -25,6 +26,7 @@ from saberops.jobs.models import (
 __all__ = [
     "DISPATCHABLE_ROLES",
     "NO_ROUTE_FOR_REQUIREMENTS",
+    "PREEMPTION_LIMIT",
     "RUN_FAILED",
     "RUN_MISSING",
     "SIZE_HINTS",

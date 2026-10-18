@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -74,6 +75,50 @@ def _model_for(harness: str) -> str:
     return "opencode-go/test-model" if harness == "opencode" else "model"
 
 
+def _seed_verified_codex_posture(config_home: Path) -> None:
+    """Seed an isolated owner config with a verified class-A posture for the
+    synthetic ``codex`` provider this orchestrator-dispatch run uses.
+
+    Covers: ADR-0002 D2 / WORKFLOW §7 authorized setup-only fixture migration,
+    following the accepted precedent in ``tests/test_continue_run.py``.  The run
+    dispatches a synthetic ``codex`` candidate with no matching posture record,
+    so the accepted M2-4b F1 admission seam rightfully skips it
+    (POSTURE_UNVERIFIED) and the stub child is never launched.  This seeds ONLY
+    that synthetic provider identity plus the same packaged ``chatgpt-plus``
+    membership without ``overage_possible`` (the blank test DB carries no quota
+    evidence the historical fixture never provided).  No assertion, candidate,
+    or hermetic-env expectation changes, no real vendor receives an attestation,
+    and no production posture/admission/pool semantics are touched.
+    ``verified_on`` is stamped at run time with a 90-day TTL so replay never
+    expires.
+    """
+    cfg_dir = config_home / "saberops"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    today_iso = datetime.now(UTC).date().isoformat()
+    cp_doc = {
+        "version": 2,
+        "providers": {"codex": {"state": "ALLOWED"}},
+        "quota_pools": {
+            "chatgpt-plus": {
+                "mode": "STRICT",
+                "red_line_pct": 15.0,
+                "members": ["codex", "opencode/openai/*"],
+                "overage_possible": False,
+            }
+        },
+        "postures": {
+            "codex": {
+                "class": "A",
+                "policy_urls": ["https://example.com/synthetic-test-posture"],
+                "ttl_days": 90,
+                "verified_on": today_iso,
+                "note": "synthetic verified test posture for hermetic-dispatch fixtures",
+            }
+        },
+    }
+    (cfg_dir / "control_plane.json").write_text(json.dumps(cp_doc), encoding="utf-8")
+
+
 # ---------------------------------------------------------------------------
 # Unit tests for :func:`hermetic_env`.
 # ---------------------------------------------------------------------------
@@ -117,6 +162,7 @@ def test_per_harness_additions_are_harness_specific() -> None:
 
 
 def test_overlay_allowlist_keeps_safe_and_saberops_keys_only() -> None:
+    """Covers: HV-2 owned env pins (only exact required OPENCODE_* names)."""
     overlay = {
         **CANARIES,
         "PATH": "/custom-bin",
@@ -124,6 +170,13 @@ def test_overlay_allowlist_keeps_safe_and_saberops_keys_only() -> None:
         "ORCH_RUN_ID": "run-1",
         "ORCH_DB_PATH": "/state/runs.db",
         "OPENCODE_CONFIG_CONTENT": "{}",
+        "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
+        "OPENCODE_CONFIG": "/tmp/hostile.json",
+        "OPENCODE_CONFIG_DIR": "/tmp/hostile-dir",
+        "OPENCODE_MODEL": "evil/model",
+        "OPENCODE_CONFIG_PROJECT_DISABLE": "0",
+        "OPENCODE_MODELS_PATH": "/tmp/hostile-models",
+        "OPENCODE_CLI_CONFIG_CONTENT": "{}",
         "CLAUDE_CODE_DISABLE_FAST_MODE": "1",
         "FROZEN": "not-saberops-owned",
     }
@@ -131,6 +184,18 @@ def test_overlay_allowlist_keeps_safe_and_saberops_keys_only() -> None:
         env = hermetic_env(harness, overlay, {})
         for canary in CANARIES:
             assert canary not in env, f"{canary} reached {harness}"
+        # The exact discovery switch is pinned for every harness; every other
+        # config selector is dropped (no OPENCODE_* prefix is allowed).
+        assert env["OPENCODE_DISABLE_PROJECT_CONFIG"] == "1"
+        for selector in (
+            "OPENCODE_CONFIG",
+            "OPENCODE_CONFIG_DIR",
+            "OPENCODE_MODEL",
+            "OPENCODE_CONFIG_PROJECT_DISABLE",
+            "OPENCODE_MODELS_PATH",
+            "OPENCODE_CLI_CONFIG_CONTENT",
+        ):
+            assert selector not in env, f"{selector} reached {harness}"
         assert env["PATH"] == "/custom-bin"
         assert env["HOME"] == "/custom-home"
         assert env["ORCH_RUN_ID"] == "run-1"
@@ -273,10 +338,27 @@ def _child_env(outfile: Path) -> dict[str, str]:
     return {str(k): str(v) for k, v in loaded.items()}
 
 
-def _assert_hermetic(child: dict[str, str], home: Path) -> None:
+def _assert_hermetic(
+    child: dict[str, str], home: Path, harness: str | None = None
+) -> None:
     for name in CANARIES:
         assert name not in child, f"canary {name} reached the worker child"
     assert child.get("PATH")
+    if harness == "opencode":
+        # HV-2 isolation repair: the OpenCode child HOME is the owned private
+        # root, never the ambient home; the same holds for the global config
+        # directory, and project/ancestor discovery is disabled.  The owned
+        # root is removed after the child exits, so post-run assertions check
+        # the redirect (not on-disk presence); creation-time emptiness is
+        # covered by the helper tests.
+        owned_home = Path(child["HOME"])
+        assert str(owned_home) != str(home)
+        assert "saberops-opencode-isolation-" in str(owned_home.parent)
+        owned_config = Path(child["XDG_CONFIG_HOME"])
+        assert owned_config.parent == owned_home.parent
+        assert child["OPENCODE_DISABLE_PROJECT_CONFIG"] == "1"
+        assert not owned_home.parent.exists(), "owned root must be cleaned up"
+        return
     assert child.get("HOME") == str(home)
 
 
@@ -315,7 +397,7 @@ def test_no_adapter_child_sees_gateway_env(
         WorkerRequest("task", tmp_path, _model_for(harness), env=dict(DISALLOWED_GATEWAY_OVERLAY))
     )
     child = _child_env(outfile)
-    _assert_hermetic(child, home)
+    _assert_hermetic(child, home, harness)
     for key in DISALLOWED_GATEWAY_OVERLAY:
         assert key not in child, f"{key} reached {harness}"
 
@@ -346,7 +428,7 @@ def test_production_shaped_overlay_is_hermetic(
     adapter = _adapter_for(harness, name)
     adapter.run(WorkerRequest("task", tmp_path, _model_for(harness), env=production_env))
     child = _child_env(outfile)
-    _assert_hermetic(child, home)
+    _assert_hermetic(child, home, harness)
     assert child["ORCH_RUN_ID"] == "run-1"
     assert child["ORCH_ATTEMPT_ID"] == "attempt-1"
     assert child["ORCH_DB_PATH"] == "/state/runs.db"
@@ -380,6 +462,7 @@ def test_orchestrator_real_dispatch_forwards_hermetic_env(
 ) -> None:
     for key in ("XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"):
         monkeypatch.setenv(key, str(tmp_path / key))
+    _seed_verified_codex_posture(tmp_path / "XDG_CONFIG_HOME")
     for key in (
         "SABEROPS_PROFILE",
         "ORCH_BINDING_STORE",
