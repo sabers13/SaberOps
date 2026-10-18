@@ -14,6 +14,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -60,7 +61,7 @@ def _ready(server: McpServer) -> None:
 
 
 def _call(server: McpServer, method: str, params: dict[str, object] | None = None,
-          mid: int = 1) -> dict[str, object]:
+          mid: int = 1) -> dict[str, Any]:
     response = server.handle(
         {"jsonrpc": "2.0", "id": mid, "method": method, "params": params or {}}
     )
@@ -68,10 +69,11 @@ def _call(server: McpServer, method: str, params: dict[str, object] | None = Non
     return response
 
 
-def _tool(server: McpServer, name: str, arguments: dict[str, object]) -> dict[str, object]:
+def _tool(server: McpServer, name: str, arguments: dict[str, object]) -> dict[str, Any]:
     response = _call(server, "tools/call", {"name": name, "arguments": arguments})
     assert "result" in response, response
-    return response["result"]  # type: ignore[return-value]
+    result: dict[str, Any] = response["result"]
+    return result
 
 
 def _dead_pid() -> int:
@@ -126,7 +128,7 @@ def test_reads_require_the_handshake(tmp_path: Path, method: str) -> None:
     """Covers: prompt section 'Standard MCP lifecycle methods' (ordering)."""
     server = _server(tmp_path)
     response = _call(server, method, {"uri": "saberops://lease"})
-    assert response["error"]["code"] == -32600  # type: ignore[index]
+    assert response["error"]["code"] == -32600
 
 
 def test_ping_works_without_initialization(tmp_path: Path) -> None:
@@ -140,10 +142,10 @@ def test_tools_list_exposes_exactly_the_twelve_d7_tools(tmp_path: Path) -> None:
     server = _server(tmp_path)
     _ready(server)
     result = _call(server, "tools/list")["result"]
-    names = [tool["name"] for tool in result["tools"]]  # type: ignore[index]
+    names = [tool["name"] for tool in result["tools"]]
     assert sorted(names) == sorted(TOOL_NAMES)
     assert len(names) == 12
-    for tool in result["tools"]:  # type: ignore[index]
+    for tool in result["tools"]:
         assert tool["inputSchema"]["type"] == "object"
 
 
@@ -151,7 +153,7 @@ def test_unknown_method_is_method_not_found(tmp_path: Path) -> None:
     """Covers: JSON-RPC 2.0 (unknown method -> -32601)."""
     server = _server(tmp_path)
     response = _call(server, "server/unknown")
-    assert response["error"]["code"] == -32601  # type: ignore[index]
+    assert response["error"]["code"] == -32601
 
 
 def test_bad_jsonrpc_version_is_invalid_request(tmp_path: Path) -> None:
@@ -419,7 +421,7 @@ def test_read_only_client_refuses_mutations_but_allows_reads(tmp_path: Path) -> 
     assert server.read_only is True
     _ready(server)
     blocked = _call(server, "tools/call", {"name": "submit_job", "arguments": {}})
-    assert blocked["error"]["code"] == -32020  # type: ignore[index]
+    assert blocked["error"]["code"] == -32020
     read = _tool(server, "list_jobs", {})
     assert read["isError"] is False
 

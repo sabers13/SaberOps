@@ -13,6 +13,7 @@ import os
 import subprocess
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -83,7 +84,7 @@ def _server(tmp_path: Path, *, read_only: bool = False) -> McpServer:
     return server
 
 
-def _call(server: McpServer, name: str, arguments: Mapping[str, object]) -> dict[str, object]:
+def _call(server: McpServer, name: str, arguments: Mapping[str, object]) -> dict[str, Any]:
     response = server.handle(
         {
             "jsonrpc": "2.0",
@@ -96,12 +97,13 @@ def _call(server: McpServer, name: str, arguments: Mapping[str, object]) -> dict
     return response
 
 
-def _payload(server: McpServer, name: str, arguments: Mapping[str, object]) -> dict[str, object]:
+def _payload(server: McpServer, name: str, arguments: Mapping[str, object]) -> dict[str, Any]:
     response = _call(server, name, arguments)
     assert "result" in response, response
-    result = response["result"]
+    result: dict[str, Any] = response["result"]
     assert result["isError"] is False, result
-    return result["structuredContent"]  # type: ignore[return-value]
+    structured: dict[str, Any] = result["structuredContent"]
+    return structured
 
 
 def _ask(
@@ -134,7 +136,7 @@ def _ask(
     return question.question_id
 
 
-def _wave(*, lane_a: str = "src/a.py", lane_b: str = "src/b.py") -> dict[str, object]:
+def _wave(*, lane_a: str = "src/a.py", lane_b: str = "src/b.py") -> dict[str, Any]:
     return {
         "wave_id": "w-1",
         "base_sha": "a" * 40,
@@ -176,8 +178,8 @@ def test_every_never_exposed_operation_is_refused(tmp_path: Path, operation: str
     server = _server(tmp_path)
     response = _call(server, operation, {})
     assert "error" in response, response
-    assert response["error"]["code"] == -32010  # type: ignore[index]
-    assert operation in response["error"]["message"]  # type: ignore[index]
+    assert response["error"]["code"] == -32010
+    assert operation in response["error"]["message"]
 
 
 def test_never_exposed_operations_are_absent_from_tools_list(tmp_path: Path) -> None:
@@ -194,7 +196,7 @@ def test_owner_only_authorities_cannot_be_reached_by_alias(tmp_path: Path) -> No
     server = _server(tmp_path)
     for alias in ("approve_proposal", "git_push", "move_main", "gate_full", "read_token"):
         response = _call(server, alias, {})
-        assert response["error"]["code"] == -32010, alias  # type: ignore[index]
+        assert response["error"]["code"] == -32010, alias
 
 
 @pytest.mark.parametrize("tool", sorted(MUTATING_TOOLS))
@@ -202,7 +204,7 @@ def test_mutating_tools_require_the_writer_lease(tmp_path: Path, tool: str) -> N
     """Covers: prompt section 'read-only second client' (mutating refusal)."""
     server = _server(tmp_path, read_only=True)
     response = _call(server, tool, {})
-    assert response["error"]["code"] == -32020, response  # type: ignore[index]
+    assert response["error"]["code"] == -32020, response
 
 
 def test_read_tools_succeed_for_a_read_only_client(tmp_path: Path) -> None:
@@ -249,8 +251,8 @@ def test_submit_job_refuses_requirement_denylisted_fields(
     server = _server(tmp_path)
     response = _call(server, "submit_job", {"repo": "/tmp", "goal": "g", field: "x"})
     assert "result" in response
-    assert response["result"]["isError"] is True  # type: ignore[index]
-    assert response["result"]["structuredContent"]["error"]["code"] == -32602  # type: ignore[index]
+    assert response["result"]["isError"] is True
+    assert response["result"]["structuredContent"]["error"]["code"] == -32602
 
 
 def test_submit_job_refuses_a_nested_denylisted_field(tmp_path: Path) -> None:
@@ -261,7 +263,7 @@ def test_submit_job_refuses_a_nested_denylisted_field(tmp_path: Path) -> None:
         "submit_job",
         {"repo": "/tmp", "goal": "g", "requirements": {"provider": "openai"}},
     )
-    assert response["result"]["isError"] is True  # type: ignore[index]
+    assert response["result"]["isError"] is True
 
 
 def test_submit_job_is_idempotent_with_a_key(
@@ -297,8 +299,8 @@ def test_get_job_refuses_an_unknown_job(tmp_path: Path) -> None:
     """Covers: prompt section 'get_job' (not found is explicit)."""
     server = _server(tmp_path)
     response = _call(server, "get_job", {"job_id": "job-nope"})
-    assert response["result"]["isError"] is True  # type: ignore[index]
-    assert response["result"]["structuredContent"]["error"]["code"] == -32040  # type: ignore[index]
+    assert response["result"]["isError"] is True
+    assert response["result"]["structuredContent"]["error"]["code"] == -32040
 
 
 def test_cancel_job_marks_a_queued_job_cancelled(
@@ -340,8 +342,8 @@ def test_submit_wave_refuses_overlapping_lane_scopes(tmp_path: Path) -> None:
     server = _server(tmp_path)
     shared = "src/shared.py"
     response = _call(server, "submit_wave", {"wave": _wave(lane_a=shared, lane_b=shared)})
-    assert response["result"]["isError"] is True  # type: ignore[index]
-    data = response["result"]["structuredContent"]["error"]["data"]  # type: ignore[index]
+    assert response["result"]["isError"] is True
+    data = response["result"]["structuredContent"]["error"]["data"]
     assert data["reasons"] and data["reasons"][0].startswith("OVERLAPPING_TOUCHES:")
 
 
@@ -349,9 +351,9 @@ def test_submit_wave_refuses_a_self_overlapping_lane(tmp_path: Path) -> None:
     """Covers: ADR-0004 invariant 2 (a lane may not touch its own no-touch set)."""
     server = _server(tmp_path)
     wave = _wave()
-    wave["lanes"][0]["must_not_touch"] = ["src/a.py"]  # type: ignore[index]
+    wave["lanes"][0]["must_not_touch"] = ["src/a.py"]
     response = _call(server, "submit_wave", {"wave": wave})
-    assert response["result"]["isError"] is True  # type: ignore[index]
+    assert response["result"]["isError"] is True
 
 
 def test_wave_status_returns_lanes_barriers_and_slot_states(tmp_path: Path) -> None:
@@ -378,15 +380,15 @@ def test_wave_status_refuses_an_unknown_wave(tmp_path: Path) -> None:
     """Covers: prompt section 'wave_status' (unknown wave is explicit)."""
     server = _server(tmp_path)
     response = _call(server, "wave_status", {"wave_id": "nope"})
-    assert response["result"]["isError"] is True  # type: ignore[index]
-    assert response["result"]["structuredContent"]["error"]["code"] == -32040  # type: ignore[index]
+    assert response["result"]["isError"] is True
+    assert response["result"]["structuredContent"]["error"]["code"] == -32040
 
 
 def test_wave_status_requires_a_wave_or_wave_id(tmp_path: Path) -> None:
     """Covers: prompt section 'wave_status' (arguments are validated)."""
     server = _server(tmp_path)
     response = _call(server, "wave_status", {})
-    assert response["result"]["isError"] is True  # type: ignore[index]
+    assert response["result"]["isError"] is True
 
 
 # --------------------------------------------------------------------------- #
@@ -414,7 +416,7 @@ def test_answer_question_refuses_owner_authority(tmp_path: Path) -> None:
         "answer_question",
         {"question_id_or_key": "q-1", "answer_text": "yes", "authority": "OWNER"},
     )
-    assert response["error"]["code"] == -32010  # type: ignore[index]
+    assert response["error"]["code"] == -32010
 
 
 def test_answer_question_refuses_an_owner_only_decision_class(tmp_path: Path) -> None:
@@ -427,7 +429,7 @@ def test_answer_question_refuses_an_owner_only_decision_class(tmp_path: Path) ->
         "answer_question",
         {"question_id_or_key": "q-1", "answer_text": "yes", "authority": "ORCHESTRATOR"},
     )
-    assert response["error"]["code"] == -32010  # type: ignore[index]
+    assert response["error"]["code"] == -32010
 
 
 def test_answer_question_refuses_its_own_finding(tmp_path: Path) -> None:
@@ -440,8 +442,8 @@ def test_answer_question_refuses_its_own_finding(tmp_path: Path) -> None:
         "answer_question",
         {"question_id_or_key": "q-1", "answer_text": "yes", "authority": "ORCHESTRATOR"},
     )
-    assert response["result"]["isError"] is True  # type: ignore[index]
-    assert "own finding" in response["result"]["structuredContent"]["error"]["message"]  # type: ignore[index]
+    assert response["result"]["isError"] is True
+    assert "own finding" in response["result"]["structuredContent"]["error"]["message"]
 
 
 def test_answer_question_records_an_orchestrator_answer(tmp_path: Path) -> None:
@@ -515,7 +517,7 @@ def test_propose_config_change_refuses_an_unknown_setting(tmp_path: Path) -> Non
         "propose_config_change",
         {"changes": {"not_a_setting": 1}, "rationale": "r", "proposed_by": "o"},
     )
-    assert response["result"]["isError"] is True  # type: ignore[index]
+    assert response["result"]["isError"] is True
 
 
 def test_list_proposals_lists_approved_decisions(tmp_path: Path) -> None:
@@ -543,5 +545,5 @@ def test_no_tool_can_approve_a_config_proposal(tmp_path: Path) -> None:
     server = _server(tmp_path)
     for name in ("approve_config_proposal", "config_approve", "record_config_decision"):
         response = _call(server, name, {})
-        assert response["error"]["code"] == -32010, name  # type: ignore[index]
+        assert response["error"]["code"] == -32010, name
     assert ConfigLedger(tmp_path / "config.jsonl").entries() == ()
