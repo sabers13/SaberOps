@@ -196,9 +196,9 @@ is unchanged. It is skipped only when `bwrap` is absent from the host.
   mount-point file, which is what the denied path is meant to contain; this
   equals what `git` itself creates. An existing `.git/config` is never
   modified.
-* Neither the argv guard nor the kernel mask protects against a worker that
-  runs a *different* VCS or writes repository files directly (for example
-  editing `.git/config` through a non-git program): the path-level
-  `assert_worker_write()` guard and the kernel mask cover that case, and a
-  host without `bwrap` cannot enforce it at the kernel — the launch fails
-  closed instead (`FILESYSTEM CONTAINMENT UNAVAILABLE`).
+* The argv guard only sees `git` invocations. A worker that writes
+  repository files through a non-git program is covered by the path-level
+  `assert_worker_write()` guard and, at the kernel, by the bwrap masks when
+  containment is available. On a host without `bwrap`, autonomous mutating
+  execution fails closed (`FILESYSTEM CONTAINMENT UNAVAILABLE`) instead of
+  running outside containment, so the argv guard is never the only control.
