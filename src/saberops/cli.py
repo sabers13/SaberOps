@@ -62,9 +62,12 @@ from saberops.ownership import (
 )
 from saberops.project import (
     ProjectIdentityError,
+    ProjectRegistry,
     ProjectStateConflictError,
+    RegisteredProject,
     owner_state_dir,
 )
+from saberops.project_scope.plan_store import PlanStore
 from saberops.questions import (
     STANDING_RULE_THRESHOLD,
     AnswerAuthority,
@@ -1044,6 +1047,28 @@ def build_parser() -> argparse.ArgumentParser:
     plan_parser = subparsers.add_parser("plan", help="Show persisted execution plan as JSON.")
     plan_parser.add_argument("run_id", type=str)
     plan_parser.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
+    plan_store_parser = subparsers.add_parser(
+        "plan-store",
+        help="Show or validate a stored versioned plan revision (Step 015 plan store).",
+    )
+    plan_store_sub = plan_store_parser.add_subparsers(dest="plan_store_command", required=True)
+    plan_show = plan_store_sub.add_parser(
+        "show", help="Show a stored versioned plan revision (Step 015 plan store)."
+    )
+    plan_show.add_argument("--project", type=str, required=True, help="Stable project ID.")
+    plan_show.add_argument("--version", type=str, default=None, help="Plan version (default: active).")
+    plan_show.add_argument("--store", type=str, default=None, help="Plan-store root directory.")
+    plan_show.add_argument("--json", action="store_true", help="JSON output")
+    plan_validate = plan_store_sub.add_parser(
+        "validate", help="Validate a stored plan revision (Step 015 plan store)."
+    )
+    plan_validate.add_argument("--project", type=str, default=None, help="Stable project ID.")
+    plan_validate.add_argument(
+        "--all", action="store_true", help="Validate every project with an active revision."
+    )
+    plan_validate.add_argument("--version", type=str, default=None, help="Plan version (default: active).")
+    plan_validate.add_argument("--store", type=str, default=None, help="Plan-store root directory.")
+    plan_validate.add_argument("--json", action="store_true", help="JSON output")
     handoff_parser = subparsers.add_parser(
         "handoff", help="Show latest immutable handoff or resume capsule."
     )
@@ -1972,6 +1997,60 @@ def build_parser() -> argparse.ArgumentParser:
     _add_repo_arg(project_show)
     _add_json_arg(project_show)
 
+    project_list = project_sub.add_parser(
+        "list",
+        help="List explicitly registered stable projects (Step 015 registry).",
+    )
+    project_list.add_argument(
+        "--registry", type=str, default=None, help="Registry file path."
+    )
+    _add_json_arg(project_list)
+
+    project_register = project_sub.add_parser(
+        "register",
+        help="Register one stable project with explicit identity (Step 015 registry).",
+    )
+    project_register.add_argument("--id", type=str, required=True, help="Stable project slug.")
+    project_register.add_argument("--name", type=str, required=True, help="Display name.")
+    project_register.add_argument("--repo", type=str, required=True, help="Repository root path.")
+    project_register.add_argument("--state-dir", type=str, required=True, help="State root path.")
+    project_register.add_argument(
+        "--active", action="store_true", help="Activate immediately (enforces the 3-project cap)."
+    )
+    project_register.add_argument(
+        "--registry", type=str, default=None, help="Registry file path."
+    )
+    _add_json_arg(project_register)
+
+    project_active = project_sub.add_parser(
+        "active",
+        help="List currently active registered projects (Step 015 registry).",
+    )
+    project_active.add_argument(
+        "--registry", type=str, default=None, help="Registry file path."
+    )
+    _add_json_arg(project_active)
+
+    project_activate = project_sub.add_parser(
+        "activate",
+        help="Mark a registered project active (enforces the 3-project cap).",
+    )
+    project_activate.add_argument("--id", type=str, required=True, help="Stable project slug.")
+    project_activate.add_argument(
+        "--registry", type=str, default=None, help="Registry file path."
+    )
+    _add_json_arg(project_activate)
+
+    project_deactivate = project_sub.add_parser(
+        "deactivate",
+        help="Mark a registered project inactive.",
+    )
+    project_deactivate.add_argument("--id", type=str, required=True, help="Stable project slug.")
+    project_deactivate.add_argument(
+        "--registry", type=str, default=None, help="Registry file path."
+    )
+    _add_json_arg(project_deactivate)
+
     project_set_gate = project_sub.add_parser(
         "set-gate",
         help="Persist the project's gate command (explicit owner decision).",
@@ -2575,6 +2654,9 @@ def _format_output_tail(
 
 def handle_plan(args: argparse.Namespace) -> int:
     """Handle ``orch plan`` using only persisted normalized rows."""
+    if not getattr(args, "run_id", None):
+        print("[!] orch plan requires a run_id (or the show|validate subcommand)", file=sys.stderr)
+        return 2
     db = db_for_run(args, args.run_id)
     plan = db.get_run_plan(args.run_id)
     if plan is None:
@@ -2615,6 +2697,112 @@ def handle_plan(args: argparse.Namespace) -> int:
         )
     )
     return 0
+
+
+def _plan_store_for(args: argparse.Namespace) -> PlanStore:
+    """Resolve the Step 015 plan store for CLI args."""
+    raw = str(getattr(args, "store", "") or "").strip()
+    if raw:
+        return PlanStore(Path(raw).expanduser())
+    return PlanStore()
+
+
+def handle_plan_show(args: argparse.Namespace) -> int:
+    """Handle ``orch plan show`` (stored versioned plan revision)."""
+    from saberops.project_scope.plan_store import PlanNotFoundError, PlanTamperError
+
+    try:
+        store = _plan_store_for(args)
+        project_id = str(args.project)
+        version = str(args.version) if getattr(args, "version", None) else None
+        revision = (
+            store.load_active(project_id) if version is None else store.get_revision(project_id, version)
+        )
+    except (PlanNotFoundError, PlanTamperError) as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(revision.as_dict(), indent=2, sort_keys=True))
+        return 0
+    print(f"project: {revision.project_id}  version: {revision.version}")
+    print(f"created: {revision.created_at}  sha256: {revision.sha256[:16]}...")
+    if not revision.tasks:
+        print("  (no tasks)")
+        return 0
+    for task in revision.tasks:
+        print(f"  {task.task_id} [{task.phase}] {task.title}")
+        for dep in task.start_dependencies:
+            print(f"    needs: {dep}")
+        for prereq in task.integration_prerequisites:
+            print(f"    integrates-after: {prereq}")
+    return 0
+
+
+def handle_plan_validate(args: argparse.Namespace) -> int:
+    """Handle ``orch plan validate`` (exit 2 on validation errors)."""
+    from saberops.project_scope.plan_store import (
+        PlanNotFoundError,
+        PlanStoreError,
+        PlanTamperError,
+        PlanValidationError,
+        plan_revisions_to_snapshot,
+    )
+    from saberops.ready_frontier import FrontierRequest, project_ready_frontier
+
+    try:
+        store = _plan_store_for(args)
+        if getattr(args, "all", False):
+            root_entries = (
+                sorted(entry.name for entry in store.root.iterdir() if entry.is_dir())
+                if store.root.is_dir()
+                else []
+            )
+            targets = [
+                project_id
+                for project_id in root_entries
+                if store.active_version(project_id) is not None
+            ]
+            if not targets:
+                raise PlanNotFoundError("no project has an active plan revision")
+            revisions = [store.load_active(project_id) for project_id in targets]
+            snapshot = plan_revisions_to_snapshot(revisions, owner_id="cli")
+            projection = project_ready_frontier(FrontierRequest(snapshot=snapshot))
+            ok = projection.projected
+            errors = [] if ok else list(projection.reason_codes())
+        else:
+            project_id = str(getattr(args, "project", "") or "").strip()
+            if not project_id:
+                raise PlanValidationError("--project is required (or pass --all)")
+            version = str(args.version) if getattr(args, "version", None) else None
+            revision = (
+                store.load_active(project_id)
+                if version is None
+                else store.get_revision(project_id, version)
+            )
+            snapshot = plan_revisions_to_snapshot([revision], owner_id="cli")
+            projection = project_ready_frontier(FrontierRequest(snapshot=snapshot))
+            ok = revision.verify()
+            errors = (
+                []
+                if ok and projection.projected
+                else ([f"hash mismatch for {revision.version!r}"] if not ok else [])
+                + ([] if projection.projected else list(projection.reason_codes()))
+            )
+    except (PlanNotFoundError, PlanTamperError, PlanValidationError, PlanStoreError) as exc:
+        if getattr(args, "json", False):
+            print(json.dumps({"ok": False, "errors": [str(exc)]}, indent=2, sort_keys=True))
+        else:
+            print(f"[!] {exc}", file=sys.stderr)
+        return 2
+    if getattr(args, "json", False):
+        print(json.dumps({"ok": ok, "errors": errors}, indent=2, sort_keys=True))
+        return 0 if ok else 2
+    if ok:
+        print("Plan valid.")
+        return 0
+    for error in errors:
+        print(f"[!] {error}", file=sys.stderr)
+    return 2
 
 
 def handle_handoff(args: argparse.Namespace) -> int:
@@ -3753,6 +3941,114 @@ def handle_project_show(args: argparse.Namespace) -> int:
         "  explicit      : "
         f"{'yes' if summary['accept_target_branch_explicit'] else 'no (live branch)'}"
     )
+    return 0
+
+
+def _project_registry_for(args: argparse.Namespace) -> ProjectRegistry:
+    """Resolve the Step 015 stable project registry for CLI args."""
+    raw = str(getattr(args, "registry", "") or "").strip()
+    if raw:
+        return ProjectRegistry(Path(raw).expanduser())
+    return ProjectRegistry()
+
+
+def _print_registered_projects(projects: tuple[RegisteredProject, ...], as_json: bool) -> int:
+    """Render registered projects as JSON or human text."""
+    records = [item.as_dict() for item in projects]
+    if as_json:
+        print(json.dumps({"projects": records}, indent=2, sort_keys=True))
+        return 0
+    if not records:
+        print("(no registered projects)")
+        return 0
+    for record in records:
+        flag = "active" if record["active"] else "inactive"
+        print(f"{record['project_id']} [{flag}] {record['display_name']}")
+        print(f"  repo : {record['repository_root']}")
+        print(f"  state: {record['state_root']}")
+    return 0
+
+
+def handle_project_list(args: argparse.Namespace) -> int:
+    """Handle ``orch project list`` (Step 015 stable registry)."""
+    from saberops.project import ProjectRegistrationError
+
+    try:
+        registry = _project_registry_for(args)
+        projects = registry.list_projects()
+    except ProjectRegistrationError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    return _print_registered_projects(projects, bool(getattr(args, "json", False)))
+
+
+def handle_project_register(args: argparse.Namespace) -> int:
+    """Handle ``orch project register`` (explicit identity only)."""
+    from saberops.project import ProjectCapError, ProjectRegistrationError
+
+    try:
+        registry = _project_registry_for(args)
+        project = registry.register(
+            str(args.id),
+            str(args.name),
+            str(args.repo),
+            str(args.state_dir),
+            active=bool(getattr(args, "active", False)),
+        )
+    except (ProjectRegistrationError, ProjectCapError) as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(project.as_dict(), indent=2, sort_keys=True))
+        return 0
+    print(f"registered {project.project_id} ({project.display_name})")
+    return 0
+
+
+def handle_project_active(args: argparse.Namespace) -> int:
+    """Handle ``orch project active`` (currently active registrations)."""
+    from saberops.project import ProjectRegistrationError
+
+    try:
+        registry = _project_registry_for(args)
+        projects = registry.active_projects()
+    except ProjectRegistrationError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    return _print_registered_projects(projects, bool(getattr(args, "json", False)))
+
+
+def handle_project_activate(args: argparse.Namespace) -> int:
+    """Handle ``orch project activate`` (enforces the 3-project cap)."""
+    from saberops.project import ProjectCapError, ProjectRegistrationError
+
+    try:
+        registry = _project_registry_for(args)
+        project = registry.activate(str(args.id))
+    except (ProjectRegistrationError, ProjectCapError) as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(project.as_dict(), indent=2, sort_keys=True))
+        return 0
+    print(f"activated {project.project_id}")
+    return 0
+
+
+def handle_project_deactivate(args: argparse.Namespace) -> int:
+    """Handle ``orch project deactivate``."""
+    from saberops.project import ProjectRegistrationError
+
+    try:
+        registry = _project_registry_for(args)
+        project = registry.deactivate(str(args.id))
+    except ProjectRegistrationError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(project.as_dict(), indent=2, sort_keys=True))
+        return 0
+    print(f"deactivated {project.project_id}")
     return 0
 
 
@@ -5148,7 +5444,16 @@ def handle_doctor(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     """Main CLI entrypoint."""
     parser = build_parser()
-    args = parser.parse_args(argv)
+    normalized = list(sys.argv[1:] if argv is None else argv)
+    # `orch plan show|validate ...` addresses the Step 015 plan store, while
+    # `orch plan <run_id>` keeps its legacy run-plan contract. argparse cannot
+    # mix an optional positional with subparsers (a run ID would be mistaken
+    # for a subcommand), so the store verbs live on the `plan-store`
+    # group and this shim rewrites only the exact `plan show|validate` prefix.
+    # `orch plan --db X show` still means run ID "show" (escape hatch).
+    if len(normalized) >= 2 and normalized[0] == "plan" and normalized[1] in ("show", "validate"):
+        normalized = ["plan-store", *normalized[1:]]
+    args = parser.parse_args(normalized)
     try:
         return _dispatch(args)
     except ProjectIdentityError as exc:
@@ -5313,6 +5618,11 @@ def _dispatch(args: argparse.Namespace) -> int:
         return handle_status(args)
     elif args.command == "plan":
         return handle_plan(args)
+    elif args.command == "plan-store":
+        if args.plan_store_command == "show":
+            return handle_plan_show(args)
+        elif args.plan_store_command == "validate":
+            return handle_plan_validate(args)
     elif args.command == "handoff":
         return handle_handoff(args)
     elif args.command in ("wait", "watch"):
@@ -5475,6 +5785,16 @@ def _dispatch(args: argparse.Namespace) -> int:
             return handle_project_clear_target_branch(args)
         elif args.project_command == "set-workflow":
             return handle_project_set_workflow(args)
+        elif args.project_command == "list":
+            return handle_project_list(args)
+        elif args.project_command == "register":
+            return handle_project_register(args)
+        elif args.project_command == "active":
+            return handle_project_active(args)
+        elif args.project_command == "activate":
+            return handle_project_activate(args)
+        elif args.project_command == "deactivate":
+            return handle_project_deactivate(args)
 
     return 0
 
