@@ -14,7 +14,7 @@ import sys
 import time
 import tomllib
 from dataclasses import dataclass
-from datetime import UTC
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +64,19 @@ from saberops.project import (
     ProjectIdentityError,
     ProjectStateConflictError,
     owner_state_dir,
+)
+from saberops.questions import (
+    STANDING_RULE_THRESHOLD,
+    AnswerAuthority,
+    AskRole,
+    DecisionClass,
+    Escalation,
+    OwnerQuestion,
+    OwnerQuestionQueue,
+    QuestionError,
+    QuestionRequest,
+    QuestionStatus,
+    question_view,
 )
 from saberops.review_adaptive import ReviewPolicyError
 from saberops.routing_config import (
@@ -1530,6 +1543,250 @@ def build_parser() -> argparse.ArgumentParser:
         help="Verification date YYYY-MM-DD (default: today, local).",
     )
     posture_verify.add_argument("--json", action="store_true", help="JSON output")
+
+    # orch questions ask|list|show|answer|defer|moot|diverge|divergences|
+    # standing-rules|audit (Q-1 owner question queue).
+    questions_parser = subparsers.add_parser(
+        "questions",
+        help="Owner question queue: ask, answer (verbatim), defer, moot and report (Q-1).",
+    )
+    questions_sub = questions_parser.add_subparsers(dest="questions_command", required=True)
+
+    def _add_store_arg(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument(
+            "--store",
+            type=str,
+            default=None,
+            help=(
+                "Path to the question document (default: "
+                "$XDG_STATE_HOME/saberops/questions.json)."
+            ),
+        )
+
+    questions_ask = questions_sub.add_parser(
+        "ask",
+        help="Raise one keyed question with its five-part escalation.",
+    )
+    questions_ask.add_argument("--key", type=str, required=True, help="Idempotency key.")
+    questions_ask.add_argument("--subject", type=str, required=True, help="The question.")
+    questions_ask.add_argument(
+        "--kind", type=str, required=True, help="Question kind (groups standing rules)."
+    )
+    questions_ask.add_argument(
+        "--decision-class",
+        dest="decision_class",
+        type=str,
+        required=True,
+        choices=[item.value for item in DecisionClass],
+        help="Decision class; the answerable authority is derived from it.",
+    )
+    questions_ask.add_argument(
+        "--role",
+        type=str,
+        required=True,
+        choices=[item.value for item in AskRole],
+        help="Role raising the question.",
+    )
+    questions_ask.add_argument(
+        "--by", dest="raised_by", type=str, required=True, help="Actor raising it."
+    )
+    questions_ask.add_argument("--scope", type=str, default=None, help="Scope it belongs to.")
+    questions_ask.add_argument("--run-id", dest="run_id", type=str, default=None)
+    questions_ask.add_argument(
+        "--blocks",
+        action="append",
+        default=[],
+        metavar="SCOPE",
+        help="What the question blocks; repeat for multiple.",
+    )
+    questions_ask.add_argument(
+        "--option",
+        dest="options",
+        action="append",
+        default=[],
+        metavar="OPTION",
+        help="An allowed answer option; repeat for multiple.",
+    )
+    questions_ask.add_argument("--default-option", dest="default_option", type=str, default=None)
+    questions_ask.add_argument(
+        "--supersedes", type=str, default=None, help="Question id/key this one supersedes."
+    )
+    questions_ask.add_argument(
+        "--requirement", type=str, required=True, help="Escalation 1/5: forcing requirement."
+    )
+    questions_ask.add_argument(
+        "--expansion",
+        dest="proposed_expansion",
+        type=str,
+        required=True,
+        help="Escalation 2/5: proposed expansion.",
+    )
+    questions_ask.add_argument(
+        "--smallest",
+        dest="smallest_compliant",
+        type=str,
+        required=True,
+        help="Escalation 3/5: smallest compliant option.",
+    )
+    questions_ask.add_argument(
+        "--consequences",
+        type=str,
+        required=True,
+        help="Escalation 4/5: concrete consequences.",
+    )
+    questions_ask.add_argument(
+        "--recommendation",
+        type=str,
+        required=True,
+        help="Escalation 5/5: Orchestrator recommendation.",
+    )
+    questions_ask.add_argument("--json", action="store_true", help="JSON output")
+    _add_store_arg(questions_ask)
+
+    questions_list = questions_sub.add_parser("list", help="List questions with their status.")
+    questions_list.add_argument(
+        "--status",
+        type=str,
+        default=None,
+        choices=[item.value for item in QuestionStatus],
+        help="Restrict to one status.",
+    )
+    questions_list.add_argument(
+        "--as-of",
+        dest="as_of",
+        type=str,
+        default=None,
+        help="Reference date YYYY-MM-DD (default: today) for deferred resurfacing.",
+    )
+    questions_list.add_argument("--run-id", dest="run_id", type=str, default=None)
+    questions_list.add_argument("--json", action="store_true", help="JSON output")
+    _add_store_arg(questions_list)
+
+    questions_show = questions_sub.add_parser("show", help="Show one question in full.")
+    questions_show.add_argument("ref", type=str, help="Question key or id.")
+    questions_show.add_argument(
+        "--as-of", dest="as_of", type=str, default=None, help="Reference date YYYY-MM-DD."
+    )
+    questions_show.add_argument("--json", action="store_true", help="JSON output")
+    _add_store_arg(questions_show)
+
+    questions_answer = questions_sub.add_parser(
+        "answer", help="Answer a question, storing the owner's exact words."
+    )
+    questions_answer.add_argument("ref", type=str, help="Question key or id.")
+    questions_answer.add_argument(
+        "--words", type=str, required=True, help="The owner's exact words (stored verbatim)."
+    )
+    questions_answer.add_argument(
+        "--authority",
+        type=str,
+        default="owner",
+        choices=["owner", "orchestrator"],
+        help="Answer authority (default: owner).",
+    )
+    questions_answer.add_argument("--by", dest="answered_by", type=str, default=None)
+    questions_answer.add_argument(
+        "--role", type=str, default=None, choices=[item.value for item in AskRole]
+    )
+    questions_answer.add_argument("--chosen-option", dest="chosen_option", type=str, default=None)
+    questions_answer.add_argument(
+        "--evidence", type=str, default=None, help="Required for an Orchestrator-alone answer."
+    )
+    questions_answer.add_argument(
+        "--rejected-alternative",
+        dest="rejected_alternative",
+        type=str,
+        default=None,
+        help="Required for an Orchestrator-alone answer.",
+    )
+    questions_answer.add_argument("--json", action="store_true", help="JSON output")
+    _add_store_arg(questions_answer)
+
+    questions_defer = questions_sub.add_parser(
+        "defer", help="Defer a question until a date; it resurfaces then."
+    )
+    questions_defer.add_argument("ref", type=str, help="Question key or id.")
+    questions_defer.add_argument("--until", type=str, required=True, help="Resurface date YYYY-MM-DD.")
+    questions_defer.add_argument("--by", dest="deferred_by", type=str, default="owner")
+    questions_defer.add_argument(
+        "--role",
+        type=str,
+        default="OWNER",
+        choices=[AskRole.OWNER.value, AskRole.ORCHESTRATOR.value],
+    )
+    questions_defer.add_argument("--note", type=str, default="")
+    questions_defer.add_argument("--json", action="store_true", help="JSON output")
+    _add_store_arg(questions_defer)
+
+    questions_moot = questions_sub.add_parser(
+        "moot", help="Close a question as moot on explicit evidence."
+    )
+    questions_moot.add_argument("ref", type=str, help="Question key or id.")
+    questions_moot.add_argument(
+        "--evidence", type=str, required=True, help="Evidence proving the question is moot."
+    )
+    questions_moot.add_argument("--by", dest="closed_by", type=str, default="owner")
+    questions_moot.add_argument(
+        "--role",
+        type=str,
+        default=AskRole.OWNER.value,
+        choices=[
+            AskRole.OWNER.value,
+            AskRole.ORCHESTRATOR.value,
+            AskRole.ENGINE.value,
+        ],
+    )
+    questions_moot.add_argument("--json", action="store_true", help="JSON output")
+    _add_store_arg(questions_moot)
+
+    questions_diverge = questions_sub.add_parser(
+        "diverge", help="Record a conflicting later record (never auto-closes)."
+    )
+    questions_diverge.add_argument("ref", type=str, help="Question key or id.")
+    questions_diverge.add_argument(
+        "--reason",
+        type=str,
+        required=True,
+        choices=[
+            "DIFFERENT_WORDS",
+            "DIFFERENT_OPTION",
+            "ANSWER_AFTER_MOOT",
+            "MOOT_AFTER_ANSWER",
+            "DIFFERENT_EVIDENCE",
+        ],
+    )
+    questions_diverge.add_argument("--words", type=str, required=True)
+    questions_diverge.add_argument("--by", dest="recorded_by", type=str, required=True)
+    questions_diverge.add_argument(
+        "--role", type=str, required=True, choices=[item.value for item in AskRole]
+    )
+    questions_diverge.add_argument("--chosen-option", dest="chosen_option", type=str, default=None)
+    questions_diverge.add_argument("--note", type=str, default="")
+    questions_diverge.add_argument("--json", action="store_true", help="JSON output")
+    _add_store_arg(questions_diverge)
+
+    questions_divergences = questions_sub.add_parser(
+        "divergences", help="Report every divergent record."
+    )
+    questions_divergences.add_argument("ref", type=str, nargs="?", default=None)
+    questions_divergences.add_argument("--json", action="store_true", help="JSON output")
+    _add_store_arg(questions_divergences)
+
+    questions_standing = questions_sub.add_parser(
+        "standing-rules",
+        help="Propose CFG-1 standing rules from repeated same-kind owner answers.",
+    )
+    questions_standing.add_argument(
+        "--threshold", type=int, default=STANDING_RULE_THRESHOLD, help="Repeat count (default: 3)."
+    )
+    questions_standing.add_argument("--json", action="store_true", help="JSON output")
+    _add_store_arg(questions_standing)
+
+    questions_audit = questions_sub.add_parser(
+        "audit", help="Audit list of every Orchestrator-alone decision."
+    )
+    questions_audit.add_argument("--json", action="store_true", help="JSON output")
+    _add_store_arg(questions_audit)
 
     # orch job submit|get|list|cancel (M2-3 job queue; each command calls
     # exactly one service function in saberops.jobs.service).
@@ -4019,6 +4276,286 @@ def handle_posture_verify(args: argparse.Namespace) -> int:
     return 0
 
 
+def _questions_queue(args: argparse.Namespace) -> OwnerQuestionQueue:
+    """Resolve the question document the command should act on."""
+    return OwnerQuestionQueue(getattr(args, "store", None))
+
+
+def _questions_fail(exc: Exception) -> int:
+    print(f"[!] {exc}", file=sys.stderr)
+    return 1
+
+
+def _questions_reference_date(raw: str | None) -> date:
+    """Resolve the reference date for deferred resurfacing (default: today)."""
+    if raw is None or not str(raw).strip():
+        return datetime.now(UTC).date()
+    return date.fromisoformat(str(raw).strip())
+
+
+def _print_question(question: OwnerQuestion, *, as_json: bool) -> int:
+    view = question_view(question)
+    if as_json:
+        print(json.dumps(view, sort_keys=True))
+        return 0
+    print(f"Question : {view['question_id']} ({view['key']}) [{view['status']}]")
+    print(f"Subject  : {view['subject']}")
+    print(f"Class    : {view['decision_class']} — answerable by {view['answerable_by']}")
+    print(f"Raised   : {view['raised_by_role']} {view['raised_by']} at {view['raised_at']}")
+    if view["scope"] or view["run_id"]:
+        print(f"Scope    : {view['scope'] or '-'} run {view['run_id'] or '-'}")
+    if view["blocks"]:
+        print(f"Blocks   : {', '.join(view['blocks'])}")
+    if view["defer_until"]:
+        print(f"Deferred : until {view['defer_until']}")
+    if view["answer"] is not None:
+        answer = view["answer"]
+        print(f"Answer   : {answer['words']}")
+        print(f"Authority: {answer['authority']} ({answer['answered_by']})")
+    if view["moot_evidence"]:
+        print(f"Moot     : {view['moot_evidence']}")
+    if view["divergence_count"]:
+        print(f"Divergent: {view['divergence_count']} record(s) — reported, not auto-closed")
+    return 0
+
+
+def handle_questions_ask(args: argparse.Namespace) -> int:
+    """Handle `orch questions ask` (raises one keyed escalatable question)."""
+    try:
+        request = QuestionRequest(
+            key=str(args.key),
+            subject=str(args.subject),
+            kind=str(args.kind),
+            decision_class=DecisionClass(str(args.decision_class)),
+            raised_by_role=AskRole(str(args.role)),
+            raised_by=str(args.raised_by),
+            escalation=Escalation(
+                requirement=str(args.requirement),
+                proposed_expansion=str(args.proposed_expansion),
+                smallest_compliant=str(args.smallest_compliant),
+                consequences=str(args.consequences),
+                recommendation=str(args.recommendation),
+            ),
+            scope=args.scope,
+            run_id=args.run_id,
+            blocks=tuple(str(item) for item in args.blocks),
+            options=tuple(str(item) for item in args.options),
+            default_option=args.default_option,
+            supersedes=args.supersedes,
+        )
+        question = _questions_queue(args).ask(request)
+    except QuestionError as exc:
+        return _questions_fail(exc)
+    return _print_question(question, as_json=bool(args.json))
+
+
+def handle_questions_list(args: argparse.Namespace) -> int:
+    """Handle `orch questions list`."""
+    try:
+        as_of = _questions_reference_date(args.as_of)
+        queue = _questions_queue(args)
+        questions = queue.questions(status=args.status, run_id=args.run_id)
+        views = [question_view(question, as_of) for question in questions]
+    except (QuestionError, ValueError) as exc:
+        return _questions_fail(exc)
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "as_of": as_of.isoformat(),
+                    "questions": views,
+                    "pending": [
+                        view["question_id"]
+                        for view in views
+                        if view["status"] == QuestionStatus.OPEN.value or view["due"]
+                    ],
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+    if not views:
+        print("No questions.")
+        return 0
+    for view in views:
+        marker = "DUE" if view["due"] else view["status"]
+        print(
+            f"{view['question_id']}  {marker:<9} {view['decision_class']:<32} "
+            f"{view['key']}  {view['subject']}"
+        )
+    return 0
+
+
+def handle_questions_show(args: argparse.Namespace) -> int:
+    """Handle `orch questions show REF`."""
+    try:
+        as_of = _questions_reference_date(args.as_of)
+        question = _questions_queue(args).get(str(args.ref))
+    except (QuestionError, ValueError) as exc:
+        return _questions_fail(exc)
+    if question is None:
+        print(f"[!] unknown question: {args.ref!r}", file=sys.stderr)
+        return 1
+    if args.as_of and not args.json:
+        print(f"Reference date: {as_of.isoformat()}")
+    return _print_question(question, as_json=bool(args.json))
+
+
+def handle_questions_answer(args: argparse.Namespace) -> int:
+    """Handle `orch questions answer REF --words ...` (verbatim owner words)."""
+    authority = AnswerAuthority(str(args.authority).strip().upper())
+    role_raw = getattr(args, "role", None)
+    role = (
+        AskRole(str(role_raw))
+        if role_raw
+        else (
+            AskRole.OWNER
+            if authority is AnswerAuthority.OWNER
+            else AskRole.ORCHESTRATOR
+        )
+    )
+    actor = str(args.answered_by) if args.answered_by else (
+        "owner" if authority is AnswerAuthority.OWNER else ""
+    )
+    if not actor:
+        print(
+            "[!] --by is required for an Orchestrator answer (the actor is audited)",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        question = _questions_queue(args).answer(
+            str(args.ref),
+            words=str(args.words),
+            authority=authority,
+            answered_by=actor,
+            answered_by_role=role,
+            chosen_option=args.chosen_option,
+            evidence=args.evidence,
+            rejected_alternative=args.rejected_alternative,
+        )
+    except QuestionError as exc:
+        return _questions_fail(exc)
+    return _print_question(question, as_json=bool(args.json))
+
+
+def handle_questions_defer(args: argparse.Namespace) -> int:
+    """Handle `orch questions defer REF --until DATE`."""
+    try:
+        question = _questions_queue(args).defer(
+            str(args.ref),
+            until=str(args.until),
+            deferred_by=str(args.deferred_by),
+            deferred_by_role=AskRole(str(args.role)),
+            note=str(args.note or ""),
+        )
+    except QuestionError as exc:
+        return _questions_fail(exc)
+    return _print_question(question, as_json=bool(args.json))
+
+
+def handle_questions_moot(args: argparse.Namespace) -> int:
+    """Handle `orch questions moot REF --evidence ...` (evidence-backed close)."""
+    try:
+        question = _questions_queue(args).mark_moot(
+            str(args.ref),
+            evidence=str(args.evidence),
+            closed_by=str(args.closed_by),
+            closed_by_role=AskRole(str(args.role)),
+        )
+    except QuestionError as exc:
+        return _questions_fail(exc)
+    return _print_question(question, as_json=bool(args.json))
+
+
+def handle_questions_diverge(args: argparse.Namespace) -> int:
+    """Handle `orch questions diverge REF ...` (records a conflict)."""
+    from saberops.questions import DivergenceReason
+
+    try:
+        question = _questions_queue(args).record_divergence(
+            str(args.ref),
+            reason=DivergenceReason(str(args.reason)),
+            words=str(args.words),
+            recorded_by=str(args.recorded_by),
+            recorded_by_role=AskRole(str(args.role)),
+            chosen_option=args.chosen_option,
+            note=str(args.note or ""),
+        )
+    except QuestionError as exc:
+        return _questions_fail(exc)
+    return _print_question(question, as_json=bool(args.json))
+
+
+def handle_questions_divergences(args: argparse.Namespace) -> int:
+    """Handle `orch questions divergences [REF]` (reported, never auto-closed)."""
+    try:
+        reports = _questions_queue(args).divergences(args.ref)
+    except QuestionError as exc:
+        return _questions_fail(exc)
+    if args.json:
+        print(json.dumps([report.to_mapping() for report in reports], sort_keys=True))
+        return 0
+    if not reports:
+        print("No divergent records.")
+        return 0
+    for report in reports:
+        record = report.record
+        print(
+            f"{record.recorded_at}  {report.question_id} [{report.status.value}]  "
+            f"{record.reason.value}  {record.words}"
+        )
+    return 0
+
+
+def handle_questions_standing_rules(args: argparse.Namespace) -> int:
+    """Handle `orch questions standing-rules` (proposals for CFG-1)."""
+    try:
+        proposals = _questions_queue(args).standing_rule_proposals(int(args.threshold))
+    except QuestionError as exc:
+        return _questions_fail(exc)
+    if args.json:
+        print(
+            json.dumps(
+                {"threshold": int(args.threshold), "proposals": [p.to_mapping() for p in proposals]},
+                sort_keys=True,
+            )
+        )
+        return 0
+    if not proposals:
+        print("No standing-rule proposal yet.")
+        return 0
+    print("Standing-rule proposals for CFG-1 (proposals only; nothing is applied):")
+    for proposal in proposals:
+        print(
+            f"  {proposal.kind} x{proposal.occurrences} -> {proposal.chosen_answer} "
+            f"({', '.join(proposal.question_ids)})"
+        )
+    return 0
+
+
+def handle_questions_audit(args: argparse.Namespace) -> int:
+    """Handle `orch questions audit` (every Orchestrator-alone decision)."""
+    try:
+        decisions = _questions_queue(args).orchestrator_alone_decisions()
+    except QuestionError as exc:
+        return _questions_fail(exc)
+    if args.json:
+        print(json.dumps([item.to_mapping() for item in decisions], sort_keys=True))
+        return 0
+    if not decisions:
+        print("No Orchestrator-alone decision recorded.")
+        return 0
+    for item in decisions:
+        print(
+            f"{item.answered_at}  {item.question_id}  {item.decision_class.value}  "
+            f"{item.words}"
+        )
+        print(f"    evidence : {item.evidence}")
+        print(f"    rejected : {item.rejected_alternative}")
+    return 0
+
+
 def _job_payload(job: object) -> dict[str, Any]:
     from saberops.jobs.models import Job as _Job
 
@@ -4758,6 +5295,27 @@ def _dispatch(args: argparse.Namespace) -> int:
             return handle_posture_show(args)
         elif args.posture_command == "verify":
             return handle_posture_verify(args)
+    elif args.command == "questions":
+        if args.questions_command == "ask":
+            return handle_questions_ask(args)
+        elif args.questions_command == "list":
+            return handle_questions_list(args)
+        elif args.questions_command == "show":
+            return handle_questions_show(args)
+        elif args.questions_command == "answer":
+            return handle_questions_answer(args)
+        elif args.questions_command == "defer":
+            return handle_questions_defer(args)
+        elif args.questions_command == "moot":
+            return handle_questions_moot(args)
+        elif args.questions_command == "diverge":
+            return handle_questions_diverge(args)
+        elif args.questions_command == "divergences":
+            return handle_questions_divergences(args)
+        elif args.questions_command == "standing-rules":
+            return handle_questions_standing_rules(args)
+        elif args.questions_command == "audit":
+            return handle_questions_audit(args)
     elif args.command == "job":
         if args.job_command == "submit":
             return handle_job_submit(args)
