@@ -182,7 +182,6 @@ class PlanTaskDef:
 def _require_str_tuple(value: object, task_id: str) -> tuple[str, ...]:
     if not isinstance(value, (list, tuple)):
         raise PlanValidationError(f"task {task_id!r}: dependency/scope lists must hold strings")
-        raise PlanValidationError(f"task {task_id!r}: dependency/scope lists must hold strings")
     cleaned: list[str] = []
     for entry in value:
         if not isinstance(entry, str) or not entry.strip():
