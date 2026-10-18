@@ -24,6 +24,7 @@ from saberops.autonomous_runtime import (
     SupervisorAction,
     SupervisorStopReason,
 )
+from saberops.capacity.admission import order_candidates_for_role
 from saberops.config import (
     RunConfig,
     freeze_owner_binding_registry_payload,
@@ -76,6 +77,12 @@ from saberops.dispatch import (
 )
 from saberops.dispatch import control_plane_decision as control_plane_decision
 from saberops.execution_failover import FailoverEngine
+from saberops.gate_runner import (
+    EngineGateExecutor,
+    EngineGateRequest,
+    EngineGateResult,
+    GateSlotPool,
+)
 from saberops.git import (
     CandidatePublication,
     CandidatePublicationError,
@@ -184,6 +191,8 @@ from saberops.routing_decision import (
     is_escalation_evidence,
 )
 from saberops.slicing import resolve_work_packages
+from saberops.storage_gc import retire_run_worktrees
+from saberops.storage_maintenance import database_audit_sink
 from saberops.telemetry import persist_worker_usage
 from saberops.terminal import get_transcript_path
 from saberops.tooling import (
@@ -966,6 +975,67 @@ def _gate_disposition_payload(disposition: GateDisposition) -> dict[str, object]
     }
 
 
+def run_engine_gate(
+    *,
+    target_repo: Path | str,
+    kind: str,
+    evidence_dir: Path | str,
+    base: str = "",
+    head_sha: str = "",
+    requested_profile: str | None = None,
+    state_dir: Path | str | None = None,
+    touches: tuple[str, ...] = (),
+    must_not_touch: tuple[str, ...] = (),
+    changed_files: tuple[str, ...] = (),
+    disk_estimate_bytes: int = 0,
+) -> EngineGateResult:
+    """Run one engine-owned gate and record ``producer: engine`` evidence.
+
+    Covers: ADR-0004 D3 (engine is the only producer of gate evidence),
+    ADR-0004 D3 write-scope preflight, ADR-0003 D2 profiles and D3 slots.
+
+    A model's own run of the same commands stays G0: it never reaches the
+    history ledger and is rejected by :func:`project_gate_outcome` as
+    non-engine evidence.  This seam is intentionally thin so the engine can
+    call it for G1, G2, G3 and the periodic main gate with the same rules.
+    """
+    resolve_state = Path(state_dir).expanduser() if state_dir is not None else None
+    executor = EngineGateExecutor(slot_pool=GateSlotPool(_common_dir_for(target_repo)))
+    return executor.execute(
+        EngineGateRequest(
+            target_repo=Path(target_repo).expanduser(),
+            kind=kind,
+            evidence_dir=Path(evidence_dir).expanduser(),
+            base=base,
+            head_sha=head_sha,
+            requested_profile=requested_profile,
+            state_dir=resolve_state,
+            touches=touches,
+            must_not_touch=must_not_touch,
+            changed_files=changed_files,
+            disk_estimate_bytes=disk_estimate_bytes,
+        )
+    )
+
+
+def _common_dir_for(repo: Path | str) -> Path:
+    """Resolve the git common dir for a repository path (engine gate seam)."""
+    path = Path(repo).expanduser()
+    completed = subprocess.run(
+        ["git", "rev-parse", "--git-common-dir"],
+        cwd=path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"cannot resolve git common dir for {path}: {completed.stderr.strip()}"
+        )
+    raw = completed.stdout.strip()
+    return (path / raw).resolve() if not Path(raw).is_absolute() else Path(raw)
+
+
 def load_owner_runtime_bindings(
     binding_registry: Any | None,
     binding_policy: OrchBindingPolicy | None,
@@ -1050,6 +1120,31 @@ def _reconstruct_frozen_worker_binding_registry(payload: Any | None) -> Any | No
         return binding_registry_from_mapping(payload)
     except Exception:  # noqa: BLE001 - corrupt frozen material must not launch
         return None
+
+
+def _current_executor_owner_token(db: Any, run_id: str) -> tuple[str | None, int | None]:
+    """Return ``(owner_id, generation)`` iff *this process* is the executor.
+
+    ADR-0002 D8 crash recovery binds a decision receipt to the exact executor
+    generation that made it, so the receipt must name the durable owner row
+    only when that row's recorded process incarnation **is this process**.
+    Looking up "whatever owner row happens to exist" would let a stale process
+    stamp its decision with another generation's identity, so anything not
+    positively adopted by this incarnation returns ``(None, None)`` -- an
+    unbound receipt that recovery refuses to promote (fail closed).
+    """
+    try:
+        owner = db.get_execution_owner(run_id)
+    except Exception:
+        return None, None
+    if owner is None or not owner.is_active:
+        return None, None
+    try:
+        if owner.identity != ProcessIdentity.for_self():
+            return None, None
+    except Exception:
+        return None, None
+    return owner.owner_id, int(owner.generation)
 
 
 class Orchestrator:
@@ -2692,7 +2787,14 @@ class Orchestrator:
             # other hard control-plane filter, so excluded candidates still
             # produce typed decision evidence and cannot be resurrected by
             # ranking or overrides.
-            candidates = list(base_candidates)
+            candidates = order_candidates_for_role(
+                role=current_role,
+                snapshot=routing_snapshot,
+                base_candidates=base_candidates,
+                policy=control_plane_policy,
+                quota_states=quota_states,
+                db=self.db,
+            )
             # Structured per-candidate skip evidence for this run: every
             # automatic candidate that cannot dispatch appends one
             # sanitized record (provider/model/binding, canonical skip
@@ -3217,7 +3319,14 @@ class Orchestrator:
                         provider_override=config.provider_override,
                         snapshot=routing_snapshot,
                     )
-                    candidates = list(base_candidates)
+                    candidates = order_candidates_for_role(
+                        role=current_role,
+                        snapshot=routing_snapshot,
+                        base_candidates=base_candidates,
+                        policy=control_plane_policy,
+                        quota_states=quota_states,
+                        db=self.db,
+                    )
                     selected_routing_context = routing_context_for_role(current_role)
                     self.db.record_event(
                         run_id,
@@ -3280,6 +3389,40 @@ class Orchestrator:
                     # drive method is never invoked here.
                     def _autonomous_stop(stop_summary: str, stop_reason: str) -> RunResult:
                         """Terminalize the run for a supervisor STOP (fail closed)."""
+                        if stop_reason == SupervisorStopReason.NO_ELIGIBLE_BINDING.value:
+                            # ADR-0002 D8 (M2-5): a durable job-owned run that
+                            # suffered genuine quota exhaustion with no
+                            # admitted fallback route parks (PREEMPTED +
+                            # requeue with resume capsule) instead of failing.
+                            # Standalone runs and non-quota stops decline
+                            # inside and keep this FAILED path unchanged.
+                            from saberops.preemption import complete_preemption
+
+                            _stop_owner_id, _stop_owner_gen = _current_executor_owner_token(
+                                self.db, run_id
+                            )
+                            preempted = complete_preemption(
+                                self.db,
+                                run_id=run_id,
+                                repo_path=str(repo),
+                                base_sha=base_commit,
+                                owner_id=_stop_owner_id,
+                                owner_generation=_stop_owner_gen,
+                                decision_ref=f"autonomous_stop:{stop_reason}",
+                            )
+                            if preempted.owned:
+                                assert preempted.status is not None
+                                return RunResult(
+                                    run_id=run_id,
+                                    passed=False,
+                                    status=preempted.status,
+                                    summary=preempted.summary,
+                                    target_repo=str(repo),
+                                    base_commit=base_commit,
+                                    attempts=attempts,
+                                    checks=checks,
+                                    reviews=reviews,
+                                )
                         now_stop = current_iso_timestamp()
                         self.db.update_run(
                             run_id=run_id,
@@ -4128,6 +4271,7 @@ class Orchestrator:
                         else True
                     ),
                     explicit_unknown_readiness=is_explicit,
+                    db=self.db,
                 )
                 # Keep the legacy string at this boundary for existing event
                 # consumers while persisting the authoritative typed decision
@@ -4176,6 +4320,7 @@ class Orchestrator:
                             if readiness_pre is not None
                             else True
                         ),
+                        db=self.db,
                     )
                 self.db.record_event(
                     run_id,
@@ -5418,7 +5563,14 @@ class Orchestrator:
                                     provider_override=config.provider_override,
                                     snapshot=routing_snapshot,
                                 )
-                                candidates = list(base_candidates)
+                                candidates = order_candidates_for_role(
+                                    role=current_role,
+                                    snapshot=routing_snapshot,
+                                    base_candidates=base_candidates,
+                                    policy=control_plane_policy,
+                                    quota_states=quota_states,
+                                    db=self.db,
+                                )
                                 selected_routing_context = routing_context_for_role(current_role)
                                 self.db.record_event(
                                     run_id,
@@ -5759,7 +5911,14 @@ class Orchestrator:
                                             for c in base_repair_candidates
                                             if c.provider not in blocked_repair_providers
                                         ]
-                                    repair_candidates = list(base_repair_candidates)
+                                    repair_candidates = order_candidates_for_role(
+                                        role=JobRole.WORKER,
+                                        snapshot=routing_snapshot,
+                                        base_candidates=base_repair_candidates,
+                                        policy=control_plane_policy,
+                                        quota_states=quota_states_rep,
+                                        db=self.db,
+                                    )
                                     selected_repair: (
                                         tuple[WorkerCandidate, WorkerAdapter] | None
                                     ) = None
@@ -5884,6 +6043,7 @@ class Orchestrator:
                                             readiness_state=rep_readiness_state,
                                             readiness_reason=rep_readiness_reason,
                                             readiness_executable_available=rep_executable,
+                                            db=self.db,
                                         )
                                         decision_rep = control_plane_decision(
                                             candidate=repair_candidate,
@@ -5902,6 +6062,7 @@ class Orchestrator:
                                             readiness_reason=rep_readiness_reason,
                                             readiness_executable_available=rep_executable,
                                             explicit_unknown_readiness=is_explicit_rep,
+                                            db=self.db,
                                         )
                                         self.db.record_event(
                                             run_id,
@@ -8467,6 +8628,42 @@ class Orchestrator:
                     f"All {chain_attempt_count} attempt(s) failed to pass gate "
                     f"'{gate_command}'."
                 )
+            # ADR-0002 D8 (M2-5): quota-preemption owns this terminal outcome
+            # when the run suffered genuine quota exhaustion with no admitted
+            # fallback route and a durable job owns it.  The coordinator
+            # declines (owned=False) for ordinary gate failures, standalone
+            # runs, and non-quota exhaustion, leaving every assertion below
+            # -- including the plan-step failure marking -- untouched.  The
+            # hook sits BEFORE the plan-failure marking because a preempted
+            # run is parked, not failed: its plan steps stay exactly as they
+            # were for the resumed run to continue.
+            from saberops.preemption import complete_preemption as _complete_preemption
+
+            _chain_owner_id, _chain_owner_gen = _current_executor_owner_token(
+                self.db, run_id
+            )
+            _preemption = _complete_preemption(
+                self.db,
+                run_id=run_id,
+                repo_path=str(repo),
+                base_sha=base_commit,
+                owner_id=_chain_owner_id,
+                owner_generation=_chain_owner_gen,
+                decision_ref="end_of_chain",
+            )
+            if _preemption.owned:
+                assert _preemption.status is not None
+                return RunResult(
+                    run_id=run_id,
+                    passed=False,
+                    status=_preemption.status,
+                    summary=_preemption.summary,
+                    target_repo=str(repo),
+                    base_commit=base_commit,
+                    attempts=attempts,
+                    checks=checks,
+                    reviews=reviews,
+                )
             failed_step = next(
                 (
                     step
@@ -8628,21 +8825,61 @@ class Orchestrator:
                 reviews=reviews,
             )
 
-    def cleanup_run(self, run_id: str) -> dict[str, list[str]]:
-        """Safely remove clean attempt worktrees for a completed or failed run.
+    def run_engine_gate(
+        self,
+        *,
+        target_repo: Path | str,
+        kind: str,
+        evidence_dir: Path | str,
+        base: str = "",
+        head_sha: str = "",
+        requested_profile: str | None = None,
+        state_dir: Path | str | None = None,
+        touches: tuple[str, ...] = (),
+        must_not_touch: tuple[str, ...] = (),
+        changed_files: tuple[str, ...] = (),
+        disk_estimate_bytes: int = 0,
+    ) -> EngineGateResult:
+        """Orchestrator-owned entry point for engine-run G1/G2/G3 evidence.
 
-        Refuses cleanup for running runs, external worktrees, or dirty worktrees.
-        Preserves candidate branches and database records.
+        Covers: ADR-0004 D3 (engine gate evidence + write-scope preflight).
+
+        Delegates to the deterministic :func:`run_engine_gate` seam so the
+        engine (and only the engine) produces authoritative gate evidence; a
+        model's iteration run remains G0 and can never be submitted as
+        evidence.
+        """
+        return run_engine_gate(
+            target_repo=target_repo,
+            kind=kind,
+            evidence_dir=evidence_dir,
+            base=base,
+            head_sha=head_sha,
+            requested_profile=requested_profile,
+            state_dir=state_dir,
+            touches=touches,
+            must_not_touch=must_not_touch,
+            changed_files=changed_files,
+            disk_estimate_bytes=disk_estimate_bytes,
+        )
+
+    def cleanup_run(self, run_id: str) -> dict[str, list[str]]:
+        """Guardedly retire clean attempt worktrees for a terminal run.
+
+        Delegates to the shared guarded lifecycle service so the compatibility
+        route and ``orch gc`` enforce exactly the same checks: no repository-wide
+        ``git worktree prune``, no force, no deletion outside the resolved
+        worktree base, and dirty / symlinked / uniquely-ignored / actively-owned
+        worktrees are preserved.  Candidate branches and database records are
+        kept; immutable SHAs and evidence survive.
 
         Returns:
-            Dict containing 'removed', 'skipped_dirty', and 'skipped_missing' paths.
+            Dict containing 'removed', 'skipped_dirty', 'skipped_missing' and
+            'skipped_protected' paths.
         """
         run = self.db.get_run(run_id)
         if not run:
             raise ValueError(f"Run '{run_id}' not found")
-
-        if run.status == RunStatus.RUNNING:
-            raise RuntimeError(f"Cannot clean up run '{run_id}': status is RUNNING")
 
         # The repository always comes from the persisted run identity; the UI's
         # currently selected project can never retarget an existing run.
@@ -8651,59 +8888,13 @@ class Orchestrator:
         except ProvenanceError as exc:
             raise RuntimeError(f"Refusing cleanup for run '{run_id}': {exc}") from exc
 
-        base_wt_dir = (
-            self.worktree_base.resolve()
-            if self.worktree_base is not None
-            else GitManager.get_default_worktree_base(repo).resolve()
+        return retire_run_worktrees(
+            self.db,
+            repo_root=repo,
+            run_id=run_id,
+            worktree_base=self.worktree_base,
+            audit=database_audit_sink(self.db),
         )
-
-        attempts = self.db.get_attempts_for_run(run_id)
-        removed: list[str] = []
-        skipped_dirty: list[str] = []
-        skipped_missing: list[str] = []
-
-        for attempt in attempts:
-            if not attempt.worktree_path:
-                continue
-            wt_path = Path(attempt.worktree_path).resolve()
-            if not wt_path.exists():
-                skipped_missing.append(str(wt_path))
-                continue
-
-            # Verify path belongs to orchestrator worktree root
-            try:
-                is_subpath = wt_path.is_relative_to(base_wt_dir) and wt_path != base_wt_dir
-            except (ValueError, AttributeError):
-                is_subpath = False
-
-            if not is_subpath:
-                raise RuntimeError(
-                    f"Refusing cleanup: worktree '{wt_path}' does not belong "
-                    f"to orchestrator worktree root '{base_wt_dir}'"
-                )
-
-            # Check if worktree is clean
-            if not GitManager.is_clean(wt_path):
-                skipped_dirty.append(str(wt_path))
-                continue
-
-            # Safely remove clean worktree
-            GitManager.remove_worktree(
-                repo_path=repo,
-                worktree_path=wt_path,
-                force=False,
-                worktree_base=base_wt_dir,
-            )
-            removed.append(str(wt_path))
-
-        # Prune git worktree metadata
-        run_process(["git", "worktree", "prune"], cwd=repo)
-
-        return {
-            "removed": removed,
-            "skipped_dirty": skipped_dirty,
-            "skipped_missing": skipped_missing,
-        }
 
 
 def _run_configured_gate(

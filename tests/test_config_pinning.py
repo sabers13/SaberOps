@@ -37,7 +37,8 @@ def _write_recording_stub(bindir: Path, name: str, outfile: Path) -> None:
         f"#!{sys.executable}\n"
         "import json, os, sys\n"
         f"with open({str(outfile)!r}, 'w', encoding='utf-8') as fh:\n"
-        "    json.dump({'argv': sys.argv, 'env': dict(os.environ)}, fh, sort_keys=True)\n"
+        "    json.dump({'argv': sys.argv, 'cwd': os.getcwd(), 'env': dict(os.environ)},"
+        " fh, sort_keys=True)\n"
     )
     path = bindir / name
     path.write_text(script, encoding="utf-8")
@@ -69,6 +70,7 @@ def _child(outfile: Path) -> dict[str, Any]:
 def test_opencode_run_pins_enabled_providers_and_drops_shell_config(
     stub_bin: tuple[Path, Path], tmp_path: Path
 ) -> None:
+    """Covers: HV-2 isolation contract (pinned inline config + child cwd)."""
     bindir, outfile = stub_bin
     _write_recording_stub(bindir, "stub-opencode", outfile)
     adapter = OpenCodeAdapter(opencode_bin="stub-opencode")
@@ -90,7 +92,9 @@ def test_opencode_run_pins_enabled_providers_and_drops_shell_config(
     assert result.status == AttemptStatus.SUCCESS
     child = _child(outfile)
     pinned = json.loads(child["env"]["OPENCODE_CONFIG_CONTENT"])
-    assert pinned == {"enabled_providers": ["opencode-go"]}
+    assert pinned["enabled_providers"] == ["opencode-go"]
+    assert {"action": "integration.use", "resource": "plugin:*",
+            "effect": "deny"} in pinned["policies"]
     for key in ("OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_MODEL"):
         assert key not in child["env"], f"shell {key} reached the opencode child"
     # The server username/password names pass the projection by design
@@ -98,8 +102,36 @@ def test_opencode_run_pins_enabled_providers_and_drops_shell_config(
     # selection, and billing itself is pinned above.
     assert child["env"]["OPENCODE_SERVER_USERNAME"] == "shell-user"
     argv = child["argv"]
-    assert argv[1] == "run" and "--pure" in argv
+    # opencode v2.0.29 documents neither ``--pure`` nor ``--dir`` (HV-1 F1,
+    # fixed in Step 024/HV-2).  The worktree now travels as the child ``cwd``
+    # and discovery isolation is the owned private config/home root asserted
+    # below -- never an argv flag.
+    assert argv[1] == "run"
+    assert "--pure" not in argv and "--dir" not in argv
     assert argv[argv.index("--model") + 1] == MODEL
+    assert Path(child["cwd"]).resolve() == tmp_path.resolve()
+    # The child environment is the isolation-owned root, not the ambient
+    # shell: project/ancestor discovery is disabled and ambient config
+    # selectors (OPENCODE_CONFIG/OPENCODE_CONFIG_DIR/OPENCODE_MODEL and a
+    # hostile project-disable value) never survive.
+    assert child["env"]["OPENCODE_DISABLE_PROJECT_CONFIG"] == "1"
+    assert "OPENCODE_CONFIG" not in child["env"]
+    assert "OPENCODE_CONFIG_DIR" not in child["env"]
+    assert "OPENCODE_MODEL" not in child["env"]
+    config_home = Path(child["env"]["XDG_CONFIG_HOME"])
+    home = Path(child["env"]["HOME"])
+    assert config_home != home
+    for directory in (config_home, home):
+        assert "saberops-opencode-isolation-" in str(directory)
+    # The owned root lives only for the dispatch: it is removed after the
+    # child exits (creation-time emptiness is covered by the helper tests).
+    assert not config_home.parent.exists()
+    inline = json.loads(child["env"]["OPENCODE_CONFIG_CONTENT"])
+    assert inline["enabled_providers"] == ["opencode-go"]
+    assert {"action": "integration.use", "resource": "plugin:*",
+            "effect": "deny"} in inline["policies"]
+    assert {"action": "integration.use", "resource": "mcp:*",
+            "effect": "deny"} in inline["policies"]
 
 
 def test_opencode_run_refuses_model_without_provider_prefix(
@@ -287,6 +319,7 @@ def test_model_check_pins_checked_provider() -> None:
 
     def runner(argv: list[str], **kwargs: Any) -> ProcessResult:
         seen["config"] = json.loads(kwargs["env"]["OPENCODE_CONFIG_CONTENT"])
+        assert kwargs["inherit_env"] is False
         challenge = "SABEROPS_ACCESS_never"
         output = json.dumps({"type": "text", "part": {"text": challenge}})
         output += "\n" + json.dumps({"type": "step_finish", "part": {"reason": "stop"}})
@@ -305,6 +338,7 @@ def test_model_check_without_prefix_keeps_previous_behaviour() -> None:
 
     def runner(argv: list[str], **kwargs: Any) -> ProcessResult:
         seen["config"] = json.loads(kwargs["env"]["OPENCODE_CONFIG_CONTENT"])
+        assert kwargs["inherit_env"] is False
         return ProcessResult(argv, 1, "", "nope", 0.01)
 
     assert (

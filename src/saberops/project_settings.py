@@ -462,18 +462,6 @@ def set_project_review_policy(repo_path: Path | str, mode: object) -> Path:
     return set_project_review_policy_for_state_dir(state_dir, mode)  # type: ignore[arg-type]
 
 
-def set_project_gate_scratch_mode(repo_path: Path | str, mode: object) -> Path:
-    """Persist the project's gate-scratch mode via the canonical store.
-
-    Delegates to :func:`saberops.gate_runner.set_project_gate_scratch_policy`
-    so project-settings writes use the canonical existing persistence
-    rather than producing a divergent copy.
-    """
-    from saberops.gate_runner import set_project_gate_scratch_policy
-
-    return set_project_gate_scratch_policy(repo_path, mode)  # type: ignore[arg-type]
-
-
 __all__ = [
     "DataPolicy",
     "OWNER_DATA_POLICY_LABELS",
@@ -491,7 +479,6 @@ __all__ = [
     "set_project_accept_target_branch",
     "set_project_data_policy",
     "set_project_gate_command",
-    "set_project_gate_scratch_mode",
     "set_project_review_policy",
     "set_project_settings_for_state_dir",
 ]

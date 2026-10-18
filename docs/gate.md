@@ -8,11 +8,20 @@ Zero targets skips pytest, while lint and types still run. This evidence makes a
 lane provisional; it does not certify integration.
 
 The integrator merges all lanes and runs **one** `bash scripts/gate-full.sh
-[--result-dir DIR]`. The full gate holds a shared slot during lint, types, both
-pytest passes, reruns and cleanup. The first pass runs `not serial` with xdist
-worksteal; the second runs `serial` without xdist. Both retain `--durations=20`.
-Every failure identified in JUnit is rerun once without xdist, unless infrastructure
-or collection errors prevent a meaningful rerun. No tests are excluded by quarantine.
+[--result-dir DIR]`. The full gate holds a shared slot during lint, types, the
+pytest pass, reruns and cleanup. There is **one** pytest pass: the whole suite
+runs in parallel with bounded xdist worksteal (`SABEROPS_GATE_WORKERS`, default
+4); the separate serial tier was removed (`D-0061`). Every failure identified in
+JUnit is rerun once serially without xdist (`-p no:xdist`) and only those node
+IDs, which is what `FLAKY_PASS` evaluates. No tests are excluded by quarantine.
+Each gate child tree is wrapped in a transient `systemd-run --user --scope`
+(`MemoryHigh=6G`, `MemoryMax=8G`) when available, so a gate cannot drive the
+host out of memory or take down the interactive session; set
+`SABEROPS_GATE_CGROUP=0` to disable the wrapper. The engine-run history line
+records `kind` (`G1|G2|G3|main-gate|manual`), `producer` (`engine` for
+authoritative engine runs) and `profile` alongside the existing fields.
+`outcome.json` additionally records `kind`, `producer`, `profile`, `checks_ok`
+and `selected`.
 
 On failures, run:
 
@@ -83,8 +92,16 @@ the default lives inside private scratch and is available in the copied evidence
 | SABEROPS_GATE_SLOTS | 1 | Concurrent full gates in this repository's git common directory |
 | SABEROPS_LANE_SLOTS | 2 | Concurrent lane/fix checks holding light slots |
 | SABEROPS_GATE_SLOT_WAIT | 3600 | Slot wait deadline in seconds |
-| SABEROPS_GATE_WORKERS | auto | xdist worker count in full parallel pass |
+| SABEROPS_GATE_WORKERS | 4 | xdist worker count for the single full-suite pass (bounded RAM) |
+| SABEROPS_LANE_WORKERS | 2 | xdist worker count for lane/fix checks with >1 target |
+| SABEROPS_GATE_CGROUP | unset | `0`/`off` disables the `systemd-run` memory scope |
+| SABEROPS_GATE_KIND | derived | History `kind`: `G1`/`G2`/`G3`/`main-gate`/`manual` |
+| SABEROPS_GATE_PRODUCER | developer | Evidence producer; the engine sets `engine` |
+| SABEROPS_GATE_PROFILE | derived | Gate profile: `fast`/`acceptance`/`full` |
+| SABEROPS_GATE_EXTERNAL_SLOT | unset | `1` = caller already holds host-gates slots |
+| SABEROPS_GATE_NO_HISTORY | unset | `1` = the engine writes the single history line |
 | SABEROPS_LANE_TIMEOUT | 1200 | Whole lane pytest budget in seconds |
+| SABEROPS_MAP_WORKERS | 4 | xdist worker count for `build_test_map.py` |
 | MYPY_CACHE_DIR | `<git-common-dir>/saberops-mypy-cache` | Shared incremental type cache |
 
 A slot uses an OS flock, automatically released when its owner dies. The heavy pool
@@ -99,7 +116,13 @@ worktree and start time immediately and once per minute; exceeding
 `SABEROPS_GATE_SLOT_WAIT` is `INFRA SLOT_WAIT_TIMEOUT`. Because the full gate
 always takes heavy before light and a lane never waits for heavy while holding
 light, new lanes queue behind a draining full gate and the order cannot deadlock.
-More than 150 lane target arguments use four xdist workers.
+Lane checks run in parallel with bounded workers (`SABEROPS_LANE_WORKERS`,
+default 2) whenever more than one target is selected; a single target stays in
+one process. The engine holds the same heavy/light slots for its own G1/G2/G3
+runs and passes `SABEROPS_GATE_EXTERNAL_SLOT=1` to the child so the child never
+re-acquires (which would self-deadlock). The engine also passes
+`SABEROPS_GATE_NO_HISTORY=1` and appends the single authoritative history line
+itself.
 
 Each run creates `<worktree>-<UTC timestamp>-<pid>/owner.json`, and each pytest pass
 owns a separate basetemp under it. Startup sweeps owned runs with dead pids or age over
@@ -116,11 +139,13 @@ reports INTERRUPTED. SIGKILL leaves an owned orphan for the next sweep.
 
 `pytest-timeout` enforces 180 seconds per test. Longer timeouts need a measured
 reason next to an explicit `@pytest.mark.timeout(N)`. Markers `serial` and `slow`
-are registered and strict marker validation is enabled. Timing/process-control
-modules `test_session_control.py` and `test_parallel_work.py` run serially because
-ADR-0003 records contention failures and successful serial reruns. Additional marks
-require evidence; no test logic is changed. Plain pytest retains only failed tmp_path
-directories, with a retention count of one.
+are registered and strict marker validation is enabled. The timing/process-control
+modules `test_session_control.py` and `test_parallel_work.py` keep their `serial`
+marker as documentation, but there is no serial tier: they run in the single
+bounded parallel pass and, if they flake, are rerun once serially with just their
+node IDs (a still-flaky unquarantined test fails the full gate per D5). Additional
+marks require evidence; no test logic is changed. Plain pytest retains only failed
+tmp_path directories, with a retention count of one.
 
 `tests/quarantine.txt` contains exact node IDs, one per line; blank lines and comments
 are ignored. The initial file is empty. Only owner-approved entries belong there.

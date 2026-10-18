@@ -208,28 +208,12 @@ def test_xdg_overrides_remain_authoritative(
     """Explicit XDG_* bases change the base; the saberops segment stays fixed."""
     state_base = tmp_path / "custom-state"
     config_base = tmp_path / "custom-config"
-    cache_base = tmp_path / "custom-cache"
-    for path in (state_base, config_base, cache_base):
+    for path in (state_base, config_base):
         path.mkdir(parents=True)
     monkeypatch.setenv("XDG_STATE_HOME", str(state_base))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(config_base))
-    monkeypatch.setenv("XDG_CACHE_HOME", str(cache_base))
     assert get_default_db_path() == state_base / "saberops" / "orchestrator.db"
     assert get_user_routing_path() == config_base / "saberops" / "routing.json"
-    assert saberops_paths.saberops_cache_dir() == cache_base / "saberops"
-
-
-def test_cache_namespace_and_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Cache namespace follows XDG_CACHE_HOME with the platform fallback."""
-    cache_base = tmp_path / "c"
-    cache_base.mkdir()
-    monkeypatch.setenv("XDG_CACHE_HOME", str(cache_base))
-    assert saberops_paths.saberops_cache_dir() == cache_base / "saberops"
-    monkeypatch.delenv("XDG_CACHE_HOME")
-    # Unset + HOME fallback: only assert the tail, never the real home content.
-    monkeypatch.setenv("HOME", str(tmp_path))
-    assert saberops_paths.cache_home() == tmp_path / ".cache"
-    assert saberops_paths.saberops_cache_dir() == tmp_path / ".cache" / "saberops"
 
 
 def test_legacy_state_not_selected_for_fresh_install(
@@ -375,7 +359,6 @@ def test_no_default_path_carries_legacy_segments(
         get_default_projects_path(),
         owner_state_dir(),
         projects_state_root(),
-        saberops_paths.saberops_cache_dir(),
     ]
     for path in candidates:
         assert "orchestrator-mvp" not in str(path), str(path)

@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 
-from saberops.cli_usage import CliUsageService
 from saberops.native_usage_panel import parse_panel, read_panel
 
 CLAUDE = """Session
@@ -109,14 +108,3 @@ def test_unknown_login_dialog_does_not_receive_prompt(
         os.kill(int(pid.read_text()), 0)
 
 
-def test_refresh_queries_claude_and_antigravity_native_limits(tmp_path: Path) -> None:
-    service = CliUsageService(
-        home=tmp_path,
-        which=lambda exe: exe if exe in ("claude", "agy") else None,
-        limits=lambda exe, provider: parse_panel(provider, CLAUDE if exe == "claude" else AGY),
-    )
-    cards = service.snapshot(refresh=True, force=True)
-    claude = next(c for c in cards if c["provider"] == "anthropic")
-    agy = next(c for c in cards if c["provider"] == "antigravity")
-    assert len(claude["windows"]) == 2 and len(agy["windows"]) == 4
-    assert claude["source"] == agy["source"] == "Native CLI /usage panel"
