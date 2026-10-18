@@ -396,7 +396,97 @@ def test_notebook_never_evicts_a_pinned_entry(tmp_path: Path) -> None:
     with pytest.raises(NotebookBudgetError):
         store.put(_entry("per", NotebookTier.PERISHABLE))
     assert store.get("pin") is not None
+    assert store.entry_count() == 1
     assert store.total_chars() == before
+    assert store.archive.read() == ()
+
+
+def test_second_pinned_entry_is_refused_instead_of_evicting_the_first(tmp_path: Path) -> None:
+    """Covers: OM-1 pinned entries are excluded from eviction candidates."""
+    store = _notebook(tmp_path, max_chars=15)
+    store.put(_entry("pin1", NotebookTier.PINNED))
+    with pytest.raises(NotebookBudgetError):
+        store.put(_entry("pin2", NotebookTier.PINNED))
+    assert store.get("pin1") is not None
+    assert store.get("pin2") is None
+    assert store.entry_count() == 1
+    assert store.total_chars() == 10
+    assert store.archive.read() == ()
+
+
+def test_pinned_entry_never_becomes_the_victim_when_others_are_evictable(
+    tmp_path: Path,
+) -> None:
+    """Covers: OM-1 only aging/perishable entries are eviction victims."""
+    store = _notebook(tmp_path, max_chars=30)
+    store.put(_entry("pin", NotebookTier.PINNED))
+    store.put(_entry("age", NotebookTier.AGING))
+    store.put(_entry("per", NotebookTier.PERISHABLE))
+    result = store.put(_entry("new", NotebookTier.PERISHABLE))
+    assert [entry.key for entry in result.evicted] == ["per"]
+    assert store.get("pin") is not None
+    assert store.get("age") is not None
+
+
+def test_repeated_eviction_cycles_never_touch_pinned_entries(tmp_path: Path) -> None:
+    """Covers: OM-1 pinned entries survive every eviction cycle untouched."""
+    store = _notebook(tmp_path, max_chars=30)
+    store.put(_entry("pin1", NotebookTier.PINNED))
+    store.put(_entry("pin2", NotebookTier.PINNED))
+    for index in range(5):
+        store.put(_entry(f"note-{index}", NotebookTier.PERISHABLE))
+        assert store.get("pin1") is not None
+        assert store.get("pin2") is not None
+    archived = {record["entry"]["key"] for record in store.archive.read()}
+    assert "pin1" not in archived
+    assert "pin2" not in archived
+    assert {entry.key for entry in store.entries()} == {"pin1", "pin2", "note-4"}
+
+
+def test_evicted_entries_are_archived_before_the_notebook_is_persisted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: OM-1 archive-before-persist ordering closes the eviction crash window."""
+    store = _notebook(tmp_path, max_chars=20)
+    store.put(_entry("pin", NotebookTier.PINNED))
+    store.put(_entry("per", NotebookTier.PERISHABLE))
+    notebook_before = store.path.read_text(encoding="utf-8")
+
+    def fail_write(entries: Any, order: Any) -> None:
+        raise OSError("simulated crash before notebook persistence")
+
+    monkeypatch.setattr(store, "_write", fail_write)
+    with pytest.raises(OSError):
+        store.put(_entry("new", NotebookTier.PERISHABLE))
+    monkeypatch.undo()
+
+    archive = store.archive.read()
+    assert [record["entry"]["key"] for record in archive] == ["per"]
+    assert store.path.read_text(encoding="utf-8") == notebook_before
+    assert store.get("per") is not None
+    assert store.get("new") is None
+
+
+def test_boundary_clear_archives_before_persisting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: OM-1 boundary clearing archives before rewriting notebook.json."""
+    store = _notebook(tmp_path)
+    store.put(_entry("pin", NotebookTier.PINNED))
+    store.put(_entry("per", NotebookTier.PERISHABLE))
+    notebook_before = store.path.read_text(encoding="utf-8")
+
+    def fail_write(entries: Any, order: Any) -> None:
+        raise OSError("simulated crash before notebook persistence")
+
+    monkeypatch.setattr(store, "_write", fail_write)
+    with pytest.raises(OSError):
+        store.clear_perishable()
+    monkeypatch.undo()
+
+    assert [record["entry"]["key"] for record in store.archive.read()] == ["per"]
+    assert store.path.read_text(encoding="utf-8") == notebook_before
+    assert store.get("per") is not None
 
 
 def test_notebook_refusal_does_not_partially_mutate(tmp_path: Path) -> None:

@@ -515,12 +515,15 @@ class NotebookStore:
                 "silently truncated"
             )
 
-    def _persist(self) -> None:
+    def _write(self, entries: Mapping[str, NotebookEntry], order: Sequence[str]) -> None:
         payload = {
             "version": ORCHESTRATOR_MEMORY_VERSION,
-            "entries": [self._entries[key].as_dict() for key in self._order],
+            "entries": [entries[key].as_dict() for key in order],
         }
         _atomic_write_json(self.path, payload)
+
+    def _persist(self) -> None:
+        self._write(self._entries, self._order)
 
     # -- reads ------------------------------------------------------------- #
 
@@ -551,14 +554,27 @@ class NotebookStore:
 
     @staticmethod
     def _lowest_priority(
-        entries: Mapping[str, NotebookEntry], order: Sequence[str]
+        entries: Mapping[str, NotebookEntry],
+        order: Sequence[str],
+        *,
+        excluded_key: str | None = None,
     ) -> NotebookEntry | None:
-        """Return the lowest-priority candidate, deterministically."""
-        if not entries:
+        """Return the lowest-priority *evictable* entry, deterministically.
+
+        ``pinned`` entries are permanent and are never eviction candidates.
+        The entry being admitted is excluded as well: an incoming entry is
+        refused rather than evicting itself out of the notebook.
+        """
+        eligible = [
+            entry
+            for entry in entries.values()
+            if entry.tier is not NotebookTier.PINNED and entry.key != excluded_key
+        ]
+        if not eligible:
             return None
         rank = {key: index for index, key in enumerate(order)}
         return min(
-            entries.values(),
+            eligible,
             key=lambda entry: (effective_priority(entry), -entry.age, rank[entry.key]),
         )
 
@@ -570,10 +586,12 @@ class NotebookStore:
     def put(self, entry: NotebookEntry) -> NotebookWrite:
         """Admit one entry, evicting lower-priority entries to stay within budget.
 
-        ``pinned`` entries are never evicted.  If the incoming entry is itself
-        the lowest-priority candidate, it is refused instead of displacing
-        higher-priority state.  Evictions are planned on a copy first, so a
-        refused write never leaves the notebook partially mutated.
+        ``pinned`` entries are excluded from the eviction candidates entirely, so
+        they are permanent even when every non-pinned entry is gone.  If the
+        notebook is still over budget and no non-pinned entry can be evicted, the
+        write fails closed with :class:`NotebookBudgetError` instead of dropping
+        pinned state.  Evictions are planned on a copy first, so a refused write
+        never leaves the notebook partially mutated.
         """
         if not isinstance(entry, NotebookEntry):
             raise OrchestratorMemoryError("put requires a NotebookEntry")
@@ -584,22 +602,24 @@ class NotebookStore:
 
         evicted: list[NotebookEntry] = []
         while self._over_budget(candidates):
-            victim = self._lowest_priority(candidates, order)
-            if victim is None or victim.key == entry.key:
+            victim = self._lowest_priority(candidates, order, excluded_key=entry.key)
+            if victim is None:
                 raise NotebookBudgetError(
-                    f"entry {entry.key!r} cannot be admitted: it is the lowest-priority "
-                    f"resident and the notebook is at its bound ({self.max_chars} chars, "
-                    f"{self.max_entries} entries)"
+                    f"entry {entry.key!r} cannot be admitted: no evictable non-pinned "
+                    "entry can free space (pinned entries are permanent) at the "
+                    f"notebook bound ({self.max_chars} chars, {self.max_entries} entries)"
                 )
             del candidates[victim.key]
             order.remove(victim.key)
             evicted.append(victim)
 
-        self._entries = candidates
-        self._order = order
-        self._persist()
+        # Archive before persisting: an evicted entry must never be missing from
+        # both the notebook and the archive if the process dies between writes.
         for victim in evicted:
             self._archive(victim, "budget_eviction")
+        self._write(candidates, order)
+        self._entries = candidates
+        self._order = order
         return NotebookWrite(
             admitted=entry,
             evicted=tuple(evicted),
@@ -614,13 +634,19 @@ class NotebookStore:
             for entry in self._entries.values()
             if entry.tier is NotebookTier.PERISHABLE
         ]
+        if not doomed:
+            return ()
+        candidates = dict(self._entries)
+        order = list(self._order)
         for entry in doomed:
-            self._entries.pop(entry.key)
-            self._order.remove(entry.key)
-        if doomed:
-            self._persist()
-            for entry in doomed:
-                self._archive(entry, "boundary_cleared")
+            del candidates[entry.key]
+            order.remove(entry.key)
+        # Archive before persisting, for the same crash-safety reason as ``put``.
+        for entry in doomed:
+            self._archive(entry, "boundary_cleared")
+        self._write(candidates, order)
+        self._entries = candidates
+        self._order = order
         return tuple(doomed)
 
     def advance_age(self) -> tuple[NotebookEntry, ...]:

@@ -132,7 +132,7 @@ If the irreducible digest cannot fit the budget, `build_startup_digest` raises
 
 | Tier | Priority | Lifetime |
 |---|---|---|
-| `pinned` | `1 000 000` | permanent across restarts; never evicted |
+| `pinned` | `1 000 000` | permanent across restarts; excluded from eviction candidates |
 | `aging` | `10 000 - 1 000 × age` (floored at 0) | decays at every wave/turn boundary |
 | `perishable` | `5 000` | cleared at the wave/turn boundary |
 
@@ -144,12 +144,20 @@ Bounds: `NOTEBOOK_MAX_CHARS` (8 000 rendered characters),
 `NOTEBOOK_MAX_ENTRIES` (512) and `NOTEBOOK_MAX_ENTRY_CHARS` (500 per entry).
 
 `put(entry)` plans evictions on a copy and only then commits, so a refused write
-never leaves a partially mutated notebook. Eviction order is deterministic:
-lowest priority first, then oldest, then earliest inserted. If the incoming entry
-is itself the lowest-priority candidate, it is refused with
-`NotebookBudgetError` rather than displacing higher-priority state. Every evicted
-entry (budget eviction or boundary clear) is appended to
-`notebook-archive.jsonl`; the archive is never rewritten.
+never leaves a partially mutated notebook. Only `aging` and `perishable` entries
+are eviction candidates: `pinned` entries are filtered out of the candidate set
+entirely, so they survive even when every non-pinned entry is exhausted. If the
+notebook is still over budget and no non-pinned entry can be evicted, the write
+fails closed with `NotebookBudgetError` instead of dropping pinned state.
+Eviction order is deterministic: lowest priority first, then oldest, then
+earliest inserted.
+
+Crash ordering: every evicted or boundary-cleared entry is appended and fsynced
+to `notebook-archive.jsonl` **before** `notebook.json` is rewritten. A process
+killed between the two writes can therefore leave a still-live entry duplicated
+in the archive, but can never lose an entry from both stores. `put` and
+`clear_perishable` both write from a prepared candidate set and only adopt it in
+memory after the notebook write succeeds.
 
 ## Lock protocol
 
@@ -266,6 +274,7 @@ All inputs are validated; malformed or unbounded input raises
 | `open_items > total_items` or `total_items <= 0` | impossible progress |
 | a negative token count or corrupt `ContextUsage` | corrupt telemetry |
 | an unknown authority mode | never guessed |
+| a notebook write that only fits by evicting a pinned entry | pinned state is permanent |
 
 ## Testing
 
