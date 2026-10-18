@@ -30,8 +30,13 @@ rcfile is temporary; the repo's own coverage settings are left alone).
 
 Usage:
     python scripts/build_test_map.py [--repo PATH] [--map DIR] [--no-subprocesses]
-        [--no-slot]
+        [--no-slot] [--wave-barrier] [--reuse-if-current]
     python scripts/build_test_map.py --from-data PATH/TO/.coverage --build-seconds S
+
+Wave consolidation policy (D-0076 item 3): in a multi-lane wave, intermediate
+lane gates run with ``--reuse-if-current`` (a no-op once the map covers HEAD)
+and the map is rebuilt once at the consolidation barrier with ``--wave-barrier``,
+so concurrent integrators do not each monopolise the heavy slot.
 
 The full suite runs once under coverage.py with pytest-xdist
 (``-n <SABEROPS_MAP_WORKERS|SABEROPS_GATE_WORKERS|4> --dist worksteal``);
@@ -85,10 +90,140 @@ def positive_int_env(name: str, default: int) -> int:
 
 
 def map_workers() -> int:
-    """Worker count for the coverage suite: map knob, then gate knob, then cap."""
+    """Worker count for the coverage suite: map knob, then gate knob, then RAM.
+
+    The final fallback is the D-0076 worker auto-scaling
+    (``max(1, min(cores, MemAvailable // 0.6 GiB))``) so the map build sizes
+    itself to the live machine; an explicit env knob still wins.
+    """
     if os.environ.get(SABEROPS_MAP_WORKERS_ENV, "").strip():
         return positive_int_env(SABEROPS_MAP_WORKERS_ENV, DEFAULT_MAP_WORKERS)
-    return positive_int_env(SABEROPS_GATE_WORKERS_ENV, DEFAULT_MAP_WORKERS)
+    if os.environ.get(SABEROPS_GATE_WORKERS_ENV, "").strip():
+        return positive_int_env(SABEROPS_GATE_WORKERS_ENV, DEFAULT_MAP_WORKERS)
+    return dynamic_worker_count()
+
+
+#: Per worker-session memory estimate used by the D-0076 auto-scaling formula.
+WORKER_SESSION_GIB = 0.6
+_MEMINFO_PATH = Path("/proc/meminfo")
+
+
+def _read_meminfo_bytes() -> dict[str, int]:
+    """Parse ``/proc/meminfo`` into ``{field: bytes}``; empty when unreadable."""
+    try:
+        text = _MEMINFO_PATH.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    values: dict[str, int] = {}
+    for line in text.splitlines():
+        key, sep, rest = line.partition(":")
+        if not sep:
+            continue
+        parts = rest.split()
+        if not parts:
+            continue
+        try:
+            values[key.strip()] = int(parts[0]) * 1024
+        except ValueError:
+            continue
+    return values
+
+
+def available_memory_bytes() -> int | None:
+    """Available memory in bytes via ``MemAvailable`` then an ``sysconf`` fallback."""
+    info = _read_meminfo_bytes()
+    if "MemAvailable" in info:
+        return info["MemAvailable"]
+    try:
+        pages = int(os.sysconf("SC_AVPHYS_PAGES"))
+        size = int(os.sysconf("SC_PAGE_SIZE"))
+    except (ValueError, OSError, AttributeError):
+        return None
+    return pages * size if pages > 0 and size > 0 else None
+
+
+def cpu_core_count() -> int:
+    return max(1, os.cpu_count() or 1)
+
+
+def dynamic_worker_count(
+    available_bytes: int | None = None, cpu_cores: int | None = None
+) -> int:
+    """``max(1, min(cpu_cores, int(MemAvailable // 0.6GiB)))`` (D-0076).
+
+    An unreadable ``/proc/meminfo`` keeps the conservative ``DEFAULT_MAP_WORKERS``
+    cap instead of restoring uncapped parallelism.
+    """
+    available = available_memory_bytes() if available_bytes is None else available_bytes
+    cores = cpu_core_count() if cpu_cores is None else cpu_cores
+    if available is None:
+        return min(cores, DEFAULT_MAP_WORKERS)
+    by_ram = int(available // int(WORKER_SESSION_GIB * 1024**3))
+    return max(1, min(cores, by_ram))
+
+
+# ---------------------------------------------------------------------------
+# Wave consolidation test-map policy (D-0076 item 3)
+# ---------------------------------------------------------------------------
+#
+# Rebuilding the coverage map runs the whole suite under coverage (~10 minutes)
+# while holding the exclusive heavy slot.  In a multi-lane wave that is wasteful
+# and serializes concurrent integrators.  Policy: intermediate lane gates call
+# ``--reuse-if-current`` (a no-op when the existing map already covers HEAD) and
+# the map is rebuilt once, at the wave consolidation barrier, with
+# ``--wave-barrier``.
+
+
+def map_commit(map_dir: Path) -> str:
+    """Return the commit sha the existing map was built from, or ``""``."""
+    try:
+        data = json.loads((map_dir / MAP_META).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    commit = data.get("commit") if isinstance(data, dict) else None
+    return commit if isinstance(commit, str) else ""
+
+
+def map_is_current(map_dir: Path, repo: Path, head: str) -> bool:
+    """True when the existing map's build commit is an ancestor of ``head``.
+
+    That is exactly the selector's own freshness rule, so a map this reports as
+    current is one ``scripts/select_tests.py`` will trust rather than fall back
+    from.
+    """
+    commit = map_commit(map_dir)
+    if not commit:
+        return False
+    completed = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", commit, head],
+        cwd=repo,
+        check=False,
+        capture_output=True,
+    )
+    return completed.returncode == 0
+
+
+def wave_barrier_decision(
+    map_dir: Path,
+    repo: Path,
+    head: str,
+    *,
+    wave_barrier: bool,
+    reuse_if_current: bool,
+) -> str:
+    """Return ``"rebuild"`` or ``"reuse"`` for one map invocation.
+
+    ``--wave-barrier`` always rebuilds (it *is* the single consolidated build).
+    ``--reuse-if-current`` skips the rebuild when the map already covers HEAD,
+    which is what makes an intermediate lane invocation a cheap no-op instead of
+    a redundant heavy-slot monopoly.  Without either flag the historical
+    behaviour (always rebuild) is preserved.
+    """
+    if wave_barrier:
+        return "rebuild"
+    if reuse_if_current and map_is_current(map_dir, repo, head):
+        return "reuse"
+    return "rebuild"
 
 
 def suite_command(python: str, rcfile: Path, plugin_module: str, workers: int) -> list[str]:
@@ -375,6 +510,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="skip the exclusive heavy-gate slot (recovery/seeding only)",
     )
     parser.add_argument(
+        "--wave-barrier",
+        action="store_true",
+        help=("this invocation is the wave consolidation barrier: the single "
+              "intended test-map rebuild for the wave"),
+    )
+    parser.add_argument(
+        "--reuse-if-current",
+        action="store_true",
+        help=("skip the rebuild when the existing map already covers HEAD "
+              "(the no-op path for intermediate lane gates)"),
+    )
+    parser.add_argument(
         "--from-data",
         default=None,
         help=("reuse an existing combined coverage data file instead of running "
@@ -402,6 +549,22 @@ def main(argv: list[str] | None = None) -> int:
     commit = _git(repo, "rev-parse", "HEAD")
     map_dir = Path(args.map) if args.map else default_map_dir(repo)
     with_subprocesses = not args.no_subprocesses
+
+    if args.wave_barrier:
+        print("wave consolidation barrier: single test-map rebuild for this wave")
+    decision = wave_barrier_decision(
+        map_dir,
+        repo,
+        commit,
+        wave_barrier=args.wave_barrier,
+        reuse_if_current=args.reuse_if_current,
+    )
+    if decision == "reuse":
+        print(
+            f"map {map_dir} already covers HEAD {commit[:12]} "
+            "(reuse-if-current); skipping rebuild"
+        )
+        return 0
 
     if args.from_data:
         if args.build_seconds is None:

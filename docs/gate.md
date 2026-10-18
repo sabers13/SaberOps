@@ -11,7 +11,8 @@ The integrator merges all lanes and runs **one** `bash scripts/gate-full.sh
 [--result-dir DIR]`. The full gate holds a shared slot during lint, types, the
 pytest pass, reruns and cleanup. There is **one** pytest pass: the whole suite
 runs in parallel with bounded xdist worksteal (`SABEROPS_GATE_WORKERS`, default
-4); the separate serial tier was removed (`D-0061`). Every failure identified in
+derived from live RAM as `max(1, min(cores, MemAvailable // 0.6 GiB))`, D-0076);
+the separate serial tier was removed (`D-0061`). Every failure identified in
 JUnit is rerun once serially without xdist (`-p no:xdist`) and only those node
 IDs, which is what `FLAKY_PASS` evaluates. No tests are excluded by quarantine.
 Each gate child tree is wrapped in a transient `systemd-run --user --scope`
@@ -142,40 +143,78 @@ G1/G2/G3 runs always declare one.
 | SABEROPS_GATE_MIN_FREE_GB | 10 | Minimum free GiB; 10% filesystem floor also applies |
 | SABEROPS_GATE_KEEP_FAILED_GB | 2 | Total retained failed scratch cap in GiB |
 | SABEROPS_GATE_KEEP | unset | `1` bypasses exit cleanup |
-| SABEROPS_GATE_SLOTS | 1 | Concurrent full gates in this repository's git common directory |
-| SABEROPS_LANE_SLOTS | 2 | Concurrent lane/fix checks holding light slots |
+| SABEROPS_GATE_SLOTS | dynamic | Concurrent full gates in this repository's git common directory (heavy slots) |
+| SABEROPS_LANE_SLOTS | dynamic | Concurrent lane/fix checks holding light slots |
 | SABEROPS_GATE_SLOT_WAIT | 3600 | Slot wait deadline in seconds |
-| SABEROPS_GATE_WORKERS | 4 | xdist worker count for the single full-suite pass (bounded RAM) |
+| SABEROPS_GATE_WORKERS | dynamic | xdist worker count: `max(1, min(cores, MemAvailable // 0.6 GiB))` |
 | SABEROPS_LANE_WORKERS | 2 | xdist worker count for lane/fix checks with >1 target |
 | SABEROPS_GATE_CGROUP | unset | `0`/`off` disables the `systemd-run` memory scope |
+| SABEROPS_GATE_MEMORY_GUARD | unset | `0`/`off` disables the heavy-gate RAM pre-admission guard |
+| SABEROPS_GATE_MIN_AVAILABLE_GB | 5 | Heavy-gate guard floor in GiB (2 GiB safety + 3 GiB heavy) |
 | SABEROPS_GATE_KIND | derived | History `kind`: `G1`/`G2`/`G3`/`main-gate`/`manual` |
 | SABEROPS_GATE_PRODUCER | developer | Evidence producer; the engine sets `engine` |
 | SABEROPS_GATE_PROFILE | derived | Gate profile: `fast`/`acceptance`/`full` |
 | SABEROPS_GATE_EXTERNAL_SLOT | unset | `1` = caller already holds host-gates slots |
 | SABEROPS_GATE_NO_HISTORY | unset | `1` = the engine writes the single history line |
 | SABEROPS_LANE_TIMEOUT | 1200 | Whole lane pytest budget in seconds |
-| SABEROPS_MAP_WORKERS | 4 | xdist worker count for `build_test_map.py` |
+| SABEROPS_MAP_WORKERS | dynamic | xdist worker count for `build_test_map.py` |
 | MYPY_CACHE_DIR | `<git-common-dir>/saberops-mypy-cache` | Shared incremental type cache |
 
 A slot uses an OS flock, automatically released when its owner dies. The heavy pool
-(`saberops-gate-slots`, `SABEROPS_GATE_SLOTS`, default 1) is exclusive: a full gate
-holds the heavy slot and then drains all light slots, holding them for the whole
-run. The light pool (`saberops-gate-light-slots`, `SABEROPS_LANE_SLOTS`, default 2,
-must be >= 1) is for lane checks (G1) and fix checks (G2). A lane first waits while
-a full gate holds the heavy slot, then acquires one light slot and holds it for the
-whole run (lint, types, tests). Waiting prints `waiting for full-gate slot:`,
-`waiting for lane slot:`, or `waiting for running lane checks:` with holder pid,
-worktree and start time immediately and once per minute; exceeding
-`SABEROPS_GATE_SLOT_WAIT` is `INFRA SLOT_WAIT_TIMEOUT`. Because the full gate
-always takes heavy before light and a lane never waits for heavy while holding
-light, new lanes queue behind a draining full gate and the order cannot deadlock.
-Lane checks run in parallel with bounded workers (`SABEROPS_LANE_WORKERS`,
-default 2) whenever more than one target is selected; a single target stays in
-one process. The engine holds the same heavy/light slots for its own G1/G2/G3
-runs and passes `SABEROPS_GATE_EXTERNAL_SLOT=1` to the child so the child never
-re-acquires (which would self-deadlock). The engine also passes
+(`saberops-gate-slots`, `SABEROPS_GATE_SLOTS`, dynamic default 1) is exclusive: a
+full gate holds the heavy slot and then drains **every potential** light index
+`0..MAX_LIGHT_SLOTS` (`MAX_LIGHT_SLOTS = 8`), holding them for the whole
+run. The light pool (`saberops-gate-light-slots`, `SABEROPS_LANE_SLOTS`, dynamic
+default, must be >= 1) is for lane checks (G1) and fix checks (G2). A lane first
+waits while a full gate holds the heavy slot, then acquires one light slot and
+holds it for the whole run (lint, types, tests). Waiting prints `waiting for
+full-gate slot:`, `waiting for lane slot:`, or `waiting for running lane
+checks:` with holder pid, worktree and start time immediately and once per
+minute; exceeding `SABEROPS_GATE_SLOT_WAIT` is `INFRA SLOT_WAIT_TIMEOUT`. Because
+the full gate always takes heavy before light and a lane never waits for heavy
+while holding light, new lanes queue behind a draining full gate and the order
+cannot deadlock. Lane checks run in parallel with bounded workers
+(`SABEROPS_LANE_WORKERS`, default 2) whenever more than one target is selected; a
+single target stays in one process. The engine holds the same heavy/light slots
+for its own G1/G2/G3 runs and passes `SABEROPS_GATE_EXTERNAL_SLOT=1` to the child
+so the child never re-acquires (which would self-deadlock). The engine also passes
 `SABEROPS_GATE_NO_HISTORY=1` and appends the single authoritative history line
 itself.
+
+### Dynamic RAM capacity and self-healing slots (D-0076)
+
+Slot counts and the worker cap are derived from live memory instead of being
+pinned. Both the product pool (`saberops.gate_runner`) and the developer gate
+(`scripts/gate_tools.py`) read `/proc/meminfo` (`MemAvailable`, `MemTotal`) and
+fall back to `os.sysconf` when it is missing; no extra dependency is added.
+
+- Safety floor `2.0 GiB` is reserved for the OS, editor/UI and shells.
+- Light slot cost `1.0 GiB`; heavy slot cost `3.0 GiB`.
+- Light slots: `max(1, min(MAX_LIGHT_SLOTS, (MemAvailable - 2 GiB) // 1 GiB,
+  cpu_cores // 2))`.
+- Heavy slots: `1`, or `2` when `MemTotal >= 32 GiB` **and** `MemAvailable >=
+  8 GiB` **and** `cpu_cores >= 12`.
+- Worker auto-scaling: `max(1, min(cpu_cores, MemAvailable // 0.6 GiB))`.
+
+Explicit knobs (`SABEROPS_GATE_SLOTS`, `SABEROPS_LANE_SLOTS`,
+`SABEROPS_GATE_WORKERS`) stay authoritative; a malformed value still fails closed
+as `INFRA SLOT_WAIT_TIMEOUT`. Before a heavy gate starts, the pre-admission
+memory guard soft-queues while available RAM is below the floor (default
+`5 GiB = 2 GiB safety + 3 GiB heavy`, override with
+`SABEROPS_GATE_MIN_AVAILABLE_GB`), bounded by `SABEROPS_GATE_SLOT_WAIT`, so the
+host queues instead of crashing into OOM; unreadable memory never blocks a gate.
+A recorded `<index>.json` whose pid is dead is unlinked immediately and is never
+shown in a wait notice (`os.kill(pid, 0)`), so a process that died or was
+interrupted cannot leave a phantom "waiting for ..." holder behind.
+
+### Wave consolidation test-map policy
+
+Rebuilding the coverage map runs the whole suite under coverage (~10 minutes)
+while holding the exclusive heavy slot. In a multi-lane wave, intermediate lane
+gates run `scripts/build_test_map.py --reuse-if-current` (a no-op once the map
+covers HEAD) and the map is rebuilt once at the consolidation barrier with
+`--wave-barrier`; concurrent integrators therefore stop serializing on redundant
+map builds. `--wave-barrier` alone is the historical always-rebuild behaviour.
 
 Each run creates `<worktree>-<UTC timestamp>-<pid>/owner.json`, and each pytest pass
 owns a separate basetemp under it. Startup sweeps owned runs with dead pids or age over

@@ -1197,6 +1197,10 @@ def test_full_gate_is_one_parallel_pass_without_serial(
     repo.mkdir()
     _init_main_repo(repo)
     monkeypatch.delenv("SABEROPS_GATE_WORKERS", raising=False)
+    # D-0076: the worker default is RAM-derived; pin it for determinism
+    # (2.4 GiB / 0.6 GiB = 4 workers on 8 cores).
+    monkeypatch.setattr(g, "available_memory_bytes", lambda: int(2.4 * g.GB))
+    monkeypatch.setattr(g, "cpu_core_count", lambda: 8)
     runner, calls = _capture_runner(repo, "full", tmp_path, monkeypatch)
     code = runner.run_checks("HEAD", [])  # type: ignore[attr-defined]
     assert code == 0
@@ -1219,6 +1223,9 @@ def test_gate_workers_cap_from_env_and_malformed_falls_back(
     runner, calls = _capture_runner(repo, "full", tmp_path, monkeypatch)
     runner.run_checks("HEAD", [])  # type: ignore[attr-defined]
     assert calls[0][1][:2] == ["-n", "3"]
+    # D-0076: a malformed knob falls back to the RAM-derived default.
+    monkeypatch.setattr(g, "available_memory_bytes", lambda: int(2.4 * g.GB))
+    monkeypatch.setattr(g, "cpu_core_count", lambda: 8)
     monkeypatch.setenv("SABEROPS_GATE_WORKERS", "auto")
     runner2, calls2 = _capture_runner(repo, "full", tmp_path, monkeypatch)
     runner2.run_checks("HEAD", [])  # type: ignore[attr-defined]
@@ -1416,9 +1423,12 @@ def test_map_suite_command_is_parallel() -> None:
 
 
 def test_map_workers_env_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Covers: D-0061 (map worker knob, then gate knob, then conservative cap)."""
+    """Covers: D-0061/D-0076 (map knob, then gate knob, then RAM-derived default)."""
     monkeypatch.delenv("SABEROPS_MAP_WORKERS", raising=False)
     monkeypatch.delenv("SABEROPS_GATE_WORKERS", raising=False)
+    # Pin the memory reading so the RAM-derived default is deterministic.
+    monkeypatch.setattr(m, "available_memory_bytes", lambda: int(2.4 * 1024**3))
+    monkeypatch.setattr(m, "cpu_core_count", lambda: 8)
     assert m.map_workers() == 4
     monkeypatch.setenv("SABEROPS_GATE_WORKERS", "3")
     assert m.map_workers() == 3
@@ -1434,6 +1444,54 @@ def test_map_exclusive_wraps_the_canonical_slot(tmp_path: Path) -> None:
     assert Path(command[1]).name == "gate_tools.py"
     assert command[2:4] == ["exclusive", "--"]
     assert command[4:] == ["/py", "-m", "coverage", "run"]
+
+
+def test_map_wave_barrier_policy(tmp_path: Path) -> None:
+    """Covers: D-0076 item 3 (reuse-if-current no-op; wave-barrier rebuilds)."""
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_main_repo(repo)
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    map_dir = tmp_path / "map"
+    map_dir.mkdir()
+    # No map yet -> nothing to reuse.
+    assert m.map_commit(map_dir) == ""
+    assert m.map_is_current(map_dir, repo, head) is False
+    # A map built from HEAD is current for HEAD.
+    (map_dir / m.MAP_META).write_text(json.dumps({"commit": head}))
+    assert m.map_commit(map_dir) == head
+    assert m.map_is_current(map_dir, repo, head) is True
+    assert (
+        m.wave_barrier_decision(
+            map_dir, repo, head, wave_barrier=False, reuse_if_current=True
+        )
+        == "reuse"
+    )
+    # The consolidation barrier always rebuilds, even when a reuse flag is set.
+    assert (
+        m.wave_barrier_decision(
+            map_dir, repo, head, wave_barrier=True, reuse_if_current=True
+        )
+        == "rebuild"
+    )
+    # Without either flag the historical always-rebuild behaviour is preserved.
+    assert (
+        m.wave_barrier_decision(
+            map_dir, repo, head, wave_barrier=False, reuse_if_current=False
+        )
+        == "rebuild"
+    )
+    # A map whose build commit is not an ancestor of HEAD is stale -> rebuild.
+    (map_dir / m.MAP_META).write_text(json.dumps({"commit": "0" * 40}))
+    assert m.map_is_current(map_dir, repo, head) is False
+    assert (
+        m.wave_barrier_decision(
+            map_dir, repo, head, wave_barrier=False, reuse_if_current=True
+        )
+        == "rebuild"
+    )
 
 
 
