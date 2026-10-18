@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+{# SaberOps first-run onboarding (Step 019 / UI-1).
+   Server-rendered from the authoritative backend projections built in
+   saberops.web.  No credential field exists anywhere: vendor logins always
+   happen in the owner's own terminal on the vendor's own surface.  Every
+   mutation posts a process-local CSRF token and (where required) explicit
+   owner confirmation.  Progressive disclosure uses native <details>. #}
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>First run · SaberOps</title>
+  <link rel="stylesheet" href="/static/css/console-v2.css">
+  <link rel="stylesheet" href="/static/css/saberops-console.css">
+  <link rel="stylesheet" href="/static/css/onboarding.css">
+  <script>
+    // Restore appearance before paint; mirrors dashboard.html. Reads only the
+    // theme key; never credentials or provider state.
+    try {
+      var soTheme = window.localStorage.getItem("saberops-theme");
+      if (soTheme === "dark" || soTheme === "light") {
+        document.documentElement.setAttribute("data-theme", soTheme);
+      } else if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) {
+        document.documentElement.setAttribute("data-theme", "dark");
+      }
+    } catch (_soErr) { /* Browser storage may be unavailable. */ }
+  </script>
+</head>
+<body>
+  <a class="skip-link" href="#ob-main">Skip to content</a>
+  <div class="ob-wrap">
+    <header class="ob-head">
+      <div>
+        <p class="eyebrow muted">SaberOps {{ saberops_version }} · first run</p>
+        <h1>First-run setup</h1>
+        <p class="muted">Everything below reads the local backend directly.
+        A step that is red blocks its action and names the exact fix; nothing
+        proceeds silently. Steps marked <strong>OWNER</strong> need you at this
+        machine — never a chat, message, or remote approval. Vendor logins
+        always happen in your own terminal; this page has no field for a
+        password, token, or secret.</p>
+      </div>
+      <p class="ob-head-links">
+        <a href="/">Runs</a>
+        <a href="/first-run">Onboarding</a>
+        <a href="/health">health</a>
+      </p>
+    </header>
+
+    {% if notice %}<p class="ob-notice" role="status">{{ notice }}</p>{% endif %}
+    {% if error %}<p class="ob-error" role="alert">{{ error }}</p>{% endif %}
+
+    <nav class="ob-nav" aria-label="First-run sections">
+      <a href="#ob-a">A · Onboarding</a>
+      <a href="#ob-b">B · Routing &amp; projects</a>
+      <a href="#ob-c">C · Runs, questions &amp; storage</a>
+    </nav>
+
+    <main id="ob-main" class="ob-main">
+
+      <!-- ============================ SECTION A ============================ -->
+      <section class="ob-card" id="ob-a" aria-labelledby="ob-a-h">
+        <h2 id="ob-a-h">A · First-run onboarding</h2>
+
+        <h3 id="ob-a1">A1 · Readiness &amp; system diagnostics</h3>
+        <table class="ob-table">
+          <caption>Local-only diagnostics; nothing here contacts the network.</caption>
+          <thead><tr><th scope="col">Check</th><th scope="col">State</th><th scope="col">Detail</th><th scope="col">Fix</th></tr></thead>
+          <tbody>
+          {% for row in diagnostics %}
+            <tr>
+              <td>{{ row.label }}</td>
+              <td><span class="ob-pill" data-state="{{ row.state }}">{{ row.state | upper }}</span></td>
+              <td class="muted">{{ row.detail }}</td>
+              <td class="muted">{{ row.fix or "—" }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+
+        <h3 id="ob-a2">A2 · Official vendor logins <span class="ob-pill" data-state="owner">OWNER</span></h3>
+        <p class="muted">Run each vendor's own login in your terminal. SaberOps
+        never scrapes, stores, or forwards native credentials; it only records
+        non-secret readiness evidence.</p>
+        <table class="ob-table">
+          <caption>Account-backed CLI connections and their observed readiness.</caption>
+          <thead><tr><th scope="col">Connection</th><th scope="col">Executable</th><th scope="col">Installed</th><th scope="col">Readiness</th><th scope="col">Login</th></tr></thead>
+          <tbody>
+          {% for row in vendor_logins %}
+            <tr>
+              <td>{{ row.connection_id }}<br><span class="muted mono">{{ row.provider }} · {{ row.backend }}</span></td>
+              <td class="mono">{{ row.executable }}</td>
+              <td><span class="ob-pill" data-state="{{ 'ok' if row.installed else 'fail' }}">{{ 'INSTALLED' if row.installed else 'MISSING' }}</span></td>
+              <td><span class="ob-pill" data-state="{{ row.state_class }}">{{ row.readiness_state }}</span><br><span class="muted mono">{{ row.readiness_reason }}</span></td>
+              <td><code>{{ row.login_hint }}</code></td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+
+        <h3 id="ob-a3">A3 · Providers &amp; model discovery</h3>
+        {% if connections %}
+        <table class="ob-table">
+          <caption>Owner model-access connections.</caption>
+          <thead><tr><th scope="col">Connection</th><th scope="col">Provider</th><th scope="col">Readiness</th><th scope="col">Catalog</th><th scope="col">Discover</th></tr></thead>
+          <tbody>
+          {% for row in connections %}
+            <tr>
+              <td>{{ row.connection_id }}<br><span class="muted mono">{{ row.backend }} · {{ row.auth_mode }}</span></td>
+              <td>{{ row.provider }}</td>
+              <td><span class="ob-pill" data-state="{{ row.state_class }}">{{ row.readiness_state }}</span><br><span class="muted mono">{{ row.readiness_reason }}</span></td>
+              <td>{{ row.catalog_models }} model(s)</td>
+              <td>
+                <form method="post" action="/first-run/discover">
+                  <input type="hidden" name="csrf" value="{{ csrf_token }}">
+                  <input type="hidden" name="connection_id" value="{{ row.connection_id }}">
+                  <button type="submit">Refresh models</button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <p class="ob-empty" role="note">No connections yet. Add one in your
+        terminal with <code>orch access add</code> (credential references only —
+        never a secret value), then recheck.</p>
+        {% endif %}
+
+        {% if models %}
+        <table class="ob-table">
+          <caption>Discovered model catalog: listed vs executable.</caption>
+          <thead><tr><th scope="col">Model</th><th scope="col">Provider</th><th scope="col">Source</th><th scope="col">Execution</th><th scope="col">Auto-routing</th></tr></thead>
+          <tbody>
+          {% for row in models %}
+            <tr>
+              <td class="mono">{{ row.model_id }}{% if row.stale %} <span class="ob-pill" data-state="warn">STALE</span>{% endif %}</td>
+              <td>{{ row.provider }}</td>
+              <td class="muted">{{ row.source }}</td>
+              <td><span class="ob-pill" data-state="{{ row.state_class }}">{{ row.execution_support }}</span></td>
+              <td>{{ "eligible" if row.auto_routing else "excluded" }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <p class="ob-empty" role="note">No catalog yet — connect a provider first,
+        then refresh. A failed refresh keeps the last catalog and marks it stale;
+        it never erases saved connections, and it never invents model ids.</p>
+        {% endif %}
+
+        <h3 id="ob-a4">A4 · Billing posture (fail-closed) <span class="ob-pill" data-state="owner">OWNER</span></h3>
+        <p class="muted">Only routes with a verified, unexpired posture may enter
+        automatic routing. Missing or expired verification blocks the route
+        everywhere — there is no override.</p>
+        {% if postures %}
+        <table class="ob-table">
+          <caption>Per-route billing posture and auto-routing eligibility.</caption>
+          <thead><tr><th scope="col">Route</th><th scope="col">Class</th><th scope="col">Verified</th><th scope="col">Expires</th><th scope="col">Status</th><th scope="col">Auto-routing</th></tr></thead>
+          <tbody>
+          {% for row in postures %}
+            <tr>
+              <td class="mono">{{ row.selector }}</td>
+              <td>{{ row.posture_class }}</td>
+              <td class="muted">{{ row.verified_on or "—" }}</td>
+              <td class="muted">{{ row.expires_on or "—" }}</td>
+              <td><span class="ob-pill" data-state="{{ row.state_class }}">{{ row.status }}</span></td>
+              <td>{{ "eligible" if row.auto_routing else "excluded" }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <p class="ob-empty" role="note">No routes yet. Verify with
+        <code>orch posture verify</code>, or record an attestation below.</p>
+        {% endif %}
+        <details class="ob-details">
+          <summary>Record an owner posture attestation</summary>
+          <form method="post" action="/first-run/posture/verify" class="ob-form">
+            <input type="hidden" name="csrf" value="{{ csrf_token }}">
+            <label>Selector <input type="text" name="selector" required placeholder="provider/model or provider"></label>
+            <label>Class
+              <select name="posture_class">
+                <option value="">keep existing</option>
+                <option value="A">A — unmetered subscription</option>
+                <option value="B">B — attended only</option>
+                <option value="C">C — metered, unattended allowed</option>
+                <option value="D">D — metered, attended only</option>
+                <option value="X">X — forbidden</option>
+              </select>
+            </label>
+            <label>Policy URLs (one per line, https only) <textarea name="policy_urls" rows="2"></textarea></label>
+            <label>Note <input type="text" name="note"></label>
+            <button type="submit" class="primary">Record attestation</button>
+          </form>
+        </details>
+      </section>
+
+      <!-- ============================ SECTION B ============================ -->
+      <section class="ob-card" id="ob-b" aria-labelledby="ob-b-h">
+        <h2 id="ob-b-h">B · Routing, project setup &amp; concurrency</h2>
+
+        <h3 id="ob-b1">B1 · Per-role model assignment <span class="ob-pill" data-state="owner">OWNER</span></h3>
+        {% set bindings = role_bindings.roles %}
+        {% for role in ["worker", "reviewer", "orchestrator"] %}
+        <h4>{{ role | capitalize }}</h4>
+        {% if bindings[role] %}
+        <ul class="ob-list">
+          {% for binding in bindings[role] %}
+          <li><span class="mono">{{ binding.binding_id }}</span> — {{ binding.provider }}/{{ binding.model }} ({{ binding.backend }})</li>
+          {% endfor %}
+        </ul>
+        {% else %}
+        <p class="ob-empty" role="note">No {{ role }} binding yet. Discover models in
+        section A, then select with <code>orch {{ 'reviewer' if role == 'reviewer' else 'orchestrator' }} select</code>.</p>
+        {% endif %}
+        {% endfor %}
+        <p class="muted">Selected reviewer chain: <span class="mono">{{ role_bindings.selected_reviewer | join(", ") or "none" }}</span>.
+        Selected Orchestrator chain: <span class="mono">{{ role_bindings.selected_orchestrator | join(", ") or "none" }}</span>.</p>
+        <p class="muted"><strong>Explicit Orchestrator choice:</strong> the planner
+        is never engine-dispatched. An external chat Orchestrator is not an
+        engine route; an ORCHESTRATOR-bound engine session carries no worktree
+        and no policy powers. Choose one explicitly before a plan starts.</p>
+
+        <h3 id="ob-b2">B2 · Effective role chains</h3>
+        {% if role_chains %}
+        <table class="ob-table">
+          <caption>Effective routing fallback chains per role.</caption>
+          <thead><tr><th scope="col">Role</th><th scope="col">Fallback groups (in order)</th></tr></thead>
+          <tbody>
+          {% for row in role_chains %}
+            <tr>
+              <td>{{ row.role }}</td>
+              <td>
+                {% for group in row.groups %}
+                <span class="ob-group mono">{{ group | join(" → ") }}</span>{% if not loop.last %} · {% endif %}
+                {% endfor %}
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <p class="ob-empty" role="note">No effective routing chains loaded.</p>
+        {% endif %}
+
+        <h3 id="ob-b3">B3 · Concurrency configuration <span class="ob-pill" data-state="owner">OWNER</span></h3>
+        <p class="muted">Owner ceilings, not occupancy targets: at most
+        <strong>{{ concurrency.max_active_projects }}</strong> active projects ×
+        <strong>{{ concurrency.max_child_slots }}</strong> executing child slots per
+        project (derived ceiling {{ concurrency.derived_ceiling }}). Lowering a limit
+        parks new work; it never kills running work.</p>
+        <p class="muted">Current: {{ concurrency.active_projects }} project(s) ×
+        {{ concurrency.child_slots_per_project }} task(s)
+        ({{ "owner-configured" if concurrency.configured else "defaults" }}).</p>
+        <form method="post" action="/first-run/concurrency" class="ob-form">
+          <input type="hidden" name="csrf" value="{{ csrf_token }}">
+          <label>Active projects (1–{{ concurrency.max_active_projects }})
+            <input type="number" name="active_projects" min="1" max="{{ concurrency.max_active_projects }}" value="{{ concurrency.active_projects }}" required>
+          </label>
+          <label>Executing child slots per project (1–{{ concurrency.max_child_slots }})
+            <input type="number" name="child_slots_per_project" min="1" max="{{ concurrency.max_child_slots }}" value="{{ concurrency.child_slots_per_project }}" required>
+          </label>
+          <label class="ob-check"><input type="checkbox" name="owner_confirmed" value="yes"> I (owner) confirm this concurrency change.</label>
+          <button type="submit" class="primary">Save concurrency</button>
+        </form>
+
+        <h3 id="ob-b4">B4 · Project entry modes</h3>
+        <form method="get" action="/first-run" class="ob-form">
+          <label>Repository path <input type="text" name="repo" value="{{ repo_param }}" placeholder="/path/to/repo"></label>
+          <button type="submit">Inspect repository</button>
+        </form>
+        <table class="ob-table">
+          <caption>The six project entry modes, lightest first.</caption>
+          <thead><tr><th scope="col">Mode</th><th scope="col">Label</th><th scope="col">Owner confirmation</th><th scope="col">Required facts</th></tr></thead>
+          <tbody>
+          {% for mode in project.modes %}
+            <tr>
+              <td class="mono">{{ mode.value }}</td>
+              <td>{{ mode.label }}</td>
+              <td>{{ "required" if mode.requires_owner_confirmation else "not required" }}</td>
+              <td class="muted mono">{{ mode.requirements | join(", ") or "—" }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        {% if project.error %}
+        <p class="ob-error" role="alert">{{ project.error }}</p>
+        {% elif project.recommended %}
+        <p><strong>Recommended:</strong> {{ project.recommended.label }}
+        ({{ project.recommended.mode }}, confidence {{ project.recommended.confidence }}{% if project.recommended.runner_up %}, runner-up {{ project.recommended.runner_up }}{% endif %}).</p>
+        <p class="muted">Allowed modes: {{ project.allowed | map(attribute="value") | join(", ") }}.</p>
+        {% if project.preflight %}
+        <p>Preflight for {{ project.preflight.mode }}:
+        <span class="ob-pill" data-state="{{ 'ok' if project.preflight.ok else 'fail' }}">{{ "OK" if project.preflight.ok else "BLOCKED" }}</span></p>
+        {% if project.preflight.blockers %}
+        <ul class="ob-list">
+          {% for blocker in project.preflight.blockers %}
+          <li><span class="mono">{{ blocker.code }}</span> — {{ blocker.summary }}<br><code>{{ blocker.fix }}</code></li>
+          {% endfor %}
+        </ul>
+        {% endif %}
+        {% for warning in project.preflight.warnings %}
+        <p class="muted">warning: {{ warning }}</p>
+        {% endfor %}
+        {% endif %}
+        {% else %}
+        <p class="ob-empty" role="note">Enter a repository path to observe the
+        entry-mode facts, the recommended mode and its preflight blockers.</p>
+        {% endif %}
+        <details class="ob-details">
+          <summary>Register a project</summary>
+          <form method="post" action="/first-run/project/register" class="ob-form">
+            <input type="hidden" name="csrf" value="{{ csrf_token }}">
+            <label>Project id <input type="text" name="project_id" required></label>
+            <label>Display name <input type="text" name="display_name" required></label>
+            <label>Repository root <input type="text" name="repository_root" value="{{ repo_param }}" required></label>
+            <label>State directory <input type="text" name="state_dir" required></label>
+            <label class="ob-check"><input type="checkbox" name="owner_confirmed" value="yes"> I (owner) confirm this registration.</label>
+            <button type="submit">Register project</button>
+          </form>
+        </details>
+
+        <h3 id="ob-b5">B5 · Plans &amp; wave optimization</h3>
+        {% if plans.error %}
+        <p class="ob-error" role="alert">{{ plans.error }}</p>
+        {% else %}
+        <details class="ob-details">
+          <summary>Effective plan registry (accounts, quota pools, postures, reserves)</summary>
+          {% for section in [["accounts", plans.accounts], ["quota_pools", plans.quota_pools], ["postures", plans.postures]] %}
+          <h4>{{ section[0] }}</h4>
+          {% if section[1] %}
+          <table class="ob-table">
+            <thead><tr><th scope="col">Key</th><th scope="col">Values</th></tr></thead>
+            <tbody>
+            {% for key, entry in section[1] | dictsort %}
+              <tr><td class="mono">{{ key }}</td><td class="mono muted">{{ entry | tojson }}</td></tr>
+            {% endfor %}
+            </tbody>
+          </table>
+          {% else %}
+          <p class="ob-empty" role="note">(none)</p>
+          {% endif %}
+          {% endfor %}
+          <h4>reserves</h4>
+          {% if plans.reserves %}
+          <ul class="ob-list">{% for reserve in plans.reserves %}<li class="mono">{{ reserve }}</li>{% endfor %}</ul>
+          {% else %}
+          <p class="ob-empty" role="note">(none)</p>
+          {% endif %}
+        </details>
+        {% endif %}
+        <form method="get" action="/first-run" class="ob-form">
+          <label>Project id for a stored plan <input type="text" name="wave_project" value="{{ wave_project }}" placeholder="project-id"></label>
+          <button type="submit">Preview dependency DAG &amp; waves</button>
+        </form>
+        <p class="muted">Optimizer limits: {{ wave.limits.active_projects }} projects ×
+        {{ wave.limits.workers_per_project }} workers, {{ wave.limits.heavy_gate_slots }} heavy gate slot(s),
+        max {{ wave.limits.max_rounds }} round(s), min gain {{ wave.limits.min_gain }}.</p>
+        {% if wave.error %}
+        <p class="ob-empty" role="note">{{ wave.error }}{% if wave.revisions %} · revisions: {{ wave.revisions | join(", ") }}{% endif %}</p>
+        {% elif wave.available %}
+        <p>Tasks: {{ wave.task_count }} · waves: {{ wave.waves | length }} ·
+        critical path: {{ wave.critical_path }} · makespan: {{ wave.makespan }} ·
+        parallelism: {{ wave.parallelism }} · scope overlaps: {{ wave.scope_overlap_count }} ·
+        peak workers: {{ wave.peak_workers }}</p>
+        <table class="ob-table">
+          <caption>Computed waves from the active stored plan revision.</caption>
+          <thead><tr><th scope="col">Wave</th><th scope="col">Tasks</th></tr></thead>
+          <tbody>
+          {% for wave_row in wave.waves %}
+            <tr><td>{{ wave_row.index }}</td><td class="mono">{{ wave_row.tasks | join(", ") or "—" }}</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <p class="ob-empty" role="note">No stored plan revision supplied; wave
+        optimization scores appear once a project has an active plan.</p>
+        {% endif %}
+      </section>
+
+      <!-- ============================ SECTION C ============================ -->
+      <section class="ob-card" id="ob-c" aria-labelledby="ob-c-h">
+        <h2 id="ob-c-h">C · Runs, questions, unattended &amp; storage</h2>
+
+        <h3 id="ob-c1">C1 · Run monitoring</h3>
+        {% if runs %}
+        <table class="ob-table">
+          <caption>Recent runs; each links to live SSE progress.</caption>
+          <thead><tr><th scope="col">Run</th><th scope="col">Status</th><th scope="col">Tier</th><th scope="col">Created</th></tr></thead>
+          <tbody>
+          {% for run in runs %}
+            <tr>
+              <td><a href="/runs/{{ run.id }}">{{ run.summary }}</a><br><span class="muted mono">{{ run.id }}</span></td>
+              <td><span class="ob-pill" data-state="info">{{ run.status }}</span></td>
+              <td>{{ run.tier }}</td>
+              <td class="muted">{{ fmt(run.created_at) }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        <p class="muted">Live progress uses server-sent events at
+        <code>/runs/&lt;run_id&gt;/events/stream</code> on each run page.</p>
+        {% else %}
+        <p class="ob-empty" role="note">No runs yet. Launch work with
+        <code>orch run</code>; live progress then streams on the run page.</p>
+        {% endif %}
+
+        <h3 id="ob-c2">C2 · Owner question queue <span class="ob-pill" data-state="owner">OWNER</span></h3>
+        {% if questions.error %}
+        <p class="ob-error" role="alert">{{ questions.error }}</p>
+        {% elif questions.pending %}
+        {% for question in questions.pending %}
+        <article class="ob-question">
+          <h4>{{ question.subject }} <span class="ob-pill" data-state="{{ question.state_class }}">{{ question.status }}</span></h4>
+          <p class="muted mono">{{ question.key }} · {{ question.kind }} · {{ question.decision_class }} · answerable by {{ question.answerable_by }}</p>
+          {% if question.blocks %}<p class="muted">Blocks: {{ question.blocks | join(", ") }}</p>{% endif %}
+          {% if question.options %}<p class="muted">Options: {{ question.options | join(", ") }}</p>{% endif %}
+          <form method="post" action="/questions/{{ question.question_id }}/answer" class="ob-form">
+            <input type="hidden" name="csrf" value="{{ csrf_token }}">
+            <label>Your answer (recorded verbatim) <textarea name="answer_text" rows="2" required></textarea></label>
+            {% if question.options %}
+            <label>Chosen option <select name="chosen_option"><option value="">(none)</option>{% for option in question.options %}<option value="{{ option }}">{{ option }}</option>{% endfor %}</select></label>
+            {% endif %}
+            <button type="submit" class="primary">Record answer</button>
+          </form>
+          <form method="post" action="/questions/{{ question.question_id }}/defer" class="ob-form">
+            <input type="hidden" name="csrf" value="{{ csrf_token }}">
+            <label>Defer until (ISO date) <input type="date" name="until" required></label>
+            <label>Note <input type="text" name="note"></label>
+            <button type="submit">Defer</button>
+          </form>
+        </article>
+        {% endfor %}
+        {% else %}
+        <p class="ob-empty" role="note">No questions waiting. Owner-class questions
+        are answered here at this machine; a blocked wave parks with a report
+        instead of stalling silently.</p>
+        {% endif %}
+        {% if questions.all %}
+        <details class="ob-details">
+          <summary>Full question ledger ({{ questions.all | length }})</summary>
+          <table class="ob-table">
+            <thead><tr><th scope="col">Key</th><th scope="col">Status</th><th scope="col">Raised</th><th scope="col">Answerable by</th></tr></thead>
+            <tbody>
+            {% for question in questions.all %}
+              <tr><td class="mono">{{ question.key }}</td><td>{{ question.status }}</td><td class="muted">{{ fmt(question.raised_at) }}</td><td>{{ question.answerable_by }}</td></tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </details>
+        {% endif %}
+
+        <h3 id="ob-c3">C3 · Unattended &amp; standing decisions</h3>
+        <p class="muted">Authority mode: <strong>{{ authority.label }}</strong>
+        (<span class="mono">{{ authority.mode }}</span>).</p>
+        <details class="ob-details" open>
+          <summary>Never-delegable decisions (the engine may never decide these)</summary>
+          <table class="ob-table">
+            <thead><tr><th scope="col">Kind</th><th scope="col">What stays with the owner</th></tr></thead>
+            <tbody>
+            {% for row in never_delegable %}
+              <tr><td class="mono">{{ row.kind }}</td><td>{{ row.description }}</td></tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </details>
+        {% if standing_decisions.error %}
+        <p class="ob-error" role="alert">Standing decisions unreadable: {{ standing_decisions.error }}</p>
+        {% elif standing_decisions.rows %}
+        <table class="ob-table">
+          <caption>Standing decisions and their expiration windows.</caption>
+          <thead><tr><th scope="col">Decision</th><th scope="col">Scope</th><th scope="col">Owner words</th><th scope="col">Expires</th><th scope="col">Live</th></tr></thead>
+          <tbody>
+          {% for row in standing_decisions.rows %}
+            {% if row.error %}
+            <tr><td colspan="5" class="ob-error">{{ row.error }}</td></tr>
+            {% else %}
+            <tr>
+              <td class="mono">{{ row.decision_key }}</td>
+              <td class="mono muted">{{ row.project_id }}/{{ row.task_id }}</td>
+              <td>{{ row.owner_words }}</td>
+              <td class="muted mono">{{ row.expires_at or ("turns: " ~ row.ttl_turns) }}</td>
+              <td><span class="ob-pill" data-state="{{ row.state_class }}">{{ "LIVE" if row.live else "EXPIRED" }}</span></td>
+            </tr>
+            {% endif %}
+          {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <p class="ob-empty" role="note">No standing decisions recorded
+        ({{ standing_decisions.path }}). A bounded standing permission must carry an
+        absolute expiry and/or a turn count; an unbounded permission is refused.</p>
+        {% endif %}
+
+        <h3 id="ob-c4">C4 · Storage &amp; Git lifecycle <span class="ob-pill" data-state="owner">OWNER</span></h3>
+        <p class="muted">Dry-run only until you confirm. Retained artifacts list a
+        reason; eligible artifacts are exact previewed targets; nothing is deleted
+        without an approved standing policy and a typed confirmation.</p>
+        {% if not repo_param %}
+        <p class="ob-empty" role="note">Enter a repository path in section B4 to
+        preview storage and Git lifecycle cleanup for it.</p>
+        {% elif storage.error %}
+        <p class="ob-error" role="alert">{{ storage.error }}</p>
+        {% elif storage.available %}
+        <p>Policy: <span class="mono">{{ storage.policy_ref or "none (nothing eligible)" }}</span> ·
+        <span class="ob-pill" data-state="{{ 'ok' if storage.approved else 'warn' }}">{{ "APPROVED" if storage.approved else "UNAPPROVED" }}</span> ·
+        estimated reclaimable: {{ storage.estimated_reclaimable_bytes if storage.estimated_reclaimable_bytes is not none else "unknown" }} bytes</p>
+        {% if storage.warnings %}
+        <ul class="ob-list">{% for warning in storage.warnings %}<li class="muted">{{ warning }}</li>{% endfor %}</ul>
+        {% endif %}
+        <h4>Eligible for cleanup ({{ storage.candidates | length }})</h4>
+        {% if storage.candidates %}
+        <table class="ob-table">
+          <thead><tr><th scope="col">Class</th><th scope="col">Action</th><th scope="col">Reference</th><th scope="col">Reason</th><th scope="col">Est. bytes</th></tr></thead>
+          <tbody>
+          {% for candidate in storage.candidates %}
+            <tr>
+              <td class="mono">{{ candidate.artifact_class }}</td>
+              <td>{{ candidate.action }}</td>
+              <td class="mono">{{ candidate.reference }}</td>
+              <td class="muted">{{ candidate.reason }}</td>
+              <td>{{ candidate.estimated_bytes if candidate.estimated_bytes is not none else "unknown" }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <p class="ob-empty" role="note">Nothing eligible under the current policy.</p>
+        {% endif %}
+        <h4>Retained / blocked ({{ storage.exclusions | length }})</h4>
+        {% if storage.exclusions %}
+        <details class="ob-details">
+          <summary>Show retained artifacts and reasons</summary>
+          <table class="ob-table">
+            <thead><tr><th scope="col">Class</th><th scope="col">Reference</th><th scope="col">Reason</th></tr></thead>
+            <tbody>
+            {% for exclusion in storage.exclusions %}
+              <tr><td class="mono">{{ exclusion.artifact_class }}</td><td class="mono">{{ exclusion.reference }}</td><td class="muted">{{ exclusion.reason }}</td></tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </details>
+        {% endif %}
+        {% if storage.approved and storage.candidates %}
+        <form method="post" action="/first-run/storage/apply" class="ob-form">
+          <input type="hidden" name="csrf" value="{{ csrf_token }}">
+          <input type="hidden" name="repo" value="{{ repo_param }}">
+          <input type="hidden" name="preview_id" value="{{ storage.preview_id }}">
+          <label>Type the exact preview id to confirm: <span class="mono">{{ storage.preview_id }}</span>
+            <input type="text" name="confirm" required autocomplete="off">
+          </label>
+          <button type="submit" class="danger">Apply cleanup</button>
+        </form>
+        {% else %}
+        <p class="ob-empty" role="note">Apply stays disabled: cleanup requires an
+        approved standing policy (<code>orch gc</code> policy) and eligible targets.</p>
+        {% endif %}
+        {% else %}
+        <p class="ob-empty" role="note">No preview available for this path.</p>
+        {% endif %}
+      </section>
+
+    </main>
+    <footer class="ob-foot muted">Local-only · bound to 127.0.0.1 · Host and Origin
+    checked on every request · destructive actions require a CSRF token and owner
+    confirmation. Design follows <code>docs/ui-design-principles.md</code>.</footer>
+  </div>
+</body>
+</html>
