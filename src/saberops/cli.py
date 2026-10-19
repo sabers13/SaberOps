@@ -16,7 +16,10 @@ import tomllib
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from saberops.certification import CertificationResult
 
 from saberops.authority import (
     AUTHORITY_ORDER,
@@ -2227,6 +2230,64 @@ def build_parser() -> argparse.ArgumentParser:
     )
     mcp_parser.add_argument("--json", action="store_true", help="JSON output (tools).")
 
+    # orch certify check|run|report|approve (END production certification).
+    certify_parser = subparsers.add_parser(
+        "certify",
+        help="Evaluate END production certification for self-dogfooding.",
+    )
+    certify_sub = certify_parser.add_subparsers(dest="certify_command", required=True)
+    certify_check = certify_sub.add_parser(
+        "check", help="Read-only evaluation of the certification checklist and Q4."
+    )
+    certify_check.add_argument(
+        "--evidence", type=str, default=None, help="JSON evidence file (default: none)."
+    )
+    certify_check.add_argument("--json", action="store_true", help="JSON output")
+    certify_run = certify_sub.add_parser(
+        "run", help="Execute the certification suite and scenario verifications."
+    )
+    certify_run.add_argument(
+        "--evidence", type=str, default=None, help="JSON evidence file (default: none)."
+    )
+    certify_run.add_argument(
+        "--scenario",
+        type=str,
+        default=None,
+        choices=[
+            "mid-turn-kill",
+            "context-overflow",
+            "second-session",
+            "dead-worker",
+            "gate-protection",
+            "standing-scope",
+            "morning-report",
+            "stall-alarm",
+            "idea-intake",
+        ],
+        help="Restrict output to one resilience scenario.",
+    )
+    certify_run.add_argument("--json", action="store_true", help="JSON output")
+    certify_report = certify_sub.add_parser(
+        "report", help="Generate a human-readable markdown certification report."
+    )
+    certify_report.add_argument(
+        "--evidence", type=str, default=None, help="JSON evidence file (default: none)."
+    )
+    certify_report.add_argument("--out", type=str, default=None, help="Output file.")
+    certify_approve = certify_sub.add_parser(
+        "approve", help="Owner-only authorization to start self-dogfooding."
+    )
+    certify_approve.add_argument(
+        "--evidence", type=str, default=None, help="JSON evidence file (default: none)."
+    )
+    certify_approve.add_argument(
+        "--token", type=str, default=None, help="Explicit owner approval token."
+    )
+    certify_approve.add_argument(
+        "--record", type=str, default=None, help="Approval record file (JSONL)."
+    )
+    certify_approve.add_argument("--note", type=str, default="", help="Optional note.")
+
     return parser
 
 
@@ -4052,6 +4113,113 @@ def handle_project_deactivate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _certify_result_for(args: argparse.Namespace) -> CertificationResult:
+    """Resolve the certification result from --evidence or an empty evaluation."""
+    from saberops import certification as _cert
+
+    evidence = getattr(args, "evidence", None)
+    if evidence:
+        return _cert.load_evidence_file(evidence)
+    return _cert.default_empty_evaluation()
+
+
+def handle_certify_check(args: argparse.Namespace) -> int:
+    """Handle ``orch certify check`` (read-only checklist + Q4 evaluation)."""
+    from saberops import certification as _cert
+
+    try:
+        result = _certify_result_for(args)
+    except _cert.CertificationError as exc:
+        print(f"[!] Invalid evidence: {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+    else:
+        print(_cert.render_markdown_report(result))
+    return 0 if result.passed else 1
+
+
+def handle_certify_run(args: argparse.Namespace) -> int:
+    """Handle ``orch certify run`` (execute suite + scenario verifications)."""
+    from saberops import certification as _cert
+
+    try:
+        result = _certify_result_for(args)
+    except _cert.CertificationError as exc:
+        print(f"[!] Invalid evidence: {exc}", file=sys.stderr)
+        return 1
+    scenario = getattr(args, "scenario", None)
+    if scenario:
+        wanted = {
+            "mid-turn-kill": "S1",
+            "context-overflow": "S2",
+            "second-session": "S3",
+            "dead-worker": "S4",
+            "gate-protection": "S5",
+            "standing-scope": "S6",
+            "morning-report": "S7",
+            "stall-alarm": "S8",
+            "idea-intake": "S9",
+        }[scenario]
+        filtered = tuple(c for c in result.checks if c.name.startswith(wanted + " "))
+        if getattr(args, "json", False):
+            print(json.dumps([c.to_dict() for c in filtered], indent=2, sort_keys=True))
+        else:
+            for check in filtered:
+                print(f"[{'PASS' if check.passed else 'FAIL'}] {check.name}: {check.evidence}")
+        return 0 if all(c.passed for c in filtered) else 1
+    if getattr(args, "json", False):
+        print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+    else:
+        print(_cert.render_markdown_report(result))
+    return 0 if result.passed else 1
+
+
+def handle_certify_report(args: argparse.Namespace) -> int:
+    """Handle ``orch certify report`` (markdown report to stdout or file)."""
+    from saberops import certification as _cert
+
+    try:
+        result = _certify_result_for(args)
+    except _cert.CertificationError as exc:
+        print(f"[!] Invalid evidence: {exc}", file=sys.stderr)
+        return 1
+    text = _cert.render_markdown_report(result)
+    out = getattr(args, "out", None)
+    if out:
+        Path(out).write_text(text, encoding="utf-8")
+        print(f"Wrote certification report to {out}")
+    else:
+        print(text)
+    return 0 if result.passed else 1
+
+
+def handle_certify_approve(args: argparse.Namespace) -> int:
+    """Handle ``orch certify approve`` (owner-only self-dogfooding grant)."""
+    import os
+
+    from saberops import certification as _cert
+
+    try:
+        result = _certify_result_for(args)
+    except _cert.CertificationError as exc:
+        print(f"[!] Invalid evidence: {exc}", file=sys.stderr)
+        return 1
+    token = getattr(args, "token", None) or os.environ.get("SABEROPS_OWNER_TOKEN", "")
+    record_path = getattr(args, "record", None) or os.environ.get(
+        "SABEROPS_APPROVAL_RECORD", "approval-record.jsonl"
+    )
+    try:
+        record = _cert.approve_self_dogfooding(
+            result, owner_token=token, record_path=record_path, note=str(getattr(args, "note", ""))
+        )
+    except _cert.CertificationError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    print(f"Recorded self-dogfooding approval (digest {record.certification_digest})")
+    return 0
+
+
 def handle_project_set_gate(args: argparse.Namespace) -> int:
     """Handle ``orch project set-gate <command>``."""
     from saberops.project_settings import ProjectSettingsError, set_project_gate_command
@@ -5795,6 +5963,15 @@ def _dispatch(args: argparse.Namespace) -> int:
             return handle_project_activate(args)
         elif args.project_command == "deactivate":
             return handle_project_deactivate(args)
+    elif args.command == "certify":
+        if args.certify_command == "check":
+            return handle_certify_check(args)
+        elif args.certify_command == "run":
+            return handle_certify_run(args)
+        elif args.certify_command == "report":
+            return handle_certify_report(args)
+        elif args.certify_command == "approve":
+            return handle_certify_approve(args)
 
     return 0
 
