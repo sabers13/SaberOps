@@ -24,7 +24,7 @@ orch mcp tools --json         # print names + JSON input schemas
 | `--config-ledger PATH` | Configuration decision ledger (default: `<state>/config-ledger.jsonl`). |
 | `--cwd PATH` | Base directory used to discover the `.orch` / `.saberops` evidence roots. |
 
-Server identity: `name = "saberops"`, `version = "0.3.8"`. The newest protocol
+Server identity: `name = "saberops"`, `version = "0.4.0"`. The newest protocol
 revision implemented is `2025-06-18`; `2025-03-26` and `2024-11-05` are also
 served, and an unknown requested revision falls back to `2025-06-18`.
 

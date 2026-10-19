@@ -51,7 +51,7 @@ __all__ = [
 
 #: Server identity advertised in ``initialize`` (ADR-0004 D7 / Step 014).
 SERVER_NAME = "saberops"
-SERVER_VERSION = "0.3.8"
+SERVER_VERSION = "0.4.0"
 
 #: The newest MCP protocol revision this server implements.
 PROTOCOL_VERSION = "2025-06-18"

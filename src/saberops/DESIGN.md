@@ -139,7 +139,7 @@ and gates. Open choices are explicitly UNRESOLVED.
   provenance, and acceptance. Source: [README](../../README.md).
 - **Primary user:** The repository owner/operator configuring providers, exact
   Worker/Reviewer/Orchestrator bindings, project policies, and candidate decisions.
-- **Product type:** Professional developer tool; v0.3.8 dogfood/preview release.
+- **Product type:** Professional developer tool; v0.4.0 preview release.
 - **Current surfaces:** Shared console shell, new-run dashboard, run inspector,
   first-run setup, access/providers, routing, reviewer, orchestrator, quota, and
   candidate Inbox. Sources: [templates](templates/) and `web.py`.

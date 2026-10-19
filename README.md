@@ -3,37 +3,66 @@
 [![CI](https://github.com/sabers13/SaberOps/actions/workflows/ci.yml/badge.svg)](https://github.com/sabers13/SaberOps/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 ![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)
-[![Latest tag](https://img.shields.io/github/v/tag/sabers13/SaberOps?label=release&color=orange)](https://github.com/sabers13/SaberOps/tags)
+[![Latest release](https://img.shields.io/github/v/release/sabers13/SaberOps?label=release&color=orange)](https://github.com/sabers13/SaberOps/releases)
 
-**A local control plane for supervised, multi-model AI engineering.**
+**A plan-aware execution engine that turns your AI coding subscriptions into verified commits.**
 
-SaberOps lets AI models propose software changes while deterministic code controls **what may run, which exact model is used, how work is isolated, what counts as success, and what may be accepted into the repository**.
+You (or any of your own agents) submit coding tasks. SaberOps runs them through
+the vendors' **official CLIs, within each subscription's plan limits**, isolates
+every attempt in its own Git worktree, verifies the result with deterministic
+gates and an independent review, and hands back **accepted commits with
+evidence**: during the day and while you sleep.
 
-> **Core principle: the LLM advises; deterministic software decides.**
+> **Core principle: LLMs advise; deterministic software decides.**
 
 > [!IMPORTANT]
-> **SaberOps is becoming a headless execution engine** (see
-> [ADR-0001](docs/decisions/0001-saberops-engine-mcp-first.md)): tasks in,
-> verified commits out, driven through vendors' official CLIs within plan
-> limits. The web console is cut to a **minimal status page** (run list, run
-> detail with status/attempts/gate/review/diff, report JSON, accept/reject,
-> health); owner configuration lives in the `orch` CLI. This is still
-> **preview software**: not production-ready, stable, or complete.
+> v0.4.0 is a direction change. SaberOps is no longer a chat/workspace
+> application. It is a **headless engine**
+> ([ADR-0001](docs/decisions/0001-saberops-engine-mcp-first.md)) driven through
+> the `orch` CLI, an **MCP server** and a local first-run web UI. It is still
+> **preview software**: interfaces can change and it is not production-ready.
+
+---
+
+## Contents
+
+- [Why SaberOps?](#why-saberops)
+- [How it works](#how-it-works)
+- [What's in the engine](#whats-in-the-engine)
+- [Interfaces](#interfaces)
+- [Worker adapters](#worker-adapters)
+- [Authority modes](#authority-modes)
+- [Installation](#installation)
+- [Quick start](#quick-start)
+- [Security and execution boundaries](#security-and-execution-boundaries)
+- [Development](#development)
+- [Current limitations](#current-limitations)
+- [Documentation map](#documentation-map)
 
 ---
 
 ## Why SaberOps?
 
-A coding agent can propose a patch. The harder engineering problem is deciding whether that patch was produced under the right authority, by the intended model, against the intended repository state, and whether it is safe to accept.
+A coding agent can propose a patch. The hard part is everything around it:
 
-SaberOps separates **semantic work** from **execution authority**:
+- **Spending plans, not tokens.** Pace work across Codex, Claude, OpenCode and
+  other subscriptions so it fits each plan's 5-hour, weekly and monthly windows,
+  without falling back to pay-per-token billing or tripping a vendor's terms.
+- **Trusting the result.** Knowing the patch was produced by the intended model,
+  against the intended base commit, passed a gate the worker could not tamper
+  with, and was reviewed by an independent model family.
+- **Running unattended.** Parking what only the owner can decide, continuing
+  what is independent, and producing a morning report instead of a silent stall.
 
-| AI models | Deterministic SaberOps control plane |
+SaberOps keeps semantic work (models) separate from execution authority
+(deterministic code):
+
+| Models propose | SaberOps decides |
 | --- | --- |
-| Orchestrator proposes worker tasks | Validates exact provider/backend/model bindings |
-| Worker model proposes implementation changes | Enforces routing admission, readiness, quota, and policy |
-| Optional reviewer provides an independent read-only assessment | Owns Git worktrees, gates, provenance, durable state, and acceptance |
-| Models never decide whether their own result is accepted | Fails closed when required evidence is missing |
+| The Orchestrator proposes plans, waves and tasks | Validates the plan, scores waves, admits lanes with disjoint write scopes |
+| Workers propose implementation commits | Chooses the route from role chains, plan capacity and billing posture |
+| Reviewers give an independent read-only verdict | Owns worktrees, gates, provenance, durable state and acceptance |
+| Nobody accepts their own work | Fails closed whenever required evidence is missing |
 
 ---
 
@@ -41,61 +70,100 @@ SaberOps separates **semantic work** from **execution authority**:
 
 ```mermaid
 flowchart LR
-    T[Task] --> C[SaberOps control plane]
-    C --> O[Orchestrator role<br/>conversation + bounded guidance]
-    O --> C
-    C --> R[Exact worker binding<br/>readiness / quota / policy]
-    R --> W[Isolated Git worktree]
-    W --> A[Worker agent]
-    A --> G{Deterministic gate}
-    G -- fail --> F[Retry / failover policy]
-    F --> R
-    G -- pass --> V{Review policy}
-    V -- review --> RV[Independent<br/>read-only review]
-    RV --> P[Verified candidate<br/>+ provenance]
-    V -- no review --> P
-    P --> AC[Acceptance per authority mode<br/>fast-forward + post-integration gate]
+    S[Caller<br/>CLI / MCP / UI] --> J[Job queue<br/>requirements only]
+    J --> SC[Pacing scheduler<br/>posture + capacity admission]
+    SC --> W[Isolated worktree<br/>official vendor CLI]
+    W --> G{Gate<br/>base-trusted}
+    G -- fail --> R[Surgeon / retry<br/>role chain]
+    R --> W
+    G -- pass --> RV[Independent review<br/>read-only]
+    RV --> A[Acceptance<br/>per authority mode]
+    W -. plan exhausted .-> P[Preempt: commit WIP<br/>+ resume capsule]
+    P --> J
 ```
 
-A normal run follows these boundaries:
-
-1. **Admission.** SaberOps selects or validates an exact worker binding and checks the evidence required by routing policy.
-2. **Isolation.** Each attempt gets its own Git worktree, keeping candidate changes separate from the source checkout.
-3. **Execution.** The selected worker adapter receives the bounded task context and exact execution identity.
-4. **Verification.** Your deterministic gate (for example `pytest -q` or `make gate`) decides whether the candidate passes.
-5. **Review.** Review can be required explicitly or selected by a risk-adaptive policy; reviewers are read-only.
-6. **Acceptance.** Only a verified candidate can be integrated, fast-forward only, followed by a post-integration gate. In the default `supervised` mode this requires an explicit `orch accept`; see [Authority modes](#authority-modes).
-7. **Durability.** Run state, events, provenance, and decisions are persisted so interrupted runs can be inspected and reconciled.
+1. **Submit.** A job states *requirements* (role, capabilities, read-only,
+   model-family constraints, size, priority, deadline), never a provider,
+   model or billing route.
+2. **Admit.** The scheduler admits a route only if its billing posture is
+   owner-verified and unexpired and its capacity pool has headroom. Among
+   admitted routes it picks by pacing score: spare capacity per hour until the
+   binding window resets.
+3. **Isolate.** Each attempt gets its own Git worktree and a hermetic child
+   environment. The worker cannot leave the worktree, rewrite Git control files
+   or touch owner/host configuration.
+4. **Verify.** A gate defined by the *base* commit decides; a candidate that
+   edits the gate, `conftest.py` or gate scripts is refused.
+5. **Review.** An independent, read-only reviewer from a different model family
+   assesses the candidate.
+6. **Accept.** A verified candidate integrates fast-forward only, followed by a
+   post-integration gate, under the configured [authority mode](#authority-modes).
+7. **Preempt and resume.** If a plan runs out mid-run, the work in progress is
+   committed to a checkpoint ref with a resume capsule and re-queued until the
+   window resets.
 
 ---
 
-## Key design decisions
+## What's in the engine
 
-### Exact execution identity
+| Area | What it does | Docs |
+| --- | --- | --- |
+| **Jobs and scheduler** | Durable job queue (URGENT > NORMAL > BACKGROUND, deadline, FIFO), idempotency keys, single-instance scheduler lease, atomic dispatch | [operations](docs/operations.md#jobs) |
+| **Plan registry and billing posture** | Accounts → pools → windows; per-route posture class (A/B/C/D/X) with policy URL, owner verification date and TTL. Unverified or expired routes are never admitted unattended | [operations](docs/operations.md#plans-and-billing-posture) |
+| **Capacity ledger** | Usage observations, vendor exhaustion errors and learned per-job cost (EWMA by S/M/L size) feed admission and pacing | [operations](docs/operations.md#capacity-ledger-inspection-orch-capacity-show) |
+| **Role-chain routing** | Ordered fallback groups per role: WORKER, SURGEON, INTEGRATOR; owner-selected Orchestrator and Reviewer bindings; exact provider/backend/model identity end to end | [operations](docs/operations.md#worker-routing-policy) |
+| **Quota preemption** | Plan exhaustion classifies to `QUOTA_EXHAUSTED` with a reset time; WIP is anchored to create-only checkpoint refs and resumed from the capsule | [waves](docs/waves.md#quota-preemption--auto-resume-wx-2--m2-5) |
+| **Waves and lanes** | Plans run as waves of lanes with disjoint write scopes, sequential pinned-SHA merges and one gate per wave; at most 3 active projects × 5 child tasks (owner-adjustable ceilings) | [waves](docs/waves.md), [wave optimization](docs/wave-plan-optimization.md) |
+| **Gates G1 / G2 / G3** | Base-trusted gate profiles, gate slots sized to free RAM, gate history, coverage-mapped affected gate and a single-pass full gate | [gate](docs/gate.md), [operations](docs/operations.md#engine-run-gates-g1--g2--g3-and-the-history-ledger) |
+| **Owner questions** | The engine never guesses an owner decision: keyed questions with a five-part escalation, answered verbatim from the CLI, web UI or Telegram | [questions](docs/questions.md) |
+| **Unattended plans** | Frozen decision sheet, never-delegable list, three autonomous decision classes, circuit breaker, stall alarm and morning report. Unattended runs can never push | [unattended](docs/unattended-plans.md) |
+| **Orchestrator memory** | Bounded startup digest, size-bounded notebook with archive, single-writer session lock, turn admission and context rotation at 50% of the window | [memory](docs/orchestrator-memory-restart.md), [turns](docs/orchestrator-turn-policy.md) |
+| **Project entry modes** | Six modes (`new_project`, `develop_existing`, `continue_saberops`, `task`, `resume_run`, `inspect`) qualified from repository facts with a blocker preflight | [project modes](docs/project-modes.md) |
+| **Roadmap change requests** | Idea intake, triage, frozen-step guard and impact checks without disturbing running waves | [roadmap changes](docs/roadmap-change-requests.md) |
+| **Storage lifecycle** | Owner-aware inventory, retention and guarded GC of worktrees, branches, checkpoint refs and evidence; dry-run first, never `--force` | [storage](docs/storage-lifecycle.md) |
+| **Central configuration** | Declarative workflow settings with an append-only, owner-approved decision ledger | [config](docs/config.md) |
+| **Certification** | `orch certify` evaluates Q4 dogfooding criteria and nine resilience scenarios | [certification](docs/end-certification.md) |
 
-SaberOps preserves provider, backend, and model identity from discovery through binding and dispatch. Same-named models from different upstreams remain distinct, and exact bindings prevent silent sibling-model or first-match substitution.
+---
 
-### Separate Orchestrator and worker roles
+## Interfaces
 
-The Orchestrator role and worker models use separate role-bound execution bindings. Changing the Orchestrator selection does not reorder worker routing, and a worker-role binding cannot be used as the Orchestrator binding.
+| Surface | Use it for |
+| --- | --- |
+| **`orch` CLI** | Everything. Every owner-facing command supports `--json` for agents and scripts. |
+| **MCP server** (`orch mcp serve`, stdio) | The primary integration surface for other agents: 12 tools to submit and inspect jobs and waves, read evidence, list/answer questions and propose configuration changes. `submit_job` rejects provider, model and billing fields. See [MCP](docs/mcp.md). |
+| **Web UI** (`orch ui`) | Localhost first-run onboarding (readiness, vendor logins, model discovery, billing-posture attestation), routing and concurrency, project registration, plan/wave scoring, question queue, run monitoring with live events, and storage cleanup with typed confirmation. See [first-run web UI](docs/first-run-web-ui.md). |
+| **Telegram** (optional) | Notifications for questions, gate completions and wave milestones; status queries from stored records; keyed `/answer` replies. Inert without a bot token. See [Telegram](docs/telegram.md). |
 
-### Provenance before acceptance
+---
 
-A candidate is tied to the run, objective, and base revision that produced it. Acceptance is based on verified provenance, not simply on the existence of an agent-generated commit.
+## Worker adapters
 
-### Truthful capability handling
+All model execution goes through the vendors' official CLIs or an explicitly
+configured direct API. SaberOps never extracts OAuth tokens or impersonates a
+CLI.
 
-SaberOps does not invent model capabilities. If no controllable reasoning-effort tier is known and no tier was explicitly requested, the provider default is used. Explicit unsupported requests fail closed.
+| Adapter | Automatic routing | Notes |
+| --- | :---: | --- |
+| Codex CLI | Yes | User config ignored on every invocation; billing-relevant settings pinned |
+| Claude Code CLI | Yes | Subscription login checked before each task; API/gateway overrides stripped; Fast mode disabled; user/project settings excluded |
+| OpenCode | Yes | Isolated config/plugin root per child; billing-relevant settings pinned |
+| Cline | Yes | |
+| Direct API (OpenAI-compatible, incl. OmniRoute) | Yes | Bounded tool loop; billed to the API account (posture class D, never scheduled unattended) |
+| Antigravity | **No** | Attended-only: used only when the owner explicitly selects provider and model for a run |
 
-### Connections are not authorization
-
-Saving or probing a provider connection does not authorize execution. Discovery, exact binding, readiness, and routing admission remain separate checks.
+The Copilot adapter was removed in v0.4.0. "Implemented" means the adapter
+exists and is covered by hermetic tests replaying recorded CLI fixtures; it does
+not mean every adapter has been live-certified against every account. The
+owner-run [vendor CLI live check](docs/vendor-cli-live-check.md) detects CLI
+drift without sending prompts or reading credentials.
 
 ---
 
 ## Authority modes
 
-How much SaberOps may do without asking is an explicit, persisted owner setting. Unknown mode values fail closed and never degrade into a more permissive mode.
+How much SaberOps may do without asking is an explicit, persisted owner setting.
+Unknown values fail closed and never degrade into a more permissive mode.
 
 | Mode | May accept verified candidates without asking | Publishes candidate branch |
 | --- | :---: | :---: |
@@ -105,160 +173,125 @@ How much SaberOps may do without asking is an explicit, persisted owner setting.
 | `full_autonomy` | Yes | Yes |
 | `full_autonomy_publish` | Yes | Yes |
 
-Acceptance authority never bypasses verification; a candidate must still satisfy the fail-closed acceptance requirements. `full_autonomy_publish` additionally grants publication of accepted work, but v0.3.8 has no governed publication command, so it stops at the accepted state. Inspect or change the mode with `orch authority show`, `orch authority list`, and `orch authority set`.
-
----
-
-## Requirements
-
-- Python **3.12+**
-- Git
-- For real provider-backed runs: the relevant provider CLI installed and authenticated through that provider's normal mechanism
-
-SaberOps does not ship a model and does not require provider credentials for its test suite or CI.
+Acceptance never bypasses verification. Unattended acceptance is limited to a
+local commit; no autonomous decision can move a remote. Inspect or change the
+mode with `orch authority show|list|set`.
 
 ---
 
 ## Installation
 
+Requirements: Python **3.12+**, Git, and for real runs the relevant vendor CLIs
+installed and logged in through the vendor's own mechanism. SaberOps ships no
+model, and its tests and CI make no provider calls.
+
 ```bash
 git clone https://github.com/sabers13/SaberOps.git
 cd SaberOps
-
 python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install .
-
 orch --help
 ```
 
-For development:
-
-```bash
-python -m pip install -e ".[dev]"
-```
+For development: `python -m pip install -e ".[dev]"`.
 
 ---
 
 ## Quick start
 
-Inspect your local environment and a target repository:
+**1. Onboard.** Start the local web UI. On an empty store it opens the
+first-run wizard:
 
 ```bash
-orch doctor --repo /path/to/project
-orch models
+orch ui            # http://127.0.0.1:8765
+```
+
+Or do the same from the CLI:
+
+```bash
+orch doctor --repo /path/to/project   # read-only readiness checks
+orch access list                      # model-access connections
+orch access discover <connection>     # record discovered models (evidence only)
+orch plans show                       # accounts, pools, windows, postures
+orch posture verify codex --url <policy-url>   # attest a route's billing posture
+orch routing show                     # WORKER / SURGEON / INTEGRATOR chains
 orch authority show
 ```
 
-Start the local status page with an isolated first-run profile (binds to `127.0.0.1:8765` by default):
+Routes stay unadmitted until their billing posture has been verified with
+`orch posture verify`. Run `orch <command> --help` for every option.
+
+**2. Configure the project** gate and policies:
 
 ```bash
-orch ui --profile first-run
+orch project set-gate --repo /path/to/project "pytest -q"
+orch project show --repo /path/to/project
 ```
 
-The page shows the run list and, per run, status, attempts, gate results,
-review verdict, diff, the canonical report, and the accept/reject owner
-actions. It never dispatches work. Owner configuration (worker routing,
-quota, authority, project policy) lives in the `orch` CLI:
+**3. Run work.** Either run one task directly:
 
 ```bash
-orch routing show        # effective role routing: WORKER/SURGEON/INTEGRATOR chains
-orch quota list          # quota state (set with `orch quota set`)
-orch authority show      # authority mode and host access
-orch project show        # project gate / data / review / branch policy
-orch models              # discovered models and readiness
-orch doctor --repo .     # local readiness checks
-```
-
-At launch, SaberOps detects CLIs on PATH and in common user installation folders
-(including OpenCode and nvm), then runs supported native login-status commands
-with a timeout. The same PATH is used to launch workers. Startup does not send
-model prompts, read CLI credentials or choose routing.
-
-Provider readiness is recorded by explicit verification and consumed from
-durable evidence; installation and model catalogs alone never establish
-access. Readiness follows the connection-level 24-hour freshness policy.
-`orch doctor` reports what is verifiable locally; a failed check keeps prior
-evidence rather than manufacturing readiness.
-
-Direct API workers use a bounded tool loop with worktree file tools and command
-execution. Reviewers and orchestrators get read-only file tools. The existing
-monitored process boundary handles stop/deadline controls and records actual
-response usage; autonomous containment requirements continue to apply. API models
-must support Chat Completions and function tools; unsupported responses fail
-explicitly. These calls consume the API account's billing, independently of CLI
-subscriptions. Model access connections persist in the owner state directory;
-there is currently no `orch` command to add them (see Current limitations).
-
-Claude account execution launches the installed `claude` CLI and retains its
-native tools, agent loop, and system prompt. It checks the CLI’s subscription
-login before sending the task, removes API/gateway/cloud-provider overrides from
-the child environment, and disables Fast mode. It never extracts OAuth tokens,
-implements an Anthropic HTTP transport, or retries a refused subscription call
-through a paid API. User/project settings are excluded for this connection so
-they cannot change the billing source; managed provider policies still apply.
-Tasks consume the account’s normal usage allowance. Disable usage credits in your
-Claude account if you require no additional charges: native CLI use alone cannot
-guarantee subscription terms or zero additional provider billing.
-
-Configure each target repository before dispatch: `orch project set-gate`,
-`set-data-policy`, `set-review-policy`, `set-target-branch` (see
-`orch project --help`). For worker routing, `orch routing init` writes a user
-routing file; `orch routing validate` checks it; `orch routing migrate`
-previews (or with `--write` persists) the schema-1/2 to role-chain migration;
-`orch routing add|remove|move|reorder` edits the role chains. Settings freeze at run creation,
-including acceptance; skipped checks are recorded as SKIPPED, never PASS.
-
-### Example provider-backed run
-
-After installing and authenticating a supported provider CLI:
-
-```bash
-orch run \
-  --repo /path/to/project \
+orch run --repo /path/to/project \
   --task "Add input validation to the CSV importer" \
-  --gate "pytest -q" \
-  --review
+  --gate "pytest -q" --review
 ```
 
-Then inspect and, if appropriate, accept the verified result:
+or queue jobs and let the pacing scheduler dispatch them within plan limits:
 
 ```bash
-orch status <run_id>
-orch events <run_id>
-orch report <run_id>   # Canonical read-only run report (text, or --json for the deterministic payload)
-orch monitor <run_id>  # Follow a run live with the canonical projection (read-only)
-orch accept <run_id>
-orch cleanup <run_id>
+orch job submit --repo /path/to/project --goal "Fix the login retry" \
+  --acceptance "gate passes" --size M --idempotency-key login-1
+orch scheduler run                    # or --once for a single tick
+orch capacity show
 ```
 
-Run `orch <command> --help` for the full command and option reference. Runtime state, databases, worktrees, and logs live outside the installed package in XDG or project-local locations. Commands that operate on run state accept `--db PATH` where applicable.
+**4. Inspect and accept.**
 
----
+```bash
+orch list
+orch report <run_id>       # canonical read-only run report (--json available)
+orch monitor <run_id>      # follow live
+orch questions list        # anything waiting on you
+orch accept <run_id>
+orch gc --dry-run          # preview storage cleanup
+```
 
-## Worker adapters
+**5. Connect another agent over MCP:**
 
-| Adapter | Implemented in the codebase |
-| --- | :---: |
-| Codex | Yes |
-| Claude Code (native subscription CLI) | Yes |
-| Copilot | Yes |
-| Cline | Yes |
-| OpenCode | Yes |
-| Antigravity | Yes |
+```bash
+orch mcp tools --json      # list the 12 tools and their schemas
+orch mcp serve             # JSON-RPC 2.0 over stdio
+```
 
-"Implemented" means the adapter exists in the codebase. It does **not** mean that every adapter has been live-certified against a real provider account in v0.3.8.
+Runtime state, databases, worktrees and logs live outside the package in XDG or
+project-local locations; commands that touch run state accept `--db PATH`.
 
 ---
 
 ## Security and execution boundaries
 
-- Provider authentication remains with the provider's normal mechanism. Credential references may be stored; secret values are not.
-- Do not put credentials in source, committed configuration, or task text.
-- The status page binds to localhost by default.
-- Host access for workers is `governed` by default. `unrestricted` exists as an explicit owner choice (`orch authority set-host-access`); worktree isolation separates candidate changes, it is not a sandbox against a worker with unrestricted host access.
-- Missing required admission evidence causes a refusal rather than an inferred approval.
-- Tests and CI make no provider or model calls.
+- **Worker isolation.** Every worker effect must resolve inside its worktree or
+  declared scratch roots; `..`, symlink escapes, Git control-surface writes and
+  host configuration (`~/.ssh`, `~/.gitconfig`, `/etc`, …) are refused. Workers
+  run with an explicit `worker` session authority, a scratch `HOME` and neutral
+  Git configuration. See [security](docs/security.md).
+- **Owner actions.** Review and accept can only be executed under owner session
+  authority; an automated worker session fails closed.
+- **Local web guard.** The UI binds to localhost, enforces a loopback `Host`
+  allowlist, and requires a CSRF token on every mutation.
+- **Credentials.** Authentication stays with each vendor. The UI has no
+  password or token field; credential references may be stored, secret values
+  are not. Child environments are allowlisted so API keys cannot leak into a
+  subscription run.
+- **Gate integrity.** Gates come from the base commit; candidates touching gate
+  definitions are blocked.
+- **Fail closed.** Missing posture, capacity, ownership or provenance evidence
+  means refusal, never an inferred approval.
+
+Worktree isolation separates candidate changes; it is not an operating-system
+sandbox against a worker granted `unrestricted` host access
+(`orch authority set-host-access`).
 
 ---
 
@@ -272,53 +305,67 @@ mypy --strict src tests
 pytest -q
 ```
 
-GitHub Actions runs the same checks on Python 3.12 without provider credentials or model calls.
+GitHub Actions runs the same three checks on Python 3.12 without provider
+credentials. Repository gate wrappers:
 
-Frontend iteration follows the five modes in [AGENTS.md](AGENTS.md), with current
-UI direction and source evidence in [DESIGN.md](src/saberops/DESIGN.md).
-With the existing development environment and Node.js available,
-`bash scripts/gate-ui-fast.sh` runs the presentation-only template/asset checks;
-`bash scripts/gate-full.sh` preserves the complete checks above for UI FINALIZE.
-The wrappers use `.venv/bin/python` when present, otherwise the active `python`.
-Use the fast gate only within the documented UI scope and after inspecting the
-rendered result. The minimal status page keeps the FastAPI/Jinja
-frontend with the shared console-v2 tokens and light/dark styles; no frontend
-build step is required.
+| Script | Purpose |
+| --- | --- |
+| `scripts/gate-full.sh` | Authoritative milestone/merge gate: ruff, strict mypy, the full suite in one parallel pass |
+| `scripts/gate-affected.sh` | Per-task gate: runs only tests that cover the changed lines (coverage map, with static fallback) |
+| `scripts/lane-check.sh` | Cheap diff-targeted lane evidence for workers |
+| `scripts/gate-ui-fast.sh` | Presentation-only template/asset checks for UI tweaks |
+| `scripts/main-gate.sh` | Scheduled full gate with history and flaky-test report (systemd units in `scripts/systemd/`) |
 
-### Repository layout
+Contributor and agent workflow rules, including the frontend modes, are in
+[AGENTS.md](AGENTS.md); the visual language is in
+[DESIGN.md](src/saberops/DESIGN.md).
 
 ```text
-src/saberops/            runtime package
-tests/                   public capability tests
-.github/workflows/       public CI
-pyproject.toml           package metadata and tool configuration
-LICENSE                  Apache License 2.0
-THIRD_PARTY_NOTICES.md   shipped third-party notices
+src/saberops/          engine package (capacity/, jobs/, control_plane/, mcp/,
+                       sandbox/, workers/, templates/, static/, ...)
+tests/                 hermetic test suite (no provider calls)
+docs/                  design and operating documentation
+scripts/               gate wrappers and tooling
 ```
 
 ---
 
 ## Current limitations
 
-- Parallel Work supports two to six tasks with up to four concurrent workers. Conflicts stop integration; automatic mid-team recovery and automatic conflict repair are not implemented. See the [workflow guide](docs/parallel-work.md).
-- The status page is read-only apart from accept/reject. Run retry/continuation,
-  reviewer/orchestrator/model-access selection, and workflow presets have no
-  `orch` command yet; they are engine capabilities awaiting CLI parity (M3).
-- This is a preview release: interfaces and workflows may change.
-- SaberOps is not production-ready, stable, or feature-complete.
+- **Preview.** Interfaces, storage schemas and workflows may still change; a
+  downgrade is not a supported migration path.
+- **Project-aware concurrency.** The scheduler enforces a global ceiling
+  (default 15 running jobs); the 3 projects × 5 tasks policy is enforced by the
+  wave executor and slot policy, not yet by the job scheduler itself.
+- **Waves at runtime.** The wave executor does not yet replace the older
+  parallel-team path for every run; MCP `submit_wave` performs structural
+  admission only.
+- **No governed publication.** Accepted work is not pushed automatically;
+  `full_autonomy_publish` stops at the accepted state.
+- **Adapter coverage.** Not every adapter/account combination has been
+  live-validated; Antigravity is attended-only.
+- **Merge conflicts** stop integration and preserve branches; automatic conflict
+  repair is not implemented.
 
 ---
 
-## Further reading
+## Documentation map
 
-- [v0.3.8 release notes](docs/releases/0.3.8.md): changes, upgrade instructions and validation.
-- [Engine direction](docs/decisions/0001-saberops-engine-mcp-first.md): SaberOps
-  as a plan-aware, verified execution engine.
-- [Parallel Work and Git tracking](docs/parallel-work.md): team planning, isolated
-  worker branches, ordered integration, checks and owner acceptance.
-- [Operating notes](docs/operations.md): worker routing, CLI usage limits, and
-  fixed-source candidate verification.
-- [UI design principles](docs/ui-design-principles.md).
+- [v0.4.0 release notes](docs/releases/0.4.0.md)
+- [ADR-0001: engine direction](docs/decisions/0001-saberops-engine-mcp-first.md)
+- Operating: [operations](docs/operations.md) · [config](docs/config.md) ·
+  [storage lifecycle](docs/storage-lifecycle.md) · [security](docs/security.md) ·
+  [vendor CLI live check](docs/vendor-cli-live-check.md)
+- Execution: [waves](docs/waves.md) · [wave optimization](docs/wave-plan-optimization.md) ·
+  [parallel work](docs/parallel-work.md) · [gate](docs/gate.md) ·
+  [unattended plans](docs/unattended-plans.md) · [certification](docs/end-certification.md)
+- Orchestrator: [parallel-first policy](docs/orchestrator-parallel-first.md) ·
+  [turn policy](docs/orchestrator-turn-policy.md) ·
+  [memory and restart](docs/orchestrator-memory-restart.md) ·
+  [project modes](docs/project-modes.md) ·
+  [roadmap changes](docs/roadmap-change-requests.md) · [questions](docs/questions.md)
+- Interfaces: [MCP](docs/mcp.md) · [first-run web UI](docs/first-run-web-ui.md) ·
+  [Telegram](docs/telegram.md) · [UI design principles](docs/ui-design-principles.md)
 
 ---
 

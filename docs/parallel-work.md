@@ -213,4 +213,4 @@ Eleven browser check groups passed against the candidate. It remained unaccepted
 and the owner's project checkout remained unchanged. These observations apply
 to the tested provider accounts and CLI versions, not every supported adapter.
 
-See the [release notes](releases/0.3.8.md) for repository-wide release validation.
+See the [release notes](releases/0.4.0.md) for repository-wide release validation.
