@@ -9,18 +9,30 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
 from saberops import certification as cert
 
 
-def _green_wave(wave_id: str, repo: str, **kw: object) -> cert.WaveRecord:
-    base: dict[str, object] = {
-        "wave_id": wave_id, "repo": repo, "green": True, "evidence": "gate-log",
-    }
-    base.update(kw)
-    return cert.WaveRecord(**base)  # type: ignore[arg-type]
+def _green_wave(
+    wave_id: str,
+    repo: str,
+    *,
+    g3_failure_routed_with_attribution: bool = False,
+    infra_failures: int = 0,
+    owner_only_autonomous_decisions: int = 0,
+) -> cert.WaveRecord:
+    return cert.WaveRecord(
+        wave_id=wave_id,
+        repo=repo,
+        green=True,
+        infra_failures=infra_failures,
+        g3_failure_routed_with_attribution=g3_failure_routed_with_attribution,
+        owner_only_autonomous_decisions=owner_only_autonomous_decisions,
+        evidence="gate-log",
+    )
 
 
 def _passing_scenarios() -> tuple[cert.ScenarioOutcome, ...]:
@@ -438,7 +450,7 @@ def test_digest_is_stable() -> None:
 # -- Owner approval ----------------------------------------------------------
 
 
-def test_approve_records_digest_without_token(tmp_path) -> None:
+def test_approve_records_digest_without_token(tmp_path: Path) -> None:
     """Covers: END approval record serialization."""
     record_file = tmp_path / "approval.jsonl"
     record = cert.approve_self_dogfooding(
@@ -453,7 +465,7 @@ def test_approve_records_digest_without_token(tmp_path) -> None:
     assert got[0].certification_digest == record.certification_digest
 
 
-def test_approve_refuses_without_certified_verdict(tmp_path) -> None:
+def test_approve_refuses_without_certified_verdict(tmp_path: Path) -> None:
     """Covers: END approval fails closed without CERTIFIED."""
     with pytest.raises(cert.CertificationError):
         cert.approve_self_dogfooding(
@@ -463,7 +475,7 @@ def test_approve_refuses_without_certified_verdict(tmp_path) -> None:
         )
 
 
-def test_approve_refuses_without_explicit_phrase(tmp_path) -> None:
+def test_approve_refuses_without_explicit_phrase(tmp_path: Path) -> None:
     """Covers: END approval requires the explicit owner phrase."""
     with pytest.raises(cert.CertificationError):
         cert.approve_self_dogfooding(
@@ -473,7 +485,7 @@ def test_approve_refuses_without_explicit_phrase(tmp_path) -> None:
         )
 
 
-def test_read_approval_records_empty_when_missing(tmp_path) -> None:
+def test_read_approval_records_empty_when_missing(tmp_path: Path) -> None:
     """Covers: END approval record serialization."""
     assert cert.read_approval_records(tmp_path / "nope.jsonl") == []
 
@@ -481,7 +493,7 @@ def test_read_approval_records_empty_when_missing(tmp_path) -> None:
 # -- Evidence file + CLI -----------------------------------------------------
 
 
-def _write_evidence(tmp_path) -> object:
+def _write_evidence(tmp_path: Path) -> Path:
     payload = {
         "waves": [
             {"wave_id": "w1", "repo": "fixture-a", "green": True,
@@ -514,13 +526,13 @@ def _write_evidence(tmp_path) -> object:
     return path
 
 
-def test_load_evidence_file_certifies(tmp_path) -> None:
+def test_load_evidence_file_certifies(tmp_path: Path) -> None:
     """Covers: END evidence-file evaluation path."""
     result = cert.load_evidence_file(_write_evidence(tmp_path))
     assert result.passed
 
 
-def test_load_evidence_file_rejects_garbage(tmp_path) -> None:
+def test_load_evidence_file_rejects_garbage(tmp_path: Path) -> None:
     """Covers: END evidence-file evaluation path."""
     bad = tmp_path / "bad.json"
     bad.write_text("[1,2]", encoding="utf-8")
@@ -528,7 +540,7 @@ def test_load_evidence_file_rejects_garbage(tmp_path) -> None:
         cert.load_evidence_file(bad)
 
 
-def test_cli_certify_check_json_runs(tmp_path) -> None:
+def test_cli_certify_check_json_runs(tmp_path: Path) -> None:
     """Covers: END orch certify check CLI wiring."""
     proc = subprocess.run(
         [sys.executable, "-m", "saberops.cli", "certify", "check", "--json",
@@ -549,7 +561,7 @@ def test_cli_certify_check_no_evidence_fails() -> None:
     assert json.loads(proc.stdout)["verdict"] == "NOT_CERTIFIED"
 
 
-def test_cli_certify_run_scenario_filter(tmp_path) -> None:
+def test_cli_certify_run_scenario_filter(tmp_path: Path) -> None:
     """Covers: END orch certify run --scenario CLI wiring."""
     proc = subprocess.run(
         [sys.executable, "-m", "saberops.cli", "certify", "run", "--json",
@@ -560,7 +572,7 @@ def test_cli_certify_run_scenario_filter(tmp_path) -> None:
     assert len(json.loads(proc.stdout)) == 1
 
 
-def test_cli_certify_report_writes_file(tmp_path) -> None:
+def test_cli_certify_report_writes_file(tmp_path: Path) -> None:
     """Covers: END orch certify report CLI wiring."""
     out = tmp_path / "report.md"
     proc = subprocess.run(
@@ -572,7 +584,7 @@ def test_cli_certify_report_writes_file(tmp_path) -> None:
     assert "CERTIFIED" in out.read_text(encoding="utf-8")
 
 
-def test_cli_certify_approve_needs_token_and_evidence(tmp_path) -> None:
+def test_cli_certify_approve_needs_token_and_evidence(tmp_path: Path) -> None:
     """Covers: END orch certify approve CLI wiring."""
     record = tmp_path / "approval.jsonl"
     refused = subprocess.run(
