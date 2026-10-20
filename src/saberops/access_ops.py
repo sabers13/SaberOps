@@ -401,6 +401,61 @@ def discover_access_models(connection_id: str) -> dict[str, Any]:
     return result.to_dict()
 
 
+def refresh_outdated_model_lists(max_age_hours: float = 24.0) -> dict[str, str]:
+    """Re-list models for account connections whose list is missing or old.
+
+    Covers every installed account backend with a supported listing: no
+    catalog entries yet, any entry marked stale, or the newest reading older
+    than ``max_age_hours``. Returns ``{connection_id: outcome}``; a failure
+    keeps the previous list (marked stale) exactly as a manual refresh does.
+    """
+    import shutil
+    from datetime import UTC, datetime, timedelta
+
+    from saberops.model_access import ACCOUNT_BACKENDS
+
+    registry = _require_registry()
+    catalog = load_catalog_safely()
+    now = datetime.now(UTC)
+    outcomes: dict[str, str] = {}
+    for connection in registry.list_connections():
+        if not connection.is_account_backed:
+            continue
+        descriptor = next(
+            (b for b in ACCOUNT_BACKENDS if b.connection_id == connection.connection_id), None
+        )
+        if descriptor is None or not descriptor.has_model_listing:
+            continue
+        if shutil.which(descriptor.executable) is None:
+            continue
+        entries = [m for m in catalog.list_models() if m.connection_id == connection.connection_id]
+        newest = max(
+            (
+                datetime.fromisoformat(m.discovered_at.replace("Z", "+00:00"))
+                for m in entries
+                if m.discovered_at
+            ),
+            default=None,
+        )
+        fresh = (
+            entries
+            and not any(m.is_stale for m in entries)
+            and newest is not None
+            and now - (newest if newest.tzinfo else newest.replace(tzinfo=UTC))
+            < timedelta(hours=max_age_hours)
+        )
+        if fresh:
+            outcomes[connection.connection_id] = "fresh"
+            continue
+        try:
+            result = discover_access_models(connection.connection_id)
+        except Exception:
+            outcomes[connection.connection_id] = "failed"
+            continue
+        outcomes[connection.connection_id] = "refreshed" if result.get("ok") else "failed"
+    return outcomes
+
+
 _VERIFY_MESSAGES = {
     "READY": (
         "The selected model completed the access check. Readiness is saved for this "

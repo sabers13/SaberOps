@@ -174,6 +174,49 @@ must match `prompt.md`, `report.md`, `outcome.json`, `failures.md`, `gate.txt`,
 roots, a symlink that escapes, and a disallowed file name are all refused with
 `-32030`. Reads are capped at 1 MiB and report `truncated` when the cap is hit.
 
+## Connecting an agent
+
+The easy way registers the server in each agent CLI for you (it uses the
+agent's own `mcp add` command where one exists, and edits a JSON config only
+when it is plain JSON, after a backup):
+
+```bash
+orch connect                  # list agents on this computer and whether each is connected
+orch connect claude codex     # connect specific agents (or: orch connect all)
+orch connect claude --project # only for the current repository (.mcp.json)
+orch connect --remove codex   # undo
+orch connect codex --dry-run  # show what would change
+```
+
+The Setup page offers the same as one **Connect** button per agent. Supported:
+Claude Code, Codex, Antigravity, OpenCode and Cursor; any other MCP client can
+use the snippet under "Client configuration" below.
+
+## Turning SaberOps on and off
+
+* **Per session, in the agent.** Every agent session starts with SaberOps
+  **off**: the agent sees a single `saberops_on` tool, holds no planner lease and
+  works as a normal coding agent. Say "turn on saberops" and the agent calls
+  `saberops_on`; the full tools appear (the server sends
+  `notifications/tools/list_changed`) and that session becomes the planner. Say
+  "turn off saberops" and it calls `saberops_off`, releases the lease and is a
+  normal agent again. `orch mcp serve --active` starts a session already on.
+* **For every agent, by the owner.** `orch mcp off` (or Setup → Turn off for all
+  agents) keeps every agent registered but offers no tools at all, not even
+  `saberops_on`. `orch mcp on` restores it; `orch mcp status` shows the state and
+  the planning agent. The switch is per profile.
+
+Every tool result starts with `Orchestrator:`, and the guide asks the agent to
+start every message that relays SaberOps with `Orchestrator:` too, so the user
+can always tell SaberOps apart from the agent's own words.
+
+## The built-in guide
+
+How to plan and submit work (when to use a job or a wave, writing acceptance
+criteria, what stays with the owner) is delivered three ways so any client sees
+it: the `initialize` instructions, the `saberops-guide` prompt and the
+`saberops://guide` resource; `saberops_on` also returns it.
+
 ## Client configuration
 
 The server is a local stdio process; there is no network listener and no token.

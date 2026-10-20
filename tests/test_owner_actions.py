@@ -1175,7 +1175,7 @@ def test_run_page_and_actions_json_show_durable_action_state(
     page = client.get("/runs/run-v2")
     assert page.status_code == 200
     assert 'id="owner-action-status"' in page.text
-    assert "A Review owner action is already running" in page.text
+    assert "A review you started is still running" in page.text
 
 
 def test_reject_remains_synchronous_and_untouched(tmp_path: Path) -> None:

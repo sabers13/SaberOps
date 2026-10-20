@@ -177,7 +177,8 @@ def test_packaged_runtime_resources_are_present() -> None:
     package = Path(__file__).resolve().parents[1] / "src" / "saberops"
     assert (package / "templates" / "dashboard.html").is_file()
     assert (package / "templates" / "run_detail.html").is_file()
-    assert (package / "static" / "css" / "saberops-console.css").is_file()
+    assert (package / "static" / "css" / "app.css").is_file()
+    assert (package / "templates" / "base.html").is_file()
     assert (package / "defaults" / "routing.json").is_file()
 
 

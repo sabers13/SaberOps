@@ -63,8 +63,8 @@ document.
 
 1. Explicit user instructions for the current task.
 2. Existing repository safety, architecture, security, engineering, CI, and release rules.
-3. [src/saberops/DESIGN.md](src/saberops/DESIGN.md) and the existing design values in
-   [console-v2.css](src/saberops/static/css/console-v2.css).
+3. [src/saberops/DESIGN.md](src/saberops/DESIGN.md) and the existing design tokens in
+   [app.css](src/saberops/static/css/app.css).
 4. This frontend workflow section.
 5. The globally installed `frontend-ui-workflow` skill for detailed guidance.
 
@@ -91,10 +91,10 @@ Templates are in `src/saberops/templates/`, application styles in
 Keep existing template variables, conditions, form fields/actions, IDs, `data-*`
 hooks, and request contracts intact during visual iteration.
 
-`console-v2.css` is the verbatim approved design extraction: its header says not
-to hand-edit it. Reuse its custom properties and put integration style additions
-in `saberops-console.css`. Do not replace tokens or introduce a second theme
-system during adoption. Token consolidation or missing token categories belong
+`app.css` is the single application stylesheet (DESIGN.md §Framed sheet, 20 October
+2026); every page extends `templates/base.html`. Reuse its custom properties for
+new styles and keep colour, type, space and radius values as tokens. Do not
+introduce a second stylesheet or theme system. Token consolidation or missing token categories belong
 in a separately scoped UI INIT; changing shared theme architecture requires the
 normal engineering workflow. Preserve vendored xterm assets and their notices.
 
@@ -158,7 +158,7 @@ active development environment. Direct interpreter invocation also works when
 a moved checkout has stale virtual-environment activation paths or tool shebangs.
 The fast wrapper uses installed Jinja2/pytest and the available Node.js executable;
 it installs nothing. It compiles all current templates without importing the
-backend, runs `node --check` on the three application JavaScript files, and runs
+backend, runs `node --check` on the application JavaScript files, and runs
 only these existing test node IDs from `tests/test_web.py`:
 
 - `test_c16c2_dashboard_lists_runs_with_kept_tokens`: renders the real dashboard and

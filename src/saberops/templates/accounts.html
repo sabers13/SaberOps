@@ -1,0 +1,141 @@
+{% extends "base.html" %}
+{% import "_ui.html" as ui %}
+{% set active_page = "accounts" %}
+{% block title %}Accounts{% endblock %}
+{# Accounts: "How much of each subscription is left, and may SaberOps use it on
+   its own?" Usage is read from each CLI's own usage metadata (no prompt, no
+   quota spent). Billing confirmations reuse /first-run/posture/verify with
+   return_to=accounts. Selectors, class codes and harness ids stay behind
+   "Technical details". #}
+{% macro scope(selector, account) -%}
+{%- if selector == account or selector.endswith("/*") and selector.count("/") == 1 -%}Whole account
+{%- elif selector.endswith("/*") -%}{{ selector[:-2].split("/")[-1] }} models
+{%- elif selector.startswith("backend:") -%}{{ selector.split(":")[-1] | replace("_", " ") | lower | capitalize | replace(" api", " API") }} connections
+{%- else -%}{{ selector.split("/")[-1] }}{%- endif -%}
+{%- endmacro %}
+{% macro other_title(selector) -%}
+{%- if selector.startswith("backend:") -%}{{ selector.split(":")[-1] | replace("_", " ") | lower | capitalize | replace(" api", " API") }} connections
+{%- elif selector.endswith("/*") -%}{{ selector[:-2].split("/")[-1] | replace("-", " ") | capitalize }} models
+{%- else -%}{{ selector | replace("-", " ") | capitalize }}{%- endif -%}
+{%- endmacro %}
+{% macro billing_row(row, account="", title=None) %}
+<li class="bill">
+  <div class="row-main">
+    <span class="row-title">{{ title or (scope(row.selector, account) | capitalize) }}</span>
+    <span class="row-sub">{{ row.billing }} · {% if row.ok %}{% if row.expires_on %}confirmed until {{ row.expires_on }}{% else %}confirmed{% endif %}{% elif row.status == "EXPIRED" %}confirmation ran out{% elif row.class == "X" %}never used{% else %}not confirmed{% endif %}</span>
+  </div>
+  {% if row.class == "X" %}{{ ui.status("FORBIDDEN") }}{% elif row.ok %}<span class="status" data-tone="ok">Confirmed</span>{% endif %}
+  <div class="bill-actions">
+    {% if row.class != "X" and (row.urls or row.class == "D") %}
+    <form method="post" action="/first-run/posture/verify">
+      <input type="hidden" name="csrf" value="{{ csrf_token }}"><input type="hidden" name="return_to" value="accounts">
+      <input type="hidden" name="selector" value="{{ row.selector }}">
+      <button type="submit">{{ "Confirm again" if row.ok else "Confirm" }}</button>
+    </form>
+    {% endif %}
+    <details class="more bill-change">
+      <summary>Change</summary>
+      <div class="more-body">
+        <form method="post" action="/first-run/posture/verify" class="form">
+          <input type="hidden" name="csrf" value="{{ csrf_token }}"><input type="hidden" name="return_to" value="accounts">
+          <input type="hidden" name="selector" value="{{ row.selector }}">
+          <label class="field">How it is billed
+            <select name="posture_class">
+              {% for code, label in accounts.labels.items() %}<option value="{{ code }}"{% if code == row.class %} selected{% endif %}>{{ label }}</option>{% endfor %}
+            </select>
+          </label>
+          <label class="field">Pages you checked <span class="hint">The provider's terms or pricing, one https link per line. Needed unless it is pay per use, only while you watch.</span>
+            <textarea name="policy_urls" rows="2" autocomplete="off" spellcheck="false">{{ row.urls | join("\n") }}</textarea>
+          </label>
+          <label class="field">Note <input type="text" name="note" value="{{ row.note }}" autocomplete="off"></label>
+          <div><button type="submit" class="primary">Save and confirm</button></div>
+        </form>
+      </div>
+    </details>
+  </div>
+</li>
+{% endmacro %}
+{% block content %}
+{% set a = accounts %}
+<header class="page-head">
+  <div>
+    <h1>Accounts</h1>
+    <p class="lede">
+      {% if a.low %}{% set name, w = a.low[0] %}<strong>{{ name }} has {{ w.remaining }}% of {{ w.label | lower }} left</strong>{% if w.reset %}, {{ w.reset }}{% endif %}. New work moves to the next model in line when it runs out.
+      {% elif a.unconfirmed %}<strong>{{ a.unconfirmed | join(", ") }} {{ "needs" if a.unconfirmed | length == 1 else "need" }} billing confirmed</strong> before SaberOps uses {{ "it" if a.unconfirmed | length == 1 else "them" }} on its own.
+      {% else %}How much of each AI subscription is left, and how each one is billed.{% endif %}
+    </p>
+  </div>
+</header>
+{% if a.billing_error %}<div class="banner" data-tone="bad" role="alert">{{ a.billing_error }}</div>{% endif %}
+{% set pending = (a.cards | map(attribute="billing") | sum(start=[]) | list) + a.others %}
+{% set to_confirm = pending | rejectattr("ok") | rejectattr("class", "equalto", "X") | list %}
+{% if to_confirm or a.unconfirmed %}
+<div class="banner confirm-all" data-tone="info" role="note">
+  <div><strong>Confirm billing once</strong>Confirm every account in one step, with the billing type and links shown below. It stays confirmed until you change it.</div>
+  <form method="post" action="/accounts/confirm-all">
+    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+    <button type="submit" class="primary">Confirm all</button>
+  </form>
+</div>
+{% endif %}
+
+<div class="stack-lg">
+{% for card in a.cards %}
+<section class="panel account" aria-labelledby="acc-{{ card.slug }}">
+  <div class="panel-head">
+    <div><h2 id="acc-{{ card.slug }}">{{ card.name }}</h2><p>{% if not card.installed %}Not installed on this computer{% elif card.windows %}Usage checked {{ card.checked }}{% else %}Usage not checked yet{% endif %}</p></div>
+    {% if not card.installed %}{{ ui.status("MISSING") }}{% elif card.billing_ok %}<span class="status" data-tone="ok">Billing confirmed</span>{% elif card.billing %}<span class="status" data-tone="warn">Needs confirmation</span>{% endif %}
+  </div>
+  <div class="panel-body account-body">
+    <div class="usage" aria-label="{{ card.name }} usage">
+      <h3>What is left</h3>
+      {% if card.windows %}
+      <ul class="meters">
+        {% for w in card.windows %}
+        <li>
+          <div class="meter-head"><span>{{ w.label }}</span><span class="num"><b>{{ w.remaining }}%</b> left</span></div>
+          <div class="meter" data-tone="{{ w.tone }}" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ w.remaining }}" aria-label="{{ w.label }}: {{ w.remaining }}% left"><span style="width: {{ w.remaining }}%"></span></div>
+          {% if w.reset %}<div class="meter-foot">{{ w.reset }}</div>{% endif %}
+        </li>
+        {% endfor %}
+      </ul>
+      {% if card.stale %}<p class="small muted">This reading is over an hour old.</p>{% endif %}
+      {% else %}
+      <p class="muted">{% if card.installed %}No reading yet. Checking asks the {{ card.name }} tool for its own usage numbers; it sends no prompt and uses none of your limit.{% else %}Install and sign in to its command-line tool to see its usage here.{% endif %}</p>
+      {% endif %}
+      {% if card.installed %}
+      <form method="post" action="/accounts/check">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}"><input type="hidden" name="account" value="{{ card.slug }}">
+        <button type="submit">Check now</button>
+      </form>
+      {% endif %}
+    </div>
+    <div class="billing" aria-label="{{ card.name }} billing">
+      <h3>How it is billed</h3>
+      {% if card.billing %}
+      <ul class="rows bills">{% for row in card.billing %}{{ billing_row(row, card.billing[0].selector.split("/")[0]) }}{% endfor %}</ul>
+      {% else %}
+      <p class="muted">Nothing recorded yet. Confirm it in Setup or with <code>orch posture verify</code>.</p>
+      {% endif %}
+    </div>
+  </div>
+  <details class="tech account-tech"><summary>Technical details</summary>
+    <dl class="kv">
+      <dt>Usage source</dt><dd>{% if card.display_only %}Read on request only; shown here, never used for routing{% else %}Capacity probe, also used for routing{% endif %}</dd>
+      {% for row in card.billing %}<dt class="mono">{{ row.selector }}</dt><dd>Class {{ row.class }} · {{ row.status }}{% if row.verified_on %} · confirmed {{ row.verified_on }}{% endif %}</dd>{% endfor %}
+    </dl>
+  </details>
+</section>
+{% endfor %}
+
+{% if a.others %}
+<section class="panel" aria-labelledby="others-h">
+  <div class="panel-head"><div><h2 id="others-h">Other connections</h2><p>Billing for connections that are not one of the subscriptions above.</p></div></div>
+  <div class="panel-body">
+    <ul class="rows bills">{% for row in a.others %}{{ billing_row(row, title=other_title(row.selector)) }}{% endfor %}</ul>
+  </div>
+</section>
+{% endif %}
+</div>
+{% endblock %}

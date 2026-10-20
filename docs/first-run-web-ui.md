@@ -13,8 +13,12 @@ process-local CSRF token plus (where required) explicit owner confirmation.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/` | Dashboard; renders the onboarding wizard instead when the store is empty (no runs, bindings, projects or discovered models). |
-| GET | `/first-run` | The complete first-run onboarding surface (Sections A/B/C). |
+| GET | `/` | Runs; renders Setup (as "First-run setup") instead when the store is empty (no runs, bindings, projects or discovered models). |
+| GET | `/setup` | System check, provider sign-in, model discovery and billing confirmation. |
+| GET | `/routing` | Model roles, fallback order and capacity (concurrency). |
+| GET | `/projects` | Repository check and entry modes, registration, plans and waves, storage cleanup (`?repo=`, `?wave_project=`). |
+| GET | `/questions` | Owner question queue, standing permissions and never-delegable decisions. |
+| GET | `/first-run` | Legacy URL: `303` redirect to `/setup`, keeping the query string. |
 | POST | `/first-run/concurrency` | Persist the owner-confirmed 3-project × 5-task concurrency limits. |
 | POST | `/first-run/discover` | Run bounded model discovery for one connection (evidence only). |
 | POST | `/first-run/posture/verify` | Record the owner's billing-posture attestation for one selector. |
@@ -28,12 +32,16 @@ process-local CSRF token plus (where required) explicit owner confirmation.
 `{id}` in the question routes may be either the deterministic question id or
 its stable key; the queue resolves a key first.
 
-## Onboarding flow (Section A)
+The POST paths are unchanged from the original single onboarding page. Each one
+now redirects on success to the page that owns it (`/setup`, `/routing`,
+`/projects` or `/questions`) and re-renders that page with the error on refusal.
+
+## Setup (`/setup`)
 
 1. **Empty-state navigation.** A fresh install has no runs, bindings, projects
    or discovered models, so `GET /` renders the wizard directly instead of an
-   empty run table. Once any of those exist, `/` returns the dashboard and the
-   wizard stays reachable at `/first-run`.
+   empty run table. Once any of those exist, `/` returns the run list and
+   Setup stays reachable from the sidebar.
 2. **Readiness & diagnostics.** Python runtime, git executable, the bundled
    SQLite library, and the disk free floor (`max(10 GB, 10 %)`) are computed
    locally. A red row names the exact fix.
@@ -50,7 +58,7 @@ its stable key; the queue resolves a key first.
    whose status is `OK`/`EXPIRING` are marked auto-routing-eligible; missing or
    expired verification excludes the route everywhere.
 
-## Routing, projects & concurrency (Section B)
+## Routing (`/routing`) and Projects (`/projects`)
 
 - **Per-role assignment.** Owner bindings are grouped by semantic role
   (Worker / Reviewer / Orchestrator) with their exact `binding_id`; the
@@ -70,9 +78,9 @@ its stable key; the queue resolves a key first.
   `saberops.wave_plan_optimizer.optimize_plan` to show waves, critical path,
   makespan, parallelism and scope overlaps.
 
-## Runs, questions, unattended & storage (Section C)
+## Runs (`/`), Questions (`/questions`) and storage (`/projects`)
 
-- **Run monitoring.** Recent runs link to the existing run page, whose live
+- **Run monitoring.** The run list links to each run page, whose live
   progress streams over server-sent events at
   `/runs/{run_id}/events/stream`.
 - **Question queue.** Open and due questions are listed with their decision
@@ -114,25 +122,25 @@ its stable key; the queue resolves a key first.
 
 ## Operational workflows
 
-- **Fresh install.** Open the UI, follow Section A top to bottom, connect a
-  vendor in your terminal, discover models, verify posture, then configure
-  routing and concurrency in Section B.
-- **Answer a question.** Section C2 lists pending questions; type the answer
+- **Fresh install.** Open the UI, follow the four Setup steps top to bottom
+  (connect a vendor in your terminal, discover models, confirm billing), then
+  configure roles and capacity on Routing.
+- **Answer a question.** Questions lists pending items (the sidebar shows the
+  count); type the answer
   (and choose an option when the question offers one) and submit. The answer is
   recorded verbatim with owner authority.
-- **Plan a cleanup.** Enter the repository path, review the dry-run targets and
+- **Plan a cleanup.** On Projects, check the repository path, review the dry-run targets and
   their estimated bytes, then type the preview id and apply. If no approved
   standing policy exists, apply stays refused.
-- **Inspect a plan.** Enter a project id in Section B5 to preview the dependency
+- **Inspect a plan.** Enter a project id under Plans and waves to preview the dependency
   DAG and the optimizer's wave scores for that project's active plan revision.
 
 ## Development notes
 
-- The wired page is `src/saberops/templates/onboarding.html` with
-  `src/saberops/static/css/onboarding.css`, built on the existing
-  `console-v2.css` design tokens. The earlier preview-only asset
-  `first_run.html` / `first_run.css` / `first_run.js` is retained unchanged as a
-  static design reference and is not routed.
+- The owner pages are `setup.html`, `routing.html`, `projects.html` and
+  `questions.html` in `src/saberops/templates/`, extending the shared
+  `base.html` shell and `_ui.html` macros, styled only by
+  `src/saberops/static/css/app.css` (see `src/saberops/DESIGN.md` §Basalt).
 - Tests: `tests/test_web.py` (routes, states, persistence, security) and
   `tests/test_contract_first_run_ui_assets.py` (asset contracts). They run
   hermetically with isolated XDG roots and no network.

@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+{# SaberOps app shell ("Framed sheet", orch-UI pick B, 20 October 2026).
+   A tinted L-frame (sidebar + top bar) around a white sheet. Every page
+   extends this. console.js owns the theme; app.js owns run live refresh. #}
+{% set nav = nav_state() %}
+{% import "_ui.html" as ui %}
+{% set icon = ui.icon %}
+{% macro mark() -%}
+<svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="11" fill="var(--accent)"/><path d="M7 16.5 16.5 7M11 17.5h6" stroke="var(--surface)" stroke-width="2" stroke-linecap="round"/></svg>
+{%- endmacro %}
+{% macro nav_items() -%}
+<ul class="nav-list">
+  <li><a class="nav-link" href="/"{% if active_page == "runs" %} aria-current="page"{% endif %}>{{ icon("runs") }}Runs</a></li>
+  <li><a class="nav-link" href="/questions"{% if active_page == "questions" %} aria-current="page"{% endif %}>{{ icon("questions") }}Questions{% if nav.pending_questions %}<span class="nav-count">{{ nav.pending_questions }}<span class="sr-only"> waiting</span></span>{% endif %}</a></li>
+  <li><a class="nav-link" href="/projects"{% if active_page == "projects" %} aria-current="page"{% endif %}>{{ icon("projects") }}Projects</a></li>
+  <li><a class="nav-link" href="/routing"{% if active_page == "routing" %} aria-current="page"{% endif %}>{{ icon("routing") }}Routing</a></li>
+  <li><a class="nav-link" href="/accounts"{% if active_page == "accounts" %} aria-current="page"{% endif %}>{{ icon("accounts") }}Accounts</a></li>
+  <li><a class="nav-link" href="/setup"{% if active_page == "setup" %} aria-current="page"{% endif %}>{{ icon("setup") }}Setup{% if nav.setup_attention %}<span class="nav-dot" role="img" aria-label="needs attention"></span>{% endif %}</a></li>
+</ul>
+{%- endmacro %}
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#eef2f5" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0d0f10" media="(prefers-color-scheme: dark)">
+  <title>{% block title %}SaberOps{% endblock %} · SaberOps</title>
+  <link rel="preload" href="/static/fonts/IBMPlexSans-Variable.ttf" as="font" type="font/ttf" crossorigin>
+  <link rel="stylesheet" href="/static/css/app.css">
+  <script>
+    // Restore appearance before paint; console.js owns subsequent changes.
+    try {
+      var soTheme = window.localStorage.getItem("saberops-theme");
+      if (soTheme === "dark" || soTheme === "light") {
+        document.documentElement.setAttribute("data-theme", soTheme);
+      } else if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) {
+        document.documentElement.setAttribute("data-theme", "dark");
+      }
+    } catch (_soErr) { /* Browser storage may be unavailable. */ }
+  </script>
+</head>
+<body>
+  <a class="skip-link" href="#content">Skip to content</a>
+  <div class="frame">
+    <a class="brand" href="/">{{ mark() }}SaberOps</a>
+    <div class="topbar">
+      <nav class="crumbs" aria-label="Breadcrumb">{% block crumbs %}<span>This computer</span><span aria-hidden="true">/</span><span aria-current="page">{{ self.title() }}</span>{% endblock %}</nav>
+      <div class="top-actions">
+        <button type="button" class="icon-btn" id="themeToggle" aria-label="Switch light or dark appearance" title="Switch appearance">
+          <span class="theme-light-only">{{ icon("moon") }}</span><span class="theme-dark-only">{{ icon("sun") }}</span>
+        </button>
+      </div>
+    </div>
+    <nav class="side" aria-label="Main">
+      {{ nav_items() }}
+      <div class="nav-foot">
+        <span>SaberOps {{ nav.version }} · <a href="/health">Health</a></span>
+      </div>
+    </nav>
+    <div class="mobile-bar">
+      <details>
+        <summary>
+          <span class="brand">{{ mark() }}SaberOps</span>
+          <span class="menu-label">{{ icon("menu") }}Menu</span>
+        </summary>
+        <nav aria-label="Main (mobile)">
+          {{ nav_items() }}
+        </nav>
+        <div class="nav-foot">
+          <span>v{{ nav.version }} · <a href="/health">Health</a></span>
+          <span class="btn-row">
+            <button type="button" class="icon-btn" data-set-theme="light" aria-label="Light appearance">{{ icon("sun") }}</button>
+            <button type="button" class="icon-btn" data-set-theme="dark" aria-label="Dark appearance">{{ icon("moon") }}</button>
+          </span>
+        </div>
+      </details>
+    </div>
+    <main class="sheet" id="content" tabindex="-1">
+      <div class="sheet-inner">
+        {% if notice %}<div class="banner notice-saved" data-tone="ok" role="status">{{ notice }}</div>{% endif %}
+        {% if error %}<div class="banner" data-tone="bad" role="alert">{{ error }}</div>{% endif %}
+        {% block content %}{% endblock %}
+      </div>
+    </main>
+  </div>
+  <script src="/static/js/console.js"></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

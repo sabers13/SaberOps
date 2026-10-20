@@ -98,16 +98,21 @@ class LeaseRecord:
     pid: int
     acquired_at: str
     host: str = ""
+    #: The MCP client's self-reported name (``clientInfo.name``), display only.
+    client: str = ""
     schema_version: int = LEASE_SCHEMA_VERSION
 
     def to_mapping(self) -> dict[str, Any]:
-        return {
+        mapping: dict[str, Any] = {
             "schema_version": self.schema_version,
             "holder": self.holder,
             "pid": self.pid,
             "acquired_at": self.acquired_at,
             "host": self.host,
         }
+        if self.client:
+            mapping["client"] = self.client
+        return mapping
 
     @classmethod
     def from_mapping(cls, payload: object) -> LeaseRecord | None:
@@ -133,11 +138,13 @@ class LeaseRecord:
         if not isinstance(acquired_at, str) or not acquired_at.strip():
             return None
         host = payload.get("host")
+        client = payload.get("client")
         return cls(
             holder=holder,
             pid=pid,
             acquired_at=acquired_at,
             host=host if isinstance(host, str) else "",
+            client=client.strip()[:80] if isinstance(client, str) else "",
         )
 
 
@@ -243,6 +250,43 @@ class OrchestratorLease:
                     fcntl.flock(handle, fcntl.LOCK_UN)
         except OSError as exc:
             raise McpError(f"cannot acquire orchestrator lease {self._path}: {exc}") from exc
+
+    def record_client(self, client: str) -> bool:
+        """Label the held lease with the connected client's name (display only).
+
+        Only the current writer relabels its own record; a read-only client,
+        a missing record or a record owned by another process is left alone.
+        The label never grants anything: it lets the owner's local pages say
+        which agent plans the work.
+        """
+        label = " ".join(str(client).split())[:80]
+        if not self._writer or not label:
+            return False
+        try:
+            with self._path.open("a+", encoding="utf-8") as handle:
+                fcntl.flock(handle, fcntl.LOCK_EX)
+                try:
+                    handle.seek(0)
+                    existing = self._parse(handle.read())
+                    if existing is None or existing.pid != self._pid:
+                        return False
+                    record = LeaseRecord(
+                        holder=existing.holder,
+                        pid=existing.pid,
+                        acquired_at=existing.acquired_at,
+                        host=existing.host,
+                        client=label,
+                    )
+                    handle.seek(0)
+                    handle.truncate()
+                    handle.write(json.dumps(record.to_mapping(), sort_keys=True) + "\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                    return True
+                finally:
+                    fcntl.flock(handle, fcntl.LOCK_UN)
+        except OSError:
+            return False
 
     def release(self) -> bool:
         """Release the lease when this instance holds it.

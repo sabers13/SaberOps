@@ -67,9 +67,10 @@ def serve_stdio(
                 )
             else:
                 response = server.handle(decoded)
-            if response is None:
-                continue
-            sink.write(json.dumps(response, sort_keys=True) + "\n")
+            if response is not None:
+                sink.write(json.dumps(response, sort_keys=True) + "\n")
+            for notification in server.drain_notifications():
+                sink.write(json.dumps(notification, sort_keys=True) + "\n")
             sink.flush()
     finally:
         server.close()

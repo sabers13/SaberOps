@@ -542,14 +542,14 @@ def test_j_web_parity(tmp_path: Path) -> None:
 
     page = client.get("/runs/run-j")
     assert page.status_code == 200
-    assert "Reject candidate" in page.text
+    assert ">Reject</button>" in page.text
     assert 'data-action="reject"' in page.text
 
     confirm = client.post("/runs/run-j/reject", data={"confirm": "0"})
     assert confirm.status_code == 200
-    assert "Reject this candidate?" in confirm.text
-    assert "This records a durable owner decision." in confirm.text
-    assert "It does not delete the commit or worktree." in confirm.text
+    assert "Reject these changes?" in confirm.text
+    assert "This records your decision." in confirm.text
+    assert "It does not delete the copy or its commit." in confirm.text
     assert "Type the exact run id" not in confirm.text
     rejected_events = db.get_events_by_type("run-j", REJECTION_EVENT_TYPE)
     assert rejected_events == []
@@ -570,7 +570,7 @@ def test_j_web_parity(tmp_path: Path) -> None:
     assert "REJECTED" in after.text
     assert 'id="candidate-state"' in after.text
     assert 'data-action="reject"' not in after.text
-    assert 'disabled title="Accept is blocked by the checklist below"' in after.text
+    assert 'id="acceptRunButton" disabled aria-describedby="accept-blocked"' in after.text
     # The review page-action is gone (review runs via `orch review`); only
     # the accept/reject owner actions remain on the page.
     assert 'data-action="review"' not in after.text

@@ -7,7 +7,8 @@ I/O and is not wired into preflight or routing (that is M2-4b).
 TTL boundary: ``expires_on = verified_on + ttl_days`` and the record
 is valid *through* ``expires_on`` (expired when
 ``verified_on + ttl_days < today``).  Both sides of the boundary are
-tested in ``tests/test_posture.py``.
+tested in ``tests/test_posture.py``.  A record with ``ttl_days`` unset
+never expires: the owner's confirmation holds until they change it.
 """
 
 from __future__ import annotations
@@ -123,7 +124,19 @@ def posture_decision(
             expires_on=None,
             expiring_soon=False,
         )
-    expires = verified + timedelta(days=record.ttl_days or 0)
+    if record.ttl_days is None:
+        # No expiry: the confirmation stands until the owner changes it.
+        # The billing class is still enforced exactly as below.
+        return PostureDecision(
+            posture_class=cls,
+            selector=record.selector,
+            admitted_unattended=cls not in ("B", "D"),
+            reason={"B": POSTURE_ATTENDED_ONLY, "D": POSTURE_METERED}.get(cls),
+            verified_on=record.verified_on,
+            expires_on=None,
+            expiring_soon=False,
+        )
+    expires = verified + timedelta(days=record.ttl_days)
     if expires < today:
         return PostureDecision(
             posture_class=cls,

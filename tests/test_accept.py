@@ -530,7 +530,7 @@ def test_r0b_eligible_candidate_checklist_passes_and_accept_enabled(
         "/runs/run_r0b_a/accept", data={"confirm_run_id": ""}
     )
     assert confirm.status_code == 200
-    assert "Type the exact run id to confirm." in confirm.text
+    assert "Type the run id to confirm" in confirm.text
 
 
 def test_r0b_moved_target_head_blocks_accept(

@@ -380,6 +380,27 @@
     // Keep the pre-paint selection, including when storage is blocked.
     document.documentElement.setAttribute("data-palette", currentPalette());
     paintThemeButton();
+    // Pending feedback for plain form POSTs: once the browser has built the
+    // request, mark the submit button busy so slow actions (model discovery,
+    // cleanup) show progress and are not submitted twice.
+    document.addEventListener("submit", function (event) {
+      var form = event.target;
+      var button = event.submitter;
+      if (!form || (form.method || "").toLowerCase() !== "post" || !button || event.defaultPrevented) return;
+      window.setTimeout(function () {
+        button.setAttribute("data-pending", button.textContent);
+        button.disabled = true;
+        button.textContent = "Working…";
+      }, 0);
+    });
+    window.addEventListener("pageshow", function (event) {
+      if (!event.persisted) return;
+      document.querySelectorAll("button[data-pending]").forEach(function (button) {
+        button.textContent = button.getAttribute("data-pending");
+        button.removeAttribute("data-pending");
+        button.disabled = false;
+      });
+    });
     window.addEventListener("storage", function (event) {
       if (event.key === THEME_KEY || event.key === LEGACY_THEME_KEY || event.key === PALETTE_KEY || event.key === null) {
         document.documentElement.setAttribute("data-theme", storedTheme() || systemTheme());
@@ -729,4 +750,69 @@
     setConnectionState: setConnectionState,
     enhanceRunContent: enhanceRunContent
   };
+})();
+
+// Routing model picker: search filters every model; results page by ten.
+// Without script the GET search form and the Previous/Next links do the same
+// on the server (?q=…&page=N).
+(function () {
+  function initModelPicker() {
+    var input = document.querySelector("[data-model-search]");
+    var list = document.querySelector("[data-model-options]");
+    var pager = document.querySelector("[data-model-pager]");
+    var count = document.querySelector("[data-model-count]");
+    if (!input || !list) return;
+    var per = parseInt(list.getAttribute("data-per-page") || "10", 10);
+    var items = Array.from(list.querySelectorAll("li[data-search]"));
+    var params = new URLSearchParams(window.location.search);
+    var page = Math.max(1, parseInt(params.get("page") || "1", 10) || 1);
+    var matches = items;
+    function render() {
+      var pages = Math.max(1, Math.ceil(matches.length / per));
+      if (page > pages) page = pages;
+      var from = (page - 1) * per;
+      items.forEach(function (item) { item.hidden = true; });
+      matches.slice(from, from + per).forEach(function (item) { item.hidden = false; });
+      if (pager) {
+        pager.hidden = pages < 2;
+        pager.querySelectorAll("[data-page-step]").forEach(function (link) {
+          var step = parseInt(link.getAttribute("data-page-step"), 10);
+          var off = (step < 0 && page <= 1) || (step > 0 && page >= pages);
+          if (off) { link.setAttribute("aria-disabled", "true"); link.setAttribute("tabindex", "-1"); }
+          else { link.removeAttribute("aria-disabled"); link.removeAttribute("tabindex"); }
+        });
+      }
+      if (count) count.textContent = "Page " + page + " of " + pages + " · " + matches.length + (matches.length === 1 ? " model" : " models");
+    }
+    function filter() {
+      // Same flattening as the server: "OpenCode Go" matches "opencode-go".
+      var needle = input.value.toLowerCase().replace(/[-_/.~·]/g, " ").split(/\s+/).filter(Boolean).join(" ");
+      function names(item) { return (item.getAttribute("data-upstream") || "").split("|"); }
+      // A search that names a provider exactly ("opencode go") shows only its models.
+      var exact = needle && items.some(function (item) { return names(item).indexOf(needle) !== -1; });
+      matches = items.filter(function (item) {
+        if (!needle) return true;
+        return exact ? names(item).indexOf(needle) !== -1 : item.getAttribute("data-search").indexOf(needle) !== -1;
+      });
+      page = 1;
+      render();
+    }
+    input.addEventListener("input", filter);
+    if (pager) {
+      pager.addEventListener("click", function (ev) {
+        var link = ev.target.closest("[data-page-step]");
+        if (!link) return;
+        ev.preventDefault();
+        if (link.getAttribute("aria-disabled") === "true") return;
+        page += parseInt(link.getAttribute("data-page-step"), 10);
+        render();
+        var url = new URL(window.location.href);
+        url.searchParams.set("page", String(page));
+        history.replaceState(null, "", url);
+        list.scrollIntoView({ block: "nearest" });
+      });
+    }
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", initModelPicker);
+  else initModelPicker();
 })();

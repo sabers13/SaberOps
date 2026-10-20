@@ -46,3 +46,8 @@ htmlcov/
 
 # Local browser automation artifacts (MCP remains globally configured)
 .playwright-mcp/
+.ui-shots/
+.playwright-cli/
+
+# orch-UI design workflow scratch (prototypes, taste receipts, inspector shots)
+.taste-skill/

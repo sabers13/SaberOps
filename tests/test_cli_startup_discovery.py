@@ -260,7 +260,9 @@ def test_opencode_model_listing_launches_inside_owned_isolation(
     monkeypatch.setattr(_web, "_run_backend_listing", listing)
     registry = AccessStore(owner_state / AccessStore.FILENAME).load()
     assert _list_account_models(registry.get("opencode-account")) == ["upstream/model"]
-    assert seen["argv"] == ["/fake/opencode", "models"]
+    # OpenCode v2 serves the CLI from one background service on a fixed port;
+    # the isolated listing runs its own private server instead of sharing it.
+    assert seen["argv"] == ["/fake/opencode", "models", "--standalone"]
     env = seen["env_keys"]
     assert isinstance(env, list)
     for key in (
@@ -271,12 +273,44 @@ def test_opencode_model_listing_launches_inside_owned_isolation(
         "XDG_DATA_HOME",
     ):
         assert key in env, f"isolation key {key} missing from OpenCode listing env"
-    assert seen["config"]["enabled_providers"] == ["opencode"]
+    # The listing is read-only metadata: every provider the account reaches is
+    # listed; billing stays pinned per run to the model's own provider.
+    assert "enabled_providers" not in seen["config"]
     assert {
         "action": "integration.use",
         "resource": "plugin:*",
         "effect": "deny",
     } in seen["config"]["policies"]
+
+
+def test_opencode_model_listing_falls_back_without_standalone(
+    owner_state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """OpenCode before v2 has no --standalone flag: retry the plain listing."""
+    from saberops import web as _web
+    from saberops.model_access.connections import ConnectionTestReason
+    from saberops.model_access.discovery import ModelListingError
+
+    calls: list[list[str]] = []
+
+    def listing(argv: list[str], *, env: dict[str, str] | None = None) -> str:
+        calls.append(argv)
+        if "--standalone" in argv:
+            raise ModelListingError(ConnectionTestReason.ENDPOINT_UNREACHABLE, "exit 1")
+        return "opencode-go/deepseek-v4-pro\n"
+
+    monkeypatch.setattr(
+        "shutil.which", lambda name: "/fake/opencode" if name == "opencode" else None
+    )
+    monkeypatch.setattr(_web, "_run_backend_listing", listing)
+    registry = AccessStore(owner_state / AccessStore.FILENAME).load()
+    assert _list_account_models(registry.get("opencode-account")) == [
+        "opencode-go/deepseek-v4-pro"
+    ]
+    assert calls == [
+        ["/fake/opencode", "models", "--standalone"],
+        ["/fake/opencode", "models"],
+    ]
 
 
 def test_opencode_model_listing_refusal_keeps_typed_failure(

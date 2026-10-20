@@ -131,7 +131,7 @@ flowchart LR
 | Surface | Use it for |
 | --- | --- |
 | **`orch` CLI** | Everything. Every owner-facing command supports `--json` for agents and scripts. |
-| **MCP server** (`orch mcp serve`, stdio) | The primary integration surface for other agents: 12 tools to submit and inspect jobs and waves, read evidence, list/answer questions and propose configuration changes. `submit_job` rejects provider, model and billing fields. See [MCP](docs/mcp.md). |
+| **MCP server** (`orch mcp serve`, stdio; `orch connect` registers it in agent CLIs) | The primary integration surface for other agents: off until the user says "turn on saberops", then 12 tools to submit and inspect jobs and waves, read evidence, list/answer questions and propose configuration changes. `submit_job` rejects provider, model and billing fields. See [MCP](docs/mcp.md). |
 | **Web UI** (`orch ui`) | Localhost first-run onboarding (readiness, vendor logins, model discovery, billing-posture attestation), routing and concurrency, project registration, plan/wave scoring, question queue, run monitoring with live events, and storage cleanup with typed confirmation. See [first-run web UI](docs/first-run-web-ui.md). |
 | **Telegram** (optional) | Notifications for questions, gate completions and wave milestones; status queries from stored records; keyed `/answer` replies. Inert without a bot token. See [Telegram](docs/telegram.md). |
 
@@ -185,16 +185,38 @@ Requirements: Python **3.12+**, Git, and for real runs the relevant vendor CLIs
 installed and logged in through the vendor's own mechanism. SaberOps ships no
 model, and its tests and CI make no provider calls.
 
+Install it as a tool, so `orch` is on your `PATH` for every shell and every
+agent CLI:
+
 ```bash
-git clone https://github.com/sabers13/SaberOps.git
-cd SaberOps
-python3.12 -m venv .venv
-source .venv/bin/activate
-python -m pip install .
+uv tool install git+https://github.com/sabers13/SaberOps.git@v0.5.0
+# or: pipx install git+https://github.com/sabers13/SaberOps.git@v0.5.0
 orch --help
 ```
 
-For development: `python -m pip install -e ".[dev]"`.
+Upgrade later with `uv tool upgrade saberops` (or `pipx upgrade saberops`).
+
+### One-time setup
+
+```bash
+orch ui            # http://127.0.0.1:8765
+orch connect all   # register SaberOps in Claude Code, Codex, Antigravity, OpenCode, Cursor
+```
+
+In the web UI: **Setup** signs you in and finds your models, **Accounts**
+confirms how each subscription is billed (**Confirm all**, once), and
+**Routing** chooses which model writes, checks, repairs and combines. Then open
+a new session in your agent and say **"turn on saberops"**; say **"turn off
+saberops"** to go back to a normal agent. Messages from SaberOps start with
+`Orchestrator:`. `orch mcp off` hides SaberOps from every agent.
+
+For development, from a clone:
+
+```bash
+git clone https://github.com/sabers13/SaberOps.git && cd SaberOps
+python3.12 -m venv .venv && source .venv/bin/activate
+python -m pip install -e ".[dev]"
+```
 
 ---
 
@@ -351,7 +373,7 @@ scripts/               gate wrappers and tooling
 
 ## Documentation map
 
-- [v0.4.0 release notes](docs/releases/0.4.0.md)
+- [v0.5.0 release notes](docs/releases/0.5.0.md) · [v0.4.0](docs/releases/0.4.0.md)
 - [ADR-0001: engine direction](docs/decisions/0001-saberops-engine-mcp-first.md)
 - Operating: [operations](docs/operations.md) · [config](docs/config.md) ·
   [storage lifecycle](docs/storage-lifecycle.md) · [security](docs/security.md) ·

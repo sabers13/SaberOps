@@ -9,6 +9,7 @@ runs, reviews, accept, cleanup, and live SSE event streaming.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import json
 import os
@@ -1056,14 +1057,20 @@ def _list_account_models(connection: ProviderConnection) -> list[str]:
             raise ModelListingError(
                 ConnectionTestReason.ENDPOINT_UNREACHABLE, str(exc)
             ) from exc
+        # The listing is read-only metadata, so it lists every provider the
+        # account can reach (OpenCode Go, Zen, Anthropic via OpenCode, ...);
+        # billing stays pinned per run to the model's own provider by the
+        # worker. OpenCode v2 serves the CLI from one background service on a
+        # fixed port; the isolated config cannot share the owner's running
+        # service, so the listing runs its own private server (--standalone).
         with isolation:
-            listing_env = isolation.env_for(
-                base_env,
-                config=isolation.config({"enabled_providers": ["opencode"]}),
-            )
-            stdout = _run_backend_listing(
-                [executable, *descriptor.model_list_argv], env=listing_env
-            )
+            listing_env = isolation.env_for(base_env, config=isolation.config({}))
+            argv = [executable, *descriptor.model_list_argv]
+            try:
+                stdout = _run_backend_listing([*argv, "--standalone"], env=listing_env)
+            except ModelListingError:
+                # OpenCode before v2 has no --standalone flag.
+                stdout = _run_backend_listing(argv, env=listing_env)
     else:
         stdout = _run_backend_listing([executable, *descriptor.model_list_argv])
     if descriptor.backend == "antigravity":
@@ -1617,13 +1624,53 @@ def _unattended_store_path() -> Path:
 def _onboarding_notice(request: Request) -> str | None:
     """Translate an onboarding success-redirect flag into a human notice."""
     params = request.query_params
+    saved = params.get("saved")
+    if saved in ("added", "removed", "moved"):
+        return {
+            "added": "Saved. The model was added.",
+            "removed": "Saved. The model was removed.",
+            "moved": "Saved. The order changed.",
+        }[saved]
     if params.get("concurrency_saved") == "1":
-        return "Concurrency configuration saved (owner-approved decision recorded)."
+        return "Saved. New limits apply to the next task that starts."
     if params.get("discovered") == "1":
         connection = params.get("connection") or "the connection"
-        return f"Model discovery ran for {connection}; the catalog is evidence only."
+        return f"Model list refreshed for {connection}."
     if params.get("posture_saved") == "1":
-        return "Posture attestation recorded for the selected route."
+        return "Saved. Billing confirmed until you change it."
+    if params.get("confirmed_all") is not None:
+        count = params.get("confirmed_all") or "0"
+        skipped = params.get("skipped") or "0"
+        message = f"Saved. Billing confirmed for {count} account(s) until you change it."
+        if skipped != "0":
+            message += f" {skipped} still need a terms or pricing link: use Change on each."
+        return message
+    agent = params.get("agent")
+    if agent:
+        from saberops.agent_connect import agent_by_slug
+
+        found = agent_by_slug(agent)
+        name = found.name if found else agent
+        if params.get("agent_action") == "disconnect":
+            return f"Saved. SaberOps was removed from {name}."
+        return (
+            f"Saved. {name} is connected. Start a new {name} session and say "
+            "\"turn on saberops\" when you want it."
+        )
+    if params.get("mcp") in ("on", "off"):
+        return (
+            "Saved. Agents can use SaberOps again when you turn it on in a session."
+            if params.get("mcp") == "on"
+            else "Saved. SaberOps is off for every agent; they work as normal agents."
+        )
+    checked = params.get("checked")
+    if checked:
+        outcome = params.get("outcome") or ""
+        return {
+            "ran": "Usage checked just now.",
+            "no-executable": "Usage not checked: this account's command-line tool is not installed.",
+            "failed": "Usage could not be read. The account may need you to sign in again.",
+        }.get(outcome, "Usage was not checked this time.")
     if params.get("project_registered") == "1":
         return "Project registered (inactive until you activate it)."
     if params.get("answered") == "1":
@@ -1809,6 +1856,7 @@ def _posture_rows() -> list[dict[str, Any]]:
                 "expires_on": row.get("expires_on"),
                 "status": status,
                 "auto_routing": status in ("OK", "EXPIRING"),
+                "confirmed": status in ("OK", "EXPIRING", "ATTENDED_ONLY", "METERED"),
                 "state_class": _pill_class(status),
             }
         )
@@ -1871,6 +1919,261 @@ def _role_chain_rows() -> list[dict[str, Any]]:
             }
         )
     return rows
+
+
+_ACCOUNT_LABELS: dict[str, str] = {
+    "anthropic": "Claude",
+    "antigravity": "Antigravity",
+    "cline": "Cline",
+    "codex": "Codex",
+    "google": "Google",
+    "openai": "OpenAI",
+    "opencode": "OpenCode",
+}
+
+
+def _account_label(provider: str) -> str:
+    """Plain account name for a provider id ("codex" -> "Codex")."""
+    key = provider.strip().lower()
+    return _ACCOUNT_LABELS.get(key, key.replace("-", " ").replace("_", " ").title() or "Unknown")
+
+
+#: Owner-facing names for the upstream providers an aggregator account (OpenCode,
+#: a custom API connection) routes to; the prefix is the model id's first segment.
+_UPSTREAM_LABELS: dict[str, str] = {
+    "opencode": "OpenCode Zen",
+    "opencode-go": "OpenCode Go",
+    "cline-pass": "Cline Pass",
+    "minimax-coding-plan": "MiniMax Coding Plan",
+    "generalcompute": "General Compute",
+    "tokenrouter": "TokenRouter",
+    "zhipuai": "Zhipu AI",
+    "z-ai": "Z.ai",
+    "x-ai": "xAI",
+    "openai": "OpenAI",
+    "anthropic": "Anthropic",
+    "google": "Google",
+    "deepseek": "DeepSeek",
+    "mistralai": "Mistral AI",
+    "moonshotai": "Moonshot AI",
+    "meta-llama": "Meta Llama",
+    "minimax": "MiniMax",
+    "openrouter": "OpenRouter",
+    "nvidia": "NVIDIA",
+    "qwen": "Qwen",
+    "ibm-granite": "IBM Granite",
+}
+
+
+def _upstream_label(prefix: str) -> str:
+    key = prefix.strip().lower().lstrip("~")
+    if key in _UPSTREAM_LABELS:
+        return _UPSTREAM_LABELS[key]
+    words = key.replace("_", " ").replace("-", " ").split()
+    return " ".join(w.upper() if w == "ai" else w.capitalize() for w in words) or prefix
+
+
+def _model_origin(provider: str, model: str) -> str:
+    """Where a model really comes from, in words: "OpenCode Go · via OpenCode"."""
+    account = _account_label(provider)
+    head, sep, _rest = model.partition("/")
+    if not sep:
+        return f"{account} account"
+    return f"{_upstream_label(head)} · via {account}"
+
+
+def _search_text(*parts: str) -> str:
+    """Lowercased words with separators flattened, so "opencode go" finds "opencode-go"."""
+    text = " ".join(parts).lower()
+    for mark in "-_/.~·":
+        text = text.replace(mark, " ")
+    return " ".join(text.split())
+
+
+def _model_family(provider: str, model: str) -> str:
+    """The company behind a model, used only to hint at independent review."""
+    text = f"{provider}/{model}".lower()
+    for needle, family in (
+        ("claude", "Anthropic"), ("gemini", "Google"), ("gpt", "OpenAI"), ("codex", "OpenAI"),
+    ):
+        if needle in text:
+            return family
+    return _account_label(provider)
+
+
+def _planner_view() -> dict[str, Any]:
+    """The agent that plans the work: whoever holds the MCP writer lease."""
+    from saberops.mcp.lease import OrchestratorLease, pid_is_alive
+    from saberops.mcp.switch import mcp_enabled
+
+    try:
+        record = OrchestratorLease().read()
+    except Exception:
+        record = None
+    if not mcp_enabled():
+        return {"connected": False, "name": "", "since": None, "holder": None, "off": True}
+    if record is None or not pid_is_alive(record.pid):
+        return {"connected": False, "name": "", "since": None, "holder": None}
+    raw = record.client or ""
+    name = raw.replace("-", " ").replace("_", " ").strip().title() if raw else "Your agent"
+    return {"connected": True, "name": name, "since": record.acquired_at, "holder": record.holder}
+
+
+def _chain_row(position: int, key: str, provider: str, model: str, technical: str) -> dict[str, Any]:
+    return {
+        "position": position,
+        "key": key,
+        # Stable per-model name so a reorder animates the row, not the list.
+        "vt": "m" + hashlib.sha1(key.encode("utf-8")).hexdigest()[:12],
+        "label": model.rsplit("/", 1)[-1],
+        "account": _account_label(provider),
+        "origin": _model_origin(provider, model),
+        "family": _model_family(provider, model),
+        "technical": technical,
+    }
+
+
+def _routing_view(request: Request, registry: AdapterRegistry) -> dict[str, Any]:
+    """Everything the Routing page shows: jobs, the selected job and its picker."""
+    from saberops import routing_ops
+    from saberops.routing_config import load_effective_routing_payload
+
+    owner = _load_owner_bindings_safely()
+    error: str | None = None
+    try:
+        payload = load_effective_routing_payload()
+    except Exception as exc:
+        payload = {"roles": {}}
+        error = f"The routing file could not be read: {exc}"
+    approvals = payload.get("approved_candidates") or {}
+    planner = _planner_view()
+    jobs: list[dict[str, Any]] = []
+    for job in routing_ops.JOBS:
+        chain: list[dict[str, Any]] = []
+        if job.store == "routing":
+            groups = payload.get("roles", {}).get(job.role, [])
+            for number, group in enumerate(groups, start=1):
+                for candidate_id in group.get("routes", []):
+                    provider, _, model = str(candidate_id).partition("/")
+                    approval = approvals.get(candidate_id) or {}
+                    technical = str(approval.get("binding_id") or candidate_id)
+                    chain.append(_chain_row(number, candidate_id, provider, model, technical))
+        elif job.store == "reviewer":
+            for number, binding_id in enumerate(owner.role_binding_ids("reviewer"), start=1):
+                binding = owner.registry.try_get(binding_id)
+                provider = binding.provider if binding is not None else binding_id
+                model = binding.model if binding is not None else binding_id
+                chain.append(_chain_row(number, binding_id, provider, model, binding_id))
+        jobs.append(
+            {
+                "slug": job.slug,
+                "role": job.role,
+                "name": job.name,
+                "verb": job.verb,
+                "help": job.help,
+                "store": job.store,
+                "chain": chain,
+                "ready": planner["connected"] if job.store == "agent" else bool(chain),
+            }
+        )
+    wanted = (request.query_params.get("job") or "").strip().lower()
+    selected = next((job for job in jobs if job["slug"] == wanted), None)
+    if selected is None:
+        selected = next((j for j in jobs if j["store"] != "agent" and not j["ready"]), jobs[1])
+    query = (request.query_params.get("q") or "").strip()
+    account = (request.query_params.get("account") or "").strip()
+    options: list[dict[str, Any]] = []
+    if selected["store"] != "agent":
+        try:
+            if selected["store"] == "reviewer":
+                found = routing_ops.reviewer_options(owner, registry)
+            else:
+                found = routing_ops.chain_options(
+                    owner, access_ops.load_catalog_safely(), registry
+                )
+        except Exception:
+            found = []
+        taken = {row["key"] for row in selected["chain"]}
+        writer = next((j for j in jobs if j["slug"] == "write"), None)
+        writer_family = writer["chain"][0]["family"] if writer and writer["chain"] else ""
+        for option in found:
+            if option.key in taken:
+                continue
+            family = _model_family(option.provider, option.model)
+            label = option.label.rsplit("/", 1)[-1]
+            origin = _model_origin(option.provider, option.model)
+            head, sep, _tail = option.model.partition("/")
+            upstream = _search_text(_upstream_label(head) if sep else _account_label(option.provider))
+            options.append(
+                {
+                    "key": option.key,
+                    "label": label,
+                    "account": _account_label(option.provider),
+                    "origin": origin,
+                    "search": _search_text(label, option.key, origin),
+                    "upstream": upstream,
+                    "upstream_key": _search_text(head) if sep else upstream,
+                    "provider": option.provider,
+                    "technical": option.binding_id,
+                    "same_company": selected["slug"] == "check" and family == writer_family,
+                }
+            )
+    accounts: dict[str, int] = {}
+    for row in options:
+        accounts[row["account"]] = accounts.get(row["account"], 0) + 1
+    needle = _search_text(query)
+    # A search that names a provider exactly ("opencode go") shows that provider's
+    # models only; anything else is a plain substring search.
+    exact = needle and any(needle in (row["upstream"], row["upstream_key"]) for row in options)
+    shown = [
+        row
+        for row in options
+        if (not account or row["account"] == account)
+        and (
+            not needle
+            or (needle in (row["upstream"], row["upstream_key"]) if exact else needle in row["search"])
+        )
+    ]
+    # Accounts whose model list is out of date: their models are never offered
+    # (stale evidence never routes), so say so and offer a refresh in place.
+    outdated: dict[str, dict[str, Any]] = {}
+    if selected["store"] != "agent":
+        try:
+            for entry in access_ops.load_catalog_safely().list_models():
+                if entry.is_stale and entry.is_discovery_verified:
+                    row = outdated.setdefault(
+                        entry.connection_id,
+                        {
+                            "connection_id": entry.connection_id,
+                            "account": _account_label(entry.provider),
+                            "count": 0,
+                        },
+                    )
+                    row["count"] += 1
+        except Exception:
+            outdated = {}
+    per_page = 10
+    pages = max(1, -(-len(shown) // per_page))
+    try:
+        page = min(max(1, int(request.query_params.get("page") or 1)), pages)
+    except ValueError:
+        page = 1
+    return {
+        "outdated": sorted(outdated.values(), key=lambda row: row["account"]),
+        "per_page": per_page,
+        "page": page,
+        "pages": pages,
+        "jobs": jobs,
+        "selected": selected,
+        "planner": planner,
+        "options": shown,
+        "option_total": len(options),
+        "accounts": sorted(accounts.items()),
+        "query": query,
+        "account": account,
+        "missing": [j for j in jobs if j["store"] != "agent" and not j["ready"]],
+        "error": error,
+    }
 
 
 def _concurrency_view() -> dict[str, Any]:
@@ -2235,6 +2538,29 @@ def _storage_view(repo_param: str, db: Database) -> dict[str, Any]:
     return view
 
 
+OWNER_PAGES: tuple[str, ...] = ("setup", "routing", "accounts", "projects", "questions")
+
+
+def _nav_state() -> dict[str, Any]:
+    """Sidebar badges for every page: pending questions and setup attention.
+
+    Read-only and never raises; an unreadable store simply shows no badge.
+    """
+    try:
+        pending = len(_question_rows().get("pending") or [])
+    except Exception:
+        pending = 0
+    try:
+        attention = any(row.get("state") != "ok" for row in _diagnostics_rows())
+    except Exception:
+        attention = False
+    return {
+        "pending_questions": pending,
+        "setup_attention": attention,
+        "version": saberops_version(),
+    }
+
+
 def _first_run_required(service: OrchestratorService) -> bool:
     """True only when the store holds no runs, bindings, projects or models.
 
@@ -2291,6 +2617,7 @@ def _onboarding_context(
         "connections": _connection_rows(),
         "models": _model_rows(),
         "postures": _posture_rows(),
+        "planner": _planner_view(),
         "role_bindings": _role_binding_view(),
         "role_chains": _role_chain_rows(),
         "concurrency": _concurrency_view(),
@@ -2349,6 +2676,7 @@ def create_app(
     app = FastAPI(title="SaberOps Status")
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
     templates.env.globals["fmt"] = format_timestamp
+    templates.env.globals["nav_state"] = _nav_state
 
     @app.middleware("http")
     async def _origin_guard(request: Request, call_next: Callable[..., Any]) -> Response:
@@ -2387,13 +2715,8 @@ def create_app(
     @app.get("/", response_class=HTMLResponse, name="dashboard")
     def dashboard(request: Request) -> HTMLResponse:
         if _first_run_required(service):
-            # Fresh install: land directly on the first-run onboarding wizard
-            # instead of an empty run table.
-            return templates.TemplateResponse(
-                request,
-                "onboarding.html",
-                _onboarding_context(service, db, request),
-            )
+            # Fresh install: land directly on Setup instead of an empty run table.
+            return onboarding_page(request, page="setup", first_run=True)
         return templates.TemplateResponse(
             request,
             "dashboard.html",
@@ -2403,22 +2726,56 @@ def create_app(
     def onboarding_page(
         request: Request,
         *,
+        page: str,
         error: str | None = None,
         notice: str | None = None,
         status_code: int = 200,
+        first_run: bool = False,
     ) -> HTMLResponse:
-        """Render the first-run onboarding page (shared by GET and POST)."""
+        """Render one owner page (setup/routing/projects/questions) for GET and POST."""
+        context = _onboarding_context(service, db, request, error=error, notice=notice)
+        context["first_run"] = first_run
+        if page == "routing":
+            context["routing"] = _routing_view(request, resolved_registry)
+        if page == "setup":
+            from saberops.agent_connect import agent_rows
+            from saberops.mcp.switch import mcp_enabled
+
+            context["agents"] = {"rows": agent_rows(), "enabled": mcp_enabled()}
+        if page == "accounts":
+            from saberops.accounts_view import accounts_view
+
+            context["accounts"] = accounts_view(db)
         return templates.TemplateResponse(
-            request,
-            "onboarding.html",
-            _onboarding_context(service, db, request, error=error, notice=notice),
-            status_code=status_code,
+            request, f"{page}.html", context, status_code=status_code
         )
 
-    @app.get("/first-run", response_class=HTMLResponse, name="first_run")
-    def first_run(request: Request) -> HTMLResponse:
-        """Complete first-run onboarding, routing, run and storage surface."""
-        return onboarding_page(request, notice=_onboarding_notice(request))
+    @app.get("/first-run", name="first_run")
+    def first_run(request: Request) -> RedirectResponse:
+        """Legacy onboarding URL: Setup now owns first-run, keeping the query."""
+        query = request.url.query
+        return RedirectResponse(url="/setup" + (f"?{query}" if query else ""), status_code=303)
+
+    def _owner_page_route(page: str) -> Callable[[Request], HTMLResponse]:
+        def render(request: Request) -> HTMLResponse:
+            return onboarding_page(
+                request,
+                page=page,
+                notice=_onboarding_notice(request),
+                first_run=page == "setup" and _first_run_required(service),
+            )
+
+        render.__name__ = f"{page}_page"
+        return render
+
+    for _page in OWNER_PAGES:
+        app.add_api_route(
+            f"/{_page}",
+            _owner_page_route(_page),
+            methods=["GET"],
+            response_class=HTMLResponse,
+            name=f"{_page}_page",
+        )
 
     @app.post("/first-run/concurrency", name="save_concurrency")
     def save_concurrency(
@@ -2436,12 +2793,14 @@ def create_app(
         if not _csrf_valid(csrf):
             return onboarding_page(
                 request,
+                page="routing",
                 error="Refused: missing or invalid confirmation token.",
                 status_code=403,
             )
         if owner_confirmed != "yes":
             return onboarding_page(
                 request,
+                page="routing",
                 error="Owner confirmation is required before saving concurrency limits.",
                 status_code=400,
             )
@@ -2450,7 +2809,8 @@ def create_app(
             slots = int(child_slots_per_project)
         except ValueError:
             return onboarding_page(
-                request, error="Concurrency limits must be whole numbers.", status_code=400
+                request,
+                page="routing", error="Concurrency limits must be whole numbers.", status_code=400
             )
         ledger = _config_ledger()
         try:
@@ -2467,38 +2827,133 @@ def create_app(
             approve_config_proposal(proposal, ledger=ledger, approved_by="owner")
         except ConfigError as exc:
             return onboarding_page(
-                request, error=f"Concurrency not saved: {exc}", status_code=400
+                request,
+                page="routing", error=f"Concurrency not saved: {exc}", status_code=400
             )
-        return RedirectResponse(url="/first-run?concurrency_saved=1", status_code=303)
+        return RedirectResponse(url="/routing?concurrency_saved=1", status_code=303)
+
+    def _routing_refusal(request: Request, message: str, status_code: int) -> HTMLResponse:
+        return onboarding_page(request, page="routing", error=message, status_code=status_code)
+
+    def _routing_done(job: str, saved: str) -> RedirectResponse:
+        return RedirectResponse(url=f"/routing?job={quote(job)}&saved={saved}", status_code=303)
+
+    @app.post("/routing/add", name="add_routing_model")
+    def routing_add(
+        request: Request,
+        csrf: Annotated[str, Form()] = "",
+        job: Annotated[str, Form()] = "",
+        model: Annotated[str, Form()] = "",
+    ) -> Response:
+        """Owner decision: append one evidenced model to a job's fallback order."""
+        from saberops import routing_ops
+
+        if not _csrf_valid(csrf):
+            return _routing_refusal(request, "Refused: missing or invalid confirmation token.", 403)
+        try:
+            routing_ops.add_to_job(
+                job,
+                model,
+                owner=_load_owner_bindings_safely(),
+                catalog=access_ops.load_catalog_safely(),
+                registry=resolved_registry,
+            )
+        except (routing_ops.RoutingEditError, BindingStoreError) as exc:
+            return _routing_refusal(request, str(exc), 400)
+        return _routing_done(job, "added")
+
+    @app.post("/routing/remove", name="remove_routing_model")
+    def routing_remove(
+        request: Request,
+        csrf: Annotated[str, Form()] = "",
+        job: Annotated[str, Form()] = "",
+        model: Annotated[str, Form()] = "",
+    ) -> Response:
+        """Owner decision: take one model off a job (an empty job stays empty)."""
+        from saberops import routing_ops
+
+        if not _csrf_valid(csrf):
+            return _routing_refusal(request, "Refused: missing or invalid confirmation token.", 403)
+        try:
+            routing_ops.remove_from_job(job, model, owner=_load_owner_bindings_safely())
+        except (routing_ops.RoutingEditError, BindingStoreError) as exc:
+            return _routing_refusal(request, str(exc), 400)
+        return _routing_done(job, "removed")
+
+    @app.post("/routing/move", name="move_routing_model")
+    def routing_move(
+        request: Request,
+        csrf: Annotated[str, Form()] = "",
+        job: Annotated[str, Form()] = "",
+        position: Annotated[str, Form()] = "",
+        direction: Annotated[str, Form()] = "",
+    ) -> Response:
+        """Owner decision: move one model a place earlier or later in a job."""
+        from saberops import routing_ops
+
+        if not _csrf_valid(csrf):
+            return _routing_refusal(request, "Refused: missing or invalid confirmation token.", 403)
+        try:
+            routing_ops.move_in_job(
+                job, int(position), direction, owner=_load_owner_bindings_safely()
+            )
+        except ValueError as exc:
+            return _routing_refusal(request, f"Order not saved: {exc}", 400)
+        except BindingStoreError as exc:
+            return _routing_refusal(request, str(exc), 400)
+        return _routing_done(job, "moved")
 
     @app.post("/first-run/discover", name="discover_models")
     def discover_models(
         request: Request,
         csrf: Annotated[str, Form()] = "",
         connection_id: Annotated[str, Form()] = "",
+        return_to: Annotated[str, Form()] = "",
+        job: Annotated[str, Form()] = "",
     ) -> Response:
         """Run bounded model discovery for one connection (evidence only)."""
+        page = "routing" if return_to == "routing" else "setup"
         if not _csrf_valid(csrf):
             return onboarding_page(
                 request,
+                page=page,
                 error="Refused: missing or invalid confirmation token.",
                 status_code=403,
             )
         wanted = connection_id.strip()
         if not wanted:
             return onboarding_page(
-                request, error="Choose a connection to discover.", status_code=400
+                request,
+                page=page, error="Choose a connection to discover.", status_code=400
             )
         try:
-            access_ops.discover_access_models(wanted)
+            outcome = access_ops.discover_access_models(wanted)
         except Exception as exc:
             return onboarding_page(
                 request,
-                error=f"Discovery failed: {exc.__class__.__name__}: {exc}",
+                page=page,
+                error=f"The model list could not be refreshed: {exc}",
                 status_code=400,
             )
+        if not outcome.get("ok"):
+            reason = str(outcome.get("reason") or "")
+            plain = {
+                "ENDPOINT_UNREACHABLE": "the tool did not answer",
+                "BACKEND_NOT_INSTALLED": "its command-line tool is not installed",
+                "NOT_AUTHENTICATED": "you are not signed in to it",
+            }.get(reason, "it could not list its models")
+            return onboarding_page(
+                request,
+                page=page,
+                error=(
+                    f"The model list for {wanted} was not refreshed: {plain}. "
+                    "The last list is kept and stays hidden until a refresh works."
+                ),
+                status_code=502,
+            )
+        back = f"/routing?job={quote(job)}&" if page == "routing" and job else f"/{page}?"
         return RedirectResponse(
-            url=f"/first-run?discovered=1&connection={quote(wanted)}", status_code=303
+            url=f"{back}discovered=1&connection={quote(wanted)}", status_code=303
         )
 
     @app.post("/first-run/posture/verify", name="verify_posture_route")
@@ -2509,11 +2964,14 @@ def create_app(
         posture_class: Annotated[str, Form()] = "",
         policy_urls: Annotated[str, Form()] = "",
         note: Annotated[str, Form()] = "",
+        return_to: Annotated[str, Form()] = "",
     ) -> Response:
         """Record the owner's attestation for one billing-posture selector."""
+        page = "accounts" if return_to == "accounts" else "setup"
         if not _csrf_valid(csrf):
             return onboarding_page(
                 request,
+                page=page,
                 error="Refused: missing or invalid confirmation token.",
                 status_code=403,
             )
@@ -2524,9 +2982,118 @@ def create_app(
             )
         except plans_ops.PlansOperationError as exc:
             return onboarding_page(
-                request, error=f"Posture not recorded: {exc}", status_code=400
+                request,
+                page=page, error=f"Billing not confirmed: {exc}", status_code=400
             )
-        return RedirectResponse(url="/first-run?posture_saved=1", status_code=303)
+        return RedirectResponse(url=f"/{page}?posture_saved=1", status_code=303)
+
+    @app.post("/setup/agents", name="connect_agent")
+    def connect_agent(
+        request: Request,
+        csrf: Annotated[str, Form()] = "",
+        agent: Annotated[str, Form()] = "",
+        action: Annotated[str, Form()] = "connect",
+    ) -> Response:
+        """Owner action: register (or remove) SaberOps in one agent CLI."""
+        from saberops.agent_connect import agent_by_slug, connect, disconnect
+
+        if not _csrf_valid(csrf):
+            return onboarding_page(
+                request, page="setup",
+                error="Refused: missing or invalid confirmation token.", status_code=403,
+            )
+        if agent_by_slug(agent) is None or action not in ("connect", "disconnect"):
+            return onboarding_page(
+                request, page="setup", error="Choose an agent to connect.", status_code=400
+            )
+        result = connect(agent) if action == "connect" else disconnect(agent)
+        if not result.ok:
+            message = result.message
+            if result.snippet:
+                message += " Add it by hand: " + " ".join(result.snippet.split())
+            return onboarding_page(request, page="setup", error=message, status_code=400)
+        return RedirectResponse(
+            url=f"/setup?agent={quote(agent)}&agent_action={quote(action)}", status_code=303
+        )
+
+    @app.post("/setup/mcp-switch", name="mcp_switch")
+    def mcp_switch(
+        request: Request,
+        csrf: Annotated[str, Form()] = "",
+        enabled: Annotated[str, Form()] = "",
+    ) -> Response:
+        """Owner action: the master switch for every connected agent."""
+        from saberops.mcp.switch import set_mcp_enabled
+
+        if not _csrf_valid(csrf):
+            return onboarding_page(
+                request, page="setup",
+                error="Refused: missing or invalid confirmation token.", status_code=403,
+            )
+        set_mcp_enabled(enabled == "on")
+        return RedirectResponse(url=f"/setup?mcp={'on' if enabled == 'on' else 'off'}", status_code=303)
+
+    @app.post("/accounts/confirm-all", name="confirm_all_billing")
+    def confirm_all_billing(
+        request: Request,
+        csrf: Annotated[str, Form()] = "",
+    ) -> Response:
+        """Owner action: confirm every account's billing as currently recorded.
+
+        Re-confirms each non-forbidden record with its existing class and
+        policy links (the owner's statement that they still hold); records
+        that still need links are left for the owner to fill in.
+        """
+        from saberops.accounts_view import accounts_view
+
+        if not _csrf_valid(csrf):
+            return onboarding_page(
+                request, page="accounts",
+                error="Refused: missing or invalid confirmation token.", status_code=403,
+            )
+        view = accounts_view(db)
+        rows = [r for card in view["cards"] for r in card["billing"]] + view["others"]
+        confirmed, skipped = 0, 0
+        for row in rows:
+            if row["class"] == "X":
+                continue
+            if not row["urls"] and row["class"] in ("A", "B", "C"):
+                skipped += 1
+                continue
+            try:
+                plans_ops.verify_posture(row["selector"], (), None, None, None)
+            except plans_ops.PlansOperationError:
+                skipped += 1
+                continue
+            confirmed += 1
+        return RedirectResponse(
+            url=f"/accounts?confirmed_all={confirmed}&skipped={skipped}", status_code=303
+        )
+
+    @app.post("/accounts/check", name="check_account_usage")
+    def check_account_usage(
+        request: Request,
+        csrf: Annotated[str, Form()] = "",
+        account: Annotated[str, Form()] = "",
+    ) -> Response:
+        """Owner-initiated, zero-inference usage reading for one account."""
+        from saberops.accounts_view import ACCOUNTS, check_usage
+
+        if not _csrf_valid(csrf):
+            return onboarding_page(
+                request,
+                page="accounts",
+                error="Refused: missing or invalid confirmation token.",
+                status_code=403,
+            )
+        if account not in {a.slug for a in ACCOUNTS}:
+            return onboarding_page(
+                request, page="accounts", error="Choose an account to check.", status_code=400
+            )
+        outcome = check_usage(db, account)
+        return RedirectResponse(
+            url=f"/accounts?checked={quote(account)}&outcome={quote(outcome)}", status_code=303
+        )
 
     @app.post("/first-run/project/register", name="register_project")
     def register_project(
@@ -2542,12 +3109,14 @@ def create_app(
         if not _csrf_valid(csrf):
             return onboarding_page(
                 request,
+                page="projects",
                 error="Refused: missing or invalid confirmation token.",
                 status_code=403,
             )
         if owner_confirmed != "yes":
             return onboarding_page(
                 request,
+                page="projects",
                 error="Owner confirmation is required before registering a project.",
                 status_code=400,
             )
@@ -2561,9 +3130,10 @@ def create_app(
             )
         except Exception as exc:
             return onboarding_page(
-                request, error=f"Project not registered: {exc}", status_code=400
+                request,
+                page="projects", error=f"Project not registered: {exc}", status_code=400
             )
-        return RedirectResponse(url="/first-run?project_registered=1", status_code=303)
+        return RedirectResponse(url="/projects?project_registered=1", status_code=303)
 
     @app.post("/questions/{question_id}/answer", name="answer_question")
     def answer_question_route(
@@ -2577,12 +3147,14 @@ def create_app(
         if not _csrf_valid(csrf):
             return onboarding_page(
                 request,
+                page="questions",
                 error="Refused: missing or invalid confirmation token.",
                 status_code=403,
             )
         if not answer_text.strip():
             return onboarding_page(
-                request, error="An owner answer requires words.", status_code=400
+                request,
+                page="questions", error="An owner answer requires words.", status_code=400
             )
         try:
             _question_queue().answer(
@@ -2595,9 +3167,10 @@ def create_app(
             )
         except QuestionError as exc:
             return onboarding_page(
-                request, error=f"Answer not recorded: {exc}", status_code=400
+                request,
+                page="questions", error=f"Answer not recorded: {exc}", status_code=400
             )
-        return RedirectResponse(url="/first-run?answered=1", status_code=303)
+        return RedirectResponse(url="/questions?answered=1", status_code=303)
 
     @app.post("/questions/{question_id}/defer", name="defer_question")
     def defer_question_route(
@@ -2611,6 +3184,7 @@ def create_app(
         if not _csrf_valid(csrf):
             return onboarding_page(
                 request,
+                page="questions",
                 error="Refused: missing or invalid confirmation token.",
                 status_code=403,
             )
@@ -2624,9 +3198,10 @@ def create_app(
             )
         except QuestionError as exc:
             return onboarding_page(
-                request, error=f"Question not deferred: {exc}", status_code=400
+                request,
+                page="questions", error=f"Question not deferred: {exc}", status_code=400
             )
-        return RedirectResponse(url="/first-run?deferred=1", status_code=303)
+        return RedirectResponse(url="/questions?deferred=1", status_code=303)
 
     @app.post("/first-run/storage/apply", name="apply_storage_cleanup")
     def apply_storage_cleanup(
@@ -2644,6 +3219,7 @@ def create_app(
         if not _csrf_valid(csrf):
             return onboarding_page(
                 request,
+                page="projects",
                 error="Refused: missing or invalid confirmation token.",
                 status_code=403,
             )
@@ -2651,6 +3227,7 @@ def create_app(
         if not repo.strip() or not repo_path.exists():
             return onboarding_page(
                 request,
+                page="projects",
                 error="A valid repository path is required to apply cleanup.",
                 status_code=400,
             )
@@ -2665,12 +3242,14 @@ def create_app(
         except Exception as exc:
             return onboarding_page(
                 request,
+                page="projects",
                 error=f"Cleanup preview failed: {exc.__class__.__name__}: {exc}",
                 status_code=400,
             )
         if not preview.approved:
             return onboarding_page(
                 request,
+                page="projects",
                 error=(
                     "Refused: no validated standing owner policy authorizes "
                     "destructive cleanup."
@@ -2680,12 +3259,14 @@ def create_app(
         if not preview.preview_id or confirm.strip() != preview.preview_id:
             return onboarding_page(
                 request,
+                page="projects",
                 error="Owner confirmation required: type the exact preview id to apply cleanup.",
                 status_code=400,
             )
         if preview_id.strip() and preview_id.strip() != preview.preview_id:
             return onboarding_page(
                 request,
+                page="projects",
                 error="The preview changed; refresh the dry-run before applying.",
                 status_code=409,
             )
@@ -2700,6 +3281,7 @@ def create_app(
         except Exception as exc:
             return onboarding_page(
                 request,
+                page="projects",
                 error=f"Cleanup failed: {exc.__class__.__name__}: {exc}",
                 status_code=500,
             )
@@ -2707,7 +3289,7 @@ def create_app(
         refused = len(result.refused)
         uncertain = "&audit_uncertain=1" if result.audit_uncertain else ""
         return RedirectResponse(
-            url=f"/first-run?gc_applied=1&applied={applied}&refused={refused}{uncertain}",
+            url=f"/projects?gc_applied=1&applied={applied}&refused={refused}{uncertain}",
             status_code=303,
         )
 
@@ -3161,8 +3743,33 @@ def create_app(
             "orch_executable": resolve_orch_executable(),
         })
 
+    refresh_stop = threading.Event()
+
+    @app.on_event("startup")
+    def _refresh_model_lists() -> None:
+        """Keep account model lists current without the owner pressing Refresh.
+
+        On start and then daily, re-list the models of every account whose
+        list is missing, out of date or older than a day. Listing is
+        read-only metadata (no prompt). Off under tests and with
+        SABEROPS_NO_AUTO_REFRESH=1.
+        """
+        if os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("SABEROPS_NO_AUTO_REFRESH"):
+            return
+
+        def loop() -> None:
+            while not refresh_stop.is_set():
+                try:
+                    access_ops.refresh_outdated_model_lists()
+                except Exception:
+                    pass
+                refresh_stop.wait(24 * 3600)
+
+        threading.Thread(target=loop, name="saberops-model-refresh", daemon=True).start()
+
     @app.on_event("shutdown")
     def _shutdown() -> None:
+        refresh_stop.set()
         """Server shutdown releases cached runtimes without corrupting state."""
         try:
             runtimes.shutdown()

@@ -10,6 +10,162 @@ The agent inspector keeps global terminal actions near its top, uses compact
 status text, and supports resizable output and an expanded reading view. Native
 Apple styling and platform-specific chrome are not required for this web app.
 
+## Framed sheet — orch-UI redesign, 20 October 2026 (current)
+
+The owner judged "Basalt" generic and confusing and asked for a calm redesign led by
+the Routing page. Intake: less technical people, long sessions kept open, Apple System
+Settings as the reference, calm and serious, comfortable density, light and dark with a
+toggle, desktop first with phones usable, English. Three prototypes of Routing were
+built (`.taste-skill/prototypes/{a,b,c}.html`); the owner picked **B, framed sheet**
+(taste library style `framed-sheet`, seed 1102595334). Owner notes, verbatim:
+
+> option b, but motion make fluid use the tools in orch-UI
+
+Everything below this section is history. Execution, review, acceptance, CSRF and
+host authorities are unchanged.
+
+**The move.** One tinted L-frame holds the sidebar and the 48px top bar (breadcrumb,
+appearance toggle) with no rule between them; the work sits on a white sheet inset 8px
+from the window's right and bottom edges, 16px corners, a 1px edge, no shadow. Depth
+comes from one tone step. Phones lose the frame: the sheet is the screen under a 48px
+bar with a `<details>` menu.
+
+**Face.** The frame is tinted a low-chroma blue-grey (a control room). The one hue,
+teal `--accent`, marks the selected job, the model in charge and focus; everything else
+in the chrome is grey. Primary buttons are near-black ink. Type is IBM Plex Sans
+(bundled, OFL); IBM Plex Mono only for ids, paths and code.
+
+**Plain language.** Screens use the owner's words: jobs ("Writes the code", "Checks the
+work"), accounts ("Codex account"), "Ready for your decision". Engine terms (roles,
+tiers, binding ids, commit SHAs, paths, posture classes, mode codes) live behind a
+"Technical details" disclosure (`details.tech`) on the same screen.
+
+**Each screen's one question.**
+
+| Screen | Question | Hidden by default |
+|---|---|---|
+| Routing | Which model does each job, and who takes over when it is busy? | role keys, binding ids, approvals |
+| Runs | What is running, and what needs me right now? | run ids, tier |
+| Run detail | Did this work, and should I accept it? | paths, SHAs, tier, dispatch counts, raw report |
+| Questions | What is waiting for my decision? | keys, kinds, decision classes |
+| Accounts | How much of each subscription is left, and may SaberOps use it on its own? | posture selectors, class codes, probe sources |
+| Projects | Can SaberOps work in this repository, and how much space does it use? | mode codes, preflight codes, plan registry JSON |
+| Setup | Is everything connected and ready? | connection ids, executables, catalog sources |
+
+**Routing contract.** Five jobs in work order: Plans the work (ORCHESTRATOR, always the
+agent connected over MCP, read from the writer lease's `client` label, never chosen in
+the UI), Writes the code (WORKER), Checks the work (REVIEWER order in the binding store),
+Repairs failed work (SURGEON), Combines finished work (INTEGRATOR). One job is open at a
+time (`/routing?job=<slug>`); a phone shows the job list or one job. The picker offers
+only models with fresh, discovery-verified, execution-supported evidence and an exact
+binding that resolves (`routing_ops.chain_options` / `reviewer_options`), eight at a
+time with account tabs and search. Changes are plain POSTs (`/routing/add`,
+`/routing/remove`, `/routing/move`, CSRF) through the canonical writers. A fresh
+install starts with every routed job empty; nothing is substituted.
+
+**Accounts contract (added 20 October 2026, owner request).** One panel per subscription
+(Codex, Claude, OpenCode Go, Antigravity): what is left per window (5-hour, week, month)
+as meters at the true ratio with the reset time, and how it is billed with a one-click
+"Confirm again" plus a "Change" disclosure. Usage comes only from zero-inference CLI
+metadata: "Check now" forces the engine's own capacity probe for registered harnesses
+(the reading also feeds routing); Antigravity, which the engine never probes on its own,
+is read on request into a display-only cache. Confirming reuses
+`/first-run/posture/verify` with `return_to=accounts`.
+
+**Agent connection (added 20 October 2026, owner request).** Setup's last step lists the
+agent CLIs on the computer (Claude Code, Codex, Antigravity, OpenCode, Cursor) with one
+Connect/Remove button each (`orch connect`), plus the owner's master switch
+(`orch mcp on|off`). Every agent session starts with SaberOps off; the user says "turn on
+saberops" / "turn off saberops" in the agent (`saberops_on` / `saberops_off`). Everything
+SaberOps says starts with "Orchestrator:".
+
+**Tokens** (`static/css/app.css`):
+
+| Token | Light | Dark | Role |
+|---|---|---|---|
+| `--ground` | #eef2f5 | #0d0f10 | the frame |
+| `--surface` | #ffffff | #16191b | the sheet, panels |
+| `--raised` / `--active` | #f4f6f8 / #e6eaee | #1d2023 / #24282b | wells, hover / selected row, nav pill |
+| `--border` / `--rule` / `--control` | #e3e7ea / #eef0f2 / #cdced1 | #262a2d / #202326 / #3d4246 | panel edge / row rule / control edge |
+| `--text` / `--muted` / `--faint` | #131416 / #5a5d60 / #66696c | #f1f3f4 / #aeb3b7 / #92979b | three text tiers, all 4.5:1 |
+| `--accent` | #1b6c80 | #5fb3c7 | the one hue |
+| `--primary` | #131416 | #f1f3f4 | primary button fill |
+| `--ok` `--warn` `--bad` `--live` | pale pill pairs (`-soft` / `-ink`) | dark tints | status only |
+
+- **Type:** 22 title / 20 lead / 16 section / 14 body / 12 small; weights 400, 500, 600;
+  sentence case; tabular figures on every number.
+- **Space:** 4/8/12/16/24/32/48, one 24px gap. **Radius:** 6 controls, 8 panels, 16 sheet.
+- **Surfaces:** a 1px border or a tone step, never a shadow at rest (only floating menus).
+- **Motion** (taste `motion.md`, feedback only, all under `prefers-reduced-motion` off):
+  cross-document view transitions (the sheet fades out 160ms and rises in 380ms; the
+  active nav pill glides between pages; chain rows carry per-model names so a reorder
+  slides the row); press scale 0.97 at 140ms; colour hovers 180ms; disclosures and
+  notices settle 240ms. Curves: `--ease-out`, `--ease-in-out`, `--ease-exit`.
+- **Do:** one question per screen answered first; a finding in the lede; one primary per
+  screen; empty states that say what to do next. **Don't:** engine ids on screen,
+  uppercase labels, icons in tinted boxes, gradients, glows, emoji.
+
+**Verification:** orch-UI `taste-check.sh` (lint + inspector) and `shoot.sh` at
+375/768/1440 px light and dark on the `ui-workflow` profile with a disposable store; no
+overflow, no console errors. Hygiene review per the vendored web interface guidelines.
+
+## Basalt — UI INIT, 19 October 2026 (history)
+
+The owner asked for a complete, friendlier and more straightforward web UI, with
+backend route changes allowed, a left sidebar, and a fresh palette. This section is
+the current visual language and information architecture; everything below it is
+history. Execution, review, acceptance and CSRF/host authorities are unchanged.
+
+**Information architecture.** One shell (`templates/base.html`) with a sidebar:
+Runs (`/`), Questions (`/questions`, pending count badge), Projects (`/projects`),
+Routing (`/routing`), Setup (`/setup`, attention dot when a system check fails).
+Phones get a sticky bar with a native `<details>` menu. The former single
+`/first-run` onboarding page is split across those four owner pages; `/first-run`
+303-redirects to `/setup` with its query. Every POST path, field name and CSRF
+contract is unchanged; each POST now redirects to (or re-renders on error) the
+page that owns it. A fresh install still lands on Setup ("First-run setup").
+
+**Priority per screen.** Runs: what is running, done, failed. Run detail: the
+decision first (outcome, three key facts, accept checklist, Accept/Reject), then
+evidence in tabs (Changes, Attempts, Review, Activity). Accept/Reject only appear
+when a candidate exists. Setup: four numbered steps with a ready count.
+
+**Tokens** (`static/css/app.css`, the only stylesheet the pages load):
+
+| Token | Light | Dark | Role |
+|---|---|---|---|
+| `--bg` | #f4f5f3 | #0e1012 | page |
+| `--surface` | #ffffff | #15181b | cards, tables |
+| `--sunken` | #edefec | #101315 | sidebar, table heads, code |
+| `--border` / `--border-strong` | #dde0db / #c4c8c1 | #262b30 / #343a40 | hairlines / controls |
+| `--text` / `--text-2` / `--text-3` | #14181b / #4e565d / #687077 | #e7eaec / #a9b0b6 / #8a9299 | primary / secondary / tertiary |
+| `--accent` | #2556d9 | #7da2ff | links, focus, selected nav, live status |
+| `--primary` | #14181b | #e7eaec | primary buttons (ink, not accent) |
+| `--ok` / `--warn` / `--bad` | #1d7a4c / #8f5500 / #c0352b | #4fc488 / #e2a845 / #f2766a | status only, each with a `-soft` fill |
+
+- **Type:** bundled Manrope (UI) and IBM Plex Mono (ids, paths, diffs). 22/16/14/13/12px;
+  headings 650 weight, sentence case everywhere. Tabular numerals for counts and times.
+- **Space:** 4/8/12/16/24/32/48. **Radius:** 6 controls, 10 cards, pill only for status.
+- **Elevation:** borders, not shadows; shadow only for popovers. **Motion:** 120/180ms
+  colour transitions and the live-status pulse; all removed under reduced motion.
+- **Status:** one `.status` component with `data-tone` ok/warn/bad/live/idle and a
+  sentence-case label; the raw engine state stays in `title`. Mapping lives in
+  `templates/_ui.html`.
+- **Do:** one dominant decision per screen; disclosure (`details.more`) for technical
+  evidence; empty states that say what to run next. **Don't:** ALL-CAPS pills, section
+  codes (A1, B3…), raw JSON on screen, red boxes for successful runs.
+
+`console-v2.css`, `saberops-console.css`, `workspace.css`, `chat-workspace.css`,
+`polish.css` and the `first_run.html`/`.css`/`.js` preview were removed on 20 October
+2026 at the owner's request; sections below that cite them are history. `console.js` remains the theme owner
+(it also adds pending feedback to POST buttons); `app.js` remains the single SSE
+owner and now also upgrades the run evidence tabs.
+
+**Verification (this batch):** orch-UI screenshot loop at 375/768/1440 px, light and
+dark, on a disposable seeded store (no provider calls): no horizontal overflow, no
+console errors except the intended 404 on the missing-run page. Web-interface
+hygiene review applied. Ruff, strict mypy and the full test suite: see the commit.
+
 ## Approved reconstruction direction — 5 October 2026
 
 The owner requested the complete Apple-guided reconstruction following the

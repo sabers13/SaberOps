@@ -1,210 +1,258 @@
-<!DOCTYPE html>
-{# SaberOps minimal run-detail status page (L-A step 5). Server-rendered
-   status, attempts, gate results, review verdict, and diff, plus the
-   accept/reject owner actions. Live refresh via app.js is progressive
-   enhancement; every action is a plain form POST. #}
-<html lang="en" data-theme="light">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% if missing %}Run not found{% else %}{{ display_title }}{% endif %} · SaberOps</title>
-  <link rel="stylesheet" href="/static/css/console-v2.css">
-  <link rel="stylesheet" href="/static/css/saberops-console.css">
-  <script>
-    try {
-      var soTheme = window.localStorage.getItem("saberops-theme");
-      if (soTheme === "dark" || soTheme === "light") {
-        document.documentElement.setAttribute("data-theme", soTheme);
-      } else if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) {
-        document.documentElement.setAttribute("data-theme", "dark");
-      }
-    } catch (_soErr) { /* Browser storage may be unavailable. */ }
-  </script>
-</head>
-<body>
-  <a class="skip-link" href="#run-detail">Skip to content</a>
-  <main class="status-page" id="run-detail">
-    <p><a href="/">← Runs</a></p>
-    {% if missing %}
-    <header class="status-header"><div>
-      <p class="eyebrow">SaberOps · minimal status</p>
-      <h1>Run not found</h1>
-      <p class="muted mono">{{ run_id }}</p>
-    </div></header>
-    {% else %}
-    <header class="status-header" id="run-header" data-run-id="{{ run_id }}">
-      <div>
-        <p class="eyebrow">SaberOps · minimal status</p>
-        <h1>{{ display_title }}</h1>
-        <p class="muted mono">{{ run_id }} · {{ target_repo }} · base {{ base_commit }}</p>
-        <p><span class="status status-{{ status_class }}">{{ status }}</span>
-        <span class="muted">tier {{ tier }} · gate <code>{{ gate_command }}</code></span>
-        <span class="muted"><a href="/runs/{{ run_id }}/report">report JSON</a></span></p>
-      </div>
-    </header>
-    {% if notice %}<p class="so-notice" role="status">{{ notice }}</p>{% endif %}
-    {% if error %}<p class="so-error" role="alert">{{ error }}</p>{% endif %}
+{% extends "base.html" %}
+{% import "_ui.html" as ui %}
+{% set active_page = "runs" %}
+{% block title %}{% if missing %}Run not found{% else %}{{ display_title }}{% endif %}{% endblock %}
+{% block crumbs %}<a href="/">Runs</a><span aria-hidden="true">/</span><span aria-current="page">{% if missing %}Run not found{% else %}{{ display_title }}{% endif %}</span>{% endblock %}
+{# Run detail: "Did this work, and should I accept it?" The decision comes
+   first; evidence follows in tabs. app.js refreshes [data-run-refresh]
+   regions and owns the single SSE stream; every action is a plain form
+   POST, so the page works without JS. Paths, SHAs and tiers stay behind
+   "Technical details". #}
+{% block content %}
+{% if missing %}
+<header class="page-head"><div><h1>Run not found</h1><p class="lede">No run with this id exists in this store. It may belong to another profile.</p></div></header>
+<p><a class="btn" href="/">Back to runs</a></p>
+{% else %}
+{% set accepted = run_report and run_report.acceptance.acceptance_status == 'ACCEPTED' %}
+{% set rejected = candidate_state == 'REJECTED' %}
+{% set awaiting = status == 'COMPLETED' and candidate_sha and not accepted and not rejected %}
+{% set failed = status in ['FAILED', 'ORPHANED', 'PREEMPTED'] %}
+{% set decision_tone = 'ok' if accepted else ('bad' if rejected or failed else ('warn' if awaiting else ('live' if status in ['RUNNING', 'PENDING'] else 'idle'))) %}
 
-    <section aria-label="Run result" data-run-refresh="result">
-      <h2>Result</h2>
-      {% if summary %}<p>{{ summary }}</p>{% else %}<p>No result summary was recorded. Inspect the evidence below.</p>{% endif %}
-      {% if run_report and run_report.acceptance.acceptance_status == 'ACCEPTED' %}
-      <p><strong>Accepted.</strong> The recorded candidate was integrated into the project.</p>
-      {% elif candidate_state == 'REJECTED' %}
-      <p><strong>Candidate rejected.</strong> The recorded work remains available for inspection.</p>
-      {% elif status == 'COMPLETED' and candidate_sha %}
-      {% if run_report and run_report.acceptance.acceptance_status == 'NOT_ACCEPTED' %}
-      <p><strong>Awaiting your acceptance.</strong> The changes are in a separate candidate; they have not been applied to <span class="mono">{{ target_repo }}</span>. Inspect the result, then accept below when you are ready.</p>
-      {% endif %}
-      {% endif %}
-      {% if diff_available %}<p>{{ changed_files|length }} changed file{{ '' if changed_files|length == 1 else 's' }} in the recorded candidate.</p>{% endif %}
-      {% for attempt in attempts %}{% if candidate_sha and attempt.commit_sha == candidate_sha %}<p>Candidate folder: <span class="mono">{{ attempt.worktree_path }}</span></p>{% endif %}{% endfor %}
-      {% if run_report %}
-      <p>Checks: {{ run_report.gate.summary.check_passed }} passed, {{ run_report.gate.summary.check_failed }} failed, {{ run_report.gate.summary.check_skipped }} skipped. Review: {{ run_report.review.verdicts|join(', ') if run_report.review.verdicts else 'No verdict recorded' }}.</p>
-      {% endif %}
-      {% for attempt in attempts %}{% if candidate_sha and attempt.commit_sha == candidate_sha and attempt.worker_stdout %}
-      <details><summary>What the worker built · worker response</summary><pre class="so-pre mono">{{ attempt.worker_stdout }}</pre></details>
-      {% endif %}{% endfor %}
-      <p id="candidate-state" class="muted">Candidate state: {{ candidate_state or "unknown" }}{% if candidate_sha %} · <span class="mono">{{ candidate_sha }}</span>{% endif %}</p>
-    </section>
-    {% if failure_reason %}<p class="so-error" role="alert">{{ failure_reason }}</p>{% endif %}
+<header class="page-head" id="run-header" data-run-id="{{ run_id }}" data-run-status="{{ status }}" data-created-at="{{ created_at or '' }}" data-completed-at="{{ completed_at or '' }}">
+  <div>
+    <h1>{{ display_title }}</h1>
+    <div class="meta">
+      {{ ui.status(status, id="run-status-badge") }}
+      <span><span class="sr-only">Elapsed </span><span id="elapsed-timer" class="num"></span></span>
+      <span title="{{ target_repo }}">In <strong>{{ target_repo.rstrip("/").split("/")[-1] }}</strong></span>
+    </div>
+  </div>
+</header>
 
-    <section aria-label="Attempts and gate results">
-      <h2>Attempts · gate results</h2>
-      {% if attempts %}
-      {% for attempt in attempts %}
-      <article class="worker-card" data-attempt="{{ attempt.attempt_number }}">
-        <h3>Attempt {{ attempt.attempt_number }} · {{ attempt.provider }} / {{ attempt.model }}</h3>
-        <p><span class="status status-{{ attempt.status_class }}">{{ attempt.status }}</span>
-        {% if attempt.commit_sha %}<span class="muted">Candidate Commit <span class="mono">{{ attempt.commit_sha }}</span></span>{% endif %}</p>
-        <p class="muted">Gate: {{ attempt.gate_result or "no gate evidence" }}
-        {% if attempt.gate_exit_code is not none %}(exit {{ attempt.gate_exit_code }}){% endif %}</p>
-        {% if attempt.gate_stdout %}<details><summary>Gate output</summary><pre>{{ attempt.gate_stdout }}</pre></details>{% endif %}
-        {% if attempt.worker_error %}<p class="so-error">{{ attempt.worker_error }}</p>{% endif %}
-      </article>
-      {% endfor %}
-      {% else %}
-      <p class="muted">No attempts recorded.</p>
-      {% endif %}
-    </section>
-
-    <section aria-label="Review verdict">
-      <h2>Review verdict</h2>
-      {% if reviews %}
-      {% for review in reviews %}
-      <article>
-        <p><span class="status status-{{ review.status_class }}">{{ review.verdict }}</span>
-        <span class="muted">{{ review.provider }} / {{ review.model }} · {{ fmt(review.created_at) }}</span></p>
-        <p>{{ review.summary }}</p>
-        {% if review.details %}<details><summary>Details</summary><pre>{{ review.details }}</pre></details>{% endif %}
-        {% if review.findings %}
-        <h3>Structured findings</h3>
-        <p>{{ review.findings|selectattr("blocking")|list|length }} blocking</p>
-        <ul>
-        {% for finding in review.findings %}
-          <li>{{ finding.code }} {{ finding.label }}: {{ finding.title }}</li>
-        {% endfor %}
-        </ul>
-        {% endif %}
-      </article>
-      {% endfor %}
-      {% else %}
-      <p class="muted">No independent review recorded ({{ review_count }}).</p>
-      {% endif %}
-    </section>
-
-    <section aria-label="Candidate diff">
-      <h2>Candidate diff</h2>
-      {% if diff_available %}
-      <p class="muted">{{ changed_files|length }} changed files · unified diff (max 64K shown{% if diff_truncated %}, truncated{% endif %})</p>
-      {% if diff_totals %}<p class="mono">+{{ diff_totals.added }} −{{ diff_totals.removed }}</p>{% endif %}
-      <pre class="diff">{{ diff_text }}</pre>
-      {% else %}
-      <p class="muted">No diff available{% if diff_unavailable_reason %} ({{ diff_unavailable_reason }}){% endif %}.</p>
-      {% endif %}
-    </section>
-
-    <section aria-label="Owner actions" data-run-refresh="actions" id="owner-action-status">
-      <h2>Owner actions</h2>
-      {% if owner_review_active %}<p role="status">A Review owner action is already running.</p>{% endif %}
-      {% if owner_accept_active %}<p role="status">An Accept owner action is already running.</p>{% endif %}
-      {% if accept_result %}<p class="so-notice" role="status">{{ accept_result }}</p>{% endif %}
-      <h3>Accept checklist</h3>
-      {% if accept_checklist %}
-      <ul>
-        {% for check in accept_checklist %}
-        <li data-check-key="{{ check.key }}" data-check-status="{{ check.status }}"><span class="status status-{{ check.status }}">{{ check.status }}</span> {{ check.label }}{% if check.reason %} — {{ check.reason }}{% endif %}</li>
-        {% endfor %}
-      </ul>
-      {% else %}
-      <p class="muted">No acceptance evidence yet.</p>
-      {% endif %}
-      {% if owner_accept_last_error %}<p class="muted">Last accept: {{ owner_accept_last_error }}</p>{% endif %}
-      {% if confirming_accept %}
-      <form method="post" action="/runs/{{ run_id }}/accept">
-        <p>Type the exact run id to confirm.</p>
-        <p><label>Run id <input name="confirm_run_id" autocomplete="off"></label>
-        <button type="submit" id="acceptRunButton">Confirm accept</button></p>
-      </form>
-      {% else %}
-      <form method="post" action="/runs/{{ run_id }}/accept">
-        <button type="submit" id="acceptRunButton"{% if not can_accept %} disabled title="Accept is blocked by the checklist below"{% endif %}>Accept candidate</button>
-      </form>
-      {% endif %}
-      {% if can_reject %}
-      {% if confirming_reject %}
-      <form method="post" action="/runs/{{ run_id }}/reject">
-        <p><strong>Reject this candidate?</strong></p>
-        <p>This records a durable owner decision. It does not delete the commit or worktree.</p>
-        <p><input type="hidden" name="confirm" value="1"><button type="submit" data-action="reject">Confirm reject</button></p>
-      </form>
-      {% else %}
-      <form method="post" action="/runs/{{ run_id }}/reject">
-        <button type="submit" data-action="reject">Reject candidate</button>
-      </form>
-      {% endif %}
-      {% endif %}
-      {% if owner_review_last_error %}<p class="muted">Last review: {{ owner_review_last_error }}</p>{% endif %}
-    </section>
-
-    <section aria-label="Live monitoring" data-run-refresh="monitoring">
-      <h2>Live Monitoring</h2>
-      <p class="muted">Same data as <span class="mono">orch report {{ run_id }} --json</span></p>
-      {% if run_report %}
-      <dl class="so-kv">
-        <dt>Live Stage</dt><dd class="mono">{{ run_report.lifecycle.current_stage }} ({{ run_report.lifecycle.current_stage_source }})</dd>
-        <dt>Worker Requested</dt><dd class="mono">{{ run_report.worker.requested_provider }} / {{ run_report.worker.requested_model }}</dd>
-        <dt>Worker Actual</dt><dd class="mono">{{ run_report.worker.actual_provider }} / {{ run_report.worker.actual_model }} ({{ run_report.worker.actual_identity_status }})</dd>
-        <dt>Dispatches</dt><dd class="mono">worker {{ run_report.execution.worker_dispatch_count }} · retry {{ run_report.execution.retry_dispatch_count }} · repair {{ run_report.execution.repair_dispatch_count }} · reviewer {{ run_report.execution.reviewer_dispatch_count }} · resumes {{ run_report.execution.resume_count }}</dd>
-        <dt>Gate</dt><dd class="mono">{% if run_report.gate.disabled %}Disabled by project policy · {% endif %}{{ run_report.gate.summary.check_skipped }} skipped / {{ run_report.gate.summary.check_passed }} passed / {{ run_report.gate.summary.check_failed }} failed / {{ run_report.gate.summary.check_total }} checks · {{ run_report.gate.summary.receipt_total }} receipt(s)</dd>
-        <dt>Review</dt><dd class="mono">required={{ run_report.review.review_required }} · rounds={{ run_report.review.rounds }} · verdicts={{ run_report.review.verdicts | join(", ") if run_report.review.verdicts else "none" }}</dd>
-        <dt>Usage Events</dt><dd class="mono">{{ run_report.usage.provider_usage_event_count }} events · in={{ run_report.usage.input_tokens }} out={{ run_report.usage.output_tokens }} cache_r={{ run_report.usage.cache_read_tokens }} cache_w={{ run_report.usage.cache_write_tokens }} reason={{ run_report.usage.reasoning_tokens }} total={{ run_report.usage.total_tokens }}</dd>
-        <dt>Acceptance</dt><dd class="mono">{{ run_report.acceptance.acceptance_status }} · {{ run_report.acceptance.accepted_candidate_sha }}</dd>
-        <dt>Elapsed</dt><dd class="mono">created {{ fmt(created_at) }} · wall {{ run_report.lifecycle.total_wall_seconds }}s</dd>
-      </dl>
-      {% if run_report.warnings %}
-      <p class="muted">Warnings: {{ run_report.warnings | join("; ") }}</p>
-      {% endif %}
-      {% if run_report.evidence_gaps %}
-      <p class="muted">Evidence gaps: {{ run_report.evidence_gaps | join("; ") }}</p>
-      {% endif %}
-      <p class="muted">UNKNOWN means the value was not reported; it is not zero. <a href="/runs/{{ run_id }}/report">View as JSON</a></p>
-      {% else %}
-      <p class="muted">Canonical report unavailable for this run.</p>
-      {% endif %}
-    </section>
-
-    <section aria-label="Events" data-run-refresh="events-status">
-      <h2>Events</h2>
-      <div id="events-log">
-      {% for event in events %}
-        <p class="event-row" data-event-id="{{ event.id }}"><span class="muted mono">{{ event.id }} · {{ fmt(event.created_at) }}</span> {{ event.event_type }}</p>
-      {% endfor %}
-      </div>
-    </section>
+<section class="decision" data-tone="{{ decision_tone }}" aria-labelledby="decision-h">
+  <div data-run-refresh="result" class="stack" aria-label="Run result">
+    <h2 class="decision-title" id="decision-h">
+      {% if accepted %}Accepted. The changes are in your project.
+      {% elif rejected %}Rejected. The changes were not applied.
+      {% elif awaiting %}Ready for your decision
+      {% elif failed %}This run did not finish
+      {% elif status in ['RUNNING', 'PENDING'] %}Working on it
+      {% else %}No changes to decide on{% endif %}
+    </h2>
+    {% if summary %}<p>{{ summary }}</p>{% else %}<p class="muted">No summary was recorded. The evidence below shows what happened.</p>{% endif %}
+    {% if awaiting %}<p class="muted">The changes sit in a separate copy and have not touched your project yet. Read them below, then accept or reject.</p>{% endif %}
+    {% if failure_reason and failed and failure_reason != summary %}<div class="banner" data-tone="bad" role="alert">{{ failure_reason }}</div>{% endif %}
+    {% set check_summary = run_report.gate.summary if run_report else None %}
+    <div class="figures">
+      <div class="figure" data-changed-files="{{ changed_files | length if diff_available else '' }}"><div class="figure-label">Files changed</div><div class="figure-value">{% if diff_available %}{{ changed_files | length }}{% else %}<span class="faint">—</span>{% endif %}</div>{% if diff_totals %}<div class="figure-note diff-stat num"><span class="add">+{{ diff_totals.added }}</span> <span class="del">−{{ diff_totals.removed }}</span> lines</div>{% endif %}</div>
+      <div class="figure"><div class="figure-label">Checks passed</div><div class="figure-value">{% if check_summary %}{{ check_summary.check_passed }}<span class="figure-unit"> of {{ check_summary.check_passed + check_summary.check_failed }}</span>{% else %}<span class="faint">—</span>{% endif %}</div>{% if check_summary and check_summary.check_skipped %}<div class="figure-note">{{ check_summary.check_skipped }} skipped</div>{% endif %}</div>
+      <div class="figure"><div class="figure-label">Review</div><div class="figure-value is-word">{% if run_report and run_report.review.verdicts %}{{ ui.label(run_report.review.verdicts[-1]) }}{% else %}<span class="faint">—</span>{% endif %}</div></div>
+    </div>
+    {% for attempt in attempts %}{% if candidate_sha and attempt.commit_sha == candidate_sha %}
+    <p class="small muted">Candidate: <span id="candidate-state" title="{{ candidate_state or 'UNKNOWN' }}">{{ ui.label(candidate_state or "unknown") }}</span></p>
+    {% if attempt.worker_stdout %}
+    <details class="more"><summary>What the model says it did</summary><div class="more-body"><pre class="output">{{ attempt.worker_stdout }}</pre></div></details>
     {% endif %}
-  </main>
-  <script src="/static/js/console.js"></script>
-  <script src="/static/js/app.js"></script>
-</body>
-</html>
+    <details class="tech"><summary>Technical details</summary>
+      <dl class="kv">
+        <dt>Project folder</dt><dd class="mono">{{ target_repo }}</dd>
+        <dt>Candidate folder</dt><dd class="mono">{{ attempt.worktree_path }}</dd>
+        <dt>Candidate commit</dt><dd class="mono">{{ candidate_sha }}</dd>
+        <dt>Base commit</dt><dd class="mono">{{ base_commit }}</dd>
+        <dt>Tier</dt><dd>{{ tier }}</dd>
+        <dt>Run</dt><dd class="mono">{{ run_id }} · <a href="/runs/{{ run_id }}/report">Report JSON</a></dd>
+      </dl>
+    </details>
+    {% endif %}{% endfor %}
+    {% if not candidate_sha %}<p id="candidate-state" class="small muted" title="{{ candidate_state or 'NONE' }}">Candidate: {{ ui.label(candidate_state or ("none yet" if status in ['RUNNING', 'PENDING'] else "none")) }}</p>
+    <details class="tech"><summary>Technical details</summary>
+      <dl class="kv">
+        <dt>Project folder</dt><dd class="mono">{{ target_repo }}</dd>
+        <dt>Base commit</dt><dd class="mono">{{ base_commit }}</dd>
+        <dt>Tier</dt><dd>{{ tier }}</dd>
+        <dt>Run</dt><dd class="mono">{{ run_id }} · <a href="/runs/{{ run_id }}/report">Report JSON</a></dd>
+      </dl>
+    </details>
+    {% endif %}
+  </div>
+
+  <div data-run-refresh="actions" id="owner-action-status" class="stack" aria-label="Owner actions">
+    {% if owner_review_active %}<div class="banner" data-tone="info" role="status">A review you started is still running.</div>{% endif %}
+    {% if owner_accept_active %}<div class="banner" data-tone="info" role="status">An accept you started is still running.</div>{% endif %}
+    {% if accept_result %}<div class="banner" data-tone="ok" role="status">{{ accept_result }}</div>{% endif %}
+    {% set has_candidate = candidate_sha or can_accept or can_reject or accepted or confirming_accept or confirming_reject %}
+    {% if accept_checklist %}
+    <details class="more"{% if has_candidate and not can_accept and not accepted %} open{% endif %}>
+      <summary>Before you accept <span class="faint num">{{ accept_checklist | selectattr("status", "equalto", "pass") | list | length }} of {{ accept_checklist | length }} checks pass</span></summary>
+      <div class="more-body">
+        <ul class="checklist" id="accept-checklist" data-accept-eligible="{{ 'true' if can_accept else 'false' }}">
+          {% for check in accept_checklist %}
+          <li data-check-key="{{ check.key }}" data-check-status="{{ check.status }}">{{ ui.check(check.status) }}<div>{{ check.label }}{% if check.reason %}<span class="row-sub">{{ check.reason }}</span>{% endif %}</div></li>
+          {% endfor %}
+        </ul>
+      </div>
+    </details>
+    {% else %}
+    <p class="small muted">No acceptance evidence yet.</p>
+    {% endif %}
+    {% if owner_accept_last_error %}<p class="small muted">Last accept attempt: {{ owner_accept_last_error }}</p>{% endif %}
+    {% if owner_review_last_error %}<p class="small muted">Last review: {{ owner_review_last_error }}</p>{% endif %}
+
+    {% if confirming_accept %}
+    <form method="post" action="/runs/{{ run_id }}/accept" class="form">
+      <label class="field">Type the run id to confirm <span class="hint mono">{{ run_id }}</span><input type="text" name="confirm_run_id" autocomplete="off" spellcheck="false"></label>
+      <div class="btn-row"><button type="submit" class="primary" id="acceptRunButton">Confirm accept</button><a class="btn" href="/runs/{{ run_id }}">Cancel</a></div>
+    </form>
+    {% elif confirming_reject and can_reject %}
+    <form method="post" action="/runs/{{ run_id }}/reject" class="stack">
+      <p><strong>Reject these changes?</strong> This records your decision. It does not delete the copy or its commit.</p>
+      <input type="hidden" name="confirm" value="1">
+      <div class="btn-row"><button type="submit" class="danger" data-action="reject">Confirm reject</button><a class="btn" href="/runs/{{ run_id }}">Cancel</a></div>
+    </form>
+    {% else %}
+    <div class="btn-row">
+      <form method="post" action="/runs/{{ run_id }}/accept">
+        <button type="submit" class="primary" id="acceptRunButton"{% if not can_accept %} disabled aria-describedby="accept-blocked"{% endif %}>Accept changes</button>
+      </form>
+      {% if can_reject %}
+      <form method="post" action="/runs/{{ run_id }}/reject">
+        <button type="submit" class="danger" data-action="reject">Reject</button>
+      </form>
+      {% endif %}
+      {% if not can_accept and not accepted %}<span class="small muted" id="accept-blocked">{% if has_candidate %}Accept unlocks when every check above passes.{% elif status in ['RUNNING', 'PENDING'] %}Accept becomes available once the run has changes to show.{% else %}There is nothing to accept: this run made no changes.{% endif %}</span>{% endif %}
+    </div>
+    {% endif %}
+  </div>
+</section>
+
+{% set file_count = changed_files | length %}
+<div class="tabs" role="tablist" aria-label="Run evidence" data-run-tabs>
+  <a class="tab" role="tab" href="#tab-changes" aria-controls="tab-changes" aria-selected="true">Changes <span class="faint num">{{ file_count if diff_available else 0 }}</span></a>
+  <a class="tab" role="tab" href="#tab-attempts" aria-controls="tab-attempts" aria-selected="false">Attempts <span class="faint num">{{ attempts | length }}</span></a>
+  <a class="tab" role="tab" href="#tab-review" aria-controls="tab-review" aria-selected="false">Review <span class="faint num">{{ reviews | length }}</span></a>
+  <a class="tab" role="tab" href="#tab-activity" aria-controls="tab-activity" aria-selected="false">Activity</a>
+</div>
+
+<section class="tab-panel" id="tab-changes" role="tabpanel" aria-label="Changes">
+  <div class="section-head"><h2>Changes</h2>{% if diff_available %}<p class="num">{{ file_count }} file{{ '' if file_count == 1 else 's' }}{% if diff_truncated %} · large diff, first 64K shown{% endif %}</p>{% endif %}</div>
+  {% if diff_available and diff_files %}
+  {% for file in diff_files %}
+  <details class="more" data-diff-path="{{ file.path }}" open>
+    <summary><span class="mono">{{ file.path }}</span> <span class="faint">{{ file.status }}{% if file.added is not none %} · <span class="diff-stat num"><span class="add">+{{ file.added }}</span> <span class="del">−{{ file.removed }}</span></span>{% endif %}</span></summary>
+    <div class="more-body">
+      {% if file.binary %}<p class="small muted">Binary file; no text diff.</p>
+      {% elif not file.patch_available %}<p class="small muted">Patch not shown (diff limit reached).</p>
+      {% else %}
+      <pre class="diff">{% for line in file.lines if line.kind != "meta" %}<span class="ln{% if line.kind == 'add' %} ln-add{% elif line.kind == 'delete' %} ln-del{% elif line.kind == 'hunk' %} ln-hunk{% endif %}">{{ line.text }}</span>{% endfor %}</pre>
+      {% if file.truncated %}<p class="small muted">This file's patch is truncated.</p>{% endif %}
+      {% endif %}
+    </div>
+  </details>
+  {% endfor %}
+  {% elif diff_available %}
+  <pre class="output">{{ diff_text }}</pre>
+  {% else %}
+  {% call ui.empty("No changes to show") %}<p>{% if status in ['RUNNING', 'PENDING'] %}The changes appear once the model commits them.{% else %}<span{% if diff_unavailable_reason %} title="{{ diff_unavailable_reason }}"{% endif %}>This run produced no changes to show.</span>{% endif %}</p>{% endcall %}
+  {% endif %}
+</section>
+
+<section class="tab-panel" id="tab-attempts" role="tabpanel" aria-label="Attempts">
+  <div class="section-head"><h2>Attempts and checks</h2></div>
+  {% if attempts %}
+  {% for attempt in attempts %}
+  <article class="panel worker-card" data-attempt="{{ attempt.attempt_number }}">
+    <div class="panel-head">
+      <div><h3>Attempt {{ attempt.attempt_number }}</h3><p>{{ attempt.model }} <span class="faint">· {{ attempt.provider }}</span></p></div>
+      <div class="btn-row">{{ ui.status(attempt.status) }}{% if attempt.gate_result %}<span class="status" data-tone="{{ ui.tone(attempt.gate_result) }}">Checks {{ attempt.gate_result | lower }}</span>{% endif %}</div>
+    </div>
+    <div class="panel-body">
+      {% if attempt.worker_error %}<div class="banner" data-tone="bad" role="alert">{{ attempt.worker_error }}</div>{% endif %}
+      <dl class="kv">
+        <dt>Checks</dt><dd>{{ attempt.gate_result or "No check evidence" }}{% if attempt.gate_exit_code is not none %} <span class="muted">(exit {{ attempt.gate_exit_code }})</span>{% endif %}</dd>
+        <dt>Started</dt><dd class="num">{{ fmt(attempt.created_at) }}</dd>
+      </dl>
+      {% if attempt.gate_stdout %}<details class="more"><summary>Check output</summary><div class="more-body"><pre class="output">{{ attempt.gate_stdout }}</pre></div></details>{% endif %}
+      <details class="tech"><summary>Technical details</summary><dl class="kv"><dt>Check command</dt><dd><code>{{ gate_command }}</code></dd>{% if attempt.commit_sha %}<dt>Commit</dt><dd class="mono">{{ attempt.commit_sha }}</dd>{% endif %}</dl></details>
+    </div>
+  </article>
+  {% endfor %}
+  {% else %}
+  {% call ui.empty("No attempts yet") %}<p>An attempt appears here when a model starts on the task.</p>{% endcall %}
+  {% endif %}
+</section>
+
+<section class="tab-panel" id="tab-review" role="tabpanel" aria-label="Review">
+  <div class="section-head"><h2>Independent review</h2></div>
+  {% if reviews %}
+  {% for review in reviews %}
+  <article class="panel review-card">
+    <div class="panel-head">
+      <div><h3>{{ review.model }} <span class="faint">· {{ review.provider }}</span></h3><p class="num">{{ fmt(review.created_at) }}</p></div>
+      {{ ui.status(review.verdict) }}
+    </div>
+    <div class="panel-body">
+      <p>{{ review.summary }}</p>
+      {% if review.findings %}
+      <h4>Findings · {{ review.findings | selectattr("blocking") | list | length }} blocking</h4>
+      <ul class="checklist">
+        {% for finding in review.findings %}<li>{{ ui.check("FAIL" if finding.blocking else "WARN") }}<div>{{ finding.title }}<span class="row-sub">{{ finding.label }}</span></div></li>{% endfor %}
+      </ul>
+      {% endif %}
+      {% if review.details %}<details class="more"><summary>Full review</summary><div class="more-body"><pre class="output">{{ review.details }}</pre></div></details>{% endif %}
+    </div>
+  </article>
+  {% endfor %}
+  {% else %}
+  {% call ui.empty("No review recorded") %}<p>{% if review_count %}{{ review_count }} review(s) recorded without detail.{% else %}No independent model has checked this run yet.{% endif %}</p>{% endcall %}
+  {% endif %}
+</section>
+
+<section class="tab-panel" id="tab-activity" role="tabpanel" aria-label="Activity">
+  <div class="section-head"><h2>Activity</h2></div>
+  <div data-run-refresh="monitoring" class="stack" aria-label="Live monitoring">
+  {% if run_report %}
+  <dl class="kv">
+    <dt>Stage</dt><dd>{{ ui.label(run_report.lifecycle.current_stage) }}</dd>
+    <dt>Model used</dt><dd>{{ run_report.worker.actual_model }} <span class="faint">· {{ run_report.worker.actual_provider }}</span></dd>
+    <dt>Checks</dt><dd class="num">{% if run_report.gate.disabled %}Turned off by project policy · {% endif %}{{ run_report.gate.summary.check_passed }} passed · {{ run_report.gate.summary.check_failed }} failed · {{ run_report.gate.summary.check_skipped }} skipped</dd>
+    <dt>Review</dt><dd>{{ "Required" if run_report.review.review_required else "Not required" }} · {{ run_report.review.rounds }} round(s)</dd>
+    <dt>Tokens</dt><dd class="num">{{ run_report.usage.total_tokens }} total</dd>
+    <dt>Time</dt><dd class="num">Started {{ fmt(created_at) }} · {{ run_report.lifecycle.total_wall_seconds }} s</dd>
+  </dl>
+  {% if run_report.warnings %}<div class="banner" data-tone="warn" role="note"><div><strong>Warnings</strong>{{ run_report.warnings | join("; ") }}</div></div>{% endif %}
+  <details class="tech"><summary>Technical details</summary>
+    <dl class="kv">
+      <dt>Stage source</dt><dd>{{ run_report.lifecycle.current_stage_source }}</dd>
+      <dt>Model requested</dt><dd class="mono">{{ run_report.worker.requested_provider }} / {{ run_report.worker.requested_model }}</dd>
+      <dt>Model identity</dt><dd>{{ run_report.worker.actual_identity_status }}</dd>
+      <dt>Dispatches</dt><dd class="num">worker {{ run_report.execution.worker_dispatch_count }} · retry {{ run_report.execution.retry_dispatch_count }} · repair {{ run_report.execution.repair_dispatch_count }} · reviewer {{ run_report.execution.reviewer_dispatch_count }} · resumes {{ run_report.execution.resume_count }}</dd>
+      <dt>Receipts</dt><dd class="num">{{ run_report.gate.summary.receipt_total }}</dd>
+      <dt>Verdicts</dt><dd>{{ run_report.review.verdicts | join(", ") if run_report.review.verdicts else "none" }}</dd>
+      <dt>Token detail</dt><dd class="num">in {{ run_report.usage.input_tokens }} · out {{ run_report.usage.output_tokens }} · cache read {{ run_report.usage.cache_read_tokens }} · cache write {{ run_report.usage.cache_write_tokens }} · reasoning {{ run_report.usage.reasoning_tokens }} ({{ run_report.usage.provider_usage_event_count }} events)</dd>
+      <dt>Acceptance</dt><dd>{{ ui.label(run_report.acceptance.acceptance_status) }}{% if run_report.acceptance.accepted_candidate_sha %} · <span class="mono">{{ run_report.acceptance.accepted_candidate_sha }}</span>{% endif %}</dd>
+      {% if run_report.evidence_gaps %}<dt>Evidence gaps</dt><dd>{{ run_report.evidence_gaps | join("; ") }}</dd>{% endif %}
+      <dt>Same data</dt><dd class="mono">orch report {{ run_id }} --json</dd>
+    </dl>
+    <p class="small faint">“UNKNOWN” means the value was not reported; it is not zero.</p>
+  </details>
+  {% else %}
+  <p class="small muted">The run report is unavailable for this run.</p>
+  {% endif %}
+  </div>
+
+  <div data-run-refresh="events-status" class="stack" aria-label="Events" style="margin-top: var(--s5)">
+    <h3>Events</h3>
+    <p id="run-refresh-status" class="small faint" role="status" aria-live="polite"></p>
+    <div id="events-log" class="events">
+    {% for event in events %}
+      <p class="event-row" data-event-id="{{ event.id }}"><span class="mono">{{ fmt(event.created_at) }}</span> {{ event.event_type | replace("_", " ") }}</p>
+    {% else %}
+      <p class="event-row muted">No events yet.</p>
+    {% endfor %}
+    </div>
+  </div>
+</section>
+{% endif %}
+{% endblock %}
+{% block scripts %}{% if not missing %}<script src="/static/js/app.js"></script>{% endif %}{% endblock %}

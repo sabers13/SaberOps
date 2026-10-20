@@ -22,9 +22,11 @@
     function formatDuration(ms) {
       if (isNaN(ms) || ms < 0) return "00:00";
       var totalSec = Math.floor(ms / 1000);
-      var min = Math.floor(totalSec / 60);
+      var hours = Math.floor(totalSec / 3600);
+      var min = Math.floor((totalSec % 3600) / 60);
       var sec = totalSec % 60;
-      return (min < 10 ? "0" + min : min) + ":" + (sec < 10 ? "0" + sec : sec);
+      var tail = (min < 10 ? "0" + min : min) + ":" + (sec < 10 ? "0" + sec : sec);
+      return hours ? hours + ":" + tail : tail;
     }
 
     function update() {
@@ -173,35 +175,26 @@
       if (evData.id <= highestId) return; // Prevent duplicate append
       highestId = evData.id;
 
-      var row = document.createElement("div");
+      var row = document.createElement("p");
       row.className = "event-row";
       row.setAttribute("data-event-id", evData.id);
-      row.style.display = "flex";
-      row.style.gap = "0.75rem";
-
-      var numSpan = document.createElement("span");
-      numSpan.className = "muted";
-      numSpan.textContent = "#" + evData.id;
 
       var timeSpan = document.createElement("span");
-      timeSpan.className = "muted";
+      timeSpan.className = "mono";
       timeSpan.textContent = evData.created_at || "";
-
-      var typeSpan = document.createElement("strong");
-      typeSpan.style.color = "var(--primary, #3b82f6)";
-      typeSpan.textContent = evData.event_type;
-
-      row.appendChild(numSpan);
       row.appendChild(timeSpan);
+      var typeSpan = document.createElement("span");
+      typeSpan.textContent = String(evData.event_type || "").replace(/_/g, " ");
       row.appendChild(typeSpan);
 
       if (evData.attempt_id) {
         var attSpan = document.createElement("span");
-        attSpan.className = "muted";
-        attSpan.textContent = "[" + evData.attempt_id + "]";
+        attSpan.className = "faint";
+        attSpan.textContent = evData.attempt_id;
         row.appendChild(attSpan);
       }
 
+      eventsLog.querySelectorAll(".event-row:not([data-event-id])").forEach(function (placeholder) { placeholder.remove(); });
       eventsLog.appendChild(row);
       eventsLog.scrollTop = eventsLog.scrollHeight;
       queueDetailsRefresh();
@@ -220,17 +213,16 @@
         var badge = document.getElementById("run-status-badge");
         var detailStatus = document.getElementById("detail-status");
         var newStatus = evData.event_type === "run_completed" ? "COMPLETED" : ((evData.event_type === "run_failed" || evData.event_type === "run_exception") ? "FAILED" : "RUNNING");
-        var newClass = newStatus.toLowerCase();
+        var tone = { COMPLETED: "ok", FAILED: "bad", RUNNING: "live" }[newStatus];
+        var label = newStatus.charAt(0) + newStatus.slice(1).toLowerCase();
 
         header.setAttribute("data-run-status", newStatus);
-        if (badge) {
-          badge.className = "badge badge-" + newClass;
-          badge.textContent = newStatus;
-        }
-        if (detailStatus) {
-          detailStatus.className = "badge badge-" + newClass;
-          detailStatus.textContent = newStatus;
-        }
+        [badge, detailStatus].forEach(function (el) {
+          if (!el) return;
+          el.setAttribute("data-tone", tone);
+          el.setAttribute("title", newStatus);
+          el.textContent = label;
+        });
         if (newStatus === "COMPLETED" || newStatus === "FAILED") {
           header.setAttribute("data-completed-at", evData.created_at || new Date().toISOString());
         }
@@ -379,7 +371,45 @@
   // Theme is owned by console.js (plus the pre-paint snippet in
   // base.html); composer enhancement also lives in console.js so it
   // runs on pages where this file is not loaded.
+  // --- Evidence tabs (presentation only) ---
+  // Without script every panel is shown and the tabs are in-page links.
+  // With script one panel shows at a time; the URL hash keeps the choice.
+  function initRunTabs() {
+    var list = document.querySelector("[data-run-tabs]");
+    if (!list) return;
+    var tabs = Array.from(list.querySelectorAll('[role="tab"]'));
+    function select(tab, focus) {
+      tabs.forEach(function (other) {
+        var on = other === tab;
+        other.setAttribute("aria-selected", on ? "true" : "false");
+        other.setAttribute("tabindex", on ? "0" : "-1");
+        var panel = document.getElementById(other.getAttribute("aria-controls"));
+        if (panel) panel.hidden = !on;
+      });
+      if (focus) tab.focus();
+      document.dispatchEvent(new CustomEvent("saberops:run-tab"));
+    }
+    var initial = tabs.find(function (tab) { return tab.getAttribute("href") === window.location.hash; }) || tabs[0];
+    select(initial, false);
+    tabs.forEach(function (tab, index) {
+      tab.addEventListener("click", function (ev) {
+        ev.preventDefault();
+        select(tab, false);
+        history.replaceState(null, "", tab.getAttribute("href"));
+      });
+      tab.addEventListener("keydown", function (ev) {
+        var next = ev.key === "ArrowRight" ? index + 1 : ev.key === "ArrowLeft" ? index - 1 : ev.key === "Home" ? 0 : ev.key === "End" ? tabs.length - 1 : null;
+        if (next === null) return;
+        ev.preventDefault();
+        var target = tabs[(next + tabs.length) % tabs.length];
+        select(target, true);
+        history.replaceState(null, "", target.getAttribute("href"));
+      });
+    });
+  }
+
   document.addEventListener("DOMContentLoaded", function () {
+    initRunTabs();
     initElapsedTimer();
     initEventStream();
   });

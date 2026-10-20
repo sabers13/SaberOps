@@ -691,5 +691,5 @@ def test_c16b1_run_page_shows_monitoring_section(tmp_path: Path) -> None:
     client = TestClient(create_app(db_path=db_path))
     response = client.get("/runs/run_c16b1")
     assert response.status_code == 200
-    assert "Live Monitoring" in response.text
+    assert 'aria-label="Live monitoring"' in response.text
     assert "stage" in response.text.lower()

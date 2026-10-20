@@ -1,0 +1,204 @@
+{% extends "base.html" %}
+{% import "_ui.html" as ui %}
+{% set active_page = "setup" %}
+{% block title %}Setup{% endblock %}
+{# Setup: "Is everything connected and ready?" Five steps; a step that still
+   needs work is open, a finished one folds to its summary. Connection ids,
+   executables, posture classes and catalog sources stay behind
+   "Technical details". #}
+{% block content %}
+{% set diag_bad = diagnostics | rejectattr("state", "equalto", "ok") | list %}
+{% set logins_ready = vendor_logins | selectattr("installed") | selectattr("state_class", "equalto", "ok") | list %}
+{% set models_ok = models | selectattr("auto_routing") | list %}
+{% set postures_ok = postures | selectattr("confirmed") | list %}
+{% set steps = [diag_bad | length == 0, logins_ready | length > 0, models_ok | length > 0, postures_ok | length > 0, (agents.rows | selectattr("connected") | list | length > 0) and agents.enabled] %}
+{% set steps_done = steps | select | list | length %}
+
+<header class="page-head">
+  <div>
+    <h1>{% if first_run %}Welcome to SaberOps{% else %}Setup{% endif %}</h1>
+    <p class="lede">
+      {% if steps_done == 5 %}Everything is connected. Choose which model does each job in <a href="/routing">Routing</a>.
+      {% elif first_run %}<strong>Five short steps get this computer ready.</strong> Each one says exactly what to do. Everything stays on this machine.
+      {% else %}<strong>{{ steps_done }} of 5 steps are ready.</strong> Open steps still need you.{% endif %}
+    </p>
+  </div>
+  <span class="status num" data-tone="{{ 'ok' if steps_done == 5 else 'warn' }}">{{ steps_done }} of 5 ready</span>
+</header>
+
+<ol class="steps">
+  <li>
+    <details class="step-card" data-tone="{{ 'ok' if not diag_bad else 'bad' }}"{% if diag_bad %} open{% endif %}>
+      <summary><span class="step-mark" aria-hidden="true"></span><div><h2 id="step-system">This computer</h2><p>{% if diag_bad %}{{ diag_bad | length }} {{ "check needs" if diag_bad | length == 1 else "checks need" }} a fix.{% else %}All local checks pass.{% endif %}</p></div>{{ ui.status("OK" if not diag_bad else "BLOCKED") }}</summary>
+      <div class="step-body">
+        <ul class="checklist">
+        {% for row in diagnostics %}
+          <li>{{ ui.check(row.state) }}<div><strong>{{ row.label }}</strong> <span class="muted">{{ row.detail }}</span>{% if row.fix %}<span class="row-sub">Fix: <code>{{ row.fix }}</code></span>{% endif %}</div></li>
+        {% endfor %}
+        </ul>
+        <p class="small muted">Local checks only; nothing here contacts the network.</p>
+      </div>
+    </details>
+  </li>
+
+  <li>
+    <details class="step-card" data-tone="{{ 'ok' if logins_ready else 'warn' }}"{% if not logins_ready %} open{% endif %}>
+      <summary><span class="step-mark" aria-hidden="true"></span><div><h2 id="step-logins">Sign in to your AI accounts</h2><p class="num">{{ logins_ready | length }} of {{ vendor_logins | length }} signed in</p></div><span class="status num" data-tone="{{ 'ok' if logins_ready else 'warn' }}">{{ logins_ready | length }} ready</span></summary>
+      <div class="step-body">
+        <p class="muted">Run each provider's own sign-in in your terminal. SaberOps never asks for a password or key.</p>
+        {% if vendor_logins %}
+        <ul class="rows">
+        {% for row in vendor_logins %}
+          <li>
+            <div class="row-main"><span class="row-title">{{ row.provider | capitalize }}</span><span class="row-sub">{% if not row.installed %}Not installed{% else %}Sign in with <code>{{ row.login_hint }}</code>{% endif %}</span></div>
+            {% if not row.installed %}{{ ui.status("MISSING") }}{% else %}{{ ui.status(row.readiness_state) }}{% endif %}
+          </li>
+        {% endfor %}
+        </ul>
+        <details class="tech"><summary>Technical details</summary><dl class="kv">{% for row in vendor_logins %}<dt class="mono">{{ row.connection_id }}</dt><dd><span class="mono">{{ row.executable }}</span>{% if row.readiness_reason and row.readiness_reason != row.readiness_state %} · {{ row.readiness_reason }}{% endif %}</dd>{% endfor %}</dl></details>
+        {% else %}
+        {% call ui.empty("No provider tools found") %}<p>Install a provider's command-line tool (for example Codex, Claude Code or OpenCode), sign in with it, then reload this page.</p>{% endcall %}
+        {% endif %}
+      </div>
+    </details>
+  </li>
+
+  <li>
+    <details class="step-card" data-tone="{{ 'ok' if models_ok else 'warn' }}"{% if not models_ok %} open{% endif %}>
+      <summary><span class="step-mark" aria-hidden="true"></span><div><h2 id="step-models">Find models</h2><p class="num">{{ models_ok | length }} of {{ models | length }} found models can run</p></div><span class="status num" data-tone="{{ 'ok' if models_ok else 'warn' }}">{{ models_ok | length }} usable</span></summary>
+      <div class="step-body">
+        <p class="muted">Only models SaberOps can really run are offered in Routing.</p>
+        {% if connections %}
+        <ul class="rows">
+          {% for row in connections %}
+          <li>
+            <div class="row-main"><span class="row-title">{{ row.provider | capitalize }}</span><span class="row-sub num">{{ row.catalog_models }} model{{ '' if row.catalog_models == 1 else 's' }} found</span></div>
+            <form method="post" action="/first-run/discover">
+              <input type="hidden" name="csrf" value="{{ csrf_token }}">
+              <input type="hidden" name="connection_id" value="{{ row.connection_id }}">
+              <button type="submit">Refresh</button>
+            </form>
+          </li>
+          {% endfor %}
+        </ul>
+        {% else %}
+        {% call ui.empty("No connections yet") %}<p>Add one in your terminal with <code>orch access add</code>. It stores where the key lives, never the key itself.</p>{% endcall %}
+        {% endif %}
+        {% if models %}
+        <details class="more">
+          <summary>All found models <span class="faint num">{{ models | length }} found · {{ models_ok | length }} can run</span></summary>
+          <div class="more-body">
+            <div class="table-wrap">
+              <table class="table stack-sm">
+                <caption class="sr-only">Found models and whether SaberOps can run them</caption>
+                <thead><tr><th scope="col">Model</th><th scope="col">Account</th><th scope="col">Can run</th></tr></thead>
+                <tbody>
+                {% for row in models %}
+                  <tr>
+                    <td>{{ row.display_name or row.model_id }}{% if row.stale %} {{ ui.status("STALE") }}{% endif %}</td>
+                    <td data-label="Account">{{ row.provider | capitalize }}</td>
+                    <td data-label="Can run">{{ ui.status(row.execution_support) }}</td>
+                  </tr>
+                {% endfor %}
+                </tbody>
+              </table>
+            </div>
+            <p class="small muted">A failed refresh keeps the last list and marks it out of date. Model names are never invented.</p>
+          </div>
+        </details>
+        {% endif %}
+      </div>
+    </details>
+  </li>
+
+  <li>
+    <details class="step-card" data-tone="{{ 'ok' if postures_ok else 'warn' }}"{% if not postures_ok %} open{% endif %}>
+      <summary><span class="step-mark" aria-hidden="true"></span><div><h2 id="step-billing">Confirm how each account is billed</h2><p class="num">{{ postures_ok | length }} confirmed</p></div><span class="status num" data-tone="{{ 'ok' if postures_ok else 'warn' }}">{{ postures_ok | length }} confirmed</span></summary>
+      <div class="step-body">
+        <p class="muted">A model is used on its own only after you confirm how it is billed. You confirm once; it stays confirmed until you change it. <a href="/accounts">Open Accounts</a> to confirm them all in one click and see how much is left.</p>
+        {% if postures %}
+        <div class="table-wrap">
+          <table class="table stack-sm">
+            <caption class="sr-only">Billing confirmation per route</caption>
+            <thead><tr><th scope="col">Account or model</th><th scope="col">Billing</th><th scope="col" class="num">Expires</th><th scope="col">Status</th></tr></thead>
+            <tbody>
+            {% for row in postures %}
+              <tr>
+                <td>{{ row.selector }}</td>
+                <td data-label="Billing">{{ {"A": "Subscription, unmetered", "B": "Only while you watch", "C": "Pay per use, unattended allowed", "D": "Pay per use, only while you watch", "X": "Not allowed"}.get(row.posture_class, row.posture_class) }}</td>
+                <td data-label="Expires" class="muted num">{{ row.expires_on or "—" }}</td>
+                <td data-label="Status">{{ ui.status(row.status) }}</td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        {% call ui.empty("Nothing confirmed yet") %}<p>Confirm one below, or run <code>orch posture verify</code>.</p>{% endcall %}
+        {% endif %}
+        <details class="more"{% if not postures %} open{% endif %}>
+          <summary>Confirm billing for an account or model</summary>
+          <div class="more-body">
+            <form method="post" action="/first-run/posture/verify" class="form">
+              <input type="hidden" name="csrf" value="{{ csrf_token }}">
+              <label class="field">Account or model <span class="hint">A provider, or provider/model.</span><input type="text" name="selector" required placeholder="anthropic/claude-sonnet-5-5…" autocomplete="off" spellcheck="false"></label>
+              <label class="field">How it is billed
+                <select name="posture_class">
+                  <option value="">Keep what is recorded</option>
+                  <option value="A">Subscription, unmetered</option>
+                  <option value="B">Only while you watch</option>
+                  <option value="C">Pay per use, may run unattended</option>
+                  <option value="D">Pay per use, only while you watch</option>
+                  <option value="X">Not allowed</option>
+                </select>
+              </label>
+              <label class="field">Policy pages you checked <span class="hint">One https link per line.</span><textarea name="policy_urls" rows="2"></textarea></label>
+              <label class="field">Note <input type="text" name="note" autocomplete="off"></label>
+              <div><button type="submit" class="primary">Save confirmation</button></div>
+            </form>
+          </div>
+        </details>
+      </div>
+    </details>
+  </li>
+
+  <li>
+    {% set any_connected = agents.rows | selectattr("connected") | list %}
+    <details class="step-card" data-tone="{{ 'ok' if any_connected and agents.enabled else 'warn' }}"{% if not any_connected or not agents.enabled %} open{% endif %}>
+      <summary><span class="step-mark" aria-hidden="true"></span><div><h2 id="step-agent">Connect your agent</h2><p>{% if not agents.enabled %}Switched off for every agent.{% elif planner.connected %}{{ planner.name }} is planning the work right now.{% elif any_connected %}{{ any_connected | map(attribute="name") | join(", ") }} {{ "is" if any_connected | length == 1 else "are" }} connected.{% else %}No agent connected yet.{% endif %}</p></div>{% if not agents.enabled %}<span class="status" data-tone="warn">Off</span>{% elif planner.connected %}{{ ui.status("LIVE") }}{% elif any_connected %}<span class="status" data-tone="ok">Connected</span>{% else %}<span class="status" data-tone="warn">Not connected</span>{% endif %}</summary>
+      <div class="step-body">
+        <p class="muted">Connect SaberOps to the coding agents you use. Every new session starts with SaberOps <strong>off</strong>, so the agent works as usual. Say <strong>“turn on saberops”</strong> in the agent when you want it, and <strong>“turn off saberops”</strong> to go back. Messages from SaberOps start with “Orchestrator:”.</p>
+        <ul class="rows agents">
+          {% for row in agents.rows %}
+          <li>
+            <div class="row-main"><span class="row-title">{{ row.name }}</span><span class="row-sub">{% if row.connected %}Connected{% elif row.installed %}Installed, not connected{% else %}Not installed on this computer{% endif %}</span></div>
+            {% if row.installed or row.connected %}
+            <form method="post" action="/setup/agents">
+              <input type="hidden" name="csrf" value="{{ csrf_token }}"><input type="hidden" name="agent" value="{{ row.slug }}">
+              <input type="hidden" name="action" value="{{ 'disconnect' if row.connected else 'connect' }}">
+              <button type="submit">{{ "Remove" if row.connected else "Connect" }}</button>
+            </form>
+            {% else %}<span class="faint">—</span>{% endif %}
+          </li>
+          {% endfor %}
+        </ul>
+        <div class="well agent-switch">
+          <div><strong>{{ "SaberOps is available to agents" if agents.enabled else "SaberOps is off for every agent" }}</strong><span class="row-sub">{% if agents.enabled %}Agents can turn it on when you ask them to.{% else %}Agents stay connected but cannot see or turn on SaberOps.{% endif %} Same as <code>orch mcp {{ "off" if agents.enabled else "on" }}</code>.</span></div>
+          <form method="post" action="/setup/mcp-switch">
+            <input type="hidden" name="csrf" value="{{ csrf_token }}"><input type="hidden" name="enabled" value="{{ 'off' if agents.enabled else 'on' }}">
+            <button type="submit">{{ "Turn off for all agents" if agents.enabled else "Turn back on" }}</button>
+          </form>
+        </div>
+        <details class="tech"><summary>Technical details</summary>
+          <dl class="kv"><dt>Server command</dt><dd><code>orch mcp serve</code></dd><dt>From a terminal</dt><dd><code>orch connect claude</code> · <code>orch connect --remove claude</code> · <code>orch mcp status</code></dd>{% if planner.holder %}<dt>Lease holder</dt><dd class="mono">{{ planner.holder }}</dd>{% endif %}</dl>
+          {% for row in agents.rows %}<p>{{ row.name }}, by hand:</p><pre class="output">{{ row.snippet }}</pre>{% endfor %}
+        </details>
+      </div>
+    </details>
+  </li>
+</ol>
+
+{% if first_run %}
+<p class="muted" style="margin-top: var(--s5)">When the steps are ready, choose which model does each job in <a href="/routing">Routing</a>.</p>
+{% endif %}
+{% endblock %}

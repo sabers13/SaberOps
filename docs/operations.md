@@ -263,9 +263,15 @@ requires an explicit `--class`. Verification writes only the owner
 document, atomically, and prints the resulting status
 (OK|EXPIRING|EXPIRED|UNVERIFIED|FORBIDDEN|ATTENDED_ONLY|METERED).
 
+Expiry: confirmations are one-time by default (owner decision,
+20 October 2026): a record without `ttl_days` never expires and holds
+until the owner changes it. `orch posture verify SELECTOR --ttl-days N`
+(1-90) opts a route back into expiry. The Accounts page confirms every
+account at once ("Confirm all").
+
 What UNVERIFIED/EXPIRED mean: posture fails closed. A route with no
-record, no `verified_on`, or `verified_on + ttl_days` before today is
-never admitted unattended; once admission is wired (M2-4b), such
+record, no `verified_on`, or (when it has a `ttl_days`) `verified_on +
+ttl_days` before today is never admitted unattended; once admission is wired (M2-4b), such
 routes stay unadmitted, so every route stays unadmitted until `orch
 posture verify` has been run for it. `expires_on` is inclusive: the
 record is valid through that day. Status `EXPIRING` warns 3 days

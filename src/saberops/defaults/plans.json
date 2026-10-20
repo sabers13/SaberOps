@@ -137,7 +137,7 @@
         "https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan",
         "https://code.claude.com/docs/en/legal-and-compliance"
       ],
-      "ttl_days": 14,
+      "ttl_days": null,
       "verified_on": null,
       "account": "claude-pro",
       "note": ""
@@ -148,7 +148,7 @@
         "https://learn.chatgpt.com/docs/pricing",
         "https://learn.chatgpt.com/docs/auth"
       ],
-      "ttl_days": 30,
+      "ttl_days": null,
       "verified_on": null,
       "account": "chatgpt-plus",
       "note": ""
@@ -158,7 +158,7 @@
       "policy_urls": [
         "https://help.openai.com/en/articles/20001542-using-your-chatgpt-plan-in-other-apps-and-sites"
       ],
-      "ttl_days": 30,
+      "ttl_days": null,
       "verified_on": null,
       "account": "chatgpt-plus",
       "note": ""
@@ -166,7 +166,7 @@
     "opencode/opencode-go/*": {
       "class": "A",
       "policy_urls": ["https://opencode.ai/docs/go/"],
-      "ttl_days": 30,
+      "ttl_days": null,
       "verified_on": null,
       "account": "opencode-go",
       "note": ""
@@ -174,7 +174,7 @@
     "opencode/opencode/*": {
       "class": "C",
       "policy_urls": ["https://opencode.ai/docs/zen/"],
-      "ttl_days": 30,
+      "ttl_days": null,
       "verified_on": null,
       "account": "opencode-zen",
       "note": ""
@@ -182,7 +182,7 @@
     "cline/cline-pass/*": {
       "class": "A",
       "policy_urls": ["https://docs.cline.bot/getting-started/clinepass"],
-      "ttl_days": 30,
+      "ttl_days": null,
       "verified_on": null,
       "account": "clinepass",
       "note": "terms for unattended use not yet checked by owner"
@@ -190,7 +190,7 @@
     "antigravity": {
       "class": "B",
       "policy_urls": ["https://antigravity.google/terms/"],
-      "ttl_days": 30,
+      "ttl_days": null,
       "verified_on": null,
       "account": "google-ai-pro",
       "note": ""
@@ -198,7 +198,7 @@
     "backend:DIRECT_API": {
       "class": "D",
       "policy_urls": [],
-      "ttl_days": 30,
+      "ttl_days": null,
       "verified_on": null,
       "account": null,
       "note": "OmniRoute/direct_api: prepaid API keys, auto-recharge OFF"

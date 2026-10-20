@@ -1,59 +1,55 @@
-<!DOCTYPE html>
-{# SaberOps minimal status page (L-A step 5). Standalone; reuses the
-   console-v2 design tokens. No chat, projects, session, or settings UI:
-   owner configuration lives in the `orch` CLI. #}
-<html lang="en" data-theme="light">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Runs · SaberOps</title>
-  <link rel="stylesheet" href="/static/css/console-v2.css">
-  <link rel="stylesheet" href="/static/css/saberops-console.css">
-  <script>
-    // Restore appearance before paint; console.js owns subsequent changes.
-    try {
-      var soTheme = window.localStorage.getItem("saberops-theme");
-      if (soTheme === "dark" || soTheme === "light") {
-        document.documentElement.setAttribute("data-theme", soTheme);
-      } else if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) {
-        document.documentElement.setAttribute("data-theme", "dark");
-      }
-    } catch (_soErr) { /* Browser storage may be unavailable. */ }
-  </script>
-</head>
-<body>
-  <a class="skip-link" href="#runs">Skip to content</a>
-  <main class="status-page" id="runs">
-    <header class="status-header">
-      <div>
-        <p class="eyebrow">SaberOps {{ saberops_version }} · minimal status</p>
-        <h1>Runs</h1>
-        <p class="muted">Verified execution results. Owner configuration
-        (routing, quota, access, reviewer, projects) lives in the
-        <code>orch</code> CLI.</p>
-      </div>
-      <p><a href="/health">health</a></p>
-    </header>
-    {% if notice %}<p class="so-notice" role="status">{{ notice }}</p>{% endif %}
-    {% if error %}<p class="so-error" role="alert">{{ error }}</p>{% endif %}
-    {% if runs %}
-    <table class="status-table">
-      <thead><tr><th scope="col">Run</th><th scope="col">Status</th><th scope="col">Tier</th><th scope="col">Created</th></tr></thead>
+{% extends "base.html" %}
+{% import "_ui.html" as ui %}
+{% set active_page = "runs" %}
+{% block title %}Runs{% endblock %}
+{# Runs: "What is running, and what needs me right now?" Run ids and the
+   engine tier stay behind "Technical details" on each row. #}
+{% block content %}
+{% set live = runs | selectattr("status", "in", ["RUNNING", "PENDING"]) | list | length %}
+{% set done = runs | selectattr("status", "equalto", "COMPLETED") | list | length %}
+{% set bad = runs | selectattr("status", "in", ["FAILED", "ORPHANED", "PREEMPTED"]) | list | length %}
+<header class="page-head">
+  <div>
+    <h1>Runs</h1>
+    <p class="lede">
+      {% if not runs %}Each task your agent sends becomes a run: a separate, checked copy of the change for you to accept or reject.
+      {% elif live %}<strong>{{ live }} {{ "run is" if live == 1 else "runs are" }} working now.</strong> Open a finished run to read its changes and decide.
+      {% elif bad %}<strong>{{ bad }} {{ "run" if bad == 1 else "runs" }} did not finish.</strong> Open one to see what happened.
+      {% else %}Nothing is running. Open a finished run to read its changes and decide.{% endif %}
+    </p>
+  </div>
+</header>
+
+{% if runs %}
+<div class="figures" aria-label="Run summary">
+  <div class="figure"><div class="figure-label">Working now</div><div class="figure-value">{{ live }}</div></div>
+  <div class="figure"><div class="figure-label">Finished</div><div class="figure-value">{{ done }}</div></div>
+  <div class="figure"><div class="figure-label">Did not finish</div><div class="figure-value">{{ bad }}</div></div>
+</div>
+
+<section class="section" aria-labelledby="runs-h">
+  <div class="section-head"><h2 id="runs-h">Recent runs</h2><p class="num">{{ runs | length }} {{ "run" if runs | length == 1 else "runs" }}, newest first</p></div>
+  <div class="table-wrap">
+    <table class="table stack-sm">
+      <caption class="sr-only">Recent runs, newest first</caption>
+      <thead><tr><th scope="col">Task</th><th scope="col">Status</th><th scope="col" class="num">Started</th></tr></thead>
       <tbody>
       {% for run in runs %}
         <tr>
-          <td><a href="/runs/{{ run.id }}">{{ run.summary }}</a><br><span class="muted mono">{{ run.id }}</span></td>
-          <td><span class="status status-{{ run.status_class }}">{{ run.status }}</span></td>
-          <td>{{ run.tier }}</td>
-          <td class="muted">{{ fmt(run.created_at) }}</td>
+          <td><a class="row-link" href="/runs/{{ run.id }}" title="Run {{ run.id }} · tier {{ run.tier }}">{{ run.summary }}</a></td>
+          <td data-label="Status">{{ ui.status(run.status) }}</td>
+          <td data-label="Started" class="muted num">{{ fmt(run.created_at) }}</td>
         </tr>
       {% endfor %}
       </tbody>
     </table>
-    {% else %}
-    <p class="muted">No runs recorded in this store yet. Submit work with <code>orch run</code>.</p>
-    {% endif %}
-  </main>
-  <script src="/static/js/console.js"></script>
-</body>
-</html>
+  </div>
+</section>
+{% else %}
+{% call ui.empty("No runs yet") %}
+<p>Ask your connected agent for a change, or start one from a terminal in your project. It appears here as soon as it is queued.</p>
+<p><code>orch run "Describe the change you want"</code></p>
+{% if setup_incomplete %}<p><a href="/setup">Finish setup first</a> so a model is ready to write code.</p>{% endif %}
+{% endcall %}
+{% endif %}
+{% endblock %}
