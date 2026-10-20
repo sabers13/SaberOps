@@ -211,6 +211,9 @@ def test_worker_committed_revision_is_the_verified_candidate(
         monkeypatch.delenv(key, raising=False)
     committed: list[str] = []
     adapter = CodexAdapter()
+    # The worker is a stub (below); availability of the real codex binary is
+    # not what this test checks, and CI runners have no codex installed.
+    monkeypatch.setattr(CodexAdapter, "is_available", lambda self: True)
     gate = "make gate" if make_gate else f"{sys.executable} -c pass"
 
     def invoke(request: WorkerRequest) -> WorkerResult:
