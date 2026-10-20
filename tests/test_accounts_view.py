@@ -86,7 +86,9 @@ def test_accounts_page_and_routes(isolated_xdg: None, tmp_path: Path) -> None:
     client = TestClient(create_app(db_path=tmp_path / "web.db"))
     page = client.get("/accounts")
     assert page.status_code == 200
-    for marker in ("Accounts", "What is left", "How it is billed", 'action="/accounts/check"'):
+    # "Check now" only renders where a provider CLI is installed, so the
+    # markers here are the ones every machine shows (CI has no CLIs).
+    for marker in ("Accounts", "What is left", "How it is billed"):
         assert marker in page.text, marker
     assert 'href="/accounts"' in page.text
 
