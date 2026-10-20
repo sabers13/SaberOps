@@ -16,6 +16,15 @@ with the console cut; their notices went with them.)
 
 Copyright 2018 The Manrope Project Authors
 
+## IBM Plex Sans (font)
+
+- Location: `src/saberops/static/fonts/IBMPlexSans-Variable.ttf`
+- Project: https://github.com/IBM/plex (distributed via google/fonts)
+- License: SIL Open Font License 1.1 (full text in
+  `src/saberops/static/fonts/IBMPlexSans-OFL.txt`)
+
+Copyright © 2017 IBM Corp. with Reserved Font Name "Plex"
+
 ## IBM Plex Mono (font)
 
 - Location: `src/saberops/static/fonts/IBMPlexMono-Regular.ttf`

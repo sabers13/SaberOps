@@ -132,7 +132,8 @@ function respond(body, ok = true) {
   emit('gate_completed', 2);
   emit('run_completed', 3);
   assert.equal(timeouts.size, 1, 'event bursts coalesce');
-  assert.equal(badge.textContent, 'COMPLETED');
+  assert.equal(badge.textContent, 'Completed');
+  assert.equal(badge.getAttribute('data-tone'), 'ok');
   assert.equal(timer.textContent, 'Duration: 09:42');
   flushTimer(); respond('complete'); await settle();
   for (const region of regions.filter(region => region !== agentRegion)) assert.equal(region.textContent, 'complete:' + region.getAttribute('data-run-refresh'));

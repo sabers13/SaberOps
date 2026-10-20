@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+{% import "_ui.html" as ui %}
+{% set active_page = "questions" %}
+{% block title %}Questions{% endblock %}
+{# Questions: "What is waiting for my decision?" Keys, kinds and decision
+   classes stay behind "Technical details" on each question. #}
+{% block content %}
+{% set waiting = questions.pending | length if questions.pending else 0 %}
+<header class="page-head">
+  <div>
+    <h1>Questions</h1>
+    <p class="lede">
+      {% if waiting %}<strong>{{ waiting }} {{ "decision is" if waiting == 1 else "decisions are" }} waiting for you.</strong> Blocked work stays parked until you answer.
+      {% else %}Decisions SaberOps is not allowed to make on its own wait here. Nothing is waiting right now.{% endif %}
+    </p>
+  </div>
+</header>
+
+{% if questions.error %}
+<div class="banner" data-tone="bad" role="alert">Questions could not be read: {{ questions.error }}</div>
+{% elif questions.pending %}
+<div class="stack-lg">
+{% for question in questions.pending %}
+  <article class="question" aria-labelledby="q-{{ question.question_id }}">
+    <div class="question-head">
+      <h2 id="q-{{ question.question_id }}">{{ question.subject }}</h2>
+      {{ ui.status(question.status) }}
+    </div>
+    {% if question.blocks %}<p class="muted">Holding up {{ question.blocks | length }} {{ "task" if question.blocks | length == 1 else "tasks" }} until you answer.</p>{% endif %}
+    <form method="post" action="/questions/{{ question.question_id }}/answer" class="form">
+      <input type="hidden" name="csrf" value="{{ csrf_token }}">
+      {% if question.options %}
+      <label class="field">Choose an option
+        <select name="chosen_option"><option value="">No option</option>{% for option in question.options %}<option value="{{ option }}">{{ option }}</option>{% endfor %}</select>
+      </label>
+      {% endif %}
+      <label class="field">Your answer <span class="hint">Saved word for word.</span><textarea name="answer_text" rows="3" required></textarea></label>
+      <div><button type="submit" class="primary">Send answer</button></div>
+    </form>
+    <details class="more">
+      <summary>Not now, ask me later</summary>
+      <div class="more-body">
+        <form method="post" action="/questions/{{ question.question_id }}/defer" class="form-inline">
+          <input type="hidden" name="csrf" value="{{ csrf_token }}">
+          <label class="field">Ask again on <input type="date" name="until" required></label>
+          <label class="field">Note <input type="text" name="note" autocomplete="off"></label>
+          <button type="submit">Ask later</button>
+        </form>
+      </div>
+    </details>
+    <details class="tech"><summary>Technical details</summary>
+      <dl class="kv"><dt>Key</dt><dd class="mono">{{ question.key }}</dd><dt>Kind</dt><dd>{{ question.kind }}</dd><dt>Decision class</dt><dd>{{ question.decision_class }}</dd><dt>Answered by</dt><dd>{{ question.answerable_by }}</dd>{% if question.blocks %}<dt>Blocks</dt><dd class="mono">{{ question.blocks | join(", ") }}</dd>{% endif %}</dl>
+    </details>
+  </article>
+{% endfor %}
+</div>
+{% else %}
+{% call ui.empty("No questions waiting") %}<p>When a task needs your decision, it shows up here and as a count in the sidebar.</p>{% endcall %}
+{% endif %}
+
+<section class="section" aria-labelledby="authority-h">
+  <div class="section-head"><h2 id="authority-h">What may run without you</h2><p>Mode: <strong>{{ authority.label }}</strong></p></div>
+  {% if standing_decisions.error %}
+  <div class="banner" data-tone="bad" role="alert">Standing permissions could not be read: {{ standing_decisions.error }}</div>
+  {% elif standing_decisions.rows %}
+  <div class="table-wrap">
+    <table class="table stack-sm">
+      <caption class="sr-only">Standing permissions and when they expire</caption>
+      <thead><tr><th scope="col">Your words</th><th scope="col">Expires</th><th scope="col">State</th></tr></thead>
+      <tbody>
+      {% for row in standing_decisions.rows %}
+        {% if row.error %}
+        <tr><td colspan="3"><span class="status" data-tone="bad">Unreadable</span> {{ row.error }}</td></tr>
+        {% else %}
+        <tr>
+          <td>{{ row.owner_words }}<span class="row-sub" title="{{ row.decision_key }} · {{ row.project_id }}/{{ row.task_id }}">{{ row.project_id }}</span></td>
+          <td data-label="Expires" class="muted num">{{ row.expires_at or ("after " ~ row.ttl_turns ~ " turns") }}</td>
+          <td data-label="State">{{ ui.status("LIVE" if row.live else "EXPIRED") }}</td>
+        </tr>
+        {% endif %}
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="muted">No standing permissions. A standing permission needs an expiry date or a turn count; open-ended ones are refused.</p>
+  {% endif %}
+  <details class="more">
+    <summary>Always your decision <span class="faint num">{{ never_delegable | length }} kinds</span></summary>
+    <div class="more-body">
+      <ul class="rows">{% for row in never_delegable %}<li><div class="row-main"><span>{{ row.description }}</span><span class="row-sub mono">{{ row.kind }}</span></div></li>{% endfor %}</ul>
+    </div>
+  </details>
+  <details class="tech"><summary>Technical details</summary><dl class="kv"><dt>Authority mode</dt><dd class="mono">{{ authority.mode }}</dd>{% if standing_decisions.path %}<dt>Permissions file</dt><dd class="mono">{{ standing_decisions.path }}</dd>{% endif %}</dl></details>
+</section>
+
+{% if questions.all %}
+<section class="section" aria-labelledby="history-h">
+  <details class="more">
+    <summary id="history-h">All questions <span class="faint num">{{ questions.all | length }}</span></summary>
+    <div class="more-body">
+      <div class="table-wrap">
+        <table class="table stack-sm">
+          <thead><tr><th scope="col">Question</th><th scope="col">Status</th><th scope="col" class="num">Raised</th></tr></thead>
+          <tbody>
+          {% for question in questions.all %}
+            <tr><td>{{ question.subject or question.key }}</td><td data-label="Status">{{ ui.status(question.status) }}</td><td data-label="Raised" class="muted num">{{ fmt(question.raised_at) }}</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </details>
+</section>
+{% endif %}
+{% endblock %}

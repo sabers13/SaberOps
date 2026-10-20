@@ -299,7 +299,7 @@ def test_d_no_trustworthy_candidate_unavailable(tmp_path: Path) -> None:
     client = TestClient(create_app(db_path=tmp_path / "r3b-d.db"))
     page = client.get("/runs/run-r3b-d")
     assert page.status_code == 200
-    assert "No diff available" in page.text
+    assert "This run produced no changes to show." in page.text
     assert "untrusted" not in page.text
 
 
@@ -556,13 +556,13 @@ def test_r3b1_gate_unproven_endpoint_and_changes_parity(
     client = TestClient(create_app(db_path=tmp_path / "r3b1-parity.db"))
     page = client.get("/runs/run-r3b1-parity")
     assert page.status_code == 200
-    assert "No diff available" in page.text
+    assert "This run produced no changes to show." in page.text
     assert "candidate_without_gate_success" in page.text
     assert "Candidate SHA" not in page.text
     assert "candidate-change-r3b1" not in page.text
     # The Workers tab still shows the attempt's raw evidence; that is
     # historical attempt data, not the verified current candidate.
-    assert "Candidate Commit" in page.text
+    assert "Candidate commit" in page.text
 
 
 def test_r3b1_gate_unproven_reads_write_nothing(tmp_path: Path) -> None:

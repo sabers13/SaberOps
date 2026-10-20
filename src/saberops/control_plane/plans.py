@@ -401,9 +401,11 @@ def validate_plan_sections(
         if cls == "X":
             if ttl is not None:
                 raise _fail(f"{base}.ttl_days", "class X must not set ttl_days")
-        else:
+        elif ttl is not None:
+            # ``None`` = no expiry: the owner's confirmation holds until they
+            # change it (owner decision, 20 October 2026: one-time setup).
             if isinstance(ttl, bool) or not isinstance(ttl, int) or not 1 <= ttl <= 90:
-                raise _fail(f"{base}.ttl_days", "ttl_days must be an int in 1..90")
+                raise _fail(f"{base}.ttl_days", "ttl_days must be an int in 1..90 or null")
         verified = raw.get("verified_on")
         if verified is not None:
             if packaged:

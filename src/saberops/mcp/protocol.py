@@ -37,8 +37,21 @@ from saberops.mcp.errors import (
     ParseError,
     ToolError,
 )
+from saberops.mcp.guide import (
+    GUIDE,
+    GUIDE_PROMPT,
+    GUIDE_URI,
+    PAUSED_INSTRUCTIONS,
+    PREFIX,
+    SABEROPS_OFF_TOOL,
+    SABEROPS_ON_TOOL,
+    SESSION_OFF_INSTRUCTIONS,
+    SESSION_OFF_MESSAGE,
+    SHORT_INSTRUCTIONS,
+)
 from saberops.mcp.ledger import SNAPSHOT_SCHEMA_VERSION
 from saberops.mcp.redaction import redact_secrets
+from saberops.mcp.switch import mcp_enabled
 from saberops.mcp.tools import ServerContext, ToolRegistry, build_default_registry
 
 __all__ = [
@@ -51,7 +64,7 @@ __all__ = [
 
 #: Server identity advertised in ``initialize`` (ADR-0004 D7 / Step 014).
 SERVER_NAME = "saberops"
-SERVER_VERSION = "0.4.0"
+SERVER_VERSION = "0.5.0"
 
 #: The newest MCP protocol revision this server implements.
 PROTOCOL_VERSION = "2025-06-18"
@@ -93,12 +106,20 @@ class McpServer:
         name: str = SERVER_NAME,
         version: str = SERVER_VERSION,
         acquire_lease: bool = True,
+        start_active: bool = True,
     ) -> None:
         self._context = context if context is not None else ServerContext()
         self._name = name
         self._version = version
         self._registry: ToolRegistry = build_default_registry(self._context)
-        if acquire_lease:
+        self._want_lease = acquire_lease
+        # A session is "on" only when the owner's master switch allows it and
+        # the user turned SaberOps on in this agent (``saberops_on``). Agent
+        # CLIs start sessions off (``orch mcp serve``), so opening a CLI is a
+        # normal agent until the user asks for SaberOps.
+        self._active = start_active
+        self._outbox: list[dict[str, Any]] = []
+        if acquire_lease and self.enabled and self._active:
             self._context.lease.acquire()
         self._initialized = False
         self._client_info: dict[str, Any] = {}
@@ -110,6 +131,37 @@ class McpServer:
     @property
     def registry(self) -> ToolRegistry:
         return self._registry
+
+    @property
+    def enabled(self) -> bool:
+        """The owner's on/off switch (``orch mcp on|off``), read on every request."""
+        return mcp_enabled(self._context.lease.path)
+
+    @property
+    def active(self) -> bool:
+        """SaberOps is on in this session (master switch on and turned on here)."""
+        return self.enabled and self._active
+
+    def drain_notifications(self) -> list[dict[str, Any]]:
+        """Server-to-client notifications queued since the last call."""
+        queued, self._outbox = self._outbox, []
+        return queued
+
+    def _tools_changed(self) -> None:
+        self._outbox.append({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
+
+    def _sync_switch(self) -> bool:
+        """Follow a switch flipped mid-session; return whether tools are offered."""
+        on = self.active
+        lease = self._context.lease
+        if not on and lease.writer:
+            lease.release()
+        elif on and self._want_lease and not lease.writer:
+            lease.acquire()
+            name = self._client_info.get("title") or self._client_info.get("name")
+            if isinstance(name, str):
+                lease.record_client(name)
+        return on
 
     @property
     def read_only(self) -> bool:
@@ -174,15 +226,46 @@ class McpServer:
             return self._initialize(params)
         if method == "ping":
             return {}
-        if method in ("tools/list", "tools/call", "resources/list", "resources/read"):
+        if method in (
+            "tools/list", "tools/call", "resources/list", "resources/read",
+            "prompts/list", "prompts/get",
+        ):
             if not self._initialized:
                 raise InvalidRequestError(
                     "initialize and notifications/initialized are required first"
                 )
         if method == "tools/list":
-            return {"tools": self._registry.descriptors()}
+            on = self._sync_switch()
+            if not self.enabled:
+                return {"tools": []}
+            if not on:
+                return {"tools": [SABEROPS_ON_TOOL]}
+            return {"tools": [*self._registry.descriptors(), SABEROPS_OFF_TOOL]}
         if method == "tools/call":
+            name = params.get("name")
+            if name in (SABEROPS_ON_TOOL["name"], SABEROPS_OFF_TOOL["name"]):
+                return self._session_switch(turn_on=name == SABEROPS_ON_TOOL["name"])
+            if not self.enabled:
+                return self._tool_error_result(ToolError(PAUSED_INSTRUCTIONS))
+            if not self._sync_switch():
+                return self._tool_error_result(ToolError(SESSION_OFF_MESSAGE))
             return self._tools_call(params)
+        if method == "prompts/list":
+            return {
+                "prompts": [
+                    {
+                        "name": GUIDE_PROMPT,
+                        "description": "How to plan and submit work through SaberOps.",
+                    }
+                ]
+            }
+        if method == "prompts/get":
+            if params.get("name") != GUIDE_PROMPT:
+                raise InvalidParamsError(f"unknown prompt: {params.get('name')!r}")
+            return {
+                "description": "How to plan and submit work through SaberOps.",
+                "messages": [{"role": "user", "content": {"type": "text", "text": GUIDE}}],
+            }
         if method == "resources/list":
             return self._resources_list()
         if method == "resources/read":
@@ -201,11 +284,27 @@ class McpServer:
         client = params.get("clientInfo")
         if isinstance(client, Mapping):
             self._client_info = {str(k): v for k, v in client.items()}
+            name = self._client_info.get("title") or self._client_info.get("name")
+            if isinstance(name, str):
+                self._context.lease.record_client(name)
+        enabled = self.enabled
+        if not enabled:
+            instructions = PAUSED_INSTRUCTIONS
+        elif not self._active:
+            instructions = SESSION_OFF_INSTRUCTIONS
+        else:
+            instructions = (
+                SHORT_INSTRUCTIONS
+                + " Approving proposals, moving main, pushing, quarantine approval, "
+                "posture attestation, gate execution, tracked-source edits and "
+                "deletions outside .orch are never available here."
+            )
         return {
             "protocolVersion": negotiated,
             "capabilities": {
-                "tools": {"listChanged": False},
+                "tools": {"listChanged": True},
                 "resources": {"subscribe": False, "listChanged": False},
+                "prompts": {"listChanged": False},
             },
             "serverInfo": {
                 "name": self._name,
@@ -215,12 +314,9 @@ class McpServer:
             "snapshotSchemaVersion": SNAPSHOT_SCHEMA_VERSION,
             "readOnly": self.read_only,
             "lease": self._context.lease.status(),
-            "instructions": (
-                "SaberOps exposes the Orchestrator contract tools only. "
-                "Approving proposals, moving main, pushing, quarantine approval, "
-                "posture attestation, gate execution, tracked-source edits and "
-                "deletions outside .orch are never available here."
-            ),
+            "enabled": enabled,
+            "active": enabled and self._active,
+            "instructions": instructions,
         }
 
     # -- tools -------------------------------------------------------------
@@ -251,7 +347,8 @@ class McpServer:
             "content": [
                 {
                     "type": "text",
-                    "text": json.dumps(redacted, sort_keys=True, indent=2),
+                    "text": PREFIX + f" {name.strip()} result\n"
+                    + json.dumps(redacted, sort_keys=True, indent=2),
                 }
             ],
             "isError": False,
@@ -260,13 +357,44 @@ class McpServer:
 
     @staticmethod
     def _tool_error_result(error: McpError) -> dict[str, Any]:
+        text = error.message if error.message.startswith(PREFIX) else f"{PREFIX} {error.message}"
         return {
-            "content": [{"type": "text", "text": error.message}],
+            "content": [{"type": "text", "text": text}],
             "isError": True,
             "structuredContent": {
                 "v": SNAPSHOT_SCHEMA_VERSION,
                 "error": error.to_error(),
             },
+        }
+
+    def _session_switch(self, *, turn_on: bool) -> dict[str, Any]:
+        """``saberops_on`` / ``saberops_off``: the user's in-agent switch."""
+        if turn_on and not self.enabled:
+            return self._tool_error_result(ToolError(PAUSED_INSTRUCTIONS))
+        changed = self._active != turn_on
+        self._active = turn_on
+        self._sync_switch()
+        if changed:
+            self._tools_changed()
+        if turn_on:
+            role = (
+                "This session plans the work."
+                if not self.read_only
+                else "Another agent session is already planning; this one can only read."
+            )
+            text = (
+                f"{PREFIX} SaberOps is on. {role} Start every message that relays SaberOps "
+                f"to the user with \"{PREFIX}\". Follow this guide:\n\n{GUIDE}"
+            )
+        else:
+            text = (
+                f"{PREFIX} SaberOps is off for this session. You are a normal coding agent "
+                "again; do not use SaberOps until the user turns it back on."
+            )
+        return {
+            "content": [{"type": "text", "text": text}],
+            "isError": False,
+            "structuredContent": {"v": SNAPSHOT_SCHEMA_VERSION, "active": self.active},
         }
 
     # -- resources ---------------------------------------------------------
@@ -280,6 +408,7 @@ class McpServer:
             },
             {"uri": LEASE_URI, "name": "Orchestrator lease", "mimeType": _JSON_MIME},
             {"uri": LEDGER_URI, "name": "Append-only event ledger", "mimeType": _JSON_MIME},
+            {"uri": GUIDE_URI, "name": "How to work with SaberOps", "mimeType": "text/markdown"},
         ]
         for path in self._context.evidence.list_files():
             resources.append(
@@ -303,6 +432,8 @@ class McpServer:
             return self._contents(target, self._context.lease.status(), _JSON_MIME)
         if target == LEDGER_URI:
             return self._contents(target, self._context.ledger.snapshot(), _JSON_MIME)
+        if target == GUIDE_URI:
+            return self._contents(target, GUIDE, "text/markdown")
         if target.startswith("file://"):
             parsed = urlparse(target)
             path = Path(unquote(parsed.path))
@@ -317,7 +448,7 @@ class McpServer:
             return self._contents(target, payload, _mime_for(resolved.name))
         raise InvalidParamsError(
             f"unsupported resource uri: {target!r}",
-            data={"supported": [SNAPSHOT_URI, LEASE_URI, LEDGER_URI, "file://..."]},
+            data={"supported": [SNAPSHOT_URI, LEASE_URI, LEDGER_URI, GUIDE_URI, "file://..."]},
         )
 
     def _contents(self, uri: str, payload: Any, mime: str) -> dict[str, Any]:

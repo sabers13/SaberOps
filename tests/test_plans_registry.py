@@ -455,7 +455,9 @@ def test_packaged_defaults_load_and_validate() -> None:
         "antigravity",
     }
     assert plans.pool_plans["opencode-zen"].overage_possible is False
-    assert plans.postures["anthropic"].ttl_days == 14
+    # One-time setup (owner decision, 20 October 2026): packaged postures
+    # never expire; an owner may still set ttl_days 1..90 per route.
+    assert all(record.ttl_days is None for record in plans.postures.values())
     assert plans.postures["copilot"].posture_class == "X"
     assert all(record.verified_on is None for record in plans.postures.values())
 

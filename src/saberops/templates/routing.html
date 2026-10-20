@@ -1,0 +1,173 @@
+{% extends "base.html" %}
+{% import "_ui.html" as ui %}
+{% set active_page = "routing" %}
+{% block title %}Routing{% endblock %}
+{# Routing: "Which model does each job, and who takes over when it is busy?"
+   Jobs on the left, the chosen job on the right; one job is changed at a
+   time. Every change is a plain form POST (csrf); script only filters the
+   model list as you type. Engine ids live behind "Technical details". #}
+{% block content %}
+{% set r = routing %}
+{% set job = r.selected %}
+{% set opened = request.query_params.get("job") %}
+<header class="page-head">
+  <div>
+    <h1>Routing</h1>
+    <p class="lede">
+      {% if r.missing %}<strong>{{ "One job needs" if r.missing | length == 1 else (r.missing | length) ~ " jobs need" }} a model.</strong> Choose a job to change who does it.
+      {% else %}Every job has a model. Backups take over, in order, when the one in charge is busy or out of plan limit.{% endif %}
+      {% if not r.planner.connected %}No agent is connected to plan the work yet; see <a href="/setup">Setup</a>.{% endif %}
+    </p>
+  </div>
+</header>
+{% if r.error %}<div class="banner" data-tone="bad" role="alert">{{ r.error }}</div>{% endif %}
+
+<div class="split routing-split{% if opened %} is-detail{% endif %}">
+  <div class="job-pick stack-lg">
+    <nav aria-label="Jobs">
+      <ul class="jobs">
+        {% for j in r.jobs %}
+        {% set first = j.chain[0] if j.chain else None %}
+        <li>
+          <a class="job-link" href="/routing?job={{ j.slug }}"{% if j.slug == job.slug %} aria-current="true"{% endif %}>
+            <span class="job-name">{{ j.name }}</span>
+            <span class="job-now">{% if j.store == "agent" %}{{ r.planner.name if r.planner.connected else "No agent connected" }}{% elif first %}{{ first.label }}{% else %}Not chosen{% endif %}</span>
+            <span class="job-meta">
+              {% if j.store == "agent" %}Your agent
+              {% elif not j.chain %}<span class="status" data-tone="warn">Needs a model</span>
+              {% elif j.chain | length == 1 %}No backup
+              {% elif j.chain | length == 2 %}1 backup
+              {% else %}{{ j.chain | length - 1 }} backups{% endif %}
+            </span>
+          </a>
+        </li>
+        {% endfor %}
+      </ul>
+    </nav>
+
+    <section class="panel" aria-labelledby="capacity-h">
+      <div class="panel-head"><div><h2 id="capacity-h">How much runs at once</h2><p>Upper limits, not targets. Lowering one only pauses new work.</p></div></div>
+      <div class="panel-body capacity">
+        <form method="post" action="/first-run/concurrency" class="stack">
+          <input type="hidden" name="csrf" value="{{ csrf_token }}">
+          <div class="form-inline">
+            <label class="field">Projects at once <span class="hint">1 to {{ concurrency.max_active_projects }}</span>
+              <input type="number" name="active_projects" min="1" max="{{ concurrency.max_active_projects }}" value="{{ concurrency.active_projects }}" required inputmode="numeric" autocomplete="off">
+            </label>
+            <label class="field">Tasks per project <span class="hint">1 to {{ concurrency.max_child_slots }}</span>
+              <input type="number" name="child_slots_per_project" min="1" max="{{ concurrency.max_child_slots }}" value="{{ concurrency.child_slots_per_project }}" required inputmode="numeric" autocomplete="off">
+            </label>
+          </div>
+          <div class="cap-total"><span>At most, together</span><b class="num">{{ concurrency.derived_ceiling }} task{{ "" if concurrency.derived_ceiling == 1 else "s" }}</b></div>
+          <label class="confirm"><input type="checkbox" name="owner_confirmed" value="yes"> I confirm this change.</label>
+          <div><button type="submit">Save limits</button></div>
+          <p class="small muted">{{ "Set by you." if concurrency.configured else "Using the defaults." }}</p>
+        </form>
+      </div>
+    </section>
+  </div>
+
+  <section class="job-detail" aria-labelledby="job-h">
+    <a class="back-link btn" href="/routing">All jobs</a>
+    <h2 id="job-h">{{ job.name }}</h2>
+    <p>{{ job.help }}{% if job.store != "agent" %} Backups take over, in order, when the one in charge is busy or out of plan limit.{% endif %}</p>
+
+    {% if job.store == "agent" %}
+      {% if r.planner.connected %}
+      <div class="agent-card"><b>{{ r.planner.name }}</b><span>Connected over MCP{% if r.planner.since %} since {{ fmt(r.planner.since) }}{% endif %}. Connect a different agent to change this.</span></div>
+      {% else %}
+      <div class="agent-card off"><b>{{ "SaberOps is off for every agent" if r.planner.off else "No agent is planning right now" }}</b><span>{% if r.planner.off %}Turn it back on in <a href="/setup">Setup</a>.{% else %}Connect your coding agent in <a href="/setup">Setup</a>, then say “turn on saberops” in it. That session plans the work until you say “turn off saberops”.{% endif %}</span></div>
+      {% endif %}
+      <details class="tech"><summary>Technical details</summary><dl class="kv"><dt>Engine role</dt><dd>{{ job.role }}</dd><dt>Lease holder</dt><dd class="mono">{{ r.planner.holder or "—" }}</dd></dl></details>
+    {% else %}
+      {% if job.chain %}
+      <ol class="chain" aria-label="Order for {{ job.name | lower }}">
+        {% for row in job.chain %}
+        <li style="view-transition-name: {{ row.vt }}; view-transition-class: chain-row">
+          <span class="role">{{ "In charge" if loop.first else "Backup " ~ (loop.index - 1) }}</span>
+          <div class="who"><b>{{ row.label }}</b><span>{{ row.origin }}</span></div>
+          <div class="row-acts">
+            <form method="post" action="/routing/move">
+              <input type="hidden" name="csrf" value="{{ csrf_token }}"><input type="hidden" name="job" value="{{ job.slug }}">
+              <input type="hidden" name="position" value="{{ row.position }}"><input type="hidden" name="direction" value="up">
+              <button type="submit" class="icon-btn" aria-label="Move {{ row.label }} up"{% if loop.first %} disabled{% endif %}>{{ ui.icon("up") }}</button>
+            </form>
+            <form method="post" action="/routing/move">
+              <input type="hidden" name="csrf" value="{{ csrf_token }}"><input type="hidden" name="job" value="{{ job.slug }}">
+              <input type="hidden" name="position" value="{{ row.position }}"><input type="hidden" name="direction" value="down">
+              <button type="submit" class="icon-btn" aria-label="Move {{ row.label }} down"{% if loop.last %} disabled{% endif %}>{{ ui.icon("down") }}</button>
+            </form>
+            <form method="post" action="/routing/remove">
+              <input type="hidden" name="csrf" value="{{ csrf_token }}"><input type="hidden" name="job" value="{{ job.slug }}">
+              <input type="hidden" name="model" value="{{ row.key }}">
+              <button type="submit" class="icon-btn" aria-label="Remove {{ row.label }}">{{ ui.icon("x") }}</button>
+            </form>
+          </div>
+        </li>
+        {% endfor %}
+      </ol>
+      {% else %}
+      <div class="empty" role="note" style="margin-bottom: var(--gap)"><strong>No model {{ job.verb }} yet.</strong>{% if job.slug == "repair" %}Failed work waits for you until you pick one.{% elif job.slug == "check" %}Changes wait for your own review until you pick one.{% else %}Work that needs this job waits until you pick one.{% endif %}</div>
+      {% endif %}
+
+      <h3 id="picker-h">{{ "Add a backup" if job.chain else "Choose a model" }}</h3>
+      {% for row in r.outdated %}
+      <div class="banner outdated" data-tone="warn" role="note">
+        <div><strong>{{ row.account }}: {{ row.count }} model{{ "" if row.count == 1 else "s" }} hidden</strong>The list of {{ row.account }} models is out of date, so they are not offered here. Refreshing asks {{ row.account }} for its current models; it sends no prompt.</div>
+        <form method="post" action="/first-run/discover">
+          <input type="hidden" name="csrf" value="{{ csrf_token }}"><input type="hidden" name="connection_id" value="{{ row.connection_id }}">
+          <input type="hidden" name="return_to" value="routing"><input type="hidden" name="job" value="{{ job.slug }}">
+          <button type="submit">Refresh models</button>
+        </form>
+      </div>
+      {% endfor %}
+      {% if r.option_total or r.query or r.account %}
+      <nav class="picker-tabs" aria-label="Accounts">
+        <a href="/routing?job={{ job.slug }}{% if r.query %}&amp;q={{ r.query | urlencode }}{% endif %}"{% if not r.account %} aria-current="true"{% endif %}>All<span class="count">{{ r.option_total }}</span></a>
+        {% for name, count in r.accounts %}
+        <a href="/routing?job={{ job.slug }}&amp;account={{ name | urlencode }}{% if r.query %}&amp;q={{ r.query | urlencode }}{% endif %}"{% if r.account == name %} aria-current="true"{% endif %}>{{ name }}<span class="count">{{ count }}</span></a>
+        {% endfor %}
+      </nav>
+      <form method="get" action="/routing" class="picker-search" role="search">
+        <input type="hidden" name="job" value="{{ job.slug }}">
+        {% if r.account %}<input type="hidden" name="account" value="{{ r.account }}">{% endif %}
+        <label class="sr-only" for="model-search">Search models</label>
+        <input type="search" id="model-search" name="q" value="{{ r.query }}" placeholder="Search a model or provider, like opus or opencode go…" autocomplete="off" spellcheck="false" data-model-search>
+        <button type="submit">Search</button>
+      </form>
+      {% set per = r.per_page %}
+      {% set start = (r.page - 1) * per %}
+      {% set base_q = "/routing?job=" ~ job.slug ~ ("&account=" ~ (r.account | urlencode) if r.account else "") ~ ("&q=" ~ (r.query | urlencode) if r.query else "") %}
+      <ul class="options" aria-labelledby="picker-h" data-model-options data-per-page="{{ per }}">
+        {% for option in r.options %}
+        <li data-search="{{ option.search }}" data-upstream="{{ option.upstream }}|{{ option.upstream_key }}"{% if loop.index0 < start or loop.index0 >= start + per %} hidden{% endif %}>
+          <form method="post" action="/routing/add">
+            <input type="hidden" name="csrf" value="{{ csrf_token }}"><input type="hidden" name="job" value="{{ job.slug }}">
+            <input type="hidden" name="model" value="{{ option.key }}">
+            <div class="who"><b>{{ option.label }}</b><span>{{ option.origin }}{% if option.same_company %} · <span class="hint-warn">Same company as the code writer</span>{% endif %}</span></div>
+            <button type="submit">{{ "Add as backup" if job.chain else "Put in charge" }}</button>
+          </form>
+        </li>
+        {% else %}
+        <li><p class="options-more">{% if r.query %}Nothing matches “{{ r.query }}”.{% else %}No usable model yet. Find models in <a href="/setup">Setup</a>.{% endif %}</p></li>
+        {% endfor %}
+      </ul>
+      <nav class="pager" aria-label="Model pages" data-model-pager{% if r.pages < 2 %} hidden{% endif %}>
+        <a class="btn" href="{{ base_q }}&amp;page={{ r.page - 1 }}" data-page-step="-1" rel="prev"{% if r.page <= 1 %} aria-disabled="true" tabindex="-1"{% endif %}>Previous</a>
+        <span class="num" data-model-count aria-live="polite">Page {{ r.page }} of {{ r.pages }} · {{ r.options | length }} model{{ "" if r.options | length == 1 else "s" }}</span>
+        <a class="btn" href="{{ base_q }}&amp;page={{ r.page + 1 }}" data-page-step="1" rel="next"{% if r.page >= r.pages %} aria-disabled="true" tabindex="-1"{% endif %}>Next</a>
+      </nav>
+      {% if r.pages < 2 and r.options %}<p class="options-more num">{{ r.options | length }} model{{ "" if r.options | length == 1 else "s" }}</p>{% endif %}
+      {% else %}
+      <div class="empty" role="note"><strong>No usable model yet.</strong>Sign in to a provider and find its models in <a href="/setup">Setup</a>. Only models SaberOps can really run are offered here.</div>
+      {% endif %}
+
+      <details class="tech" style="margin-top: var(--s5)"><summary>Technical details</summary>
+        <dl class="kv"><dt>Engine role</dt><dd>{{ job.role }}</dd>
+        {% for row in job.chain %}<dt>{{ "In charge" if loop.first else "Backup " ~ (loop.index - 1) }}</dt><dd class="mono">{{ row.technical }}</dd>{% endfor %}
+        </dl>
+      </details>
+    {% endif %}
+  </section>
+</div>
+{% endblock %}

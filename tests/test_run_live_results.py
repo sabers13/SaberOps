@@ -148,7 +148,7 @@ def test_running_to_completed_snapshot_exposes_all_evidence(
     db, client = state
     repo, base, candidate = seed_candidate(db, tmp_path)
     running = client.get("/runs/run-live").text
-    assert "Awaiting your acceptance" not in running
+    assert "Ready for your decision" not in running
     for key in (
         "result",
         "actions",
@@ -180,11 +180,12 @@ def test_running_to_completed_snapshot_exposes_all_evidence(
     before = len(db.get_events("run-live"))
     html = client.get("/runs/run-live").text
     result = result_region(html)
-    assert "Awaiting your acceptance" in result
-    assert "1 changed file in the recorded candidate" in result
-    assert "Candidate folder:" in result and "/tmp/candidate" in result
-    assert "Checks: 1 passed, 0 failed, 0 skipped. Review: PASS." in result
-    assert "What the worker built" in result
+    assert "Ready for your decision" in result
+    assert 'data-changed-files="1"' in result
+    assert "Candidate folder" in result and "/tmp/candidate" in result
+    assert 'Checks passed</div><div class="figure-value">1<span class="figure-unit"> of 1' in result
+    assert 'Review</div><div class="figure-value is-word">Pass</div>' in result
+    assert "What the model says it did" in result
     assert "Built the task board. Start with make run." in result
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in result
     assert "<script>alert(1)</script>" not in result
@@ -208,11 +209,11 @@ def test_result_distinguishes_owner_decisions(
         payload={"candidate_sha": candidate, "final_branch": "main"},
     )
     result = result_region(client.get("/runs/run-live").text)
-    assert "Awaiting your acceptance" not in result
+    assert "Ready for your decision" not in result
     assert (
-        "<strong>Accepted.</strong>"
+        "Accepted. The changes are in your project."
         if decision == "accepted"
-        else "<strong>Candidate rejected.</strong>"
+        else "Rejected. The changes were not applied."
     ) in result
 
 
@@ -224,9 +225,9 @@ def test_completed_without_candidate_does_not_claim_ready_for_acceptance(
     seed_candidate(db, tmp_path)
     db.update_run("run-live", RunStatus.COMPLETED, completed_at=COMPLETED)
     result = result_region(client.get("/runs/run-live").text)
-    assert "No result summary was recorded" in result
-    assert "Awaiting your acceptance" not in result
-    assert "Candidate folder:" not in result
+    assert "No summary was recorded" in result
+    assert "Ready for your decision" not in result
+    assert "Candidate folder" not in result
 
 
 def test_live_controller_refresh_ordering_drafts_timer_and_recovery() -> None:
@@ -264,7 +265,7 @@ def test_total_changes_uses_exact_counts_and_escaped_diff(
         "available": True,
     }
     page = client.get("/runs/run-live").text
-    assert "1 changed file in the recorded candidate" in page
+    assert 'data-changed-files="1"' in page
     assert "Total changes" not in page
     assert "print(&#39;hello&#39;)" in page
 

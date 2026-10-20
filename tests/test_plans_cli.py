@@ -288,4 +288,18 @@ def test_verify_explicit_date(
     assert code == 0
     result = json.loads(out)
     assert result["verified_on"] == "2026-10-01"
-    assert result["expires_on"] == "2026-10-31"
+    assert result["expires_on"] is None  # confirmed until the owner changes it
+    assert result["status"] == "OK"
+
+
+def test_verify_with_ttl_days_expires(
+    isolated: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, out, _ = _cli(
+        "posture", "verify", "codex", "--date", "2026-10-01", "--ttl-days", "30",
+        "--json", capsys=capsys,
+    )
+    assert code == 0
+    assert json.loads(out)["expires_on"] == "2026-10-31"
+    code, _out, err = _cli("posture", "verify", "codex", "--ttl-days", "91", capsys=capsys)
+    assert code == 1 and "1..90" in err

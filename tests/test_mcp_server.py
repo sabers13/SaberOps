@@ -94,9 +94,9 @@ def test_initialize_advertises_saberops_and_the_d7_capabilities(tmp_path: Path) 
     result = _call(server, "initialize", {"protocolVersion": "2025-06-18"})["result"]
     assert isinstance(result, dict)
     assert result["serverInfo"]["name"] == SERVER_NAME == "saberops"
-    assert result["serverInfo"]["version"] == SERVER_VERSION == "0.4.0"
+    assert result["serverInfo"]["version"] == SERVER_VERSION == "0.5.0"
     assert result["protocolVersion"] == "2025-06-18"
-    assert set(result["capabilities"]) == {"tools", "resources"}
+    assert set(result["capabilities"]) == {"tools", "resources", "prompts"}
     assert result["snapshotSchemaVersion"] == SNAPSHOT_SCHEMA_VERSION == 1
     assert result["readOnly"] is False
 
@@ -143,8 +143,9 @@ def test_tools_list_exposes_exactly_the_twelve_d7_tools(tmp_path: Path) -> None:
     _ready(server)
     result = _call(server, "tools/list")["result"]
     names = [tool["name"] for tool in result["tools"]]
-    assert sorted(names) == sorted(TOOL_NAMES)
-    assert len(names) == 12
+    # The twelve D7 tools plus the user's in-agent switch to turn SaberOps off.
+    assert sorted(n for n in names if n != "saberops_off") == sorted(TOOL_NAMES)
+    assert len(TOOL_NAMES) == 12 and "saberops_off" in names
     for tool in result["tools"]:
         assert tool["inputSchema"]["type"] == "object"
 

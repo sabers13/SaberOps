@@ -1,0 +1,198 @@
+{% extends "base.html" %}
+{% import "_ui.html" as ui %}
+{% set active_page = "projects" %}
+{% block title %}Projects{% endblock %}
+{# Projects: "Can SaberOps work on this repository, and how much space does it
+   use?" Mode codes, preflight codes, plan registry JSON and raw references
+   stay behind "Technical details". #}
+{% block content %}
+<header class="page-head">
+  <div>
+    <h1>Projects</h1>
+    <p class="lede">Check a repository before work starts, add it, preview how a plan splits into parallel rounds, and clean up old copies.</p>
+  </div>
+</header>
+
+<section class="section" aria-labelledby="inspect-h">
+  <div class="section-head"><h2 id="inspect-h">Check a repository</h2></div>
+  <div class="panel"><div class="panel-body">
+    <form method="get" action="/projects" class="form-inline">
+      <label class="field">Repository folder <input type="text" name="repo" value="{{ repo_param }}" placeholder="/home/you/code/project…" autocomplete="off" spellcheck="false"></label>
+      {% if wave_project %}<input type="hidden" name="wave_project" value="{{ wave_project }}">{% endif %}
+      <button type="submit" class="primary">Check</button>
+    </form>
+    {% if project.error %}
+    <div class="banner" data-tone="bad" role="alert">{{ project.error }}</div>
+    {% elif project.recommended %}
+    <div class="stack">
+      <p><strong>Recommended: {{ project.recommended.label }}</strong></p>
+      {% if project.preflight %}
+      <div class="banner" data-tone="{{ 'ok' if project.preflight.ok else 'bad' }}">
+        <div>
+          <strong>{{ "Ready to start" if project.preflight.ok else "Something blocks a start" }}</strong>
+          {% if project.preflight.blockers %}
+          <ul class="checklist" style="margin-top: var(--s2)">
+            {% for blocker in project.preflight.blockers %}
+            <li>{{ ui.check("FAIL") }}<div>{{ blocker.summary }}<span class="row-sub">Fix: <code>{{ blocker.fix }}</code></span></div></li>
+            {% endfor %}
+          </ul>
+          {% endif %}
+        </div>
+      </div>
+      {% for warning in project.preflight.warnings %}<p class="small muted">Note: {{ warning }}</p>{% endfor %}
+      {% endif %}
+      <details class="tech"><summary>Technical details</summary>
+        <dl class="kv">
+          <dt>Mode</dt><dd class="mono">{{ project.recommended.mode }}</dd>
+          <dt>Confidence</dt><dd>{{ project.recommended.confidence }}</dd>
+          {% if project.recommended.runner_up %}<dt>Runner-up</dt><dd class="mono">{{ project.recommended.runner_up }}</dd>{% endif %}
+          <dt>Also allowed</dt><dd class="mono">{{ project.allowed | map(attribute="value") | join(", ") }}</dd>
+          {% if project.preflight %}{% for blocker in project.preflight.blockers %}<dt>Blocker</dt><dd class="mono">{{ blocker.code }}</dd>{% endfor %}{% endif %}
+        </dl>
+      </details>
+    </div>
+    {% else %}
+    <p class="muted">Enter a folder to see how SaberOps would work in it and whether anything blocks a start.</p>
+    {% endif %}
+    <details class="more">
+      <summary>The six ways to work in a project <span class="faint">lightest first</span></summary>
+      <div class="more-body">
+        <div class="table-wrap">
+          <table class="table stack-sm">
+            <caption class="sr-only">Project entry modes</caption>
+            <thead><tr><th scope="col">Way</th><th scope="col">Needs your confirmation</th></tr></thead>
+            <tbody>
+            {% for mode in project.modes %}
+              <tr>
+                <td><strong>{{ mode.label }}</strong> <span class="faint mono" translate="no">{{ mode.value }}</span>{% if mode.requirements %}<span class="row-sub">Needs {{ mode.requirements | join(", ") }}</span>{% endif %}</td>
+                <td data-label="Needs your confirmation">{{ "Yes" if mode.requires_owner_confirmation else "No" }}</td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </details>
+  </div></div>
+</section>
+
+<section class="section" aria-labelledby="register-h">
+  <div class="section-head"><h2 id="register-h">Add a project</h2><p>New projects start paused until you switch them on.</p></div>
+  <div class="panel"><div class="panel-body">
+    <form method="post" action="/first-run/project/register" class="form">
+      <input type="hidden" name="csrf" value="{{ csrf_token }}">
+      <label class="field">Display name <input type="text" name="display_name" required autocomplete="off"></label>
+      <label class="field">Short name <span class="hint">Stays the same forever, for example billing-api.</span><input type="text" name="project_id" required autocomplete="off" spellcheck="false"></label>
+      <label class="field">Repository folder <input type="text" name="repository_root" value="{{ repo_param }}" required autocomplete="off" spellcheck="false"></label>
+      <label class="field">Working folder <span class="hint">Where SaberOps keeps this project's own files.</span><input type="text" name="state_dir" required autocomplete="off" spellcheck="false"></label>
+      <label class="confirm"><input type="checkbox" name="owner_confirmed" value="yes"> I confirm adding this project.</label>
+      <div><button type="submit">Add project</button></div>
+    </form>
+  </div></div>
+</section>
+
+<section class="section" aria-labelledby="plans-h">
+  <div class="section-head"><h2 id="plans-h">Plan preview</h2><p>How a stored plan splits into rounds that run side by side.</p></div>
+  <div class="panel"><div class="panel-body">
+    {% if plans.error %}<div class="banner" data-tone="bad" role="alert">{{ plans.error }}</div>{% endif %}
+    <form method="get" action="/projects" class="form-inline">
+      <label class="field">Project short name <input type="text" name="wave_project" value="{{ wave_project }}" placeholder="billing-api…" autocomplete="off" spellcheck="false"></label>
+      {% if repo_param %}<input type="hidden" name="repo" value="{{ repo_param }}">{% endif %}
+      <button type="submit">Preview</button>
+    </form>
+    {% if wave.error %}
+    <div class="banner" data-tone="warn" role="note">{{ wave.error }}</div>
+    {% elif wave.available %}
+    <div class="figures">
+      <div class="figure"><div class="figure-label">Tasks</div><div class="figure-value">{{ wave.task_count }}</div></div>
+      <div class="figure"><div class="figure-label">Rounds</div><div class="figure-value">{{ wave.waves | length }}</div></div>
+      <div class="figure"><div class="figure-label">Most at once</div><div class="figure-value">{{ wave.peak_workers }}</div></div>
+      <div class="figure"><div class="figure-label">Longest chain</div><div class="figure-value">{{ wave.critical_path }}</div></div>
+    </div>
+    <ol class="rows">
+      {% for wave_row in wave.waves %}<li><div class="row-main"><span class="row-title">Round {{ wave_row.index }}</span><span class="row-sub mono">{{ wave_row.tasks | join(", ") or "—" }}</span></div><span class="muted num">{{ wave_row.tasks | length }} {{ "task" if wave_row.tasks | length == 1 else "tasks" }}</span></li>{% endfor %}
+    </ol>
+    {% else %}
+    <p class="muted">Enter a project with an active plan to see how it splits.</p>
+    {% endif %}
+    <p class="small muted num">Limits: {{ wave.limits.active_projects }} projects × {{ wave.limits.workers_per_project }} tasks each, at most {{ wave.limits.max_rounds }} rounds.</p>
+    {% if not plans.error %}
+    <details class="tech"><summary>Technical details</summary>
+      <div class="stack">
+        <dl class="kv"><dt>Heavy check slots</dt><dd>{{ wave.limits.heavy_gate_slots }}</dd><dt>Minimum gain</dt><dd>{{ wave.limits.min_gain }}</dd>{% if wave.available %}<dt>Makespan</dt><dd>{{ wave.makespan }}</dd><dt>Parallelism</dt><dd>{{ wave.parallelism }}</dd><dt>Scope overlaps</dt><dd>{{ wave.scope_overlap_count }}</dd>{% endif %}{% if wave.revisions %}<dt>Revisions</dt><dd class="mono">{{ wave.revisions | join(", ") }}</dd>{% endif %}</dl>
+        {% for section in [["Accounts", plans.accounts], ["Quota pools", plans.quota_pools], ["Billing", plans.postures]] %}
+        <h4>{{ section[0] }}</h4>
+        {% if section[1] %}<dl class="kv">{% for key, entry in section[1] | dictsort %}<dt class="mono">{{ key }}</dt><dd class="mono">{{ entry | tojson }}</dd>{% endfor %}</dl>{% else %}<p>None.</p>{% endif %}
+        {% endfor %}
+        <h4>Reserves</h4>
+        {% if plans.reserves %}<ul class="mono">{% for reserve in plans.reserves %}<li>{{ reserve }}</li>{% endfor %}</ul>{% else %}<p>None.</p>{% endif %}
+      </div>
+    </details>
+    {% endif %}
+  </div></div>
+</section>
+
+<section class="section" aria-labelledby="storage-h">
+  <div class="section-head"><h2 id="storage-h">Free up space</h2><p>Always a preview first. Nothing is deleted without an approved policy and your typed confirmation.</p></div>
+  <div class="panel"><div class="panel-body">
+    {% if not repo_param %}
+    <p class="muted">Check a repository above to preview what could be cleaned up.</p>
+    {% elif storage.error %}
+    <div class="banner" data-tone="bad" role="alert">{{ storage.error }}</div>
+    {% elif storage.available %}
+    <div class="figures">
+      <div class="figure"><div class="figure-label">Could free</div><div class="figure-value">{% if storage.estimated_reclaimable_bytes is not none %}{{ (storage.estimated_reclaimable_bytes / 1048576) | round(1) }}<span class="figure-unit"> MB</span>{% else %}<span class="faint">—</span>{% endif %}</div></div>
+      <div class="figure"><div class="figure-label">Items</div><div class="figure-value">{{ storage.candidates | length }}</div></div>
+      <div class="figure"><div class="figure-label">Cleanup policy</div><div class="figure-value is-word">{{ ui.status("APPROVED" if storage.approved else "UNAPPROVED") }}</div></div>
+    </div>
+    {% for warning in storage.warnings %}<p class="small muted">Note: {{ warning }}</p>{% endfor %}
+    {% if storage.candidates %}
+    <div class="table-wrap">
+      <table class="table stack-sm">
+        <thead><tr><th scope="col">What</th><th scope="col">Why</th><th scope="col" class="num">Size</th></tr></thead>
+        <tbody>
+        {% for candidate in storage.candidates %}
+          <tr>
+            <td>{{ ui.label(candidate.artifact_class) }}<span class="row-sub">{{ candidate.action }}</span></td>
+            <td data-label="Why" class="muted">{{ candidate.reason }}</td>
+            <td data-label="Size" class="num">{{ candidate.estimated_bytes if candidate.estimated_bytes is not none else "—" }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="muted">Nothing can be cleaned up under the current policy.</p>
+    {% endif %}
+    {% if storage.exclusions %}
+    <details class="more">
+      <summary>Kept <span class="faint num">{{ storage.exclusions | length }} with reasons</span></summary>
+      <div class="more-body">
+        <ul class="rows">{% for exclusion in storage.exclusions %}<li><div class="row-main"><span>{{ ui.label(exclusion.artifact_class) }}</span><span class="row-sub">{{ exclusion.reason }}</span></div></li>{% endfor %}</ul>
+      </div>
+    </details>
+    {% endif %}
+    <details class="tech"><summary>Technical details</summary>
+      <dl class="kv"><dt>Policy</dt><dd class="mono">{{ storage.policy_ref or "None" }}</dd>
+      {% for candidate in storage.candidates %}<dt>Item</dt><dd class="mono">{{ candidate.reference }}</dd>{% endfor %}
+      {% for exclusion in storage.exclusions %}<dt>Kept</dt><dd class="mono">{{ exclusion.reference }}</dd>{% endfor %}</dl>
+    </details>
+    {% if storage.approved and storage.candidates %}
+    <form method="post" action="/first-run/storage/apply" class="form">
+      <input type="hidden" name="csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="repo" value="{{ repo_param }}">
+      <input type="hidden" name="preview_id" value="{{ storage.preview_id }}">
+      <label class="field">Type the preview code to confirm <span class="hint mono">{{ storage.preview_id }}</span>
+        <input type="text" name="confirm" required autocomplete="off" spellcheck="false">
+      </label>
+      <div><button type="submit" class="danger">Apply cleanup</button></div>
+    </form>
+    {% else %}
+    <p class="small muted">Cleaning stays off until an approved cleanup policy (<code>orch gc</code>) has items to remove.</p>
+    {% endif %}
+    {% else %}
+    <p class="muted">No preview is available for this folder.</p>
+    {% endif %}
+  </div></div>
+</section>
+{% endblock %}

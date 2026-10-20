@@ -168,8 +168,12 @@ def verify_posture(
     note: str | None,
     posture_class: str | None,
     day: str | None,
+    ttl_days: int | None = None,
 ) -> dict[str, Any]:
     """Record the owner's re-verification of one posture selector.
+
+    The confirmation never expires unless ``ttl_days`` (1..90) is given:
+    the owner chose one-time setup (20 October 2026).
 
     Writes only the owner document, atomically, through policy.py's
     writer, and only the attestation fields (plus ``class`` for a new
@@ -225,14 +229,15 @@ def verify_posture(
             raise PlansOperationError(
                 "INVALID_URL", f"policy url must be https: {url!r}"
             )
+    if ttl_days is not None and (
+        isinstance(ttl_days, bool) or not isinstance(ttl_days, int) or not 1 <= ttl_days <= 90
+    ):
+        raise PlansOperationError("INVALID_TTL", "ttl_days must be a whole number of days, 1..90")
+    new_ttl = None if new_class == "X" else ttl_days
     if existing is not None:
-        new_ttl = existing.ttl_days
         new_account = existing.account
         new_note = note if note is not None else existing.note
     else:
-        # A new selector has no packaged record to inherit: TTL defaults to
-        # the packaged convention (30 days, X has none).
-        new_ttl = 30 if new_class != "X" else None
         new_account = None
         new_note = note if note is not None else ""
 
@@ -245,7 +250,8 @@ def verify_posture(
         "verified_on": verified_on,
         "note": new_note,
     }
-    if new_ttl is not None:
+    if new_class != "X":
+        # Always explicit, so ``null`` (no expiry) wins over a packaged ttl.
         entry["ttl_days"] = new_ttl
     if new_account is not None:
         entry["account"] = new_account

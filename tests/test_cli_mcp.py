@@ -95,14 +95,24 @@ def _stdin_payload(*lines: dict[str, object]) -> str:
 
 
 def _serve(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, options: dict[str, str], payload: str
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    options: dict[str, str],
+    payload: str,
+    *,
+    active: bool = True,
 ) -> list[dict[str, object]]:
-    """Run `orch mcp serve` against a captured stdin/stdout pair."""
+    """Run `orch mcp serve` against a captured stdin/stdout pair.
+
+    ``active`` starts the session with SaberOps on (``--active``), as a
+    session the user turned on; the default `orch mcp serve` starts it off.
+    """
     captured = io.StringIO()
     monkeypatch.setattr(sys, "stdin", io.StringIO(payload))
     monkeypatch.setattr(sys, "stdout", captured)
     monkeypatch.setattr(sys, "stderr", io.StringIO())
-    assert main(_argv(options, "serve")) == 0
+    extra = ["--active"] if active else []
+    assert main(_argv(options, "serve") + extra) == 0
     return [json.loads(line) for line in captured.getvalue().splitlines() if line]
 
 
@@ -123,7 +133,29 @@ def test_cli_mcp_serve_roundtrip(
     )
     assert [response["id"] for response in responses] == [1, 2]
     names = [tool["name"] for tool in responses[1]["result"]["tools"]]  # type: ignore[index]
-    assert sorted(names) == sorted(TOOL_NAMES)
+    # Once SaberOps is on, the twelve D7 tools are offered, plus saberops_off.
+    assert sorted(n for n in names if n != "saberops_off") == sorted(TOOL_NAMES)
+
+
+def test_cli_mcp_serve_starts_off_until_the_user_turns_it_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: agent sessions start with SaberOps off (owner decision, 20 October 2026)."""
+    options = _isolate(monkeypatch, tmp_path)
+    responses = _serve(
+        monkeypatch,
+        tmp_path,
+        options,
+        _stdin_payload(
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+        ),
+        active=False,
+    )
+    assert responses[0]["result"]["active"] is False  # type: ignore[index]
+    names = [tool["name"] for tool in responses[1]["result"]["tools"]]  # type: ignore[index]
+    assert names == ["saberops_on"]
 
 
 def test_cli_mcp_default_action_serves(

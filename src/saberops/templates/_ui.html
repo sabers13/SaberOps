@@ -1,0 +1,62 @@
+{# Shared presentation macros. Status tones map engine states to the four
+   semantic colours; labels are sentence case. Raw state stays in title. #}
+{% set _tones = {
+  "COMPLETED": "ok", "SUCCESS": "ok", "PASS": "ok", "OK": "ok", "READY": "ok",
+  "INSTALLED": "ok", "SUPPORTED": "ok", "VERIFIED": "ok", "ACCEPTED": "ok",
+  "APPROVED": "ok", "LIVE": "ok", "ATTENDED_ONLY": "ok", "METERED": "ok", "PASSED": "ok", "ELIGIBLE": "ok",
+  "RUNNING": "live", "PENDING": "live", "IN_PROGRESS": "live", "LOADING": "live",
+  "FAILED": "bad", "FAIL": "bad", "ORPHANED": "bad", "BLOCK": "bad", "BLOCKED": "bad",
+  "MISSING": "bad", "FORBIDDEN": "bad", "REJECTED": "bad", "TIMEOUT": "bad",
+  "NOT_AUTHENTICATED": "bad", "FINAL_BLOCK": "bad", "REVIEW_EXECUTION_FAILED": "bad",
+  "PREEMPTED": "warn", "WARN": "warn", "UNKNOWN": "warn", "STALE": "warn", "EXPIRED": "warn",
+  "UNVERIFIED": "warn", "UNAPPROVED": "warn", "OWNER": "warn", "DEFERRED": "warn",
+  "PASS_WITH_BACKLOG": "warn", "CONVERGENCE_STALLED": "warn", "NOT_ACCEPTED": "warn",
+} %}
+{% set _labels = {
+  "PENDING": "Queued", "NOT_AUTHENTICATED": "Not signed in", "PASS_WITH_BACKLOG": "Pass with backlog",
+  "REVIEW_EXECUTION_FAILED": "Review failed to run", "FINAL_BLOCK": "Blocked", "OK": "OK",
+  "NOT_ACCEPTED": "Not accepted",
+  "ATTENDED_ONLY": "Confirmed, while you watch", "METERED": "Confirmed, pay per use",
+} %}
+
+{% macro tone(state) -%}
+{%- set key = (state or "UNKNOWN") | string | upper -%}
+{%- if key in _tones %}{{ _tones[key] }}{% elif key.startswith("FAIL") %}bad{% elif key.startswith("OK") %}ok{% else %}idle{% endif -%}
+{%- endmacro %}
+
+{% macro label(state) -%}
+{%- set key = (state or "Unknown") | string -%}
+{%- if key | upper in _labels %}{{ _labels[key | upper] }}{% else %}{{ key | replace("_", " ") | lower | capitalize }}{% endif -%}
+{%- endmacro %}
+
+{% macro status(state, id=None) -%}
+<span class="status" data-tone="{{ tone(state) }}" title="{{ state }}"{% if id %} id="{{ id }}"{% endif %}>{{ label(state) }}</span>
+{%- endmacro %}
+
+{% macro check(state) -%}
+{%- set t = tone(state) -%}
+<span class="check-icon" data-tone="{{ t }}" aria-hidden="true">{% if t == "ok" %}<svg viewBox="0 0 12 12"><path d="M2.5 6.2 5 8.5l4.5-5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>{% elif t == "bad" %}<svg viewBox="0 0 12 12"><path d="M3.5 3.5l5 5M8.5 3.5l-5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>{% elif t == "warn" %}!{% endif %}</span>
+{%- endmacro %}
+
+{% macro empty(title) -%}
+<div class="empty" role="note"><strong>{{ title }}</strong>{{ caller() }}</div>
+{%- endmacro %}
+
+{# One outline icon set (20px grid, 1.6 stroke). #}
+{% macro icon(name) -%}
+<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+{%- if name == "runs" %}<path d="M4 5h12M4 10h12M4 15h7"/>
+{%- elif name == "questions" %}<circle cx="10" cy="10" r="7"/><path d="M8 8a2.1 2.1 0 1 1 2.8 2c-.6.2-.8.6-.8 1.2M10 14v.1"/>
+{%- elif name == "projects" %}<path d="M3 6.5V15a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8a1 1 0 0 0-1-1h-6L8.5 5H4a1 1 0 0 0-1 1.5z"/>
+{%- elif name == "routing" %}<circle cx="5" cy="5" r="2"/><circle cx="15" cy="15" r="2"/><path d="M7 5h5.5a2.5 2.5 0 0 1 0 5h-5a2.5 2.5 0 0 0 0 5H13"/>
+{%- elif name == "accounts" %}<path d="M3.5 13.5a6.5 6.5 0 1 1 13 0"/><path d="M10 13.5l3-4"/><path d="M3.5 16.5h13"/>
+{%- elif name == "setup" %}<circle cx="10" cy="10" r="2.6"/><path d="M10 2.5v2.2M10 15.3v2.2M2.5 10h2.2M15.3 10h2.2M4.7 4.7l1.5 1.5M13.8 13.8l1.5 1.5M4.7 15.3l1.5-1.5M13.8 6.2l1.5-1.5"/>
+{%- elif name == "sun" %}<circle cx="10" cy="10" r="3.2"/><path d="M10 2.5v1.8M10 15.7v1.8M2.5 10h1.8M15.7 10h1.8M4.7 4.7l1.3 1.3M14 14l1.3 1.3M4.7 15.3 6 14M14 6l1.3-1.3"/>
+{%- elif name == "moon" %}<path d="M15.5 12.3A6 6 0 0 1 7.7 4.5a6 6 0 1 0 7.8 7.8z"/>
+{%- elif name == "menu" %}<path d="M3.5 6h13M3.5 10h13M3.5 14h13"/>
+{%- elif name == "up" %}<path d="M10 15V5M5.5 9.5 10 5l4.5 4.5"/>
+{%- elif name == "down" %}<path d="M10 5v10M5.5 10.5 10 15l4.5-4.5"/>
+{%- elif name == "x" %}<path d="M5.5 5.5l9 9M14.5 5.5l-9 9"/>
+{%- endif %}
+</svg>
+{%- endmacro %}

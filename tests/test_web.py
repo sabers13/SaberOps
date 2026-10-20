@@ -66,22 +66,23 @@ def _seed_run(
 def test_c16c2_dashboard_lists_runs_with_kept_tokens(
     isolated_xdg: None, tmp_path: Path
 ) -> None:
-    """Minimal dashboard lists runs and reuses the approved CSS tokens."""
+    """Dashboard lists runs on the shared shell and its single stylesheet."""
     _seed_run(tmp_path)
     page = _client(tmp_path).get("/")
     assert page.status_code == 200
     text = page.text
-    assert "/static/css/console-v2.css" in text
+    assert "/static/css/app.css" in text
     assert "/static/js/console.js" in text
     assert "console integration probe" in text
+    # Shared navigation reaches every owner page.
+    for page_link in ('href="/questions"', 'href="/projects"', 'href="/routing"', 'href="/setup"'):
+        assert page_link in text, page_link
     assert 'href="/runs/run_c16c2"' in text
     # Removed console surfaces stay gone.
     for gone in (
         "/access",
-        "/routing",
         "/quota",
         "/inbox",
-        "/setup",
         "/chats",
         "chat-composer",
         "resolveDecision",
@@ -100,9 +101,9 @@ def test_c16c2_run_detail_renders_status_evidence_and_actions(
     assert live.status_code == 200
     text = live.text
     for section in (
-        "Attempts · gate results",
-        "Review verdict",
-        "Candidate diff",
+        "Attempts and checks",
+        "Independent review",
+        "Changes",
         "Owner actions",
         "Events",
     ):
@@ -129,7 +130,8 @@ def test_c16c2_missing_run_keeps_minimal_page(
     page = client.get("/runs/does-not-exist")
     assert page.status_code == 404
     assert "Run not found" in page.text
-    assert "SaberOps · minimal status" in page.text
+    assert "Back to runs" in page.text
+    assert 'aria-label="Main"' in page.text
 
 
 def test_c16c2_report_and_health_stay_json(
@@ -150,8 +152,7 @@ def test_c16c2_console_assets_are_served(
 ) -> None:
     client = _client(tmp_path)
     for asset in (
-        "/static/css/console-v2.css",
-        "/static/css/saberops-console.css",
+        "/static/css/app.css",
         "/static/js/console.js",
         "/static/js/app.js",
     ):
@@ -198,7 +199,7 @@ def onboarding_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _csrf(client: TestClient) -> str:
     """Extract the process CSRF token rendered into the onboarding page."""
-    match = re.search(r'name="csrf" value="([^"]+)"', client.get("/first-run").text)
+    match = re.search(r'name="csrf" value="([^"]+)"', client.get("/setup").text)
     assert match is not None, "onboarding page renders no CSRF token"
     return match.group(1)
 
@@ -268,40 +269,53 @@ def test_ui1_empty_store_lands_on_onboarding(
     client = _client(tmp_path)
     page = client.get("/")
     assert page.status_code == 200
-    assert "First-run setup" in page.text
+    assert "Welcome to SaberOps" in page.text
+    legacy = client.get("/first-run", follow_redirects=False)
+    assert legacy.status_code == 303
+    assert legacy.headers["location"] == "/setup"
     assert client.get("/first-run").status_code == 200
     _seed_run(tmp_path)
-    assert "First-run setup" not in client.get("/").text
+    assert "Welcome to SaberOps" not in client.get("/").text
 
 
 def test_ui1_onboarding_sections_render(onboarding_env: None, tmp_path: Path) -> None:
-    """Covers: UI-1 Sections A/B/C render with honest empty states."""
-    text = _client(tmp_path).get("/first-run").text
-    for marker in (
-        "A1 · Readiness",
-        "A2 · Official vendor logins",
-        "A3 · Providers",
-        "A4 · Billing posture",
-        "B1 · Per-role model assignment",
-        "B3 · Concurrency",
-        "B4 · Project entry modes",
-        "B5 · Plans",
-        "C1 · Run monitoring",
-        "C2 · Owner question queue",
-        "C3 · Unattended",
-        "C4 · Storage",
-    ):
-        assert marker in text, marker
-    assert "No runs yet" in text
-    assert "password, token, or secret" in text
-    assert "/static/css/onboarding.css" in text
+    """Covers: UI-1 Sections A/B/C render on their owner pages with honest empty states."""
+    client = _client(tmp_path)
+    expected = {
+        "/setup": (
+            "This computer",
+            "Sign in to your AI accounts",
+            "Find models",
+            "Confirm how each account is billed",
+            "never asks for a password or key",
+            "Connect your agent",
+        ),
+        "/routing": ("Plans the work", "Writes the code", "How much runs at once"),
+        "/projects": (
+            "Check a repository",
+            "Add a project",
+            "Plan preview",
+            "Free up space",
+        ),
+        "/questions": (
+            "No questions waiting",
+            "What may run without you",
+            "Always your decision",
+        ),
+    }
+    for path, markers in expected.items():
+        page = client.get(path)
+        assert page.status_code == 200, path
+        assert "/static/css/app.css" in page.text, path
+        for marker in markers:
+            assert marker in page.text, (path, marker)
 
 
 def test_ui1_onboarding_assets_are_served(
     onboarding_env: None, tmp_path: Path
 ) -> None:
-    """Covers: UI-1 — the onboarding stylesheet is served with content."""
-    response = _client(tmp_path).get("/static/css/onboarding.css")
+    """Covers: UI-1 — the shared stylesheet is served with content."""
+    response = _client(tmp_path).get("/static/css/app.css")
     assert response.status_code == 200
     assert len(response.text) > 100
 
@@ -323,7 +337,7 @@ def test_ui1_concurrency_saves_owner_confirmed_limits(
         follow_redirects=False,
     )
     assert response.status_code == 303
-    assert response.headers["location"].endswith("concurrency_saved=1")
+    assert response.headers["location"] == "/routing?concurrency_saved=1"
     from saberops.config import (
         ConfigLedger,
         config_ledger_path,
@@ -399,7 +413,7 @@ def test_ui1_posture_fail_closed_excludes_forbidden_routes(
         follow_redirects=False,
     )
     assert response.status_code == 303
-    text = client.get("/first-run").text
+    text = client.get("/setup").text
     assert "example/model-x" in text
     assert "FORBIDDEN" in text
 
@@ -412,7 +426,7 @@ def test_ui1_question_answer_and_defer(
     _seed_question("Q-UI1-B")
     client = _client(tmp_path)
     token = _csrf(client)
-    page = client.get("/first-run").text
+    page = client.get("/questions").text
     assert "subject Q-UI1-A" in page
     assert client.post(
         "/questions/Q-UI1-A/answer",
@@ -465,7 +479,7 @@ def test_ui1_storage_dry_run_requires_policy_and_confirmation(
         encoding="utf-8",
     )
     monkeypatch.setenv("ORCH_GC_POLICY", str(policy))
-    page = client.get("/first-run", params={"repo": str(repo)}).text
+    page = client.get("/projects", params={"repo": str(repo)}).text
     assert "APPROVED" in page
     assert str(scratch) in page
     preview = re.search(r'name="preview_id" value="([^"]+)"', page)
@@ -505,7 +519,7 @@ def test_ui1_project_entry_modes_and_registration(
     repo = _git_repo(tmp_path)
     client = _client(tmp_path)
     token = _csrf(client)
-    page = client.get("/first-run", params={"repo": str(repo)}).text
+    page = client.get("/projects", params={"repo": str(repo)}).text
     assert "Recommended:" in page
     assert "develop_existing" in page
     registered = client.post(
@@ -607,7 +621,7 @@ def test_ui1_standing_decisions_show_expiration_windows(
         encoding="utf-8",
     )
     monkeypatch.setenv("ORCH_UNATTENDED_STORE", str(store))
-    text = _client(tmp_path).get("/first-run").text
+    text = _client(tmp_path).get("/questions").text
     assert "k-live" in text and "LIVE" in text
     assert "k-expired" in text and "EXPIRED" in text
 

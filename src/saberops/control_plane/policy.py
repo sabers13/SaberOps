@@ -242,7 +242,9 @@ def _plans_digest_payload(plans: PlanSet) -> dict[str, object]:
             selector: {
                 "class": record.posture_class,
                 "policy_urls": list(record.policy_urls),
-                **({"ttl_days": record.ttl_days} if record.ttl_days is not None else {}),
+                # A non-X record always states its ttl, so ``null`` (no expiry)
+                # survives the overlay instead of falling back to a packaged value.
+                **({"ttl_days": record.ttl_days} if record.posture_class != "X" else {}),
                 **(
                     {"verified_on": record.verified_on}
                     if record.verified_on is not None

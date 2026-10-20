@@ -1570,6 +1570,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Verification date YYYY-MM-DD (default: today, local).",
     )
+    posture_verify.add_argument(
+        "--ttl-days",
+        dest="ttl_days",
+        type=int,
+        default=None,
+        help="Make this confirmation expire after N days (1-90). Default: never expires.",
+    )
     posture_verify.add_argument("--json", action="store_true", help="JSON output")
 
     # orch questions ask|list|show|answer|defer|moot|diverge|divergences|
@@ -2199,8 +2206,19 @@ def build_parser() -> argparse.ArgumentParser:
         "mcp_action",
         nargs="?",
         default="serve",
-        choices=["serve", "tools"],
-        help="serve the MCP server (default) or list the exposed tools.",
+        choices=["serve", "tools", "on", "off", "status"],
+        help=(
+            "serve the MCP server (default), list the exposed tools, or switch agent "
+            "access on/off (off keeps every agent registered but SaberOps offers nothing)."
+        ),
+    )
+    mcp_parser.add_argument(
+        "--profile", type=str, default=None, help="SaberOps profile whose switch/lease to use."
+    )
+    mcp_parser.add_argument(
+        "--active",
+        action="store_true",
+        help="Start the session with SaberOps on (default: off until the user turns it on).",
     )
     mcp_parser.add_argument(
         "--transport",
@@ -2229,6 +2247,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="Base directory used to discover the .orch/.saberops evidence roots.",
     )
     mcp_parser.add_argument("--json", action="store_true", help="JSON output (tools).")
+
+    # orch connect [agent ...] (register SaberOps as an MCP server in agent CLIs).
+    connect_parser = subparsers.add_parser(
+        "connect",
+        help="Connect SaberOps to coding-agent CLIs (Claude Code, Codex, ...) over MCP.",
+        description=(
+            "Register `orch mcp serve` with each agent's own MCP settings. With no agent "
+            "named, lists the agents found on this computer and whether each is connected."
+        ),
+    )
+    connect_parser.add_argument(
+        "agents", nargs="*", help="claude, codex, antigravity, opencode, cursor, or all."
+    )
+    connect_parser.add_argument(
+        "--remove", action="store_true", help="Disconnect instead of connect."
+    )
+    connect_parser.add_argument(
+        "--project",
+        nargs="?",
+        const=".",
+        default=None,
+        help="Connect only for this project folder (default: current folder).",
+    )
+    connect_parser.add_argument(
+        "--dry-run", action="store_true", help="Show what would change; change nothing."
+    )
+    connect_parser.add_argument(
+        "--profile", type=str, default=None, help="SaberOps profile the agents should use."
+    )
+    connect_parser.add_argument("--json", action="store_true", help="JSON output.")
 
     # orch certify check|run|report|approve (END production certification).
     certify_parser = subparsers.add_parser(
@@ -4771,6 +4819,7 @@ def handle_posture_verify(args: argparse.Namespace) -> int:
             str(args.note) if args.note is not None else None,
             str(args.posture_class) if args.posture_class is not None else None,
             str(args.date) if args.date is not None else None,
+            ttl_days=getattr(args, "ttl_days", None),
         )
     except PlansOperationError as exc:
         print(f"[!] {exc}", file=sys.stderr)
@@ -4781,7 +4830,7 @@ def handle_posture_verify(args: argparse.Namespace) -> int:
     print(
         f"Posture verified: {result['selector']} "
         f"(class {result['class']}, verified {result['verified_on']}, "
-        f"expires {result['expires_on']}, status {result['status']})"
+        f"expires {result['expires_on'] or 'never'}, status {result['status']})"
     )
     return 0
 
@@ -5363,6 +5412,8 @@ def handle_mcp(args: argparse.Namespace) -> int:
     from saberops.mcp.stdio import build_server_context, serve_stdio
 
     action = str(getattr(args, "mcp_action", "serve") or "serve")
+    if action in ("on", "off", "status"):
+        return _handle_mcp_switch(args, action)
     transport = str(getattr(args, "transport", "stdio") or "stdio")
     if transport != "stdio":
         print(f"[!] unsupported MCP transport: {transport}", file=sys.stderr)
@@ -5385,8 +5436,15 @@ def handle_mcp(args: argparse.Namespace) -> int:
         for descriptor in descriptors:
             print(f"{descriptor['name']:<22} {descriptor['description']}")
         return 0
-    server = McpServer(context)
-    if not server.read_only:
+    # Agent sessions start with SaberOps off; the user turns it on in the agent
+    # ("turn on saberops" -> saberops_on). --active starts it on.
+    server = McpServer(context, start_active=bool(getattr(args, "active", False)))
+    if not server.active:
+        print(
+            "[i] SaberOps MCP ready and OFF for this session; ask the agent to turn it on.",
+            file=sys.stderr,
+        )
+    elif not server.read_only:
         print(
             "[i] MCP writer lease acquired; owner-only operations stay unavailable.",
             file=sys.stderr,
@@ -5397,6 +5455,79 @@ def handle_mcp(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
     return serve_stdio(server)
+
+
+def _handle_mcp_switch(args: argparse.Namespace, action: str) -> int:
+    """`orch mcp on|off|status`: the owner's agent-access switch."""
+    from saberops.mcp.lease import OrchestratorLease, pid_is_alive
+    from saberops.mcp.switch import mcp_enabled, set_mcp_enabled
+
+    lease_path = Path(args.lease).expanduser() if getattr(args, "lease", None) else None
+    if action in ("on", "off"):
+        set_mcp_enabled(action == "on", lease_path)
+    enabled = mcp_enabled(lease_path)
+    lease = OrchestratorLease(lease_path) if lease_path else OrchestratorLease()
+    record = lease.read()
+    planner = (
+        record.client or record.holder
+        if enabled and record is not None and pid_is_alive(record.pid)
+        else None
+    )
+    if getattr(args, "json", False):
+        print(json.dumps({"enabled": enabled, "planner": planner}, indent=2, sort_keys=True))
+        return 0
+    if enabled:
+        print("SaberOps agent access: ON")
+        print(f"Planning agent       : {planner or 'none connected'}")
+    else:
+        print("SaberOps agent access: OFF (agents stay registered but see no SaberOps tools)")
+        print("Turn it back on with : orch mcp on")
+    return 0
+
+
+def handle_connect(args: argparse.Namespace) -> int:
+    """`orch connect [agent ...] [--remove] [--project [DIR]] [--dry-run]`."""
+    from saberops.agent_connect import AGENTS, agent_rows, connect, disconnect
+
+    wanted = [a.strip().lower() for a in (getattr(args, "agents", None) or []) if a.strip()]
+    project = Path(args.project).expanduser().resolve() if args.project else None
+    if not wanted:
+        rows = agent_rows()
+        if args.json:
+            print(json.dumps({"agents": rows}, indent=2, sort_keys=True))
+            return 0
+        for row in rows:
+            state = (
+                "connected" if row["connected"]
+                else "not connected" if row["installed"] else "not installed"
+            )
+            print(f"{row['name']:<12} {state}")
+        print("\nConnect one with:  orch connect claude   (or: orch connect all)")
+        return 0
+    if wanted == ["all"]:
+        wanted = [row["slug"] for row in agent_rows() if row["installed"]]
+    unknown = [slug for slug in wanted if slug not in {a.slug for a in AGENTS}]
+    if unknown:
+        print(f"[!] Unknown agent(s): {', '.join(unknown)}", file=sys.stderr)
+        return 2
+    results = [
+        disconnect(slug, project=project) if args.remove
+        else connect(slug, project=project, dry_run=args.dry_run)
+        for slug in wanted
+    ]
+    if args.json:
+        print(json.dumps({"results": [r.__dict__ for r in results]}, indent=2, sort_keys=True))
+    else:
+        for result in results:
+            print(("✓ " if result.ok else "✗ ") + result.message)
+            for command in result.commands:
+                print(f"    $ {command}")
+            if result.snippet and not result.ok:
+                print("    Add this by hand:")
+                print("    " + result.snippet.replace("\n", "\n    "))
+        if any(r.ok for r in results) and not args.remove and not args.dry_run:
+            print("\nStart a new session in that agent; it becomes the agent that plans the work.")
+    return 0 if all(r.ok for r in results) else 1
 
 
 def handle_project_set_workflow(args: argparse.Namespace) -> int:
@@ -5899,6 +6030,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             return handle_capacity_show(args)
     elif args.command == "mcp":
         return handle_mcp(args)
+    elif args.command == "connect":
+        return handle_connect(args)
     elif args.command == "retry":
         return handle_retry(args)
     elif args.command == "continue":
