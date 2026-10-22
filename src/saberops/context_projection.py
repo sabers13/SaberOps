@@ -50,6 +50,7 @@ from enum import StrEnum
 
 from saberops.models import DispatchRole
 from saberops.tooling.contracts import FrozenToolContract
+from saberops.worker_engineering_policy import WORKER_ENGINEERING_POLICY_TEXT
 
 # ---------------------------------------------------------------------------
 # Public configuration constants — small, explicit, deterministic budgets.
@@ -991,8 +992,9 @@ def render_projection(
     The validation policy is appended exactly once and idempotently.  The
     invariant contract prefix is byte-identical for identical
     (role, mode, parent_slug, package_id, dispatch_reason) tuples.
-    An optional bounded ``[PROJECT SCOPE]`` section is appended exactly
-    once, before the validation policy.
+    Stable first-party worker engineering guidance is inserted once, before
+    the project scope, run verification, and final validation policy. An
+    optional bounded ``[PROJECT SCOPE]`` section is appended exactly once.
     """
     if projection.mode in MODES_WITHOUT_FULL_TASK:
         # Defense in depth: refuse to model-expose the full task in
@@ -1014,7 +1016,9 @@ def render_projection(
         tools_section += "\n\nInspect one tool lazily with:\n  orch tools describe <logical-ref>"
         tools_section += "\nInvoke one tool lazily with:\n  orch tools exec <logical-ref> -- <args>"
         body = body.rstrip() + "\n\n" + tools_section
-    stripped = body.rstrip()
+    # Add this trusted, stable guidance independently of task-supplied text:
+    # a task cannot opt out by spoofing the policy marker.
+    stripped = body.rstrip() + "\n\n" + WORKER_ENGINEERING_POLICY_TEXT
     if project_scope_text is not None and "[PROJECT SCOPE]" not in stripped:
         stripped = stripped + "\n\n" + project_scope_text.rstrip()
     if run_verification_text is not None:
