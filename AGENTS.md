@@ -57,6 +57,23 @@ workers, merge, push, or move the target branch, and reading it does **not**
 activate a scheduler — see "Current capability versus target" in the policy
 document.
 
+## Implementation worker engineering discipline
+
+All implementation, retry, continuation, surgical, and repair dispatches using
+the canonical context-projection renderer receive the same compact,
+versioned [worker policy](src/saberops/worker_engineering_policy.py).
+The engine injects it into the model-visible prompt before project scope,
+run verification, and validation policy; it does **not** grant execution
+authority or replace frozen security, scope, gate, or review rules.
+
+For agents working directly in this checkout rather than via the renderer:
+resolve only material blockers with the owner; otherwise proceed under explicit
+reversible assumptions. Prefer the smallest correct change, preserve necessary
+boundary validation/error handling and concurrency safeguards, keep edits within
+authorized ownership, use focused checks and existing acceptance criteria, and
+stop after success. Never introduce extra review rounds or silently expand scope.
+Only the Orchestrator owns the authoritative gate and independent review.
+
 ## Frontend workflow
 
 ### Precedence and skills
