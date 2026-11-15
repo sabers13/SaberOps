@@ -455,7 +455,7 @@ def test_reviewer_dispatch_preserves_model_family_exclusion() -> None:
     rev_same_family = _make_candidate("openai", "gpt-5.6-terra")
     rev_different_family = _make_candidate("opencode", "deepseek-v4-pro")
 
-    policy = _make_policy()
+    policy = _make_policy(today_str=datetime.now(UTC).date().isoformat())
 
     # Same model family -> refused with model_family_excluded
     skip_same = _pre_dispatch_skip_reason(

@@ -78,8 +78,10 @@ def _make_routes(worker_groups: tuple[tuple[WorkerCandidate, ...], ...]) -> Rout
     )
 
 
-def _make_policy(pool_plans: dict[str, PoolPlan] | None = None) -> ControlPlanePolicy:
-    today_str = (_NOW.date() - timedelta(days=5)).isoformat()
+def _make_policy(
+    pool_plans: dict[str, PoolPlan] | None = None, *, posture_now: datetime = _NOW
+) -> ControlPlanePolicy:
+    today_str = (posture_now.date() - timedelta(days=5)).isoformat()
     postures = {
         "codex": PostureRecord("codex", "A", ttl_days=30, verified_on=today_str),
         "openai": PostureRecord("openai", "A", ttl_days=30, verified_on=today_str),
@@ -951,7 +953,7 @@ def test_production_shape_lease_expiry_without_clock_fn_fences_launches(
         owner_db, "openai", "chatgpt-plus", 100.0, None, source="OWNER", now=now_fresh
     )
     routes = _make_routes(((_make_candidate("openai", "gpt-5"),),))
-    policy = _make_policy()
+    policy = _make_policy(posture_now=now_fresh)
 
     dispatched_live: list[str] = []
     current_wall = [now_fresh]
