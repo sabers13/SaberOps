@@ -258,6 +258,7 @@ def submit_job(
     caller_id: str = "owner",
     routing: RoutingSnapshot | None = None,
     now: datetime | None = None,
+    mcp_session_id: str | None = None,
 ) -> SubmitResult:
     """Submit one job; infeasible requirements store FAILED, never park forever."""
     if not caller_id or not caller_id.strip():
@@ -345,7 +346,7 @@ def submit_job(
             request_digest=digest,
         )
     try:
-        store.insert_job(db, job, now=now)
+        store.insert_job(db, job, now=now, mcp_session_id=mcp_session_id)
     except JobConflictError:
         if key is not None:
             existing = store.find_by_idempotency(db, caller, key)

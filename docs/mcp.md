@@ -206,6 +206,20 @@ use the snippet under "Client configuration" below.
   `saberops_on`. `orch mcp on` restores it; `orch mcp status` shows the state and
   the planning agent. The switch is per profile.
 
+`orch mcp status` separates shared access from chat activation (which the CLI
+cannot observe) and shows the planning holder, PID, session, epoch, last
+activity, idle time, active job count and lease-file scope. The in-session
+`saberops://lease` resource reports ownership for that session.
+
+An idle session can be replaced after 15 minutes without a tool call; set
+`SABEROPS_MCP_IDLE_SECONDS` to a positive number of seconds to change that
+bound. The previous session is fenced from later writes. Jobs submitted by the
+holder protect its lease while they are queued or running. To hand off sooner,
+run `orch mcp release --holder <session-id-or-pid>` using the holder shown by
+status. This targets only that holder and refuses if its work is active or its
+work state cannot be checked. A live legacy owner without fencing must be closed
+before its lease can be released. The release does not turn off shared access.
+
 Every tool result starts with `Orchestrator:`, and the guide asks the agent to
 start every message that relays SaberOps with `Orchestrator:` too, so the user
 can always tell SaberOps apart from the agent's own words.

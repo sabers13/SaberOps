@@ -2206,7 +2206,7 @@ def build_parser() -> argparse.ArgumentParser:
         "mcp_action",
         nargs="?",
         default="serve",
-        choices=["serve", "tools", "on", "off", "status"],
+        choices=["serve", "tools", "on", "off", "status", "release"],
         help=(
             "serve the MCP server (default), list the exposed tools, or switch agent "
             "access on/off (off keeps every agent registered but SaberOps offers nothing)."
@@ -2226,6 +2226,9 @@ def build_parser() -> argparse.ArgumentParser:
         default="stdio",
         choices=["stdio"],
         help="Transport to serve (only stdio is implemented).",
+    )
+    mcp_parser.add_argument(
+        "--holder", type=str, default=None, help="Holder PID or session id for targeted release."
     )
     mcp_parser.add_argument("--db", type=str, default=None, help="Owner database path.")
     mcp_parser.add_argument(
@@ -5412,7 +5415,7 @@ def handle_mcp(args: argparse.Namespace) -> int:
     from saberops.mcp.stdio import build_server_context, serve_stdio
 
     action = str(getattr(args, "mcp_action", "serve") or "serve")
-    if action in ("on", "off", "status"):
+    if action in ("on", "off", "status", "release"):
         return _handle_mcp_switch(args, action)
     transport = str(getattr(args, "transport", "stdio") or "stdio")
     if transport != "stdio":
@@ -5467,21 +5470,51 @@ def _handle_mcp_switch(args: argparse.Namespace, action: str) -> int:
         set_mcp_enabled(action == "on", lease_path)
     enabled = mcp_enabled(lease_path)
     lease = OrchestratorLease(lease_path) if lease_path else OrchestratorLease()
+    if action == "release":
+        target = getattr(args, "holder", None)
+        if not target:
+            print("[!] Specify the holder PID or session id with --holder.", file=sys.stderr)
+            return 2
+        released, message = lease.release_target(target)
+        print(message, file=sys.stdout if released else sys.stderr)
+        return 0 if released else 1
     record = lease.read()
+    status = lease.status()
     planner = (
         record.client or record.holder
         if enabled and record is not None and pid_is_alive(record.pid)
         else None
     )
     if getattr(args, "json", False):
-        print(json.dumps({"enabled": enabled, "planner": planner}, indent=2, sort_keys=True))
+        print(
+            json.dumps(
+                {
+                    "enabled": enabled,
+                    "planner": planner,
+                    "chat_activation": "unknown (CLI is outside the chat)",
+                    "ownership": status,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
         return 0
     if enabled:
         print("SaberOps agent access: ON")
-        print(f"Planning agent       : {planner or 'none connected'}")
     else:
         print("SaberOps agent access: OFF (agents stay registered but see no SaberOps tools)")
         print("Turn it back on with : orch mcp on")
+    print("This chat activation : unknown (CLI runs outside the chat)")
+    print(f"Planning agent       : {planner or 'none connected'}")
+    print(f"Planning ownership   : {status['holder'] or 'none'}")
+    if record is not None:
+        print(f"Holder PID/session   : {record.pid} / {record.session_id or 'unavailable'}")
+        print(f"Epoch / scope        : {record.epoch} / {lease.path}")
+        print(f"Live / idle seconds  : {pid_is_alive(record.pid)} / {status['idle_seconds']:.1f}")
+        print(f"Last activity        : {record.last_activity or 'unavailable'}")
+        print(f"Active work          : {status['active_work']}")
+        print(f"Takeover eligible    : {status['takeover_eligible']}")
+        print(f"Targeted handoff     : orch mcp release --holder {record.pid}")
     return 0
 
 

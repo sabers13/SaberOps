@@ -227,7 +227,8 @@ def _append_event(
 
 
 def insert_job(
-    db: Any, job: Job, *, event_kind: str = "submitted", now: datetime | None = None
+    db: Any, job: Job, *, event_kind: str = "submitted", now: datetime | None = None,
+    mcp_session_id: str | None = None,
 ) -> Job:
     """Insert a new job row plus its first event atomically."""
     ensure_tables(db)
@@ -237,9 +238,19 @@ def insert_job(
     placeholders = ", ".join("?" for _ in cols)
     try:
         with _owner_conn(db) as conn:
+            if mcp_session_id is not None:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS mcp_job_owners ("
+                    "job_id TEXT PRIMARY KEY REFERENCES jobs(job_id), session_id TEXT NOT NULL)"
+                )
             conn.execute(
                 f"INSERT INTO jobs ({names}) VALUES ({placeholders})", tuple(cols.values())
             )
+            if mcp_session_id is not None:
+                conn.execute(
+                    "INSERT INTO mcp_job_owners (job_id, session_id) VALUES (?, ?)",
+                    (job.job_id, mcp_session_id),
+                )
             _append_event(
                 conn,
                 job_id=job.job_id,

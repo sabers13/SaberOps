@@ -33,15 +33,18 @@ def build_server_context(
     """Build a :class:`ServerContext` from explicit CLI options."""
     from pathlib import Path
 
+    from saberops.db import get_default_db_path
     from saberops.mcp.evidence import EvidenceRoots
 
+    lease = OrchestratorLease(lease_path) if lease_path else OrchestratorLease()
+    lease.configure_database(Path(db_path) if db_path else get_default_db_path())
     return ServerContext(
         db_path=Path(db_path) if db_path else None,
         questions_store=Path(questions_store) if questions_store else None,
         config_ledger_path=Path(config_ledger) if config_ledger else None,
         evidence=EvidenceRoots.discover(Path(cwd).resolve() if cwd else None),
         ledger=EventLedger(ledger_path) if ledger_path else EventLedger(),
-        lease=OrchestratorLease(lease_path) if lease_path else OrchestratorLease(),
+        lease=lease,
     )
 
 

@@ -354,3 +354,20 @@ def test_concurrent_dispatch_exactly_one_wins(tmp_path: Path) -> None:
     assert job is not None
     assert job.state == JobState.RUNNING
     assert len(job.run_ids) == 1
+
+
+def test_mcp_job_owner_is_saved_with_job(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    store.insert_job(db, _job("mcp-owned"), mcp_session_id="session-123")
+    with db._get_connection() as conn:
+        row = conn.execute(
+            "SELECT session_id FROM mcp_job_owners WHERE job_id = ?", ("mcp-owned",)
+        ).fetchone()
+    assert row is not None and row[0] == "session-123"
+
+
+def test_legacy_jobs_can_be_read_without_mcp_owner_table(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    _seed(db, "legacy-job")
+    readonly_db = Database(db.db_path, read_only=True)
+    assert store.get_job(readonly_db, "legacy-job") is not None

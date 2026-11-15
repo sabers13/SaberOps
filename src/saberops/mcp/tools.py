@@ -275,17 +275,27 @@ class ToolRegistry:
         if not isinstance(arguments, Mapping):
             raise InvalidParamsError(f"{name}: arguments must be a JSON object")
         if spec.mutating and self._lease is not None and not self._lease.writer:
+            status = self._lease.status()
             raise LeaseReadOnlyError(
-                f"{name!r} is a mutating tool and this client holds only the "
-                "read-only lease; another Orchestrator is the writer",
+                f"{name!r} is read-only: {status['holder']} (pid {status['holder_pid']}) "
+                "holds planning ownership; use orch mcp release --holder <pid-or-session> "
+                "for a targeted handoff",
                 data={"tool": name, "operation": "mutating", "lease_writer": False},
             )
         errors = validate_instance(spec.input_schema, dict(arguments))
         if errors:
-            raise InvalidParamsError(
-                f"{name}: invalid arguments", data={"errors": errors}
-            )
-        return spec.handler(arguments)
+            raise InvalidParamsError(f"{name}: invalid arguments", data={"errors": errors})
+        if self._lease is None:
+            return spec.handler(arguments)
+        with self._lease.guarded_call(mutating=spec.mutating) as owned:
+            if spec.mutating and not owned:
+                status = self._lease.status()
+                raise LeaseReadOnlyError(
+                    f"planning ownership changed to {status['holder']} "
+                    f"(pid {status['holder_pid']}); use orch mcp release for handoff",
+                    data={"tool": name, "lease_writer": False},
+                )
+            return spec.handler(arguments)
 
 
 def _now_iso() -> str:
@@ -373,6 +383,7 @@ def _submit_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[st
             not_before=arguments.get("not_before"),
             idempotency_key=arguments.get("idempotency_key"),
             caller_id=str(arguments.get("caller_id") or "orchestrator"),
+            mcp_session_id=context.lease.session_id,
         )
     except IdempotencyConflictError as exc:
         raise ToolError(f"idempotency conflict: {exc}") from exc

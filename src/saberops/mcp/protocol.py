@@ -109,6 +109,9 @@ class McpServer:
         start_active: bool = True,
     ) -> None:
         self._context = context if context is not None else ServerContext()
+        from saberops.db import get_default_db_path
+
+        self._context.lease.configure_database(self._context.db_path or get_default_db_path())
         self._name = name
         self._version = version
         self._registry: ToolRegistry = build_default_registry(self._context)
@@ -141,6 +144,10 @@ class McpServer:
     def active(self) -> bool:
         """SaberOps is on in this session (master switch on and turned on here)."""
         return self.enabled and self._active
+
+    def _lease_status(self) -> dict[str, Any]:
+        return {**self._context.lease.status(), "shared_access": self.enabled,
+                "chat_activation": self.active}
 
     def drain_notifications(self) -> list[dict[str, Any]]:
         """Server-to-client notifications queued since the last call."""
@@ -242,6 +249,9 @@ class McpServer:
                 return {"tools": [SABEROPS_ON_TOOL]}
             return {"tools": [*self._registry.descriptors(), SABEROPS_OFF_TOOL]}
         if method == "tools/call":
+            if self._context.lease.writer:
+                with self._context.lease.guarded_call(mutating=False):
+                    pass
             name = params.get("name")
             if name in (SABEROPS_ON_TOOL["name"], SABEROPS_OFF_TOOL["name"]):
                 return self._session_switch(turn_on=name == SABEROPS_ON_TOOL["name"])
@@ -313,7 +323,7 @@ class McpServer:
             },
             "snapshotSchemaVersion": SNAPSHOT_SCHEMA_VERSION,
             "readOnly": self.read_only,
-            "lease": self._context.lease.status(),
+            "lease": self._lease_status(),
             "enabled": enabled,
             "active": enabled and self._active,
             "instructions": instructions,
@@ -429,7 +439,7 @@ class McpServer:
         if target == SNAPSHOT_URI:
             return self._contents(target, self._snapshot(), _JSON_MIME)
         if target == LEASE_URI:
-            return self._contents(target, self._context.lease.status(), _JSON_MIME)
+            return self._contents(target, self._lease_status(), _JSON_MIME)
         if target == LEDGER_URI:
             return self._contents(target, self._context.ledger.snapshot(), _JSON_MIME)
         if target == GUIDE_URI:
@@ -461,7 +471,7 @@ class McpServer:
         snapshot: dict[str, Any] = {
             "v": SNAPSHOT_SCHEMA_VERSION,
             "generated_at": _now_iso(),
-            "lease": self._context.lease.status(),
+            "lease": self._lease_status(),
             "ledger": self._context.ledger.snapshot(),
         }
         for tool, arguments in (
