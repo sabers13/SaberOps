@@ -187,6 +187,25 @@ AUTHORITY_PRESETS: Final[dict[AuthorityMode, AuthorityPolicy]] = {
     ),
 }
 
+#: Policy dimensions a live decision path reads today.  Everything else in
+#: :class:`AuthorityPolicy` is a recorded intent only: no engine code consults
+#: it, so the CLI and web surfaces must label it advisory rather than promise
+#: it as a live permission.
+ENFORCED_POLICY_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "auto_start",
+        "auto_retry",
+        "auto_repair",
+        "auto_escalate_when_policy_justifies",
+        "auto_publish_candidate",
+    }
+)
+
+#: Every policy dimension that is *not* read by live code yet.
+ADVISORY_POLICY_FIELDS: Final[frozenset[str]] = frozenset(
+    AUTHORITY_PRESETS[AuthorityMode.SUPERVISED].as_dict()
+) - ENFORCED_POLICY_FIELDS
+
 
 def parse_authority_mode(value: object) -> AuthorityMode:
     """Resolve an exact mode ID, failing closed on anything unrecognized.

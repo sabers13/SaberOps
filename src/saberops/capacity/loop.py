@@ -1207,6 +1207,33 @@ def scheduler_tick(
                 continue
 
         elif isinstance(dec, DispatchDecision):
+            # F1: one typed owner-mode decision before anything leaves QUEUED.
+            # Dispatch follows the authority preset's ``auto_start``; the owner
+            # mode never widens it (ask-me also narrows recovery in the
+            # supervisor).  The check happens before the lease, the memory
+            # reservation and the CAS, so a refused dispatch has zero side
+            # effects.
+            from saberops.owner_mode import ModeAction, decide_owner_action
+
+            mode_decision = decide_owner_action(ModeAction.DISPATCH)
+            if not mode_decision.allowed:
+                try:
+                    store.set_waiting(
+                        db,
+                        dec.job.job_id,
+                        reason=WaitingReason.MODE_RESTRICTED,
+                        details={
+                            "owner_mode": mode_decision.mode.value,
+                            "authority_mode": mode_decision.authority_mode.value,
+                            "reason": mode_decision.reason,
+                        },
+                        now=moment,
+                    )
+                    waited_count += 1
+                except (JobConflictError, JobTransitionError, JobNotFoundError, ValueError):
+                    pass
+                continue
+
             # Check lease before dispatch
             if not check_lease(db, lease, now=_current_moment()):
                 return lost_during_tick()

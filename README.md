@@ -157,23 +157,32 @@ drift without sending prompts or reading credentials.
 
 ---
 
-## Authority settings
+## Owner mode and authority settings
 
-How much SaberOps may do without asking is an explicit, persisted owner setting,
-not an orchestration mode. Unknown values fail closed and never degrade into a
-more permissive setting.
+Two persisted settings decide what SaberOps may do without asking.
 
-| Setting | May accept verified candidates without asking | Publishes candidate branch |
-| --- | :---: | :---: |
-| `ask_before_actions` | No | No |
-| `supervised` (default) | No | No |
-| `autonomous` | No | Yes |
-| `full_autonomy` | Yes | Yes |
-| `full_autonomy_publish` | Yes | Yes |
+**Owner mode** is `ask-me` (default), `critical-only` or `away`, with an optional
+end time on `away`. It is a presence switch, not a second authority system: it
+can only narrow the authority preset, never widen it. Only the owner switches it
+with `orch mode show|set|clear` or the Questions page. An expired `away` behaves
+as `ask-me`; closing the planning session and pausing work is separate.
 
-Acceptance never bypasses verification. Unattended acceptance is limited to a
-local commit; no autonomous decision can move a remote. Inspect or change the
-setting with `orch authority show|list|set`.
+**Authority preset** is the ceiling. Unknown values fail closed and never degrade
+into a more permissive setting.
+
+| Setting | Recovery (retry / repair / escalation) | Candidate branch publication | Acceptance policy (recorded intent) |
+| --- | :---: | :---: | :---: |
+| `ask_before_actions` | No | No | No |
+| `supervised` (default) | No | No | No |
+| `autonomous` | Yes | Yes | No |
+| `full_autonomy` | Yes | Yes | Yes |
+| `full_autonomy_publish` | Yes | Yes | Yes |
+
+Recovery, candidate-branch publication and the owner-mode decisions are enforced
+today. The acceptance column is **recorded intent only**: acceptance stays
+owner-only until the away/critical-only auto-accept lane lands, and `ask-me`
+never auto-accepts. Inspect or change the preset with
+`orch authority show|list|set` and the mode with `orch mode show|set|clear`.
 
 ---
 

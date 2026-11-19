@@ -592,7 +592,7 @@ def test_ui1_discover_is_bounded_and_csrf_gated(
 def test_ui1_standing_decisions_show_expiration_windows(
     onboarding_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: UI-1 Section C — standing decisions with live/expired windows."""
+    """Covers: UI-1 Section C + F1 — standing decisions are advisory/expired windows."""
     store = tmp_path / "unattended.json"
     store.write_text(
         json.dumps(
@@ -622,6 +622,50 @@ def test_ui1_standing_decisions_show_expiration_windows(
     )
     monkeypatch.setenv("ORCH_UNATTENDED_STORE", str(store))
     text = _client(tmp_path).get("/questions").text
-    assert "k-live" in text and "LIVE" in text
+    assert "k-live" in text and "ADVISORY" in text
     assert "k-expired" in text and "EXPIRED" in text
+    # F1: an unenforced standing permission is never presented as LIVE.
+    live_row = text.split("k-live", 1)[1].split("</tr>", 1)[0]
+    assert 'title="LIVE"' not in live_row
+
+
+def test_f1_questions_page_switches_owner_mode(
+    onboarding_env: None, tmp_path: Path
+) -> None:
+    """Covers: F1 — the owner switches the one owner mode from the web page."""
+    from saberops.owner_mode import load_owner_mode_settings
+
+    client = _client(tmp_path)
+    token = _csrf(client)
+    page = client.get("/questions").text
+    assert "Owner mode" in page
+    assert "Ask me" in page
+    assert "Only you can switch it" in page
+
+    refused = client.post(
+        "/questions/mode",
+        data={"mode": "away", "until": "2999-01-01T00:00:00Z"},
+    )
+    assert refused.status_code == 403
+
+    saved = client.post(
+        "/questions/mode",
+        data={
+            "csrf": token,
+            "mode": "away",
+            "until": "2999-01-01T00:00:00Z",
+        },
+        follow_redirects=False,
+    )
+    assert saved.status_code == 303
+    assert load_owner_mode_settings().mode.value == "away"
+    assert "Away" in client.get("/questions").text
+
+    cleared = client.post(
+        "/questions/mode",
+        data={"csrf": token, "clear": "yes"},
+        follow_redirects=False,
+    )
+    assert cleared.status_code == 303
+    assert load_owner_mode_settings().mode.value == "ask-me"
 

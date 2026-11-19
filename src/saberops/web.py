@@ -105,6 +105,16 @@ from saberops.owner_actions import (
     OwnerActionSupervisor,
     summarize_owner_actions,
 )
+from saberops.owner_mode import (
+    OwnerModeError,
+    clear_owner_mode,
+    list_owner_modes,
+    parse_owner_mode,
+    set_owner_mode,
+)
+from saberops.owner_mode import (
+    mode_view as owner_mode_view,
+)
 from saberops.paths import saberops_state_dir
 from saberops.project import ProjectRegistry, owner_state_dir
 from saberops.project_mode import (
@@ -1625,6 +1635,8 @@ def _unattended_store_path() -> Path:
 def _onboarding_notice(request: Request) -> str | None:
     """Translate an onboarding success-redirect flag into a human notice."""
     params = request.query_params
+    if params.get("mode_saved") == "1":
+        return "Saved. The owner mode applies to the next decision."
     saved = params.get("saved")
     if saved in ("added", "removed", "moved"):
         return {
@@ -2460,6 +2472,28 @@ def _authority_view() -> dict[str, Any]:
         return {"mode": "UNKNOWN", "label": f"unavailable ({exc.__class__.__name__})"}
 
 
+def _owner_mode_view() -> dict[str, Any]:
+    """The effective owner mode, its choices and each decision it permits."""
+    try:
+        view = owner_mode_view()
+        view["choices"] = list_owner_modes()
+        view["error"] = None
+        return view
+    except Exception as exc:
+        return {
+            "error": f"{exc.__class__.__name__}: {exc}",
+            "mode": "UNKNOWN",
+            "declared_mode": "UNKNOWN",
+            "label": "unavailable",
+            "until": None,
+            "expired": False,
+            "config_path": None,
+            "authority_mode": "UNKNOWN",
+            "choices": [],
+            "decisions": {},
+        }
+
+
 def _storage_view(repo_param: str, db: Database) -> dict[str, Any]:
     """Storage/Git lifecycle dry-run: retained, eligible and blocked artifacts."""
     view: dict[str, Any] = {
@@ -2630,6 +2664,7 @@ def _onboarding_context(
         "standing_decisions": _standing_decision_rows(),
         "never_delegable": _never_delegable_rows(),
         "authority": _authority_view(),
+        "owner_mode": _owner_mode_view(),
         "storage": _storage_view(repo_param, db),
         "repo_param": repo_param,
         "wave_project": wave_project,
@@ -3186,6 +3221,40 @@ def create_app(
                 page="questions", error=f"Answer not recorded: {exc}", status_code=400
             )
         return RedirectResponse(url="/questions?answered=1", status_code=303)
+
+    @app.post("/questions/mode", name="set_owner_mode_route")
+    def set_owner_mode_route(
+        request: Request,
+        csrf: Annotated[str, Form()] = "",
+        mode: Annotated[str, Form()] = "",
+        until: Annotated[str, Form()] = "",
+        clear: Annotated[str, Form()] = "",
+    ) -> Response:
+        """Owner-only mode switch from the Questions page (F1)."""
+        if not _csrf_valid(csrf):
+            return onboarding_page(
+                request,
+                page="questions",
+                error="Refused: missing or invalid confirmation token.",
+                status_code=403,
+            )
+        try:
+            if clear == "yes" or not mode.strip():
+                clear_owner_mode()
+            else:
+                set_owner_mode(
+                    parse_owner_mode(mode.strip()),
+                    until=until.strip() or None,
+                    set_by="owner",
+                )
+        except (OwnerModeError, OSError) as exc:
+            return onboarding_page(
+                request,
+                page="questions",
+                error=f"Owner mode not changed: {exc}",
+                status_code=400,
+            )
+        return RedirectResponse(url="/questions?mode_saved=1", status_code=303)
 
     @app.post("/questions/{question_id}/defer", name="defer_question")
     def defer_question_route(

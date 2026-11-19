@@ -49,6 +49,12 @@ from saberops.models import (
     ReasoningEffort,
     WorkerCandidate,
 )
+from saberops.owner_mode import (
+    ModeAction,
+    decide_owner_action,
+    effective_authority_policy,
+    load_effective_owner_mode,
+)
 from saberops.process import AutonomousDispatchConfig
 
 
@@ -304,22 +310,23 @@ class AutonomousSupervisor:
 
     @property
     def _policy(self) -> AuthorityPolicy:
-        return load_authority_settings().policy
+        settings = load_authority_settings()
+        return effective_authority_policy(settings.policy, load_effective_owner_mode())
 
     @property
     def allows_retry(self) -> bool:
-        """Whether the persisted policy permits autonomous retry."""
-        return self._policy.auto_retry
+        """Whether the effective mode and policy permit autonomous retry."""
+        return decide_owner_action(ModeAction.RETRY).allowed
 
     @property
     def allows_repair(self) -> bool:
-        """Whether the persisted policy permits autonomous repair."""
-        return self._policy.auto_repair
+        """Whether the effective mode and policy permit autonomous repair."""
+        return decide_owner_action(ModeAction.REPAIR).allowed
 
     @property
     def allows_escalation(self) -> bool:
-        """Whether the persisted policy permits autonomous escalation."""
-        return self._policy.auto_escalate_when_policy_justifies
+        """Whether the effective mode and policy permit autonomous escalation."""
+        return decide_owner_action(ModeAction.ESCALATION).allowed
 
     # -- decisions ------------------------------------------------------------
 
@@ -565,16 +572,19 @@ class AutonomousSupervisor:
         loop state and persisted authority; executes nothing and mutates
         nothing (callers persist the returned decision as an event).
         """
-        policy = self._policy
+        start_decision = decide_owner_action(ModeAction.AUTONOMOUS_START)
         run = self.db.get_run(run_id)
         if run is None:
             raise ValueError(f"Cannot decide for unknown run '{run_id}'")
-        if not policy.auto_start:
+        if not start_decision.allowed:
             return SupervisorDecision(
                 action=SupervisorAction.STOP,
                 run_id=run_id,
                 stop_reason=SupervisorStopReason.AUTHORITY_REFUSED,
-                detail="persisted owner authority does not auto-start autonomous work",
+                detail=(
+                    "the owner mode and authority preset do not auto-start "
+                    f"autonomous work: {start_decision.reason}"
+                ),
             )
         attempts = self.db.get_attempts_for_run(run_id)
         terminal = [
@@ -725,14 +735,14 @@ class AutonomousSupervisor:
                     f"({failover.reason_code.value}): {failover.reason}"
                 ),
             )
-        if not policy.auto_retry:
+        if not decide_owner_action(ModeAction.RETRY).allowed:
             return SupervisorDecision(
                 action=SupervisorAction.STOP,
                 run_id=run_id,
                 stop_reason=SupervisorStopReason.AUTHORITY_REFUSED,
                 detail=(
-                    "persisted owner authority forbids autonomous retry; "
-                    f"attempt {last.id} already terminal"
+                    "the owner mode and authority preset forbid autonomous "
+                    f"retry; attempt {last.id} already terminal"
                 ),
             )
         # Required-base validation before Attempt B may exist.  The

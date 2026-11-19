@@ -189,6 +189,7 @@ def test_read_tools_succeed_for_a_read_only_client(tmp_path: Path) -> None:
         "read_evidence": {"path": "missing.md"},
         "list_questions": {},
         "list_proposals": {},
+        "get_mode": {},
     }
     for tool in sorted(READ_TOOLS):
         response = _call(server, tool, arguments[tool])

@@ -102,6 +102,7 @@ MUTATING_TOOLS: frozenset[str] = frozenset(
         "note_job",
         "answer_question",
         "propose_config_change",
+        "propose_mode_change",
     }
 )
 
@@ -118,6 +119,7 @@ READ_TOOLS: frozenset[str] = frozenset(
         "read_evidence",
         "list_questions",
         "list_proposals",
+        "get_mode",
     }
 )
 
@@ -138,6 +140,8 @@ TOOL_NAMES: tuple[str, ...] = (
     "answer_question",
     "propose_config_change",
     "list_proposals",
+    "get_mode",
+    "propose_mode_change",
 )
 
 _JOB_STATES = ["QUEUED", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"]
@@ -147,6 +151,7 @@ _EFFORTS = ["low", "medium", "high"]
 _QUESTION_STATUSES = ["OPEN", "DEFERRED", "ANSWERED", "MOOT"]
 _ANSWER_AUTHORITIES = ["OWNER", "PLAN"]
 _ANSWER_ROLES = ["OWNER", "PLAN"]
+_OWNER_MODE_VALUES = ["ask-me", "critical-only", "away"]
 
 #: Field names that would let a caller choose a billing/model route
 #: (ADR-0001 invariant 3: callers state requirements only).
@@ -1281,6 +1286,101 @@ def _list_proposals(context: ServerContext, arguments: Mapping[str, Any]) -> dic
     }
 
 
+def _get_mode(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    """Read the effective owner mode; never changes it (F1)."""
+    from saberops.owner_mode import OwnerModeError, mode_view
+
+    try:
+        view = mode_view()
+    except (OwnerModeError, ValueError) as exc:
+        raise ToolError(f"owner mode unavailable: {exc}") from exc
+    return {"v": SNAPSHOT_SCHEMA_VERSION, **view}
+
+
+def _propose_mode_change(
+    context: ServerContext, arguments: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Raise an owner question for a mode change; never flips the mode (F1)."""
+    from saberops.owner_mode import (
+        OWNER_MODE_ORDER,
+        OwnerMode,
+        OwnerModeError,
+        mode_view,
+        normalize_until,
+        parse_owner_mode,
+    )
+    from saberops.questions import (
+        AskRole,
+        DecisionClass,
+        Escalation,
+        QuestionError,
+        QuestionRequest,
+        question_view,
+    )
+
+    try:
+        mode = parse_owner_mode(arguments.get("mode"))
+        until = normalize_until(arguments.get("until"))
+    except OwnerModeError as exc:
+        raise InvalidParamsError(str(exc)) from exc
+    if until is not None and mode is not OwnerMode.AWAY:
+        raise InvalidParamsError("until is only valid with away")
+    rationale = _require_text(arguments, "rationale", what="rationale")
+    proposed_by = _require_text(arguments, "proposed_by", what="proposed_by")
+    proposed = f"set the owner mode to {mode.value}"
+    if until is not None:
+        proposed += f" until {until}"
+    request = QuestionRequest(
+        key=f"owner-mode-change:{mode.value}",
+        subject=f"Change the owner mode to {mode.value}",
+        kind="owner_mode_change",
+        decision_class=DecisionClass.OTHER,
+        raised_by_role=AskRole.PLAN,
+        raised_by=proposed_by,
+        escalation=Escalation(
+            requirement=(
+                "Only the owner switches the SaberOps owner mode; the planning "
+                "session may propose but never set it."
+            ),
+            proposed_expansion=proposed,
+            smallest_compliant="Keep the current mode until the owner decides.",
+            consequences=(
+                "Nothing changes from this proposal: work continues under the "
+                "current mode, and the owner may still decline."
+            ),
+            recommendation=rationale,
+        ),
+        options=tuple(item.value for item in OWNER_MODE_ORDER) + ("keep-current",),
+        default_option="keep-current",
+    )
+    try:
+        question = context.question_queue().ask(request)
+    except QuestionError as exc:
+        raise ToolError(f"mode-change question was not recorded: {exc}") from exc
+    context.ledger.append(
+        "mode_change_proposed",
+        {
+            "proposed_mode": mode.value,
+            "until": until,
+            "proposed_by": proposed_by,
+            "question_id": question.question_id,
+            "applied": False,
+        },
+    )
+    return {
+        "v": SNAPSHOT_SCHEMA_VERSION,
+        "applied": False,
+        "proposed_mode": mode.value,
+        "until": until,
+        "current": mode_view(),
+        "question": question_view(question),
+        "note": (
+            "a proposal changes nothing; only the owner sets the mode with "
+            "`orch mode set` or the Questions page"
+        ),
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Registry construction
 # --------------------------------------------------------------------------- #
@@ -1516,6 +1616,31 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
         _schema({}),
         _list_proposals,
         mutating=False,
+    )
+    register(
+        "get_mode",
+        "Read the effective owner mode, its authority intersection and every decision it permits.",
+        _schema({}),
+        _get_mode,
+        mutating=False,
+    )
+    register(
+        "propose_mode_change",
+        "Propose an owner mode change as an owner question; never changes the mode.",
+        _schema(
+            {
+                "mode": {
+                    "type": "string",
+                    "enum": _OWNER_MODE_VALUES,
+                },
+                "until": {"type": "string"},
+                "rationale": {"type": "string", "minLength": 1},
+                "proposed_by": {"type": "string", "minLength": 1},
+            },
+            required=("mode", "rationale", "proposed_by"),
+        ),
+        _propose_mode_change,
+        mutating=True,
     )
 
     registered = set(registry.names())

@@ -59,6 +59,8 @@ served, and an unknown requested revision falls back to `2025-06-18`.
 | `answer_question` | yes | `question_id_or_key`, `answer_text`, `authority` | `saberops.questions.OwnerQuestionQueue.answer` |
 | `propose_config_change` | yes | `changes`, `rationale`, `proposed_by` | `saberops.config.propose_config_change` |
 | `list_proposals` | no | — | `saberops.config.ConfigLedger.entries` |
+| `get_mode` | no | — | `saberops.owner_mode.mode_view` |
+| `propose_mode_change` | yes | `mode`, `until`, `rationale`, `proposed_by` | raises an owner question; never changes the mode |
 
 `submit_job` accepts **requirements only**. `provider`, `model`, `tier`,
 `billing`, `route`, `quota` and `account` are rejected at the top level and
@@ -108,6 +110,12 @@ proposal. It **applies nothing**: only the owner approving through
 `orch config approve <id>` or the local web surface writes the config ledger
 (ADR-0004 D8.2, invariant 7).
 
+`get_mode` is read-only: it returns the effective owner mode, the authority
+preset it intersects, and every decision the mode permits or parks. A mode only
+narrows the authority preset. `propose_mode_change` raises an owner question and
+**never flips the mode**; only the owner sets it with `orch mode set` or the
+Questions page (ADR-0020).
+
 ## Never exposed
 
 ADR-0004 D7 and REHEARSAL §3 pin a list of authorities that MCP must never
@@ -150,10 +158,10 @@ exclusive `flock` during each read-modify-write.
 * The first client to acquire becomes the writer; the lease is acquired during
   `initialize` and released at EOF.
 * A second live client (a different, live `pid` holds the record) is read-only:
-  calls to `submit_job`, `cancel_job`, `note_job`, `answer_question` and
-  `propose_config_change` are refused with JSON-RPC error `-32020`. Its read
-  tools (`get_job`, `catch_up`, `list_jobs`, `capacity`, `read_evidence`,
-  `list_questions`, `list_proposals`) keep working.
+  calls to `submit_job`, `cancel_job`, `note_job`, `answer_question`,
+  `propose_config_change` and `propose_mode_change` are refused with JSON-RPC
+  error `-32020`. Its read tools (`get_job`, `catch_up`, `list_jobs`, `capacity`,
+  `read_evidence`, `list_questions`, `list_proposals`, `get_mode`) keep working.
 * **Stale self-healing:** a record whose `pid` is dead is stale and is stolen by
   the next client (`os.kill(pid, 0)` is the liveness probe), so a crashed client
   never locks out future writers. A non-empty but unreadable/malformed record is

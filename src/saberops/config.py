@@ -12,7 +12,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final, Literal
 
-from saberops.authority import load_authority_policy
 from saberops.classifier import classify_task_tier
 from saberops.control_plane.capabilities import (
     Capability,
@@ -20,6 +19,7 @@ from saberops.control_plane.capabilities import (
 )
 from saberops.jobs.models import JobRole, coerce_job_role
 from saberops.models import GateScratchMode, ReviewPolicyMode, Tier
+from saberops.owner_mode import ModeAction, decide_owner_action
 from saberops.tooling.contracts import validate_logical_ref
 
 RoutingMode = Literal["auto", "manual"]
@@ -425,7 +425,9 @@ def resolve_run_config(
         publish_candidate=(
             bool(publish_candidate)
             if publish_candidate is not None
-            else load_authority_policy().auto_publish_candidate
+            else decide_owner_action(
+                ModeAction.PUBLISH_CANDIDATE
+            ).effective_policy.auto_publish_candidate
         ),
         tool_refs=normalized_tool_refs,
         effort=(str(effort).strip().lower() if effort else None),

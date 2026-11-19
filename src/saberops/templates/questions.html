@@ -58,8 +58,45 @@
 {% call ui.empty("No questions waiting") %}<p>When a task needs your decision, it shows up here and as a count in the sidebar.</p>{% endcall %}
 {% endif %}
 
+<section class="section" aria-labelledby="owner-mode-h">
+  <div class="section-head"><h2 id="owner-mode-h">Owner mode</h2><p>Current: <strong>{{ owner_mode.label }}</strong>{% if owner_mode.until %} until {{ owner_mode.until }}{% if owner_mode.expired %} (expired &mdash; ask-me applies){% endif %}{% endif %}</p></div>
+  {% if owner_mode.error %}
+  <div class="banner" data-tone="bad" role="alert">Owner mode could not be read: {{ owner_mode.error }}</div>
+  {% else %}
+  <p class="muted">The mode narrows your authority preset; it never widens it. Only you can switch it.</p>
+  <form method="post" action="/questions/mode" class="form-inline">
+    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+    <label class="field">Mode
+      <select name="mode">{% for row in owner_mode.choices %}<option value="{{ row.mode }}"{% if row.mode == owner_mode.mode %} selected{% endif %}>{{ row.label }}</option>{% endfor %}</select>
+    </label>
+    <label class="field">Ends <span class="hint">away only; ISO-8601 with timezone</span><input type="text" name="until" value="{{ owner_mode.until or '' }}" placeholder="2026-11-20T09:00:00Z" autocomplete="off"></label>
+    <button type="submit">Set mode</button>
+  </form>
+  <form method="post" action="/questions/mode" class="form-inline">
+    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="clear" value="yes">
+    <button type="submit">Use ask-me</button>
+  </form>
+  <details class="tech"><summary>Technical details</summary>
+    <dl class="kv"><dt>Declared mode</dt><dd class="mono">{{ owner_mode.declared_mode }}</dd><dt>Authority preset</dt><dd class="mono">{{ owner_mode.authority_mode }}</dd><dt>Mode file</dt><dd class="mono">{{ owner_mode.config_path }}</dd></dl>
+    <div class="table-wrap">
+      <table class="table stack-sm">
+        <caption class="sr-only">What the effective mode permits without you</caption>
+        <thead><tr><th scope="col">Decision</th><th scope="col">Standing</th><th scope="col">Why</th></tr></thead>
+        <tbody>
+        {% for action, decision in owner_mode.decisions.items() %}
+          <tr><td class="mono">{{ action }}</td><td data-label="Standing">{{ ui.status("LIVE" if (decision.allowed and decision.enforced) else ("ADVISORY" if decision.allowed else "PARKED")) }}</td><td class="muted">{{ decision.reason }}</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </details>
+  {% endif %}
+</section>
+
 <section class="section" aria-labelledby="authority-h">
-  <div class="section-head"><h2 id="authority-h">What may run without you</h2><p>Mode: <strong>{{ authority.label }}</strong></p></div>
+  <div class="section-head"><h2 id="authority-h">What may run without you</h2><p>Authority preset: <strong>{{ authority.label }}</strong></p></div>
+  <div class="banner" data-tone="warn" role="status">Standing permissions below are recorded but <strong>not enforced yet</strong>; the engine will not act on them until the standing-decision wiring lands.</div>
   {% if standing_decisions.error %}
   <div class="banner" data-tone="bad" role="alert">Standing permissions could not be read: {{ standing_decisions.error }}</div>
   {% elif standing_decisions.rows %}
@@ -75,7 +112,7 @@
         <tr>
           <td>{{ row.owner_words }}<span class="row-sub" title="{{ row.decision_key }} · {{ row.project_id }}/{{ row.task_id }}">{{ row.project_id }}</span></td>
           <td data-label="Expires" class="muted num">{{ row.expires_at or ("after " ~ row.ttl_turns ~ " turns") }}</td>
-          <td data-label="State">{{ ui.status("LIVE" if row.live else "EXPIRED") }}</td>
+          <td data-label="State">{{ ui.status("ADVISORY" if row.live else "EXPIRED") }}</td>
         </tr>
         {% endif %}
       {% endfor %}

@@ -110,6 +110,11 @@ def get_authority_config_path() -> Path:
     return saberops_config_dir() / "authority.json"
 
 
+def get_owner_mode_path() -> Path:
+    """Return the canonical owner-mode document path."""
+    return saberops_config_dir() / "mode.json"
+
+
 def get_control_plane_config_path() -> Path:
     """Return the canonical owner control-plane-config path."""
     return saberops_config_dir() / "control_plane.json"

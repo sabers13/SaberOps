@@ -87,6 +87,11 @@ class WaitingReason(StrEnum):
     PREEMPTED = "PREEMPTED"
     CONCURRENCY = "CONCURRENCY"
     MEMORY_LOW = "MEMORY_LOW"
+    #: F1: the owner mode does not permit autonomous dispatch here.  ``away``
+    #: never exceeds the authority preset, so a preset without ``auto_start``
+    #: parks the job instead of launching it.  Clears by itself when the mode
+    #: or the preset changes.
+    MODE_RESTRICTED = "MODE_RESTRICTED"
     #: F8: at least one job named in ``Job.depends_on`` has not been accepted
     #: yet, so this job must not start.  Clears by itself once the dependency
     #: is accepted.

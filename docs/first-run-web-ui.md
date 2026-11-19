@@ -17,7 +17,7 @@ process-local CSRF token plus (where required) explicit owner confirmation.
 | GET | `/setup` | System check, provider sign-in, model discovery and billing confirmation. |
 | GET | `/routing` | Model roles, fallback order and capacity (concurrency). |
 | GET | `/projects` | Repository check and entry modes, registration, plans and waves, storage cleanup (`?repo=`, `?wave_project=`). |
-| GET | `/questions` | Owner question queue, standing permissions and never-delegable decisions. |
+| GET | `/questions` | Owner question queue, the owner mode, advisory standing permissions and never-delegable decisions. |
 | GET | `/first-run` | Legacy URL: `303` redirect to `/setup`, keeping the query string. |
 | POST | `/first-run/concurrency` | Persist the owner-confirmed 3-project × 5-task concurrency limits. |
 | POST | `/first-run/discover` | Run bounded model discovery for one connection (evidence only). |
@@ -26,6 +26,7 @@ process-local CSRF token plus (where required) explicit owner confirmation.
 | POST | `/first-run/storage/apply` | Execute the previewed storage/Git cleanup under typed owner confirmation. |
 | POST | `/questions/{id}/answer` | Record the owner's answer to one queued question, verbatim. |
 | POST | `/questions/{id}/defer` | Defer one question until an explicit ISO date. |
+| POST | `/questions/mode` | Owner-only switch of the effective owner mode (`ask-me`, `critical-only`, `away`). |
 | GET | `/runs/{run_id}/events/stream` | Server-sent-event live progress (existing run page). |
 | GET | `/health` | Non-secret install identity (unchanged). |
 

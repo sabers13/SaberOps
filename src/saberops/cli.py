@@ -22,7 +22,9 @@ if TYPE_CHECKING:
     from saberops.certification import CertificationResult
 
 from saberops.authority import (
+    ADVISORY_POLICY_FIELDS,
     AUTHORITY_ORDER,
+    ENFORCED_POLICY_FIELDS,
     AuthorityConfigError,
     HostAccessMode,
     label_for,
@@ -56,6 +58,14 @@ from saberops.observability.run_report import (
     is_terminal_report,
     render_monitor_frame,
     render_report_text,
+)
+from saberops.owner_mode import (
+    OWNER_MODE_ORDER,
+    OwnerModeError,
+    clear_owner_mode,
+    mode_view,
+    parse_owner_mode,
+    set_owner_mode,
 )
 from saberops.ownership import (
     OWNER_ENV_ID,
@@ -1527,6 +1537,39 @@ def build_parser() -> argparse.ArgumentParser:
     )
     authority_host.add_argument("mode", choices=[mode.value for mode in HostAccessMode], type=str)
     authority_host.add_argument("--json", action="store_true", help="JSON output")
+
+    # orch mode show|set|clear
+    mode_parser = subparsers.add_parser(
+        "mode",
+        help="Show or switch the owner mode (ask-me, critical-only, away).",
+    )
+    mode_sub = mode_parser.add_subparsers(dest="mode_command", required=True)
+
+    mode_show = mode_sub.add_parser(
+        "show", help="Show the effective owner mode, its limits and each decision."
+    )
+    mode_show.add_argument("--json", action="store_true", help="JSON output")
+
+    mode_set = mode_sub.add_parser(
+        "set", help="Persist the owner mode (owner-only; a mode only narrows authority)."
+    )
+    mode_set.add_argument(
+        "mode",
+        choices=[mode.value for mode in OWNER_MODE_ORDER],
+        type=str,
+        help="Exact owner mode id: " + ", ".join(m.value for m in OWNER_MODE_ORDER) + ".",
+    )
+    mode_set.add_argument(
+        "--until",
+        default=None,
+        help="Optional ISO-8601 end time with timezone; away only.",
+    )
+    mode_set.add_argument("--json", action="store_true", help="JSON output")
+
+    mode_clear = mode_sub.add_parser(
+        "clear", help="Remove the saved owner mode (ask-me applies)."
+    )
+    mode_clear.add_argument("--json", action="store_true", help="JSON output")
 
     # orch reviewer show|select|clear
     reviewer_parser = subparsers.add_parser(
@@ -4999,6 +5042,8 @@ def handle_authority_show(args: argparse.Namespace) -> int:
         print(f"[!] Authority config invalid: {exc}", file=sys.stderr)
         return 1
     payload = settings.as_dict()
+    payload["enforced_fields"] = sorted(ENFORCED_POLICY_FIELDS)
+    payload["advisory_fields"] = sorted(ADVISORY_POLICY_FIELDS)
     if getattr(args, "json", False):
         print(json.dumps(payload, indent=2))
         return 0
@@ -5011,7 +5056,8 @@ def handle_authority_show(args: argparse.Namespace) -> int:
     print("Policy:")
     policy = settings.policy.as_dict()
     for key in policy:
-        print(f"  {key}: {'true' if policy[key] else 'false'}")
+        marker = "" if key in ENFORCED_POLICY_FIELDS else "  (advisory: not enforced yet)"
+        print(f"  {key}: {'true' if policy[key] else 'false'}{marker}")
     return 0
 
 
@@ -5062,6 +5108,91 @@ def handle_authority_set_host_access(args: argparse.Namespace) -> int:
         print(json.dumps({"host_access": mode.value, "config_path": str(path)}, indent=2))
     else:
         print(f"Host access set to '{mode.value}' at {path}")
+    return 0
+
+
+def _print_mode_view(view: dict[str, Any]) -> None:
+    """Print the effective owner mode and each decision reason."""
+    mode = view["mode"]
+    print(f"Owner mode    : {mode} ({view['label']})")
+    if view.get("declared_mode") != mode:
+        print(f"Declared      : {view['declared_mode']}")
+    if view.get("until"):
+        suffix = " (expired: ask-me applies)" if view.get("expired") else ""
+        print(f"Until         : {view['until']}{suffix}")
+    print(f"Authority     : {view['authority_mode']} ({view['authority_label']})")
+    print(f"Source        : {view['source']} {view['source_path'] or '(packaged default)'}")
+    print(f"Config path   : {view['config_path']}")
+    print("Decisions:")
+    for action, decision in view["decisions"].items():
+        verdict = "allowed" if decision["allowed"] else "parked"
+        print(f"  {action}: {verdict} - {decision['reason']}")
+    print("Policy (effective):")
+    for key, value in view["effective_policy"].items():
+        marker = "" if key in ENFORCED_POLICY_FIELDS else "  (advisory: not enforced yet)"
+        print(f"  {key}: {'true' if value else 'false'}{marker}")
+
+
+def handle_mode_show(args: argparse.Namespace) -> int:
+    """Handle `orch mode show`."""
+    try:
+        view = mode_view()
+    except (AuthorityConfigError, OwnerModeError) as exc:
+        print(f"[!] Owner mode unavailable: {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(view, indent=2, sort_keys=True))
+        return 0
+    _print_mode_view(view)
+    return 0
+
+
+def handle_mode_set(args: argparse.Namespace) -> int:
+    """Handle `orch mode set <mode> [--until ISO-8601]`."""
+    try:
+        mode = parse_owner_mode(args.mode)
+        path = set_owner_mode(mode, until=args.until, set_by="owner")
+    except (OwnerModeError, OSError) as exc:
+        print(f"[!] Could not persist owner mode: {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(
+            json.dumps(
+                {
+                    "mode": mode.value,
+                    "until": args.until,
+                    "config_path": str(path),
+                    "note": "a mode only narrows the authority preset",
+                },
+                indent=2,
+            )
+        )
+        return 0
+    until = f" until {args.until}" if args.until else ""
+    print(f"Owner mode set to '{mode.value}'{until} at {path}")
+    print("A mode only narrows the authority preset; it never widens it.")
+    return 0
+
+
+def handle_mode_clear(args: argparse.Namespace) -> int:
+    """Handle `orch mode clear`."""
+    try:
+        path = clear_owner_mode()
+    except OSError as exc:
+        print(f"[!] Could not clear owner mode: {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(
+            json.dumps(
+                {"cleared": path is not None, "config_path": str(path) if path else None},
+                indent=2,
+            )
+        )
+        return 0
+    if path is None:
+        print("No saved owner mode; ask-me already applies.")
+    else:
+        print(f"Owner mode cleared at {path}; ask-me applies.")
     return 0
 
 
@@ -6973,6 +7104,13 @@ def _dispatch(args: argparse.Namespace) -> int:
             return handle_authority_set(args)
         elif args.authority_command == "set-host-access":
             return handle_authority_set_host_access(args)
+    elif args.command == "mode":
+        if args.mode_command == "show":
+            return handle_mode_show(args)
+        elif args.mode_command == "set":
+            return handle_mode_set(args)
+        elif args.mode_command == "clear":
+            return handle_mode_clear(args)
     elif args.command == "notifications":
         from saberops.notifications import (
             notification_settings_path,
