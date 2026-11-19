@@ -528,7 +528,9 @@ def test_c5_result_identifies_eligible_candidate(
         AcceptEngine, "check_accept_eligibility",
         lambda self, run_id: SimpleNamespace(eligible=True),
     )
-    job = SimpleNamespace(run_ids=("run-1",), repo="/repo", base_sha="b" * 40)
+    job = SimpleNamespace(
+        run_ids=("run-1",), current_run_id=None, repo="/repo", base_sha="b" * 40
+    )
     result = _job_result(Database(tmp_path / "c5.db"), job)
     assert {key: result[key] for key in ("run_id", "candidate_sha", "diff", "owner_action")} == {
         "run_id": "run-1", "candidate_sha": "a" * 40,

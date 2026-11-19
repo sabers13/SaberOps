@@ -599,6 +599,11 @@ def main(argv: list[str] | None = None) -> int:
         or os.environ.get("ORCH_FAKE_HARNESS")
         or Path(sys.argv[0]).name
     ).strip().lower()
+    if "--version" in args:
+        # SaberOps probes `<cli> --version` before dispatch.  A version read
+        # must never edit or commit work in the caller's working directory.
+        print(f"{harness} 0.0.0-fake")
+        return 0
     mode, hang_seconds, exit_code, target_file, content = _resolve_worker_mode(cli_mode)
     review_verdict = _resolve_reviewer_verdict(cli_verdict)
 

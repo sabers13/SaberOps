@@ -273,6 +273,28 @@ def test_fake_reviewer_approves_and_rejects_on_instruction(rig: RigEnvironment) 
     assert block_res.provider == "anthropic"
 
 
+def test_fake_cli_version_probe_has_no_side_effects(rig: RigEnvironment) -> None:
+    """A ``<cli> --version`` probe prints a version and never commits work.
+
+    SaberOps reads the installed CLI version before dispatch.  A real CLI
+    answers and exits; the fake must not treat the probe as a work request
+    or tests would commit into whatever directory pytest ran from.
+    """
+    before = _git(rig.repo, "rev-parse", "HEAD")
+    for name in ("codex", "opencode", "claude"):
+        result = subprocess.run(
+            [str(rig.bin_dir / name), "--version"],
+            cwd=rig.repo,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, (name, result.stderr)
+        assert name in result.stdout
+    assert _git(rig.repo, "rev-parse", "HEAD") == before
+    assert not (rig.repo / "fake_worker_output.txt").exists()
+
+
 @pytest.mark.parametrize(
     ("adapter_cls", "model"),
     [
