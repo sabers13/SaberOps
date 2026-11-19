@@ -133,7 +133,7 @@ def parse_candidate_override(
 def _normalize_role(role: Any) -> str:
     from saberops.jobs.models import coerce_job_role
 
-    # Retired role names (WORKER/SURGEON/INTEGRATOR) resolve to the build route.
+    # Retired role names resolve to the build route (migration aliases).
     return coerce_job_role(role).value
 
 
@@ -175,7 +175,7 @@ def resolve_candidate_chain(
 
     Args:
         role: Routing role.  ``BUILD`` is the only routed role; retired names
-            (``WORKER``/``SURGEON``/``INTEGRATOR``) resolve to it.
+            resolve to it.
         tier: Deprecated alias (ADR-0002 §11): every tier selects ``BUILD``.
             Passing both ``role`` and ``tier`` raises ``ValueError``.
         strong_start: Select the build route's stronger-model setting.  Used

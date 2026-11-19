@@ -169,18 +169,18 @@ concurrently.
 - Independent review uses a **genuinely new, cold session with a different
   underlying model**, selected *before* the session is opened, and checks the
   exact pinned SHA and the real diff. Semantic review is for **implementation
-  Worker** candidates (including substantive same-task fixes and Surgeon
-  corrective code routed into that task) — never automatic for pure Integrator
-  merges, bridge-test-only commits, or a post-G3 final look.
-- A pure Integrator only assembles already-reviewed implementation commits,
-  resolves safe mechanical merges, records integration-only evidence, and runs
-  the deterministic integration gate. **No new semantic Reviewer session for a
-  pure merge.** Orch checks merge parents, exact SHA, evidence, contracts, and
+  Worker** candidates (including substantive same-task fixes and corrective
+  code routed into that task) — never automatic for pure integration merges,
+  bridge-test-only commits, or a post-G3 final look.
+- A pure integration step only assembles already-reviewed implementation
+  commits, resolves safe mechanical merges, records integration-only evidence,
+  and runs the deterministic integration gate. **No new semantic Reviewer
+  session for a pure merge.** Orch checks merge parents, exact SHA, evidence, contracts, and
   gates; the owner moves the target branch.
 - Material production behavior or glue written during integration goes **back to
   one accountable implementation Worker** under the same task scope for G1 and
   task-scoped review — no bypass. Mechanical conflict resolutions with no
-  semantic change and hermetic bridge-test-only additions stay Integrator
+  semantic change and hermetic bridge-test-only additions stay integration-only
   evidence. When in doubt whether glue is substantive, fail closed to the Worker
   path. Never globally disable risk-adaptive review on ordinary Worker runs to
   skip integration reviews.
@@ -252,7 +252,7 @@ plan says so. Never invent tasks to fill the freed slots.
 > completion, failure, owner decision, or capacity release, remembering that
 > eligible does not mean obligated to dispatch. Require G1 plus one
 > task-scoped independent model-distinct review on implementation Worker
-> candidates; pure Integrator merges and bridge-test-only commits get no
+> candidates; pure integration merges and bridge-test-only commits get no
 > automatic semantic review, and substantive integration glue returns to a
 > Worker for G1 and review. Require one exclusive integration gate with exact
 > ancestry/SHA evidence. Never implement source, run

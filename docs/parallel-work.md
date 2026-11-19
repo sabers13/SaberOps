@@ -53,11 +53,11 @@ implementation **where beneficial** — but eligibility never obligates dispatch
 sequential, one-task, and zero-wave outcomes are legitimate, and the runtime
 must never auto-create, split, or launch work to fill free slots. A ready task
 need not dispatch when cost, risk, or the owner plan says no. Semantic review
-covers **implementation Worker** candidates only; pure Integrator merges and
+covers **implementation Worker** candidates only; pure integration merges and
 bridge-test-only commits get **no automatic semantic review**, while substantive
 production glue returns to an accountable Worker for G1 and task-scoped review.
 That stage guard (trusted role/stage/task provenance, never prompt or
-branch-name inference, no phantom pending-REVIEW for Integrator work) is
+branch-name inference, no phantom pending-REVIEW for integration-only work) is
 **TARGET runtime behavior, not yet wired**: the UI and status evidence must not
 present a phantom review blocker for integration-only artifacts. At every
 approved plan-run start and frontier-changing transition the target runtime

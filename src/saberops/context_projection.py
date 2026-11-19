@@ -414,8 +414,9 @@ class SurgicalCapsule:
 
     A capsule carries ONLY the bounded residual defect; the raw full original
     task, full repository diff and complete review history are intentionally
-    absent.  The SURGEON model role is retired (ADR-0005 §3): this is a retained
-    context projection for a bounded repair on the build route, not a role.
+    absent.  The stronger-model role is retired (ADR-0005 §3): this is a
+    retained context projection for a bounded repair on the build route, not a
+    role.
     """
 
     parent_slug: str

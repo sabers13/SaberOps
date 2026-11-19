@@ -27,8 +27,7 @@ A question is keyed and immutable in its ask payload:
   names the earlier one in `supersedes` — the reference must resolve to a known
   question, and linking to it never closes it.
 * Any role may raise one: `OWNER`, `PLAN`, `BUILD`, `CHECK`, `ENGINE`.
-  Retired names (`ORCHESTRATOR`, `WORKER`, `SURGEON`, `REVIEWER`, `INTEGRATOR`)
-  are accepted from stored rows and map onto the three roles.
+  Legacy stored role names are accepted and map onto the three roles.
 
 ### Statuses and transitions
 

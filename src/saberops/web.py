@@ -1903,7 +1903,7 @@ def _role_binding_view() -> dict[str, Any]:
 
 
 def _role_chain_rows() -> list[dict[str, Any]]:
-    """Effective per-role routing chains (Worker / Integrator / Surgeon)."""
+    """Effective build-route chains and its stronger-model start setting."""
     try:
         snapshot = load_effective_routing()
     except Exception:

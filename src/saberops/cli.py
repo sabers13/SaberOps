@@ -1372,7 +1372,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--write", action="store_true", help="Write the migrated schema-3 file (with backup)."
     )
     routing_add = routing_sub.add_parser("add", help="Add a candidate to a role chain.")
-    routing_add.add_argument("role", type=str, help="Role: build or strong_start (retired worker/surgeon/integrator names migrate to build).")
+    routing_add.add_argument("role", type=str, help="Role: build or strong_start (a retired name migrates to build).")
     routing_add.add_argument("candidate_id", type=str, help="Candidate id (provider/model).")
     routing_add.add_argument(
         "--group", type=int, default=None, help="1-based group to append into."
@@ -1380,16 +1380,16 @@ def build_parser() -> argparse.ArgumentParser:
     routing_remove = routing_sub.add_parser(
         "remove", help="Remove a candidate from a role chain."
     )
-    routing_remove.add_argument("role", type=str, help="Role: build or strong_start (retired worker/surgeon/integrator names migrate to build).")
+    routing_remove.add_argument("role", type=str, help="Role: build or strong_start (a retired name migrates to build).")
     routing_remove.add_argument("candidate_id", type=str, help="Candidate id (provider/model).")
     routing_move = routing_sub.add_parser("move", help="Move a fallback group one place.")
-    routing_move.add_argument("role", type=str, help="Role: build or strong_start (retired worker/surgeon/integrator names migrate to build).")
+    routing_move.add_argument("role", type=str, help="Role: build or strong_start (a retired name migrates to build).")
     routing_move.add_argument("group", type=int, help="1-based group number.")
     routing_move.add_argument("direction", type=str, choices=["up", "down"])
     routing_reorder = routing_sub.add_parser(
         "reorder", help="Reorder a role's fallback groups (a permutation)."
     )
-    routing_reorder.add_argument("role", type=str, help="Role: build or strong_start (retired worker/surgeon/integrator names migrate to build).")
+    routing_reorder.add_argument("role", type=str, help="Role: build or strong_start (a retired name migrates to build).")
     routing_reorder.add_argument("order", type=int, nargs="+", help="1-based group numbers.")
     routing_suggest = routing_sub.add_parser(
         "suggest",
@@ -3903,7 +3903,7 @@ def _routing_role_or_refuse(role_raw: str) -> str | None:
         print(f"[!] Role {cleaned!r} is managed elsewhere; see '{pointer}'", file=sys.stderr)
         return None
     if cleaned in ("BUILD", "WORKER", "SURGEON", "INTEGRATOR"):
-        # Retired role names migrate onto the build route.
+        # Load-time migration aliases for stored role names.
         return "BUILD"
     if cleaned in ("STRONG_START", "STRONG-START"):
         return "STRONG_START"

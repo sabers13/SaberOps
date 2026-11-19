@@ -9,13 +9,10 @@ model. PLAN (the external CLI session) and CHECK (the independent reviewer)
 keep their ordered lists where they live today (``orch orchestrator show`` /
 ``orch reviewer show``).
 
-Documents written before ADR-0005 §3 name retired roles (``WORKER``,
-``SURGEON``, ``INTEGRATOR``). They load through a reported migration: the
-``WORKER`` chain becomes ``BUILD``, ``SURGEON`` becomes ``strong_start``, and
-``INTEGRATOR`` is dropped (landing is a deterministic engine stage, not a
-model role). Stored persisted snapshots keep their original digest so a
-pre-migration run stays adoptable; the legacy digest is recomputed with the
-legacy role scheme.
+A document written before ADR-0005 §3 that names a retired role loads through a
+reported migration to the build route and its ``strong_start`` setting.
+Persisted snapshots keep their original digest so a pre-migration run stays
+adoptable; the legacy digest is recomputed with the legacy role scheme.
 """
 
 from __future__ import annotations
@@ -39,9 +36,8 @@ ROUTED_ROLES: tuple[JobRole, ...] = (JobRole.BUILD,)
 
 _ROUTED_ROLE_VALUES: tuple[str, ...] = ("BUILD",)
 
-#: Roles a pre-ADR-0005 document may name.  ``WORKER`` migrates to ``BUILD``,
-#: ``SURGEON`` to the build route's ``strong_start`` setting, and
-#: ``INTEGRATOR`` is dropped.
+#: Load-time migration aliases for stored documents written before ADR-0005 §3:
+#: WORKER -> BUILD, SURGEON -> strong_start, INTEGRATOR -> dropped.
 _LEGACY_ROLE_VALUES: tuple[str, ...] = ("WORKER", "SURGEON", "INTEGRATOR")
 
 #: Canonical top-level key for the build route's stronger-model start setting.
@@ -510,8 +506,8 @@ def canonical_routing_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
 
     Pure: the input is never mutated. Schema 1 merges exactly as before,
     then migrates 2 → 3 per ADR-0002 §11 item 2. A document that names a
-    retired role (``WORKER``/``SURGEON``/``INTEGRATOR``) is migrated to the
-    build route and its ``strong_start`` setting.
+    retired role is migrated to the build route and its ``strong_start``
+    setting.
     """
     data: dict[str, Any] = json.loads(json.dumps(payload))
     if not isinstance(data, dict):
@@ -635,8 +631,8 @@ class RoutingSnapshot:
     pacing_metadata: tuple[tuple[str, tuple[int, ...]], ...] = ()
     #: The build route's stronger-model start setting (ADR-0005 §3).
     strong_start: tuple[tuple[WorkerCandidate, ...], ...] = ()
-    #: Retired routing roles the effective document named and the load migrated
-    #: (``WORKER``/``SURGEON``/``INTEGRATOR``), in document order.
+    #: Retired routing roles the effective document named and the load migrated,
+    #: in document order.
     migrated_roles: tuple[str, ...] = ()
     #: Pre-ADR-0005 role chains when the snapshot was reconstructed from a
     #: persisted schema-3 payload that still named them.  Re-emitted unchanged
@@ -656,8 +652,8 @@ class RoutingSnapshot:
         """Return the fallback groups for ``role`` in listed order.
 
         ``strong_start=True`` returns the build route's stronger-model setting
-        instead of its ordinary chain. Retired role names (``WORKER``,
-        ``SURGEON``, ``INTEGRATOR``) resolve to the build route.
+        instead of its ordinary chain. Retired role names resolve to the build
+        route.
         """
         key = self._role_key(role)
         if key in ("WORKER", "SURGEON", "INTEGRATOR"):

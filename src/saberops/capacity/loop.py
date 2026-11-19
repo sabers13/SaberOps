@@ -1120,7 +1120,7 @@ def scheduler_tick(
     readiness_map: dict[str, Any] = {}
     if readiness_service is not None:
         try:
-            for role_name in ("worker", "surgeon"):
+            for role_name in ("build",):
                 try:
                     for grp in effective_routes.groups_for(role_name):
                         for c in grp:

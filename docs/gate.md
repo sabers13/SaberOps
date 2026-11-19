@@ -11,7 +11,7 @@ a clean pytest skip, not a selector failure. Deleted test files and stale map
 node IDs are omitted. Zero targets skips pytest, while lint and types still run.
 This evidence makes a lane provisional; it does not certify integration.
 
-The integrator merges all lanes and runs **one** `bash scripts/gate-full.sh
+Integration is a deterministic engine step: it merges all lanes and runs **one** `bash scripts/gate-full.sh
 [--result-dir DIR]`. The full gate holds a shared slot during lint, types, the
 pytest pass, reruns and cleanup. There is **one** pytest pass: the whole suite
 runs in parallel with bounded xdist worksteal (`SABEROPS_GATE_WORKERS`, default
@@ -217,7 +217,7 @@ Rebuilding the coverage map runs the whole suite under coverage (~10 minutes)
 while holding the exclusive heavy slot. In a multi-lane wave, intermediate lane
 gates run `scripts/build_test_map.py --reuse-if-current` (a no-op once the map
 covers HEAD) and the map is rebuilt once at the consolidation barrier with
-`--wave-barrier`; concurrent integrators therefore stop serializing on redundant
+`--wave-barrier`; concurrent landings therefore stop serializing on redundant
 map builds. `--wave-barrier` alone is the historical always-rebuild behaviour.
 
 Each run creates `<worktree>-<UTC timestamp>-<pid>/owner.json`, and each pytest pass
@@ -250,7 +250,7 @@ A serially passing unquarantined flake still fails the full gate and is listed i
 
 ## Test hygiene report
 
-After every G3 PASS and map rebuild, the Integrator runs the read-only
+After every G3 PASS and map rebuild, the landing step runs the read-only
 `python scripts/test_hygiene.py [--repo PATH] [--map DIR] [--junit PATH]
 [--base REF] [--out PATH] [--json PATH]`, which executes no tests and imports
 no `src` module (AST and file reads only), writing only `--out`/`--json`

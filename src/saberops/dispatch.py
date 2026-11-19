@@ -60,7 +60,7 @@ def routing_context_for_role(role: Any) -> str:
 
     The three-role vocabulary (``PLAN`` / ``BUILD`` / ``CHECK``) is the new
     ``routing_context`` in skip/exhaustion evidence; a retired role name
-    (``WORKER``/``SURGEON``/``INTEGRATOR``) resolves to ``BUILD``.
+    resolves to ``BUILD``.
     """
     from saberops.jobs.models import JobRole, coerce_job_role
 

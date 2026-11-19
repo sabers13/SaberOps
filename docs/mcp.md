@@ -105,7 +105,7 @@ error code `-32010` and a message naming the invariant:
 | `push`, `git_push`, `push_remote` | Pushing is owner-only. |
 | `approve_quarantine`, `quarantine_approve` | Quarantine approval is owner-only. |
 | `attest_posture`, `posture_attest` | Posture attestation is owner-only. |
-| `run_gate`, `gate_run`, `gate_full`, `run_full_gate` | Gate execution belongs to the scripts and the Integrator. |
+| `run_gate`, `gate_run`, `gate_full`, `run_full_gate` | Gate execution belongs to the deterministic engine scripts, not to an agent. |
 | `edit_source`, `write_file`, `apply_patch` | No direct tracked-source edits over MCP. |
 | `delete_path`, `delete_outside_orch`, `remove_path` | Deletions outside `.orch`/`.saberops` are owner-only. |
 | `read_credentials`, `get_credentials`, `read_secret`, `read_token` | Read tools never return credentials. |

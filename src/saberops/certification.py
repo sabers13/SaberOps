@@ -173,7 +173,7 @@ def evaluate_q4(waves: tuple[WaveRecord, ...] | list[WaveRecord]) -> Certificati
     """Evaluate the four ADR-0004 section 8 Q4 qualification criteria.
 
     Q4-A: at least three green waves on distinct independent/fixture repos.
-    Q4-B: at least one real G3 failure correctly routed to repair/surgeon
+    Q4-B: at least one real G3 failure correctly routed to a build repair
         with durable attribution.
     Q4-C: zero INFRA failures permitted.
     Q4-D: zero owner-only decisions taken by an autonomous model without
@@ -199,7 +199,7 @@ def evaluate_q4(waves: tuple[WaveRecord, ...] | list[WaveRecord]) -> Certificati
             evidence=(
                 "routed waves: " + (", ".join(w.wave_id for w in routed) if routed else "<none>")
             ),
-            details="requires a genuine G3 failure routed to repair/surgeon, not a drill",
+            details="requires a genuine G3 failure routed to a build repair, not a drill",
         ),
         CheckOutcome(
             name="Q4-C: zero INFRA failures",

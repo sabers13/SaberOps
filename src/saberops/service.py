@@ -453,13 +453,14 @@ class OrchestratorService:
         """True when the newest routing chain used the build route's strong start.
 
         Read-only over the same durable ``tier_candidates_resolved`` evidence;
-        a legacy ``SURGEON`` role counts as a strong start.
+        a legacy stored role counts as a strong start (migration alias).
         """
         strong = False
         for event in self.db.get_events_by_type(run_id, "tier_candidates_resolved"):
             payload = event.payload
             if not isinstance(payload, dict):
                 continue
+            # A retired role in old evidence is the predecessor of strong_start.
             if str(payload.get("role", "")).strip().upper() == "SURGEON":
                 strong = True
             elif "strong_start" in payload:

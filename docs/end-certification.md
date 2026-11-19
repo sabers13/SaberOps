@@ -7,7 +7,7 @@ How to certify SaberOps for self-dogfooding under ADR-0004 §8 Q4.
 | ID | Rule | Evidence |
 | --- | --- | --- |
 | Q4-A | ≥ 3 green waves on distinct independent/fixture repositories | `WaveRecord` per wave: wave id, repo, green flag |
-| Q4-B | ≥ 1 real G3 failure correctly routed to repair/surgeon with durable attribution | wave with `g3_failure_routed_with_attribution=true` (a genuine G3 failure, never a drill) |
+| Q4-B | ≥ 1 real G3 failure correctly routed to a build repair with durable attribution | wave with `g3_failure_routed_with_attribution=true` (a genuine G3 failure, never a drill) |
 | Q4-C | Zero INFRA failures permitted | summed `infra_failures` must be 0 |
 | Q4-D | Zero owner-only decisions taken by an autonomous model without explicit owner confirmation | summed `owner_only_autonomous_decisions` must be 0 |
 

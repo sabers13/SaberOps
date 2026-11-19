@@ -267,10 +267,10 @@ def test_auto_run_labelled_t1_dispatches_worker_chain_head(
     calls: list[str] = []
     worker = ScriptedWorker("h3", {"m1": _success_with_file("h3", "m1", "A.txt", "A\n")}, log)
     worker_chain = [WorkerCandidate("h3", "m1")]
-    surgeon_chain = [WorkerCandidate("h3", "s1")]
+    strong_chain = [WorkerCandidate("h3", "s1")]
     monkeypatch.setattr(
         "saberops.orchestrator.resolve_candidate_chain",
-        _role_keyed_chain(worker_chain, surgeon_chain, calls),
+        _role_keyed_chain(worker_chain, strong_chain, calls),
     )
     db = Database(tmp_path / "orch.db")
     orch = Orchestrator(db=db, registry=AdapterRegistry([worker]), worktree_base=tmp_path / "wt")
@@ -309,10 +309,10 @@ def test_capability_failure_escalates_build_to_strong_start_once(
     }
     worker = ScriptedWorker("h3", script, log)
     worker_chain = [WorkerCandidate("h3", "m1")]
-    surgeon_chain = [WorkerCandidate("h3", "s1")]
+    strong_chain = [WorkerCandidate("h3", "s1")]
     monkeypatch.setattr(
         "saberops.orchestrator.resolve_candidate_chain",
-        _role_keyed_chain(worker_chain, surgeon_chain, calls),
+        _role_keyed_chain(worker_chain, strong_chain, calls),
     )
     db = Database(tmp_path / "orch.db")
     orch = Orchestrator(db=db, registry=AdapterRegistry([worker]), worktree_base=tmp_path / "wt")
@@ -644,10 +644,10 @@ def test_escalation_is_per_package_and_worker_chain_returns_next_package(
     }
     worker = ScriptedWorker("h3", script, log)
     worker_chain = [WorkerCandidate("h3", "m1")]
-    surgeon_chain = [WorkerCandidate("h3", "s1")]
+    strong_chain = [WorkerCandidate("h3", "s1")]
     monkeypatch.setattr(
         "saberops.orchestrator.resolve_candidate_chain",
-        _role_keyed_chain(worker_chain, surgeon_chain, calls),
+        _role_keyed_chain(worker_chain, strong_chain, calls),
     )
     assessment = TaskSizingAssessment(
         score=8,
