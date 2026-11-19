@@ -2328,6 +2328,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="Show what would change; change nothing."
     )
     connect_parser.add_argument(
+        "--skill",
+        action="store_true",
+        help=(
+            "Also install the SaberOps instruction skill (the turn-on, preflight, "
+            "submit, wait, accept loop) where the agent supports one."
+        ),
+    )
+    connect_parser.add_argument(
         "--profile", type=str, default=None, help="SaberOps profile the agents should use."
     )
     connect_parser.add_argument("--json", action="store_true", help="JSON output.")
@@ -5753,7 +5761,7 @@ def handle_connect(args: argparse.Namespace) -> int:
         return 2
     results = [
         disconnect(slug, project=project) if args.remove
-        else connect(slug, project=project, dry_run=args.dry_run)
+        else connect(slug, project=project, dry_run=args.dry_run, skill=args.skill)
         for slug in wanted
     ]
     if args.json:
@@ -5763,11 +5771,20 @@ def handle_connect(args: argparse.Namespace) -> int:
             print(("✓ " if result.ok else "✗ ") + result.message)
             for command in result.commands:
                 print(f"    $ {command}")
+            if result.skill_content:
+                print(f"    Skill file: {result.skill_path}")
+                print("    " + result.skill_content.replace("\n", "\n    "))
             if result.snippet and not result.ok:
                 print("    Add this by hand:")
                 print("    " + result.snippet.replace("\n", "\n    "))
         if any(r.ok for r in results) and not args.remove and not args.dry_run:
             print("\nStart a new session in that agent; it becomes the agent that plans the work.")
+            skill_capable = any(a.skill_dir for a in AGENTS if a.slug in wanted)
+            if not args.skill and skill_capable:
+                print(
+                    "Add --skill to also install the instruction file that makes "
+                    "\"turn on saberops\" discoverable."
+                )
     return 0 if all(r.ok for r in results) else 1
 
 

@@ -178,9 +178,19 @@ when it is plain JSON, after a backup):
 orch connect                  # list agents on this computer and whether each is connected
 orch connect claude codex     # connect specific agents (or: orch connect all)
 orch connect claude --project # only for the current repository (.mcp.json)
-orch connect --remove codex   # undo
+orch connect --remove codex   # undo (also removes the instruction skill)
 orch connect codex --dry-run  # show what would change
+orch connect codex --skill    # also install the "turn on saberops" instruction file
 ```
+
+`--skill` installs one small `SKILL.md` per agent where the CLI supports local
+skills, so "turn on saberops" is discoverable and the planner knows the
+preflight, submit, wait and owner-accept loop. The MCP server stays the only
+engine connection. Paths: `~/.claude/skills/saberops/`, `~/.codex/skills/saberops/`,
+`~/.config/opencode/skills/saberops/` and `~/.gemini/config/skills/saberops/`.
+Cursor has no local skill format, so it reports **unsupported**. `--dry-run`
+prints the exact file and path; a file SaberOps did not write is never
+overwritten or removed.
 
 The Setup page offers the same as one **Connect** button per agent. Supported:
 Claude Code, Codex, Antigravity, OpenCode and Cursor; any other MCP client can
