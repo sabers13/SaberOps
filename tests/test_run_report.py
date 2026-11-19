@@ -174,15 +174,9 @@ def _review_decision(*, required: bool, skip_reason: str = "", reason: str = "lo
 # --- running projection -----------------------------------------------------
 
 
-def test_c16b1_unknown_sentinel_matches_replay_contract() -> None:
-    """The local UNKNOWN sentinel mirrors replay/contracts.py by value.
-
-    The import lives in tests only: production observability must not
-    depend on the replay module (architecture ownership invariant).
-    """
-    from saberops.replay.contracts import UNKNOWN as REPLAY_UNKNOWN
-
-    assert UNKNOWN == REPLAY_UNKNOWN == "UNKNOWN"
+def test_c16b1_unknown_sentinel_is_literal() -> None:
+    """The local UNKNOWN sentinel is the literal string ``"UNKNOWN"``."""
+    assert UNKNOWN == "UNKNOWN"
 
 
 def test_c16b1_running_projection(tmp_path: Path) -> None:

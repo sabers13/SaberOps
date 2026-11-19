@@ -115,11 +115,10 @@ flowchart LR
 | **Quota preemption** | Plan exhaustion classifies to `QUOTA_EXHAUSTED` with a reset time; WIP is anchored to create-only checkpoint refs and resumed from the capsule | [waves](docs/waves.md#quota-preemption--auto-resume-wx-2--m2-5) |
 | **Waves and lanes** | Plans run as waves of lanes with disjoint write scopes, sequential pinned-SHA merges and one gate per wave; at most 3 active projects × 5 child tasks (owner-adjustable ceilings) | [waves](docs/waves.md), [wave optimization](docs/wave-plan-optimization.md) |
 | **Gates G1 / G2 / G3** | Base-trusted gate profiles, gate slots sized to free RAM, gate history, coverage-mapped affected gate and a single-pass full gate | [gate](docs/gate.md), [operations](docs/operations.md#engine-run-gates-g1--g2--g3-and-the-history-ledger) |
-| **Owner questions** | The engine never guesses an owner decision: keyed questions with a five-part escalation, answered verbatim from the CLI, web UI or Telegram | [questions](docs/questions.md) |
+| **Owner questions** | The engine never guesses an owner decision: keyed questions with a five-part escalation, answered verbatim from the CLI or web UI | [questions](docs/questions.md) |
 | **Unattended plans** | Frozen decision sheet, never-delegable list, three autonomous decision classes, circuit breaker, stall alarm and morning report. Unattended runs can never push | [unattended](docs/unattended-plans.md) |
 | **Orchestrator memory** | Bounded startup digest, size-bounded notebook with archive, single-writer session lock, turn admission and context rotation at 50% of the window | [memory](docs/orchestrator-memory-restart.md), [turns](docs/orchestrator-turn-policy.md) |
 | **Project entry modes** | Six modes (`new_project`, `develop_existing`, `continue_saberops`, `task`, `resume_run`, `inspect`) qualified from repository facts with a blocker preflight | [project modes](docs/project-modes.md) |
-| **Roadmap change requests** | Idea intake, triage, frozen-step guard and impact checks without disturbing running waves | [roadmap changes](docs/roadmap-change-requests.md) |
 | **Storage lifecycle** | Owner-aware inventory, retention and guarded GC of worktrees, branches, checkpoint refs and evidence; dry-run first, never `--force` | [storage](docs/storage-lifecycle.md) |
 | **Central configuration** | Declarative workflow settings with an append-only, owner-approved decision ledger | [config](docs/config.md) |
 | **Certification** | `orch certify` evaluates Q4 dogfooding criteria and nine resilience scenarios | [certification](docs/end-certification.md) |
@@ -133,7 +132,6 @@ flowchart LR
 | **`orch` CLI** | Everything. Every owner-facing command supports `--json` for agents and scripts. |
 | **MCP server** (`orch mcp serve`, stdio; `orch connect` registers it in agent CLIs) | The primary integration surface for other agents: off until the user says "turn on saberops", then 12 tools to submit and inspect jobs and waves, read evidence, list/answer questions and propose configuration changes. `submit_job` rejects provider, model and billing fields. See [MCP](docs/mcp.md). |
 | **Web UI** (`orch ui`) | Localhost first-run onboarding (readiness, vendor logins, model discovery, billing-posture attestation), routing and concurrency, project registration, plan/wave scoring, question queue, run monitoring with live events, and storage cleanup with typed confirmation. See [first-run web UI](docs/first-run-web-ui.md). |
-| **Telegram** (optional) | Notifications for questions, gate completions and wave milestones; status queries from stored records; keyed `/answer` replies. Inert without a bot token. See [Telegram](docs/telegram.md). |
 
 ---
 
@@ -385,9 +383,9 @@ scripts/               gate wrappers and tooling
   [turn policy](docs/orchestrator-turn-policy.md) ·
   [memory and restart](docs/orchestrator-memory-restart.md) ·
   [project modes](docs/project-modes.md) ·
-  [roadmap changes](docs/roadmap-change-requests.md) · [questions](docs/questions.md)
+  [questions](docs/questions.md)
 - Interfaces: [MCP](docs/mcp.md) · [first-run web UI](docs/first-run-web-ui.md) ·
-  [Telegram](docs/telegram.md) · [UI design principles](docs/ui-design-principles.md)
+  [UI design principles](docs/ui-design-principles.md)
 
 ---
 

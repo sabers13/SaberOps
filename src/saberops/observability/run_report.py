@@ -10,7 +10,7 @@ worktree existence).
 
 Evidence semantics (fail closed, never inferred):
 
-* ``UNKNOWN`` (see :mod:`saberops.replay.contracts`) stays ``UNKNOWN``.
+* ``UNKNOWN`` stays ``UNKNOWN``.
   Missing scalars are never rendered as zero, empty, or ``False``.
 * Requested provider/model (the frozen owner routing intent from the
   run ``config_json``) is never presented as actual provider/model.
@@ -57,9 +57,6 @@ REPORT_SCHEMA: str = "saberops.run_report/v1"
 REPORT_SCHEMA_VERSION: int = 1
 
 #: Sentinel string denoting an unavailable or unmeasured metric value.
-#: Mirrors ``saberops.replay.contracts.UNKNOWN`` by value (pinned equal
-#: by test) without importing the replay module: observability must not
-#: depend on replay, so the normal-run path stays unwired from it.
 UNKNOWN: str = "UNKNOWN"
 
 #: Lifecycle event types that carry an explicit pipeline-stage signal, in
