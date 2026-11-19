@@ -44,6 +44,7 @@ from saberops.control_plane.policy import (
 from saberops.db import Database
 from saberops.jobs import store
 from saberops.jobs.models import (
+    RUN_FAILED,
     Job,
     JobRequirements,
     JobState,
@@ -407,7 +408,7 @@ def test_reconcile_terminal_runs_settles_or_releases_reservations(
         clock_fn=lambda: t0,
     )
     assert res.ran is True
-    assert len(res.reconciled_changes) == 2
+    assert len(res.reconciled_changes) == 3
 
     # Check job states
     j_comp = store.get_job(owner_db, "j_comp")
@@ -416,8 +417,11 @@ def test_reconcile_terminal_runs_settles_or_releases_reservations(
     j_fail = store.get_job(owner_db, "j_fail")
     assert j_fail is not None and j_fail.state == JobState.FAILED
 
+    # An ORPHANED run is conclusive: its job ends FAILED with a reason instead
+    # of staying RUNNING with no owner.
     j_orph = store.get_job(owner_db, "j_orph")
-    assert j_orph is not None and j_orph.state == JobState.RUNNING  # Not misclassified!
+    assert j_orph is not None and j_orph.state == JobState.FAILED
+    assert j_orph.failure_reason == RUN_FAILED
 
     # Check reservations
     with owner_connection(owner_db) as conn:
@@ -434,7 +438,7 @@ def test_reconcile_terminal_runs_settles_or_releases_reservations(
         orph_res = conn.execute(
             "SELECT state FROM capacity_reservations WHERE run_id = 'run_orph'"
         ).fetchone()
-        assert orph_res["state"] == "RESERVED"
+        assert orph_res["state"] == "RELEASED"
 
 
 def test_scheduler_tick_dispatches_highest_priority_job(owner_db: Database, tmp_path: Path) -> None:

@@ -1025,7 +1025,12 @@ def job_status_view(db: Any, job: Job) -> dict[str, Any]:
         view["reason"] = "execution owner is dead; worker safety is being checked"
     elif supervision is not None and (
         supervision.health_state == HealthState.STALLED
-        or supervision.manager_state == ManagerState.ATTENTION_REQUIRED
+        # A healthy worker overrides a stale manager attention flag: recovery
+        # paths refresh health without clearing the older attention mark.
+        or (
+            supervision.health_state != HealthState.HEALTHY
+            and supervision.manager_state == ManagerState.ATTENTION_REQUIRED
+        )
     ):
         view["activity"] = "needs_attention"
         view["reason"] = supervision.health_reason or "worker needs attention"
