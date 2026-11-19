@@ -1579,6 +1579,32 @@ def build_parser() -> argparse.ArgumentParser:
     )
     posture_verify.add_argument("--json", action="store_true", help="JSON output")
 
+    provider_parser = subparsers.add_parser(
+        "provider",
+        help="Show, allow, or block worker providers (show/allow/block).",
+    )
+    provider_sub = provider_parser.add_subparsers(dest="provider_command", required=True)
+    provider_show = provider_sub.add_parser(
+        "show", help="Show effective provider allow/block policy."
+    )
+    provider_show.add_argument("--json", action="store_true", help="JSON output")
+    provider_allow = provider_sub.add_parser(
+        "allow", help="Allow a worker provider in the owner control-plane policy."
+    )
+    provider_allow.add_argument("provider", type=str, help="Provider name (e.g. 'codex', 'anthropic').")
+    provider_allow.add_argument("--json", action="store_true", help="JSON output")
+    provider_block = provider_sub.add_parser(
+        "block", help="Block (disable) a worker provider in the owner control-plane policy."
+    )
+    provider_block.add_argument("provider", type=str, help="Provider name (e.g. 'codex', 'anthropic').")
+    provider_block.add_argument(
+        "--reason",
+        type=str,
+        default=None,
+        help="Optional owner reason recorded alongside the disabled state.",
+    )
+    provider_block.add_argument("--json", action="store_true", help="JSON output")
+
     # orch questions ask|list|show|answer|defer|moot|diverge|divergences|
     # standing-rules|audit (Q-1 owner question queue).
     questions_parser = subparsers.add_parser(
@@ -4839,6 +4865,79 @@ def handle_posture_verify(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_provider_show(args: argparse.Namespace) -> int:
+    """Handle `orch provider show`."""
+    from saberops.control_plane.policy import load_control_plane_policy
+
+    try:
+        policy = load_control_plane_policy()
+    except ValueError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    providers = [
+        {
+            "provider": name,
+            "state": entry.state,
+            **({"warning": entry.warning} if entry.warning else {}),
+        }
+        for name, entry in sorted(policy.provider_policies.items())
+    ]
+    if getattr(args, "json", False):
+        print(json.dumps({"providers": providers}, indent=2, sort_keys=True))
+        return 0
+    if not providers:
+        print("(no provider policies configured)")
+        return 0
+    header = f"{'PROVIDER':<20} {'STATE':<24} {'NOTE'}"
+    print(header)
+    print("─" * len(header))
+    for row in providers:
+        print(f"{row['provider']:<20} {row['state']:<24} {row.get('warning', '')}")
+    return 0
+
+
+def _handle_provider_state_change(
+    args: argparse.Namespace, *, state: str, warning: str | None = None
+) -> int:
+    from saberops.control_plane.policy import set_provider_policy
+
+    provider = str(args.provider).strip().lower()
+    try:
+        path = set_provider_policy(provider, state, warning=warning)
+    except ValueError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    payload = {
+        "provider": provider,
+        "state": state,
+        "path": str(path),
+        **({"warning": warning} if warning else {}),
+    }
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    action = "allowed" if state == "ALLOWED" else "blocked"
+    print(f"Provider {provider} {action} ({state}) at {path}")
+    return 0
+
+
+def handle_provider_allow(args: argparse.Namespace) -> int:
+    """Handle `orch provider allow <provider>`."""
+    from saberops.control_plane.policy import ProviderPolicyState
+
+    return _handle_provider_state_change(args, state=ProviderPolicyState.ALLOWED)
+
+
+def handle_provider_block(args: argparse.Namespace) -> int:
+    """Handle `orch provider block <provider>`."""
+    from saberops.control_plane.policy import ProviderPolicyState
+
+    reason = str(args.reason).strip() if getattr(args, "reason", None) else None
+    return _handle_provider_state_change(
+        args, state=ProviderPolicyState.DISABLED, warning=reason or None
+    )
+
+
 def _questions_queue(args: argparse.Namespace) -> OwnerQuestionQueue:
     """Resolve the question document the command should act on."""
     return OwnerQuestionQueue(getattr(args, "store", None))
@@ -6026,6 +6125,13 @@ def _dispatch(args: argparse.Namespace) -> int:
             return handle_posture_show(args)
         elif args.posture_command == "verify":
             return handle_posture_verify(args)
+    elif args.command == "provider":
+        if args.provider_command == "show":
+            return handle_provider_show(args)
+        elif args.provider_command == "allow":
+            return handle_provider_allow(args)
+        elif args.provider_command == "block":
+            return handle_provider_block(args)
     elif args.command == "questions":
         if args.questions_command == "ask":
             return handle_questions_ask(args)

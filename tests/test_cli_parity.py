@@ -1217,3 +1217,145 @@ def test_cli_subparsers_do_not_shadow_command_dests() -> None:
 
     walk(root, (), ())
     assert clashes == []
+
+
+# ---------------------------------------------------------------------------
+# fresh setup provider allow-list + billing posture + provider CLI (A4)
+# ---------------------------------------------------------------------------
+
+
+def test_fresh_setup_billing_confirmation_admits_scheduled_codex_and_claude(
+    isolated: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from saberops.capacity.admission import admit
+    from saberops.control_plane.policy import load_control_plane_policy
+    from saberops.control_plane.posture import POSTURE_UNVERIFIED
+    from saberops.control_plane.preflight import PROVIDER_DISABLED
+    from saberops.jobs.models import JobRequirements
+    from saberops.models import QuotaState, RoutingState, WorkerCandidate
+
+    now = datetime(2026, 11, 19, 12, 0, tzinfo=UTC)
+    codex_candidate = WorkerCandidate(provider="codex", model="gpt-5.3-codex")
+    claude_candidate = WorkerCandidate(provider="anthropic", model="claude-sonnet-4-5")
+    codex_quota = QuotaState(
+        provider="codex",
+        pool="chatgpt-plus",
+        remaining_percent=80.0,
+        reset_at=(now + timedelta(hours=3)).isoformat(),
+        routing_state=RoutingState.NORMAL,
+        updated_at=now.isoformat(),
+    )
+    claude_quota = QuotaState(
+        provider="anthropic",
+        pool="claude-pro",
+        remaining_percent=80.0,
+        reset_at=(now + timedelta(hours=3)).isoformat(),
+        routing_state=RoutingState.NORMAL,
+        updated_at=now.isoformat(),
+    )
+    object.__setattr__(codex_quota, "freshness", "FRESH")
+    object.__setattr__(claude_quota, "freshness", "FRESH")
+    quota_states = [codex_quota, claude_quota]
+    reqs = JobRequirements()
+
+    # Unconfirmed billing posture on a fresh store is still refused.
+    initial_policy = load_control_plane_policy()
+    assert (
+        admit(
+            codex_candidate,
+            now=now,
+            policy=initial_policy,
+            quota_states=quota_states,
+            requirements=reqs,
+        ).reason
+        == POSTURE_UNVERIFIED
+    )
+    assert (
+        admit(
+            claude_candidate,
+            now=now,
+            policy=initial_policy,
+            quota_states=quota_states,
+            requirements=reqs,
+        ).reason
+        == POSTURE_UNVERIFIED
+    )
+
+    # Confirm billing posture for Codex and Claude (anthropic).
+    for selector in ("codex", "anthropic"):
+        code, _, err = _cli("posture", "verify", selector, capsys=capsys)
+        assert code == 0, err
+
+    confirmed_policy = load_control_plane_policy()
+    codex_decision = admit(
+        codex_candidate,
+        now=now,
+        policy=confirmed_policy,
+        quota_states=quota_states,
+        requirements=reqs,
+    )
+    claude_decision = admit(
+        claude_candidate,
+        now=now,
+        policy=confirmed_policy,
+        quota_states=quota_states,
+        requirements=reqs,
+    )
+    assert codex_decision.admitted is True, codex_decision
+    assert claude_decision.admitted is True, claude_decision
+
+    # Owner-blocked provider is refused; other packaged providers stay allowed.
+    code, out, err = _cli(
+        "provider", "block", "anthropic", "--reason", "owner paused", capsys=capsys
+    )
+    assert code == 0, err
+    assert "blocked" in out
+
+    blocked_policy = load_control_plane_policy()
+    assert (
+        admit(
+            claude_candidate,
+            now=now,
+            policy=blocked_policy,
+            quota_states=quota_states,
+            requirements=reqs,
+        ).reason
+        == PROVIDER_DISABLED
+    )
+    assert (
+        admit(
+            codex_candidate,
+            now=now,
+            policy=blocked_policy,
+            quota_states=quota_states,
+            requirements=reqs,
+        ).admitted
+        is True
+    )
+
+    # Owner can re-allow the provider and inspect via `orch provider show --json`.
+    code, out, err = _cli("provider", "allow", "anthropic", capsys=capsys)
+    assert code == 0, err
+    assert "allowed" in out
+
+    code, show_out, show_err = _cli("provider", "show", "--json", capsys=capsys)
+    assert code == 0, show_err
+    providers_map = {
+        row["provider"]: row["state"] for row in json.loads(show_out)["providers"]
+    }
+    assert providers_map["anthropic"] == "ALLOWED"
+    assert providers_map["codex"] == "ALLOWED"
+
+    reallowed_policy = load_control_plane_policy()
+    assert (
+        admit(
+            claude_candidate,
+            now=now,
+            policy=reallowed_policy,
+            quota_states=quota_states,
+            requirements=reqs,
+        ).admitted
+        is True
+    )

@@ -183,7 +183,7 @@ def _default() -> dict[str, object]:
         "version": 1,
         "providers": {
             provider: {"state": ProviderPolicyState.ALLOWED}
-            for provider in ("opencode", "codex", "cline")
+            for provider in ("opencode", "codex", "cline", "anthropic")
         },
         "quota_pools": {},
     }
@@ -520,6 +520,16 @@ def load_control_plane_policy() -> ControlPlanePolicy:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"Control-plane config at {path}: cannot read/parse") from exc
+    if isinstance(data, dict):
+        packaged_providers = _default().get("providers", {})
+        if isinstance(packaged_providers, dict):
+            owner_providers = data.get("providers")
+            if owner_providers is None:
+                data = {**data, "providers": dict(packaged_providers)}
+            elif isinstance(owner_providers, dict):
+                merged_providers = dict(packaged_providers)
+                merged_providers.update(owner_providers)
+                data = {**data, "providers": merged_providers}
     return _build(data, str(path))
 
 
@@ -618,6 +628,9 @@ def save_owner_control_plane(data: dict[str, object]) -> Path:
 
 
 def set_provider_policy(provider: str, state: str, warning: str | None = None) -> Path:
+    normalized_provider = provider.strip().lower()
+    if not normalized_provider:
+        raise ValueError("provider name is required")
     if state not in {
         ProviderPolicyState.ALLOWED,
         ProviderPolicyState.ALLOWED_WITH_WARNING,
@@ -627,8 +640,8 @@ def set_provider_policy(provider: str, state: str, warning: str | None = None) -
     raw = _read_raw_doc()
     current = load_control_plane_policy()
     providers = dict(current.provider_policies)
-    providers[provider.strip().lower()] = ProviderPolicy(
-        provider.strip().lower(), state, warning
+    providers[normalized_provider] = ProviderPolicy(
+        normalized_provider, state, warning
     )
     updated = ControlPlanePolicy(
         providers,
