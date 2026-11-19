@@ -106,6 +106,7 @@ __all__ = [
     "lane_digest",
     "list_active_plans",
     "mark_owner_lane_done",
+    "plan_lane_rows",
     "planning_session_active",
     "project_plan",
     "reconcile_plan_lanes",
@@ -677,6 +678,11 @@ def _lane_rows(db: Any, plan_id: str) -> dict[str, _LaneRow]:
     }
 
 
+def plan_lane_rows(db: Any, plan_id: str) -> dict[str, _LaneRow]:
+    """Public read-only accessor for one plan's lane rows (P3 projection)."""
+    return _lane_rows(db, plan_id)
+
+
 def _sync_lane_rows(
     db: Any, plan: PlanRecord, revision: PlanRevision, *, now: datetime | None = None
 ) -> None:
@@ -977,6 +983,16 @@ def submit_plan_file(
     )
     _notify_scheduler(db)
     results = reconcile_plan_lanes(db, now=now, owner_initiated=owner_initiated)
+    # P3: render immediately after activation; the tick re-renders only when
+    # the projection digest changes.  A render failure never fails the submit.
+    try:
+        from saberops.plan_state import render_plan_state
+
+        render_plan_state(db, plan, now=now)
+    except Exception:  # pragma: no cover - the projection is best-effort here
+        logging.getLogger(__name__).exception(
+            "plan state render after submit failed for plan %s", plan_id
+        )
     result = next((item for item in results if item.plan_id == plan_id), None)
     return PlanSubmission(
         plan=plan,

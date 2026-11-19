@@ -51,8 +51,9 @@ served, and an unknown requested revision falls back to `2025-06-18`.
 | `submit_plan` | yes | `repo`, `plan_path`, `base_ref` | `saberops.plan_runner.submit_plan_file` (path-only, repository-confined) |
 | `promote_scout` | yes | `job_id`, `goal`, `acceptance`, `base_ref`, `idempotency_key` | `saberops.jobs.service.promote_scout` |
 | `get_job` | no | `job_id` | `saberops.jobs.service.get_job` |
-| `catch_up` | no | `job_id` | read-only handoff over saved job, run, check, review and question records |
+| `catch_up` | no | `job_id` or `plan_id` | read-only handoff over saved job, run, check, review and question records; with `plan_id`, the plan header, lane table and per-lane open questions |
 | `list_jobs` | no | `state`, `limit` | `saberops.jobs.service.list_jobs` |
+| `plan_status` | no | `plan_id` or `repo` | `saberops.plan_state.project_plan_state` (the exact `STATE.md` projection) |
 | `cancel_job` | yes | `job_id`, `reason` | `saberops.jobs.service.cancel_job` |
 | `note_job` | yes | `job_id`, `text` | `saberops.jobs.service.note_job` |
 | `capacity` | no | — | `saberops.jobs.service.capacity` |
@@ -136,6 +137,19 @@ becomes an owner question. `promote_scout` starts an ordinary build job whose
 goal carries the report as starting context and records the lineage on both
 jobs. A plan lane may also set `kind: "scout"`: its report becomes starting
 context for the lanes that depend on it.
+
+`plan_status` returns the record-derived plan ledger: one row per lane with its
+computed status (`planned`, `owner`, `ready`, `queued`, `running`,
+`needs-attention`, `candidate`, `stale`, `accepted`, `failed`, `blocked`,
+`cancelled`, `superseded`), the final attempt's worker and model, branch, commit
+and evidence identifiers, plus the ready set, held lanes, deterministic landing
+queue and the next owner action. It is exactly the projection rendered into
+`STATE.md`, so the file and the tool cannot disagree. The tool is read-only: it
+takes no lease, writes no file and acts on nothing. The canonical file lives in
+the owner state directory and the checkout's `STATE.md` is a git-ignored
+symlink created by `orch plan-file adopt`; it is never committed and never
+created in a worker worktree, so `git status --porcelain` stays empty and
+acceptance keeps working.
 
 `catch_up` is the read-only handoff for a new planning session. It returns the
 original request, the current candidate commit, the latest gate check and

@@ -1211,6 +1211,35 @@ def build_parser() -> argparse.ArgumentParser:
         "--evidence", type=str, required=True, help="What the owner did or decided."
     )
     plan_file_done.add_argument("--json", action="store_true", help="JSON output")
+    plan_file_status = plan_file_sub.add_parser(
+        "status",
+        help="Show the record-derived plan state (the same projection as STATE.md).",
+    )
+    plan_file_status.add_argument(
+        "--plan", type=str, default=None, help="Plan ID (default: the only active plan)."
+    )
+    plan_file_status.add_argument(
+        "--project", type=str, default=None, help="Project whose active plan to show."
+    )
+    plan_file_status.add_argument("--json", action="store_true", help="JSON output")
+    plan_file_render = plan_file_sub.add_parser(
+        "render", help="Force-render the canonical plan state file."
+    )
+    plan_file_render.add_argument(
+        "--plan", type=str, default=None, help="Plan ID (default: the only active plan)."
+    )
+    plan_file_render.add_argument(
+        "--out", type=str, default=None, help="Write here instead of the canonical state file."
+    )
+    plan_file_render.add_argument("--json", action="store_true", help="JSON output")
+    plan_file_adopt = plan_file_sub.add_parser(
+        "adopt",
+        help="Create the git-ignored STATE.md symlink in the canonical checkout.",
+    )
+    plan_file_adopt.add_argument(
+        "--plan", type=str, default=None, help="Plan ID (default: the only active plan)."
+    )
+    plan_file_adopt.add_argument("--json", action="store_true", help="JSON output")
     handoff_parser = subparsers.add_parser(
         "handoff", help="Show latest immutable handoff or resume capsule."
     )
@@ -3646,6 +3675,104 @@ def handle_plan_file_done(args: argparse.Namespace) -> int:
         )
         return 0
     print(f"owner lane {view.lane_id} marked done ({view.state})")
+    return 0
+
+
+def handle_plan_file_status(args: argparse.Namespace) -> int:
+    """Handle ``orch plan-file status`` (read-only plan ledger)."""
+    from saberops.plan_runner import PlanRunnerError
+    from saberops.plan_state import (
+        project_plan_state,
+        render_plan_state_markdown,
+        resolve_plan,
+    )
+
+    db_path = get_default_db_path()
+    if not db_path.exists():
+        print("[!] no SaberOps store yet; activate a plan first", file=sys.stderr)
+        return 1
+    db = Database(db_path, read_only=True)
+    try:
+        plan = resolve_plan(
+            db,
+            plan_id=getattr(args, "plan", None),
+            project_id=getattr(args, "project", None),
+        )
+        state = project_plan_state(db, plan)
+    except (PlanRunnerError, sqlite3.OperationalError) as exc:
+        if getattr(args, "json", False):
+            print(json.dumps({"ok": False, "errors": [str(exc)]}, indent=2, sort_keys=True))
+        else:
+            print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(state.to_dict(), indent=2, sort_keys=True))
+        return 0
+    print(render_plan_state_markdown(state), end="")
+    return 0
+
+
+def handle_plan_file_render(args: argparse.Namespace) -> int:
+    """Handle ``orch plan-file render`` (explicit force render)."""
+    from saberops.plan_runner import PlanRunnerError
+    from saberops.plan_state import (
+        PlanStateError,
+        plan_state_path,
+        project_plan_state,
+        resolve_plan,
+        write_plan_state,
+    )
+
+    db = Database()
+    try:
+        plan = resolve_plan(db, plan_id=getattr(args, "plan", None))
+        state = project_plan_state(db, plan)
+        out = str(getattr(args, "out", "") or "").strip()
+        path = Path(out).expanduser() if out else plan_state_path(plan)
+        write_plan_state(state, path, force=True)
+    except (PlanRunnerError, PlanStateError, OSError) as exc:
+        if getattr(args, "json", False):
+            print(json.dumps({"ok": False, "errors": [str(exc)]}, indent=2, sort_keys=True))
+        else:
+            print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "plan_id": plan.plan_id,
+                    "path": str(path),
+                    "digest": state.digest,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    print(f"wrote {path}")
+    return 0
+
+
+def handle_plan_file_adopt(args: argparse.Namespace) -> int:
+    """Handle ``orch plan-file adopt`` (git-ignored STATE.md link)."""
+    from saberops.plan_runner import PlanRunnerError
+    from saberops.plan_state import PlanStateError, adopt_state_file, resolve_plan
+
+    db = Database()
+    try:
+        plan = resolve_plan(db, plan_id=getattr(args, "plan", None))
+        result = adopt_state_file(db, plan)
+    except (PlanRunnerError, PlanStateError, OSError) as exc:
+        if getattr(args, "json", False):
+            print(json.dumps({"ok": False, "errors": [str(exc)]}, indent=2, sort_keys=True))
+        else:
+            print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps({"ok": True, **result}, indent=2, sort_keys=True))
+        return 0
+    print(f"adopted {result['link']} -> {result['canonical']}")
     return 0
 
 
@@ -7609,6 +7736,12 @@ def _dispatch(args: argparse.Namespace) -> int:
             return handle_plan_file_submit(args)
         elif args.plan_file_command == "done":
             return handle_plan_file_done(args)
+        elif args.plan_file_command == "status":
+            return handle_plan_file_status(args)
+        elif args.plan_file_command == "render":
+            return handle_plan_file_render(args)
+        elif args.plan_file_command == "adopt":
+            return handle_plan_file_adopt(args)
     elif args.command == "handoff":
         return handle_handoff(args)
     elif args.command == "wait":

@@ -212,7 +212,8 @@ CLI (`orch mode set`) or the Questions page.
   file is read inside the checkout; you do not paste its contents.
 - Each lane without unsettled dependencies becomes one ordinary job. A lane
   starts automatically only after every dependency is accepted; independent
-  lanes run in parallel. Do not resubmit a dependent lane by hand.
+  lanes run in parallel. Do not queue a dependent lane by hand; its accepted
+  dependency starts it.
 - `run: "owner"` lanes are never dispatched. They are completed only by the
   owner with `orch plan-file done <lane> --plan <id> --evidence "<what happened>"`.
 - Lanes pause when the owner closes the planning CLI; they resume when a

@@ -1140,6 +1140,17 @@ def scheduler_tick(
         for lane_id in result.submitted
     )
 
+    # 1d. Rendered plan state (P3).  The tick is the single writer of the
+    # canonical ``STATE.md``: it rewrites atomically only when the projection
+    # digest changed.  A broken plan or an unwritable state directory must
+    # never stop unrelated jobs.
+    try:
+        from saberops.plan_state import render_active_plan_states
+
+        render_active_plan_states(db, now=moment)
+    except Exception:
+        logging.getLogger(__name__).exception("plan state rendering failed")
+
     # 2. Collect scheduling inputs
     queued_jobs, _ = store.list_jobs_tolerant(db, state=JobState.QUEUED, limit=100_000)
     running_jobs, _ = store.list_jobs_tolerant(db, state=JobState.RUNNING, limit=100_000)

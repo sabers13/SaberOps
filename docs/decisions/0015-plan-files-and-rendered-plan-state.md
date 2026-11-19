@@ -3,7 +3,9 @@
 - **Status:** Accepted. The file format, parser, activation, format-2 revision
   and `PLAN.md` renderer are implemented in Phase 1 lane P1 (Wave 3). Lane
   submission, the owner-database plan mapping and the scheduler reconciler are
-  implemented in lane P2. The rendered `STATE.md` remains pending in lane P3.
+  implemented in lane P2. The rendered `STATE.md`, its projection, the
+  git-ignored checkout link and the read-only `plan_status`/plan `catch_up`
+  paths are implemented in lane P3.
 - **Date:** 2026-11-19
 - **Decider:** Saber (owner), Phase 1 plan lane P1 after the owner approved
   every recommended choice for the plan-file design

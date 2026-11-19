@@ -2,7 +2,7 @@
 
 The following tools are exposed::
 
-    preflight submit_job submit_plan get_job catch_up tail_job wait_job list_jobs
+    preflight submit_job submit_plan get_job catch_up plan_status tail_job wait_job list_jobs
     cancel_job note_job capacity read_evidence list_questions answer_question
     propose_config_change list_proposals
 
@@ -113,6 +113,7 @@ READ_TOOLS: frozenset[str] = frozenset(
     {
         "get_job",
         "catch_up",
+        "plan_status",
         "tail_job",
         "wait_job",
         "preflight",
@@ -133,6 +134,7 @@ TOOL_NAMES: tuple[str, ...] = (
     "refresh_candidate",
     "get_job",
     "catch_up",
+    "plan_status",
     "tail_job",
     "wait_job",
     "list_jobs",
@@ -1080,6 +1082,11 @@ def _catch_up(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str,
     from saberops.candidate_lifecycle import project_candidate_state
     from saberops.jobs.service import get_job, job_status_view
 
+    plan_id = arguments.get("plan_id")
+    if plan_id is not None:
+        return _catch_up_plan(
+            context, _require_text(arguments, "plan_id", what="plan_id")
+        )
     job_id = _require_text(arguments, "job_id", what="job_id")
     db = context.database(read_only=True)
     job = None if db is None else get_job(db, job_id)
@@ -1635,6 +1642,79 @@ def _propose_mode_change(
     }
 
 
+def _plan_status(
+    context: ServerContext, arguments: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Read-only plan ledger: the exact projection behind ``STATE.md``.
+
+    Works from a read-only client, takes no lease, writes nothing (the canonical
+    file is the scheduler tick's job) and never acts on the view.
+    """
+    from saberops.plan_state import PlanStateError, find_plan, project_plan_state
+
+    plan_id = arguments.get("plan_id")
+    repo = arguments.get("repo")
+    if plan_id is None and repo is None:
+        raise InvalidParamsError("plan_id or repo is required")
+    db = context.database(read_only=True)
+    if db is None:
+        raise NotFoundError("no SaberOps store yet", data={})
+    try:
+        plan = find_plan(
+            db,
+            plan_id=_require_text(arguments, "plan_id", what="plan_id")
+            if plan_id is not None
+            else None,
+            repo=repo.strip() if isinstance(repo, str) and repo.strip() else None,
+        )
+    except PlanStateError as exc:
+        raise InvalidParamsError(str(exc)) from exc
+    if plan is None:
+        raise NotFoundError(
+            f"no active plan for {plan_id or repo}", data={"plan_id": plan_id, "repo": repo}
+        )
+    payload = project_plan_state(db, plan).to_dict()
+    payload["v"] = SNAPSHOT_SCHEMA_VERSION
+    return payload
+
+
+def _catch_up_plan(context: ServerContext, plan_id: str) -> dict[str, Any]:
+    """Read-only plan handoff: header, lane table, open questions, next action."""
+    from saberops.jobs import store as job_store
+    from saberops.plan_state import find_plan, project_plan_state
+
+    db = context.database(read_only=True)
+    if db is None:
+        raise NotFoundError(f"unknown plan: {plan_id}", data={"plan_id": plan_id})
+    plan = find_plan(db, plan_id=plan_id)
+    if plan is None:
+        raise NotFoundError(f"unknown plan: {plan_id}", data={"plan_id": plan_id})
+    projection = project_plan_state(db, plan)
+    state = projection.to_dict()
+    questions: list[dict[str, Any]] = []
+    for lane in projection.lanes:
+        if lane.job_id is None:
+            continue
+        job = job_store.get_job(db, lane.job_id)
+        if job is None:
+            continue
+        matched = _catch_up_questions(context, job)
+        if matched:
+            questions.append(
+                {"lane_id": lane.lane_id, "job_id": job.job_id, "questions": matched}
+            )
+    return {
+        "v": SNAPSHOT_SCHEMA_VERSION,
+        "plan_id": plan.plan_id,
+        "project_id": plan.project_id,
+        "revision": plan.active_version,
+        "state": state,
+        "lanes": state["lanes"],
+        "open_questions": questions,
+        "next_action": projection.next_action,
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Registry construction
 # --------------------------------------------------------------------------- #
@@ -1754,9 +1834,28 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
     register(
         "catch_up",
         "Read-only handoff: original request, candidate, latest check and review, open "
-        "question and the next allowed action for one job.",
-        _schema({"job_id": {"type": "string", "minLength": 1}}, required=("job_id",)),
+        "question and the next allowed action for one job. Pass plan_id instead for the "
+        "plan header, lane table, per-lane open questions and next owner action.",
+        _schema(
+            {
+                "job_id": {"type": "string", "minLength": 1},
+                "plan_id": {"type": "string", "minLength": 1},
+            }
+        ),
         _catch_up,
+        mutating=False,
+    )
+    register(
+        "plan_status",
+        "Read-only plan ledger: the exact projection rendered into STATE.md (lane "
+        "status, worker, branch, commit, evidence and next owner action). Writes nothing.",
+        _schema(
+            {
+                "plan_id": {"type": "string", "minLength": 1},
+                "repo": {"type": "string", "minLength": 1},
+            }
+        ),
+        _plan_status,
         mutating=False,
     )
     register(

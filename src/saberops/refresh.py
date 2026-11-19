@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 import uuid
 from dataclasses import replace
@@ -14,6 +15,7 @@ from saberops.config import reconstruct_run_config
 from saberops.db import current_iso_timestamp
 from saberops.gate_receipt import record_receipt
 from saberops.git import GitManager
+from saberops.jobs import store
 from saberops.models import Attempt, AttemptStatus, CheckResult, ReviewVerdict, RunStatus
 from saberops.orchestrator import _run_configured_gate
 from saberops.process import split_command
@@ -93,6 +95,16 @@ def refresh_candidate(service: OrchestratorService, run_id: str) -> dict[str, An
         review_risk_decision_json=None,
     )
     db.create_run(run)
+    # P3: link the refreshed run into its job's chain so acceptance and the
+    # rendered ledger follow the refreshed candidate, not the pre-refresh run.
+    try:
+        owner_job = store.find_job_for_run(db, run_id)
+        if owner_job is not None:
+            store.append_run_to_job(db, owner_job.job_id, new_id)
+    except Exception:  # pragma: no cover - refresh keeps its own evidence either way
+        logging.getLogger(__name__).exception(
+            "could not link refreshed run %s to its job", new_id
+        )
     db.record_event(
         new_id,
         "refresh_started",

@@ -381,6 +381,55 @@ def find_by_idempotency(db: Any, caller_id: str, idempotency_key: str) -> Job | 
         return _row_to_job(row) if row is not None else None
 
 
+def find_job_for_run(db: Any, run_id: str) -> Job | None:
+    """Return the job whose run chain contains ``run_id``, if any (read-only)."""
+    if not _prepare_job_read(db):
+        return None
+    with _owner_conn(db) as conn:
+        rows = conn.execute("SELECT * FROM jobs").fetchall()
+    for row in rows:
+        job = _row_to_job(row)
+        if run_id in job.run_ids:
+            return job
+    return None
+
+
+def append_run_to_job(
+    db: Any, job_id: str, run_id: str, *, now: datetime | None = None
+) -> Job:
+    """Append an already-created run to a job's chain without changing its state.
+
+    Candidate refresh (E6) creates a new run for the same job.  Linking that run
+    here keeps ``job_is_accepted`` and the rendered plan ledger following the
+    refreshed candidate instead of the pre-refresh run.  Idempotent.
+    """
+    clean_run_id = run_id.strip() if isinstance(run_id, str) else ""
+    if not clean_run_id:
+        raise ValueError("run_id must be a non-empty string")
+    ensure_tables(db)
+    at = _utcnow_iso(now)
+    with _owner_conn(db) as conn:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError:
+            pass
+        row = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+        if row is None:
+            raise JobNotFoundError(f"unknown job: {job_id}")
+        existing = list(json.loads(str(row["run_ids_json"] or "[]")))
+        if clean_run_id not in existing:
+            existing.append(clean_run_id)
+            conn.execute(
+                "UPDATE jobs SET run_ids_json = ?, updated_at = ? WHERE job_id = ?",
+                (json.dumps(existing, separators=(",", ":")), at, job_id),
+            )
+            conn.commit()
+        updated = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+    if updated is None:  # pragma: no cover - the row was read under the same lock
+        raise JobNotFoundError(f"unknown job: {job_id}")
+    return _row_to_job(updated)
+
+
 def list_jobs_raw(
     db: Any, *, state: JobState | None = None, limit: int = 50
 ) -> list[Job]:
