@@ -1,4 +1,4 @@
-# ADR-0015: Opt-in cleanup of clean, verified-landed worktrees
+# ADR-0017: Opt-in cleanup of clean, verified-landed worktrees
 
 - **Status:** Accepted. The opt-in `orch cleanup --landed` sweep is implemented.
 - **Date:** 2026-11-19

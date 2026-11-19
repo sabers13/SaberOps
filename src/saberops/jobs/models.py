@@ -293,7 +293,7 @@ class ResumeFrom:
 
 @dataclass(frozen=True)
 class SteeringNote:
-    """One durable owner note attached to a job (ADR-0013).
+    """One durable owner note attached to a job (ADR-0016).
 
     A note is never typed into a live worker.  It is recorded here and
     included in the prompt of the next worker attempt, which is the only safe

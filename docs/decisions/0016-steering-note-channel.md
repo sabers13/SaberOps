@@ -1,4 +1,4 @@
-# ADR-0013: Owner steering notes reach a worker only at an attempt boundary
+# ADR-0016: Owner steering notes reach a worker only at an attempt boundary
 
 - **Status:** Accepted
 - **Date:** 2026-11-19

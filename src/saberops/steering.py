@@ -2,7 +2,7 @@
 
 A note is never typed into a live worker: it is recorded on the job and
 included in the prompt of the next attempt that starts for the job's current
-run, which is the next safe point (ADR-0013).  Delivery is recorded once, on
+run, which is the next safe point (ADR-0016).  Delivery is recorded once, on
 the attempt whose prompt carried the note; later attempts do not repeat it.
 
 The orchestrator only reads notes at attempt assembly and records delivery

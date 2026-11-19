@@ -4,7 +4,7 @@ A worker can go quiet while its process is still alive.  Today that quiet is
 attention evidence and the job is surfaced as needing attention immediately, so
 a worker that only stopped early waits for the owner.  Behind an explicit flag,
 the engine instead records ONE bounded continue note on the job through the
-existing steering-note channel (ADR-0013) and leaves the job running; the note
+existing steering-note channel (ADR-0016) and leaves the job running; the note
 reaches the worker inside the prompt of its next attempt, exactly like an owner
 note, and is never typed into the live process.
 

@@ -1484,7 +1484,7 @@ class Orchestrator:
             # not claim the worker is stalled-for-termination.
             reason = f"output_quiet_{quiet_seconds:.0f}s"
             # F14 (flagged): a live but idle job spends one bounded continue
-            # note through the steering channel (ADR-0013) before the manager
+            # note through the steering channel (ADR-0016) before the manager
             # raises attention.  The nudge is spent once per job; any later
             # stall -- or a disabled flag, a non-job run, a finished run or a
             # failed note write -- keeps the existing attention behaviour.
@@ -4319,7 +4319,7 @@ class Orchestrator:
                         ),
                         project_notes_text=project_notes_text,
                     )
-                # ADR-0013: a pending owner steering note travels in the next
+                # ADR-0016: a pending owner steering note travels in the next
                 # attempt's prompt -- the next safe point.  Delivery is marked
                 # only once the attempt row exists (below), so a note never
                 # reaches a worker process that is already running.
@@ -6114,7 +6114,7 @@ class Orchestrator:
                                 repair_resolved: ResolvedExecutionBinding | None = None
 
                                 while True:
-                                    # ADR-0013: deliver pending owner notes in
+                                    # ADR-0016: deliver pending owner notes in
                                     # this repair attempt's prompt; the mark is
                                     # written once the attempt row exists.
                                     rep_steering_section, rep_steering_pending = (

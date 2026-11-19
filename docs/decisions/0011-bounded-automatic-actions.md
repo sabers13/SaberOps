@@ -71,7 +71,7 @@ vendor settings on the owner's behalf.
    on that evidence once and only through durable state. When the owner enables
    `ORCH_NUDGE_IDLE_WORKERS`, the first soft-inactivity crossing of a dispatched
    job whose run is still running records one fixed continue note on the job
-   (the [steering-note channel](0013-steering-note-channel.md)) and keeps the
+   (the [steering-note channel](0016-steering-note-channel.md)) and keeps the
    job running, instead of raising attention immediately. The note reaches the
    worker only inside its next attempt's prompt; nothing is typed into the live
    process. The nudge is spent once per job: a later stall after a resume or a

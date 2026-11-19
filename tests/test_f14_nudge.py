@@ -2,7 +2,7 @@
 
 The engine's soft-inactivity callback is the live-but-idle observation point.
 Behind ``ORCH_NUDGE_IDLE_WORKERS`` it records one bounded continue note through
-the steering-note channel (F13/ADR-0013) and keeps the job running; the next
+the steering-note channel (F13/ADR-0016) and keeps the job running; the next
 stall for the same job goes straight to needs-attention.  With the flag off, or
 for a run that is not a dispatched job, nothing changes.
 """

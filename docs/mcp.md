@@ -120,7 +120,7 @@ read-only second client. Owners reject a candidate from the run page
 ## Steering a running job
 
 `note_job` (or `orch job note`) records one durable owner correction on a job
-(ADR-0013). It is **not** typed into a running worker: the note is delivered
+(ADR-0016). It is **not** typed into a running worker: the note is delivered
 once, inside the prompt of the job's next worker attempt — a retry, repair or
 continuation — and the attempt, run and time are recorded on the note. A job
 that finishes before another attempt keeps the note pending. `catch_up` and

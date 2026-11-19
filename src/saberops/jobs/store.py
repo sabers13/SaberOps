@@ -131,7 +131,7 @@ def ensure_tables(db: Any) -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_job_events_job ON job_events(job_id, seq)"
         )
-        # ADR-0013: durable steering notes, delivered at the next attempt
+        # ADR-0016: durable steering notes, delivered at the next attempt
         # boundary (never typed into a running worker).
         conn.execute(
             """
@@ -534,7 +534,7 @@ def record_nudge_note(
 
     Returns ``None`` when this job already spent its nudge: the check and the
     insert share one transaction, so two callers can never spend it twice.  The
-    note itself is an ordinary steering note (ADR-0013) and is delivered by the
+    note itself is an ordinary steering note (ADR-0016) and is delivered by the
     same attempt-boundary machinery as an owner note.
     """
     ensure_tables(db)

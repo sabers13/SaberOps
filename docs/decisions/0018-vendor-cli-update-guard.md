@@ -1,4 +1,4 @@
-# ADR-0015: A vendor CLI version change is checked against the allowlisted help, never guessed
+# ADR-0018: A vendor CLI version change is checked against the allowlisted help, never guessed
 
 - **Status:** Accepted
 - **Date:** 2026-11-19

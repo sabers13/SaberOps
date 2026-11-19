@@ -1,4 +1,4 @@
-"""F13 (ADR-0013): durable steering notes reach a running job's next attempt.
+"""F13 (ADR-0016): durable steering notes reach a running job's next attempt.
 
 A note is recorded on the job and only ever reaches the worker inside the
 prompt of the next attempt that starts, never typed into a running process.

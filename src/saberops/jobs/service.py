@@ -393,7 +393,7 @@ def get_job(db: Any, job_id: str) -> Job | None:
 def note_job(
     db: Any, job_id: str, body: str, *, now: datetime | None = None
 ) -> SteeringNote:
-    """Attach one durable owner note to a job (ADR-0013).
+    """Attach one durable owner note to a job (ADR-0016).
 
     The note is never injected into a running worker.  It stays pending until
     the job's next worker attempt starts, whose prompt is the next safe point,
