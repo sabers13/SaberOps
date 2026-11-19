@@ -274,6 +274,7 @@ def test_skill_matches_the_live_mcp_tool_list() -> None:
         "goal",
         "acceptance",
         "idempotency_key",
+        "job_id",
         "run_id",
         "candidate_sha",
         "diff",

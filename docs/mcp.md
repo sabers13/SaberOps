@@ -49,6 +49,7 @@ served, and an unknown requested revision falls back to `2025-06-18`.
 | --- | --- | --- | --- |
 | `submit_job` | yes | `repo`, `goal`, `acceptance`, `base_ref`, `priority`, `deadline`, `not_before`, `idempotency_key`, `requirements` | `saberops.jobs.service.submit_job` |
 | `get_job` | no | `job_id` | `saberops.jobs.service.get_job` |
+| `catch_up` | no | `job_id` | read-only handoff over saved job, run, check, review and question records |
 | `list_jobs` | no | `state`, `limit` | `saberops.jobs.service.list_jobs` |
 | `cancel_job` | yes | `job_id`, `reason` | `saberops.jobs.service.cancel_job` |
 | `capacity` | no | — | `saberops.jobs.service.capacity` |
@@ -68,6 +69,15 @@ distinct `idempotency_key` and non-overlapping scope. If an accepted sibling
 makes another job stale, request `refresh_candidate` with its run ID (or use
 `orch refresh <run-id>`). The owner accepts the newly checked and reviewed
 candidate separately.
+
+`catch_up` is the read-only handoff for a new planning session. It returns the
+original request, the current candidate commit, the latest gate check and
+review **with the commit each assessed**, any open question, the preserved work
+location on failure, C5's `result` projection (including the exact
+`orch accept RUN_ID` when eligible) and the one next action the engine allows.
+It changes nothing, sends no notice, takes no lease, and is safe from a
+read-only second client. Owners reject a candidate from the run page
+(`/runs/<run_id>`).
 
 `answer_question` accepts only `authority: "ORCHESTRATOR"`. Owner authority is
 not exercisable over MCP: `authority: "OWNER"` is refused with `-32010`, and a
@@ -125,7 +135,7 @@ exclusive `flock` during each read-modify-write.
 * A second live client (a different, live `pid` holds the record) is read-only:
   calls to `submit_job`, `cancel_job`, `answer_question` and
   `propose_config_change` are refused with JSON-RPC error `-32020`. Its read
-  tools (`get_job`, `list_jobs`, `capacity`, `read_evidence`,
+  tools (`get_job`, `catch_up`, `list_jobs`, `capacity`, `read_evidence`,
   `list_questions`, `list_proposals`) keep working.
 * **Stale self-healing:** a record whose `pid` is dead is stale and is stolen by
   the next client (`os.kill(pid, 0)` is the liveness probe), so a crashed client

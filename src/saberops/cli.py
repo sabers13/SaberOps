@@ -2261,7 +2261,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Expose the Orchestrator contract tools over MCP (stdio transport).",
         description=(
             "Serve the SaberOps Orchestrator contract tools (submit_job, get_job, "
-            "list_jobs, cancel_job, capacity, read_evidence, "
+            "catch_up, list_jobs, cancel_job, capacity, read_evidence, "
             "list_questions, answer_question, propose_config_change, list_proposals) "
             "over the Model Context Protocol. Owner-only operations are never exposed."
         ),

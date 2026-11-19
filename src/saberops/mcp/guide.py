@@ -70,7 +70,8 @@ SHORT_INSTRUCTIONS = (
     "checked, isolated changes for the owner to accept. You plan; SaberOps decides which "
     "model does each job. Submit work with submit_job (one job per independent task), give a "
     "goal and testable acceptance criteria, never a model or provider, then call wait_job. "
-    "Use get_job / list_jobs as needed. Owner-only decisions "
+    "Use get_job / list_jobs as needed. If the owner asks to \"catch me up\" about a job, "
+    "call catch_up. Owner-only decisions "
     "(accepting changes, approving config, billing, "
     "merging, pushing) are never available here: tell the owner to use the SaberOps page. "
     "Read the full guide in the saberops-guide prompt or the saberops://guide resource before "
@@ -139,6 +140,15 @@ model review it, and leaves the result for the owner to accept or reject.
 - Report back to the owner in plain words: what finished, what failed and why,
   and what needs their decision. Link them to the run on the SaberOps page.
 - `cancel_job` only for work you submitted by mistake or that the owner stopped.
+
+## Catching up in a new session
+- When the owner says "catch me up" (or you have no history of a job), call
+  `catch_up` with its `job_id`; use `list_jobs` first when they did not give one.
+  It is read-only and works even when this session is not the planning owner.
+- Tell the owner: the original request, the current candidate commit, the latest
+  check and review with the commit each assessed, any open question, and the next
+  action. When the result offers `orch accept RUN_ID`, show that exact command;
+  the owner accepts there or rejects from the run page for full evidence.
 
 ## Questions and decisions
 - `list_questions` shows what is waiting. You may answer only planner-level

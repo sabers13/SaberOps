@@ -2,7 +2,7 @@
 
 The following tools are exposed::
 
-    preflight submit_job get_job wait_job list_jobs cancel_job capacity
+    preflight submit_job get_job catch_up wait_job list_jobs cancel_job capacity
     read_evidence list_questions answer_question
     propose_config_change list_proposals
 
@@ -108,6 +108,7 @@ MUTATING_TOOLS: frozenset[str] = frozenset(
 READ_TOOLS: frozenset[str] = frozenset(
     {
         "get_job",
+        "catch_up",
         "wait_job",
         "preflight",
         "list_jobs",
@@ -123,6 +124,7 @@ TOOL_NAMES: tuple[str, ...] = (
     "submit_job",
     "refresh_candidate",
     "get_job",
+    "catch_up",
     "wait_job",
     "list_jobs",
     "cancel_job",
@@ -471,6 +473,330 @@ def _get_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, 
         "job": job_status_view(db, job),
         "result": _job_result(db, job),
         "guidance": _job_guidance(job),
+    }
+
+
+def _excerpt(text: str | None, *, limit: int = 400, tail: bool = False) -> str | None:
+    """Return a short, single-block excerpt; full evidence stays in the records."""
+    if not text:
+        return None
+    stripped = text.strip()
+    if not stripped:
+        return None
+    if len(stripped) <= limit:
+        return stripped
+    return "…" + (stripped[-limit:] if tail else stripped[:limit])
+
+
+def _catch_up_check(
+    db: Any, run_id: str, attempts: list[Any], candidate_sha: str | None
+) -> dict[str, Any] | None:
+    """Latest gate check for the run, with the commit that check assessed."""
+    checks = db.get_checks_for_run(run_id)
+    if not checks:
+        return None
+    latest = checks[-1]
+    assessed = next(
+        (attempt.commit_sha for attempt in attempts if attempt.id == latest.attempt_id),
+        None,
+    )
+    return {
+        "check_id": latest.id,
+        "attempt_id": latest.attempt_id,
+        "assessed_commit": assessed,
+        "assessed_current_candidate": (
+            candidate_sha is not None and assessed == candidate_sha
+        ),
+        "passed": latest.passed,
+        "skipped": latest.skipped,
+        "gate_command": latest.gate_command,
+        "exit_code": latest.exit_code,
+        "excerpt": _excerpt(
+            latest.stdout if latest.passed else latest.stderr, tail=not latest.passed
+        ),
+    }
+
+
+def _catch_up_review(
+    db: Any, run_id: str, candidate_sha: str | None
+) -> dict[str, Any] | None:
+    """Latest review, preferring one bound to the current candidate.
+
+    The commit a review assessed lives in the REVIEW dispatch evidence row;
+    a review row itself carries no SHA.  Never infer the assessed commit from
+    "the latest commit" — a review of candidate A must not be attributed to a
+    later candidate B.
+    """
+    from saberops.models import DispatchStage
+
+    reviews = db.get_reviews_for_run(run_id)
+    if not reviews:
+        return None
+    assessed: dict[str, str | None] = {}
+    for dispatch in db.get_dispatch_evidence_for_run(run_id):
+        if dispatch.stage != DispatchStage.REVIEW:
+            continue
+        for key in (dispatch.association_id, dispatch.review_id):
+            if key:
+                assessed.setdefault(key, dispatch.candidate_sha)
+    relevant = [
+        review
+        for review in reviews
+        if candidate_sha is not None and assessed.get(review.id) == candidate_sha
+    ]
+    chosen = (relevant or reviews)[-1]
+    assessed_sha = assessed.get(chosen.id)
+    return {
+        "review_id": chosen.id,
+        "assessed_commit": assessed_sha,
+        "assessed_current_candidate": (
+            candidate_sha is not None and assessed_sha == candidate_sha
+        ),
+        "verdict": chosen.verdict.value,
+        "provider": chosen.provider,
+        "model": chosen.model,
+        "created_at": chosen.created_at,
+        "excerpt": _excerpt(chosen.summary),
+    }
+
+
+def _catch_up_questions(context: ServerContext, job: Any) -> list[dict[str, Any]]:
+    """Open questions that name this job or one of its runs."""
+    from saberops.questions import QuestionStatus, question_view
+
+    questions = context.question_queue().questions(status=QuestionStatus.OPEN)
+    matched: list[dict[str, Any]] = []
+    for question in questions:
+        request = question.request
+        if request.run_id not in job.run_ids and job.job_id not in request.blocks:
+            continue
+        view = question_view(question)
+        matched.append(
+            {
+                "question_id": view["question_id"],
+                "key": view["key"],
+                "subject": view["subject"],
+                "decision_class": view["decision_class"],
+                "answerable_by": view["answerable_by"],
+                "run_id": view["run_id"],
+                "blocks": view["blocks"],
+                "options": view["options"],
+                "recommendation": request.escalation.recommendation,
+            }
+        )
+    return matched
+
+
+def _catch_up_next_action(
+    job: Any,
+    view: Mapping[str, Any],
+    result: Mapping[str, Any],
+    projection: Any,
+    questions: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """The one action the engine allows next, derived only from saved records."""
+    from saberops.jobs.models import JobState
+    from saberops.models import CandidateState
+
+    run_id = result.get("run_id")
+    if questions:
+        question = questions[0]
+        if question["answerable_by"] == "ORCHESTRATOR":
+            return {
+                "action": "answer_question",
+                "owner_only": False,
+                "detail": (
+                    f"Question {question['question_id']} blocks this job; answer it with "
+                    "the answer_question tool (authority ORCHESTRATOR)."
+                ),
+                "command": None,
+                "question_id": question["question_id"],
+            }
+        return {
+            "action": "answer_question",
+            "owner_only": True,
+            "detail": (
+                f"Question {question['question_id']} blocks this job and only the owner "
+                "can answer it."
+            ),
+            "command": f'orch questions answer {question["question_id"]} --words "<answer>"',
+            "question_id": question["question_id"],
+        }
+    if projection is not None and projection.state is CandidateState.ACCEPTED:
+        return {
+            "action": "none",
+            "owner_only": False,
+            "detail": f"Candidate {projection.candidate_sha[:8]} is already accepted.",
+            "command": None,
+        }
+    if result.get("owner_action"):
+        short = str(result.get("candidate_sha") or "")[:8]
+        return {
+            "action": "owner_accept",
+            "owner_only": True,
+            "detail": f"Candidate {short} is checked and ready; the owner accepts it.",
+            "command": result["owner_action"],
+            "reject": {
+                "surface": "web",
+                "path": f"/runs/{run_id}",
+                "detail": "The owner can reject this candidate from the run page.",
+            },
+        }
+    if job.state is JobState.FAILED:
+        work = view.get("work_location") or "the preserved work location"
+        return {
+            "action": "inspect_and_resubmit",
+            "owner_only": False,
+            "detail": (
+                f"The job failed ({view.get('reason') or job.failure_reason}). "
+                f"Inspect the preserved work at {work} and resubmit with a fresh "
+                "idempotency_key once the cause is fixed."
+            ),
+            "command": None,
+        }
+    if job.state is JobState.RUNNING:
+        reason = view.get("reason")
+        return {
+            "action": "wait",
+            "owner_only": False,
+            "detail": (
+                f"The job is running ({view.get('activity') or 'running'}); call wait_job"
+                + (f": {reason}" if reason else ".")
+            ),
+            "command": None,
+        }
+    if job.state is JobState.QUEUED:
+        reason = job.waiting_reason.value if job.waiting_reason is not None else "QUEUED"
+        return {
+            "action": "wait",
+            "owner_only": False,
+            "detail": f"The job is queued ({reason}); call wait_job.",
+            "command": None,
+        }
+    if job.state is JobState.CANCELLED:
+        return {
+            "action": "none",
+            "owner_only": False,
+            "detail": "The job was cancelled; there is no owner action.",
+            "command": None,
+        }
+    if projection is not None and projection.state is CandidateState.REJECTED:
+        return {
+            "action": "none",
+            "owner_only": False,
+            "detail": "The owner rejected the current candidate; resubmit if needed.",
+            "command": None,
+        }
+    reason = projection.reason if projection is not None else "no candidate yet"
+    return {
+        "action": "inspect",
+        "owner_only": False,
+        "detail": (
+            f"Nothing is acceptable yet ({reason}); read the run page for the full "
+            "check and review evidence."
+        ),
+        "command": None,
+    }
+
+
+def _catch_up(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    """Read-only "catch me up" lookup: saved request, candidate and next action.
+
+    Reuses :func:`_job_result` (C5) so the owner action has exactly one
+    projection.  Nothing is written: no job/run/event/question mutation, no
+    notice, and no planning lease.  A session that does not hold the writer
+    lease can call it.
+    """
+    from saberops.candidate_lifecycle import project_candidate_state
+    from saberops.jobs.service import get_job, job_status_view
+
+    job_id = _require_text(arguments, "job_id", what="job_id")
+    db = context.database(read_only=True)
+    job = None if db is None else get_job(db, job_id)
+    if job is None:
+        raise NotFoundError(f"unknown job: {job_id}", data={"job_id": job_id})
+    assert db is not None
+
+    view = job_status_view(db, job)
+    result = _job_result(db, job)
+    run_id = result.get("run_id") or job.current_run_id
+    if run_id is None and job.run_ids:
+        run_id = job.run_ids[-1]
+    projection = project_candidate_state(db, run_id) if run_id is not None else None
+    run = db.get_run(run_id) if run_id is not None else None
+
+    attempts = db.get_attempts_for_run(run_id) if run_id is not None else []
+    check = (
+        _catch_up_check(
+            db,
+            run_id,
+            attempts,
+            projection.candidate_sha if projection is not None else None,
+        )
+        if run_id is not None
+        else None
+    )
+    review = (
+        _catch_up_review(db, run_id, projection.candidate_sha if projection else None)
+        if run_id is not None
+        else None
+    )
+    questions = _catch_up_questions(context, job)
+
+    failure = None
+    if job.state.value == "FAILED" or view.get("last_failed_attempt"):
+        failed_attempt = view.get("last_failed_attempt") or {}
+        failure = {
+            "reason": failed_attempt.get("reason") or view.get("reason") or job.failure_reason,
+            "work_location": view.get("work_location")
+            or failed_attempt.get("work_location"),
+            "attempt_id": failed_attempt.get("attempt_id"),
+        }
+
+    return {
+        "v": SNAPSHOT_SCHEMA_VERSION,
+        "job_id": job.job_id,
+        "request": {
+            "goal": job.goal,
+            "acceptance": job.acceptance,
+            "repo": job.repo,
+            "base_ref": job.base_ref,
+            "base_sha": job.base_sha,
+        },
+        "state": job.state.value,
+        "activity": view.get("activity"),
+        "reason": view.get("reason"),
+        "run_id": run_id,
+        "run_status": run.status.value if run is not None else None,
+        "candidate": (
+            {
+                "run_id": projection.run_id,
+                "candidate_sha": projection.candidate_sha,
+                "base_sha": run.base_commit if run is not None else None,
+                "state": (
+                    projection.state.value if projection.state is not None else None
+                ),
+                "verdict": (
+                    projection.verdict.value if projection.verdict is not None else None
+                ),
+                "reason": projection.reason,
+                "review_required": projection.review_required,
+                "evidence": list(projection.evidence),
+            }
+            if projection is not None
+            else None
+        ),
+        "check": check,
+        "review": review,
+        "open_questions": questions,
+        "failure": failure,
+        "next_action": _catch_up_next_action(job, view, result, projection, questions),
+        "result": result,
+        "evidence": {
+            "run_page": f"/runs/{run_id}" if run_id is not None else None,
+            "check": f"check:{check['check_id']}" if check is not None else None,
+            "review": f"review:{review['review_id']}" if review is not None else None,
+        },
     }
 
 
@@ -836,6 +1162,14 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
         "Return one job's record, state and timing.",
         _schema({"job_id": {"type": "string", "minLength": 1}}, required=("job_id",)),
         _get_job,
+        mutating=False,
+    )
+    register(
+        "catch_up",
+        "Read-only handoff: original request, candidate, latest check and review, open "
+        "question and the next allowed action for one job.",
+        _schema({"job_id": {"type": "string", "minLength": 1}}, required=("job_id",)),
+        _catch_up,
         mutating=False,
     )
     register(

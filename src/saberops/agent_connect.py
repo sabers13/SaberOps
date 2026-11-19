@@ -256,7 +256,11 @@ def skill_document() -> str:
         "   result's `run_id`, `candidate_sha`, `diff` reference and exact\n"
         "   `owner_action` (for example `orch accept RUN_ID`). The owner accepts;\n"
         "   you cannot accept, merge, push or approve billing.\n"
-        "6. **Turn off.** Call `saberops_off` when the owner asks to stop.\n\n"
+        "6. **Catch up.** When the owner asks to \"catch me up\" about a job, call\n"
+        "   `catch_up` with its `job_id`. It is read-only, works from a session that\n"
+        "   is not the planning owner, and returns the original request, candidate,\n"
+        "   latest check and review, any open question and the next allowed action.\n"
+        "7. **Turn off.** Call `saberops_off` when the owner asks to stop.\n\n"
         "## Full guide\n\n" + GUIDE
     )
 
