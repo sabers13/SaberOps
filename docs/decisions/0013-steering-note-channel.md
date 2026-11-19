@@ -50,5 +50,7 @@ starts. That boundary is the safe point at which new owner input can be added.
   rather than silently dropping it.
 - The owner or planner can send a note through the MCP `note_job` tool or
   `orch job note`; both are ordinary writes to durable job state.
-- Automatic nudging of a stalled worker is a separate, later feature; when it
-  exists it must use this same channel rather than typing into the process.
+- Automatic nudging of an idle worker uses this same channel (implemented in
+  lane F14 behind `ORCH_NUDGE_IDLE_WORKERS`): it records one bounded continue
+  note rather than typing into the process. The nudge is spent once per job, and
+  a second stall raises attention without another note.

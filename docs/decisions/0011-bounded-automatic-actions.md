@@ -1,10 +1,10 @@
 # ADR-0011: What the engine may do without an owner request
 
 - **Status:** Accepted. Scheduler presence, dead-run reconciliation, dispatch
-  window recovery, the wait tool, desktop delivery, read-only quota probing and
-  the `catch_up` lookup are implemented.
+  window recovery, the wait tool, desktop delivery, read-only quota probing, the
+  `catch_up` lookup and the flagged one-shot idle nudge are implemented.
 - **Date:** 2026-11-19
-- **Decider:** Saber (owner), Phase 1 plan lanes C1, C2, C2B, C3, A5 and E5
+- **Decider:** Saber (owner), Phase 1 plan lanes C1, C2, C2B, C3, A5, E5 and F14
 - **Related:** [ADR-0001](0001-saberops-engine-mcp-first.md) §3.3–§3.4,
   [ADR-0005](0005-mcp-first-engine-and-phase-2-board.md),
   [ADR-0007](0007-dynamic-memory-budget.md)
@@ -64,11 +64,28 @@ vendor settings on the owner's behalf.
    reports the latest handoff between attempts (for example a quota-exhausted
    attempt continued on another subscription from its checkpoint; see
    [ADR-0013](0013-quota-failover-continuation.md)).
+6. **One bounded continue before a live, idle job needs attention.**
+   Observationally quiet workers are attention evidence, and the engine may act
+   on that evidence once and only through durable state. When the owner enables
+   `ORCH_NUDGE_IDLE_WORKERS`, the first soft-inactivity crossing of a dispatched
+   job whose run is still running records one fixed continue note on the job
+   (the [steering-note channel](0013-steering-note-channel.md)) and keeps the
+   job running, instead of raising attention immediately. The note reaches the
+   worker only inside its next attempt's prompt; nothing is typed into the live
+   process. The nudge is spent once per job: a later stall after a resume or a
+   retry raises attention with no second note. With the flag off, for a run that
+   is not a dispatched job, for a finished run, or when the note cannot be
+   written, the engine keeps today's behaviour and raises attention. The
+   nudge cannot change scope, routing, the gate, review, acceptance or
+   isolation.
 
 ## 3. Consequences
 
 - Delivery does not depend on a live chat session, a model turn or a client
   polling at the right moment; polling still always works.
+- The one automatic nudge is bounded and visible: at most one continue note per
+  job, delivered at a normal attempt boundary, and it never suppresses the
+  attention state a second stall raises.
 - Automatic actions cannot spend tokens or mutate vendor settings, and an
   automatic read is never the only way to obtain evidence.
 - A missing scheduler, a dead worker or a missing quota reading is a reported

@@ -1476,18 +1476,43 @@ class Orchestrator:
             # AMBIGUOUS_BUSY (or anything non-STALLED), this projection must
             # not claim the worker is stalled-for-termination.
             reason = f"output_quiet_{quiet_seconds:.0f}s"
+            # F14 (flagged): a live but idle job spends one bounded continue
+            # note through the steering channel (ADR-0013) before the manager
+            # raises attention.  The nudge is spent once per job; any later
+            # stall -- or a disabled flag, a non-job run, a finished run or a
+            # failed note write -- keeps the existing attention behaviour.
+            from saberops.nudge import maybe_nudge_idle_run
+
+            nudge = maybe_nudge_idle_run(
+                self.db, run_id=run_id, attempt_id=attempt_id, reason=reason
+            )
+            if nudge.nudged:
+                health_reason = (
+                    f"attention: {reason} (not stall-confirmed); "
+                    f"one automatic nudge sent (job {nudge.job_id})"
+                )
+                manager_state = ManagerState.ATTACHED
+            else:
+                health_reason = f"attention: {reason} (not stall-confirmed)"
+                manager_state = ManagerState.ATTENTION_REQUIRED
             self.db.update_supervision_health(
                 run_id,
                 health_state=HealthState.UNCERTAIN,
-                health_reason=f"attention: {reason} (not stall-confirmed)",
+                health_reason=health_reason,
                 attempt_id=attempt_id,
-                manager_state=ManagerState.ATTENTION_REQUIRED,
+                manager_state=manager_state,
             )
             self.db.record_event(
                 run_id,
                 "worker_stalled",
                 attempt_id=attempt_id,
-                payload={"reason": reason, "destructive": False},
+                payload={
+                    "reason": reason,
+                    "destructive": False,
+                    "nudged": nudge.nudged,
+                    "nudge_reason": nudge.reason,
+                    "nudge_note_id": nudge.note_id,
+                },
             )
 
         def on_resume() -> None:

@@ -36,6 +36,10 @@ MAX_STEERING_NOTE_CHARS = 4000
 #: notes wait for the following attempt boundary instead of splitting a note.
 MAX_NOTES_PER_DELIVERY = 5
 
+#: Job-event kind marking the one automatic continue note (F14).  Its presence
+#: is the durable proof that this job already spent its single nudge.
+NUDGE_EVENT_KIND = "nudged"
+
 
 class JobNotFoundError(LookupError):
     """Unknown job id."""
@@ -513,6 +517,67 @@ def insert_steering_note(
         conn.commit()
     if row is None:  # pragma: no cover - the row was just written
         raise RuntimeError(f"steering note {note_id} disappeared after insert")
+    return _row_to_steering_note(row)
+
+
+def record_nudge_note(
+    db: Any,
+    job_id: str,
+    *,
+    run_id: str,
+    attempt_id: str | None = None,
+    body: str,
+    reason: str = "",
+    now: datetime | None = None,
+) -> SteeringNote | None:
+    """Record the one automatic continue note for a job, atomically.
+
+    Returns ``None`` when this job already spent its nudge: the check and the
+    insert share one transaction, so two callers can never spend it twice.  The
+    note itself is an ordinary steering note (ADR-0013) and is delivered by the
+    same attempt-boundary machinery as an owner note.
+    """
+    ensure_tables(db)
+    if not body or len(body) > MAX_STEERING_NOTE_CHARS:
+        raise ValueError("automatic nudge body is empty or over the note limit")
+    at = _utcnow_iso(now)
+    with _owner_conn(db) as conn:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError:
+            pass
+        spent = conn.execute(
+            "SELECT 1 FROM job_events WHERE job_id = ? AND kind = ? LIMIT 1",
+            (job_id, NUDGE_EVENT_KIND),
+        ).fetchone()
+        if spent is not None:
+            return None
+        cursor = conn.execute(
+            "INSERT INTO job_steering_notes (job_id, body, created_at) VALUES (?, ?, ?)",
+            (job_id, body, at),
+        )
+        note_id = int(cursor.lastrowid or 0)
+        _append_event(
+            conn,
+            job_id=job_id,
+            at=at,
+            kind=NUDGE_EVENT_KIND,
+            from_state=None,
+            to_state=None,
+            payload={
+                "note_id": note_id,
+                "run_id": run_id,
+                "attempt_id": attempt_id,
+                "length": len(body),
+                "reason": reason,
+            },
+        )
+        row = conn.execute(
+            "SELECT * FROM job_steering_notes WHERE note_id = ?", (note_id,)
+        ).fetchone()
+        conn.commit()
+    if row is None:  # pragma: no cover - the row was just written
+        raise RuntimeError(f"automatic nudge note {note_id} disappeared after insert")
     return _row_to_steering_note(row)
 
 
