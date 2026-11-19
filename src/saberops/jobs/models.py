@@ -71,6 +71,7 @@ class Effort(StrEnum):
     low = "low"
     medium = "medium"
     high = "high"
+    xhigh = "xhigh"
 
 
 NO_ROUTE_FOR_REQUIREMENTS = "NO_ROUTE_FOR_REQUIREMENTS"

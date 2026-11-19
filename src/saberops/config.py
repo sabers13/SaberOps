@@ -122,6 +122,7 @@ class RunConfig:
     # never accepted-target/main publication.
     publish_candidate: bool = False
     tool_refs: tuple[str, ...] = ()
+    effort: str | None = None
     # Autonomous execution is a run-scoped contract.  It contains
     # references and policy, never resolved secret material.
     autonomous_runtime: dict[str, Any] | None = None
@@ -335,6 +336,7 @@ def resolve_run_config(
     # authority always supplies an explicit value; direct low-level
     # callers may omit it (legacy "" = unknown, acceptance unchanged).
     accept_target_branch: str | None = None,
+    effort: str | None = None,
 ) -> RunConfig:
     """Normalize all public launch inputs into the one canonical policy object."""
     if type(gate_enabled) is not bool or type(review_disabled) is not bool:
@@ -423,6 +425,7 @@ def resolve_run_config(
             else load_authority_policy().auto_publish_candidate
         ),
         tool_refs=normalized_tool_refs,
+        effort=(str(effort).strip().lower() if effort else None),
         gate_scratch_mode=resolved_gate_scratch_mode,
         accept_target_branch=(str(accept_target_branch).strip() if accept_target_branch else ""),
     )
@@ -457,6 +460,7 @@ def reconstruct_run_config(data: dict[str, Any]) -> RunConfig:
         training_allowed=bool(data.get("training_allowed", True)),
         provider_override=data.get("provider_override"),
         model_override=data.get("model_override"),
+        effort=data.get("effort"),
         reserve_override=bool(data.get("reserve_override", False)),
         required_capabilities=normalize_required_capabilities(
             tuple(data.get("required_capabilities", ()))

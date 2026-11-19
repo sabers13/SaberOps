@@ -383,7 +383,25 @@ def _default_run_launcher(
 
     spec = job_dispatch_spec(job)
     cand = decision.candidate
-    req = replace(spec.request, provider_override=cand.provider, model_override=cand.model)
+    effort_value: str | None = spec.effort.value if spec.effort is not None else None
+    if spec.effort is not None and cand.binding_id:
+        from saberops.control_plane.binding_store import load_owner_bindings
+        from saberops.models import ReasoningEffort
+
+        requested_effort = ReasoningEffort(spec.effort.value.upper())
+        owner_bindings = load_owner_bindings()
+        binding = owner_bindings.registry.get(cand.binding_id)
+        if binding is not None and not binding.supports_effort(requested_effort):
+            raise ValueError(
+                f"EFFORT_UNSUPPORTED: binding {cand.binding_id!r} does not support "
+                f"requested effort {spec.effort.value!r}"
+            )
+    req = replace(
+        spec.request,
+        provider_override=cand.provider,
+        model_override=cand.model,
+        effort=effort_value,
+    )
     config = resolve_effective_run_config(req)
 
     run = Run(

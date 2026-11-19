@@ -311,8 +311,25 @@ def add_access_connection(
 
 
 def _readiness_probe_payload(
-    connection: ProviderConnection, evidence: ProviderReadinessEvidence
+    connection: ProviderConnection,
+    evidence: ProviderReadinessEvidence,
+    *,
+    missing_evidence: tuple[str, ...] = (),
 ) -> dict[str, Any]:
+    remedy = ""
+    if evidence.reason == "INSUFFICIENT_EVIDENCE" or evidence.state is ProviderReadiness.UNKNOWN:
+        missing_text = (
+            ", ".join(missing_evidence)
+            if missing_evidence
+            else "installed, authenticated, reachable"
+        )
+        remedy = (
+            f"missing evidence ({missing_text}); "
+            f"authenticate {connection.backend} "
+            f"(e.g. `{connection.backend} auth login` or configure credentials), "
+            f"then run `orch access discover {connection.connection_id}` and "
+            f"`orch access test {connection.connection_id}`"
+        )
     return {
         "connection_id": connection.connection_id,
         "ok": "TRUE" if evidence.state is ProviderReadiness.READY else "FALSE",
@@ -328,6 +345,8 @@ def _readiness_probe_payload(
         "readiness_state": evidence.state.value,
         "readiness_reason": evidence.reason,
         "observed_at": evidence.observed_at,
+        **({"missing_evidence": list(missing_evidence)} if missing_evidence else {}),
+        **({"remedy": remedy} if remedy else {}),
     }
 
 
@@ -361,11 +380,33 @@ def test_access_connection(
                 run=run or subprocess.run,
             )
             evidence = service.refresh(connection)
+            missing_evidence: tuple[str, ...] = ()
+            if evidence.state is ProviderReadiness.UNKNOWN:
+                from saberops.model_access import TriState
+
+                missing_parts: list[str] = []
+                disc = (
+                    service.last_discovery(connection.connection_id)
+                    if hasattr(service, "last_discovery")
+                    else None
+                )
+                if disc is None:
+                    missing_parts.extend(["installed", "authenticated", "reachable"])
+                else:
+                    if disc.installed is not TriState.TRUE:
+                        missing_parts.append("installed")
+                    if disc.authenticated is not TriState.TRUE:
+                        missing_parts.append("authenticated")
+                    if disc.reachable is not TriState.TRUE:
+                        missing_parts.append("reachable")
+                if not missing_parts:
+                    missing_parts.append("connection_test")
+                missing_evidence = tuple(missing_parts)
         except ReadinessStoreError as exc:
             raise AccessOperationError(
                 "READINESS_STORE_UNWRITABLE", f"Readiness store unwritable: {exc}"
             ) from exc
-        return _readiness_probe_payload(connection, evidence)
+        return _readiness_probe_payload(connection, evidence, missing_evidence=missing_evidence)
     from saberops.web import _probe_api_connection
 
     outcome = _probe_api_connection(endpoint=connection.endpoint)

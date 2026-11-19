@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -99,9 +100,38 @@ class ConnectResult:
 
 
 def orch_command() -> str:
-    """Absolute path of the ``orch`` launcher, so agent PATH quirks cannot break it."""
+    """Absolute path of the currently running ``orch`` launcher."""
+    venv_orch = Path(sys.executable).parent / "orch"
+    if venv_orch.is_file():
+        return str(venv_orch.resolve())
+    if sys.argv and sys.argv[0]:
+        argv_path = Path(sys.argv[0])
+        if argv_path.name == "orch" and argv_path.is_file():
+            return str(argv_path.resolve())
     found = shutil.which("orch")
     return str(Path(found).resolve()) if found else "orch"
+
+
+def conflicting_orch_on_path() -> str | None:
+    """Return another ``orch`` path on PATH when it differs from the running one."""
+    found = shutil.which("orch")
+    if not found:
+        return None
+    resolved_found = str(Path(found).resolve())
+    running = orch_command()
+    if running != "orch" and resolved_found != running:
+        return resolved_found
+    return None
+
+
+def _with_path_warning(message: str) -> str:
+    other = conflicting_orch_on_path()
+    if not other:
+        return message
+    return (
+        f"{message} Warning: another 'orch' exists on PATH at {other}; "
+        f"registering running {orch_command()}."
+    )
 
 
 def _env() -> dict[str, str]:
@@ -227,9 +257,15 @@ def connect(
         path = _json_path(agent, project=project, home=home)
         if dry_run:
             return ConnectResult(
-                slug, True, f"Would add SaberOps to {path}.", snippet=server_snippet(agent)
+                slug,
+                True,
+                _with_path_warning(f"Would add SaberOps to {path}."),
+                snippet=server_snippet(agent),
             )
-        return _json_edit(path, agent, remove=False)
+        res = _json_edit(path, agent, remove=False)
+        return ConnectResult(
+            res.agent, res.ok, _with_path_warning(res.message), res.commands, res.snippet
+        )
     if shutil.which(agent.executable) is None and runner is None:
         return ConnectResult(
             slug, False, f"{agent.name} is not installed.", snippet=server_snippet(agent)
@@ -242,7 +278,9 @@ def connect(
     argv = _cli_add(agent, project is not None)
     commands.append(" ".join(argv))
     if dry_run:
-        return ConnectResult(slug, True, "Would run:", commands=tuple(commands))
+        return ConnectResult(
+            slug, True, _with_path_warning("Would run:"), commands=tuple(commands)
+        )
     result = run(argv, project)
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip().splitlines()
@@ -253,7 +291,9 @@ def connect(
             commands=tuple(commands),
             snippet=server_snippet(agent),
         )
-    return ConnectResult(slug, True, f"Connected {agent.name}.", commands=tuple(commands))
+    return ConnectResult(
+        slug, True, _with_path_warning(f"Connected {agent.name}."), commands=tuple(commands)
+    )
 
 
 def disconnect(

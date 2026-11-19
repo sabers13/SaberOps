@@ -92,6 +92,33 @@ def parse_opencode_jsonl(stdout: str) -> tuple[str, list[ProviderUsage]]:
     return "\n".join(text_parts) if text_parts else stdout, usages
 
 
+def extract_opencode_identity(stdout: str) -> tuple[str | None, str | None]:
+    """Return ``(reported_model, reported_variant)`` from OpenCode JSONL events."""
+    events = _json_lines(stdout)
+    reported_model: str | None = None
+    reported_variant: str | None = None
+    for event in events:
+        part = event.get("part")
+        part_dict = part if isinstance(part, dict) else {}
+        for container in (part_dict, event):
+            raw_model = container.get("modelID") or container.get("model")
+            raw_provider = container.get("providerID") or container.get("provider")
+            if isinstance(raw_model, str) and raw_model.strip():
+                model_str = raw_model.strip()
+                if (
+                    isinstance(raw_provider, str)
+                    and raw_provider.strip()
+                    and "/" not in model_str
+                ):
+                    reported_model = f"{raw_provider.strip()}/{model_str}"
+                else:
+                    reported_model = model_str
+            raw_variant = container.get("variant")
+            if isinstance(raw_variant, str) and raw_variant.strip():
+                reported_variant = raw_variant.strip()
+    return reported_model, reported_variant
+
+
 def parse_codex_jsonl(stdout: str) -> tuple[str, list[ProviderUsage]]:
     """Parse exact usage from installed Codex ``turn.completed`` events."""
     events = _json_lines(stdout)

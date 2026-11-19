@@ -205,15 +205,16 @@ def _validate_context_chain(
                 f"Routing config at {source_label}: context {ctx_key} duplicate candidate {cid!r}"
             )
         seen.add(cid)
-        approved_entry = approved.get(cid) if approved else None
         # Candidate *identity validity* and candidate *eligibility* are distinct:
-        # a candidate is identity-valid when it is either in the closed static
-        # registry or carries an owner approval record with discovery + execution
-        # evidence.  Arbitrary unvalidated strings still fail closed here.
-        if cid not in ALLOWED_CANDIDATES and approved_entry is None:
-            raise RoutingConfigError(
-                f"Routing config at {source_label}: context {ctx_key} unknown candidate id {cid!r}"
-            )
+        # a candidate is identity-valid when it is in the static registry,
+        # carries an owner approval record, or was discovered in the owner's
+        # model catalog.  Arbitrary unvalidated strings still fail closed here.
+        _require_known_candidate_id(
+            cid,
+            approved=approved,
+            source_label=source_label,
+            scope_label=f"context {ctx_key}",
+        )
         cids.append(cid)
     return cids
 
@@ -335,11 +336,12 @@ def _validate_role_groups(
                     f"Routing config at {source_label}: role {role} duplicate candidate {cid!r}"
                 )
             seen.add(cid)
-            approved_entry = approved.get(cid) if approved else None
-            if cid not in ALLOWED_CANDIDATES and approved_entry is None:
-                raise RoutingConfigError(
-                    f"Routing config at {source_label}: role {role} unknown candidate id {cid!r}"
-                )
+            _require_known_candidate_id(
+                cid,
+                approved=approved,
+                source_label=source_label,
+                scope_label=f"role {role}",
+            )
             cids.append(cid)
         groups.append(cids)
     return groups
@@ -903,12 +905,12 @@ def payload_to_snapshot(payload: Any, run_id: str | None = None) -> RoutingSnaps
                         f"Routing config at {source_label}: role {role} duplicate candidate {cid!r}"
                     )
                 seen.add(cid)
-                approved_entry = approved.get(cid)
-                if cid not in ALLOWED_CANDIDATES and approved_entry is None:
-                    raise RoutingConfigError(
-                        f"Routing config at {source_label}: role {role} "
-                        f"unknown candidate id {cid!r}"
-                    )
+                _require_known_candidate_id(
+                    cid,
+                    approved=approved,
+                    source_label=source_label,
+                    scope_label=f"role {role}",
+                )
                 cids.append(cid)
             groups.append(cids)
         validated_v3[role] = groups
@@ -1362,3 +1364,99 @@ def save_user_routing(payload: Mapping[str, Any]) -> Path:
     except OSError as exc:
         raise RoutingConfigError(f"Routing config at {user_path}: cannot write: {exc}") from exc
     return user_path
+
+
+def _discovered_candidate_ids() -> set[str]:
+    """Return canonical ``provider/model`` ids from the owner's model catalog."""
+    try:
+        from saberops.access_ops import load_catalog_safely
+
+        catalog = load_catalog_safely()
+    except Exception:
+        return set()
+    ids: set[str] = set()
+    for entry in catalog.list_models():
+        if entry.stale:
+            continue
+        provider = entry.provider.strip().lower()
+        model_id = entry.model_id.strip()
+        if provider and model_id:
+            ids.add(f"{provider}/{model_id}")
+    return ids
+
+
+def _require_known_candidate_id(
+    cid: str,
+    *,
+    approved: Mapping[str, Any] | None,
+    source_label: str,
+    scope_label: str,
+) -> None:
+    approved_entry = approved.get(cid) if approved else None
+    if cid in ALLOWED_CANDIDATES or approved_entry is not None:
+        return
+    discovered = _discovered_candidate_ids()
+    if cid in discovered:
+        return
+    valid = sorted(ALLOWED_CANDIDATES | set(approved.keys() if approved else ()) | discovered)
+    raise RoutingConfigError(
+        f"Routing config at {source_label}: {scope_label} unknown candidate id {cid!r}; "
+        f"valid ids: {', '.join(valid)}"
+    )
+
+
+def suggest_default_routes(*, provider: str | None = None) -> list[dict[str, str]]:
+    """Suggest one default build route per discovered, billing-confirmed provider."""
+    from datetime import date
+
+    from saberops.access_ops import load_catalog_safely
+    from saberops.control_plane.plans import (
+        load_packaged_plans_raw,
+        overlay_plan_docs,
+        validate_plan_sections,
+    )
+    from saberops.control_plane.policy import (
+        ProviderPolicyState,
+        _read_raw_doc,
+        load_control_plane_policy,
+    )
+    from saberops.control_plane.posture import posture_decision
+    from saberops.model_access.discovery import ExecutionSupport
+
+    catalog = load_catalog_safely()
+    policy = load_control_plane_policy()
+    merged_plans, _ = overlay_plan_docs(load_packaged_plans_raw(), _read_raw_doc())
+    effective_plans = validate_plan_sections(merged_plans, "effective plans")
+    today = date.today()
+    wanted_provider = provider.strip().lower() if provider and provider.strip() else None
+
+    suggestions: list[dict[str, str]] = []
+    seen_providers: set[str] = set()
+    # Prefer supported, non-stale models first while preserving catalog order.
+    ordered = sorted(
+        (m for m in catalog.list_models() if not m.stale),
+        key=lambda m: 0 if m.execution_support is ExecutionSupport.SUPPORTED else 1,
+    )
+    for model in ordered:
+        prov = model.provider.strip().lower()
+        if wanted_provider is not None and prov != wanted_provider:
+            continue
+        if prov in seen_providers:
+            continue
+        if policy.provider(prov).state != ProviderPolicyState.ALLOWED:
+            continue
+        decision = posture_decision(
+            prov, model.model_id, backend=model.backend, plans=effective_plans, today=today
+        )
+        if not decision.admitted_unattended:
+            continue
+        seen_providers.add(prov)
+        suggestions.append(
+            {
+                "provider": prov,
+                "candidate_id": f"{prov}/{model.model_id}",
+                "model_id": model.model_id,
+                "connection_id": model.connection_id,
+            }
+        )
+    return suggestions

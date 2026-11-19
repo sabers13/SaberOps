@@ -1373,6 +1373,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     routing_reorder.add_argument("role", type=str, help="Role: worker | surgeon | integrator.")
     routing_reorder.add_argument("order", type=int, nargs="+", help="1-based group numbers.")
+    routing_suggest = routing_sub.add_parser(
+        "suggest",
+        help="Suggest a default build route per discovered, billing-confirmed provider.",
+    )
+    routing_suggest.add_argument(
+        "--provider", type=str, default=None, help="Filter suggestions to one provider."
+    )
+    routing_suggest.add_argument("--json", action="store_true", help="JSON output")
+    routing_accept_default = routing_sub.add_parser(
+        "accept-default",
+        help="Accept the suggested default build route(s) into the WORKER chain.",
+    )
+    routing_accept_default.add_argument(
+        "--provider", type=str, default=None, help="Accept only the named provider's default."
+    )
+    routing_accept_default.add_argument("--json", action="store_true", help="JSON output")
 
     # orch authority show|list|set|sync-opencode
     authority_parser = subparsers.add_parser(
@@ -4005,6 +4021,72 @@ def handle_routing_reorder(args: argparse.Namespace) -> int:
     return _edit_role_chain(args, "reorder")
 
 
+def handle_routing_suggest(args: argparse.Namespace) -> int:
+    """Handle `orch routing suggest`."""
+    from saberops.routing_config import suggest_default_routes
+
+    suggestions = suggest_default_routes(provider=getattr(args, "provider", None))
+    if getattr(args, "json", False):
+        print(json.dumps({"suggestions": suggestions}, indent=2, sort_keys=True))
+        return 0
+    if not suggestions:
+        print(
+            "No suggested default routes available; run `orch access discover <connection-id>` "
+            "and `orch posture verify <provider>` first."
+        )
+        return 0
+    for item in suggestions:
+        print(f"{item['provider']}: {item['candidate_id']} (connection {item['connection_id']})")
+    return 0
+
+
+def handle_routing_accept_default(args: argparse.Namespace) -> int:
+    """Handle `orch routing accept-default`."""
+    from saberops.jobs.models import JobRole
+    from saberops.routing_config import (
+        RoutingConfigError,
+        add_candidate_to_chain,
+        canonical_routing_payload,
+        load_effective_routing_payload,
+        save_user_routing,
+        suggest_default_routes,
+    )
+
+    suggestions = suggest_default_routes(provider=getattr(args, "provider", None))
+    if not suggestions:
+        print(
+            "[!] No suggested default routes available; run "
+            "`orch access discover <connection-id>` and `orch posture verify <provider>` first.",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        payload = load_effective_routing_payload()
+        if payload.get("schema_version") in (1, 2):
+            payload = canonical_routing_payload(payload)
+        added: list[str] = []
+        for item in suggestions:
+            cid = item["candidate_id"]
+            payload = add_candidate_to_chain(payload, role=JobRole.WORKER, candidate_id=cid)
+            added.append(cid)
+        canonical_routing_payload(payload)
+        dest = save_user_routing(payload)
+    except RoutingConfigError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(
+            json.dumps(
+                {"accepted": added, "path": str(dest), "worker_chain": payload["roles"]["WORKER"]},
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    print(f"Accepted default WORKER route(s) in {dest}: {', '.join(added)}")
+    return 0
+
+
 def _resolve_repo_for_project_settings(args: argparse.Namespace) -> Path:
     """Return the explicit ``--repo`` arg as a resolved Path.
 
@@ -4721,6 +4803,10 @@ def handle_access_test(args: argparse.Namespace) -> int:
     print(f"Reachable : {probe['ok']}")
     print(f"Reason    : {probe['reason']}")
     print(f"Detail    : {probe['detail']}")
+    if probe.get("missing_evidence"):
+        print(f"Missing   : {', '.join(probe['missing_evidence'])}")
+    if probe.get("remedy"):
+        print(f"Next step : {probe['remedy']}")
     return 0
 
 
@@ -6254,6 +6340,10 @@ def _dispatch(args: argparse.Namespace) -> int:
             return handle_routing_move(args)
         elif args.routing_command == "reorder":
             return handle_routing_reorder(args)
+        elif args.routing_command == "suggest":
+            return handle_routing_suggest(args)
+        elif args.routing_command == "accept-default":
+            return handle_routing_accept_default(args)
     elif args.command == "authority":
         if args.authority_command == "show":
             return handle_authority_show(args)

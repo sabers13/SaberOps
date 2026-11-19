@@ -224,6 +224,7 @@ class ReasoningEffort(StrEnum):
     LOW = "LOW"
     MEDIUM = "MEDIUM"
     HIGH = "HIGH"
+    XHIGH = "XHIGH"
     ULTRA = "ULTRA"
 
 
@@ -232,7 +233,8 @@ _REASONING_EFFORT_ORDER: dict[ReasoningEffort, int] = {
     ReasoningEffort.LOW: 0,
     ReasoningEffort.MEDIUM: 1,
     ReasoningEffort.HIGH: 2,
-    ReasoningEffort.ULTRA: 3,
+    ReasoningEffort.XHIGH: 3,
+    ReasoningEffort.ULTRA: 4,
 }
 
 
@@ -1251,6 +1253,9 @@ class WorkerResult:
     provider_exit_code: int | None = None
     provider_terminal_status: str | None = None
     execution_quiescent: bool | None = None
+    cli_version: str | None = None
+    requested_variant: str | None = None
+    reported_variant: str | None = None
 
 
 @dataclass(frozen=True)

@@ -101,6 +101,7 @@ class RunRequest:
     publish_candidate: bool | None = None
     tool_refs: tuple[str, ...] = ()
     tier: Tier | str | None = None
+    effort: str | None = None
 
 
 def _clean_gate(value: str | None) -> str | None:
@@ -343,6 +344,7 @@ def resolve_effective_run_config(request: RunRequest) -> RunConfig:
             publish_candidate=request.publish_candidate,
             tool_refs=request.tool_refs,
             tier=request.tier,
+            effort=request.effort,
             gate_scratch_mode=gate_scratch_mode,
             accept_target_branch=target_branch,
         )

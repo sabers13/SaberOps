@@ -15,7 +15,7 @@ from saberops.process import (
     launch_worker_process,
     run_process,
 )
-from saberops.telemetry import parse_opencode_jsonl
+from saberops.telemetry import extract_opencode_identity, parse_opencode_jsonl
 from saberops.workers.base import WorkerAdapter, streaming_process_kwargs
 from saberops.workers.env import hermetic_env
 from saberops.workers.exhaustion import (
@@ -137,6 +137,16 @@ class OpenCodeAdapter(WorkerAdapter):
             outcome=DispatchOutcome.ELIGIBILITY_SKIP,
         )
 
+    def _cli_version(self) -> str:
+        try:
+            res = self.runner([self.opencode_bin, "--version"], timeout=5)
+            text = (res.stdout or "").strip().splitlines()
+            if res.passed and text and text[0].strip():
+                return text[0].strip()
+        except Exception:
+            pass
+        return "unreported"
+
     def run(self, request: WorkerRequest) -> WorkerResult:
         """Dispatch task to OpenCode in the specified worktree."""
         if not self.is_available():
@@ -243,6 +253,11 @@ class OpenCodeAdapter(WorkerAdapter):
         transport_used = "stdin" if use_stdin else "argv"
 
         display_stdout, usage = parse_opencode_jsonl(res.stdout)
+        reported_model, reported_variant = extract_opencode_identity(res.stdout)
+        cli_version = self._cli_version()
+        actual_model = reported_model or "unreported"
+        requested_variant = "unreported"
+        reported_variant_val = reported_variant or "unreported"
         if res.control_interrupted:
             from saberops.models import WorkerInterruptionReason
             return WorkerResult(provider=self.provider_name, model=request.model,
@@ -325,8 +340,13 @@ class OpenCodeAdapter(WorkerAdapter):
             duration_seconds=res.duration_seconds,
             prompt_bytes=prompt_bytes,
             prompt_transport_used=transport_used,
+            actual_provider=self.provider_name,
+            actual_model=actual_model,
             outcome=outcome,
             usage=usage,
             provider_exit_code=res.exit_code,
             execution_quiescent=not res.termination_incomplete,
+            cli_version=cli_version,
+            requested_variant=requested_variant,
+            reported_variant=reported_variant_val,
         )
