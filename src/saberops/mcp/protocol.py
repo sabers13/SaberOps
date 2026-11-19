@@ -21,6 +21,8 @@ Two boundary rules live here:
 from __future__ import annotations
 
 import json
+import os
+import threading
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -124,8 +126,11 @@ class McpServer:
         self._outbox: list[dict[str, Any]] = []
         if acquire_lease and self.enabled and self._active:
             self._context.lease.acquire()
+            self._note_presence()
         self._initialized = False
         self._client_info: dict[str, Any] = {}
+        self._heartbeat_stop = threading.Event()
+        self._heartbeat_thread: threading.Thread | None = None
 
     @property
     def context(self) -> ServerContext:
@@ -165,10 +170,57 @@ class McpServer:
             lease.release()
         elif on and self._want_lease and not lease.writer:
             lease.acquire()
+            self._note_presence()
             name = self._client_info.get("title") or self._client_info.get("name")
             if isinstance(name, str):
                 lease.record_client(name)
         return on
+
+    def _note_presence(self) -> None:
+        """Arm F17 presence tracking once a session really holds the lease."""
+        if not self._context.lease.writer:
+            return
+        try:
+            from saberops.runtime_gate import mark_presence_known
+
+            mark_presence_known()
+        except Exception:  # pragma: no cover - presence is safety, never a crash
+            pass
+
+    def start_heartbeat(self, *, interval: float | None = None) -> None:
+        """Keep the planning lease's heartbeat fresh while this session lives.
+
+        The stdio loop can sit idle for minutes (or block inside one long tool
+        call), so the absence detector needs a signal that is independent of
+        tool traffic.  It is a daemon thread writing one timestamp; stopping it
+        is the only teardown the transport performs.
+        """
+        if self._heartbeat_thread is not None:
+            return
+        try:
+            configured = float(os.environ.get("SABEROPS_MCP_HEARTBEAT_SECONDS", "5"))
+        except ValueError:
+            configured = 5.0
+        every = interval if interval is not None else max(0.5, configured)
+
+        def beat() -> None:
+            while not self._heartbeat_stop.wait(every):
+                try:
+                    self._context.lease.touch()
+                except Exception:  # pragma: no cover - a beat never aborts the server
+                    pass
+
+        thread = threading.Thread(target=beat, name="saberops-lease-heartbeat", daemon=True)
+        self._heartbeat_thread = thread
+        thread.start()
+
+    def stop_heartbeat(self) -> None:
+        """Stop the heartbeat thread (idempotent)."""
+        self._heartbeat_stop.set()
+        thread = self._heartbeat_thread
+        self._heartbeat_thread = None
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
 
     @property
     def read_only(self) -> bool:
@@ -518,7 +570,13 @@ class McpServer:
     # -- lifecycle teardown ------------------------------------------------
 
     def close(self) -> bool:
-        """Release the writer lease when this session holds it."""
+        """Stop the heartbeat and release the writer lease when held.
+
+        The lease going away is the presence signal the work gate watches: the
+        scheduler sees the missing session on its next tick and pauses every
+        worker.  Nothing is resumed by a close.
+        """
+        self.stop_heartbeat()
         return self._context.lease.release()
 
 

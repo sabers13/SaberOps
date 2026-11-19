@@ -1384,6 +1384,7 @@ def complete_preemption(
     decision_ref: str | None = None,
     recovering: bool = False,
     max_preemptions: int = DEFAULT_MAX_PREEMPTIONS,
+    interruption: str = "quota",
     now: datetime | None = None,
 ) -> PreemptionOutcome:
     """Execute (or idempotently complete) the D8 preemption protocol.
@@ -1406,6 +1407,12 @@ def complete_preemption(
     from saberops.capacity.ledger import release_terminal_debt
     from saberops.jobs import store
 
+    # F17: the same checkpoint/anchor/capsule/requeue protocol parks work for a
+    # pause as for quota exhaustion, but a pause is the owner's stop, not a
+    # resource failure: it must not consume the bounded preemption budget and
+    # its job waits under PAUSED until the owner confirms a resume.
+    pause = interruption == "pause"
+    requeue_reason = WaitingReason.PAUSED if pause else WaitingReason.PREEMPTED
     moment = now if now is not None else datetime.now(UTC)
     now_iso = moment.isoformat()
     repo = Path(repo_path).resolve() if not isinstance(repo_path, Path) else repo_path
@@ -1425,7 +1432,7 @@ def complete_preemption(
         return PreemptionOutcome(owned=False, detail="run_not_running")
     else:
         run_already_preempted = False
-    if not run_already_preempted:
+    if not run_already_preempted and not pause:
         if not has_genuine_quota_signal(db, run_id):
             return PreemptionOutcome(owned=False, detail="no_quota_signal")
         if not has_no_eligible_evidence(db, run_id):
@@ -1475,14 +1482,14 @@ def complete_preemption(
     if job.state != JobState.RUNNING or job.current_run_id != run_id:
         # Cancelled, terminal, or already re-dispatched: fail closed, touch nothing.
         return PreemptionOutcome(owned=False, detail="job_not_owned", job=job)
-    if job.preemptions >= max_preemptions:
+    if not pause and job.preemptions >= max_preemptions:
         return _fail_at_limit(
             db, run_id=run_id, job=job,
             max_preemptions=max_preemptions, now=moment, now_iso=now_iso,
             owner_id=owner_id, owner_generation=owner_generation,
         )
 
-    not_before = quota_reset_eta(db, run_id)
+    not_before = None if pause else quota_reset_eta(db, run_id)
     preemptions_before = int(job.preemptions)
 
     # Crash-replay: an existing prepared intent is reused ONLY when the whole
@@ -1568,34 +1575,42 @@ def complete_preemption(
             db, run_id=run_id, job=job, checkpoint_sha=checkpoint_sha,
             handoff_id=handoff_id, now_iso=now_iso,
         )
+        intent_payload: dict[str, Any] = {
+            "version": INTENT_VERSION,
+            "job_id": job.job_id,
+            "checkpoint_sha": checkpoint_sha,
+            "checkpoint_ref": checkpoint_ref,
+            "handoff_id": handoff_id,
+            "not_before": not_before,
+            "preemptions_before": preemptions_before,
+            "owner_id": owner_id,
+            "owner_generation": owner_generation,
+            "interruption": "pause" if pause else "quota",
+        }
+        if not pause:
+            # A pause does not consume the preemption budget, so it records no
+            # ``preemptions_next`` (the verifier requires before+1 when present).
+            intent_payload["preemptions_next"] = preemptions_before + 1
         try:
-            db.record_event(
-                run_id,
-                INTENT_EVENT,
-                payload={
-                    "version": INTENT_VERSION,
-                    "job_id": job.job_id,
-                    "checkpoint_sha": checkpoint_sha,
-                    "checkpoint_ref": checkpoint_ref,
-                    "handoff_id": handoff_id,
-                    "not_before": not_before,
-                    "preemptions_before": preemptions_before,
-                    "preemptions_next": preemptions_before + 1,
-                    "owner_id": owner_id,
-                    "owner_generation": owner_generation,
-                },
-            )
+            db.record_event(run_id, INTENT_EVENT, payload=intent_payload)
         except Exception:
             return PreemptionOutcome(owned=False, detail="intent_failed", job=job)
 
     assert checkpoint_sha is not None
     assert checkpoint_ref is not None
     assert handoff_id is not None
-    summary = (
-        f"Run {run_id} PREEMPTED: genuine quota exhaustion with no admitted "
-        f"fallback route. WIP anchored at {checkpoint_ref} "
-        f"({checkpoint_sha[:12]}); job {job.job_id} requeued with resume capsule."
-    )
+    if pause:
+        summary = (
+            f"Run {run_id} PAUSED ({decision_ref or 'owner gate'}). WIP anchored at "
+            f"{checkpoint_ref} ({checkpoint_sha[:12]}); job {job.job_id} parked "
+            "with its resume capsule until a confirmed resume."
+        )
+    else:
+        summary = (
+            f"Run {run_id} PREEMPTED: genuine quota exhaustion with no admitted "
+            f"fallback route. WIP anchored at {checkpoint_ref} "
+            f"({checkpoint_sha[:12]}); job {job.job_id} requeued with resume capsule."
+        )
     terminal_ok, terminal_transitioned, terminal_detail = _terminalize_preempted(
         db, run_id=run_id, summary=summary, now_iso=now_iso,
         owner_id=owner_id, owner_generation=owner_generation,
@@ -1634,7 +1649,7 @@ def complete_preemption(
     requeued: Job | None = None
     try:
         requeued = store.requeue_exact(
-            db, job.job_id, WaitingReason.PREEMPTED,
+            db, job.job_id, requeue_reason,
             expected_run_id=run_id, expected_preemptions=preemptions_before,
             resume_from=resume_from, not_before=not_before, now=moment,
         )

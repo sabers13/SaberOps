@@ -115,6 +115,11 @@ def get_owner_mode_path() -> Path:
     return saberops_config_dir() / "mode.json"
 
 
+def get_runtime_gate_path() -> Path:
+    """Return the durable work-gate document path (pause state, presence)."""
+    return saberops_state_dir() / "runtime-gate.json"
+
+
 def get_control_plane_config_path() -> Path:
     """Return the canonical owner control-plane-config path."""
     return saberops_config_dir() / "control_plane.json"

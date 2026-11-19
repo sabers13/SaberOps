@@ -60,7 +60,6 @@ from saberops.jobs.models import (
     Priority,
 )
 from saberops.jobs.service import submit_job
-from saberops.mcp.lease import OrchestratorLease, pid_is_alive
 from saberops.plan_file import (
     ParsedPlan,
     PlanFileError,
@@ -430,15 +429,17 @@ def set_lane_submit_gate(gate: Callable[[Any], str | None] | None) -> None:
 def planning_session_active() -> bool:
     """True when a live planning session holds the MCP planning lease.
 
-    A missing, malformed or dead lease is not a session.  Plan lanes therefore
-    pause when the owner closes the planning CLI, even though the scheduler
-    keeps running.
+    F17: liveness is the heartbeat, not only the pid.  A session whose CLI was
+    killed leaves a dead pid; one whose connection broke or that crashed leaves
+    a stale heartbeat.  Both are "no session", so plan lanes stop being
+    submitted.  A missing, malformed or unreadable lease is not a session.
     """
     try:
-        record = OrchestratorLease().read()
+        from saberops.runtime_gate import presence
+
+        return presence().live
     except Exception:  # pragma: no cover - defensive: an unreadable lease is not a session
         return False
-    return record is not None and pid_is_alive(record.pid)
 
 
 def _submission_refusal(db: Any, *, owner_initiated: bool) -> str | None:

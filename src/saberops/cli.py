@@ -1696,6 +1696,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional ISO-8601 end time with timezone; away only.",
     )
+    mode_set.add_argument(
+        "--max-jobs",
+        dest="max_jobs",
+        type=int,
+        default=None,
+        help="Optional away-mode job budget; away needs this or --until.",
+    )
     mode_set.add_argument("--json", action="store_true", help="JSON output")
 
     mode_clear = mode_sub.add_parser(
@@ -1770,6 +1777,24 @@ def build_parser() -> argparse.ArgumentParser:
     away_reset.add_argument("--project", default=None, help="Exact away project scope id.")
     away_reset.add_argument("--repo", default=None, help="Repository to resolve instead.")
     away_reset.add_argument("--json", action="store_true", help="JSON output")
+    # orch pause / orch resume (F17)
+    pause_parser = subparsers.add_parser(
+        "pause",
+        help="Stop all work now: start nothing new and park running workers.",
+    )
+    pause_parser.add_argument(
+        "--reason", default=None, help="Optional short reason recorded with the pause."
+    )
+    pause_parser.add_argument(
+        "--show", action="store_true", help="Show the work gate instead of pausing."
+    )
+    pause_parser.add_argument("--json", action="store_true", help="JSON output")
+
+    resume_parser = subparsers.add_parser(
+        "resume",
+        help="Confirm resume: clear the pause and hand parked work back to the scheduler.",
+    )
+    resume_parser.add_argument("--json", action="store_true", help="JSON output")
 
     # orch reviewer show|select|clear
     reviewer_parser = subparsers.add_parser(
@@ -3584,7 +3609,11 @@ def handle_plan_file_submit(args: argparse.Namespace) -> int:
     from saberops.plan_file import PlanFileError, resolve_repo_root
     from saberops.plan_runner import PlanRunnerError, submit_plan_file
     from saberops.project_scope.plan_store import PlanStore
+    from saberops.runtime_gate import register_lane_submit_gate
 
+    # F17: an owner-invoked activation skips only the planning-session check;
+    # an explicit pause still stops every lane submission.
+    register_lane_submit_gate()
     path = str(args.path)
     try:
         repo = resolve_repo_root(path, getattr(args, "repo", None))
@@ -5571,6 +5600,8 @@ def _print_mode_view(view: dict[str, Any]) -> None:
     if view.get("until"):
         suffix = " (expired: ask-me applies)" if view.get("expired") else ""
         print(f"Until         : {view['until']}{suffix}")
+    if view.get("max_jobs") is not None:
+        print(f"Job budget    : {view['max_jobs']}")
     print(f"Authority     : {view['authority_mode']} ({view['authority_label']})")
     print(f"Source        : {view['source']} {view['source_path'] or '(packaged default)'}")
     print(f"Config path   : {view['config_path']}")
@@ -5602,7 +5633,9 @@ def handle_mode_set(args: argparse.Namespace) -> int:
     """Handle `orch mode set <mode> [--until ISO-8601]`."""
     try:
         mode = parse_owner_mode(args.mode)
-        path = set_owner_mode(mode, until=args.until, set_by="owner")
+        path = set_owner_mode(
+            mode, until=args.until, max_jobs=args.max_jobs, set_by="owner"
+        )
     except (OwnerModeError, OSError) as exc:
         print(f"[!] Could not persist owner mode: {exc}", file=sys.stderr)
         return 1
@@ -5612,6 +5645,7 @@ def handle_mode_set(args: argparse.Namespace) -> int:
                 {
                     "mode": mode.value,
                     "until": args.until,
+                    "max_jobs": args.max_jobs,
                     "config_path": str(path),
                     "note": "a mode only narrows the authority preset",
                 },
@@ -5620,6 +5654,8 @@ def handle_mode_set(args: argparse.Namespace) -> int:
         )
         return 0
     until = f" until {args.until}" if args.until else ""
+    if args.max_jobs:
+        until += f", up to {args.max_jobs} job(s)"
     print(f"Owner mode set to '{mode.value}'{until} at {path}")
     print("A mode only narrows the authority preset; it never widens it.")
     return 0
@@ -5883,6 +5919,76 @@ def handle_away_reset_breaker(args: argparse.Namespace) -> int:
     else:
         print(f"Away circuit breaker reset for {project_id}.")
     return 0
+
+
+def handle_pause(args: argparse.Namespace) -> int:
+    """Handle `orch pause [--show]` (F17 owner-only instant stop)."""
+    from saberops.db import Database as _Database
+    from saberops.pause_work import pause_now
+    from saberops.runtime_gate import gate_view
+
+    db = _Database(getattr(args, "db", None))
+    if getattr(args, "show", False):
+        view = gate_view(db=db)
+        if getattr(args, "json", False):
+            print(json.dumps(view, indent=2, sort_keys=True))
+            return 0
+        _print_gate_view(view)
+        return 0
+    reason = (args.reason or "the owner paused all work").strip()
+    try:
+        state = pause_now(db, detail=reason, by="owner")
+    except OSError as exc:
+        print(f"[!] Could not pause work: {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(state.as_dict(), indent=2, sort_keys=True))
+        return 0
+    print(f"Work paused: {state.label}.")
+    if state.paused_jobs:
+        print(f"Stopped and parked: {', '.join(state.paused_jobs)}")
+    print("Nothing starts and nothing resumes until `orch resume`.")
+    return 0
+
+
+def handle_resume(args: argparse.Namespace) -> int:
+    """Handle `orch resume` (F17 explicit confirmation)."""
+    from saberops.db import Database as _Database
+    from saberops.pause_work import resume_work
+
+    db = _Database(getattr(args, "db", None))
+    try:
+        state = resume_work(db, by="owner")
+    except OSError as exc:
+        print(f"[!] Could not resume work: {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(state.as_dict(), indent=2, sort_keys=True))
+        return 0
+    print("Work resumed. Parked jobs return to the scheduler; nothing else changes.")
+    if not state.presence.live:
+        print(
+            "Note: no planning session is connected, so the next tick pauses "
+            "again until one is open."
+        )
+    return 0
+
+
+def _print_gate_view(view: dict[str, Any]) -> None:
+    """Print the work gate, its reason and what it is holding."""
+    print(f"Work gate     : {view['label']}")
+    if view.get("since"):
+        print(f"Since         : {view['since']}")
+    if view.get("detail"):
+        print(f"Detail        : {view['detail']}")
+    print(f"Owner mode    : {view['mode']}")
+    presence = view.get("presence") or {}
+    print(f"Planning      : {'connected' if presence.get('live') else 'absent'}")
+    if presence.get("detail"):
+        print(f"              : {presence['detail']}")
+    if view.get("paused_jobs"):
+        print(f"Paused jobs   : {', '.join(view['paused_jobs'])}")
+    print(f"Resume with   : {view['resume_command']} or the resume_work MCP tool")
 
 
 def _render_bindings_human(title: str, bindings: list[dict[str, Any]]) -> None:
@@ -7952,6 +8058,10 @@ def _dispatch(args: argparse.Namespace) -> int:
             return handle_away_summary(args)
         elif args.away_command == "reset-breaker":
             return handle_away_reset_breaker(args)
+    elif args.command == "pause":
+        return handle_pause(args)
+    elif args.command == "resume":
+        return handle_resume(args)
     elif args.command == "notifications":
         from saberops.notifications import (
             notification_settings_path,

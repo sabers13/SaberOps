@@ -41,6 +41,15 @@ def refresh_candidate(service: OrchestratorService, run_id: str) -> dict[str, An
     accepts the refreshed candidate through the ordinary acceptance path.
     """
     db = service.db
+    # F17: a refresh creates a new run (a new worker).  While the work gate is
+    # closed -- owner pause, no planning session, or an away session that ran
+    # out -- nothing new starts, so the refresh is refused with the gate reason
+    # instead of quietly spending usage.
+    from saberops.runtime_gate import evaluate_gate
+
+    gate_state = evaluate_gate(db=db)
+    if gate_state.closed:
+        raise ValueError(f"Refresh is paused: {gate_state.label}")
     source = db.get_run(run_id)
     if source is None or source.status != RunStatus.COMPLETED:
         raise ValueError("Refresh requires a completed source run.")

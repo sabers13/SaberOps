@@ -64,6 +64,8 @@ served, and an unknown requested revision falls back to `2025-06-18`.
 | `list_proposals` | no | — | `saberops.config.ConfigLedger.entries` |
 | `get_mode` | no | — | `saberops.owner_mode.mode_view` |
 | `propose_mode_change` | yes | `mode`, `until`, `rationale`, `proposed_by` | raises an owner question; never changes the mode |
+| `get_pause` | no | — | `saberops.runtime_gate.gate_view` |
+| `resume_work` | yes | — | `saberops.pause_work.resume_work`; the one confirmation that clears a pause |
 
 `submit_job` accepts **requirements only**. `provider`, `model`, `tier`,
 `billing`, `route`, `quota` and `account` are rejected at the top level and
@@ -201,6 +203,14 @@ narrows the authority preset. `propose_mode_change` raises an owner question and
 **never flips the mode**; only the owner sets it with `orch mode set` or the
 Questions page (ADR-0020).
 
+`get_pause` is read-only: it reports the work gate -- running, or paused with
+its reason, the plan and worker state, the paused jobs and the one call that
+resumes. Closing the planning CLI pauses all work in every mode (ADR-0029).
+`resume_work` is the only confirmation that clears a pause; it is mutating, so a
+read-only client cannot call it. Nothing resumes by itself: a returning session
+sees the pause in `catch_up` and must confirm with `resume_work` or the owner
+must run `orch resume`.
+
 ## Never exposed
 
 ADR-0004 D7 and REHEARSAL §3 pin a list of authorities that MCP must never
@@ -244,10 +254,10 @@ exclusive `flock` during each read-modify-write.
   `initialize` and released at EOF.
 * A second live client (a different, live `pid` holds the record) is read-only:
   calls to `submit_job`, `submit_plan`, `promote_scout`, `cancel_job`,
-  `note_job`, `answer_question`, `propose_config_change` and
-  `propose_mode_change` are refused with JSON-RPC error `-32020`. Its read tools
+  `note_job`, `answer_question`, `propose_config_change`, `propose_mode_change`
+  and `resume_work` are refused with JSON-RPC error `-32020`. Its read tools
   (`get_job`, `catch_up`, `list_jobs`, `capacity`, `read_evidence`,
-  `list_questions`, `list_proposals`, `get_mode`) keep working.
+  `list_questions`, `list_proposals`, `get_mode`, `get_pause`) keep working.
 * **Stale self-healing:** a record whose `pid` is dead is stale and is stolen by
   the next client (`os.kill(pid, 0)` is the liveness probe), so a crashed client
   never locks out future writers. A non-empty but unreadable/malformed record is

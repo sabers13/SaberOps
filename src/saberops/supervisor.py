@@ -1826,6 +1826,204 @@ class RunSupervisor:
                 return proc
             return None
 
+    def pause(self, run_id: str, *, reason: str = "paused") -> bool:
+        """Stop one run's worker and park the run without discarding its work.
+
+        F17: this is the "safe point" stop.  It uses exactly the fenced
+        termination path of :meth:`cancel` -- cancel the inspected ownership
+        generation, confirm the worker tree is extinct, then stop the owner --
+        but it terminalizes the run as :attr:`RunStatus.PREEMPTED` instead of
+        FAILED.  The worktree is never touched, so the pause coordinator can
+        checkpoint the WIP and hand the job back as a resumable parking.
+
+        Undecidable liveness and unconfirmed worker termination fail closed:
+        nothing is signalled further, the run is not terminalized, and the
+        caller must keep the gate closed and retry on a later tick.
+        """
+        run = self.db.get_run(run_id)
+        if run is None:
+            return False
+        try:
+            owner, liveness = self.owner_evidence(run_id)
+        except OwnershipError:
+            return False
+        if run.status in TERMINAL_RUN_STATUSES:
+            return False
+        if liveness is Liveness.UNKNOWN:
+            self.db.record_event(
+                run_id,
+                "pause_refused",
+                payload={
+                    "reason": "owner_liveness_unknown",
+                    "owner_id": owner.owner_id if owner is not None else None,
+                },
+            )
+            return False
+        if owner is not None and run.config_json:
+            try:
+                saved = json.loads(run.config_json)
+            except (ValueError, TypeError):
+                saved = {}
+            parent_id = saved.get("parallel_parent_run_id") if isinstance(saved, dict) else None
+            parent_owner = (
+                self.db.get_execution_owner(parent_id)
+                if isinstance(parent_id, str) and parent_id
+                else None
+            )
+            if (
+                parent_owner
+                and parent_owner.identity == owner.identity
+                and liveness is Liveness.LIVE
+            ):
+                self.db.record_event(
+                    run_id,
+                    "pause_refused",
+                    payload={"reason": "team_worker_launch_reservation_in_parent_process"},
+                )
+                return False
+
+        terminated = False
+        termination_reason = "no_execution_owner"
+        if owner is not None:
+            if not self.db.begin_execution_cancellation(
+                run_id,
+                owner_id=owner.owner_id,
+                generation=owner.generation,
+                agent=ProcessIdentity.for_self(),
+            ):
+                self.db.record_event(
+                    run_id,
+                    "pause_refused",
+                    payload={
+                        "reason": "ownership_changed_before_pause",
+                        "inspected_owner_id": owner.owner_id,
+                        "inspected_generation": owner.generation,
+                    },
+                )
+                return False
+            try:
+                from saberops.parallel_work import team_children
+
+                for child_id in team_children(self.db, run_id):
+                    child = self.db.get_run(child_id)
+                    if child and child.status not in TERMINAL_RUN_STATUSES:
+                        if not self.pause(child_id, reason=reason):
+                            self.db.abort_execution_cancellation(
+                                run_id,
+                                owner_id=owner.owner_id,
+                                generation=owner.generation,
+                            )
+                            self.db.record_event(
+                                run_id,
+                                "pause_refused",
+                                payload={
+                                    "reason": "team_worker_not_confirmed_stopped",
+                                    "child_run_id": child_id,
+                                },
+                            )
+                            return False
+                if liveness is Liveness.LIVE:
+                    supervision = self.db.get_supervision(run_id)
+                    if supervision is not None and supervision.worker_identity is not None:
+                        from saberops.ownership import (
+                            terminate_worker_group_fenced as _terminate_worker,
+                        )
+
+                        worker_ok, worker_reason = _terminate_worker(
+                            supervision.worker_identity
+                        )
+                        if not worker_ok:
+                            self.db.abort_execution_cancellation(
+                                run_id,
+                                owner_id=owner.owner_id,
+                                generation=owner.generation,
+                            )
+                            self.db.record_event(
+                                run_id,
+                                "pause_refused",
+                                payload={
+                                    "reason": "worker_termination_not_confirmed",
+                                    "worker_termination_reason": worker_reason,
+                                },
+                            )
+                            return False
+                    elif supervision is not None and supervision.worker_pid is not None:
+                        self.db.abort_execution_cancellation(
+                            run_id,
+                            owner_id=owner.owner_id,
+                            generation=owner.generation,
+                        )
+                        self.db.record_event(
+                            run_id,
+                            "pause_refused",
+                            payload={
+                                "reason": "worker_identity_unavailable_or_unknown",
+                                "worker_pid": supervision.worker_pid,
+                            },
+                        )
+                        return False
+                    terminated, termination_reason = terminate_owner(owner)
+                else:
+                    termination_reason = "owner_already_dead"
+                if termination_reason == "owner_liveness_unknown":
+                    self.db.abort_execution_cancellation(
+                        run_id, owner_id=owner.owner_id, generation=owner.generation
+                    )
+                    self.db.record_event(
+                        run_id, "pause_refused", payload={"reason": "owner_liveness_unknown"}
+                    )
+                    return False
+            except BaseException:
+                self.db.abort_execution_cancellation(
+                    run_id, owner_id=owner.owner_id, generation=owner.generation
+                )
+                raise
+
+        summary = f"Paused ({reason}): work stopped and preserved for a confirmed resume."
+        outcome = self.db.terminalize_run_fenced(
+            run_id,
+            owner_id=owner.owner_id if owner is not None else None,
+            generation=owner.generation if owner is not None else None,
+            status=RunStatus.PREEMPTED,
+            result_summary=summary,
+            attempt_reason=f"paused: {reason}",
+            expected_owner_states=(ExecutionOwner.CANCELLING,),
+            release_reason="paused",
+            completed_at=current_iso_timestamp(),
+        )
+        if outcome is None:
+            if owner is not None:
+                self.db.abort_execution_cancellation(
+                    run_id, owner_id=owner.owner_id, generation=owner.generation
+                )
+            self.db.record_event(
+                run_id,
+                "pause_refused",
+                payload={"reason": "ownership_changed_during_pause"},
+            )
+            return False
+
+        self._persist_supervision(
+            run_id,
+            owner.identity.pid if owner is not None else None,
+            ManagerState.ATTENTION_REQUIRED,
+            HealthState.TERMINAL,
+            "paused",
+        )
+        self.db.record_event(
+            run_id,
+            "run_paused",
+            payload={
+                "reason": reason,
+                "owner_id": owner.owner_id if owner is not None else None,
+                "generation": owner.generation if owner is not None else None,
+                "terminated": terminated,
+                "termination": termination_reason,
+                "failed_attempts": outcome["failed_attempts"],
+            },
+        )
+        return True
+
     def cancel(self, run_id: str) -> bool:
         """Explicitly cancel a run: the only path that terminates a worker.
 

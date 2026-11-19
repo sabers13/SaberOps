@@ -98,8 +98,9 @@ the repository's one-record-of-truth rule and avoids a second plan database.
    (`LANE_SUBMIT_GATE`) and, for scheduler-driven submission, refuses when no
    live planning session holds the MCP planning lease. The scheduler lease is
    not a planning session: closing the planning CLI pauses plan lanes, as the
-   owner required for lane F17. F17 extends that same pause to all other work;
-   the plan never outranks an owner pause. An owner-invoked activation or
+   owner required for lane F17. F17 extends that same pause to all other work
+   ([ADR-0029](0029-no-work-without-a-planning-session.md)); the plan never
+   outranks an owner pause. An owner-invoked activation or
    `orch plan-file done` is a present owner action and is exempt only from the
    planning-session check, never from the pause gate.
 10. **Automation is bounded and owner-controlled.** Auto-advance submits jobs

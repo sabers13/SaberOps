@@ -161,11 +161,21 @@ drift without sending prompts or reading credentials.
 
 Two persisted settings decide what SaberOps may do without asking.
 
-**Owner mode** is `ask-me` (default), `critical-only` or `away`, with an optional
-end time on `away`. It is a presence switch, not a second authority system: it
-can only narrow the authority preset, never widen it. Only the owner switches it
-with `orch mode show|set|clear` or the Questions page. An expired `away` behaves
-as `ask-me`; closing the planning session and pausing work is separate.
+**Owner mode** is `ask-me` (default), `critical-only` or `away`. An `away`
+session needs an end time, a job budget, or both (`--until`, `--max-jobs`). It
+is a presence switch, not a second authority system: it can only narrow the
+authority preset, never widen it. Only the owner switches it with
+`orch mode show|set|clear` or the Questions page. An expired `away` behaves as
+`ask-me`.
+
+**Closing the planning CLI pauses all work, in every mode.** No new job, plan
+lane, retry, repair or refresh starts, and every running worker is stopped at a
+safe point with its worktree, checkpoint and evidence preserved. The pause is
+sticky: it clears only with `orch resume` or the `resume_work` MCP call, never on
+its own. Use `orch pause` (or the Questions page) for an instant owner stop and
+`get_pause`/`catch_up` to see what is parked. While away or critical-only, a
+periodic digest notice lists running jobs, the subscriptions in use and the
+usage so far. See [ADR-0029](docs/decisions/0029-no-work-without-a-planning-session.md).
 
 **Authority preset** is the ceiling. Unknown values fail closed and never degrade
 into a more permissive setting.

@@ -105,6 +105,7 @@ MUTATING_TOOLS: frozenset[str] = frozenset(
         "answer_question",
         "propose_config_change",
         "propose_mode_change",
+        "resume_work",
     }
 )
 
@@ -123,6 +124,7 @@ READ_TOOLS: frozenset[str] = frozenset(
         "list_questions",
         "list_proposals",
         "get_mode",
+        "get_pause",
     }
 )
 
@@ -148,6 +150,8 @@ TOOL_NAMES: tuple[str, ...] = (
     "list_proposals",
     "get_mode",
     "propose_mode_change",
+    "get_pause",
+    "resume_work",
 )
 
 _JOB_STATES = ["QUEUED", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"]
@@ -441,7 +445,9 @@ def _submit_plan(context: ServerContext, arguments: Mapping[str, Any]) -> dict[s
     ``run: "owner"`` lanes are never dispatched.
     """
     from saberops.plan_runner import PlanRunnerError, submit_plan_file
+    from saberops.runtime_gate import register_lane_submit_gate
 
+    register_lane_submit_gate()
     repo = _require_text(arguments, "repo", what="repo")
     plan_path = _require_text(arguments, "plan_path", what="plan_path")
     base_ref = arguments.get("base_ref")
@@ -1081,6 +1087,7 @@ def _catch_up(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str,
     """
     from saberops.candidate_lifecycle import project_candidate_state
     from saberops.jobs.service import get_job, job_status_view
+    from saberops.runtime_gate import gate_view
 
     plan_id = arguments.get("plan_id")
     if plan_id is not None:
@@ -1167,6 +1174,9 @@ def _catch_up(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str,
         "check": check,
         "review": review,
         "switch": switch,
+        # F17: what the gate is holding, so a returning session sees the pause
+        # and the one call that resumes it before it assumes work is running.
+        "pause": gate_view(db=db),
         "open_questions": questions,
         "self_answered": _catch_up_self_answered(context, job),
         "steering_notes": _catch_up_steering_notes(db, job),
@@ -1556,6 +1566,31 @@ def _get_mode(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str,
     except (OwnerModeError, ValueError) as exc:
         raise ToolError(f"owner mode unavailable: {exc}") from exc
     return {"v": SNAPSHOT_SCHEMA_VERSION, **view}
+
+
+def _get_pause(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    """Read the F17 work gate: closed, why, what is paused, how to resume."""
+    from saberops.runtime_gate import gate_view
+
+    db = context.database(read_only=True)
+    return {"v": SNAPSHOT_SCHEMA_VERSION, **gate_view(db=db)}
+
+
+def _resume_work(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    """Confirm a resume from the planning session; nothing resumes implicitly.
+
+    This is the one MCP call that clears a pause.  It is mutating, so it needs
+    the writer lease: a read-only client cannot resume work it does not own.
+    """
+    from saberops.pause_work import resume_work
+
+    db = context.database(read_only=False)
+    state = resume_work(db, by="planning_session")
+    context.ledger.append(
+        "work_resumed",
+        {"by": "planning_session", "mode": state.mode.value},
+    )
+    return {"v": SNAPSHOT_SCHEMA_VERSION, **state.as_dict()}
 
 
 def _propose_mode_change(
@@ -2027,6 +2062,21 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
             required=("mode", "rationale", "proposed_by"),
         ),
         _propose_mode_change,
+        mutating=True,
+    )
+    register(
+        "get_pause",
+        "Read the work gate: whether work is paused, why, what is parked and how to resume.",
+        _schema({}),
+        _get_pause,
+        mutating=False,
+    )
+    register(
+        "resume_work",
+        "Confirm a resume after a pause; parked work returns to the scheduler. "
+        "Nothing resumes without this call or `orch resume`.",
+        _schema({}),
+        _resume_work,
         mutating=True,
     )
 

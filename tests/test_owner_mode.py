@@ -135,7 +135,7 @@ def test_set_until_requires_away_and_a_timezone(isolated: Path) -> None:
 
 
 def test_clear_removes_the_document(isolated: Path) -> None:
-    set_owner_mode("away")
+    set_owner_mode("away", max_jobs=10)
     assert clear_owner_mode() == get_owner_mode_path()
     assert clear_owner_mode() is None
     assert load_owner_mode_settings().mode is OwnerMode.ASK_ME
@@ -177,7 +177,7 @@ def test_ask_me_parks_recovery_a_permissive_preset_allows(isolated: Path) -> Non
 
 def test_away_never_exceeds_the_authority_preset(isolated: Path) -> None:
     """F1 done-when (b): away is the preset, never more."""
-    set_owner_mode("away")
+    set_owner_mode("away", max_jobs=10)
     expected = {
         "ask_before_actions": (False, False, False, False),
         "supervised": (False, False, False, False),
@@ -197,7 +197,7 @@ def test_away_never_exceeds_the_authority_preset(isolated: Path) -> None:
     assert decide_owner_action(ModeAction.DISPATCH).allowed is False
     set_owner_mode("ask-me")
     assert decide_owner_action(ModeAction.DISPATCH).allowed is False
-    set_owner_mode("away")
+    set_owner_mode("away", max_jobs=10)
     assert decide_owner_action(ModeAction.DISPATCH).allowed is False
     set_authority_mode("supervised")
     assert decide_owner_action(ModeAction.DISPATCH).allowed is True
@@ -212,7 +212,7 @@ def test_full_autonomy_plus_ask_me_never_auto_accepts(isolated: Path) -> None:
         load_authority_policy(), OwnerMode.ASK_ME
     ).auto_accept is False
     # Away is where the preset's acceptance grant may later be wired (F15).
-    set_owner_mode("away")
+    set_owner_mode("away", max_jobs=10)
     assert decide_owner_action(ModeAction.ACCEPT).allowed is True
 
 
@@ -233,7 +233,7 @@ def test_expired_away_behaves_as_ask_me(isolated: Path) -> None:
 def test_decision_view_labels_unenforced_actions_advisory(isolated: Path) -> None:
     """F1 done-when (e) at the projection level: no live promise for unread work."""
     set_authority_mode("full_autonomy")
-    set_owner_mode("away")
+    set_owner_mode("away", max_jobs=10)
     view = mode_view()
     assert view["decisions"]["accept"]["allowed"] is True
     assert view["decisions"]["accept"]["enforced"] is False
@@ -258,7 +258,7 @@ def test_autonomous_supervisor_uses_the_effective_mode(
     assert supervisor.allows_repair is False
     assert supervisor.allows_escalation is False
 
-    set_owner_mode("away")
+    set_owner_mode("away", max_jobs=10)
     supervisor = AutonomousSupervisor(db=rig.db())
     assert supervisor.allows_retry is True
     assert supervisor.allows_repair is True
@@ -270,7 +270,7 @@ def test_away_parks_dispatch_the_preset_forbids(
 ) -> None:
     """F1 dispatch decision: away may not start what ask_before_actions forbids."""
     set_authority_mode("ask_before_actions")
-    set_owner_mode("away")
+    set_owner_mode("away", max_jobs=10)
     db = rig.db()
     job = submit_job(db, repo=rig.repo, goal="parked by the owner mode").job
 

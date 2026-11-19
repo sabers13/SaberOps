@@ -134,6 +134,12 @@ class WaitingReason(StrEnum):
     #: Nothing ran, so the job is requeued once with this reason (and failed
     #: with the same-named failure reason if it happens again).
     DISPATCH_WINDOW_LOST = "DISPATCH_WINDOW_LOST"
+    #: F17: the owner gate closed (owner pause, no planning session, or an away
+    #: session that ended) while this job was running.  The engine stopped the
+    #: worker, saved a verified checkpoint and parked the job here.  It clears
+    #: only when the owner or the returning planning session confirms a resume;
+    #: no autonomous path dispatches a PAUSED job.
+    PAUSED = "PAUSED"
 
 
 class Priority(StrEnum):

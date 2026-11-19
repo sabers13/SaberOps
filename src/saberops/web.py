@@ -1637,6 +1637,10 @@ def _onboarding_notice(request: Request) -> str | None:
     params = request.query_params
     if params.get("mode_saved") == "1":
         return "Saved. The owner mode applies to the next decision."
+    if params.get("paused") == "1":
+        return "Work paused. Nothing starts or resumes until you confirm a resume."
+    if params.get("resumed") == "1":
+        return "Resumed. Parked work returns to the scheduler on its next tick."
     saved = params.get("saved")
     if saved in ("added", "removed", "moved"):
         return {
@@ -2501,6 +2505,28 @@ def _owner_mode_view() -> dict[str, Any]:
             "authority_mode": "UNKNOWN",
             "choices": [],
             "decisions": {},
+            "max_jobs": None,
+            "away_bounded": False,
+        }
+
+
+def _work_gate_view(db: Database) -> dict[str, Any]:
+    """The F17 work gate: paused or running, why, and what is parked."""
+    try:
+        from saberops.runtime_gate import gate_view
+
+        view = gate_view(db=db)
+        view["error"] = None
+        return view
+    except Exception as exc:  # pragma: no cover - a page must never fail here
+        return {
+            "error": f"{exc.__class__.__name__}: {exc}",
+            "closed": True,
+            "label": "unavailable",
+            "reason": "gate_unreadable",
+            "detail": "",
+            "since": None,
+            "paused_jobs": [],
         }
 
 
@@ -2676,6 +2702,7 @@ def _onboarding_context(
         "never_delegable": _never_delegable_rows(),
         "authority": _authority_view(),
         "owner_mode": _owner_mode_view(),
+        "work_gate": _work_gate_view(db),
         "storage": _storage_view(repo_param, db),
         "repo_param": repo_param,
         "wave_project": wave_project,
@@ -3239,6 +3266,7 @@ def create_app(
         csrf: Annotated[str, Form()] = "",
         mode: Annotated[str, Form()] = "",
         until: Annotated[str, Form()] = "",
+        max_jobs: Annotated[str, Form()] = "",
         clear: Annotated[str, Form()] = "",
     ) -> Response:
         """Owner-only mode switch from the Questions page (F1)."""
@@ -3253,12 +3281,14 @@ def create_app(
             if clear == "yes" or not mode.strip():
                 clear_owner_mode()
             else:
+                budget = int(max_jobs.strip()) if max_jobs.strip() else None
                 set_owner_mode(
                     parse_owner_mode(mode.strip()),
                     until=until.strip() or None,
+                    max_jobs=budget,
                     set_by="owner",
                 )
-        except (OwnerModeError, OSError) as exc:
+        except (OwnerModeError, OSError, ValueError) as exc:
             return onboarding_page(
                 request,
                 page="questions",
@@ -3266,6 +3296,75 @@ def create_app(
                 status_code=400,
             )
         return RedirectResponse(url="/questions?mode_saved=1", status_code=303)
+
+    @app.post("/questions/pause", name="pause_work_route")
+    def pause_work_route(
+        request: Request,
+        csrf: Annotated[str, Form()] = "",
+        reason: Annotated[str, Form()] = "",
+        confirm: Annotated[str, Form()] = "",
+    ) -> Response:
+        """Owner-only instant stop from the Questions page (F17)."""
+        if not _csrf_valid(csrf):
+            return onboarding_page(
+                request,
+                page="questions",
+                error="Refused: missing or invalid confirmation token.",
+                status_code=403,
+            )
+        if confirm != "yes":
+            return onboarding_page(
+                request,
+                page="questions",
+                error="Pausing needs your explicit confirmation.",
+                status_code=400,
+            )
+        from saberops.pause_work import pause_now
+
+        try:
+            pause_now(db, detail=reason.strip() or "the owner paused all work", by="owner")
+        except OSError as exc:
+            return onboarding_page(
+                request,
+                page="questions",
+                error=f"Work was not paused: {exc}",
+                status_code=400,
+            )
+        return RedirectResponse(url="/questions?paused=1", status_code=303)
+
+    @app.post("/questions/resume", name="resume_work_route")
+    def resume_work_route(
+        request: Request,
+        csrf: Annotated[str, Form()] = "",
+        confirm: Annotated[str, Form()] = "",
+    ) -> Response:
+        """Owner-only confirmed resume from the Questions page (F17)."""
+        if not _csrf_valid(csrf):
+            return onboarding_page(
+                request,
+                page="questions",
+                error="Refused: missing or invalid confirmation token.",
+                status_code=403,
+            )
+        if confirm != "yes":
+            return onboarding_page(
+                request,
+                page="questions",
+                error="Resuming needs your explicit confirmation.",
+                status_code=400,
+            )
+        from saberops.pause_work import resume_work
+
+        try:
+            resume_work(db, by="owner")
+        except OSError as exc:
+            return onboarding_page(
+                request,
+                page="questions",
+                error=f"Work was not resumed: {exc}",
+                status_code=400,
+            )
+        return RedirectResponse(url="/questions?resumed=1", status_code=303)
 
     @app.post("/questions/{question_id}/defer", name="defer_question")
     def defer_question_route(

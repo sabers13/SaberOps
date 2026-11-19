@@ -23,10 +23,12 @@ the owner is away (`away`), and required that only the owner switch modes.
 ## 2. Decision
 
 1. **One persisted owner mode.** The document beside the authority config holds
-   `ask-me`, `critical-only` or `away`, plus an optional `until` end time. It is
-   versioned and validated fail-closed. A missing document means `ask-me`; a
-   corrupt one raises rather than selecting a different mode. Only `away` may
-   carry `until`, and an expired `away` narrows to `ask-me`.
+   `ask-me`, `critical-only` or `away`, plus an optional `until` end time and
+   job budget. It is versioned and validated fail-closed. A missing document
+   means `ask-me`; a corrupt one raises rather than selecting a different mode.
+   Only `away` may carry `until`/`max_jobs`, and an expired `away` narrows to
+   `ask-me`. F17 requires every `away` selection to carry at least one bound
+   ([ADR-0029](0029-no-work-without-a-planning-session.md)).
 2. **Effective permission = authority preset ∩ mode.** The intersection can
    only remove a permission the preset already grants. `ask-me` clears
    autonomous retry, repair, escalation, acceptance, publication and safe
@@ -66,6 +68,11 @@ the owner is away (`away`), and required that only the owner switch modes.
   [ADR-0027](0027-critical-only-questions.md); auto-accept (F15) and
   close-the-CLI pausing (F17) remain separate lanes that build on the same
   store and decision function.
+- This lane does not wire auto-accept, standing decisions or a return summary.
+  Those remain separate lanes (F15 and F11) and build on the same store and
+  decision function. Critical-only question delegation is wired in
+  [ADR-0027](0027-critical-only-questions.md); close-the-CLI pausing in every
+  mode is wired in [ADR-0029](0029-no-work-without-a-planning-session.md).
 - The safety and truth boundary is narrow and testable: the scheduler parks an
   `away` dispatch the preset forbids, the supervisor's recovery properties
   follow the mode, and no page or CLI promises an unread permission as live.

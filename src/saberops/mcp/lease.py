@@ -121,6 +121,11 @@ class LeaseRecord:
     epoch: int = 0
     last_activity: float = 0.0
     db_path: str = ""
+    #: F17: liveness heartbeat written by the connected stdio server.  It is
+    #: deliberately separate from ``last_activity`` (which drives idle
+    #: takeover) so an open-but-idle session keeps its idle handoff behaviour
+    #: while a crashed or disconnected one is still detected.
+    heartbeat_at: float = 0.0
     schema_version: int = LEASE_SCHEMA_VERSION
 
     def to_mapping(self) -> dict[str, Any]:
@@ -134,6 +139,7 @@ class LeaseRecord:
             "epoch": self.epoch,
             "last_activity": self.last_activity,
             "db_path": self.db_path,
+            "heartbeat_at": self.heartbeat_at,
         }
         if self.client:
             mapping["client"] = self.client
@@ -174,6 +180,7 @@ class LeaseRecord:
             epoch=int(payload.get("epoch") or 0),
             last_activity=float(payload.get("last_activity") or 0),
             db_path=str(payload.get("db_path") or ""),
+            heartbeat_at=float(payload.get("heartbeat_at") or 0),
         )
 
 
@@ -233,6 +240,13 @@ class OrchestratorLease:
 
     @staticmethod
     def active_work(record: LeaseRecord) -> int | None:
+        """Jobs this session still has *executing* (not parked, not terminal).
+
+        F17: a parked job (``PAUSED`` or quota ``PREEMPTED``) is durable work
+        waiting for a decision, not work in flight.  Counting it here would
+        keep the dead session's lease unreclaimable forever, so the returning
+        planning session could never take over and confirm the resume.
+        """
         if not record.session_id or not record.db_path:
             return 0
         try:
@@ -248,7 +262,9 @@ class OrchestratorLease:
                     return 0
                 row = conn.execute(
                     "SELECT count(*) FROM mcp_job_owners o JOIN jobs j ON j.job_id=o.job_id "
-                    "WHERE o.session_id=? AND j.state NOT IN ('SUCCEEDED','FAILED','CANCELLED')",
+                    "WHERE o.session_id=? AND j.state NOT IN ('SUCCEEDED','FAILED','CANCELLED') "
+                    "AND (j.state = 'RUNNING' OR j.waiting_reason IS NULL "
+                    "     OR j.waiting_reason NOT IN ('PAUSED','PREEMPTED'))",
                     (record.session_id,),
                 ).fetchone()
                 return int(row[0])
@@ -349,6 +365,7 @@ class OrchestratorLease:
                         pid=self._pid,
                         acquired_at=_now_iso(),
                         host=socket.gethostname(),
+                        heartbeat_at=time.time(),
                     )
                     handle.seek(0)
                     handle.truncate()
@@ -382,6 +399,39 @@ class OrchestratorLease:
                     if existing is None or existing.pid != self._pid:
                         return False
                     record = replace(existing, client=label)
+                    handle.seek(0)
+                    handle.truncate()
+                    handle.write(json.dumps(record.to_mapping(), sort_keys=True) + "\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                    return True
+                finally:
+                    fcntl.flock(handle, fcntl.LOCK_UN)
+        except OSError:
+            return False
+
+    def touch(self) -> bool:
+        """Refresh this session's liveness heartbeat (F17 presence detection).
+
+        Only the current writer touches its own record.  A read-only client, a
+        missing record or a record owned by another process is left alone, so a
+        heartbeat can never steal planning ownership.
+        """
+        if not self._writer:
+            return False
+        try:
+            with self._path.open("a+", encoding="utf-8") as handle:
+                fcntl.flock(handle, fcntl.LOCK_EX)
+                try:
+                    handle.seek(0)
+                    existing = self._parse(handle.read())
+                    if (
+                        existing is None
+                        or existing.pid != self._pid
+                        or (existing.session_id and existing.session_id != self._session_id)
+                    ):
+                        return False
+                    record = replace(existing, heartbeat_at=time.time())
                     handle.seek(0)
                     handle.truncate()
                     handle.write(json.dumps(record.to_mapping(), sort_keys=True) + "\n")

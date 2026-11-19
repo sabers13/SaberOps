@@ -57,6 +57,7 @@ def serve_stdio(
     """Serve ``server`` until the input stream ends; returns an exit code."""
     source: Iterable[str] = sys.stdin if stdin is None else stdin
     sink: TextIO = sys.stdout if stdout is None else stdout
+    server.start_heartbeat()
     try:
         for raw_line in source:
             line = raw_line.strip()

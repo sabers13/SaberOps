@@ -158,6 +158,19 @@ class OwnerModeSettings:
     set_by: str | None
     source: str  # "owner" when a config file was read, else "package_default"
     source_path: str | None
+    #: F17: away-mode job budget for this session; ``None`` means "no bound".
+    max_jobs: int | None = None
+
+    @property
+    def away_bounded(self) -> bool:
+        """True when an away session carries at least one end bound.
+
+        The owner decision (2026-11-19) is that away never runs unbounded: it
+        needs an end time, a job count, or both.  A document written before
+        F17 therefore loads as *unbounded* and the runtime gate refuses to
+        start work rather than silently treating it as bounded.
+        """
+        return self.until is not None or self.max_jobs is not None
 
     @property
     def label(self) -> str:
@@ -173,6 +186,7 @@ class OwnerModeSettings:
             "until": self.until,
             "set_at": self.set_at,
             "set_by": self.set_by,
+            "max_jobs": self.max_jobs,
             "source": self.source,
             "source_path": self.source_path,
             "config_path": str(get_owner_mode_path()),
@@ -248,14 +262,25 @@ def normalize_until(value: object) -> str | None:
     return _parse_until(value)
 
 
+def _parse_max_jobs(value: object) -> int | None:
+    """Parse an optional away-mode job budget (positive integer or None)."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise OwnerModeError("max_jobs must be a positive integer")
+    if value < 1:
+        raise OwnerModeError("max_jobs must be a positive integer")
+    return value
+
+
 def _validate_document(
     data: object, source_label: str
-) -> tuple[OwnerMode, str | None, str | None, str | None]:
+) -> tuple[OwnerMode, str | None, str | None, str | None, int | None]:
     if not isinstance(data, dict):
         raise OwnerModeError(
             f"Owner mode config at {source_label}: top-level must be a JSON object"
         )
-    allowed_keys = {"version", "mode", "until", "set_at", "set_by"}
+    allowed_keys = {"version", "mode", "until", "set_at", "set_by", "max_jobs"}
     unknown = set(data.keys()) - allowed_keys
     if unknown:
         raise OwnerModeError(
@@ -280,13 +305,18 @@ def _validate_document(
         raise OwnerModeError(
             f"Owner mode config at {source_label}: 'until' is only valid with away"
         )
+    max_jobs = _parse_max_jobs(data.get("max_jobs"))
+    if max_jobs is not None and mode is not OwnerMode.AWAY:
+        raise OwnerModeError(
+            f"Owner mode config at {source_label}: 'max_jobs' is only valid with away"
+        )
     set_at = data.get("set_at")
     set_by = data.get("set_by")
     if set_at is not None and not isinstance(set_at, str):
         raise OwnerModeError("Owner mode config: set_at must be a string")
     if set_by is not None and not isinstance(set_by, str):
         raise OwnerModeError("Owner mode config: set_by must be a string")
-    return mode, until, set_at, set_by
+    return mode, until, set_at, set_by, max_jobs
 
 
 def load_owner_mode_settings() -> OwnerModeSettings:
@@ -314,7 +344,7 @@ def load_owner_mode_settings() -> OwnerModeSettings:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise OwnerModeError(f"Owner mode config at {path}: invalid JSON: {exc}") from exc
-    mode, until, set_at, set_by = _validate_document(data, str(path))
+    mode, until, set_at, set_by, max_jobs = _validate_document(data, str(path))
     return OwnerModeSettings(
         mode=mode,
         until=until,
@@ -322,6 +352,7 @@ def load_owner_mode_settings() -> OwnerModeSettings:
         set_by=set_by,
         source="owner",
         source_path=str(path),
+        max_jobs=max_jobs,
     )
 
 
@@ -352,17 +383,29 @@ def set_owner_mode(
     mode: OwnerMode | str,
     *,
     until: str | None = None,
+    max_jobs: int | None = None,
     set_by: str = "owner",
 ) -> Path:
     """Validate and atomically persist the owner mode selection.
 
-    ``until`` is only valid with ``away``: an end time on an attended mode has
-    no defined meaning, so it fails closed instead of being silently ignored.
+    ``until`` and ``max_jobs`` are only valid with ``away``: an end time or job
+    budget on an attended mode has no defined meaning, so it fails closed
+    instead of being silently ignored.  An ``away`` selection must carry at
+    least one bound (F17); the owner decision is that away never runs without a
+    way to stop it.
     """
     resolved = mode if isinstance(mode, OwnerMode) else parse_owner_mode(mode)
     end = _parse_until(until)
+    budget = _parse_max_jobs(max_jobs)
     if end is not None and resolved is not OwnerMode.AWAY:
         raise OwnerModeError("until is only valid with away")
+    if budget is not None and resolved is not OwnerMode.AWAY:
+        raise OwnerModeError("max_jobs is only valid with away")
+    if resolved is OwnerMode.AWAY and end is None and budget is None:
+        raise OwnerModeError(
+            "away needs an end time or a job budget (--until/--max-jobs); "
+            "an unbounded away session is refused"
+        )
     if not isinstance(set_by, str) or not set_by.strip():
         raise OwnerModeError("set_by must be non-empty text")
     path = get_owner_mode_path()
@@ -374,6 +417,7 @@ def set_owner_mode(
                 "until": end,
                 "set_at": _now_iso(),
                 "set_by": set_by.strip(),
+                "max_jobs": budget,
             },
             indent=2,
         )
@@ -647,6 +691,8 @@ def mode_view(
         "expired": expired,
         "set_at": settings.set_at,
         "set_by": settings.set_by,
+        "max_jobs": settings.max_jobs,
+        "away_bounded": settings.away_bounded,
         "source": settings.source,
         "source_path": settings.source_path,
         "config_path": str(get_owner_mode_path()),

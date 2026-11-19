@@ -144,6 +144,14 @@ CLI (`orch mode set`) or the Questions page.
   anything you escalated; you can add criticality, never remove it.
 - Call `list_questions` before answering. `question_view.critical` and
   `critical_reasons` say why a question is the owner's.
+- Closing the planning CLI pauses everything, in every mode. No new job, plan
+  lane, retry, repair or refresh starts, and every running worker is stopped at
+  a safe point with its worktree, checkpoint and evidence preserved. Nothing
+  resumes on its own: call `get_pause` to see what is parked and why, and
+  `resume_work` only when the owner asks to continue. `orch pause` and
+  `orch resume` are the owner's own stop and resume. While away or
+  critical-only, a periodic digest notice lists running jobs, the subscriptions
+  in use and the usage so far.
 
 ## Talking to the user
 - Start every message that relays SaberOps (a submission, a status, a result, a

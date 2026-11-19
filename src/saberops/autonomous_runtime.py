@@ -314,19 +314,37 @@ class AutonomousSupervisor:
         return effective_authority_policy(settings.policy, load_effective_owner_mode())
 
     @property
+    def _work_gate_open(self) -> bool:
+        """F17: no recovery starts while the work gate is closed.
+
+        Retry, repair and escalation are *new execution*: closing the planning
+        CLI must stop them exactly like a new job.  An unreadable gate is
+        closed, never open.
+        """
+        try:
+            from saberops.runtime_gate import evaluate_gate
+
+            return not evaluate_gate(db=self.db).closed
+        except Exception:
+            return False
+
+    @property
     def allows_retry(self) -> bool:
         """Whether the effective mode and policy permit autonomous retry."""
-        return decide_owner_action(ModeAction.RETRY).allowed
+        return self._work_gate_open and decide_owner_action(ModeAction.RETRY).allowed
 
     @property
     def allows_repair(self) -> bool:
         """Whether the effective mode and policy permit autonomous repair."""
-        return decide_owner_action(ModeAction.REPAIR).allowed
+        return self._work_gate_open and decide_owner_action(ModeAction.REPAIR).allowed
 
     @property
     def allows_escalation(self) -> bool:
         """Whether the effective mode and policy permit autonomous escalation."""
-        return decide_owner_action(ModeAction.ESCALATION).allowed
+        return (
+            self._work_gate_open
+            and decide_owner_action(ModeAction.ESCALATION).allowed
+        )
 
     # -- decisions ------------------------------------------------------------
 

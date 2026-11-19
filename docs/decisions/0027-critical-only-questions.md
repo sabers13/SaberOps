@@ -36,7 +36,8 @@ yet a routine class could still be escalated on judgment and had no durable tag.
 3. **No planner means no self-answer.** With no live planning session, a routine
    question waits; the engine never starts a background planner and the question
    stays durable. The close-the-CLI work pause itself belongs to the separate
-   F17 lane, not a second mechanism here.
+   F17 lane ([ADR-0029](0029-no-work-without-a-planning-session.md)), not a
+   second mechanism here.
 4. **Every self-answer is recorded and shown.** The existing durable answer
    record holds the words, class, evidence, rejected alternative, actor and
    time. `catch_up` returns the job's self-answered decisions, and

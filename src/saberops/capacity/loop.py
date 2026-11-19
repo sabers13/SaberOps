@@ -73,7 +73,14 @@ from saberops.jobs.store import (
     JobTransitionError,
 )
 from saberops.models import RunStatus
+from saberops.pause_work import pause_running_jobs
 from saberops.routing_config import RoutingSnapshot, load_effective_routing
+from saberops.runtime_gate import (
+    maybe_send_digest,
+    refresh_gate,
+    register_lane_submit_gate,
+    set_pause,
+)
 
 DEFAULT_LEASE_NAME = "scheduler"
 DEFAULT_LEASE_TTL = 30.0
@@ -253,6 +260,10 @@ class TickResult:
     storage_infra_reason: str | None = None
     #: Plan lanes newly submitted this tick, as ``"<plan_id>:<lane_id>"`` (P2).
     plan_lanes_submitted: tuple[str, ...] = ()
+    #: F17: jobs whose workers this tick stopped and parked (gate closed).
+    paused_jobs: tuple[str, ...] = ()
+    #: F17: the pause reason id when ``reason == "paused"``.
+    pause_reason: str | None = None
 
 
 def acquire_lease(
@@ -1035,13 +1046,37 @@ def scheduler_tick(
     # Reconcile execution owners before projecting terminal runs into jobs.
     # The supervisor fences the owner generation and refuses to orphan while a
     # worker may still be alive. Worktrees and attempts are retained.
+    #
+    # F17: the work gate is evaluated first.  When it is closed, every running
+    # worker is stopped at a safe point (PREEMPTED + checkpoint + resume
+    # capsule) before this reconciliation can mistake its dead owner for an
+    # abandoned run.  A run the engine already parked is never reconciled
+    # again while it is paused.
+    register_lane_submit_gate()
+    work_gate = refresh_gate(db)
+    if work_gate.closed:
+        parked = pause_running_jobs(
+            db, reason=work_gate.reason or "unknown", detail=work_gate.detail
+        )
+        if parked:
+            work_gate = set_pause(
+                work_gate.reason or "unknown",
+                work_gate.detail,
+                by="engine",
+                paused_jobs=tuple(parked),
+            )
+    paused_run_ids = set(work_gate.paused_runs)
+
     if run_status is None:
         from saberops.supervisor import RunSupervisor
 
         supervisor = RunSupervisor(db=db)
         for running_job in running_snapshot:
             run_id = running_job.current_run_id
-            if run_id and tick_status(run_id) in (RunStatus.PENDING, RunStatus.RUNNING):
+            if run_id and run_id not in paused_run_ids and tick_status(run_id) in (
+                RunStatus.PENDING,
+                RunStatus.RUNNING,
+            ):
                 try:
                     supervisor.reconcile(run_id, orphan_recoverable=True)
                 except ValueError:
@@ -1150,6 +1185,26 @@ def scheduler_tick(
         render_active_plan_states(db, now=moment)
     except Exception:
         logging.getLogger(__name__).exception("plan state rendering failed")
+
+    # F17: a closed gate starts nothing.  Running workers were already stopped
+    # and parked above; terminal reconciliation, capacity settlement and
+    # notices keep running so the store stays truthful.  The tick keeps
+    # returning "paused" so the continuous loop keeps evaluating the gate
+    # instead of exiting, and nothing dispatches until an explicit resume.
+    if work_gate.closed:
+        return TickResult(
+            ran=True,
+            reason="paused",
+            pause_reason=work_gate.reason,
+            paused_jobs=work_gate.paused_jobs,
+            reconciled_changes=tuple(changes),
+            preemption_settled=(
+                preempt_recon.settlement.released if preempt_recon is not None else 0
+            ),
+            plan_lanes_submitted=plan_lanes_submitted,
+        )
+    maybe_send_digest(db, work_gate, now=moment)
+
 
     # 2. Collect scheduling inputs
     queued_jobs, _ = store.list_jobs_tolerant(db, state=JobState.QUEUED, limit=100_000)

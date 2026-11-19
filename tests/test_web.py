@@ -669,3 +669,68 @@ def test_f1_questions_page_switches_owner_mode(
     assert cleared.status_code == 303
     assert load_owner_mode_settings().mode.value == "ask-me"
 
+
+
+def test_f17_questions_page_pauses_and_resumes_work(
+    onboarding_env: None, tmp_path: Path
+) -> None:
+    """Covers: F17 -- the owner stops and resumes all work from the web page."""
+    from saberops.runtime_gate import evaluate_gate
+
+    client = _client(tmp_path)
+    token = _csrf(client)
+    page = client.get("/questions").text
+    assert "Work gate" in page
+    assert "Pause all work" in page
+
+    # A pause needs the explicit confirmation, and the CSRF token.
+    refused = client.post("/questions/pause", data={"reason": "stepping away"})
+    assert refused.status_code == 403
+    unconfirmed = client.post(
+        "/questions/pause", data={"csrf": token, "reason": "stepping away"}
+    )
+    assert unconfirmed.status_code == 400
+    assert evaluate_gate(db=None).closed is False
+
+    paused = client.post(
+        "/questions/pause",
+        data={"csrf": token, "confirm": "yes", "reason": "stepping away"},
+        follow_redirects=False,
+    )
+    assert paused.status_code == 303
+    state = evaluate_gate(db=None)
+    assert state.closed is True
+    assert state.reason == "owner_pause"
+
+    resumed = client.post(
+        "/questions/resume",
+        data={"csrf": token, "confirm": "yes"},
+        follow_redirects=False,
+    )
+    assert resumed.status_code == 303
+    assert evaluate_gate(db=None).closed is False
+
+
+def test_f17_away_mode_needs_a_bound_on_the_web_page(
+    onboarding_env: None, tmp_path: Path
+) -> None:
+    """Covers: F17 -- the web toggle refuses an unbounded away selection."""
+    from saberops.owner_mode import load_owner_mode_settings
+
+    client = _client(tmp_path)
+    token = _csrf(client)
+    response = client.post(
+        "/questions/mode",
+        data={"csrf": token, "mode": "away"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 400
+    assert load_owner_mode_settings().mode.value == "ask-me"
+
+    saved = client.post(
+        "/questions/mode",
+        data={"csrf": token, "mode": "away", "max_jobs": "3"},
+        follow_redirects=False,
+    )
+    assert saved.status_code == 303
+    assert load_owner_mode_settings().max_jobs == 3
