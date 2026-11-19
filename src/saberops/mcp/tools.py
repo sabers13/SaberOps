@@ -1,8 +1,8 @@
 """The Orchestrator contract tools exposed over MCP (ADR-0004 D7, M3).
 
-Eleven tools are exposed::
+The following tools are exposed::
 
-    submit_job  get_job  wait_job  list_jobs  cancel_job  capacity
+    preflight submit_job get_job wait_job list_jobs cancel_job capacity
     read_evidence list_questions answer_question
     propose_config_change list_proposals
 
@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -108,6 +108,7 @@ READ_TOOLS: frozenset[str] = frozenset(
     {
         "get_job",
         "wait_job",
+        "preflight",
         "list_jobs",
         "capacity",
         "read_evidence",
@@ -117,6 +118,7 @@ READ_TOOLS: frozenset[str] = frozenset(
 )
 
 TOOL_NAMES: tuple[str, ...] = (
+    "preflight",
     "submit_job",
     "get_job",
     "wait_job",
@@ -553,6 +555,15 @@ def _cancel_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[st
     return payload
 
 
+def _preflight(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    from saberops.preflight import collect_preflight
+
+    repo = _require_text(arguments, "repo", what="repo")
+    findings = collect_preflight(Path(repo), context.db_path)
+    return {"v": SNAPSHOT_SCHEMA_VERSION, "ready": all(f.severity != "FAIL" for f in findings),
+            "findings": [asdict(f) for f in findings]}
+
+
 def _capacity(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
     from saberops.capacity.loop import scheduler_alive
     from saberops.jobs.service import CapacityView, capacity, serialize_capacity_view
@@ -822,6 +833,13 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
         ),
         _cancel_job,
         mutating=True,
+    )
+    register(
+        "preflight",
+        "Check project readiness and report setup commands without model prompts.",
+        _schema({"repo": {"type": "string", "minLength": 1}}, required=("repo",)),
+        _preflight,
+        mutating=False,
     )
     register(
         "capacity",

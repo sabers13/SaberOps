@@ -220,72 +220,42 @@ python -m pip install -e ".[dev]"
 
 ## Quick start
 
-**1. Onboard.** Start the local web UI. On an empty store it opens the
-first-run wizard:
+Start with one project readiness check. It reports all missing setup, including
+which filesystems need space, and prints the commands to address each finding:
 
 ```bash
-orch ui            # http://127.0.0.1:8765
+orch preflight --repo /path/to/project
 ```
 
-Or do the same from the CLI:
+Use the commands printed for your own connections and project. For a Codex
+worker and Claude reviewer, a fresh store typically asks for the commands below.
+Replace the bracketed values with your own check command, billing classification,
+policy URL, quota percentage and the binding ID shown by discovery. Billing
+confirmation and quota values must come from the owner; do not guess them.
 
 ```bash
-orch doctor --repo /path/to/project   # read-only readiness checks
-orch access list                      # model-access connections
-orch access discover <connection>     # record discovered models (evidence only)
-orch plans show                       # accounts, pools, windows, postures
-orch posture verify codex --url <policy-url>   # attest a route's billing posture
-orch routing show                     # WORKER / SURGEON / INTEGRATOR chains
-orch authority show
+orch project set-gate --repo /path/to/project '<check command>'
+orch access test codex-chatgpt-account
+orch access test claude-code-subscription
+orch posture verify codex --class '<owner-confirmed-class>' --url '<policy-url>'
+orch posture verify anthropic --class '<owner-confirmed-class>' --url '<policy-url>'
+orch access discover codex-chatgpt-account && orch routing accept-default --provider codex
+orch access discover claude-code-subscription
+orch reviewer select '<binding-id>'
+orch quota set codex '<pool>' --remaining '<percent>'
+orch quota set anthropic '<pool>' --remaining '<percent>'
+orch scheduler run
 ```
 
-Routes stay unadmitted until their billing posture has been verified with
-`orch posture verify`. Run `orch <command> --help` for every option.
+Run the scheduler in its own terminal, then rerun `orch preflight --repo
+/path/to/project` until it reports no failures. If a CLI is missing, install it
+using the command preflight prints; sign in through that CLI before running its
+access test. Discovery and the access tests do not send a model prompt.
 
-**2. Configure the project** gate and policies:
-
-```bash
-orch project set-gate --repo /path/to/project "pytest -q"
-orch project show --repo /path/to/project
-```
-
-**3. Run work.** Either run one task directly:
-
-```bash
-orch run --repo /path/to/project \
-  --task "Add input validation to the CSV importer" \
-  --gate "pytest -q" --review
-```
-
-or queue jobs and let the pacing scheduler dispatch them within plan limits:
-
-```bash
-orch job submit --repo /path/to/project --goal "Fix the login retry" \
-  --acceptance "gate passes" --size M --idempotency-key login-1
-orch scheduler run                    # or --once for a single tick
-orch capacity show
-```
-
-**4. Inspect and accept.**
-
-```bash
-orch list
-orch report <run_id>       # canonical read-only run report (--json available)
-orch monitor <run_id>      # follow live
-orch questions list        # anything waiting on you
-orch accept <run_id>
-orch gc --dry-run          # preview storage cleanup
-```
-
-**5. Connect another agent over MCP:**
-
-```bash
-orch mcp tools --json      # list the available tools and their schemas
-orch mcp serve             # JSON-RPC 2.0 over stdio
-```
-
-Runtime state, databases, worktrees and logs live outside the package in XDG or
-project-local locations; commands that touch run state accept `--db PATH`.
+Connect your agent with `orch mcp serve`. After you say “turn on SaberOps”,
+the agent can call the `preflight` MCP tool with the repository path. Submit a
+job once it is ready; inspect the result with `orch report <run_id>` and make
+the owner decision with `orch accept <run_id>`.
 
 ---
 

@@ -1250,6 +1250,11 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    preflight_parser = subparsers.add_parser("preflight", help="Check project readiness and show setup commands.")
+    preflight_parser.add_argument("--repo", default=".", help="Project Git repository.")
+    preflight_parser.add_argument("--db", default=None, help="Owner database path.")
+    preflight_parser.add_argument("--json", action="store_true", help="Output structured findings.")
+
     # orch ui
     ui_parser = subparsers.add_parser(
         "ui",
@@ -6231,6 +6236,21 @@ def _dispatch(args: argparse.Namespace) -> int:
         return handle_list(args)
     elif args.command == "models":
         return handle_models(args)
+    elif args.command == "preflight":
+        from dataclasses import asdict
+
+        from saberops.preflight import collect_preflight
+
+        findings = collect_preflight(Path(args.repo), Path(args.db) if args.db else None)
+        if args.json:
+            print(json.dumps({"ready": all(f.severity != "FAIL" for f in findings),
+                              "findings": [asdict(f) for f in findings]}, indent=2))
+        else:
+            for finding in findings:
+                print(f"[{finding.severity}] {finding.message}")
+                if finding.remedy:
+                    print(f"  Fix: {finding.remedy}")
+        return 1 if any(f.severity == "FAIL" for f in findings) else 0
     elif args.command == "doctor":
         return handle_doctor(args)
     elif args.command == "ui":

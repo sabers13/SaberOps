@@ -410,7 +410,9 @@ class McpServer:
             )
             text = (
                 f"{PREFIX} SaberOps is on. {role} Start every message that relays SaberOps "
-                f"to the user with \"{PREFIX}\". Follow this guide:\n\n{GUIDE}"
+                f"to the user with \"{PREFIX}\". Call preflight with the project repository "
+                f"(or run `orch preflight --repo /path/to/project`) before submitting work. "
+                f"Follow this guide:\n\n{GUIDE}"
             )
         else:
             text = (

@@ -137,6 +137,7 @@ def test_agent_sessions_start_off_and_the_user_turns_them_on_and_off(tmp_path: P
 
     on = _call(server, "tools/call", {"name": "saberops_on", "arguments": {}})["result"]
     assert on["content"][0]["text"].startswith("Orchestrator: SaberOps is on.")
+    assert "preflight" in on["content"][0]["text"]
     assert server.drain_notifications() == [
         {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
     ]

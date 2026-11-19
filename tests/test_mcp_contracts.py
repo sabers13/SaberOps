@@ -181,6 +181,7 @@ def test_read_tools_succeed_for_a_read_only_client(tmp_path: Path) -> None:
     arguments: dict[str, dict[str, object]] = {
         "get_job": {"job_id": "unknown"},
         "wait_job": {"job_id": "unknown", "timeout_seconds": 0},
+        "preflight": {"repo": str(tmp_path)},
         "list_jobs": {},
         "capacity": {},
         "read_evidence": {"path": "missing.md"},
