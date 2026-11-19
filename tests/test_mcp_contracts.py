@@ -31,6 +31,7 @@ from saberops.mcp.tools import (
     FORBIDDEN_OPERATIONS,
     MUTATING_TOOLS,
     READ_TOOLS,
+    TOOL_NAMES,
     ServerContext,
 )
 from saberops.questions import (
@@ -136,37 +137,6 @@ def _ask(
     return question.question_id
 
 
-def _wave(*, lane_a: str = "src/a.py", lane_b: str = "src/b.py") -> dict[str, Any]:
-    return {
-        "wave_id": "w-1",
-        "base_sha": "a" * 40,
-        "target_branch": "main",
-        "merge_order": ["l1", "l2"],
-        "named_glue": [],
-        "budgets": {"g3_runs": 1, "fix_rounds": 2},
-        "lanes": [
-            {
-                "lane_id": "l1",
-                "task_id": "t1",
-                "prompt": "lane one",
-                "touches": [lane_a],
-                "worker_route": "worker-route",
-                "reviewer_route": "reviewer-route",
-                "effort": "medium",
-            },
-            {
-                "lane_id": "l2",
-                "task_id": "t2",
-                "prompt": "lane two",
-                "touches": [lane_b],
-                "worker_route": "worker-route",
-                "reviewer_route": "reviewer-route",
-                "effort": "medium",
-            },
-        ],
-    }
-
-
 # --------------------------------------------------------------------------- #
 # Never-exposed invariants
 # --------------------------------------------------------------------------- #
@@ -214,7 +184,6 @@ def test_read_tools_succeed_for_a_read_only_client(tmp_path: Path) -> None:
         "get_job": {"job_id": "unknown"},
         "list_jobs": {},
         "capacity": {},
-        "wave_status": {"wave_id": "unknown"},
         "read_evidence": {"path": "missing.md"},
         "list_questions": {},
         "list_proposals": {},
@@ -323,72 +292,16 @@ def test_capacity_returns_the_read_model(tmp_path: Path) -> None:
     assert set(payload["capacity"]) >= {"generated_at", "ledger_wired", "pools"}
 
 
-# --------------------------------------------------------------------------- #
-# waves
-# --------------------------------------------------------------------------- #
-
-
-def test_submit_wave_admits_a_valid_wave_and_records_it(tmp_path: Path) -> None:
-    """Covers: prompt section 'submit_wave' (validated + recorded)."""
+def test_wave_tools_are_removed_from_mcp_surface(tmp_path: Path) -> None:
+    """Wave tools are removed from TOOL_NAMES and tools/list (C4)."""
+    assert "submit_wave" not in TOOL_NAMES
+    assert "wave_status" not in TOOL_NAMES
     server = _server(tmp_path)
-    payload = _payload(server, "submit_wave", {"wave": _wave()})
-    assert payload["admitted"] is True
-    assert payload["wave_id"] == "w-1"
-    assert server.context.ledger.replay().waves["w-1"]["wave_id"] == "w-1"
-
-
-def test_submit_wave_refuses_overlapping_lane_scopes(tmp_path: Path) -> None:
-    """Covers: ADR-0004 invariant 2 (overlapping lane files are rejected)."""
-    server = _server(tmp_path)
-    shared = "src/shared.py"
-    response = _call(server, "submit_wave", {"wave": _wave(lane_a=shared, lane_b=shared)})
-    assert response["result"]["isError"] is True
-    data = response["result"]["structuredContent"]["error"]["data"]
-    assert data["reasons"] and data["reasons"][0].startswith("OVERLAPPING_TOUCHES:")
-
-
-def test_submit_wave_refuses_a_self_overlapping_lane(tmp_path: Path) -> None:
-    """Covers: ADR-0004 invariant 2 (a lane may not touch its own no-touch set)."""
-    server = _server(tmp_path)
-    wave = _wave()
-    wave["lanes"][0]["must_not_touch"] = ["src/a.py"]
-    response = _call(server, "submit_wave", {"wave": wave})
-    assert response["result"]["isError"] is True
-
-
-def test_wave_status_returns_lanes_barriers_and_slot_states(tmp_path: Path) -> None:
-    """Covers: prompt section 'wave_status (state, lanes, barrier conditions)'."""
-    server = _server(tmp_path)
-    _payload(server, "submit_wave", {"wave": _wave()})
-    payload = _payload(server, "wave_status", {"wave_id": "w-1"})
-    assert payload["state"] == "PLANNED"
-    assert payload["terminal"] is False
-    assert [lane["lane_id"] for lane in payload["lanes"]] == ["l1", "l2"]
-    assert payload["barriers"]["merge_order"] == ["l1", "l2"]
-    assert payload["barriers"]["g3_budget"] == 1
-    assert payload["lanes"][0]["slot_state"] == "queued"
-
-
-def test_wave_status_accepts_an_inline_wave(tmp_path: Path) -> None:
-    """Covers: prompt section 'wave_status' (inline wave projection)."""
-    server = _server(tmp_path)
-    payload = _payload(server, "wave_status", {"wave": _wave()})
-    assert payload["wave_id"] == "w-1"
-
-
-def test_wave_status_refuses_an_unknown_wave(tmp_path: Path) -> None:
-    """Covers: prompt section 'wave_status' (unknown wave is explicit)."""
-    server = _server(tmp_path)
-    response = _call(server, "wave_status", {"wave_id": "nope"})
-    assert response["result"]["isError"] is True
-    assert response["result"]["structuredContent"]["error"]["code"] == -32040
-
-
-def test_wave_status_requires_a_wave_or_wave_id(tmp_path: Path) -> None:
-    """Covers: prompt section 'wave_status' (arguments are validated)."""
-    server = _server(tmp_path)
-    response = _call(server, "wave_status", {})
-    assert response["result"]["isError"] is True
+    response = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
+    assert response is not None
+    listed = {tool["name"] for tool in response["result"]["tools"]}
+    assert "submit_wave" not in listed
+    assert "wave_status" not in listed
 
 
 # --------------------------------------------------------------------------- #

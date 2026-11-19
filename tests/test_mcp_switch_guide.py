@@ -9,7 +9,13 @@ from pathlib import Path
 from typing import Any
 
 from saberops.mcp.evidence import EvidenceRoots
-from saberops.mcp.guide import GUIDE, GUIDE_PROMPT, GUIDE_URI, PAUSED_INSTRUCTIONS
+from saberops.mcp.guide import (
+    GUIDE,
+    GUIDE_PROMPT,
+    GUIDE_URI,
+    PAUSED_INSTRUCTIONS,
+    SHORT_INSTRUCTIONS,
+)
 from saberops.mcp.lease import OrchestratorLease
 from saberops.mcp.ledger import EventLedger
 from saberops.mcp.protocol import McpServer
@@ -98,8 +104,18 @@ def test_guide_is_delivered_as_instructions_prompt_and_resource(tmp_path: Path) 
 
 
 def test_guide_names_the_owner_only_boundaries() -> None:
-    for phrase in ("Never send `provider`", "submit_wave", "acceptance", "propose_config_change"):
+    for phrase in (
+        "Never send `provider`",
+        "submit one `submit_job` per independent task",
+        "idempotency_key",
+        "stale base",
+        "acceptance",
+        "propose_config_change",
+    ):
         assert phrase in GUIDE or phrase in GUIDE.replace("\n", " "), phrase
+    for removed in ("submit_wave", "wave_status"):
+        assert removed not in GUIDE
+        assert removed not in SHORT_INSTRUCTIONS
     for owner_only in ("accepting or rejecting changes", "merging, pushing"):
         assert owner_only in GUIDE.replace("\n  ", " "), owner_only
 

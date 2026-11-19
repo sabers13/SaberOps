@@ -1,10 +1,10 @@
 """The Orchestrator contract tools exposed over MCP (ADR-0004 D7, M3).
 
-Twelve tools are exposed, exactly the D7 set::
+Ten tools are exposed::
 
     submit_job  get_job  list_jobs  cancel_job  capacity
-    submit_wave wave_status read_evidence
-    list_questions answer_question propose_config_change list_proposals
+    read_evidence list_questions answer_question
+    propose_config_change list_proposals
 
 Everything else is either not modelled or on the **never-exposed** list, which
 this module pins as data (:data:`FORBIDDEN_OPERATIONS`) and the registry
@@ -97,7 +97,6 @@ MUTATING_TOOLS: frozenset[str] = frozenset(
     {
         "submit_job",
         "cancel_job",
-        "submit_wave",
         "answer_question",
         "propose_config_change",
     }
@@ -109,7 +108,6 @@ READ_TOOLS: frozenset[str] = frozenset(
         "get_job",
         "list_jobs",
         "capacity",
-        "wave_status",
         "read_evidence",
         "list_questions",
         "list_proposals",
@@ -122,8 +120,6 @@ TOOL_NAMES: tuple[str, ...] = (
     "list_jobs",
     "cancel_job",
     "capacity",
-    "submit_wave",
-    "wave_status",
     "read_evidence",
     "list_questions",
     "answer_question",
@@ -485,115 +481,6 @@ def _capacity(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str,
     return {"v": SNAPSHOT_SCHEMA_VERSION, "capacity": serialize_capacity_view(capacity(db))}
 
 
-def _lane_overlap_reasons(wave: Any) -> list[str]:
-    from saberops.wave_admission import lane_touch_overlaps, scopes_overlap
-
-    reasons: list[str] = []
-    lanes = list(wave.lanes)
-    for index, left in enumerate(lanes):
-        for right in lanes[index + 1 :]:
-            for a, b in lane_touch_overlaps(left, right):
-                reasons.append(f"OVERLAPPING_TOUCHES:{left.lane_id}:{right.lane_id}:{a}:{b}")
-    for lane in lanes:
-        if scopes_overlap(lane.touches, lane.must_not_touch):
-            reasons.append(f"LANE_SELF_OVERLAP:{lane.lane_id}")
-    return reasons
-
-
-def _submit_wave(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
-    from saberops.wave_models import Wave, WaveModelError
-
-    raw_wave = arguments.get("wave")
-    if not isinstance(raw_wave, Mapping):
-        raise InvalidParamsError("wave must be an object")
-    try:
-        wave = Wave.from_dict(dict(raw_wave))
-    except WaveModelError as exc:
-        raise InvalidParamsError(f"invalid wave: {exc}") from exc
-    reasons = _lane_overlap_reasons(wave)
-    if reasons:
-        raise ToolError(
-            "wave refused at submit: overlapping lane scopes are never admitted",
-            data={"wave_id": wave.wave_id, "reasons": reasons},
-        )
-    # Deferred to the engine: live route-posture and Git ancestry admission
-    # need the repository and the current posture snapshot, which are not part
-    # of a pure wave description.  Recording the validated submission is the
-    # MCP surface's whole authority here; nothing is spawned and no ref moves.
-    context.ledger.append(
-        "wave_submitted",
-        {"wave_id": wave.wave_id, "wave": wave.as_dict()},
-        key=f"wave:{wave.wave_id}",
-    )
-    return {
-        "v": SNAPSHOT_SCHEMA_VERSION,
-        "wave_id": wave.wave_id,
-        "admitted": True,
-        "state": "PLANNED",
-        "wave": wave.as_dict(),
-        "reasons": [],
-    }
-
-
-def _wave_status(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
-    from saberops.wave_models import LaneState, Wave, WaveModelError, WaveState
-
-    raw_wave = arguments.get("wave")
-    wave_id = arguments.get("wave_id")
-    if isinstance(raw_wave, Mapping):
-        try:
-            wave = Wave.from_dict(dict(raw_wave))
-        except WaveModelError as exc:
-            raise InvalidParamsError(f"invalid wave: {exc}") from exc
-        submitted = None
-    elif isinstance(wave_id, str) and wave_id.strip():
-        submitted = context.ledger.replay().waves.get(wave_id.strip())
-        if submitted is None:
-            raise NotFoundError(
-                f"unknown wave: {wave_id}", data={"wave_id": wave_id}
-            )
-        try:
-            wave = Wave.from_dict(submitted.get("wave"))
-        except WaveModelError as exc:  # pragma: no cover - ledger holds validated waves
-            raise ToolError(f"stored wave is unreadable: {exc}") from exc
-    else:
-        raise InvalidParamsError("provide either wave or wave_id")
-
-    from saberops.wave_executor import LANE_STATE_TO_SLOT_STATE
-
-    planned = LaneState.PLANNED
-    slot = LANE_STATE_TO_SLOT_STATE[planned]
-    lanes = [
-        {
-            "lane_id": lane.lane_id,
-            "task_id": lane.task_id,
-            "state": planned.value,
-            "slot_state": slot.value,
-            "branch": f"orch/{wave.wave_id}/{lane.lane_id}",
-            "worktree": None,
-            "head_sha": None,
-            "fix_rounds": 0,
-        }
-        for lane in wave.lanes
-    ]
-    return {
-        "v": SNAPSHOT_SCHEMA_VERSION,
-        "wave_id": wave.wave_id,
-        "state": WaveState.PLANNED.value,
-        "terminal": False,
-        "lanes": lanes,
-        "merge_order": list(wave.merge_order),
-        "named_glue": list(wave.named_glue),
-        "barriers": {
-            "merge_order": list(wave.merge_order),
-            "g3_budget": wave.budget("g3_runs", 1),
-            "fix_round_budget": wave.budget("fix_rounds", 2),
-            "lanes_accepted": False,
-        },
-        "slot_states": {slot.value: 0},
-    }
-
-
 def _read_evidence(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
     requested = _require_text(arguments, "path", what="path")
     resolved, text, truncated = context.evidence.read(requested)
@@ -843,25 +730,6 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
         "Return the pool capacity read model (spare, reset deadlines).",
         _schema({}),
         _capacity,
-        mutating=False,
-    )
-    register(
-        "submit_wave",
-        "Validate and record a wave submission for the engine dispatcher.",
-        _schema({"wave": {"type": "object"}}, required=("wave",)),
-        _submit_wave,
-        mutating=True,
-    )
-    register(
-        "wave_status",
-        "Return wave state, lane statuses and barrier conditions.",
-        _schema(
-            {
-                "wave": {"type": "object"},
-                "wave_id": {"type": "string"},
-            }
-        ),
-        _wave_status,
         mutating=False,
     )
     register(

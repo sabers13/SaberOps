@@ -68,12 +68,12 @@ SHORT_INSTRUCTIONS = (
     "When the user asks to turn SaberOps off, call saberops_off. "
     "SaberOps runs coding work for you on the owner's AI subscriptions and hands back "
     "checked, isolated changes for the owner to accept. You plan; SaberOps decides which "
-    "model does each job. Submit work with submit_job (one task) or submit_wave (independent "
-    "tasks in parallel), give a goal and testable acceptance criteria, never a model or "
-    "provider, then follow it with get_job / wave_status. Owner-only decisions (accepting "
-    "changes, approving config, billing, merging, pushing) are never available here: tell the "
-    "owner to use the SaberOps page. Read the full guide in the saberops-guide prompt or the "
-    "saberops://guide resource before your first submission."
+    "model does each job. Submit work with submit_job (one job per independent task), give a "
+    "goal and testable acceptance criteria, never a model or provider, then follow it with "
+    "get_job / list_jobs. Owner-only decisions (accepting changes, approving config, billing, "
+    "merging, pushing) are never available here: tell the owner to use the SaberOps page. "
+    "Read the full guide in the saberops-guide prompt or the saberops://guide resource before "
+    "your first submission."
 )
 
 PAUSED_INSTRUCTIONS = (
@@ -112,13 +112,17 @@ model review it, and leaves the result for the owner to accept or reject.
    - `idempotency_key`: a stable key, so a retry never submits twice.
    Never send `provider`, `model`, `tier`, `billing`, `route`, `quota` or `account`:
    they are refused. SaberOps picks the model.
-3. Several independent tasks: `submit_wave`, one lane per task. Lanes must not
-   touch the same files; overlapping scopes are refused. Split by area, not by step.
+3. Several independent tasks: submit one `submit_job` per independent task, each
+   with its own distinct `idempotency_key` and non-overlapping scope. The
+   scheduler dispatches admitted jobs in parallel across available providers.
 4. Keep tasks small: one reviewable change each. A task that needs another
-   task's result goes in a later job or a later wave.
+   task's result goes in a later job after the first is accepted.
+   If two jobs start from the same repository base and the first is accepted,
+   the second will report a stale base with its work and evidence preserved;
+   resubmit it from the current base with a fresh `idempotency_key`.
 
 ## Following it
-- `get_job` / `list_jobs` for one task, `wave_status` for a wave.
+- `get_job` / `list_jobs` to track each job.
 - `read_evidence` for check output and review findings when something fails.
 - Report back to the owner in plain words: what finished, what failed and why,
   and what needs their decision. Link them to the run on the SaberOps page.
