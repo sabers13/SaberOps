@@ -71,10 +71,12 @@ def test_scheduler_dispatches_two_jobs_concurrently_on_two_providers(
                 provider_override=decision.candidate.provider,
                 model_override=decision.candidate.model,
                 max_attempts=1,
-                worker_timeout=15.0,
-                gate_timeout=15.0,
+                # Generous test-only budgets: the full suite runs these two
+                # fake-worker runs while other tests and lanes load the host.
+                worker_timeout=60.0,
+                gate_timeout=60.0,
                 review_enabled=True,
-                review_timeout=15.0,
+                review_timeout=60.0,
             )
         )
         started = supervisor.start_supervised_run(config)
@@ -98,7 +100,7 @@ def test_scheduler_dispatches_two_jobs_concurrently_on_two_providers(
     assert len(launched) == 2
     assert {provider for _, provider, _ in launched} == {"codex", "opencode"}
 
-    runs = [rig.wait_for_run(run_id, timeout=30.0) for run_id, _, _ in launched]
+    runs = [rig.wait_for_run(run_id, timeout=120.0) for run_id, _, _ in launched]
     assert all(run.status == RunStatus.COMPLETED for run in runs)
 
     providers_executed = set()

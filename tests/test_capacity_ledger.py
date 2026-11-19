@@ -36,7 +36,11 @@ def _obs_key(db: Database) -> tuple[str, str, str]:
     with owner._get_connection() as conn:
         row = conn.execute(
             "SELECT pool_id, window_id, source FROM capacity_observations"
-            " ORDER BY observed_at DESC, id DESC LIMIT 1"
+            # Insertion order is the tie-break: the probe writes its per-window
+            # audit row first and the pool-scoped ALL red-line row last, while
+            # both carry the same observed_at.  `id` is not a safe tie-break
+            # (owner rows use a random suffix).
+            " ORDER BY observed_at DESC, rowid DESC LIMIT 1"
         ).fetchone()
         assert row is not None
         return str(row["pool_id"]), str(row["window_id"]), str(row["source"])

@@ -32,6 +32,17 @@ def _write_meminfo(path: Path, **fields_kb: int) -> Path:
     return path
 
 
+def _pin_pressure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin zero PSI so other lanes' load cannot park these ledger tests."""
+    pressure = tmp_path / "memory.pressure"
+    pressure.write_text(
+        "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
+        "full avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(gt.PROC_PRESSURE_MEMORY_ENV, str(pressure))
+
+
 def test_meminfo_is_parsed_into_bytes(tmp_path: Path) -> None:
     """Covers: MemAvailable/MemTotal read from /proc/meminfo."""
     fake = _write_meminfo(tmp_path / "meminfo", MemTotal=1_000, MemAvailable=400)
@@ -92,6 +103,7 @@ def test_slot_pool_uses_shared_ledger_and_reaps_unflocked_metadata(
     avail_kb = (gt.DESKTOP_RESERVE_BYTES + 4 * GIB) // 1024
     meminfo = _write_meminfo(tmp_path / "meminfo", MemTotal=avail_kb * 2, MemAvailable=avail_kb)
     monkeypatch.setenv(gt.PROC_MEMINFO_ENV, str(meminfo))
+    _pin_pressure(tmp_path, monkeypatch)
     monkeypatch.delenv(gt.LEDGER_ENV, raising=False)
     common = tmp_path / "common"
     holders = common / gt.LEDGER_DIRNAME / "holders"
@@ -115,6 +127,7 @@ def test_slot_pool_blocks_when_budget_cannot_cover_predicted_peak(
     low_kb = (gt.DESKTOP_RESERVE_BYTES + 100 * gt.MIB) // 1024
     meminfo = _write_meminfo(tmp_path / "meminfo", MemTotal=low_kb * 10, MemAvailable=low_kb)
     monkeypatch.setenv(gt.PROC_MEMINFO_ENV, str(meminfo))
+    _pin_pressure(tmp_path, monkeypatch)
     monkeypatch.delenv(gt.LEDGER_ENV, raising=False)
     pool = GateSlotPool(tmp_path / "common")
     with pytest.raises(GateSlotWaitTimeout):
