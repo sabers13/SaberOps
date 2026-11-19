@@ -17,6 +17,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from saberops.db import Database
 from saberops.git import GitManager
@@ -250,6 +251,11 @@ def failover_authorized_bases(db: Database, run_id: str) -> set[str]:
     failover-legitimate Attempt B (based at its validated anchor or
     continuation start, not at the run base) remains provably a
     candidate of its run.  Anything unverifiable contributes nothing.
+
+    The ordinary (non-autonomous) continuation that a scheduler-dispatched
+    job takes after quota exhaustion records ``failover_start_authorized``
+    with the same anchor / start / checkpoint triple.  It is verified by the
+    same rules here, so both paths share one proof and one reader.
     """
     authorized: set[str] = set()
     try:
@@ -272,6 +278,9 @@ def failover_authorized_bases(db: Database, run_id: str) -> set[str]:
             continue
         if source is not None and source.base_sha == anchor:
             authorized.add(anchor)
+    for event in events:
+        if event.event_type == "failover_start_authorized":
+            _authorize_ordinary_continuation_base(db, run_id, event, authorized)
     if not authorized:
         return authorized
     for event in events:
@@ -309,6 +318,60 @@ def failover_authorized_bases(db: Database, run_id: str) -> set[str]:
         except Exception:
             continue
     return authorized
+
+
+def _authorize_ordinary_continuation_base(
+    db: Database, run_id: str, event: Any, authorized: set[str]
+) -> None:
+    """Verify one ``failover_start_authorized`` record, fail-closed.
+
+    The record must name its source Attempt, that Attempt's durable base must
+    still equal the named anchor, a worker checkpoint of this run must exist
+    for the source with exactly that checkpoint SHA, and the start SHA must be
+    the anchor itself or a descendant of it in the run's repository.  Any gap
+    contributes nothing; unverifiable evidence never grants candidate
+    authority.
+    """
+    payload = event.payload
+    if not isinstance(payload, dict):
+        return
+    anchor = payload.get("required_base_sha")
+    start = payload.get("start_sha")
+    source_id = payload.get("failover_from_attempt_id")
+    checkpoint_sha = payload.get("checkpoint_sha")
+    if not all(
+        isinstance(value, str) and value
+        for value in (anchor, start, source_id, checkpoint_sha)
+    ):
+        return
+    try:
+        source = db.get_attempt(str(source_id))
+    except Exception:
+        return
+    if source is None or source.base_sha != anchor:
+        return
+    if source.run_id != run_id:
+        return
+    try:
+        checkpoint = db.get_worker_checkpoint_by_sha(run_id, str(checkpoint_sha))
+    except Exception:
+        return
+    if (
+        checkpoint is None
+        or checkpoint.source_attempt_id != str(source_id)
+        or checkpoint.source_base_sha != anchor
+    ):
+        return
+    if start == anchor:
+        authorized.add(str(start))
+        return
+    try:
+        run = db.get_run(run_id)
+        repo = run.target_repo if run is not None else None
+        if repo and GitManager.is_ancestor(repo, anchor, str(start)):
+            authorized.add(str(start))
+    except Exception:
+        return
 
 
 def execution_authorized_bases(db: Database, run_id: str) -> set[str]:

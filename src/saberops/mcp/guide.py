@@ -175,6 +175,10 @@ steps, not model roles. There are no selectable modes.
   check and review with the commit each assessed, any open question, and the next
   action. When the result offers `orch accept RUN_ID`, show that exact command;
   the owner accepts there or rejects from the run page for full evidence.
+- `attempts` lists each attempt's provider, model and binding; `switch` describes
+  the latest handoff (for example a quota-exhausted attempt continued on another
+  subscription from its checkpoint). Report that plainly; it is durable evidence,
+  not a guess.
 
 ## Questions and decisions
 - `list_questions` shows what is waiting. You may answer only planner-level

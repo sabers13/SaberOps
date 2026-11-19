@@ -132,7 +132,9 @@ class RigEnvironment:
 
     def set_worker_mode(
         self,
-        mode: Literal["commit", "hang", "crash", "quota_exhausted", "live"],
+        mode: Literal[
+            "commit", "hang", "crash", "quota_exhausted", "live", "partial_quota"
+        ],
         *,
         hang_seconds: float | None = None,
         exit_code: int | None = None,
@@ -143,8 +145,14 @@ class RigEnvironment:
         prompt_log: Path | None = None,
         wait_file: Path | None = None,
         wait_timeout_seconds: float | None = None,
+        per_harness: dict[str, str] | None = None,
     ) -> None:
-        """Configure fake worker behaviour via control file and ``ORCH_FAKE_*`` env vars."""
+        """Configure fake worker behaviour via control file and ``ORCH_FAKE_*`` env vars.
+
+        ``per_harness`` overrides the mode for one CLI only (for example
+        ``{"codex": "partial_quota"}``), so a failover test can exhaust a single
+        subscription while the other provider keeps working.
+        """
         control_path = self.state_home / "saberops" / "fake-worker-mode.json"
         control_path.parent.mkdir(parents=True, exist_ok=True)
         payload: dict[str, object] = {"mode": mode}
@@ -154,6 +162,8 @@ class RigEnvironment:
             payload["wait_file"] = str(wait_file)
         if wait_timeout_seconds is not None:
             payload["wait_timeout_seconds"] = wait_timeout_seconds
+        if per_harness is not None:
+            payload["per_harness"] = dict(per_harness)
         if hang_seconds is not None:
             payload["hang_seconds"] = hang_seconds
         if exit_code is not None:

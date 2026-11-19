@@ -74,11 +74,24 @@ def _worker_control_path() -> str | None:
     return None
 
 
-def _resolve_worker_mode(cli_mode: str | None) -> tuple[str, float, int, str, str | None]:
+def _resolve_worker_mode(
+    cli_mode: str | None, harness: str
+) -> tuple[str, float, int, str, str | None]:
     cfg = _read_control_json(_worker_control_path())
+
+    # ``per_harness`` lets one lane's CLI fail while another keeps working, so a
+    # failover test can exhaust a single subscription.  It outranks the generic
+    # environment/control mode; an explicit ``--fake-mode`` still wins.
+    per_harness = cfg.get("per_harness")
+    harness_mode = None
+    if isinstance(per_harness, dict):
+        raw = per_harness.get(harness)
+        if raw is not None:
+            harness_mode = str(raw)
 
     mode = (
         cli_mode
+        or harness_mode
         or os.environ.get("ORCH_FAKE_WORKER_MODE")
         or str(cfg.get("mode", "commit"))
     ).strip().lower()
@@ -231,7 +244,30 @@ def _commit_change(workdir: Path, harness: str, target_file: str, content: str |
     )
 
 
-def _run_failure_switch(harness: str, mode: str, hang_seconds: float, exit_code: int) -> int | None:
+def _write_partial_change(
+    workdir: Path, harness: str, target_file: str, content: str | None
+) -> None:
+    """Leave an uncommitted worktree change, the way a worker interrupted mid-task would."""
+    target = workdir / target_file
+    target.parent.mkdir(parents=True, exist_ok=True)
+    nonce = uuid.uuid4().hex[:8]
+    line = content if content is not None else f"{harness}:{nonce}:partial-work\n"
+    if not line.endswith("\n"):
+        line += "\n"
+    existing = target.read_text(encoding="utf-8") if target.is_file() else ""
+    target.write_text(existing + line, encoding="utf-8")
+
+
+def _run_failure_switch(
+    harness: str,
+    mode: str,
+    hang_seconds: float,
+    exit_code: int,
+    *,
+    workdir: Path | None = None,
+    target_file: str = "fake_worker_output.txt",
+    content: str | None = None,
+) -> int | None:
     if mode == "live":
         # Emit line-oriented output while the process is still running so a
         # second session can tail the run transcript mid-flight.  Execution
@@ -253,7 +289,11 @@ def _run_failure_switch(harness: str, mode: str, hang_seconds: float, exit_code:
         sys.stderr.write(f"fake {harness} worker crashed mid-task\n")
         sys.stderr.flush()
         return exit_code if exit_code != 0 else 2
-    if mode == "quota_exhausted":
+    if mode in {"quota_exhausted", "partial_quota"}:
+        if mode == "partial_quota" and workdir is not None:
+            # A real quota exhaustion arrives mid-turn: the worker has already
+            # edited files but never committed them.
+            _write_partial_change(workdir, harness, target_file, content)
         if harness == "codex":
             print(
                 json.dumps(
@@ -332,7 +372,15 @@ def _handle_codex(
         prompt_text = _codex_prompt_arg(args)
     _prompt_log_append("codex", prompt_text)
     _wait_for_control_file()
-    switched = _run_failure_switch("codex", mode, hang_seconds, exit_code)
+    switched = _run_failure_switch(
+        "codex",
+        mode,
+        hang_seconds,
+        exit_code,
+        workdir=workdir,
+        target_file=target_file,
+        content=content,
+    )
     if switched is not None:
         return switched
 
@@ -560,7 +608,15 @@ def _handle_opencode(
         )
         return 0
 
-    switched = _run_failure_switch("opencode", mode, hang_seconds, exit_code)
+    switched = _run_failure_switch(
+        "opencode",
+        mode,
+        hang_seconds,
+        exit_code,
+        workdir=Path.cwd(),
+        target_file=target_file,
+        content=content,
+    )
 
     stdin_text = ""
     if not sys.stdin.isatty():
@@ -716,7 +772,9 @@ def main(argv: list[str] | None = None) -> int:
         # must never edit or commit work in the caller's working directory.
         print(f"{harness} 0.0.0-fake")
         return 0
-    mode, hang_seconds, exit_code, target_file, content = _resolve_worker_mode(cli_mode)
+    mode, hang_seconds, exit_code, target_file, content = _resolve_worker_mode(
+        cli_mode, harness
+    )
     review_verdict = _resolve_reviewer_verdict(cli_verdict)
 
     if harness == "codex":

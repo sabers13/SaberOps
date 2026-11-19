@@ -618,6 +618,111 @@ def _catch_up_review(
     }
 
 
+def _catch_up_attempts(db: Any, run_id: str, attempts: list[Any]) -> list[dict[str, Any]]:
+    """Per-attempt durable identity, in execution order.
+
+    Read-only.  A caller recovering a job from another session needs to see
+    that a replacement attempt continued an earlier one, on which provider and
+    (when the engine recorded it) which exact binding or quota pool.
+    """
+    from saberops.models import DispatchStage
+
+    dispatches: dict[str, Any] = {}
+    for dispatch in db.get_dispatch_evidence_for_run(run_id):
+        if dispatch.attempt_id is None or dispatch.stage is DispatchStage.REVIEW:
+            continue
+        dispatches.setdefault(dispatch.attempt_id, dispatch)
+    rows: list[dict[str, Any]] = []
+    for attempt in attempts:
+        dispatch = dispatches.get(attempt.id)
+        rows.append(
+            {
+                "attempt_id": attempt.id,
+                "attempt_number": attempt.attempt_number,
+                "provider": attempt.provider,
+                "model": attempt.model,
+                "binding_id": getattr(dispatch, "binding_id", None),
+                "quota_pool_id": getattr(dispatch, "quota_pool_id", None),
+                "status": attempt.status.value,
+                "interruption_reason": attempt.interruption_reason,
+                "dispatch_reason": getattr(dispatch, "dispatch_reason", None),
+                "base_sha": attempt.base_sha,
+                "candidate_sha": attempt.commit_sha,
+                "work_location": attempt.worktree_path,
+            }
+        )
+    return rows
+
+
+def _catch_up_switch(db: Any, run_id: str, attempts: list[Any]) -> dict[str, Any] | None:
+    """The latest handoff from one attempt to its replacement, for ``catch_up``.
+
+    F4: when a subscription runs out, the run continues from the interrupted
+    attempt's checkpoint on a different binding.  That switch is durable
+    evidence (attempt rows, worker checkpoints, dispatch evidence); this
+    projection only reads it, so the owner sees the handoff without opening
+    the run page.
+    """
+    from saberops.models import AttemptStatus
+
+    if len(attempts) < 2:
+        return None
+    checkpoints = {
+        checkpoint.source_attempt_id: checkpoint
+        for checkpoint in db.get_worker_checkpoints_for_run(run_id)
+    }
+    dispatches = {
+        dispatch.attempt_id: dispatch
+        for dispatch in db.get_dispatch_evidence_for_run(run_id)
+        if dispatch.attempt_id is not None
+    }
+    from_attempt, to_attempt = attempts[-2], attempts[-1]
+    if from_attempt.status not in (AttemptStatus.FAILED, AttemptStatus.TIMEOUT):
+        return None
+    checkpoint = checkpoints.get(from_attempt.id)
+    dispatch = dispatches.get(to_attempt.id)
+    inherited = getattr(dispatch, "inherited_checkpoint_sha", None)
+    from_binding = getattr(dispatches.get(from_attempt.id), "binding_id", None)
+    to_binding = getattr(dispatch, "binding_id", None)
+    if from_binding and to_binding:
+        different_binding: bool | None = from_binding != to_binding
+    else:
+        different_binding = None
+    try:
+        preserved = bool(from_attempt.worktree_path) and Path(
+            from_attempt.worktree_path
+        ).is_dir()
+    except OSError:
+        preserved = False
+    return {
+        "reason": from_attempt.interruption_reason or "attempt_failed",
+        "from": {
+            "attempt_id": from_attempt.id,
+            "provider": from_attempt.provider,
+            "model": from_attempt.model,
+            "binding_id": from_binding,
+        },
+        "to": {
+            "attempt_id": to_attempt.id,
+            "provider": to_attempt.provider,
+            "model": to_attempt.model,
+            "binding_id": to_binding,
+        },
+        "different_provider": (from_attempt.provider, from_attempt.model)
+        != (to_attempt.provider, to_attempt.model),
+        "different_binding": different_binding,
+        "checkpoint_sha": checkpoint.checkpoint_sha if checkpoint is not None else None,
+        "inherited_checkpoint_sha": inherited,
+        "continued_from_checkpoint": (
+            checkpoint is not None
+            and inherited is not None
+            and inherited == checkpoint.checkpoint_sha
+        ),
+        "work_location": from_attempt.worktree_path,
+        "work_location_preserved": preserved,
+    }
+
+
 def _catch_up_questions(context: ServerContext, job: Any) -> list[dict[str, Any]]:
     """Open questions that name this job or one of its runs."""
     from saberops.questions import QuestionStatus, question_view
@@ -807,6 +912,8 @@ def _catch_up(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str,
         else None
     )
     questions = _catch_up_questions(context, job)
+    attempt_rows = _catch_up_attempts(db, run_id, attempts) if run_id is not None else []
+    switch = _catch_up_switch(db, run_id, attempts) if run_id is not None else None
 
     failure = None
     if job.state.value == "FAILED" or view.get("last_failed_attempt"):
@@ -853,6 +960,8 @@ def _catch_up(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str,
         ),
         "check": check,
         "review": review,
+        "attempts": attempt_rows,
+        "switch": switch,
         "open_questions": questions,
         "steering_notes": _catch_up_steering_notes(db, job),
         "failure": failure,

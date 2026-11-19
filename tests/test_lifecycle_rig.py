@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 from lifecycle_rig import (
@@ -33,6 +34,7 @@ from saberops.control_plane import (
 )
 from saberops.db import current_iso_timestamp
 from saberops.jobs.service import get_job, submit_job
+from saberops.mcp.tools import _catch_up
 from saberops.model_access.readiness_service import ReadinessService
 from saberops.models import (
     Attempt,
@@ -447,3 +449,124 @@ def test_unrelated_review_does_not_change_replacement_acceptance(
         with pytest.raises(RuntimeError, match="no candidate-linked review"):
             engine.accept_run(acceptance_rig.run_id)
         assert _git(acceptance_rig.rig.repo, "rev-parse", "HEAD") == acceptance_rig.base_sha
+
+
+def _run_to_terminal(rig: RigEnvironment, *, task: str, max_attempts: int = 3) -> Run:
+    """Start one supervised run from the rig's project settings and await it."""
+    db = rig.db()
+    config: RunConfig = resolve_effective_run_config(
+        RunRequest(
+            task=task,
+            repo_path=rig.repo,
+            max_attempts=max_attempts,
+            worker_timeout=10.0,
+            gate_timeout=10.0,
+            review_enabled=True,
+            review_timeout=10.0,
+        )
+    )
+    started = RunSupervisor(db=db).start_supervised_run(config)
+    return rig.wait_for_run(started.run_id, timeout=60.0)
+
+
+def _catch_up_context(rig: RigEnvironment) -> Any:
+    """MCP context over the rig's isolated store (read-only catch_up lookup)."""
+    from saberops.mcp.evidence import EvidenceRoots
+    from saberops.mcp.lease import OrchestratorLease
+    from saberops.mcp.ledger import EventLedger
+    from saberops.mcp.tools import ServerContext
+
+    state_dir = rig.state_home / "saberops"
+    return ServerContext(
+        db_path=rig.db().db_path,
+        questions_store=state_dir / "questions.json",
+        config_ledger_path=state_dir / "config.jsonl",
+        evidence=EvidenceRoots(roots=(rig.root,)),
+        ledger=EventLedger(state_dir / "events.jsonl"),
+        lease=OrchestratorLease(state_dir / "lease.json"),
+    )
+
+
+def _dispatch_submitted_job(rig: RigEnvironment) -> tuple[str, str]:
+    """Submit a job and dispatch it the way the scheduler does; return (job_id, run_id)."""
+    db = rig.db()
+    submitted = submit_job(db, repo=rig.repo, goal="Continue on another subscription")
+    readiness = ReadinessService.for_owner_state(owner_state_dir())
+    tick = run_scheduler_loop(db, once=True, readiness_service=readiness)
+    assert tick is not None and tick.ran and tick.dispatched == 1, tick
+    job = get_job(db, submitted.job.job_id)
+    assert job is not None and job.current_run_id is not None
+    return submitted.job.job_id, job.current_run_id
+
+
+def test_quota_exhausted_attempt_continues_on_another_binding_from_checkpoint(
+    rig: RigEnvironment,
+) -> None:
+    """F4: a scheduler-dispatched job continues on another binding after quota exhaustion."""
+    db = rig.db()
+    rig.set_worker_mode("commit", per_harness={"codex": "partial_quota"})
+
+    job_id, run_id = _dispatch_submitted_job(rig)
+    run = rig.wait_for_run(run_id, timeout=60.0)
+    assert run.status is RunStatus.COMPLETED, run.result_summary
+
+    attempts = db.get_attempts_for_run(run.id)
+    assert [attempt.provider for attempt in attempts[:2]] == ["codex", "opencode"], (
+        [(a.provider, a.status.value) for a in attempts]
+    )
+    first, second = attempts[0], attempts[1]
+    assert first.status is AttemptStatus.FAILED
+    assert first.interruption_reason == WorkerInterruptionReason.QUOTA_EXHAUSTED.value
+
+    # The partial work survived as a checkpoint on the first attempt's own branch.
+    checkpoint = db.get_worker_checkpoint_for_attempt(run.id, first.id)
+    assert checkpoint is not None, "no checkpoint recorded for the quota-exhausted attempt"
+    assert checkpoint.reason == WorkerInterruptionReason.QUOTA_EXHAUSTED.value
+    assert checkpoint.checkpoint_sha != rig.base_sha
+    assert "fake_worker_output.txt" in checkpoint.changed_paths
+    assert _git(Path(first.worktree_path), "rev-parse", "HEAD") == checkpoint.checkpoint_sha
+
+    # The replacement attempt inherited the checkpoint and did not lose the work.
+    assert second.base_sha == checkpoint.checkpoint_sha
+    inherited = (
+        Path(second.worktree_path) / "fake_worker_output.txt"
+    ).read_text(encoding="utf-8")
+    assert "codex:" in inherited and "partial-work" in inherited
+    assert "opencode:" in inherited
+
+    # The switch is visible in catch_up from a read-only lookup.
+    catch_up = _catch_up(_catch_up_context(rig), {"job_id": job_id})
+    assert [row["provider"] for row in catch_up["attempts"]] == ["codex", "opencode"]
+    switch = catch_up["switch"]
+    assert switch is not None
+    assert switch["reason"] == WorkerInterruptionReason.QUOTA_EXHAUSTED.value
+    assert switch["from"]["provider"] == "codex"
+    assert switch["to"]["provider"] == "opencode"
+    assert switch["different_provider"] is True
+    assert switch["checkpoint_sha"] == checkpoint.checkpoint_sha
+    assert switch["continued_from_checkpoint"] is True
+    assert switch["work_location"] == first.worktree_path
+    assert switch["work_location_preserved"] is True
+
+    # The continued candidate still reaches owner acceptance unchanged.
+    accepted = AcceptEngine(db=db).accept_run(run.id)
+    assert accepted.accepted is True
+    assert (rig.repo / "fake_worker_output.txt").is_file()
+
+
+def test_every_route_exhausted_keeps_the_job_and_its_work(rig: RigEnvironment) -> None:
+    """F4: with no admitted fallback the run stops visibly and keeps the work; it never loops."""
+    db = rig.db()
+    rig.set_worker_mode("partial_quota")
+
+    job_id, run_id = _dispatch_submitted_job(rig)
+    run = rig.wait_for_run(run_id, timeout=60.0)
+    assert run.status is not RunStatus.COMPLETED, run.result_summary
+    assert len(db.get_attempts_for_run(run.id)) <= 2
+
+    catch_up = _catch_up(_catch_up_context(rig), {"job_id": job_id})
+    assert catch_up["failure"] is not None
+    assert catch_up["failure"]["work_location"]
+    assert Path(catch_up["failure"]["work_location"]).parent.is_dir()
+    assert catch_up["next_action"]["action"] in {"wait", "inspect"}
+

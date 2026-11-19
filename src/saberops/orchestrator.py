@@ -526,6 +526,56 @@ def _record_quota_exhaustion_evidence(
             pass
 
 
+def _authorize_ordinary_failover_start(
+    db: Database,
+    *,
+    repo: Path,
+    run_id: str,
+    checkpoint: Any,
+    source_attempt: Any,
+    recorded: set[tuple[str, str]],
+) -> None:
+    """Durably authorize an ordinary failover start at a worker checkpoint.
+
+    Mirrors the autonomous path's ``autonomous_failover_start_authorized``
+    record for the non-autonomous continuation (quota / binding interruption)
+    that a scheduler-dispatched job takes.  Publication and acceptance only
+    accept a non-run-base candidate when such a record is re-verifiable, so
+    the proof lives beside the evidence it certifies.  Nothing is recorded
+    when the derivation cannot be proven from durable evidence; acceptance
+    then keeps refusing the candidate, exactly as before.
+    """
+    if source_attempt is None:
+        return
+    key = (str(source_attempt.id), str(checkpoint.checkpoint_sha))
+    if key in recorded:
+        return
+    anchor = getattr(source_attempt, "base_sha", None) or getattr(
+        checkpoint, "source_base_sha", None
+    )
+    if not anchor:
+        return
+    try:
+        derives = GitManager.is_ancestor(repo, anchor, checkpoint.checkpoint_sha)
+    except Exception:
+        derives = False
+    if not derives:
+        return
+    recorded.add(key)
+    db.record_event(
+        run_id,
+        "failover_start_authorized",
+        attempt_id=str(checkpoint.source_attempt_id),
+        payload={
+            "failover_from_attempt_id": str(source_attempt.id),
+            "required_base_sha": anchor,
+            "start_sha": str(checkpoint.checkpoint_sha),
+            "checkpoint_sha": str(checkpoint.checkpoint_sha),
+            "path": "ordinary_continuation",
+        },
+    )
+
+
 # Durable event types that install a genuinely fresh routing candidate
 # chain.  Each is emitted exactly where the in-memory
 # ``chain_attempt_start`` marker advances during uninterrupted execution
@@ -2814,6 +2864,16 @@ class Orchestrator:
                 db=self.db,
                 strong_start=strong_start_active,
             )
+            # F4: the provider a provider/model pin names, captured once.
+            # A scheduler-dispatched job's admitted route arrives as this
+            # pin; it is a preference, never a command to re-dispatch a
+            # subscription that already ran out mid-run.
+            pinned_candidate_provider: str | None = (
+                candidates[0].provider
+                if config.model_override is not None and candidates
+                else None
+            )
+            pinned_failover_installed = False
             # Structured per-candidate skip evidence for this run: every
             # automatic candidate that cannot dispatch appends one
             # sanitized record (provider/model/binding, canonical skip
@@ -2941,6 +3001,9 @@ class Orchestrator:
             active_continuation_dispatch_reason: DispatchReason | None = None
             active_continuation_attempt: Attempt | None = None
             blocked_providers_in_cycle: set[str] = set()
+            # Ordinary-path failover starts already authorized this run
+            # (source attempt id, start sha): one durable record per pair.
+            ordinary_failover_authorized: set[tuple[str, str]] = set()
 
             # Strict positive-evidence recovery gate.  Cold-takeover must
             # only mutate persisted state when the strict predicate passes; an
@@ -3379,6 +3442,56 @@ class Orchestrator:
                     # The next dispatch stays on the build route, now using
                     # its stronger-model setting.
                     continue
+                # F4: continue on another binding when the pinned route's
+                # subscription runs out.  A job dispatched by the scheduler
+                # carries its admitted route as a provider/model pin, which
+                # collapses the candidate ladder to that one entry.  When that
+                # route's provider is already blocked in this chain cycle
+                # (quota / binding / transport failure), re-resolve the role's
+                # routing chain without the pin so the next attempt can
+                # continue from its checkpoint on a different binding.
+                # Admission still runs for every fallback candidate below.
+                pinned_route_blocked = bool(
+                    pinned_candidate_provider is not None
+                    and pinned_candidate_provider in blocked_providers_in_cycle
+                )
+                if pinned_route_blocked and not pinned_failover_installed:
+                    try:
+                        from saberops.capacity.snapshot import effective_quota_states
+
+                        failover_quota_states = effective_quota_states(self.db)
+                    except Exception:
+                        failover_quota_states = self.db.list_quota()
+                    failover_candidates = order_candidates_for_role(
+                        role=current_role,
+                        snapshot=routing_snapshot,
+                        base_candidates=resolve_candidate_chain(
+                            role=current_role,
+                            training_allowed=config.training_allowed,
+                            is_peak=is_peak,
+                            snapshot=routing_snapshot,
+                        ),
+                        policy=control_plane_policy,
+                        quota_states=failover_quota_states,
+                        db=self.db,
+                    )
+                    self.db.record_event(
+                        run_id,
+                        "override_failover_after_blocked_route",
+                        payload={
+                            "pinned_provider": pinned_candidate_provider,
+                            "pinned_model": config.model_override,
+                            "blocked_providers": sorted(blocked_providers_in_cycle),
+                            "approaches": [
+                                {"provider": c.provider, "model": c.model}
+                                for c in failover_candidates
+                            ],
+                            "reason": "pinned_route_unavailable",
+                        },
+                    )
+                    candidates = failover_candidates
+                    candidate_idx = 0
+                    pinned_failover_installed = True
                 auto_pinned_candidate = None
                 auto_decision_effort: str | None = None
                 # Exact executable binding: the resolved runtime
@@ -3524,7 +3637,7 @@ class Orchestrator:
                     # overrides which entry dispatches this round and must
                     # never be preempted by candidate-ladder exhaustion.
                     candidate = auto_pinned_candidate
-                elif config.model_override is not None:
+                elif config.model_override is not None and not pinned_route_blocked:
                     candidate = candidates[0]
                 else:
                     while (
@@ -4477,6 +4590,26 @@ class Orchestrator:
                         else lineage_base_sha
                     )
                 )
+
+                if (
+                    supervisor is None
+                    and auto_failover_start is None
+                    and active_continuation_checkpoint is not None
+                ):
+                    # F4: an ordinary (non-autonomous) continuation after a
+                    # quota / binding interruption starts Attempt B at the
+                    # interrupted attempt's checkpoint, not at the run base.
+                    # Publication and acceptance require a durable proof that
+                    # such a base is this run's own, so record the same
+                    # verified authorization the autonomous path records.
+                    _authorize_ordinary_failover_start(
+                        self.db,
+                        repo=repo,
+                        run_id=run_id,
+                        checkpoint=active_continuation_checkpoint,
+                        source_attempt=active_continuation_attempt,
+                        recorded=ordinary_failover_authorized,
+                    )
 
                 try:
                     GitManager.create_worktree(
