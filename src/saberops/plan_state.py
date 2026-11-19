@@ -89,7 +89,15 @@ _CANDIDATE_STATES = frozenset({"candidate", "stale"})
 
 #: Lane states shown under ``Held``: work the owner or a dependency must move.
 _HELD_STATES = frozenset(
-    {"held", "blocked", "owner", "failed", "cancelled", "superseded"}
+    {
+        "held",
+        "blocked",
+        "owner",
+        "failed",
+        "cancelled",
+        "superseded",
+        "needs-decision",
+    }
 )
 
 
@@ -406,13 +414,19 @@ def _refine_state(db: Any, view: LaneView, job: Job | None, target_head: str | N
             from saberops.jobs.service import job_status_view
 
             if job_status_view(db, job).get("activity") == "needs_attention":
-                return "needs-attention"
+                state = "needs-attention"
         except Exception:  # pragma: no cover - activity is advisory, never authoritative
-            return state
-    if state == "candidate" and target_head:
+            pass
+    elif state == "candidate" and target_head:
         run, _ = _lane_run(db, job, False)
         if run is not None and run.base_commit != target_head:
-            return "stale"
+            state = "stale"
+    if view.superseded_by:
+        # P4: a changed lane never silently inherits its old result.
+        if state in {"candidate", "stale"}:
+            return "needs-decision"
+        if state in {"queued", "running", "needs-attention"}:
+            return "superseded"
     return state
 
 
@@ -475,6 +489,13 @@ def _next_action(
         command = f"orch refresh {lane.run_id}" if lane.run_id else "orch refresh RUN_ID"
         return (
             f"Refresh lane {lane.lane_id}'s stale candidate, then accept it: `{command}`."
+        )
+
+    lane = first("needs-decision")
+    if lane is not None:
+        return (
+            f"Lane {lane.lane_id} changed after its candidate was ready; accept "
+            "that result or revise the plan for a new attempt."
         )
 
     lane = first("candidate")

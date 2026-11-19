@@ -5,10 +5,12 @@
   submission, the owner-database plan mapping and the scheduler reconciler are
   implemented in lane P2. The rendered `STATE.md`, its projection, the
   git-ignored checkout link and the read-only `plan_status`/plan `catch_up`
-  paths are implemented in lane P3. Lane P5 implemented the typed owner-mode
-  start decision for auto-advance, plan complete/stalled/needs-decision
-  notices, the plan section of the away return summary, and the planner/skill
-  and MCP documentation.
+  paths are implemented in lane P3. Mid-run plan edits, the revision diff and
+  the edit matrix — including the promise that a running lane is never
+  signalled — are implemented in lane P4. Lane P5 implemented the typed
+  owner-mode start decision for auto-advance, plan complete/stalled/
+  needs-decision notices, the plan section of the away return summary, and the
+  planner/skill and MCP documentation.
 - **Date:** 2026-11-19
 - **Decider:** Saber (owner), Phase 1 plan lane P1 after the owner approved
   every recommended choice for the plan-file design
@@ -115,7 +117,10 @@ the repository's one-record-of-truth rule and avoids a second plan database.
 11. **Running work is never cut off.** A lane edited or removed mid-run that is
     already running finishes under its original brief. A changed lane with a
     candidate-ready result becomes an owner decision, never an automatic
-    discard.
+    discard. A lane that is already accepted, or already completed by the
+    owner, cannot be rewritten: a revision that changes its brief is refused as
+    a whole and the previous revision stays active, so accepted work remains a
+    fact; replacing it means adding a new lane.
 12. **Plan completion is acceptance, not activity.** A plan is complete only
     when every lane is accepted, explicitly marked done, or explicitly removed.
     A failed lane keeps the plan blocked until the owner replaces or removes it.

@@ -66,7 +66,7 @@ from saberops.jobs.models import (
     JobState,
     Priority,
 )
-from saberops.jobs.service import submit_job
+from saberops.jobs.service import cancel_job, submit_job
 from saberops.plan_file import (
     ParsedPlan,
     PlanFileError,
@@ -195,7 +195,12 @@ def ensure_plan_tables(db: Any) -> None:
             "plan_events",
             "idx_plans_active_project",
         }:
-            return
+            columns = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(plan_lanes)")
+            }
+            if {"lane_spec_digest", "generation"} <= columns:
+                return
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS plans (
@@ -220,6 +225,8 @@ def ensure_plan_tables(db: Any) -> None:
                 plan_id TEXT NOT NULL,
                 lane_id TEXT NOT NULL,
                 lane_digest TEXT NOT NULL,
+                lane_spec_digest TEXT NOT NULL DEFAULT '',
+                generation INTEGER NOT NULL DEFAULT 0,
                 job_id TEXT,
                 run_ids_json TEXT NOT NULL DEFAULT '[]',
                 superseded_by TEXT,
@@ -254,6 +261,19 @@ def ensure_plan_tables(db: Any) -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_plan_events_plan ON plan_events(plan_id, id)"
         )
+        # Older plan tables predate mid-run edits (P4).  Adding the columns in
+        # place keeps an existing owner store readable without a second table.
+        columns = {
+            str(row["name"]) for row in conn.execute("PRAGMA table_info(plan_lanes)")
+        }
+        if "lane_spec_digest" not in columns:
+            conn.execute(
+                "ALTER TABLE plan_lanes ADD COLUMN lane_spec_digest TEXT NOT NULL DEFAULT ''"
+            )
+        if "generation" not in columns:
+            conn.execute(
+                "ALTER TABLE plan_lanes ADD COLUMN generation INTEGER NOT NULL DEFAULT 0"
+            )
         conn.commit()
 
 
@@ -327,6 +347,8 @@ class PlanRecord:
 class _LaneRow:
     lane_id: str
     lane_digest: str
+    lane_spec_digest: str
+    generation: int
     job_id: str | None
     superseded_by: str | None
     owner_done_at: str | None
@@ -345,6 +367,8 @@ class LaneView:
     status: str
     reasons: tuple[str, ...] = ()
     job_id: str | None = None
+    #: The revision that superseded this lane's mapped attempt, if any (P4).
+    superseded_by: str | None = None
 
     @property
     def is_ready(self) -> bool:
@@ -583,6 +607,21 @@ def lane_digest(task: PlanTaskDef) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def lane_spec_digest(task: PlanTaskDef) -> str:
+    """Return the digest of a lane's brief, ignoring its dependency edges.
+
+    A mid-run edit (P4) treats a dependency-only change differently from a
+    changed brief: edges are never retroactive, while a changed brief supersedes
+    a live attempt.  The edges are part of :func:`lane_digest` (the idempotency
+    key), so the two cases need separate hashes.
+    """
+    payload = task.as_dict(format_version=2)
+    payload["start_dependencies"] = []
+    payload["integration_prerequisites"] = []
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 # ---------------------------------------------------------------------------
 # Plan records
 # ---------------------------------------------------------------------------
@@ -701,14 +740,17 @@ def _lane_rows(db: Any, plan_id: str) -> dict[str, _LaneRow]:
     ensure_plan_tables(db)
     with _owner_conn(db) as conn:
         rows = conn.execute(
-            "SELECT lane_id, lane_digest, job_id, superseded_by, owner_done_at,"
-            " owner_evidence FROM plan_lanes WHERE plan_id = ?",
+            "SELECT lane_id, lane_digest, lane_spec_digest, generation, job_id,"
+            " superseded_by, owner_done_at, owner_evidence FROM plan_lanes"
+            " WHERE plan_id = ?",
             (plan_id,),
         ).fetchall()
     return {
         str(row["lane_id"]): _LaneRow(
             lane_id=str(row["lane_id"]),
             lane_digest=str(row["lane_digest"]),
+            lane_spec_digest=str(row["lane_spec_digest"] or ""),
+            generation=int(row["generation"] or 0),
             job_id=str(row["job_id"]) if row["job_id"] else None,
             superseded_by=str(row["superseded_by"]) if row["superseded_by"] else None,
             owner_done_at=str(row["owner_done_at"]) if row["owner_done_at"] else None,
@@ -728,17 +770,28 @@ def plan_lane_rows(db: Any, plan_id: str) -> dict[str, _LaneRow]:
 def _sync_lane_rows(
     db: Any, plan: PlanRecord, revision: PlanRevision, *, now: datetime | None = None
 ) -> None:
-    """Register every lane in the revision without disturbing an existing job."""
+    """Register every lane in the revision without disturbing an existing row.
+
+    An existing row keeps the digest of the spec its current attempt was
+    submitted under; the reconciler compares that digest with the active
+    revision and applies the mid-run edit rules (P4).  Only a lane the plan has
+    never seen is inserted here.
+    """
     stamp = _iso(now)
     with _owner_conn(db) as conn:
         for task in revision.tasks:
-            digest = lane_digest(task)
             conn.execute(
                 "INSERT INTO plan_lanes (plan_id, lane_id, lane_digest,"
-                " run_ids_json, updated_at) VALUES (?, ?, ?, '[]', ?)"
-                " ON CONFLICT(plan_id, lane_id) DO UPDATE SET"
-                " lane_digest = excluded.lane_digest, updated_at = excluded.updated_at",
-                (plan.plan_id, task.task_id, digest, stamp),
+                " lane_spec_digest, generation, run_ids_json, updated_at)"
+                " VALUES (?, ?, ?, ?, 0, '[]', ?)"
+                " ON CONFLICT(plan_id, lane_id) DO NOTHING",
+                (
+                    plan.plan_id,
+                    task.task_id,
+                    lane_digest(task),
+                    lane_spec_digest(task),
+                    stamp,
+                ),
             )
         conn.commit()
 
@@ -749,15 +802,54 @@ def _write_lane_job(
     plan_id: str,
     lane_id: str,
     digest: str,
+    spec_digest: str,
     job_id: str,
     now: datetime | None = None,
 ) -> None:
     """Link a lane to its job *after* the job exists (crash-safe mapping)."""
     with _owner_conn(db) as conn:
         conn.execute(
-            "UPDATE plan_lanes SET job_id = ?, lane_digest = ?, updated_at = ?"
+            "UPDATE plan_lanes SET job_id = ?, lane_digest = ?, lane_spec_digest = ?,"
+            " superseded_by = NULL, updated_at = ?"
             " WHERE plan_id = ? AND lane_id = ?",
-            (job_id, digest, _iso(now), plan_id, lane_id),
+            (job_id, digest, spec_digest, _iso(now), plan_id, lane_id),
+        )
+        conn.commit()
+
+
+def _update_lane_row(
+    db: Any,
+    *,
+    plan_id: str,
+    lane_id: str,
+    digest: str,
+    spec_digest: str,
+    job_id: str | None,
+    superseded_by: str | None,
+    bump_generation: bool = False,
+    now: datetime | None = None,
+) -> None:
+    """Write one lane row's active spec and attempt in a single UPDATE.
+
+    ``bump_generation`` retires the previous attempt: the next submission's
+    idempotency key must differ from the retired job, so re-adding an identical
+    lane cannot collide with a cancelled one.
+    """
+    generation_sql = ", generation = generation + 1" if bump_generation else ""
+    with _owner_conn(db) as conn:
+        conn.execute(
+            "UPDATE plan_lanes SET job_id = ?, lane_digest = ?, lane_spec_digest = ?,"
+            f" superseded_by = ?{generation_sql}, updated_at = ?"
+            " WHERE plan_id = ? AND lane_id = ?",
+            (
+                job_id,
+                digest,
+                spec_digest,
+                superseded_by,
+                _iso(now),
+                plan_id,
+                lane_id,
+            ),
         )
         conn.commit()
 
@@ -774,12 +866,16 @@ def _lane_status(
     jobs: dict[str, Job | None],
     accepted: dict[str, bool],
 ) -> tuple[str, Job | None]:
-    """Map one lane's live records onto the frontier's status vocabulary."""
+    """Map one lane's live records onto the frontier's status vocabulary.
+
+    A superseded lane (P4) keeps the status of its live attempt: an attempt
+    that is still running reserves its scopes and holds its dependants, and an
+    accepted attempt is an owner decision that counts.  Only an attempt with no
+    job is ``PENDING`` again, so the reconciler can submit the new spec.
+    """
     if task.run == "owner":
         done = row is not None and row.owner_done_at is not None
         return (TaskStatus.COMPLETED.value if done else TaskStatus.PENDING.value, None)
-    if row is not None and row.superseded_by:
-        return TaskStatus.SKIPPED.value, None
     job_id = row.job_id if row is not None else None
     if not job_id:
         return TaskStatus.PENDING.value, None
@@ -917,6 +1013,7 @@ def _project(
                 status=statuses[task.task_id],
                 reasons=reasons,
                 job_id=job_id,
+                superseded_by=row.superseded_by if row is not None else None,
             )
         )
     return PlanProjection(
@@ -990,6 +1087,20 @@ def submit_plan_file(
             "complete or abandon it first"
         )
 
+    # P4: refuse a revision that rewrites accepted or owner-completed work
+    # BEFORE anything is stored or cancelled.  The old revision stays active.
+    if existing is not None and existing.active_version:
+        try:
+            old_revision = existing.plan_store().get_revision(
+                existing.project_id, existing.active_version
+            )
+        except (PlanNotFoundError, PlanTamperError, PlanValidationError) as exc:
+            raise PlanRunnerError(
+                f"plan {plan_id!r} revision {existing.active_version!r} is "
+                f"unreadable: {exc}"
+            ) from exc
+        _backfill_lane_specs(db, existing, old_revision, now=now)
+        refuse_lane_rewrite(db, existing, old_revision, parsed.to_tasks())
     plan_store = store or PlanStore()
     try:
         revision = activate_plan_file(plan_store, parsed, project, repo=root)
@@ -1157,8 +1268,10 @@ def submit_lane_job(
         return LaneSubmitResult(lane_id=task.task_id, job_id=row.job_id)
 
     digest = lane_digest(task)
+    spec_digest = lane_spec_digest(task)
+    generation = row.generation if row is not None else 0
     caller = f"plan:{plan.plan_id}"
-    key = f"plan:{plan.plan_id}:{digest}"
+    key = f"plan:{plan.plan_id}:{generation}:{digest}"
     goal = _lane_goal(task)
     report_context, scout_reports = _scout_report_context(db, plan, task, rows)
     if report_context:
@@ -1186,7 +1299,9 @@ def submit_lane_job(
         plan_id=plan.plan_id,
         lane_id=task.task_id,
         kind="plan_lane_submitted",
-        event_key=f"plan:{plan.plan_id}:lane:{task.task_id}:{digest}",
+        event_key=(
+            f"plan:{plan.plan_id}:lane:{task.task_id}:{generation}:{digest}"
+        ),
         payload={
             "plan_id": plan.plan_id,
             "lane_id": task.task_id,
@@ -1196,6 +1311,7 @@ def submit_lane_job(
             "revision": plan.active_version,
             "created": result.created,
             "kind": job.kind.value,
+            "generation": generation,
             "scout_reports": list(scout_reports),
         },
         now=now,
@@ -1205,12 +1321,679 @@ def submit_lane_job(
         plan_id=plan.plan_id,
         lane_id=task.task_id,
         digest=digest,
+        spec_digest=spec_digest,
         job_id=job.job_id,
         now=now,
     )
     return LaneSubmitResult(
         lane_id=task.task_id, job_id=job.job_id, created=result.created
     )
+
+
+# ---------------------------------------------------------------------------
+# Mid-run plan edits (P4)
+# ---------------------------------------------------------------------------
+
+
+def _never_signal_running(run_id: str) -> bool:
+    """Refuse to cancel a RUNNING attempt (a superseded lane finishes its brief).
+
+    ``cancel_job`` asks a run canceller only for a RUNNING job.  Returning
+    ``False`` means "leave it alone"; it is the mechanical form of the lane's
+    promise that a plan edit never cuts off work already in flight.
+    """
+    logging.getLogger(__name__).info(
+        "plan edit kept running attempt %s; it finishes under its original brief",
+        run_id,
+    )
+    return False
+
+
+def _cancel_queued_lane_job(db: Any, job: Job) -> tuple[bool, Job | None]:
+    """Cancel a QUEUED lane job; never signal a RUNNING one.
+
+    Returns ``(cancelled, current)`` where ``current`` is the re-read job
+    (``None`` when it disappeared).  A job that raced into RUNNING between the
+    read and the cancel comes back unchanged.
+    """
+    if job.state != JobState.QUEUED:
+        return False, job
+    try:
+        result = cancel_job(db, job.job_id, run_canceller=_never_signal_running)
+    except Exception:  # pragma: no cover - a cancel failure is retried next tick
+        logging.getLogger(__name__).exception(
+            "cannot cancel superseded queued job %s", job.job_id
+        )
+        result = None
+    current = store.get_job(db, job.job_id)
+    return (result is not None and result.cancelled), current
+
+
+def _supersede_event(
+    db: Any,
+    plan: PlanRecord,
+    lane_id: str,
+    *,
+    action: str,
+    previous_digest: str,
+    digest: str,
+    job: Job | None,
+    now: datetime | None = None,
+) -> None:
+    """Record one idempotent ``plan_lane_superseded`` event."""
+    _event(
+        db,
+        plan_id=plan.plan_id,
+        lane_id=lane_id,
+        kind="plan_lane_superseded",
+        event_key=(
+            f"plan:{plan.plan_id}:lane:{lane_id}:superseded:"
+            f"{plan.active_version}:{digest}"
+        ),
+        payload={
+            "plan_id": plan.plan_id,
+            "lane_id": lane_id,
+            "action": action,
+            "revision": plan.active_version,
+            "previous_digest": previous_digest,
+            "digest": digest,
+            "job_id": job.job_id if job is not None else None,
+            "job_state": job.state.value if job is not None else None,
+        },
+        now=now,
+    )
+
+
+def _backfill_lane_specs(
+    db: Any, plan: PlanRecord, revision: PlanRevision, *, now: datetime | None = None
+) -> None:
+    """Give rows written before P4 a brief digest from the previous revision.
+
+    Without this, the first edit after an upgrade cannot tell a dependency-only
+    change from a changed brief on a lane whose live attempt predates the
+    column.
+    """
+    rows = _lane_rows(db, plan.plan_id)
+    for task in revision.tasks:
+        row = rows.get(task.task_id)
+        if row is None or row.lane_spec_digest:
+            continue
+        _update_lane_row(
+            db,
+            plan_id=plan.plan_id,
+            lane_id=task.task_id,
+            digest=row.lane_digest,
+            spec_digest=lane_spec_digest(task),
+            job_id=row.job_id,
+            superseded_by=row.superseded_by,
+            now=now,
+        )
+
+
+def refuse_lane_rewrite(
+    db: Any, plan: PlanRecord, revision: PlanRevision, tasks: tuple[PlanTaskDef, ...]
+) -> None:
+    """Refuse a revision that rewrites accepted or owner-completed work.
+
+    Run before the new revision is stored, so the previously active revision
+    stays active and nothing is cancelled.  Accepted lanes are facts; replacing
+    one means adding a new lane.
+    """
+    previous = {task.task_id: task for task in revision.tasks}
+    rows = _lane_rows(db, plan.plan_id)
+    for task in tasks:
+        old = previous.get(task.task_id)
+        if old is None or lane_digest(old) == lane_digest(task):
+            continue
+        if lane_spec_digest(old) == lane_spec_digest(task):
+            # A dependency-only edit is not a rewrite of the lane's brief; the
+            # matrix records it with no retroaction instead of refusing.
+            continue
+        row = rows.get(task.task_id)
+        if row is None:
+            continue
+        if row.owner_done_at is not None:
+            raise PlanRunnerError(
+                f"lane {task.task_id!r} was completed by the owner and cannot be "
+                "rewritten; add a new lane instead"
+            )
+        if row.job_id:
+            job = store.get_job(db, row.job_id)
+            if job is not None and job_is_accepted(db, job):
+                raise PlanRunnerError(
+                    f"lane {task.task_id!r} is accepted and cannot be rewritten; "
+                    "add a new lane instead"
+                )
+
+
+def _dependencies_changed_event(
+    db: Any,
+    plan: PlanRecord,
+    task: PlanTaskDef,
+    *,
+    row: _LaneRow,
+    digest: str,
+    job: Job,
+    now: datetime | None = None,
+) -> None:
+    """Record a dependency-only edit without treating it as a rewrite."""
+    _event(
+        db,
+        plan_id=plan.plan_id,
+        lane_id=task.task_id,
+        kind="plan_lane_dependencies_changed",
+        event_key=(
+            f"plan:{plan.plan_id}:lane:{task.task_id}:deps:"
+            f"{plan.active_version}:{digest}"
+        ),
+        payload={
+            "plan_id": plan.plan_id,
+            "lane_id": task.task_id,
+            "revision": plan.active_version,
+            "previous_digest": row.lane_digest,
+            "digest": digest,
+            "depends_on": list(task.start_dependencies),
+            "job_id": job.job_id,
+            "job_state": job.state.value,
+        },
+        now=now,
+    )
+
+
+def _apply_lane_edits(
+    db: Any,
+    plan: PlanRecord,
+    revision: PlanRevision,
+    rows: dict[str, _LaneRow],
+    *,
+    now: datetime | None = None,
+) -> tuple[str, ...]:
+    """Apply the plan-edit matrix to lanes that still exist (report §6)."""
+    touched: list[str] = []
+    for task in revision.tasks:
+        row = rows.get(task.task_id)
+        if row is None:
+            continue
+        digest = lane_digest(task)
+        spec = lane_spec_digest(task)
+        if row.lane_digest == digest:
+            if row.lane_spec_digest != spec:
+                # A row written before P4 has no brief digest yet; the spec is
+                # unchanged, so this is a backfill, not an edit.
+                _update_lane_row(
+                    db,
+                    plan_id=plan.plan_id,
+                    lane_id=task.task_id,
+                    digest=digest,
+                    spec_digest=spec,
+                    job_id=row.job_id,
+                    superseded_by=row.superseded_by,
+                    now=now,
+                )
+            continue
+        job = store.get_job(db, row.job_id) if row.job_id else None
+        if row.job_id and job is None:
+            # The attempt row is unreadable; adopt the new spec rather than
+            # waiting forever on a job that is not there.
+            _update_lane_row(
+                db,
+                plan_id=plan.plan_id,
+                lane_id=task.task_id,
+                digest=digest,
+                spec_digest=spec,
+                job_id=None,
+                superseded_by=None,
+                bump_generation=True,
+                now=now,
+            )
+            touched.append(task.task_id)
+            continue
+        dependencies_only = bool(row.lane_spec_digest) and row.lane_spec_digest == spec
+        if job is not None and job_is_accepted(db, job):
+            # Acceptance landed between activation and this tick.  Accepted
+            # work is a fact: a brief change is never rewritten, and a
+            # dependency-only change is recorded with no retroaction.
+            if dependencies_only:
+                _dependencies_changed_event(
+                    db, plan, task, row=row, digest=digest, job=job, now=now
+                )
+                _update_lane_row(
+                    db,
+                    plan_id=plan.plan_id,
+                    lane_id=task.task_id,
+                    digest=digest,
+                    spec_digest=spec,
+                    job_id=job.job_id,
+                    superseded_by=row.superseded_by,
+                    now=now,
+                )
+                touched.append(task.task_id)
+            continue
+        if job is None:
+            _update_lane_row(
+                db,
+                plan_id=plan.plan_id,
+                lane_id=task.task_id,
+                digest=digest,
+                spec_digest=spec,
+                job_id=None,
+                superseded_by=None,
+                now=now,
+            )
+            touched.append(task.task_id)
+            continue
+        if dependencies_only:
+            # Edges are never retroactive.  A QUEUED job is cancelled and the
+            # lane waits for the new edge to be accepted; a live or finished
+            # attempt keeps running under its original edges.
+            if job.state == JobState.QUEUED:
+                cancelled, current = _cancel_queued_lane_job(db, job)
+                if current is not None and current.state == JobState.RUNNING:
+                    _dependencies_changed_event(
+                        db, plan, task, row=row, digest=digest, job=current, now=now
+                    )
+                    _update_lane_row(
+                        db,
+                        plan_id=plan.plan_id,
+                        lane_id=task.task_id,
+                        digest=digest,
+                        spec_digest=spec,
+                        job_id=current.job_id,
+                        superseded_by=row.superseded_by,
+                        now=now,
+                    )
+                elif cancelled:
+                    _dependencies_changed_event(
+                        db, plan, task, row=row, digest=digest, job=current or job, now=now
+                    )
+                    _update_lane_row(
+                        db,
+                        plan_id=plan.plan_id,
+                        lane_id=task.task_id,
+                        digest=digest,
+                        spec_digest=spec,
+                        job_id=None,
+                        superseded_by=None,
+                        bump_generation=True,
+                        now=now,
+                    )
+                else:  # pragma: no cover - a failed cancel is retried next tick
+                    continue
+            else:
+                _dependencies_changed_event(
+                    db, plan, task, row=row, digest=digest, job=job, now=now
+                )
+                _update_lane_row(
+                    db,
+                    plan_id=plan.plan_id,
+                    lane_id=task.task_id,
+                    digest=digest,
+                    spec_digest=spec,
+                    job_id=job.job_id,
+                    superseded_by=row.superseded_by,
+                    now=now,
+                )
+            touched.append(task.task_id)
+            continue
+
+        # The brief changed: a running attempt finishes under its own brief.
+        if job.state == JobState.QUEUED:
+            cancelled, current = _cancel_queued_lane_job(db, job)
+            if current is not None and current.state == JobState.RUNNING:
+                _supersede_event(
+                    db,
+                    plan,
+                    task.task_id,
+                    action="kept_running",
+                    previous_digest=row.lane_digest,
+                    digest=digest,
+                    job=current,
+                    now=now,
+                )
+                _update_lane_row(
+                    db,
+                    plan_id=plan.plan_id,
+                    lane_id=task.task_id,
+                    digest=digest,
+                    spec_digest=spec,
+                    job_id=current.job_id,
+                    superseded_by=plan.active_version,
+                    now=now,
+                )
+            elif cancelled:
+                _supersede_event(
+                    db,
+                    plan,
+                    task.task_id,
+                    action="cancelled_queued",
+                    previous_digest=row.lane_digest,
+                    digest=digest,
+                    job=current or job,
+                    now=now,
+                )
+                _update_lane_row(
+                    db,
+                    plan_id=plan.plan_id,
+                    lane_id=task.task_id,
+                    digest=digest,
+                    spec_digest=spec,
+                    job_id=None,
+                    superseded_by=None,
+                    bump_generation=True,
+                    now=now,
+                )
+            else:  # pragma: no cover - a failed cancel is retried next tick
+                _supersede_event(
+                    db,
+                    plan,
+                    task.task_id,
+                    action="cancel_failed",
+                    previous_digest=row.lane_digest,
+                    digest=digest,
+                    job=current or job,
+                    now=now,
+                )
+                _update_lane_row(
+                    db,
+                    plan_id=plan.plan_id,
+                    lane_id=task.task_id,
+                    digest=digest,
+                    spec_digest=spec,
+                    job_id=job.job_id,
+                    superseded_by=plan.active_version,
+                    now=now,
+                )
+        elif job.state == JobState.RUNNING:
+            _supersede_event(
+                db,
+                plan,
+                task.task_id,
+                action="kept_running",
+                previous_digest=row.lane_digest,
+                digest=digest,
+                job=job,
+                now=now,
+            )
+            _update_lane_row(
+                db,
+                plan_id=plan.plan_id,
+                lane_id=task.task_id,
+                digest=digest,
+                spec_digest=spec,
+                job_id=job.job_id,
+                superseded_by=plan.active_version,
+                now=now,
+            )
+        elif job.state == JobState.SUCCEEDED:
+            _supersede_event(
+                db,
+                plan,
+                task.task_id,
+                action="needs_decision",
+                previous_digest=row.lane_digest,
+                digest=digest,
+                job=job,
+                now=now,
+            )
+            _update_lane_row(
+                db,
+                plan_id=plan.plan_id,
+                lane_id=task.task_id,
+                digest=digest,
+                spec_digest=spec,
+                job_id=job.job_id,
+                superseded_by=plan.active_version,
+                now=now,
+            )
+        else:  # FAILED or CANCELLED: the new brief needs a fresh attempt
+            _supersede_event(
+                db,
+                plan,
+                task.task_id,
+                action="retried",
+                previous_digest=row.lane_digest,
+                digest=digest,
+                job=job,
+                now=now,
+            )
+            _update_lane_row(
+                db,
+                plan_id=plan.plan_id,
+                lane_id=task.task_id,
+                digest=digest,
+                spec_digest=spec,
+                job_id=None,
+                superseded_by=None,
+                bump_generation=True,
+                now=now,
+            )
+        touched.append(task.task_id)
+    return tuple(touched)
+
+
+def _apply_removed_lanes(
+    db: Any,
+    plan: PlanRecord,
+    revision: PlanRevision,
+    rows: dict[str, _LaneRow],
+    *,
+    now: datetime | None = None,
+) -> tuple[str, ...]:
+    """Retire lanes the active revision no longer contains (report §6)."""
+    kept = {task.task_id for task in revision.tasks}
+    touched: list[str] = []
+    for lane_id, row in rows.items():
+        if lane_id in kept:
+            continue
+        job = store.get_job(db, row.job_id) if row.job_id else None
+        if (
+            row.superseded_by == plan.active_version
+            and (job is None or job.state != JobState.QUEUED)
+        ):
+            continue
+        if job is None:
+            if plan.active_version == row.superseded_by:
+                continue
+            _update_lane_row(
+                db,
+                plan_id=plan.plan_id,
+                lane_id=lane_id,
+                digest=row.lane_digest,
+                spec_digest=row.lane_spec_digest,
+                job_id=None,
+                superseded_by=plan.active_version,
+                now=now,
+            )
+            _supersede_event(
+                db,
+                plan,
+                lane_id,
+                action="dropped",
+                previous_digest=row.lane_digest,
+                digest=row.lane_digest,
+                job=None,
+                now=now,
+            )
+            touched.append(lane_id)
+            continue
+        if job_is_accepted(db, job):
+            # Accepted lanes are facts; removing one keeps its history intact.
+            continue
+        if job.state == JobState.QUEUED:
+            cancelled, current = _cancel_queued_lane_job(db, job)
+            if current is not None and current.state == JobState.RUNNING:
+                _supersede_event(
+                    db,
+                    plan,
+                    lane_id,
+                    action="kept_running",
+                    previous_digest=row.lane_digest,
+                    digest=row.lane_digest,
+                    job=current,
+                    now=now,
+                )
+                _update_lane_row(
+                    db,
+                    plan_id=plan.plan_id,
+                    lane_id=lane_id,
+                    digest=row.lane_digest,
+                    spec_digest=row.lane_spec_digest,
+                    job_id=current.job_id,
+                    superseded_by=plan.active_version,
+                    now=now,
+                )
+            elif cancelled:
+                _supersede_event(
+                    db,
+                    plan,
+                    lane_id,
+                    action="cancelled_queued",
+                    previous_digest=row.lane_digest,
+                    digest=row.lane_digest,
+                    job=current or job,
+                    now=now,
+                )
+                _update_lane_row(
+                    db,
+                    plan_id=plan.plan_id,
+                    lane_id=lane_id,
+                    digest=row.lane_digest,
+                    spec_digest=row.lane_spec_digest,
+                    job_id=None,
+                    superseded_by=plan.active_version,
+                    bump_generation=True,
+                    now=now,
+                )
+            else:  # pragma: no cover - a failed cancel is retried next tick
+                continue
+        elif job.state == JobState.RUNNING:
+            _supersede_event(
+                db,
+                plan,
+                lane_id,
+                action="kept_running",
+                previous_digest=row.lane_digest,
+                digest=row.lane_digest,
+                job=job,
+                now=now,
+            )
+            _update_lane_row(
+                db,
+                plan_id=plan.plan_id,
+                lane_id=lane_id,
+                digest=row.lane_digest,
+                spec_digest=row.lane_spec_digest,
+                job_id=job.job_id,
+                superseded_by=plan.active_version,
+                now=now,
+            )
+        elif job.state == JobState.SUCCEEDED:
+            _supersede_event(
+                db,
+                plan,
+                lane_id,
+                action="needs_decision",
+                previous_digest=row.lane_digest,
+                digest=row.lane_digest,
+                job=job,
+                now=now,
+            )
+            _update_lane_row(
+                db,
+                plan_id=plan.plan_id,
+                lane_id=lane_id,
+                digest=row.lane_digest,
+                spec_digest=row.lane_spec_digest,
+                job_id=job.job_id,
+                superseded_by=plan.active_version,
+                now=now,
+            )
+        else:
+            _supersede_event(
+                db,
+                plan,
+                lane_id,
+                action="dropped",
+                previous_digest=row.lane_digest,
+                digest=row.lane_digest,
+                job=job,
+                now=now,
+            )
+            _update_lane_row(
+                db,
+                plan_id=plan.plan_id,
+                lane_id=lane_id,
+                digest=row.lane_digest,
+                spec_digest=row.lane_spec_digest,
+                job_id=None,
+                superseded_by=plan.active_version,
+                bump_generation=True,
+                now=now,
+            )
+        touched.append(lane_id)
+    return tuple(touched)
+
+
+def _recover_superseded(
+    db: Any,
+    plan: PlanRecord,
+    revision: PlanRevision,
+    rows: dict[str, _LaneRow],
+    *,
+    now: datetime | None = None,
+) -> tuple[str, ...]:
+    """Move a superseded attempt forward once it reaches a terminal state.
+
+    A running attempt is left alone.  A failed or cancelled one frees the lane
+    for the new brief on the next submission; a succeeded one waits for the
+    owner, who alone decides whether the old result is acceptable.
+    """
+    touched: list[str] = []
+    for task in revision.tasks:
+        row = rows.get(task.task_id)
+        if row is None or not row.superseded_by or not row.job_id:
+            continue
+        job = store.get_job(db, row.job_id)
+        if job is not None and job.state in (JobState.RUNNING, JobState.SUCCEEDED):
+            continue
+        if job is not None and job.state == JobState.QUEUED:
+            cancelled, current = _cancel_queued_lane_job(db, job)
+            if current is not None and current.state == JobState.RUNNING:
+                continue
+            if not cancelled and current is not None and current.state == JobState.QUEUED:
+                continue
+            job = current
+        _event(
+            db,
+            plan_id=plan.plan_id,
+            lane_id=task.task_id,
+            kind="plan_lane_retried",
+            event_key=(
+                f"plan:{plan.plan_id}:lane:{task.task_id}:retried:"
+                f"{plan.active_version}:{lane_digest(task)}"
+            ),
+            payload={
+                "plan_id": plan.plan_id,
+                "lane_id": task.task_id,
+                "revision": plan.active_version,
+                "previous_job_id": row.job_id,
+                "previous_job_state": job.state.value if job is not None else None,
+            },
+            now=now,
+        )
+        _update_lane_row(
+            db,
+            plan_id=plan.plan_id,
+            lane_id=task.task_id,
+            digest=lane_digest(task),
+            spec_digest=lane_spec_digest(task),
+            job_id=None,
+            superseded_by=None,
+            bump_generation=True,
+            now=now,
+        )
+        touched.append(task.task_id)
+    return tuple(touched)
 
 
 # ---------------------------------------------------------------------------
@@ -1244,6 +2027,15 @@ def _dependencies_satisfied(
 def _reconcile_one(
     db: Any, plan: PlanRecord, *, owner_initiated: bool, now: datetime | None
 ) -> PlanReconcileResult:
+    # P4: apply a mid-run edit before projecting.  The edit rules are
+    # idempotent and keyed on the stored digests, so a crash between the
+    # revision activation and this step is completed on the next tick.
+    revision = plan.plan_store().get_revision(plan.project_id, plan.active_version)
+    rows = _lane_rows(db, plan.plan_id)
+    _apply_lane_edits(db, plan, revision, rows, now=now)
+    rows = _lane_rows(db, plan.plan_id)
+    _apply_removed_lanes(db, plan, revision, rows, now=now)
+    _recover_superseded(db, plan, revision, rows, now=now)
     projection = _project(db, plan)
     if not projection.projected:
         raise PlanRunnerError(
