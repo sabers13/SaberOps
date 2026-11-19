@@ -355,8 +355,17 @@ class McpServer:
         elif not self._active:
             instructions = SESSION_OFF_INSTRUCTIONS
         else:
+            from saberops.walkthrough import intro_text, store_needs_introduction
+
+            opening = (
+                intro_text() + " Ask me to walk you through the setup, or call "
+                "start_walkthrough with your project folder. "
+                if store_needs_introduction(self._context.db_path)
+                else ""
+            )
             instructions = (
-                SHORT_INSTRUCTIONS
+                opening
+                + SHORT_INSTRUCTIONS
                 + " Approving proposals, moving main, pushing, quarantine approval, "
                 "posture attestation, gate execution, tracked-source edits and "
                 "deletions outside .orch are never available here."
@@ -460,11 +469,19 @@ class McpServer:
                 if not self.read_only
                 else "Another agent session is already planning; this one can only read."
             )
+            from saberops.walkthrough import intro_text, store_needs_introduction
+
+            opening = (
+                f" {intro_text()} Say \"walk me through saberops\" and call "
+                "start_walkthrough with the project folder to set it up together."
+                if store_needs_introduction(self._context.db_path)
+                else ""
+            )
             text = (
-                f"{PREFIX} SaberOps is on. {role} Start every message that relays SaberOps "
-                f"to the user with \"{PREFIX}\". Call preflight with the project repository "
-                f"(or run `orch preflight --repo /path/to/project`) before submitting work. "
-                f"Follow this guide:\n\n{GUIDE}"
+                f"{PREFIX} SaberOps is on. {role}{opening} Start every message that relays "
+                f"SaberOps to the user with \"{PREFIX}\". Call preflight with the project "
+                f"repository (or run `orch preflight --repo /path/to/project`) before "
+                f"submitting work. Follow this guide:\n\n{GUIDE}"
             )
         else:
             text = (

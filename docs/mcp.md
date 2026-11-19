@@ -43,6 +43,20 @@ served, and an unknown requested revision falls back to `2025-06-18`.
 `tools/*` and `resources/*` are refused with JSON-RPC `-32600` until
 `initialize` + `notifications/initialized` have completed.
 
+## First run, in plain words
+
+On a fresh store, turning SaberOps on opens with a short introduction and then
+one setup step at a time, each derived from `preflight`. `orch welcome` prints
+the same text in a terminal (`--json` for the structured form), and the MCP
+`start_walkthrough` tool returns it to the agent. The agent may run a routine
+step (`kind: agent`) after the owner agrees. Steps marked `owner` — confirming a
+plan, signing in to a CLI, allowing or blocking a provider, freeing disk space,
+updating a CLI — are handed to the owner with the exact command and never run by
+the agent. A step marked `answer` needs one value from the owner (a check
+command, a remaining plan amount) and the agent never invents it. Progress is
+derived from the live preflight, so an interrupted walkthrough resumes at the
+first missing step with no stored cursor.
+
 ## The job and administration tools
 
 | Tool | Mutating | Key arguments | Calls |
@@ -52,6 +66,8 @@ served, and an unknown requested revision falls back to `2025-06-18`.
 | `promote_scout` | yes | `job_id`, `goal`, `acceptance`, `base_ref`, `idempotency_key` | `saberops.jobs.service.promote_scout` |
 | `get_job` | no | `job_id` | `saberops.jobs.service.get_job` |
 | `catch_up` | no | `job_id` or `plan_id` | read-only handoff over saved job, run, check, review and question records; with `plan_id`, the plan header, lane table and per-lane open questions |
+| `preflight` | no | `repo` | `saberops.preflight.collect_preflight` |
+| `start_walkthrough` | no | `repo` | `saberops.walkthrough.build_walkthrough`: the plain-language introduction and one setup step at a time, with check marks |
 | `list_jobs` | no | `state`, `limit` | `saberops.jobs.service.list_jobs` |
 | `plan_status` | no | `plan_id` or `repo` | `saberops.plan_state.project_plan_state` (the exact `STATE.md` projection) |
 | `cancel_job` | yes | `job_id`, `reason` | `saberops.jobs.service.cancel_job` |
@@ -274,7 +290,8 @@ exclusive `flock` during each read-modify-write.
   `note_job`, `answer_question`, `propose_config_change`, `propose_mode_change`
   and `resume_work` are refused with JSON-RPC error `-32020`. Its read tools
   (`get_job`, `catch_up`, `list_jobs`, `capacity`, `read_evidence`,
-  `list_questions`, `list_proposals`, `get_mode`, `get_pause`) keep working.
+  `list_questions`, `list_proposals`, `get_mode`, `get_pause`, `start_walkthrough`)
+  keep working.
 * **Stale self-healing:** a record whose `pid` is dead is stale and is stolen by
   the next client (`os.kill(pid, 0)` is the liveness probe), so a crashed client
   never locks out future writers. A non-empty but unreadable/malformed record is

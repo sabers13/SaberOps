@@ -160,6 +160,31 @@ CLI (`orch mode set`) or the Questions page.
 - When the user asks to turn SaberOps off, call `saberops_off` and carry on as a
   normal coding agent. Turn it back on only when they ask (`saberops_on`).
 
+## First time: the walkthrough
+- When the owner says "walk me through saberops", asks how to start, or the
+  setup is unfinished (a fresh store, `preflight` not green, or no job yet),
+  call `start_walkthrough` with the project `repo` before anything else.
+- Open with the short introduction it returns, in plain words: what SaberOps
+  does, what it never does, and how long setup takes. Avoid jargon; if a word
+  cannot be avoided, define it in one line (the result carries a small glossary
+  for job, review and accept).
+- Then one step at a time. Explain the step in one or two sentences, ask, and
+  either run its command after a clear yes (`kind: agent`) or give the exact
+  command the owner types (`kind: owner`). Never run an owner step: confirming a
+  plan, signing in to a CLI, allowing or blocking a provider, freeing disk
+  space, updating a CLI. For `kind: answer`, ask for the value (a test command,
+  a remaining amount) and never invent one, above all a remaining plan amount;
+  then run the step's command with it.
+- After each step, call `start_walkthrough` again. Steps already done come back
+  with `done: true` and `next_step` is the first missing one, so an interrupted
+  conversation resumes at the right place with no stored cursor. Never tell the
+  owner a step is done without that result.
+- When `ready` is true, submit `sample_first_job` as one `submit_job`, call
+  `wait_job`, and present the exact `orch accept RUN_ID` when it finishes. The
+  owner accepts; you cannot. Then show `what_next` as one short screen.
+- If the owner writes in another language, say the walkthrough in that language
+  and keep every command exactly as written.
+
 ## When to use it
 - Use SaberOps for changes worth isolating and checking: features, fixes,
   refactors, anything that touches several files or must pass the project's checks.

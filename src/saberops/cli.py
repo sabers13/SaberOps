@@ -1489,6 +1489,16 @@ def build_parser() -> argparse.ArgumentParser:
     preflight_parser.add_argument("--db", default=None, help="Owner database path.")
     preflight_parser.add_argument("--json", action="store_true", help="Output structured findings.")
 
+    welcome_parser = subparsers.add_parser(
+        "welcome",
+        help="Introduce SaberOps in plain words and show the next setup step.",
+    )
+    welcome_parser.add_argument("--repo", default=".", help="Project Git repository.")
+    welcome_parser.add_argument("--db", default=None, help="Owner database path.")
+    welcome_parser.add_argument(
+        "--json", action="store_true", help="Output the structured walkthrough."
+    )
+
     # orch ui
     ui_parser = subparsers.add_parser(
         "ui",
@@ -7908,6 +7918,15 @@ def _dispatch(args: argparse.Namespace) -> int:
                 if finding.remedy:
                     print(f"  Fix: {finding.remedy}")
         return 1 if any(f.severity == "FAIL" for f in findings) else 0
+    elif args.command == "welcome":
+        from saberops.walkthrough import build_walkthrough, render_text
+
+        walkthrough = build_walkthrough(Path(args.repo), Path(args.db) if args.db else None)
+        if args.json:
+            print(json.dumps(walkthrough.as_dict(), indent=2))
+        else:
+            print(render_text(walkthrough))
+        return 0
     elif args.command == "doctor":
         return handle_doctor(args)
     elif args.command == "ui":

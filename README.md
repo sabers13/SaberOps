@@ -240,6 +240,11 @@ python -m pip install -e ".[dev]"
 
 ## Quick start
 
+`orch welcome --repo /path/to/project` introduces SaberOps in plain words and
+shows the setup steps in the order `preflight` reports them, with a check mark
+after each one. It is the same walkthrough the agent offers when you say "walk me
+through saberops".
+
 Start with one project readiness check. It reports all missing setup, including
 which filesystems need space, and prints the commands to address each finding:
 

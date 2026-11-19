@@ -2,9 +2,9 @@
 
 The following tools are exposed::
 
-    preflight submit_job submit_plan get_job catch_up plan_status tail_job wait_job list_jobs
-    cancel_job note_job capacity read_evidence list_questions answer_question
-    propose_config_change list_proposals get_mode propose_mode_change
+    preflight start_walkthrough submit_job submit_plan get_job catch_up plan_status tail_job
+    wait_job list_jobs cancel_job note_job capacity read_evidence list_questions
+    answer_question propose_config_change list_proposals get_mode propose_mode_change
 
 With ``ORCH_NATIVE_WORKERS`` enabled, four more tools exist for the hybrid
 native-worker path (ADR-0030): ``native_claim``, ``native_heartbeat``,
@@ -137,6 +137,7 @@ READ_TOOLS: frozenset[str] = frozenset(
         "tail_job",
         "wait_job",
         "preflight",
+        "start_walkthrough",
         "list_jobs",
         "capacity",
         "read_evidence",
@@ -149,6 +150,7 @@ READ_TOOLS: frozenset[str] = frozenset(
 
 TOOL_NAMES: tuple[str, ...] = (
     "preflight",
+    "start_walkthrough",
     "submit_job",
     "submit_plan",
     "promote_scout",
@@ -1342,6 +1344,15 @@ def _note_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str,
     }
 
 
+def _start_walkthrough(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    from saberops.walkthrough import build_walkthrough
+
+    repo = _require_text(arguments, "repo", what="repo")
+    payload = build_walkthrough(Path(repo), context.db_path).as_dict()
+    payload["v"] = SNAPSHOT_SCHEMA_VERSION
+    return payload
+
+
 def _preflight(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
     from saberops.preflight import collect_preflight
 
@@ -2098,6 +2109,14 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
         "Check project readiness and report setup commands without model prompts.",
         _schema({"repo": {"type": "string", "minLength": 1}}, required=("repo",)),
         _preflight,
+        mutating=False,
+    )
+    register(
+        "start_walkthrough",
+        "Plain-language first-run walkthrough: a short introduction, then one setup "
+        "step at a time from preflight, with check marks. Resume by calling it again.",
+        _schema({"repo": {"type": "string", "minLength": 1}}, required=("repo",)),
+        _start_walkthrough,
         mutating=False,
     )
     register(
