@@ -667,3 +667,30 @@ def test_scoped_launch_failure_propagates_without_masking_exit_127(
     )
     assert res_real_127.launch_failed is False
     assert res_real_127.exit_code == 127
+
+
+def test_parallel_step_grant_does_not_collapse_to_one_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: E2 -- a stale one-worker total peak must not freeze worker count."""
+    monkeypatch.setattr(gt, "cpu_core_count", lambda: 8)
+    reserve = 2 * gt.GB
+    avail = reserve + 6 * gt.GB
+    ledger = gt.MemoryLedger(
+        tmp_path / "ledger",
+        reserve_bytes=reserve,
+        cold_start_peak_bytes=1 * gt.GB,
+        available_memory_fn=lambda: avail,
+        pressure_fn=lambda: gt.MemoryPressure(0.0, 0.0),
+    )
+    # A partial or one-worker run recorded a small total peak.
+    ledger.record_peak("full", "full", 142 * gt.MIB, workers=1)
+    assert ledger.predict_peak("full", "full") == 142 * gt.MIB
+    with ledger.acquire("full", "full", wait=0.0) as lease:
+        assert lease.grant_bytes > 142 * gt.MIB
+        assert ledger.workers_for_grant(lease.grant_bytes, "full", "full") >= 2
+    # A learned total that genuinely exceeds the budget still waits.
+    ledger.record_peak("full", "full", 8 * gt.GB, workers=4)
+    with pytest.raises(TimeoutError):
+        with ledger.acquire("full", "full", wait=0.05, notify=lambda _m: None):
+            pass

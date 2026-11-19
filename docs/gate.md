@@ -2,10 +2,14 @@
 
 Workers run `bash scripts/lane-check.sh --base REF [--also PATH_OR_NODE ...]
 [--out FILE]`. It prints committed and local changed files, checks the whole
-repository with ruff and strict mypy, and runs changed test files plus matching
-`tests/test_<module>.py` files and explicit targets. Deleted test files are omitted.
-Zero targets skips pytest, while lint and types still run. This evidence makes a
-lane provisional; it does not certify integration.
+repository with ruff and strict mypy, and runs the tests selected by
+`scripts/select_tests.py` plus explicit targets. `scripts/gate-affected.sh` is
+the same runner with the same selector, so a diff always selects the same tests
+in both entry points. Tests marked `pytest.mark.slow` are excluded from the
+per-change selection (the full gate still runs them); an all-slow selection is
+a clean pytest skip, not a selector failure. Deleted test files and stale map
+node IDs are omitted. Zero targets skips pytest, while lint and types still run.
+This evidence makes a lane provisional; it does not certify integration.
 
 The integrator merges all lanes and runs **one** `bash scripts/gate-full.sh
 [--result-dir DIR]`. The full gate holds a shared slot during lint, types, the

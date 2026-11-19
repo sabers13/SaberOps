@@ -1,7 +1,8 @@
 # ADR-0010: Skip the duplicate post-integration gate only for a receipt-bound fast-forward
 
-- **Status:** Accepted (owner approval 2026-11-19). Implementation pending in
-  Phase 1 lane E2; until then the gate runs as it does today.
+- **Status:** Accepted (owner approval 2026-11-19) and implemented in Phase 1
+  lane E2. A passing full gate records a durable run receipt; acceptance skips
+  the duplicate gate only when every condition below holds.
 - **Date:** 2026-11-19
 - **Decider:** Saber (owner)
 - **Related:** [ADR-0001](0001-saberops-engine-mcp-first.md) (acceptance),
@@ -39,6 +40,18 @@ receipt re-runs the full gate.
 Everything else is unchanged: the target-base check, the final
 compare-and-swap, owner-only acceptance and the recorded evidence. The receipt
 used and the fact that the gate was skipped are recorded with the acceptance.
+
+### Implementation
+
+A passing configured gate records a `full_gate_receipt` on the run's durable
+event stream. The receipt carries the base SHA, candidate SHA, gate command, a
+digest of the frozen gate configuration, the pass flag, start/finish times and
+a self-digest. Acceptance re-validates every field at accept time, including
+the 24-hour age and the self-digest, and records the receipt digest with the
+`post_integration_gate_skipped` and `run_accepted` events. Tests cover the skip
+and each re-run condition: different base, different candidate (merge or
+refresh), changed command, changed configuration, expired receipt, tampered
+receipt, and a receipt from another run.
 
 ## 3. Consequences
 

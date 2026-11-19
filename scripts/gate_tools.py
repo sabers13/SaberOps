@@ -924,6 +924,54 @@ class MemoryLedger:
         cores = max(1, int(self._cpu_cores()))
         return max(1, min(cores, int(grant_bytes) // per_worker))
 
+    def effective_grant(
+        self,
+        predicted: int,
+        step: str,
+        size_bucket: str,
+        remaining: int | None,
+    ) -> int:
+        """Return the reservation for a parallel pytest step.
+
+        A total-peak estimate learned from an interrupted or one-worker run can
+        be much smaller than the memory this step would use with the workers the
+        budget can actually cover.  Without this floor the worker count
+        collapses to one and stays there, because the next run learns the same
+        small total peak.  Parallel steps therefore reserve the larger of the
+        learned total and ``per_worker * affordable_workers``, never more than
+        the remaining host budget.  A step whose *learned total* already exceeds
+        the budget still waits (the budget check happens before this floor).
+        """
+        if remaining is None or predicted <= 0:
+            return predicted
+        parallel = step in ("full", "coverage-map") or (
+            step == "affected" and size_bucket != "small"
+        )
+        if not parallel:
+            return predicted
+        # Caller already holds the ledger lock (or is only reading); do not call
+        # the public predictor here or the non-reentrant flock deadlocks.
+        data = self._load_peaks_locked()
+        entry = data["steps"].get(step_key(step, size_bucket))
+        learned = entry.get("per_worker_bytes") if isinstance(entry, dict) else None
+        if not (isinstance(learned, int) and learned > 0):
+            learned = data.get("per_worker_bytes")
+        per_worker = max(
+            1,
+            learned
+            if isinstance(learned, int) and learned > 0
+            else self.cold_start_per_worker_bytes,
+        )
+        cores = max(1, int(self._cpu_cores()))
+        affordable = max(1, min(cores, remaining // per_worker))
+        # One worker's worth of headroom keeps the step's own cgroup ceiling
+        # (MemoryHigh = grant) from throttling the controller and workers when
+        # the estimate is exactly right.
+        desired = per_worker * (affordable + 1)
+        if desired <= predicted:
+            return predicted
+        return min(remaining, desired)
+
     def record_peak(
         self,
         step: str,
@@ -1152,13 +1200,14 @@ class MemoryLedger:
                     lock_file.close()
                     lock_path.unlink(missing_ok=True)
                     return None, "MEMORY_LOW"
+                grant = self.effective_grant(predicted, step, size_bucket, remaining)
                 record: dict[str, Any] = {
                     "holder_id": holder_id,
                     "pid": os.getpid(),
                     "worktree": worktree,
                     "step": step,
                     "size_bucket": size_bucket,
-                    "grant_bytes": predicted,
+                    "grant_bytes": grant,
                     "started_at": now_wall,
                     "unit_name": "",
                     "cgroup_path": "",
@@ -1172,7 +1221,7 @@ class MemoryLedger:
                         holder_id=holder_id,
                         step=step,
                         size_bucket=size_bucket,
-                        grant_bytes=predicted,
+                        grant_bytes=grant,
                         wait_seconds=0.0,
                         lock_file=lock_file,
                         meta_path=meta_path,
@@ -1228,7 +1277,9 @@ class MemoryLedger:
                             f"> budget={remaining} bytes ({len(live)} active)"
                         )
                     else:
-                        grant = predicted
+                        grant = self.effective_grant(
+                            predicted, step, size_bucket, remaining
+                        )
                         record: dict[str, Any] = {
                             "holder_id": holder_id,
                             "pid": os.getpid(),
