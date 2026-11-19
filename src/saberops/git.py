@@ -466,6 +466,30 @@ class GitManager:
         return wt
 
     @staticmethod
+    def create_detached_worktree(
+        repo_path: Path | str,
+        worktree_path: Path | str,
+        start_point: str,
+    ) -> Path:
+        """Create a scratch worktree checked out detached at ``start_point``.
+
+        Used for read-only work (F26 advisor calls) that must never create a
+        branch or move any ref.  The same repository-global worktree metadata
+        lock as :meth:`create_worktree` serializes the mutation.
+        """
+        repo = Path(repo_path).resolve()
+        wt = Path(worktree_path).resolve()
+        if wt.exists():
+            raise FileExistsError(f"Target worktree path already exists: {wt}")
+        wt.parent.mkdir(parents=True, exist_ok=True)
+        args = ["git", "worktree", "add", "--detach", str(wt), start_point]
+        with _serialized_worktree_metadata_mutation(repo):
+            res = run_process(args, cwd=repo)
+        if not res.passed:
+            raise RuntimeError(f"Failed to create detached worktree at {wt}: {res.stderr}")
+        return wt
+
+    @staticmethod
     def remove_worktree(
         repo_path: Path | str,
         worktree_path: Path | str,

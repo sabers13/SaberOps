@@ -22,8 +22,9 @@ starts. That boundary is the safe point at which new owner input can be added.
 ## 2. Decision
 
 1. A steering note is **durable state on the job**, not a live process input.
-   It is stored with its creation time and delivery record in the owner
-   database and appears in the job event history.
+   It is stored with its creation time, its source (`owner` or `advisor`) and
+   its delivery record in the owner database, and appears in the job event
+   history.
 2. A note is delivered **only inside the prompt of the next worker attempt**
    that starts for the job's current run — the first attempt for a queued job,
    otherwise the next retry, repair or continuation attempt. Nothing is ever
@@ -54,3 +55,7 @@ starts. That boundary is the safe point at which new owner input can be added.
   lane F14 behind `ORCH_NUDGE_IDLE_WORKERS`): it records one bounded continue
   note rather than typing into the process. The nudge is spent once per job, and
   a second stall raises attention without another note.
+- Advisor checkpoints (ADR-0034, lane F26) record their advice through the same
+  channel with `source=advisor`. Advice is not owner authority and is labelled
+  as advice in the prompt and in every note view; delivery semantics are
+  identical.

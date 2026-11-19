@@ -1291,6 +1291,14 @@ def job_status_view(db: Any, job: Job) -> dict[str, Any]:
     if report is not None:
         view["report"] = report
     view["steering_notes"] = [note.to_dict() for note in steering_notes(db, job.job_id)]
+    # F26: advisor route, calls and advice share one read-only projection with
+    # get_job, tail_job and catch_up, so every surface states the same record.
+    try:
+        from saberops.advisor import advisor_view_for_job
+
+        view["advisor"] = advisor_view_for_job(db, job)
+    except Exception as exc:  # noqa: BLE001 - a projection never breaks status
+        view["advisor"] = {"enabled": False, "error": exc.__class__.__name__}
     roles = (
         build_roles_view(db, job.current_run_id, plan_identity=job.caller_id)
         if job.current_run_id

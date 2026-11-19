@@ -17,6 +17,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, ClassVar, Protocol
 
+from saberops.advisor import advisor_before_attempt, advisor_before_review
 from saberops.authority import load_authority_settings
 from saberops.autonomous_runtime import (
     AutonomousRuntimeContract,
@@ -201,6 +202,7 @@ from saberops.slicing import resolve_work_packages
 from saberops.steering import (
     append_steering_section,
     record_steering_delivery,
+    render_steering_section,
     steering_section_for_run,
 )
 from saberops.storage_gc import retire_run_worktrees
@@ -4807,6 +4809,38 @@ class Orchestrator:
                     run_id=run_id,
                     attempt_id=attempt.id,
                 )
+                # F26: at most one read-only advisor checkpoint can fire before
+                # this attempt starts.  Its advice is an ordinary steering note
+                # (ADR-0016): it rides the prompt this attempt is about to run,
+                # is recorded on the attempt, and never reaches a live process.
+                # Off by default; bounded by the per-job call budget.
+                if config.kind != SCOUT_RUN_KIND:
+                    advisor_advice = advisor_before_attempt(
+                        self.db,
+                        repo=repo,
+                        run_id=run_id,
+                        registry=self.registry,
+                        attempt_id=attempt_id,
+                        attempts=attempts,
+                        plan_steps=plan_steps,
+                        base_sha=start_point,
+                        task=task,
+                        prior_worktree=(
+                            attempts[-1].worktree_path if attempts else None
+                        ),
+                    )
+                    if advisor_advice is not None and advisor_advice.note is not None:
+                        task_for_worker_pre = append_steering_section(
+                            task_for_worker_pre,
+                            render_steering_section([advisor_advice.note]),
+                        )
+                        record_steering_delivery(
+                            self.db,
+                            [advisor_advice.note],
+                            run_id=run_id,
+                            attempt_id=attempt_id,
+                        )
+                        prompt_bytes_pre = len(task_for_worker_pre.encode("utf-8"))
                 worker_activation = WorkerActivation(
                     id=f"act_{uuid.uuid4().hex[:10]}",
                     run_id=run_id,
@@ -6061,6 +6095,27 @@ class Orchestrator:
                             candidate_sha=commit_sha,
                             is_autonomous=bool(autonomous is not None),
                         )
+                        # F26: the single "before the result goes to review"
+                        # checkpoint.  It runs after the gate passed and before
+                        # independent review is dispatched; its advice becomes a
+                        # pending steering note, so a review-repair attempt (the
+                        # next safe point) carries it.  Never for a scout report.
+                        if (
+                            config.kind != SCOUT_RUN_KIND
+                            and decision.independent_review_required
+                        ):
+                            advisor_before_review(
+                                self.db,
+                                repo=repo,
+                                run_id=run_id,
+                                registry=self.registry,
+                                attempt_id=attempt_id,
+                                attempts=attempts,
+                                plan_steps=plan_steps,
+                                base_sha=adopted_base_commit or base_commit,
+                                task=task,
+                                worktree_path=wt_path,
+                            )
                         if not decision.independent_review_required:
                             self.db.record_event(
                                 run_id,

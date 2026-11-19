@@ -366,6 +366,9 @@ class SteeringNote:
     delivered_at: str | None = None
     delivered_run_id: str | None = None
     delivered_attempt_id: str | None = None
+    #: Who wrote the note: ``owner`` (or the planner on the owner's behalf) or
+    #: ``advisor`` (F26 checkpoint advice).  Delivery semantics are identical.
+    source: str = "owner"
 
     @property
     def delivered(self) -> bool:
@@ -381,6 +384,7 @@ class SteeringNote:
             "delivered_at": self.delivered_at,
             "delivered_run_id": self.delivered_run_id,
             "delivered_attempt_id": self.delivered_attempt_id,
+            "source": self.source,
         }
 
 

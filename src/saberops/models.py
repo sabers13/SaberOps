@@ -123,6 +123,8 @@ class DispatchStage(StrEnum):
     RETRY = "retry"
     REPAIR = "repair"
     REVIEW = "review"
+    #: F26: one read-only advisor checkpoint call, never a coding dispatch.
+    ADVISOR = "advisor"
 
 
 class ProviderReadiness(StrEnum):

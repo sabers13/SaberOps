@@ -27,9 +27,11 @@ __all__ = [
 ]
 
 _STEERING_BANNER = (
-    "[OWNER STEERING NOTES]\n"
-    "The owner sent these corrections while this work was already running. "
-    "Apply them to the current attempt; keep completed work and do not redo it."
+    "[STEERING NOTES]\n"
+    "Corrections for work already in progress. Owner notes come from the owner; "
+    "advisor notes were produced by the configured advisor model at a checkpoint "
+    "and are advice, not authority. Apply them to the current attempt; keep "
+    "completed work and do not redo it."
 )
 
 
@@ -37,7 +39,8 @@ def render_steering_section(notes: tuple[SteeringNote, ...] | list[SteeringNote]
     """Render one bounded, clearly delimited section for the attempt prompt."""
     lines = [_STEERING_BANNER, ""]
     for note in notes:
-        lines.append(f"- ({note.created_at}) {note.body}")
+        source = "advisor" if getattr(note, "source", "owner") == "advisor" else "owner"
+        lines.append(f"- ({note.created_at}) [{source}] {note.body}")
     return "\n".join(lines)
 
 

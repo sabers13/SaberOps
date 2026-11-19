@@ -227,6 +227,14 @@ continuation — and the attempt, run and time are recorded on the note. A job
 that finishes before another attempt keeps the note pending. `catch_up` and
 `orch job notes` list every note with its delivery state.
 
+An optional advisor (ADR-0034) records its checkpoint advice through the same
+channel with `source: "advisor"`; the prompt and the note views label it as
+advice rather than owner authority. Set it per project with
+`orch project advisor set <provider> <model> [--calls N]` and turn it off with
+`orch project advisor off`; it is off by default. Its route, call budget, calls
+and advice appear in the `advisor` block of `get_job`, `tail_job` and
+`catch_up`, and its calls are counted in per-job usage.
+
 `answer_question` accepts only `authority: "PLAN"` (legacy `ORCHESTRATOR` is
 accepted and mapped). Owner authority is not exercisable over MCP:
 `authority: "OWNER"` is refused with `-32010`, and a question whose decision

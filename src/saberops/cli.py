@@ -2731,6 +2731,50 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_repo_arg(project_notes_clear)
 
+    # F26: optional advisor route (off by default), a stronger plan model
+    # consulted read-only at three checkpoints and never used to write code.
+    project_advisor = project_sub.add_parser(
+        "advisor",
+        help="Show, set or turn off the optional read-only advisor route (F26).",
+    )
+    project_advisor_sub = project_advisor.add_subparsers(
+        dest="project_advisor_command", required=True
+    )
+    project_advisor_show = project_advisor_sub.add_parser(
+        "show",
+        help="Show the advisor route and its per-job call budget.",
+    )
+    _add_repo_arg(project_advisor_show)
+    _add_json_arg(project_advisor_show)
+    project_advisor_set = project_advisor_sub.add_parser(
+        "set",
+        help="Set the advisor route from a plan-subscription provider and model.",
+    )
+    _add_repo_arg(project_advisor_set)
+    project_advisor_set.add_argument(
+        "provider",
+        type=str,
+        help="Plan-subscription provider (codex, opencode, anthropic).",
+    )
+    project_advisor_set.add_argument(
+        "model",
+        type=str,
+        help="Model on that subscription (for example the strongest available model).",
+    )
+    project_advisor_set.add_argument(
+        "--calls",
+        dest="advisor_calls",
+        type=int,
+        default=3,
+        help="Per-job advisor call budget (default 3).",
+    )
+    _add_json_arg(project_advisor_set)
+    project_advisor_off = project_advisor_sub.add_parser(
+        "off",
+        help="Turn the advisor off for this project (the default).",
+    )
+    _add_repo_arg(project_advisor_off)
+
     project_set_workflow = project_sub.add_parser(
         "set-workflow",
         help="Persist a workflow preset (quick|balanced|thorough|max) or custom settings.",
@@ -5749,6 +5793,89 @@ def handle_project_notes_clear(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_project_advisor_show(args: argparse.Namespace) -> int:
+    """Handle ``orch project advisor show`` (F26)."""
+    from saberops.advisor import AdvisorConfigError, load_advisor_route
+
+    try:
+        repo = _resolve_repo_for_project_settings(args)
+    except SystemExit:
+        return 2
+    try:
+        route = load_advisor_route(repo)
+    except (OSError, AdvisorConfigError) as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    payload = {
+        "repo": str(repo),
+        "enabled": route is not None,
+        "route": route.as_dict() if route is not None else None,
+        "call_budget": route.call_budget if route is not None else None,
+    }
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    if route is None:
+        print("Advisor: off (the default)")
+        return 0
+    print(f"Advisor: {route.route_id} (up to {route.call_budget} calls per job)")
+    return 0
+
+
+def handle_project_advisor_set(args: argparse.Namespace) -> int:
+    """Handle ``orch project advisor set PROVIDER MODEL`` (F26)."""
+    from saberops.advisor import (
+        PLAN_ROUTE_PROVIDERS,
+        AdvisorConfigError,
+        set_advisor_route,
+    )
+
+    try:
+        repo = _resolve_repo_for_project_settings(args)
+    except SystemExit:
+        return 2
+    provider = str(getattr(args, "provider", "") or "").strip().lower()
+    if provider not in PLAN_ROUTE_PROVIDERS:
+        known = ", ".join(sorted(PLAN_ROUTE_PROVIDERS))
+        print(
+            f"[!] the advisor runs on a plan subscription only; expected one of {known}",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        route = set_advisor_route(
+            repo,
+            provider=provider,
+            model=str(getattr(args, "model", "") or ""),
+            call_budget=int(getattr(args, "advisor_calls", 3)),
+        )
+    except (OSError, AdvisorConfigError) as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(route.as_dict(), indent=2, sort_keys=True))
+        return 0
+    print(f"Advisor set to {route.route_id} (up to {route.call_budget} calls per job)")
+    return 0
+
+
+def handle_project_advisor_off(args: argparse.Namespace) -> int:
+    """Handle ``orch project advisor off`` (F26)."""
+    from saberops.advisor import AdvisorConfigError, clear_advisor_route
+
+    try:
+        repo = _resolve_repo_for_project_settings(args)
+    except SystemExit:
+        return 2
+    try:
+        path = clear_advisor_route(repo)
+    except (OSError, AdvisorConfigError) as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    print(f"Advisor off (removed {path})")
+    return 0
+
+
 def handle_authority_show(args: argparse.Namespace) -> int:
     """Handle `orch authority show`."""
     try:
@@ -8506,6 +8633,13 @@ def _dispatch(args: argparse.Namespace) -> int:
                 return handle_project_notes_set(args)
             elif args.project_notes_command == "clear":
                 return handle_project_notes_clear(args)
+        elif args.project_command == "advisor":
+            if args.project_advisor_command == "show":
+                return handle_project_advisor_show(args)
+            elif args.project_advisor_command == "set":
+                return handle_project_advisor_set(args)
+            elif args.project_advisor_command == "off":
+                return handle_project_advisor_off(args)
         elif args.project_command == "set-workflow":
             return handle_project_set_workflow(args)
         elif args.project_command == "list":

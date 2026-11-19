@@ -726,6 +726,9 @@ def _tail_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str,
         "activity": view["activity"],
         "reason": view["reason"],
         "run_id": run_id,
+        # F26: advice is visible while the job runs, from the same record
+        # catch_up and get_job read.
+        "advisor": view.get("advisor"),
     }
     if run_id is None:
         payload.update(
@@ -1084,13 +1087,17 @@ def _catch_up_next_action(
     }
 
 
-def _catch_up_return_summary(context: ServerContext) -> dict[str, Any]:
+def _catch_up_return_summary(
+    context: ServerContext, *, advisor: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
     """The one durable "while you were away" summary, shared with the notifier.
 
     Read-only: the journal part is append-only away state, and the ``plans``
     section reuses the projection behind ``STATE.md``.  A killed scheduler and a
     fresh CLI session therefore read exactly the same records, and closing the
-    planner never loses the plan's next action.
+    planner never loses the plan's next action.  When the caller passes the
+    job's advisor projection, the same record is attached here too (F26), so the
+    return summary never disagrees with `catch_up`.
     """
     try:
         from saberops.away import build_return_summary
@@ -1098,7 +1105,10 @@ def _catch_up_return_summary(context: ServerContext) -> dict[str, Any]:
 
         db = context.database(read_only=True)
         plans = plan_return_summaries(db) if db is not None else ()
-        return build_return_summary(plans=plans).as_dict()
+        payload = build_return_summary(plans=plans).as_dict()
+        if advisor is not None:
+            payload["advisor"] = dict(advisor)
+        return payload
     except Exception as exc:
         return {"error": f"{exc.__class__.__name__}: {exc}"}
 
@@ -1206,7 +1216,11 @@ def _catch_up(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str,
         "open_questions": questions,
         "self_answered": _catch_up_self_answered(context, job),
         "steering_notes": _catch_up_steering_notes(db, job),
-        "return_summary": _catch_up_return_summary(context),
+        # F26: advisor route, calls and advice for this job.
+        "advisor": view.get("advisor"),
+        "return_summary": _catch_up_return_summary(
+            context, advisor=view.get("advisor")
+        ),
         "failure": failure,
         "report": result.get("report"),
         "next_action": _catch_up_next_action(job, view, result, projection, questions),

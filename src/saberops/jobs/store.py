@@ -146,15 +146,31 @@ def ensure_tables(db: Any) -> None:
                 created_at TEXT NOT NULL,
                 delivered_at TEXT,
                 delivered_run_id TEXT,
-                delivered_attempt_id TEXT
+                delivered_attempt_id TEXT,
+                source TEXT NOT NULL DEFAULT 'owner'
             )
             """
         )
+        _ensure_steering_source_column(conn)
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_job_steering_notes_job "
             "ON job_steering_notes(job_id, note_id)"
         )
         conn.commit()
+
+
+def _ensure_steering_source_column(conn: sqlite3.Connection) -> None:
+    """Add ``source`` to a steering-notes table created before F26.
+
+    Existing rows are owner notes, which is exactly the column default.  The
+    advisor (F26) records its advice through the same durable channel, so a
+    note must say who wrote it without changing delivery semantics.
+    """
+    columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(job_steering_notes)")}
+    if "source" not in columns:
+        conn.execute(
+            "ALTER TABLE job_steering_notes ADD COLUMN source TEXT NOT NULL DEFAULT 'owner'"
+        )
 
 
 def _ensure_depends_on_column(conn: sqlite3.Connection) -> None:
@@ -580,19 +596,25 @@ def _row_to_steering_note(row: sqlite3.Row) -> SteeringNote:
             if row["delivered_attempt_id"] is not None
             else None
         ),
+        source=(
+            str(row["source"])
+            if "source" in row.keys() and row["source"] is not None
+            else "owner"
+        ),
     )
 
 
 def insert_steering_note(
-    db: Any, job_id: str, body: str, *, now: datetime | None = None
+    db: Any, job_id: str, body: str, *, now: datetime | None = None, source: str = "owner"
 ) -> SteeringNote:
     """Record one durable note plus its job event in a single transaction."""
     ensure_tables(db)
     at = _utcnow_iso(now)
     with _owner_conn(db) as conn:
         cursor = conn.execute(
-            "INSERT INTO job_steering_notes (job_id, body, created_at) VALUES (?, ?, ?)",
-            (job_id, body, at),
+            "INSERT INTO job_steering_notes (job_id, body, created_at, source)"
+            " VALUES (?, ?, ?, ?)",
+            (job_id, body, at, source),
         )
         note_id = int(cursor.lastrowid or 0)
         _append_event(
@@ -602,7 +624,7 @@ def insert_steering_note(
             kind="steering_note",
             from_state=None,
             to_state=None,
-            payload={"note_id": note_id, "length": len(body)},
+            payload={"note_id": note_id, "length": len(body), "source": source},
         )
         row = conn.execute(
             "SELECT * FROM job_steering_notes WHERE note_id = ?", (note_id,)
