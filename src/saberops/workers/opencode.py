@@ -138,8 +138,20 @@ class OpenCodeAdapter(WorkerAdapter):
         )
 
     def _cli_version(self) -> str:
+        """Return the installed CLI version for dispatch evidence.
+
+        The probe is a vendor process launch, so it receives the same
+        hermetic projection as the worker child: ambient shell
+        configuration (for example ``OPENCODE_CONFIG_CONTENT``) and
+        credentials must never reach it.
+        """
         try:
-            res = self.runner([self.opencode_bin, "--version"], timeout=5)
+            res = self.runner(
+                [self.opencode_bin, "--version"],
+                timeout=5,
+                env=hermetic_env("opencode", {}),
+                inherit_env=False,
+            )
             text = (res.stdout or "").strip().splitlines()
             if res.passed and text and text[0].strip():
                 return text[0].strip()
@@ -236,6 +248,10 @@ class OpenCodeAdapter(WorkerAdapter):
             return self._isolation_refusal(request, str(exc))
         if use_stdin:
             kwargs["input_text"] = request.task
+        # Dispatch evidence: the CLI version that serves this turn is read
+        # before the worker child starts, so the probe is never the last
+        # child a recorder sees and cannot race the dispatch it describes.
+        cli_version = self._cli_version()
         # Billing pinning and isolation pinning both run after the hermetic
         # projection and after any accepted overlay, so an ambient
         # OPENCODE_CONFIG_CONTENT (or OPENCODE_CONFIG path override, which
@@ -254,7 +270,6 @@ class OpenCodeAdapter(WorkerAdapter):
 
         display_stdout, usage = parse_opencode_jsonl(res.stdout)
         reported_model, reported_variant = extract_opencode_identity(res.stdout)
-        cli_version = self._cli_version()
         actual_model = reported_model or "unreported"
         requested_variant = "unreported"
         reported_variant_val = reported_variant or "unreported"
