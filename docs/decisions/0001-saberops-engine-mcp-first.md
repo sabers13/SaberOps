@@ -61,7 +61,12 @@ Use every AI subscription Saber pays for **through plan limits, not pay-per-toke
 - **MCP server (primary integration surface)** — few, coarse, asynchronous tools:
   `submit_task(repo, goal, acceptance, priority, deadline) -> job_id + ETA`,
   `get_job`, `get_result` (commit SHA, diff summary, gate evidence, review verdict),
-  `cancel_job`, `list_jobs`, `capacity()`. Logs/evidence as MCP resources. Polling must always work; progress notifications are optional.
+  `cancel_job`, `list_jobs`, `capacity()`. Logs/evidence as MCP resources.
+  Polling must always work; progress notifications are optional. The concrete
+  tool set has since gained a wait-for-outcome tool, a preflight and read-only
+  evidence reads such as `catch_up`; the shipped schemas are the contract, and
+  delivery does not depend on the MCP client (see
+  [ADR-0011](0011-bounded-automatic-actions.md)).
 - **Later, as separate adapters:** ACP (SaberOps appears as an agent/engine in editors and chat apps, e.g. an OpenMausBot custom engine) and A2A (agent-to-agent delegation).
 - **Not a plugin of any host app.** Reasons: host APIs move fast; a host that launches the CLIs itself would void SaberOps' billing guarantees; language mismatch (TS vs Python); a standalone engine is the stronger portfolio artifact.
 
@@ -82,7 +87,7 @@ Use every AI subscription Saber pays for **through plan limits, not pay-per-toke
 | Coverage-mapped affected gate (T-002/T-002b) | **Keep** (developer tooling and engine gate) |
 | Job queue, capacity scheduler, preemption, MCP server, per-caller budgets | **New** (the main build) |
 | FastAPI service layer | **Keep**, cleaned into a stable internal API |
-| Web console / Jinja UI | **Optional front-end** (minimal status/approval view at most; no further investment until engine milestones are met) |
+| Web console / Jinja UI | **Superseded in part by [ADR-0005](0005-mcp-first-engine-and-phase-2-board.md):** a Phase 2 worker board plus setup page is in scope; no other UI investment |
 | Channels bridge, native shared chat, terminal/tmux handoff, synced console | **Cut** candidates (host apps do this better) |
 | OmniRoute gateway (~5.8k lines) | **Cut** candidate; API-key-only freeze (T-006) only if kept |
 | Copilot adapter | **Cut** (Student plan: 200 credits, Auto-only) |
@@ -98,7 +103,8 @@ Use every AI subscription Saber pays for **through plan limits, not pay-per-toke
 
 **Negative / costs**
 - Deleting features that took effort (console, Channels, terminal handoff, gateway).
-- No polished UI of its own; usability depends on MCP/CLI clients.
+- No polished UI in Phase 1; usability depends on MCP/CLI clients. Qualified by
+  ADR-0005: a bounded board plus setup page follows in Phase 2.
 - MCP is request/response; long-running jobs need an async design and polling.
 
 **Risks**
@@ -119,8 +125,11 @@ Use every AI subscription Saber pays for **through plan limits, not pay-per-toke
 
 ## 7. Open questions
 1. Gateway: delete entirely, or keep API-key-only (T-006)? Default: delete unless S-001 finds a real dependency.
-2. Web console: keep a minimal read-only status page or remove?
-3. Antigravity: keep attended-only adapter or remove from automation entirely?
+2. Web console: **resolved by ADR-0005** — a Phase 2 board plus setup page
+   replaces the minimal status view.
+3. Antigravity: **resolved** — the adapter stays attended-only as a worker;
+   driving SaberOps from an Antigravity session is supported, automating it is
+   not (ADR-0005 §4).
 4. Hermes Agent / OpenClaw: verify each one's MCP client support before promising integrations.
 
 ## 8. References
