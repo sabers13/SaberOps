@@ -121,6 +121,18 @@ class RigEnvironment:
     worker_candidates: tuple[str, str]
     reviewer_control_path: Path
     monkeypatch: pytest.MonkeyPatch
+    #: The attended-terminal presence record this rig holds (``None`` when the
+    #: test deliberately starts unattended).
+    attendance_path: Path | None = None
+
+    def end_attendance(self) -> None:
+        """Close the rig's attended terminal (F24: presence ends immediately)."""
+        if self.attendance_path is not None:
+            try:
+                self.attendance_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            self.attendance_path = None
 
     def db(self) -> Database:
         """Open the global owner database for this isolated store."""
@@ -264,10 +276,16 @@ def build_lifecycle_rig(
     monkeypatch: pytest.MonkeyPatch,
     *,
     gate_command: str | None = None,
+    attended: bool = True,
 ) -> RigEnvironment:
     """Create a fresh empty store + toy repo wired with fake workers and reviewer.
 
     Every setup step uses the public functions/commands an owner uses.
+
+    ``attended`` (F24) holds an attended-terminal presence record for the rig,
+    because an owner is watching the terminal while these engine tests run.
+    Tests about absence pass ``attended=False`` and open/close presence
+    themselves.
     """
     home_dir = tmp_path / "home"
     state_home = tmp_path / "state"
@@ -418,6 +436,19 @@ def build_lifecycle_rig(
     )
     rig.set_worker_mode("commit")
     rig.set_reviewer_verdict("PASS")
+    if attended:
+        # F24: presence is required from the start.  The rig represents an owner
+        # watching a terminal for the duration of the test, so a long heartbeat
+        # timeout keeps that record live without a background thread.
+        monkeypatch.setenv("SABEROPS_PLANNING_HEARTBEAT_TIMEOUT", "21600")
+        from saberops.attendance import record_attendance, record_path
+
+        folder = saberops_state_dir / "attendance"
+        monkeypatch.setenv("SABEROPS_ATTENDANCE_DIR", str(folder))
+        homepage = record_attendance(
+            "watch", label="lifecycle rig attended terminal", directory=folder
+        )
+        rig.attendance_path = record_path(homepage.session_id, folder)
     return rig
 
 

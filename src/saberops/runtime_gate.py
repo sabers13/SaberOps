@@ -19,10 +19,19 @@ it sees what was paused and the owner (or that session) clears the pause with on
 command or tool call.  That is why the gate is a small durable document rather
 than a pure function of liveness.
 
-Presence is only enforced once a planning session has actually registered
-(:attr:`GateDocument.presence_known`).  A store that has only ever been driven
-by direct CLI commands keeps its previous behaviour; the moment an MCP planning
-session turns SaberOps on, this gate arms and every later run requires one.
+Presence is required from the start for **every** store (F24): a fresh store
+with no planning session never starts work, whether or not a session was ever
+seen.  Presence comes from either of two live sources:
+
+* an AI CLI planning session holding the MCP planning lease and heartbeating it;
+* an attended terminal session (``orch watch`` or ``orch run --attended``)
+  heartbeating one of :mod:`saberops.attendance`'s records.
+
+A store that has never had either source is closed but **not** sticky: work
+queued by a direct ``orch`` command starts as soon as an attended session
+opens, because nothing was interrupted.  Once presence has been seen, losing it
+is the F17 pause: a sticky record, one notice, running workers parked at a safe
+point, and an explicit confirmation to resume.
 """
 
 from __future__ import annotations
@@ -58,8 +67,10 @@ __all__ = [
     "evaluate_gate",
     "gate_path",
     "gate_view",
+    "heartbeat_timeout",
     "mark_presence_known",
     "maybe_send_digest",
+    "note_presence_seen",
     "presence",
     "record_pause_event",
     "read_gate",
@@ -127,7 +138,7 @@ def label_for(reason: str | None) -> str:
 
 @dataclass(frozen=True)
 class Presence:
-    """The live planning-session answer, derived from the MCP planning lease."""
+    """The live presence answer: planning lease first, attended terminal second."""
 
     live: bool
     pid: int | None
@@ -136,10 +147,13 @@ class Presence:
     last_activity: float | None
     age_seconds: float | None
     detail: str
+    #: ``planning_session``, ``terminal``, ``planning_lease`` or ``none``.
+    source: str = "none"
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "live": self.live,
+            "source": self.source,
             "pid": self.pid,
             "session_id": self.session_id,
             "client": self.client,
@@ -197,20 +211,33 @@ class PauseRecord:
 
 @dataclass
 class GateDocument:
-    """The durable gate document (``<state>/runtime-gate.json``)."""
+    """The durable gate document (``<state>/runtime-gate.json``).
 
-    presence_known: bool = False
+    ``presence_known`` is kept as the on-disk arming flag for compatibility
+    with F17 documents, but every store is armed from the start (F24).  A
+    legacy document that says ``presence_known: false`` is migrated when the
+    engine next evaluates the gate.  ``presence_seen_at`` records the first
+    time a session was actually live, so a never-attended store closes without
+    a sticky pause while a store that lost its session keeps F17's pause.
+    """
+
+    presence_known: bool = True
     pause: PauseRecord | None = None
     last_resume: dict[str, str] | None = None
     #: Run ids the engine stopped for a pause and must relaunch on resume.
     paused_runs: tuple[str, ...] = ()
+    #: First observation of a live planning or attended terminal session.
+    presence_seen_at: str | None = None
     schema_version: int = SCHEMA_VERSION
     extra: dict[str, Any] = field(default_factory=dict)
+    #: True only on an in-memory document read from an F17 unarmed file.
+    legacy_unarmed: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         body: dict[str, Any] = {
             "version": self.schema_version,
             "presence_known": self.presence_known,
+            "presence_seen_at": self.presence_seen_at,
             "pause": self.pause.as_dict() if self.pause is not None else None,
             "last_resume": self.last_resume,
             "paused_runs": list(self.paused_runs),
@@ -256,6 +283,12 @@ class GateState:
     paused_runs: tuple[str, ...]
     paused_jobs: tuple[str, ...]
     resume_requires: str = "confirmation"
+    #: A session has been live at least once for this store.
+    presence_seen: bool = False
+    #: Closed only because a never-attended store has no session: not sticky.
+    transient: bool = False
+    #: An F17 ``presence_known: false`` document still needs its one migration.
+    migration_pending: bool = False
 
     @property
     def label(self) -> str:
@@ -271,6 +304,9 @@ class GateState:
             "since": self.since,
             "mode": self.mode.value,
             "presence_required": self.presence_required,
+            "presence_seen": self.presence_seen,
+            "transient": self.transient,
+            "migration_pending": self.migration_pending,
             "presence": self.presence.as_dict(),
             "away": self.away.as_dict() if self.away is not None else None,
             "paused_runs": list(self.paused_runs),
@@ -311,6 +347,11 @@ def _heartbeat_timeout() -> float:
     return value if value > 0 else DEFAULT_HEARTBEAT_TIMEOUT_SECONDS
 
 
+def heartbeat_timeout() -> float:
+    """The shared presence-heartbeat timeout in seconds."""
+    return _heartbeat_timeout()
+
+
 def _digest_seconds() -> float:
     try:
         value = float(os.environ.get(DIGEST_SECONDS_ENV, "").strip() or "0")
@@ -325,10 +366,12 @@ def _digest_seconds() -> float:
 
 
 def read_gate(path: Path | None = None) -> GateDocument:
-    """Read the gate document; a missing file is a fresh, unarmed gate.
+    """Read the gate document; a missing file is a fresh, armed gate.
 
     A file that exists but cannot be parsed raises: an unreadable gate must
-    never be read as "open".
+    never be read as "open".  An F17 document written with
+    ``presence_known: false`` reads as armed and is marked ``legacy_unarmed``
+    so :func:`refresh_gate` can persist the migration and send one notice.
     """
     target = path or gate_path()
     if not target.is_file():
@@ -348,7 +391,14 @@ def read_gate(path: Path | None = None) -> GateDocument:
         raise RuntimeGateError(
             f"work gate {target}: version must be integer {SCHEMA_VERSION}"
         )
-    known = {"version", "presence_known", "pause", "last_resume", "paused_runs"}
+    known = {
+        "version",
+        "presence_known",
+        "presence_seen_at",
+        "pause",
+        "last_resume",
+        "paused_runs",
+    }
     pause_raw = payload.get("pause")
     pause = None if pause_raw is None else PauseRecord.from_mapping(pause_raw)
     if pause_raw is not None and pause is None:
@@ -360,14 +410,17 @@ def read_gate(path: Path | None = None) -> GateDocument:
             str(key): str(value) for key, value in resume_raw.items()
         }
     runs = payload.get("paused_runs")
+    seen_raw = payload.get("presence_seen_at")
     return GateDocument(
-        presence_known=payload.get("presence_known") is True,
+        presence_known=True,
         pause=pause,
         last_resume=last_resume,
         paused_runs=tuple(str(run) for run in runs)
         if isinstance(runs, list)
         else (),
+        presence_seen_at=seen_raw if isinstance(seen_raw, str) and seen_raw else None,
         extra={k: v for k, v in payload.items() if k not in known},
+        legacy_unarmed=payload.get("presence_known") is False,
     )
 
 
@@ -406,11 +459,10 @@ def write_gate(document: GateDocument, path: Path | None = None) -> Path:
 # --------------------------------------------------------------------------- #
 
 
-def presence(*, now: datetime | None = None) -> Presence:
-    """Return whether a planning session is connected and heartbeating."""
+def _lease_presence(moment: datetime) -> Presence:
+    """The planning-lease half of presence (F17)."""
     from saberops.mcp.lease import OrchestratorLease, pid_is_alive
 
-    moment = now or _now()
     try:
         record = OrchestratorLease().read()
     except Exception as exc:  # pragma: no cover - defensive
@@ -422,6 +474,7 @@ def presence(*, now: datetime | None = None) -> Presence:
             last_activity=None,
             age_seconds=None,
             detail=f"planning lease unreadable: {type(exc).__name__}",
+            source="planning_lease",
         )
     if record is None:
         return Presence(
@@ -442,6 +495,7 @@ def presence(*, now: datetime | None = None) -> Presence:
             last_activity=record.last_activity or None,
             age_seconds=None,
             detail=f"planning session pid {record.pid} is gone",
+            source="planning_lease",
         )
     age = (
         max(0.0, moment.timestamp() - (record.heartbeat_at or record.last_activity))
@@ -460,6 +514,7 @@ def presence(*, now: datetime | None = None) -> Presence:
                 f"planning session heartbeat is {age:.0f}s old "
                 f"(limit {_heartbeat_timeout():.0f}s)"
             ),
+            source="planning_lease",
         )
     return Presence(
         live=True,
@@ -469,23 +524,82 @@ def presence(*, now: datetime | None = None) -> Presence:
         last_activity=record.heartbeat_at or record.last_activity or None,
         age_seconds=age,
         detail="planning session is connected",
+        source="planning_session",
     )
 
 
-def mark_presence_known(path: Path | None = None) -> bool:
-    """Arm the presence requirement once a planning session registers.
+def _terminal_presence(moment: datetime) -> Presence | None:
+    """The attended-terminal half of presence (F24); ``None`` when absent."""
+    from saberops.attendance import live_attendance
 
-    Called by the MCP server when it takes the planning lease.  Idempotent and
-    cheap: it only writes when the flag is not already set.
+    record = live_attendance(now=moment)
+    if record is None:
+        return None
+    age = max(0.0, moment.timestamp() - record.heartbeat_at)
+    label = record.label or record.kind
+    return Presence(
+        live=True,
+        pid=record.pid,
+        session_id=record.session_id,
+        client=label,
+        last_activity=record.heartbeat_at,
+        age_seconds=age,
+        detail=f"attended terminal is open ({label})",
+        source="terminal",
+    )
+
+
+def presence(*, now: datetime | None = None) -> Presence:
+    """Return whether a planning session or attended terminal is connected.
+
+    An AI CLI planning session (the MCP lease) wins for display when both are
+    live; either one is enough for the gate.
+    """
+    moment = now or _now()
+    lease = _lease_presence(moment)
+    if lease.live:
+        return lease
+    terminal = _terminal_presence(moment)
+    if terminal is not None:
+        return terminal
+    return lease
+
+
+def mark_presence_known(path: Path | None = None) -> bool:
+    """Record that presence has been seen for this store (called on lease take).
+
+    Arming is no longer conditional, so this only writes the first
+    ``presence_seen_at``.  Called by the MCP server when it takes the planning
+    lease.  Idempotent and cheap: it only writes when the flag is not set.
     """
     try:
         document = read_gate(path)
     except RuntimeGateError:
         # Never overwrite a corrupt document; the gate fails closed on its own.
         return False
-    if document.presence_known:
+    changed = document.legacy_unarmed or document.presence_known is not True
+    if document.presence_seen_at is None:
+        document.presence_seen_at = _now().isoformat()
+        changed = True
+    if not changed:
         return False
     document.presence_known = True
+    document.legacy_unarmed = False
+    write_gate(document, path)
+    return True
+
+
+def note_presence_seen(*, now: datetime | None = None, path: Path | None = None) -> bool:
+    """Persist the first live-presence timestamp without changing the pause."""
+    try:
+        document = read_gate(path)
+    except RuntimeGateError:
+        return False
+    if document.presence_seen_at is not None and not document.legacy_unarmed:
+        return False
+    document.presence_seen_at = document.presence_seen_at or (now or _now()).isoformat()
+    document.presence_known = True
+    document.legacy_unarmed = False
     write_gate(document, path)
     return True
 
@@ -634,43 +748,47 @@ def _state_from_document(
     detail: str = "",
 ) -> GateState:
     pause = document.pause
+    common: dict[str, Any] = {
+        "mode": mode,
+        "presence": presence_value,
+        "presence_required": True,
+        "away": away,
+        "paused_runs": document.paused_runs,
+        "presence_seen": document.presence_seen_at is not None,
+        "migration_pending": document.legacy_unarmed,
+    }
     if pause is not None:
         return GateState(
             closed=True,
             reason=pause.reason,
             detail=pause.detail,
             since=pause.since,
-            mode=mode,
-            presence=presence_value,
-            presence_required=document.presence_known,
-            away=away,
-            paused_runs=document.paused_runs,
             paused_jobs=pause.paused_jobs,
+            **common,
         )
     if reason is not None:
+        # A store that has never had a live session closes without a sticky
+        # pause: opening an attended terminal is enough to let queued work run.
+        transient = (
+            reason == PauseReason.NO_PLANNING_SESSION.value
+            and document.presence_seen_at is None
+        )
         return GateState(
             closed=True,
             reason=reason,
             detail=detail,
             since=None,
-            mode=mode,
-            presence=presence_value,
-            presence_required=document.presence_known,
-            away=away,
-            paused_runs=document.paused_runs,
             paused_jobs=(),
+            transient=transient,
+            **common,
         )
     return GateState(
         closed=False,
         reason=None,
         detail="",
         since=None,
-        mode=mode,
-        presence=presence_value,
-        presence_required=document.presence_known,
-        away=away,
-        paused_runs=document.paused_runs,
         paused_jobs=(),
+        **common,
     )
 
 
@@ -774,7 +892,7 @@ def evaluate_gate(
                 f"({budget.jobs_started}/{budget.max_jobs})"
             ),
         )
-    if document.presence_known and not current.live:
+    if not current.live:
         return _state_from_document(
             document,
             mode=mode,
@@ -800,11 +918,22 @@ def refresh_gate(
     condition holds changes nothing: the pause record keeps its original
     ``since`` and the notice key is derived from it, so the owner sees exactly
     one notice per pause.
+
+    A never-attended store (no live session was ever seen) closes *without* a
+    sticky pause: it has no interrupted work and work queued by a direct
+    ``orch`` command should start as soon as an attended session opens.  The
+    first live session is recorded here; every later loss is F17's sticky
+    pause.  An F17 document written unarmed is migrated here with one notice.
     """
     moment = now or _now()
     state = evaluate_gate(db=db, now=moment, path=path)
+    _persist_presence_bookkeeping(state, moment, path=path)
+    _migrate_legacy_gate(db, state, moment, path=path)
     if not state.closed or state.reason in (None, PauseReason.OWNER.value):
         # Owner pauses are written by the pause command itself; nothing to add.
+        return state
+    if state.transient:
+        # No session has ever been live: nothing was interrupted, no notice.
         return state
     if state.since is not None:
         return state
@@ -818,6 +947,76 @@ def refresh_gate(
     _record_pause_once(paused)
     _notify_pause_once(db, paused)
     return paused
+
+
+def _persist_presence_bookkeeping(
+    state: GateState, moment: datetime, *, path: Path | None
+) -> None:
+    """Write the first live-presence timestamp (best effort, fail closed)."""
+    if state.closed or not state.presence.live or state.presence_seen:
+        return
+    try:
+        note_presence_seen(now=moment, path=path)
+    except Exception as exc:  # pragma: no cover - bookkeeping never blocks a tick
+        logging.getLogger(__name__).warning("presence bookkeeping failed: %s", exc)
+
+
+def _migrate_legacy_gate(
+    db: Any | None, state: GateState, moment: datetime, *, path: Path | None
+) -> None:
+    """Arm an F17-unarmed document once, with one notice and one ledger event."""
+    if not state.migration_pending:
+        return
+    try:
+        document = read_gate(path)
+    except RuntimeGateError:
+        return
+    document.presence_known = True
+    document.legacy_unarmed = False
+    if state.presence.live and document.presence_seen_at is None:
+        document.presence_seen_at = moment.isoformat()
+    try:
+        write_gate(document, path)
+    except OSError as exc:  # pragma: no cover - a read-only store stays closed
+        logging.getLogger(__name__).warning("gate migration write failed: %s", exc)
+        return
+    try:
+        from saberops.mcp.ledger import EventLedger
+
+        EventLedger().append(
+            "work_gate_armed",
+            {
+                "reason": "presence_required_from_start",
+                "detail": (
+                    "work runs only while an AI CLI planning session or an "
+                    "attended terminal (orch watch, orch run --attended) is open"
+                ),
+            },
+            key="work_gate_armed:f24",
+        )
+    except Exception as exc:  # pragma: no cover - the notice path still runs
+        logging.getLogger(__name__).warning("gate migration ledger append failed: %s", exc)
+    _notify_migration_once(db)
+
+
+def _notify_migration_once(db: Any | None) -> None:
+    if db is None:
+        return
+    try:
+        from saberops.notifications import notify_once
+
+        notify_once(
+            _notifications_ledger(db),
+            "work_gate_armed:f24",
+            "SaberOps now requires a session",
+            (
+                "Work starts only while an AI CLI planning session or an attended "
+                "terminal (orch watch, orch run --attended) stays open. Nothing is "
+                "lost; open a session to continue."
+            ),
+        )
+    except Exception as exc:  # pragma: no cover - a notice must never break a tick
+        logging.getLogger(__name__).warning("gate migration notice failed: %s", exc)
 
 
 def record_pause_event(state: GateState) -> None:
@@ -990,12 +1189,13 @@ def register_lane_submit_gate() -> None:
 def summary_line(state: GateState) -> str:
     """One owner-facing line for status output and catch-up."""
     if not state.closed:
-        presence_note = (
-            "planning session connected"
-            if state.presence.live
-            else "planning presence not required"
-        )
+        presence_note = {
+            "planning_session": "planning session connected",
+            "terminal": "attended terminal open",
+        }.get(state.presence.source, "session connected")
         return f"running ({presence_note})"
+    if state.transient:
+        return "idle (no planning session or attended terminal open)"
     return f"{state.label} since {state.since or 'now'}"
 
 

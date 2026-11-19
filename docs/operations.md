@@ -54,6 +54,23 @@ effective gate requires `--gate-command` (or `quick`, which needs none).
 `--review`, `--mode` and `--limit` flags. Runs freeze the effective
 policy at creation; changing the preset affects future runs only.
 
+## Presence and the work gate
+
+SaberOps starts work only while someone is present. Presence is an AI CLI
+planning session connected over MCP, or an attended terminal session: `orch
+watch` while a terminal is attached to its tmux session, or `orch run
+--attended` while that command runs. With neither open, the scheduler dispatches
+nothing -- jobs, plan lanes, retries, repairs and candidate refreshes all wait --
+and running workers are parked at a safe point with their work preserved.
+Closing the terminal or Ctrl-C ends presence within the heartbeat bound.
+
+A fresh store is closed but not paused: `orch job submit` queues, and work
+starts as soon as a session opens. Once a session has been seen and then lost,
+the pause is sticky: work resumes only after `orch resume` (owner) or the
+`resume_work` MCP tool. A plain `orch run` refuses to start while the gate is
+closed; `orch run --attended` is the terminal form that holds presence itself.
+See [ADR-0029](decisions/0029-no-work-without-a-planning-session.md).
+
 ## Run operations (retry / continue / refresh / try-worker)
 
 `orch retry RUN_ID` starts a fresh attempt of a run's frozen task and

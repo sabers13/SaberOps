@@ -1,11 +1,12 @@
 # ADR-0029: No work runs without a connected planning session
 
-- **Status:** Accepted. Implemented in Phase 1 lane F17 (Wave 3).
+- **Status:** Accepted. Implemented in Phase 1 lanes F17 and F24 (Wave 3).
 - **Date:** 2026-11-19
-- **Decider:** Saber (owner), Phase 1 plan lane F17
+- **Decider:** Saber (owner), Phase 1 plan lanes F17 and F24
 - **Related:** [ADR-0020](0020-owner-mode.md) (owner mode),
   [ADR-0027](0027-critical-only-questions.md) (critical-only rotation),
   [ADR-0028](0028-away-mode-standing-decisions.md) (away standing decisions),
+  [ADR-0025](0025-read-only-tmux-watch.md) (read-only watch view),
   [ADR-0015](0015-plan-files-and-rendered-plan-state.md) (plan-lane pause seam),
   [ADR-0002](0002-routing-admission-and-quota.md) (quota preemption/resume),
   [ADR-0011](0011-bounded-automatic-actions.md) (no silent work)
@@ -29,6 +30,15 @@ leak the owner forbade -- and it would also contradict the mode promise, because
 `away` is supposed to mean "the owner is away from the keyboard while the
 planning CLI stays open".
 
+F17 then armed its pause the first time an MCP planning session took the
+planning lease.  A store driven only by plain `orch` commands in a terminal was
+never paused, so the guarantee still had the leak the owner named.  F24 closes
+it: presence is required from the start for every store.  With no AI CLI
+planning session connected, SaberOps never starts work, whether or not a
+session was ever seen.  Plain terminal use counts only while an *attended*
+terminal session is open: `orch watch` (F23) while a terminal is attached, or
+`orch run --attended` while that command runs.
+
 ## 2. Decision
 
 1. **One durable work gate, one answer.** `runtime-gate.json` beside the owner
@@ -37,19 +47,20 @@ planning CLI stays open".
    is the only function that answers "may work start". It is closed when *any*
    of these holds:
    - the owner paused (`orch pause`, the Questions-page toggle);
-   - no connected planning session, **once presence has been established**
-     (the MCP stdio server took the planning lease at least once);
+   - no connected planning session and no attended terminal (F24);
    - an `away` session ran past its `until` or spent its job budget;
    - an `away` session has no end time and no job budget at all;
    - the gate document or the owner-mode document cannot be read (fail closed).
-2. **Presence is the planning lease plus a heartbeat.** The MCP stdio server
-   writes `heartbeat_at` on the planning lease every few seconds while the
-   session lives, so a long tool call or an idle chat is not mistaken for a
-   disconnect. Presence is absent when the lease is missing, its pid is dead
-   (the CLI was killed), or the heartbeat is older than the timeout (the CLI
-   crashed or lost its connection). A clean CLI close releases the lease, and
-   the scheduler notices on its next tick. Closing therefore pauses new
-   dispatch within one bounded tick in every mode.
+2. **Presence is a heartbeat from one of two sources.** An AI CLI planning
+   session writes `heartbeat_at` on the planning lease every few seconds while
+   it lives; an attended terminal writes an `attendance/<session>.json` record
+   and refreshes its `heartbeat_at` every few seconds (F24).  Presence is absent
+   when every source is missing, its pid is dead (the CLI or terminal was
+   killed), or each heartbeat is older than the shared timeout (the CLI
+   crashed, lost its connection, or the terminal closed).  A clean CLI close
+   releases the lease and a closed terminal removes its record; the scheduler
+   notices on its next tick. Closing therefore pauses new dispatch within one
+   bounded tick in every mode.
 3. **A pause is sticky and never resumes silently.** The returning session sees
    the pause in `catch_up` and `get_pause`; work continues only after one
    explicit confirmation: `orch resume` (owner) or the mutating MCP
@@ -78,20 +89,32 @@ planning CLI stays open".
    ``away`` session. A pre-existing `away` document with no session bound loads
    but never starts work (`away_unbounded`), so an upgrade cannot silently run
    unbounded.
-7. **Stores without a planning session keep their old behaviour.** Presence is
-   enforced only after the first MCP planning session registers. A store driven
-   solely by direct CLI commands is not retroactively gated; once the owner uses
-   a planning CLI, the rule applies from then on. This keeps direct CLI
-   scheduling usable without weakening the rule the owner asked for.
+7. **Presence is required from the start for every store.** A fresh store, or
+   one that has only ever been driven by plain `orch` commands, is closed until
+   a planning session or an attended terminal is live (F24).  A store that has
+   never had a live session is closed **without** a sticky pause: nothing was
+   interrupted, so work queued by `orch submit` starts as soon as an attended
+   session opens.  The first live session is recorded durably; losing it after
+   that is the sticky F17 pause described above.  F17 documents written with
+   `presence_known: false` are migrated to armed on the next evaluation, with
+   one notice and one `work_gate_armed` ledger event.  `orch run --attended`
+   holds presence for its own run and refuses while an explicit pause is open;
+   a plain `orch run` refuses to start without a live session, because its
+   detached execution would keep spending after the terminal closes.  Use
+   `--attended`, open a session, or `orch submit` and let the scheduler
+   dispatch.
 8. **While away or critical-only, a digest is sent periodically** (default
    hourly) listing running jobs, the subscriptions in use and the usage
    recorded so far, so unattended spend is visible without opening a session.
 
 ## 3. Consequences
 
-- Closing the planning CLI is now the safe action the owner wanted: no new
-  jobs, lanes, retries, repairs or refreshes, and every worker stops with its
-  work preserved. The only way back is an explicit confirmation.
+- Closing the planning CLI, or the attended terminal, is now the safe action the
+  owner wanted: no new jobs, lanes, retries, repairs or refreshes, and every
+  worker stops with its work preserved. The only way back is an explicit
+  confirmation once presence has been seen.
+- A fresh install cannot spend usage before the owner connects a CLI: the
+  scheduler runs but starts nothing, and `orch submit` only queues.
 - `away` cannot be an unattended background mode; it is an attended-but-distracted
   mode with a hard bound. This is the owner's chosen trade-off.
 - The pause record is one small document and one hash-chained ledger event per

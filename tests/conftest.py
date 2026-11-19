@@ -24,6 +24,39 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers", "packaged_routing_default: read the real (empty) packaged routing default"
     )
+    config.addinivalue_line(
+        "markers",
+        "no_attendance: do not hold a test attended terminal (presence tests)",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _attended_terminal(
+    request: pytest.FixtureRequest,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[None]:
+    """Run every test as if the owner had a terminal open (F24).
+
+    Presence is required from the start: a store with no planning session and
+    no attended terminal starts nothing.  Ordinary engine tests are not about
+    absence, so they get one attended-terminal record for the test's lifetime.
+    Presence tests opt out with ``@pytest.mark.no_attendance`` and drive the
+    gate themselves.  The record lives under the test's own ``tmp_path`` and
+    never touches the owner's real state directory.
+    """
+    if request.node.get_closest_marker("no_attendance") is not None:
+        yield
+        return
+    from saberops.attendance import record_attendance
+
+    # Keep the record beside the test's temp folder, never inside it: some tests
+    # assert the exact contents of their own directory.
+    folder = tmp_path.parent / f"{tmp_path.name}-attendance"
+    monkeypatch.setenv("SABEROPS_ATTENDANCE_DIR", str(folder))
+    monkeypatch.setenv("SABEROPS_PLANNING_HEARTBEAT_TIMEOUT", "21600")
+    record_attendance("watch", label="pytest attended terminal", directory=folder)
+    yield
 
 
 @pytest.fixture(autouse=True)

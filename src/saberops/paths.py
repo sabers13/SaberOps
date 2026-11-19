@@ -120,6 +120,11 @@ def get_runtime_gate_path() -> Path:
     return saberops_state_dir() / "runtime-gate.json"
 
 
+def get_attendance_dir() -> Path:
+    """Return the directory holding attended-terminal presence records (F24)."""
+    return saberops_state_dir() / "attendance"
+
+
 def get_control_plane_config_path() -> Path:
     """Return the canonical owner control-plane-config path."""
     return saberops_config_dir() / "control_plane.json"

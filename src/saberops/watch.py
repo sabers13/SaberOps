@@ -258,6 +258,19 @@ class Tmux:
             windows.append((name.strip(), job_id.strip() or None))
         return windows
 
+    def has_client(self, session: str) -> bool:
+        """Whether a terminal is currently attached to ``session``.
+
+        F24: an attended terminal is presence only while a client is attached.
+        A tmux session that outlives its terminal is not attended.
+        """
+        if self._path is None:
+            return False
+        proc = self._run(
+            "list-clients", "-t", session, "-F", "#{client_name}", check=False
+        )
+        return proc.returncode == 0 and bool(proc.stdout.strip())
+
     def new_session(self, name: str, argv: list[str]) -> None:
         self._run(
             "new-session",
@@ -697,6 +710,34 @@ def run_snapshot(
     return 0
 
 
+def _refresh_watch_attendance(
+    tmux: Tmux, session: str, current: Any | None
+) -> Any | None:
+    """Hold presence only while a terminal is attached to our watch session.
+
+    F24: the summary window is the keeper of ``orch watch`` presence.  It runs
+    inside the tmux session, so it can tell an attached terminal from a session
+    left behind after the terminal closed.  A detached session stops
+    heartbeating and presence expires within the bounded timeout.
+    """
+    from saberops.attendance import start_attendance
+
+    try:
+        attached = tmux.has_client(session)
+    except TmuxError:
+        attached = False
+    if attached:
+        if current is None:
+            return start_attendance(
+                "watch", label=f"orch watch {session}", session_id=f"watch-{session}"
+            )
+        current.heartbeat()
+        return current
+    if current is not None:
+        current.stop()
+    return None
+
+
 def run_summary_loop(
     *,
     db_path: Path,
@@ -713,29 +754,35 @@ def run_summary_loop(
         return run_snapshot(
             db_path=db_path, repo=repo, job_id=job_id, session=session, interval=interval
         )
-    while True:
-        db = _open_or_none(db_path)
-        if db is None:
-            return 1
-        try:
-            jobs = reconcile_session(
-                tmux,
-                session,
-                db,
-                repo=repo,
-                job_id=job_id,
-                db_path=db_path,
-                interval=interval,
-            )
-        except (TmuxError, WatchError) as exc:
-            print(f"watch: {exc}", file=sys.stderr)
-            return 1
-        frame = render_summary(db, jobs, session=session, repo=repo)
-        if once:
-            print(frame)
-            return 0
-        print(_ANSI_CLEAR + frame, flush=True)
-        time.sleep(interval)
+    attendance: Any | None = None
+    try:
+        while True:
+            db = _open_or_none(db_path)
+            if db is None:
+                return 1
+            try:
+                jobs = reconcile_session(
+                    tmux,
+                    session,
+                    db,
+                    repo=repo,
+                    job_id=job_id,
+                    db_path=db_path,
+                    interval=interval,
+                )
+            except (TmuxError, WatchError) as exc:
+                print(f"watch: {exc}", file=sys.stderr)
+                return 1
+            frame = render_summary(db, jobs, session=session, repo=repo)
+            if once:
+                print(frame)
+                return 0
+            print(_ANSI_CLEAR + frame, flush=True)
+            attendance = _refresh_watch_attendance(tmux, session, attendance)
+            time.sleep(interval)
+    finally:
+        if attendance is not None:
+            attendance.stop()
 
 
 def run_follow(
@@ -951,14 +998,19 @@ def handle_watch(args: Any) -> int:
             "watch: tmux is not installed; falling back to `orch monitor`.",
             file=sys.stderr,
         )
-        return run_monitor_fallback(
-            db_path=db_path,
-            repo=repo,
-            job_id=job_id,
-            once=False,
-            interval=interval,
-            timeout=timeout,
-        )
+        # F24: the fallback is still an attended terminal view; hold presence
+        # for as long as this command runs.
+        from saberops.attendance import attend
+
+        with attend("watch", label="orch watch (monitor fallback)"):
+            return run_monitor_fallback(
+                db_path=db_path,
+                repo=repo,
+                job_id=job_id,
+                once=False,
+                interval=interval,
+                timeout=timeout,
+            )
 
     db = _open_or_none(db_path)
     if db is None:
@@ -1004,4 +1056,16 @@ def handle_watch(args: Any) -> int:
         "worker).",
         file=sys.stderr,
     )
-    return tmux.attach(session)
+    # F24: the attaching command is itself an attended terminal session.  Its
+    # heartbeat ends when the terminal closes or the owner detaches.
+    from saberops.attendance import start_attendance
+
+    attachment = start_attendance(
+        "watch",
+        label=f"orch watch {session}",
+        session_id=f"watch-attach-{session}",
+    )
+    try:
+        return tmux.attach(session)
+    finally:
+        attachment.stop()

@@ -46,14 +46,20 @@ from saberops.runtime_gate import (
     set_pause,
 )
 
-pytestmark = pytest.mark.packaged_routing_default
+pytestmark = [
+    pytest.mark.packaged_routing_default,
+    # F24: this file drives presence itself; never hold a test terminal.
+    pytest.mark.no_attendance,
+]
 
 _SETUP_TIMEOUT = 180
 
 
 @pytest.fixture()
 def rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[RigEnvironment]:
-    environment = build_lifecycle_rig(tmp_path, monkeypatch)
+    # F24: this file is about presence *ending*, so the rig must not hold an
+    # attended terminal of its own.
+    environment = build_lifecycle_rig(tmp_path, monkeypatch, attended=False)
     # The lifecycle rig already pins HOME/XDG under tmp_path; the gate document
     # must live there too.
     monkeypatch.delenv("SABEROPS_RUNTIME_GATE", raising=False)
@@ -139,14 +145,24 @@ def _close_lost_heartbeat(rig: RigEnvironment) -> None:
 
 
 def test_presence_requires_a_registered_session(rig: RigEnvironment) -> None:
-    """A store that never had an MCP session is not gated (migration rule)."""
+    """F24: a fresh store with no session is closed but never sticky."""
     assert presence().live is False
-    assert evaluate_gate(db=rig.db()).closed is False
+    fresh = evaluate_gate(db=rig.db())
+    assert fresh.closed is True
+    assert fresh.reason == PauseReason.NO_PLANNING_SESSION.value
+    assert fresh.transient is True
+    # No session was ever live, so nothing was interrupted and no pause is
+    # written by the engine.
+    refresh_gate(rig.db())
+    assert read_gate().pause is None
 
     mark_presence_known()
     state = evaluate_gate(db=rig.db())
     assert state.closed is True
     assert state.reason == PauseReason.NO_PLANNING_SESSION.value
+    assert state.transient is False
+    refresh_gate(rig.db())
+    assert read_gate().pause is not None
 
 
 def test_live_session_is_seen_through_its_heartbeat(

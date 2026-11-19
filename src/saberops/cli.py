@@ -910,6 +910,17 @@ def build_parser() -> argparse.ArgumentParser:
             "following the run. The run continues either way if this shell exits."
         ),
     )
+    run_parser.add_argument(
+        "--attended",
+        action="store_true",
+        default=False,
+        help=(
+            "Hold an attended-terminal heartbeat for as long as this command "
+            "runs, so the engine never pauses the run while you watch it. "
+            "Closing the terminal or Ctrl-C ends presence and the run pauses "
+            "at a safe point. Conflicts with --detach."
+        ),
+    )
     publish_group = run_parser.add_mutually_exclusive_group()
     publish_group.add_argument(
         "--publish-candidate",
@@ -3153,26 +3164,66 @@ def handle_run(args: argparse.Namespace) -> int:
 
     # Execution is delegated to a detached per-run owner in its own session, so
     # losing this shell (hangup, Ctrl-C, terminal close) never stops the run.
-    supervisor = RunSupervisor(db=service.db)
+    attended = bool(getattr(args, "attended", False))
+    if attended and getattr(args, "detach", False):
+        print("[!] --attended cannot be combined with --detach", file=sys.stderr)
+        return 2
+    attendance: Any | None = None
+    if attended:
+        # F24: this command is the attended terminal session.  Its heartbeat is
+        # what keeps the work gate open; closing the terminal or Ctrl-C ends
+        # presence and the engine pauses the run at a safe point.
+        from saberops.attendance import start_attendance
+
+        attendance = start_attendance("attended-run", label="orch run --attended")
+        from saberops.runtime_gate import evaluate_gate, note_presence_seen
+
+        note_presence_seen()
+        gate = evaluate_gate(db=service.db)
+        if gate.closed:
+            # Presence does not clear an owner pause, an away bound or F17's
+            # sticky pause; those need one explicit confirmation.
+            attendance.stop()
+            print(f"[!] {gate.label}: run `orch resume` first", file=sys.stderr)
+            return 1
+    else:
+        from saberops.runtime_gate import evaluate_gate
+
+        gate = evaluate_gate(db=service.db)
+        if gate.closed:
+            # F24: no presence, no work.  A detached run would keep spending
+            # after this terminal closes; --attended holds presence instead.
+            print(
+                f"[!] {gate.label}: nothing starts. Run `orch run --attended` in "
+                "this terminal, open `orch watch`, or connect an AI CLI session"
+                + ("; an explicit `orch resume` clears the pause" if gate.since else ""),
+                file=sys.stderr,
+            )
+            return 1
     try:
-        started = supervisor.start_supervised_run(config)
-    except Exception as exc:
-        print(f"[!] Error during run execution: {exc}", file=sys.stderr)
-        return 1
-    run_id = started.run_id
-    spawned_owner = service.db.get_execution_owner(run_id)
-    print(f"[*] Run ID            : {run_id}")
-    if spawned_owner is None or not spawned_owner.is_active:
-        launched = service.db.get_run(run_id)
-        summary = launched.result_summary if launched is not None else "owner was not claimed"
-        print(f"[!] Execution owner was not started: {summary}", file=sys.stderr)
-        return 1
-    print(f"[*] Execution owner   : pid {spawned_owner.identity.pid} (detached session)")
-    if args.detach:
-        print("[*] Detached. The run continues independently of this shell.")
-        print(f"    orch wait {run_id} | orch status {run_id} | orch cancel {run_id}")
-        return 0
-    return _follow_run(service.db, run_id)
+        supervisor = RunSupervisor(db=service.db)
+        try:
+            started = supervisor.start_supervised_run(config)
+        except Exception as exc:
+            print(f"[!] Error during run execution: {exc}", file=sys.stderr)
+            return 1
+        run_id = started.run_id
+        spawned_owner = service.db.get_execution_owner(run_id)
+        print(f"[*] Run ID            : {run_id}")
+        if spawned_owner is None or not spawned_owner.is_active:
+            launched = service.db.get_run(run_id)
+            summary = launched.result_summary if launched is not None else "owner was not claimed"
+            print(f"[!] Execution owner was not started: {summary}", file=sys.stderr)
+            return 1
+        print(f"[*] Execution owner   : pid {spawned_owner.identity.pid} (detached session)")
+        if getattr(args, "detach", False):
+            print("[*] Detached. The run continues independently of this shell.")
+            print(f"    orch wait {run_id} | orch status {run_id} | orch cancel {run_id}")
+            return 0
+        return _follow_run(service.db, run_id)
+    finally:
+        if attendance is not None:
+            attendance.stop()
 
 
 # Lifecycle edges worth echoing while following a detached run.

@@ -439,6 +439,8 @@ def test_crash_between_submit_and_mapping_does_not_duplicate(
 def test_reconciler_submits_nothing_without_a_planning_session(
     rig: RigEnvironment,
 ) -> None:
+    # F24: the lane seam is about absence, so close the rig's attended terminal.
+    rig.end_attendance()
     db = rig.db()
     submission = _activate(rig, LANES_A_B_C, owner_initiated=False)
     assert submission.submitted == ()
