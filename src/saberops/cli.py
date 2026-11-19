@@ -109,6 +109,7 @@ from saberops.storage_gc import (
     default_gc_policy_path,
     load_gc_policy,
     preview_gc,
+    retire_landed_worktrees,
 )
 from saberops.storage_inventory import ArtifactClass, Inventory, build_inventory
 from saberops.storage_maintenance import database_audit_sink
@@ -982,12 +983,37 @@ def build_parser() -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,
     )
 
-    # orch cleanup <run-id>
+    # orch cleanup [<run-id>] [--landed]
     cleanup_parser = subparsers.add_parser(
         "cleanup",
-        help="Safely remove clean attempt worktrees for a completed or failed run.",
+        help=(
+            "Safely remove clean attempt worktrees for a completed or failed run, "
+            "or (--landed) only verified-landed clean worktrees for this repository."
+        ),
     )
-    cleanup_parser.add_argument("run_id", type=str, help="Run identifier (e.g. run_abc123).")
+    cleanup_parser.add_argument(
+        "run_id",
+        nargs="?",
+        type=str,
+        default=None,
+        help="Run identifier (e.g. run_abc123). Required unless --landed is given.",
+    )
+    cleanup_parser.add_argument(
+        "--landed",
+        action="store_true",
+        help=(
+            "Opt-in sweep: retire only clean attempt worktrees whose candidate is "
+            "accepted and still present in the target branch. Failed, dirty and "
+            "unlanded copies are kept and reported."
+        ),
+    )
+    cleanup_parser.add_argument(
+        "--repo",
+        dest="project_repo",
+        type=str,
+        default=None,
+        help="Repository root for --landed (defaults to the current directory).",
+    )
     cleanup_parser.add_argument(
         "--db",
         type=str,
@@ -3763,12 +3789,22 @@ def handle_list(args: argparse.Namespace) -> int:
 
 
 def handle_cleanup(args: argparse.Namespace) -> int:
-    """Handle `orch cleanup <run-id>` command."""
-    service = OrchestratorService(db=db_for_run(args, args.run_id))
+    """Handle `orch cleanup <run-id>` and the opt-in `orch cleanup --landed` sweep."""
+    run_id = getattr(args, "run_id", None)
+    landed = bool(getattr(args, "landed", False))
+    if landed and run_id:
+        print("[!] Use either a run id or --landed, not both.", file=sys.stderr)
+        return 2
+    if landed:
+        return _handle_cleanup_landed(args)
+    if not run_id:
+        print("[!] cleanup requires a run id, or --landed.", file=sys.stderr)
+        return 2
+    service = OrchestratorService(db=db_for_run(args, run_id))
 
-    print(f"[*] Cleaning up attempt worktrees for run '{args.run_id}'...")
+    print(f"[*] Cleaning up attempt worktrees for run '{run_id}'...")
     try:
-        res = service.cleanup_run(args.run_id)
+        res = service.cleanup_run(run_id)
     except Exception as exc:
         print(f"[!] Cleanup failed: {exc}", file=sys.stderr)
         return 1
@@ -3789,6 +3825,52 @@ def handle_cleanup(args: argparse.Namespace) -> int:
         for path in res["skipped_missing"]:
             print(f"  - {path}")
 
+    return 0
+
+
+def _handle_cleanup_landed(args: argparse.Namespace) -> int:
+    """Retire clean attempt worktrees whose candidate is verified landed."""
+    repo = (
+        Path(args.project_repo).resolve() if args.project_repo else Path.cwd().resolve()
+    )
+    if not repo.exists() or not GitManager.is_git_repo(repo):
+        print(f"[!] Not a Git repository: {repo}", file=sys.stderr)
+        return 1
+    db = db_for_repo(args, repo)
+    print(f"[*] Retiring verified-landed clean worktrees for '{repo}'...")
+    report = retire_landed_worktrees(
+        db,
+        repo_root=repo,
+        audit=database_audit_sink(db),
+    )
+
+    print("─" * 60)
+    if report.removed:
+        print(f"Removed clean landed worktree(s) ({len(report.removed)}):")
+        for path in report.removed:
+            print(f"  ✓ {path}")
+    else:
+        print("No clean verified-landed worktrees to remove.")
+    if report.kept:
+        reasons: dict[str, list[str]] = {}
+        for kept in report.kept:
+            reasons.setdefault(kept.reason, []).append(kept.path)
+        print(f"\nKept ({len(report.kept)}), reasons:")
+        for reason, paths in sorted(reasons.items()):
+            print(f"  · {reason}: {len(paths)}")
+            for path in paths:
+                print(f"      {path}")
+        overdue = [kept for kept in report.kept if kept.beyond_retention]
+        if overdue:
+            print(
+                f"\n{len(overdue)} kept worktree(s) are older than the "
+                f"{report.retention_days}-day retention bound; inspect before "
+                "any explicit per-run cleanup."
+            )
+    print(
+        f"\nScanned {report.scanned_runs} run(s) with existing worktrees; "
+        f"removed {len(report.removed)}, kept {len(report.kept)}."
+    )
     return 0
 
 

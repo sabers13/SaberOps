@@ -20,6 +20,7 @@ from saberops.db import Database
 from saberops.git import GitManager
 from saberops.models import Attempt, AttemptStatus, CheckResult, Run, RunStatus, Tier
 from saberops.storage_gc import (
+    LANDED_CLEANUP_RETENTION_DAYS,
     GcAction,
     GcCandidate,
     GcPolicy,
@@ -29,6 +30,7 @@ from saberops.storage_gc import (
     apply_gc,
     load_gc_policy,
     preview_gc,
+    retire_landed_worktrees,
     retire_run_worktrees,
 )
 from saberops.storage_inventory import (
@@ -946,3 +948,249 @@ def test_owned_cache_is_excluded_and_forged_apply_refused(tmp_path: Path) -> Non
     assert poisoned_result.refused
     assert poisoned_result.refused[0].reason == "shared-cache-protected"
     assert cache.exists()
+
+
+# --------------------------------------------------------------------------
+# F6 -- opt-in cleanup of clean, verified-landed worktrees
+# --------------------------------------------------------------------------
+
+
+def _commit_in_worktree(repo: Path, wt: Path, branch: str, text: str) -> str:
+    GitManager.create_worktree(repo, branch, wt)
+    (wt / "a.txt").write_text(f"{text}\n", encoding="utf-8")
+    _git(wt, "add", "-A")
+    _git(wt, "commit", "-qm", text, env=_AUTHOR)
+    return _git(wt, "rev-parse", "HEAD")
+
+
+def _seed_attempt_run(
+    db: Database,
+    *,
+    repo: Path,
+    run_id: str,
+    wt: Path,
+    branch: str,
+    base_sha: str,
+    candidate: str,
+    accepted: bool,
+    status: RunStatus = RunStatus.COMPLETED,
+    created_at: str = _CREATED,
+    completed_at: str | None = _CREATED,
+) -> None:
+    db.create_run(
+        Run(
+            id=run_id,
+            task="landed-cleanup",
+            target_repo=str(repo),
+            base_commit=base_sha,
+            tier=Tier.T1,
+            training_allowed=True,
+            gate_command="true",
+            status=status,
+            created_at=created_at,
+            completed_at=completed_at,
+        )
+    )
+    db.create_attempt(
+        Attempt(
+            id=f"{run_id}-a1",
+            run_id=run_id,
+            attempt_number=1,
+            provider="p",
+            model="m",
+            worktree_path=str(wt),
+            branch_name=branch,
+            status=AttemptStatus.SUCCESS,
+            commit_sha=candidate,
+            created_at=created_at,
+            base_sha=base_sha,
+        )
+    )
+    db.create_check(
+        CheckResult(
+            id=f"{run_id}-c1",
+            attempt_id=f"{run_id}-a1",
+            gate_command="true",
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            passed=True,
+            created_at=created_at,
+        )
+    )
+    if accepted:
+        final_branch = _git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+        db.record_event(
+            run_id,
+            "run_accepted",
+            payload={
+                "candidate_sha": candidate,
+                "final_branch": final_branch,
+                "gate_command": "true",
+                "provenance": {
+                    "candidate_sha": candidate,
+                    "run_id": run_id,
+                    "attempt_id": f"{run_id}-a1",
+                    "attempt_number": 1,
+                },
+            },
+        )
+
+
+def test_landed_cleanup_removes_only_verified_landed_clean_worktrees(
+    tmp_path: Path,
+) -> None:
+    """F6: landed clean copies go; dirty, unlanded and failed copies stay."""
+    repo = _repo(tmp_path)
+    db = Database(tmp_path / "orch.db")
+    base = GitManager.get_default_worktree_base(repo)
+
+    landed_wt = base / "run_landed" / "a1"
+    landed = _commit_in_worktree(repo, landed_wt, "orch/run_landed/a1", "landed")
+    _git(repo, "merge", "--ff-only", "orch/run_landed/a1")
+    _seed_attempt_run(
+        db,
+        repo=repo,
+        run_id="run_landed",
+        wt=landed_wt,
+        branch="orch/run_landed/a1",
+        base_sha=_git(repo, "rev-parse", "HEAD~1"),
+        candidate=landed,
+        accepted=True,
+    )
+
+    dirty_wt = base / "run_dirty" / "a1"
+    dirty = _commit_in_worktree(repo, dirty_wt, "orch/run_dirty/a1", "dirty")
+    _git(repo, "merge", "--ff-only", "orch/run_dirty/a1")
+    _seed_attempt_run(
+        db,
+        repo=repo,
+        run_id="run_dirty",
+        wt=dirty_wt,
+        branch="orch/run_dirty/a1",
+        base_sha=_git(repo, "rev-parse", "HEAD~1"),
+        candidate=dirty,
+        accepted=True,
+    )
+    (dirty_wt / "a.txt").write_text("uncommitted change\n", encoding="utf-8")
+
+    unlanded_wt = base / "run_unlanded" / "a1"
+    unlanded = _commit_in_worktree(repo, unlanded_wt, "orch/run_unlanded/a1", "unlanded")
+    _seed_attempt_run(
+        db,
+        repo=repo,
+        run_id="run_unlanded",
+        wt=unlanded_wt,
+        branch="orch/run_unlanded/a1",
+        base_sha=GitManager.get_head_commit(repo),
+        candidate=unlanded,
+        accepted=True,
+    )
+
+    failed_wt = base / "run_failed" / "a1"
+    failed = _commit_in_worktree(repo, failed_wt, "orch/run_failed/a1", "failed")
+    _seed_attempt_run(
+        db,
+        repo=repo,
+        run_id="run_failed",
+        wt=failed_wt,
+        branch="orch/run_failed/a1",
+        base_sha=GitManager.get_head_commit(repo),
+        candidate=failed,
+        accepted=False,
+    )
+
+    events, sink = _audit_sink()
+    report = retire_landed_worktrees(db, repo_root=repo, audit=sink)
+
+    assert report.removed == (str(landed_wt.resolve()),)
+    assert not landed_wt.exists()
+    assert dirty_wt.exists()
+    assert unlanded_wt.exists()
+    assert failed_wt.exists()
+    assert report.scanned_runs == 4
+    assert report.retention_days == LANDED_CLEANUP_RETENTION_DAYS
+    reasons = {kept.path: kept.reason for kept in report.kept}
+    assert reasons[str(dirty_wt.resolve())] == "dirty"
+    assert reasons[str(unlanded_wt.resolve())] == "candidate-not-landed"
+    assert reasons[str(failed_wt.resolve())].startswith("candidate-not-accepted:")
+    assert all(kept.beyond_retention for kept in report.kept)
+    assert [event.reason for event in events] == ["landed-cleanup-removed"]
+    assert events[0].run_id == "run_landed"
+
+
+def test_landed_cleanup_keeps_active_run_and_reports_retention(tmp_path: Path) -> None:
+    """F6: a still-active run is never cleaned; the report carries the age bound."""
+    repo = _repo(tmp_path)
+    db = Database(tmp_path / "orch.db")
+    wt = GitManager.get_default_worktree_base(repo) / "run_active" / "a1"
+    candidate = _commit_in_worktree(repo, wt, "orch/run_active/a1", "active")
+    _git(repo, "merge", "--ff-only", "orch/run_active/a1")
+    _seed_attempt_run(
+        db,
+        repo=repo,
+        run_id="run_active",
+        wt=wt,
+        branch="orch/run_active/a1",
+        base_sha=_git(repo, "rev-parse", "HEAD~1"),
+        candidate=candidate,
+        accepted=True,
+        status=RunStatus.RUNNING,
+        completed_at=None,
+    )
+
+    report = retire_landed_worktrees(db, repo_root=repo)
+
+    assert report.removed == ()
+    assert wt.exists()
+    assert len(report.kept) == 1
+    assert report.kept[0].reason == "run-active"
+    assert report.kept[0].beyond_retention is True
+    assert report.retention_days == LANDED_CLEANUP_RETENTION_DAYS
+
+
+def test_cli_landed_cleanup_reports_what_it_did(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F6: `orch cleanup --landed` is opt-in and reports removals and keeps."""
+    from saberops.cli import main as cli_main
+
+    repo = _repo(tmp_path)
+    db = Database(tmp_path / "orch.db")
+    landed_wt = GitManager.get_default_worktree_base(repo) / "run_landed" / "a1"
+    landed = _commit_in_worktree(repo, landed_wt, "orch/run_landed/a1", "landed")
+    _git(repo, "merge", "--ff-only", "orch/run_landed/a1")
+    _seed_attempt_run(
+        db,
+        repo=repo,
+        run_id="run_landed",
+        wt=landed_wt,
+        branch="orch/run_landed/a1",
+        base_sha=_git(repo, "rev-parse", "HEAD~1"),
+        candidate=landed,
+        accepted=True,
+    )
+    failed_wt = GitManager.get_default_worktree_base(repo) / "run_failed" / "a1"
+    failed = _commit_in_worktree(repo, failed_wt, "orch/run_failed/a1", "failed")
+    _seed_attempt_run(
+        db,
+        repo=repo,
+        run_id="run_failed",
+        wt=failed_wt,
+        branch="orch/run_failed/a1",
+        base_sha=GitManager.get_head_commit(repo),
+        candidate=failed,
+        accepted=False,
+    )
+
+    code = cli_main(
+        ["cleanup", "--landed", "--repo", str(repo), "--db", str(db.db_path)]
+    )
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert "Removed clean landed worktree(s) (1)" in out
+    assert "candidate-not-accepted:" in out
+    assert "removed 1, kept 1" in out
+    assert not landed_wt.exists()
+    assert failed_wt.exists()

@@ -41,14 +41,17 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Final
 
+from saberops.candidate_lifecycle import project_candidate_state
 from saberops.db import Database
 from saberops.git import (
     CHECKPOINT_REF_PREFIX,
     BranchDeletionRefused,
     GitManager,
 )
+from saberops.models import Attempt, CandidateState, Run, RunStatus
 from saberops.paths import CONFIG_APP_DIR, config_home
 from saberops.storage_inventory import (
+    DEFAULT_MAX_RUNS,
     ArtifactClass,
     Inventory,
     InventoryItem,
@@ -73,6 +76,7 @@ from saberops.storage_lifecycle import CheckpointRef as PlannerCheckpointRef
 
 __all__ = [
     "GC_POLICY_FILENAME",
+    "LANDED_CLEANUP_RETENTION_DAYS",
     "GcAction",
     "GcApplyResult",
     "GcCandidate",
@@ -81,15 +85,21 @@ __all__ = [
     "GcPolicy",
     "GcPolicyError",
     "GcPreview",
+    "LandedCleanupKeep",
+    "LandedCleanupReport",
     "StorageAuditEvent",
     "apply_gc",
     "default_gc_policy_path",
     "load_gc_policy",
     "preview_gc",
+    "retire_landed_worktrees",
     "retire_run_worktrees",
 ]
 
 GC_POLICY_FILENAME: Final[str] = "storage_gc.json"
+
+#: A2's retention bound for worktrees this opt-in step must keep.
+LANDED_CLEANUP_RETENTION_DAYS: Final[int] = 14
 
 #: Non-`orch/` ignored entries inside a worktree that are proven disposable.
 _DISPOSABLE_IGNORED_PREFIXES: Final[tuple[str, ...]] = (".venv/",)
@@ -743,6 +753,27 @@ class GcApplyResult:
     audit_uncertain: bool = False
 
 
+@dataclass(frozen=True)
+class LandedCleanupKeep:
+    """One attempt worktree the opt-in landed-cleanup step kept."""
+
+    path: str
+    run_id: str
+    reason: str
+    age_days: int | None
+    beyond_retention: bool
+
+
+@dataclass(frozen=True)
+class LandedCleanupReport:
+    """What one opt-in landed-cleanup sweep did, and why everything else stayed."""
+
+    scanned_runs: int
+    removed: tuple[str, ...]
+    kept: tuple[LandedCleanupKeep, ...]
+    retention_days: int
+
+
 class _AuditFailure(RuntimeError):
     """Internal marker: an audit write failed after a destructive action."""
 
@@ -1266,8 +1297,6 @@ def retire_run_worktrees(
     run = db.get_run(run_id)
     if run is None:
         raise ValueError(f"Run '{run_id}' not found")
-    from saberops.models import RunStatus
-
     status = run.status if isinstance(run.status, RunStatus) else RunStatus(str(run.status))
     if status is RunStatus.RUNNING:
         raise RuntimeError(f"Cannot clean up run '{run_id}': status is RUNNING")
@@ -1341,3 +1370,234 @@ def retire_run_worktrees(
         "skipped_missing": skipped_missing,
         "skipped_protected": skipped_protected,
     }
+
+
+def _same_repo_path(candidate: str | None, repo: Path) -> bool:
+    """True when a persisted target path resolves to this exact repository."""
+    if not candidate:
+        return False
+    try:
+        return Path(candidate).resolve() == repo
+    except OSError:
+        return False
+
+
+def _attempt_worktree_path(attempt: Attempt) -> Path | None:
+    if not attempt.worktree_path:
+        return None
+    try:
+        path = Path(attempt.worktree_path).resolve()
+    except OSError:
+        return None
+    return path if path.exists() else None
+
+
+def _acceptance_target_head(db: Database, run_id: str, repo: Path) -> str | None:
+    """Resolve the target branch recorded by the latest acceptance event.
+
+    Falls back to the repository's current ``HEAD`` only when the event
+    carries no usable branch.  ``None`` means the landing cannot be proven.
+    """
+    branch: str | None = None
+    for event in db.get_events_by_type(run_id, "run_accepted"):
+        payload = event.payload
+        if not isinstance(payload, dict):
+            continue
+        raw = payload.get("final_branch")
+        if isinstance(raw, str) and raw:
+            branch = raw
+    if branch is not None:
+        head = GitManager.get_ref_commit(repo, f"refs/heads/{branch}")
+        if head:
+            return head
+    return GitManager.get_ref_commit(repo, "HEAD")
+
+
+def _landed_candidate(db: Database, run: Run, repo: Path) -> tuple[str | None, str | None]:
+    """Return ``(accepted_sha, None)`` for a verified-landed run, else a keep reason."""
+    status = run.status if isinstance(run.status, RunStatus) else RunStatus(str(run.status))
+    if status is RunStatus.RUNNING:
+        return None, "run-active"
+    try:
+        owner = db.get_execution_owner(run.id)
+    except Exception:
+        owner = None
+    if owner is not None and owner.is_active:
+        return None, "run-active"
+    try:
+        projection = project_candidate_state(db, run.id)
+    except Exception:
+        return None, "candidate-unreadable"
+    if projection.state is not CandidateState.ACCEPTED:
+        state = projection.state.value if projection.state is not None else "unknown"
+        return None, f"candidate-not-accepted:{state}"
+    candidate_sha = projection.candidate_sha
+    if not candidate_sha:
+        return None, "candidate-unreadable"
+    head = _acceptance_target_head(db, run.id, repo)
+    if head is None:
+        return None, "target-head-unreadable"
+    if not GitManager.is_ancestor(repo, candidate_sha, head):
+        return None, "candidate-not-landed"
+    return candidate_sha, None
+
+
+def _retire_landed_worktree(repo: Path, worktree: Path, base: Path) -> str | None:
+    """Apply the existing guards to one worktree; return a keep reason or ``None``."""
+    if not _is_under(worktree, base):
+        return "outside-worktree-base"
+    if worktree.is_symlink() or _has_unique_ignored_content(worktree):
+        return "protected-ignored-content"
+    if not GitManager.is_clean(worktree):
+        return "dirty"
+    try:
+        GitManager.remove_worktree(
+            repo_path=repo,
+            worktree_path=worktree,
+            force=False,
+            worktree_base=base,
+        )
+    except RuntimeError:
+        return "removal-refused"
+    return None
+
+
+def _keep_reason_report(
+    attempt: Attempt,
+    *,
+    run_id: str,
+    reason: str,
+    age_days: int | None,
+) -> LandedCleanupKeep:
+    path = _attempt_worktree_path(attempt)
+    reference = str(path) if path is not None else str(attempt.worktree_path)
+    beyond = age_days is not None and age_days >= LANDED_CLEANUP_RETENTION_DAYS
+    return LandedCleanupKeep(
+        path=reference,
+        run_id=run_id,
+        reason=reason,
+        age_days=age_days,
+        beyond_retention=beyond,
+    )
+
+
+def _run_age_days(run: Run, moment: datetime) -> int | None:
+    anchor = _parse_iso(run.completed_at or run.created_at)
+    if anchor is None:
+        return None
+    delta = moment - anchor
+    if delta.total_seconds() < 0:
+        return 0
+    return delta.days
+
+
+def retire_landed_worktrees(
+    db: Database,
+    *,
+    repo_root: Path | str,
+    worktree_base: Path | str | None = None,
+    audit: AuditSink | None = None,
+    now: datetime | None = None,
+    max_runs: int = DEFAULT_MAX_RUNS,
+) -> LandedCleanupReport:
+    """Opt-in retirement of clean, verified-landed attempt worktrees.
+
+    A run is *verified landed* only when its candidate projection reports
+    ``ACCEPTED`` and that accepted candidate SHA is still an ancestor of the
+    target branch named by its latest ``run_accepted`` event.  Only worktrees
+    that hold that exact landed candidate are considered, and each one must
+    still pass the existing guards: not the worktree base itself, not a
+    symlink, no unique ignored content, a clean working tree and no active
+    execution owner.  Failed, dirty, active, unaccepted and unlanded copies
+    are never removed; they are reported against
+    :data:`LANDED_CLEANUP_RETENTION_DAYS` so the owner can decide.
+
+    Removal uses the same non-forcing native ``git worktree remove`` as
+    :func:`retire_run_worktrees`; there is no repository-wide prune and no
+    branch or database record is touched.  This never runs automatically.
+    """
+    moment = now if now is not None else datetime.now(UTC)
+    repo = Path(repo_root).resolve()
+    base = (
+        Path(worktree_base).resolve()
+        if worktree_base is not None
+        else GitManager.get_default_worktree_base(repo).resolve()
+    )
+    removed: list[str] = []
+    kept: list[LandedCleanupKeep] = []
+    scanned_runs = 0
+    for run in db.list_runs(limit=max_runs):
+        if not _same_repo_path(run.target_repo, repo):
+            continue
+        worktree_attempts = [
+            attempt
+            for attempt in db.get_attempts_for_run(run.id)
+            if _attempt_worktree_path(attempt) is not None
+        ]
+        if not worktree_attempts:
+            continue
+        scanned_runs += 1
+        age_days = _run_age_days(run, moment)
+        accepted_sha, keep_reason = _landed_candidate(db, run, repo)
+        if accepted_sha is None:
+            for attempt in worktree_attempts:
+                kept.append(
+                    _keep_reason_report(
+                        attempt,
+                        run_id=run.id,
+                        reason=keep_reason or "candidate-unreadable",
+                        age_days=age_days,
+                    )
+                )
+            continue
+        for attempt in worktree_attempts:
+            if attempt.commit_sha != accepted_sha:
+                kept.append(
+                    _keep_reason_report(
+                        attempt,
+                        run_id=run.id,
+                        reason="not-the-landed-candidate",
+                        age_days=age_days,
+                    )
+                )
+                continue
+            worktree = _attempt_worktree_path(attempt)
+            if worktree is None:
+                continue
+            reason = _retire_landed_worktree(repo, worktree, base)
+            if reason is not None:
+                kept.append(
+                    _keep_reason_report(
+                        attempt,
+                        run_id=run.id,
+                        reason=reason,
+                        age_days=age_days,
+                    )
+                )
+                continue
+            reference = str(worktree)
+            removed.append(reference)
+            if audit is not None:
+                audit(
+                    StorageAuditEvent(
+                        at=moment,
+                        phase="result",
+                        action=GcAction.REMOVE_WORKTREE.value,
+                        artifact_class=ArtifactClass.ATTEMPT_WORKTREE.value,
+                        reference=reference,
+                        identity=reference,
+                        run_id=run.id,
+                        project_id=None,
+                        sha=accepted_sha,
+                        policy_ref=None,
+                        reason="landed-cleanup-removed",
+                        estimated_bytes=None,
+                        actual_bytes=None,
+                    )
+                )
+    return LandedCleanupReport(
+        scanned_runs=scanned_runs,
+        removed=tuple(removed),
+        kept=tuple(kept),
+        retention_days=LANDED_CLEANUP_RETENTION_DAYS,
+    )

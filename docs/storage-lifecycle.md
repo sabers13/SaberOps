@@ -205,3 +205,18 @@ instead of touching another target.
 `orch gc`: the same dirty / ignored-unique / symlink / live-owner / outside-root
 protections, native `git worktree remove` without force, and no repository-wide
 prune. Candidate branches and database records are preserved.
+
+## Opt-in landed cleanup
+
+`orch cleanup --landed [--repo PATH]` sweeps one repository and retires only
+attempt worktrees that hold the run's accepted candidate, where the candidate
+projection reports `ACCEPTED` and that exact SHA is still an ancestor of the
+target branch named by the latest `run_accepted` event. Each removal still
+passes the compatibility-route guards (terminal and inactive run, inside the
+resolved worktree base, not a symlink, no unique ignored content, clean working
+tree, non-forcing native removal). Everything else is kept: failed or
+unaccepted candidates, unlanded candidates, dirty worktrees, protected content
+and active runs. The report groups those kept copies by reason, gives their age
+against a 14-day retention bound, and names the explicit per-run
+`orch cleanup <run-id>` route for owner-inspected removal. Nothing in this path
+is automatic, and it never deletes a branch or database record.

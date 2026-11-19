@@ -160,7 +160,12 @@ identity, scoped policy, reason and estimated versus actual bytes).
 
 `orch cleanup <run-id>` is the compatibility route and delegates to the same
 guarded implementation, so it has the same protections and no prune/force
-escape. The scheduler runs bounded storage maintenance on startup (before any
+escape. `orch cleanup --landed [--repo PATH]` is the opt-in sweep for finished
+work: it removes only clean attempt worktrees whose candidate is accepted and
+still present in the target branch history, using the same non-forcing native
+retirement. Failed, dirty, active, unaccepted and unlanded worktrees are kept
+and reported with their age against a 14-day retention bound; that step never
+runs automatically and never deletes those copies. The scheduler runs bounded storage maintenance on startup (before any
 tick) and hourly, consults a per-tick launch guard, sweeps only provably
 dead-owned gate scratch, runs the owner-DB `VACUUM` at most weekly above 20 %
 free pages, and — on a below-floor or unknown reading — runs permitted GC then
