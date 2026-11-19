@@ -393,3 +393,6 @@ scripts/               gate wrappers and tooling
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+Desktop notifications are enabled by default when `notify-send` is available. Set
+`SABEROPS_DESKTOP_NOTIFICATIONS=0` in the scheduler environment to disable them.

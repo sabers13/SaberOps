@@ -1,8 +1,8 @@
 """The Orchestrator contract tools exposed over MCP (ADR-0004 D7, M3).
 
-Ten tools are exposed::
+Eleven tools are exposed::
 
-    submit_job  get_job  list_jobs  cancel_job  capacity
+    submit_job  get_job  wait_job  list_jobs  cancel_job  capacity
     read_evidence list_questions answer_question
     propose_config_change list_proposals
 
@@ -28,6 +28,7 @@ this client is not the writer.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -106,6 +107,7 @@ MUTATING_TOOLS: frozenset[str] = frozenset(
 READ_TOOLS: frozenset[str] = frozenset(
     {
         "get_job",
+        "wait_job",
         "list_jobs",
         "capacity",
         "read_evidence",
@@ -117,6 +119,7 @@ READ_TOOLS: frozenset[str] = frozenset(
 TOOL_NAMES: tuple[str, ...] = (
     "submit_job",
     "get_job",
+    "wait_job",
     "list_jobs",
     "cancel_job",
     "capacity",
@@ -281,7 +284,7 @@ class ToolRegistry:
             raise InvalidParamsError(
                 f"{name}: invalid arguments: {'; '.join(errors)}", data={"errors": errors}
             )
-        if self._lease is None:
+        if self._lease is None or name == "wait_job":
             return spec.handler(arguments)
         with self._lease.guarded_call(mutating=spec.mutating) as owned:
             if spec.mutating and not owned:
@@ -465,6 +468,32 @@ def _get_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, 
         "result": _job_result(db, job),
         "guidance": _job_guidance(job),
     }
+
+
+def _wait_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    from saberops.questions import QuestionStatus, question_view
+
+    deadline = time.monotonic() + int(arguments.get("timeout_seconds", 60))
+    while True:
+        result = _get_job(context, arguments)
+        job = result["job"]
+        if job["state"] in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+            return {**result, "timed_out": False, "outcome": "final"}
+        for question in context.question_queue().questions(status=QuestionStatus.OPEN):
+            request = question.request
+            if job["job_id"] in request.blocks or (
+                request.run_id is not None and request.run_id in job["run_ids"]
+            ):
+                return {
+                    **result,
+                    "timed_out": False,
+                    "outcome": "needs_attention",
+                    "question": question_view(question),
+                }
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return {**result, "timed_out": True, "outcome": "timeout"}
+        time.sleep(min(0.5, remaining))
 
 
 def _list_jobs(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
@@ -754,6 +783,19 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
         "Return one job's record, state and timing.",
         _schema({"job_id": {"type": "string", "minLength": 1}}, required=("job_id",)),
         _get_job,
+        mutating=False,
+    )
+    register(
+        "wait_job",
+        "Wait for a job outcome or a blocking question, up to the timeout.",
+        _schema(
+            {
+                "job_id": {"type": "string", "minLength": 1},
+                "timeout_seconds": {"type": "integer", "minimum": 0, "maximum": 3600},
+            },
+            required=("job_id",),
+        ),
+        _wait_job,
         mutating=False,
     )
     register(

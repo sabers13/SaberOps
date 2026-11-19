@@ -69,8 +69,9 @@ SHORT_INSTRUCTIONS = (
     "SaberOps runs coding work for you on the owner's AI subscriptions and hands back "
     "checked, isolated changes for the owner to accept. You plan; SaberOps decides which "
     "model does each job. Submit work with submit_job (one job per independent task), give a "
-    "goal and testable acceptance criteria, never a model or provider, then follow it with "
-    "get_job / list_jobs. Owner-only decisions (accepting changes, approving config, billing, "
+    "goal and testable acceptance criteria, never a model or provider, then call wait_job. "
+    "Use get_job / list_jobs as needed. Owner-only decisions "
+    "(accepting changes, approving config, billing, "
     "merging, pushing) are never available here: tell the owner to use the SaberOps page. "
     "Read the full guide in the saberops-guide prompt or the saberops://guide resource before "
     "your first submission."
@@ -130,7 +131,9 @@ model review it, and leaves the result for the owner to accept or reject.
    resubmit it from the current base with a fresh `idempotency_key`.
 
 ## Following it
-- `get_job` / `list_jobs` to track each job.
+- Call `wait_job` after each submission; it returns on a final outcome, blocking
+  question, or timeout. Call again after a timeout if needed.
+- `get_job` / `list_jobs` to inspect jobs.
 - `read_evidence` for check output and review findings when something fails.
 - Report back to the owner in plain words: what finished, what failed and why,
   and what needs their decision. Link them to the run on the SaberOps page.

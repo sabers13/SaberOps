@@ -143,9 +143,9 @@ def test_tools_list_exposes_exactly_the_current_d7_tools(tmp_path: Path) -> None
     _ready(server)
     result = _call(server, "tools/list")["result"]
     names = [tool["name"] for tool in result["tools"]]
-    # The ten D7 tools plus the user's in-agent switch to turn SaberOps off.
+    # The eleven D7 tools plus the user's in-agent switch to turn SaberOps off.
     assert sorted(n for n in names if n != "saberops_off") == sorted(TOOL_NAMES)
-    assert len(TOOL_NAMES) == 10 and "saberops_off" in names
+    assert len(TOOL_NAMES) == 11 and "saberops_off" in names
     for tool in result["tools"]:
         assert tool["inputSchema"]["type"] == "object"
 

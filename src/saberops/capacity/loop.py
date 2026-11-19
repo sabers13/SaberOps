@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import logging
 import os
 import sqlite3
 import subprocess
@@ -627,6 +628,13 @@ def scheduler_tick(
     if not check_lease(db, lease, now=_current_moment()):
         return TickResult(ran=False, reason="lost_lease")
 
+    from saberops.notifications import deliver_pending
+
+    try:
+        deliver_pending(db)
+    except (OSError, sqlite3.Error, ValueError):
+        logging.getLogger(__name__).exception("desktop notification scan failed")
+
     if launch_guard is not None:
         guard_reason = launch_guard()
         if guard_reason is not None:
@@ -741,6 +749,10 @@ def scheduler_tick(
 
     # 1. Startup and periodic reconciliation
     changes = reconcile_jobs(db, run_status=tick_status, now=moment)
+    try:
+        deliver_pending(db)
+    except (OSError, sqlite3.Error, ValueError):
+        logging.getLogger(__name__).exception("desktop notification scan failed")
     for ch in changes:
         if ch.to_state == JobState.SUCCEEDED:
             settle(db, ch.run_id, total_tokens=None, now=moment)

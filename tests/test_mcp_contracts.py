@@ -180,6 +180,7 @@ def test_read_tools_succeed_for_a_read_only_client(tmp_path: Path) -> None:
     server = _server(tmp_path, read_only=True)
     arguments: dict[str, dict[str, object]] = {
         "get_job": {"job_id": "unknown"},
+        "wait_job": {"job_id": "unknown", "timeout_seconds": 0},
         "list_jobs": {},
         "capacity": {},
         "read_evidence": {"path": "missing.md"},
