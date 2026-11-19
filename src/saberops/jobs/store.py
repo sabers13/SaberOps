@@ -272,8 +272,20 @@ def insert_job(
     return job
 
 
+def _prepare_job_read(db: Any) -> bool:
+    """Prepare writable stores; never create tables through a read-only connection."""
+    if not db.owner_db._read_only:
+        ensure_tables(db)
+        return True
+    with _owner_conn(db) as conn:
+        return conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'jobs'"
+        ).fetchone() is not None
+
+
 def get_job(db: Any, job_id: str) -> Job | None:
-    ensure_tables(db)
+    if not _prepare_job_read(db):
+        return None
     with _owner_conn(db) as conn:
         row = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
         return _row_to_job(row) if row is not None else None
@@ -292,7 +304,8 @@ def find_by_idempotency(db: Any, caller_id: str, idempotency_key: str) -> Job | 
 def list_jobs_raw(
     db: Any, *, state: JobState | None = None, limit: int = 50
 ) -> list[Job]:
-    ensure_tables(db)
+    if not _prepare_job_read(db):
+        return []
     with _owner_conn(db) as conn:
         if state is None:
             rows = conn.execute(

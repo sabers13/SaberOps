@@ -539,3 +539,14 @@ def test_c5_version(capsys: pytest.CaptureFixture[str]) -> None:
         build_parser().parse_args(["--version"])
     assert exc.value.code == 0
     assert capsys.readouterr().out.strip() == f"orch {__version__}"
+
+
+def test_c5_read_only_jobs_on_fresh_database(tmp_path: Path) -> None:
+    from saberops.db import Database
+    from saberops.jobs.service import get_job, list_jobs
+
+    path = tmp_path / "fresh.db"
+    Database(path)
+    reader = Database(path, read_only=True)
+    assert list_jobs(reader) == []
+    assert get_job(reader, "missing") is None

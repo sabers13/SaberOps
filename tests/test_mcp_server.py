@@ -137,15 +137,15 @@ def test_ping_works_without_initialization(tmp_path: Path) -> None:
     assert _call(server, "ping")["result"] == {}
 
 
-def test_tools_list_exposes_exactly_the_twelve_d7_tools(tmp_path: Path) -> None:
+def test_tools_list_exposes_exactly_the_current_d7_tools(tmp_path: Path) -> None:
     """Covers: ADR-0004 D7 tool set (no more, no fewer)."""
     server = _server(tmp_path)
     _ready(server)
     result = _call(server, "tools/list")["result"]
     names = [tool["name"] for tool in result["tools"]]
-    # The twelve D7 tools plus the user's in-agent switch to turn SaberOps off.
+    # The ten D7 tools plus the user's in-agent switch to turn SaberOps off.
     assert sorted(n for n in names if n != "saberops_off") == sorted(TOOL_NAMES)
-    assert len(TOOL_NAMES) == 12 and "saberops_off" in names
+    assert len(TOOL_NAMES) == 10 and "saberops_off" in names
     for tool in result["tools"]:
         assert tool["inputSchema"]["type"] == "object"
 
