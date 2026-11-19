@@ -1,6 +1,6 @@
 # ADR-0001: SaberOps becomes a plan-aware, verified execution engine (MCP-first)
 
-- **Status:** Accepted
+- **Status:** Superseded in part by [ADR-0005](0005-mcp-first-engine-and-phase-2-board.md): UI is in scope as a Phase 2 board plus setup page; the invariants here still stand.
 - **Date:** 2026-10-11
 - **Decider:** Saber (owner)
 - **Supersedes:** the v0.3.x direction "local control plane / multi-model workspace with web console"

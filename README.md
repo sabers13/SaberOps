@@ -16,10 +16,13 @@ evidence**: during the day and while you sleep.
 > **Core principle: LLMs advise; deterministic software decides.**
 
 > [!IMPORTANT]
-> v0.4.0 is a direction change. SaberOps is no longer a chat/workspace
-> application. It is a **headless engine**
-> ([ADR-0001](docs/decisions/0001-saberops-engine-mcp-first.md)) driven through
-> the `orch` CLI, an **MCP server** and a local first-run web UI. It is still
+> v0.4.0 was a direction change. SaberOps is no longer a chat/workspace
+> application. It is an **MCP-first engine**
+> ([ADR-0005](docs/decisions/0005-mcp-first-engine-and-phase-2-board.md),
+> superseding [ADR-0001](docs/decisions/0001-saberops-engine-mcp-first.md)) driven through
+> the `orch` CLI, an **MCP server** and a local first-run web UI. A bounded board
+> plus setup page is in scope as Phase 2, after the MCP core is complete and
+> tested. It is still
 > **preview software**: interfaces can change and it is not production-ready.
 
 ---
@@ -342,7 +345,8 @@ scripts/               gate wrappers and tooling
 ## Documentation map
 
 - [v0.5.0 release notes](docs/releases/0.5.0.md) · [v0.4.0](docs/releases/0.4.0.md)
-- [ADR-0001: engine direction](docs/decisions/0001-saberops-engine-mcp-first.md)
+- [ADR-0005: MCP-first engine, Phase 2 board](docs/decisions/0005-mcp-first-engine-and-phase-2-board.md) ·
+  [ADR-0001: engine direction](docs/decisions/0001-saberops-engine-mcp-first.md) (superseded in part)
 - Operating: [operations](docs/operations.md) · [config](docs/config.md) ·
   [storage lifecycle](docs/storage-lifecycle.md) · [security](docs/security.md) ·
   [vendor CLI live check](docs/vendor-cli-live-check.md)
