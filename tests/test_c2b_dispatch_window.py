@@ -124,11 +124,8 @@ def _make_routes() -> RoutingSnapshot:
         source="test",
         source_path=None,
         content_hash="test-hash",
-        role_chains=(
-            ("WORKER", ((_make_candidate("openai", "gpt-5"),),)),
-            ("SURGEON", ((_make_candidate("codex", "gpt-5.6-sol"),),)),
-            ("INTEGRATOR", ((_make_candidate("codex", "gpt-5.6-sol"),),)),
-        ),
+        role_chains=(("BUILD", ((_make_candidate("openai", "gpt-5"),),)),),
+        strong_start=((_make_candidate("codex", "gpt-5.6-sol"),),),
     )
 
 
