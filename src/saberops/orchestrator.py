@@ -9120,8 +9120,11 @@ def _run_configured_gate(
                     source_tree(snapshot.path) != snapshot.tree
                     or source_tree(cwd) != snapshot.tree
                 )
+                launch_failed = result.launch_failed or stats.launch_failed
                 return replace(
                     result,
+                    exit_code=-1 if stats.launch_failed else result.exit_code,
+                    launch_failed=launch_failed,
                     verification_tree=snapshot.tree,
                     verification_commit=snapshot.commit,
                     verification_mutated=mutated,

@@ -476,13 +476,18 @@ def test_exclusive_passthrough_and_timeout(
     assert g.exclusive_cli(["--", "true"]) == 0
     assert g.exclusive_cli(["--", "bash", "-c", "exit 7"]) == 7
 
-    # Reduce available memory so holding one heavy lease exhausts remaining budget.
+    # Fresh repo whose coverage-map still has cold-start estimate: holding one heavy
+    # lease leaves 100 MiB < COLD_START_PEAK_BYTES, so exclusive times out (exit 3).
+    repo_timeout = tmp_path / "repo-timeout"
+    repo_timeout.mkdir()
+    _init_main_repo(repo_timeout)
+    monkeypatch.chdir(repo_timeout)
     tight_kb = (g.DESKTOP_RESERVE_BYTES + g.COLD_START_PEAK_BYTES + 100 * g.MIB) // 1024
     meminfo.write_text(f"MemTotal: {avail_kb * 2} kB\nMemAvailable: {tight_kb} kB\n")
-    common = (repo / subprocess.check_output(
-        ["git", "rev-parse", "--git-common-dir"], cwd=repo, text=True
+    common = (repo_timeout / subprocess.check_output(
+        ["git", "rev-parse", "--git-common-dir"], cwd=repo_timeout, text=True
     ).strip()).resolve()
-    ledger = g.MemoryLedger(g.default_ledger_root(common, repo=repo))
+    ledger = g.MemoryLedger(g.default_ledger_root(common, repo=repo_timeout))
     monkeypatch.setenv("SABEROPS_GATE_SLOT_WAIT", "0.2")
     with ledger.acquire("full", "full"):
         code = g.exclusive_cli(["--", "true"])

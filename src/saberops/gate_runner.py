@@ -1321,8 +1321,8 @@ class GateRunner:
             stdout_text = result.stdout
             stderr_text = result.stderr
             timed_out = result.timed_out
-            exit_code = int(result.exit_code)
-            launch_failed = result.launch_failed
+            launch_failed = result.launch_failed or mem_stats.launch_failed
+            exit_code = -1 if mem_stats.launch_failed else int(result.exit_code)
             termination_incomplete = result.termination_incomplete
             memory_grant_bytes = mem_stats.grant_bytes
             memory_peak_bytes = mem_stats.measured_peak_bytes
@@ -2540,6 +2540,8 @@ class EngineGateExecutor:
                 max_peak = max(max_peak, stats.measured_peak_bytes)
                 last = replace(
                     payload,
+                    exit_code=-1 if stats.launch_failed else payload.exit_code,
+                    launch_failed=payload.launch_failed or stats.launch_failed,
                     memory_grant_bytes=stats.grant_bytes,
                     memory_peak_bytes=max_peak,
                     memory_wait_seconds=stats.wait_seconds,

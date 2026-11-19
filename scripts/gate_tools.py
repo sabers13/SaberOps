@@ -366,25 +366,32 @@ def build_cgroup_scope_prefix(
     if runner is None:
         return []
     mem_high = max(4096, int(grant_bytes))
-    wrapper = (
-        'unit="$1"; meta="$2"; shift 2; '
-        'cg_rel=""; '
-        'while IFS=: read -r hid _ctl hpath; do '
-        '[ "$hid" = "0" ] && cg_rel="$hpath"; '
-        'done < /proc/self/cgroup 2>/dev/null || true; '
-        'cg_dir=""; '
-        'case "$cg_rel" in *"$unit"*) '
-        'cg_dir="/sys/fs/cgroup${cg_rel}"; '
-        'printf "%s\\n" "$cg_dir" > "$meta/cgroup_path" ;; '
-        'esac; '
-        '"$@"; rc=$?; '
-        'if [ -n "$cg_dir" ]; then '
-        '[ -r "$cg_dir/memory.peak" ] && '
-        'cat "$cg_dir/memory.peak" > "$meta/memory.peak" 2>/dev/null || true; '
-        '[ -r "$cg_dir/memory.events" ] && '
-        'cat "$cg_dir/memory.events" > "$meta/memory.events" 2>/dev/null || true; '
-        'fi; '
-        'exit "$rc"'
+    py_wrapper = (
+        "import pathlib, subprocess, sys\n"
+        "unit, meta = sys.argv[1], pathlib.Path(sys.argv[2])\n"
+        "cg_path = pathlib.Path('/proc/self/cgroup')\n"
+        "lines = cg_path.read_text().splitlines() if cg_path.is_file() else []\n"
+        "rel = next((line.split(':', 2)[2] for line in lines if line.startswith('0:')), '')\n"
+        "cg_dir = pathlib.Path('/sys/fs/cgroup' + rel) if unit in rel else None\n"
+        "if cg_dir is not None:\n"
+        "    (meta / 'cgroup_path').write_text(str(cg_dir) + '\\n', encoding='utf-8')\n"
+        "rc = 127\n"
+        "try:\n"
+        "    if not sys.argv[3:]:\n"
+        "        raise OSError('empty command')\n"
+        "    rc = subprocess.run(sys.argv[3:], check=False).returncode\n"
+        "except OSError as exc:\n"
+        "    (meta / 'launch_failed').write_text(str(exc), encoding='utf-8')\n"
+        "    sys.stderr.write(f'{exc}\\n')\n"
+        "if cg_dir is not None:\n"
+        "    for fn in ('memory.peak', 'memory.events'):\n"
+        "        src = cg_dir / fn\n"
+        "        if src.is_file():\n"
+        "            try:\n"
+        "                (meta / fn).write_text(src.read_text())\n"
+        "            except OSError:\n"
+        "                pass\n"
+        "raise SystemExit(rc)\n"
     )
     return [
         runner,
@@ -396,10 +403,9 @@ def build_cgroup_scope_prefix(
         "-p",
         f"MemoryHigh={mem_high}",
         "--",
-        "sh",
+        sys.executable,
         "-c",
-        wrapper,
-        "saberops-cg-wrap",
+        py_wrapper,
         unit_name,
         str(meta_dir),
     ]
@@ -667,6 +673,7 @@ class MemoryRunStats:
     workers: int = 1
     oom_kill: int = 0
     rerun_count: int = 0
+    launch_failed: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -679,6 +686,7 @@ class MemoryRunStats:
             "workers": self.workers,
             "oom_kill": self.oom_kill,
             "rerun_count": self.rerun_count,
+            "launch_failed": self.launch_failed,
         }
 
     def format_line(self) -> str:
@@ -1322,6 +1330,7 @@ def run_with_lease(
                     )
             if lease is not None:
                 total_freezes += lease.freeze_count()
+            launch_failed = (meta_dir / "launch_failed").is_file()
             shutil.rmtree(meta_dir, ignore_errors=True)
             if owns_lease and lease is not None:
                 lease.release()
@@ -1338,7 +1347,8 @@ def run_with_lease(
             )
 
         was_stopped = (
-            not timed_out
+            not launch_failed
+            and not timed_out
             and not interrupted
             and (exit_code < 0 or exit_code in _STOPPED_EXIT_CODES or oom_kill > 0)
         )
@@ -1360,6 +1370,7 @@ def run_with_lease(
             workers=last_workers,
             oom_kill=last_oom,
             rerun_count=attempt,
+            launch_failed=launch_failed,
         )
         return payload, stats
 

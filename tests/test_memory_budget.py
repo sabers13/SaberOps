@@ -612,3 +612,58 @@ def test_gate_runner_and_configured_gate_record_memory_visibility(
     assert res.passed
     assert res.memory_grant_bytes > 0
     assert res.memory_wait_seconds >= 0.0
+
+
+def test_scoped_launch_failure_propagates_without_masking_exit_127(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unlaunchable target binaries report launch_failed=True even inside systemd-run."""
+    repo = _init_repo(tmp_path / "repo")
+    non_exec = repo / "non_exec.sh"
+    non_exec.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    non_exec.chmod(0o644)
+    subprocess.check_output(["git", "add", "-A"], cwd=repo)
+    subprocess.check_output(["git", "commit", "-qm", "add non_exec"], cwd=repo)
+
+    avail_bytes = gt.DESKTOP_RESERVE_BYTES + 6 * gt.GB
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text(
+        f"MemTotal: {avail_bytes * 2 // 1024} kB\nMemAvailable: {avail_bytes // 1024} kB\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(gt.PROC_MEMINFO_ENV, str(meminfo))
+    monkeypatch.setenv("SABEROPS_GATE_TMP", str(tmp_path / "disk-tmp"))
+    monkeypatch.delenv("SABEROPS_GATE_CGROUP", raising=False)
+
+    cfg = RunConfig(task="t", target_repo=str(repo), gate_command="/nonexistent/path/missing_gate")
+    res_missing = _run_configured_gate(
+        cfg, ["/nonexistent/path/missing_gate"], cwd=repo, timeout=30.0
+    )
+    assert res_missing.launch_failed is True
+    assert res_missing.exit_code == -1
+
+    res_perm = _run_configured_gate(cfg, [str(non_exec)], cwd=repo, timeout=30.0)
+    assert res_perm.launch_failed is True
+    assert res_perm.exit_code == -1
+
+    head_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    req = GateRunnerRequest(
+        target_repo=repo,
+        gate_command="/nonexistent/path/missing_gate",
+        timeout=30.0,
+        frozen_gate_scratch_mode=GateScratchMode.DISK,
+        candidate_sha=head_sha,
+        expected_post_gate_sha="HEAD",
+        evidence_dir=tmp_path / "evidence",
+    )
+    receipt = GateRunner().run(req, disk_guard=lambda _r: None)
+    assert receipt.launch_failed is True
+    assert receipt.exit_code == -1
+    assert not receipt.passed()
+
+    # A valid binary that actually runs and exits 127 must NOT be misclassified as launch_failed.
+    res_real_127 = _run_configured_gate(
+        cfg, [sys.executable, "-c", "raise SystemExit(127)"], cwd=repo, timeout=30.0
+    )
+    assert res_real_127.launch_failed is False
+    assert res_real_127.exit_code == 127
