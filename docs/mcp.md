@@ -141,7 +141,9 @@ context for the lanes that depend on it.
 original request, the current candidate commit, the latest gate check and
 review **with the commit each assessed**, any open question, the preserved work
 location on failure, C5's `result` projection (including the exact
-`orch accept RUN_ID` when eligible) and the one next action the engine allows.
+`orch accept RUN_ID` when eligible), the durable away-mode `return_summary`
+(rebuilt from the away journal, the same object the notifier sends) and the one
+next action the engine allows.
 It changes nothing, sends no notice, takes no lease, and is safe from a
 read-only second client. Owners reject a candidate from the run page
 (`/runs/<run_id>`).

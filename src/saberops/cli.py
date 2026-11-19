@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -1672,6 +1673,74 @@ def build_parser() -> argparse.ArgumentParser:
         "clear", help="Remove the saved owner mode (ask-me applies)."
     )
     mode_clear.add_argument("--json", action="store_true", help="JSON output")
+
+    # orch away show|grant|revoke|policy|summary|reset-breaker
+    away_parser = subparsers.add_parser(
+        "away",
+        help="Owner-authored standing decisions, away preflight and return summary.",
+    )
+    away_sub = away_parser.add_subparsers(dest="away_command", required=True)
+
+    away_show = away_sub.add_parser(
+        "show", help="Show the away policy, standing decisions and return summary."
+    )
+    away_show.add_argument("--json", action="store_true", help="JSON output")
+
+    away_grant = away_sub.add_parser(
+        "grant", help="Author one exact-scope, bounded standing decision (owner only)."
+    )
+    away_grant.add_argument("--repo", default=".", help="Repository the task belongs to.")
+    away_grant.add_argument("--task", required=True, help="Exact task (job) id.")
+    away_grant.add_argument("--key", default=None, help="Exact decision key identifier.")
+    away_grant.add_argument(
+        "--question-key", default=None, help="Owner question key to answer exactly."
+    )
+    away_grant.add_argument("--words", required=True, help="The owner's exact words.")
+    away_grant.add_argument("--id", default=None, help="Optional standing decision id.")
+    away_grant.add_argument(
+        "--path", action="append", default=[], help="Exact repo-relative path (repeatable)."
+    )
+    away_grant.add_argument("--expires-at", default=None, help="Absolute ISO-8601 end time.")
+    away_grant.add_argument("--ttl-turns", type=int, default=None, help="Turn-bounded grant.")
+    away_grant.add_argument(
+        "--granted-at-turn", type=int, default=None, help="Turn the ttl window starts from."
+    )
+    away_grant.add_argument("--json", action="store_true", help="JSON output")
+
+    away_revoke = away_sub.add_parser("revoke", help="Revoke one standing decision (owner only).")
+    away_revoke.add_argument("standing_decision_id", help="Exact standing decision id.")
+    away_revoke.add_argument("--json", action="store_true", help="JSON output")
+
+    away_policy = away_sub.add_parser(
+        "policy", help="Show, set or clear the away preflight limits (owner only)."
+    )
+    away_policy_sub = away_policy.add_subparsers(dest="away_policy_command", required=True)
+    away_policy_show = away_policy_sub.add_parser("show", help="Show the away preflight policy.")
+    away_policy_show.add_argument("--json", action="store_true", help="JSON output")
+    away_policy_set = away_policy_sub.add_parser(
+        "set", help="Persist the budget, wall clock, worker cap and authorized paths."
+    )
+    away_policy_set.add_argument("--budget-units", type=int, required=True)
+    away_policy_set.add_argument("--wall-clock-seconds", type=int, required=True)
+    away_policy_set.add_argument("--worker-cap", type=int, required=True)
+    away_policy_set.add_argument(
+        "--path", action="append", default=[], required=True, help="Exact authorized path."
+    )
+    away_policy_set.add_argument("--json", action="store_true", help="JSON output")
+    away_policy_clear = away_policy_sub.add_parser("clear", help="Remove the away policy.")
+    away_policy_clear.add_argument("--json", action="store_true", help="JSON output")
+
+    away_summary = away_sub.add_parser(
+        "summary", help="Print the durable 'while you were away' summary."
+    )
+    away_summary.add_argument("--json", action="store_true", help="JSON output")
+
+    away_reset = away_sub.add_parser(
+        "reset-breaker", help="Owner-only clear of a halted away circuit breaker."
+    )
+    away_reset.add_argument("--project", default=None, help="Exact away project scope id.")
+    away_reset.add_argument("--repo", default=None, help="Repository to resolve instead.")
+    away_reset.add_argument("--json", action="store_true", help="JSON output")
 
     # orch reviewer show|select|clear
     reviewer_parser = subparsers.add_parser(
@@ -5451,6 +5520,244 @@ def handle_mode_clear(args: argparse.Namespace) -> int:
     return 0
 
 
+def _away_stack() -> Any:
+    """Import the away-mode surface lazily, keeping CLI startup cheap."""
+    from saberops import away
+
+    return away
+
+
+def _normalize_cli_instant(value: str | None) -> str | None:
+    if value is None:
+        return None
+    from datetime import UTC, datetime
+
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"not a valid ISO-8601 timestamp: {exc}") from exc
+    if parsed.tzinfo is None:
+        raise ValueError("the timestamp must include a timezone offset or Z")
+    return parsed.astimezone(UTC).isoformat()
+
+
+def handle_away_show(args: argparse.Namespace) -> int:
+    """Handle `orch away show`."""
+    away = _away_stack()
+    try:
+        decisions = away.render_standing_decisions()
+        policy = away.load_away_policy()
+        summary = away.build_return_summary()
+    except (away.AwayError, OSError) as exc:
+        print(f"[!] Away state unavailable: {exc}", file=sys.stderr)
+        return 1
+    payload = {
+        "standing_decisions_path": str(away.get_standing_decisions_path()),
+        "journal_path": str(away.get_away_journal_path()),
+        "policy_path": str(away.get_away_policy_path()),
+        "policy": None if policy is None else policy.as_dict(),
+        "standing_decisions": decisions,
+        "return_summary": summary.as_dict(),
+    }
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"Standing decisions: {payload['standing_decisions_path']}")
+    if not decisions:
+        print("  (none: away mode cannot answer anything autonomously)")
+    for row in decisions:
+        state = "live" if row["live"] else "EXPIRED"
+        print(
+            f"  {row['standing_decision_id']} [{state}] {row['decision_key']} "
+            f"project={row['scope']['project_id']} task={row['scope']['task_id']}"
+        )
+        print(f"    owner words: {row['owner_words']}")
+    if policy is None:
+        print("Away preflight: NOT SET (away dispatch parks every job)")
+    else:
+        print(
+            "Away preflight: "
+            f"budget={policy.budget_units} wall={policy.wall_clock_seconds}s "
+            f"worker_cap={policy.worker_cap} paths={', '.join(policy.paths)}"
+        )
+    print(f"Journal: {payload['journal_path']} ({summary.records} record(s))")
+    if summary.has_items:
+        print(f"While you were away: {summary.one_line()}")
+    return 0
+
+
+def handle_away_grant(args: argparse.Namespace) -> int:
+    """Handle `orch away grant` (owner-only authoring)."""
+    away = _away_stack()
+    from saberops.unattended import DecisionScope, StandingDecision
+
+    if (args.key is None) == (args.question_key is None):
+        print("[!] give exactly one of --key or --question-key", file=sys.stderr)
+        return 1
+    if args.expires_at is None and args.ttl_turns is None:
+        print("[!] a standing decision must be bounded: --expires-at or --ttl-turns",
+              file=sys.stderr)
+        return 1
+    if args.ttl_turns is not None and args.granted_at_turn is None:
+        print("[!] --ttl-turns requires --granted-at-turn", file=sys.stderr)
+        return 1
+    try:
+        project_id = away.project_scope_id(args.repo)
+        decision_key = (
+            args.key
+            if args.key is not None
+            else away.decision_key_for_question(args.question_key)
+        )
+        identifier = args.id or (
+            "sd-"
+            + hashlib.sha256(f"{project_id}|{args.task}|{decision_key}".encode())
+            .hexdigest()[:12]
+        )
+        decision = StandingDecision(
+            standing_decision_id=identifier,
+            scope=DecisionScope(
+                project_id=project_id,
+                task_id=args.task,
+                paths=tuple(args.path),
+            ),
+            decision_key=decision_key,
+            owner_words=args.words,
+            answered_by="owner",
+            granted_at_turn=args.granted_at_turn,
+            ttl_turns=args.ttl_turns,
+            expires_at=_normalize_cli_instant(args.expires_at),
+        )
+        path = away.StandingDecisionStore().add(decision)
+    except (ValueError, OSError) as exc:
+        print(f"[!] Could not save the standing decision: {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps({"saved": decision.as_dict(), "path": str(path)}, indent=2))
+    else:
+        print(f"Saved standing decision {identifier} at {path}")
+        print("It applies only on this exact scope and decision key, and only while live.")
+    return 0
+
+
+def handle_away_revoke(args: argparse.Namespace) -> int:
+    """Handle `orch away revoke`."""
+    away = _away_stack()
+    try:
+        path = away.StandingDecisionStore().remove(args.standing_decision_id)
+    except (away.AwayError, OSError) as exc:
+        print(f"[!] Could not revoke: {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps({"revoked": args.standing_decision_id, "path": str(path)}, indent=2))
+    else:
+        print(f"Revoked {args.standing_decision_id} at {path}")
+    return 0
+
+
+def handle_away_policy_show(args: argparse.Namespace) -> int:
+    """Handle `orch away policy show`."""
+    away = _away_stack()
+    try:
+        policy = away.load_away_policy()
+    except (away.AwayError, OSError) as exc:
+        print(f"[!] Away policy unavailable: {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps({"policy": None if policy is None else policy.as_dict()}, indent=2))
+        return 0
+    if policy is None:
+        print("Away preflight policy: not set; away dispatch parks every job.")
+        return 0
+    print(json.dumps(policy.as_dict(), indent=2))
+    return 0
+
+
+def handle_away_policy_set(args: argparse.Namespace) -> int:
+    """Handle `orch away policy set`."""
+    away = _away_stack()
+    from datetime import UTC, datetime
+
+    try:
+        policy = away.AwayPolicy(
+            budget_units=args.budget_units,
+            wall_clock_seconds=args.wall_clock_seconds,
+            worker_cap=args.worker_cap,
+            paths=tuple(args.path),
+            set_at=datetime.now(UTC).isoformat(),
+            set_by="owner",
+        )
+        path = away.save_away_policy(policy)
+    except (ValueError, OSError) as exc:
+        print(f"[!] Could not save the away policy: {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps({"policy": policy.as_dict(), "path": str(path)}, indent=2))
+    else:
+        print(f"Saved the away preflight policy at {path}")
+        print("Away dispatch now refuses to start when any of these limits are unmet.")
+    return 0
+
+
+def handle_away_policy_clear(args: argparse.Namespace) -> int:
+    """Handle `orch away policy clear`."""
+    away = _away_stack()
+    path = away.get_away_policy_path()
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        print(f"[!] Could not clear the away policy: {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps({"cleared": True, "path": str(path)}, indent=2))
+    else:
+        print(f"Away preflight policy cleared at {path}; away dispatch parks every job.")
+    return 0
+
+
+def handle_away_summary(args: argparse.Namespace) -> int:
+    """Handle `orch away summary`."""
+    away = _away_stack()
+    try:
+        summary = away.build_return_summary()
+    except (away.AwayError, OSError) as exc:
+        print(f"[!] Away journal unavailable: {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(summary.as_dict(), indent=2, sort_keys=True))
+        return 0
+    print(f"While you were away ({summary.records} record(s)): {summary.one_line()}")
+    for entry in summary.standing_decision_actions:
+        print(f"  standing decision: {entry.get('decision_id')} -> {entry.get('owner_words')}")
+    for entry in summary.parked_branches:
+        print(f"  parked: {entry.get('decision_id')} ({entry.get('never_delegable')})")
+    for entry in summary.escalations:
+        print(f"  escalated: {entry.get('decision_id')} ({entry.get('reason')})")
+    for entry in summary.halts:
+        print(f"  HALTED: {entry.get('reason')}")
+    return 0
+
+
+def handle_away_reset_breaker(args: argparse.Namespace) -> int:
+    """Handle `orch away reset-breaker`."""
+    away = _away_stack()
+    project_id = args.project
+    if project_id is None:
+        if not args.repo:
+            print("[!] give --project or --repo", file=sys.stderr)
+            return 1
+        project_id = away.project_scope_id(args.repo)
+    try:
+        record = away.AwayJournal().reset_breaker(project_id, set_by="owner")
+    except (away.AwayError, OSError) as exc:
+        print(f"[!] Could not reset the breaker: {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps({"record": record}, indent=2))
+    else:
+        print(f"Away circuit breaker reset for {project_id}.")
+    return 0
+
+
 def _render_bindings_human(title: str, bindings: list[dict[str, Any]]) -> None:
     """Print one eligible-binding row per line (human-readable selection help)."""
     if not bindings:
@@ -7494,6 +7801,24 @@ def _dispatch(args: argparse.Namespace) -> int:
             return handle_mode_set(args)
         elif args.mode_command == "clear":
             return handle_mode_clear(args)
+    elif args.command == "away":
+        if args.away_command == "show":
+            return handle_away_show(args)
+        elif args.away_command == "grant":
+            return handle_away_grant(args)
+        elif args.away_command == "revoke":
+            return handle_away_revoke(args)
+        elif args.away_command == "policy":
+            if args.away_policy_command == "show":
+                return handle_away_policy_show(args)
+            elif args.away_policy_command == "set":
+                return handle_away_policy_set(args)
+            elif args.away_policy_command == "clear":
+                return handle_away_policy_clear(args)
+        elif args.away_command == "summary":
+            return handle_away_summary(args)
+        elif args.away_command == "reset-breaker":
+            return handle_away_reset_breaker(args)
     elif args.command == "notifications":
         from saberops.notifications import (
             notification_settings_path,

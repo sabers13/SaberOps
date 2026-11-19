@@ -59,10 +59,13 @@ the owner is away (`away`), and required that only the owner switch modes.
   the owner accepts manually. `full_autonomy + ask-me` never auto-accepts.
 - An expired `away` is visible as expired and behaves as `ask-me`; it never
   keeps acting on an old grant.
-- This lane does not wire auto-accept, standing decisions, a return summary or
-  close-the-CLI pausing. Those remain separate lanes (F15, F11 and F17) and
-  build on the same store and decision function. Critical-only question
-  delegation is wired in [ADR-0027](0027-critical-only-questions.md).
+- This lane did not wire auto-accept, standing decisions, a return summary or
+  close-the-CLI pausing. Standing decisions and the return summary were wired
+  in F11 ([ADR-0028](0028-away-mode-standing-decisions.md)); critical-only
+  question delegation is wired in
+  [ADR-0027](0027-critical-only-questions.md); auto-accept (F15) and
+  close-the-CLI pausing (F17) remain separate lanes that build on the same
+  store and decision function.
 - The safety and truth boundary is narrow and testable: the scheduler parks an
   `away` dispatch the preset forbids, the supervisor's recovery properties
   follow the mode, and no page or CLI promises an unread permission as live.

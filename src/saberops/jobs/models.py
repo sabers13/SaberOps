@@ -125,6 +125,11 @@ class WaitingReason(StrEnum):
     #: F8: a dependency ended FAILED or CANCELLED, so this job can never start.
     #: It never clears by itself; the owner cancels or resubmits it.
     DEPENDENCY_FAILED = "DEPENDENCY_FAILED"
+    #: F11: away mode parked this job on its own branch.  A never-delegable or
+    #: unhandled decision waits for the owner; independent jobs keep running.
+    #: Clears by itself when the blocking question is answered or the away
+    #: preflight/circuit breaker recovers.
+    AWAY_PARKED = "AWAY_PARKED"
     #: A scheduler died between the dispatch compare-and-swap and its run row.
     #: Nothing ran, so the job is requeued once with this reason (and failed
     #: with the same-named failure reason if it happens again).

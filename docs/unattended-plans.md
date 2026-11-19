@@ -56,6 +56,10 @@ Deliberately out of scope (owned elsewhere):
 * the git operation that performs a local commit, and any push (owner-only);
 * wiring into run creation and the run-all loop.
 
+The last item is no longer entirely out of scope: F11 wired the policy into the
+scheduler's away path.  See [Away mode wiring](#away-mode-wiring-f11) below and
+[ADR-0028](decisions/0028-away-mode-standing-decisions.md).
+
 A passing unit test here proves the policy contract. It does not prove that a
 real CLI session resumes, that a real alarm arrives, or that a real plan ran
 overnight.
@@ -360,12 +364,59 @@ The lane gate additionally runs ruff and strict mypy across the repository
 The following remain for later steps and are not claimed by this module:
 
 * the durable plan store, plan registration and the resume briefing (PL-1);
-* run creation wiring and the run-all autonomy loop that calls this policy;
-* the owner-question queue that consumes `ESCALATE_OWNER` (Q-1);
+* the run-all autonomy loop beyond one scheduler tick;
 * the Telegram and local-web transports that fan out a `StallAlarm` (TG-1);
-* the durable audit store and the Orchestrator-alone audit list persistence;
-* the git operation that performs the Class-1 local commit;
+* the git operation that performs the Class-1 local commit (F15);
 * the readiness-report UI that shows the preflight result to the owner (UI-1).
+
+F11 wired the scheduler's away path, the owner-question queue consumption and a
+durable audit journal; see [Away mode wiring](#away-mode-wiring-f11).
 
 Until that wiring is reviewed and integrated, this document describes a pure,
 tested policy projection — not a working overnight runner.
+
+## Away mode wiring (F11)
+
+`saberops.away` is the production caller for this policy, and it runs only while
+the owner mode is `away` (ADR-0020, ADR-0028).  The scheduler asks it before a
+queued job leaves `QUEUED`:
+
+1. **Circuit breaker.** Three consecutive failed tasks in one project open the
+   durable breaker; later dispatch parks with `circuit_open` until the owner
+   runs `orch away reset-breaker`.
+2. **Preflight.** `run_preflight` checks the owner's `orch away policy set`
+   budget, wall clock, worker cap and authorized paths.  Missing limits or an
+   expired policy block the start; there is no invented default.
+3. **Questions.** Every open question that blocks the job is resolved with
+   `resolve_decision` under `AuthorityMode.SUPERVISED`, so only an exact, live
+   standing decision applies; never-delegable and unhandled decisions park only
+   that job (`AWAY_PARKED`) while independent jobs continue.  A never-delegable
+   park is measured with `compute_plan_impact`, so its dependents wait and
+   unrelated work stays runnable.
+
+Dispatch-time decisions use the job scope `(project, job id)` with no paths.  A
+grant that names `--path` is exact too, but it only matches a caller that
+supplies exactly those paths; it is not a prefix, glob or wildcard for the job.
+
+Every step appends to `away-journal.jsonl` with `fsync` before the next step:
+resolutions (with their `build_morning_report` fragment), preflight results,
+plan impact and outcomes.  `build_return_summary` rebuilds "while you were
+away" from that journal alone; `catch_up` returns the same object and the
+notifier sends it once per journal revision.  A scheduler killed mid-run
+therefore resumes with the same audit instead of losing it.
+
+Owner surface (no MCP writer exists):
+
+```bash
+orch away grant --repo . --task <job-id> --question-key <key> \
+  --words "<owner words, verbatim>" --expires-at 2026-11-20T06:00:00Z
+orch away revoke <standing-decision-id>
+orch away policy set --budget-units 20 --wall-clock-seconds 36000 \
+  --worker-cap 2 --path src --path tests
+orch away show
+orch away summary
+orch away reset-breaker --repo .
+```
+
+This lane deliberately leaves auto-accept (F15) and close-the-CLI pausing (F17)
+out; away never pushes and never resumes a paused run by itself.

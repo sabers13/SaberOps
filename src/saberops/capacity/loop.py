@@ -790,6 +790,23 @@ def _default_run_launcher(
     return run_id
 
 
+def _notification_ledger(db: Any) -> Path:
+    """The durable once-per-key desktop notice ledger for this owner store."""
+    owner_db = getattr(db, "owner_db", db)
+    path = Path(owner_db.db_path)
+    return path.with_name(path.name + ".notifications.sqlite3")
+
+
+def _notify_away(db: Any, key: str, title: str, body: str) -> None:
+    """Send one away notice without ever failing the scheduler tick."""
+    try:
+        from saberops.notifications import notify_once
+
+        notify_once(_notification_ledger(db), key, title, body)
+    except Exception:
+        logging.getLogger(__name__).exception("away notification failed")
+
+
 def scheduler_tick(
     db: Any,
     lease: SchedulerLease,
@@ -849,6 +866,23 @@ def scheduler_tick(
         deliver_pending(db)
     except (OSError, sqlite3.Error, ValueError):
         logging.getLogger(__name__).exception("desktop notification scan failed")
+
+    # F11: away mode is the only place the unattended decision policy acts.
+    # The mode document is read once per tick; a corrupt document fails the
+    # whole tick closed instead of silently treating away as attended.
+    away_active = False
+    away_journal: Any = None
+    try:
+        from saberops.owner_mode import OwnerMode, load_effective_owner_mode
+
+        away_active = load_effective_owner_mode(now=moment) is OwnerMode.AWAY
+    except Exception:
+        logging.getLogger(__name__).exception("owner mode unavailable; refusing dispatch")
+        return TickResult(ran=False, reason="owner_mode_unreadable")
+    if away_active:
+        from saberops import away as away_module
+
+        away_journal = away_module.AwayJournal()
 
     if launch_guard is not None:
         guard_reason = launch_guard()
@@ -1022,6 +1056,26 @@ def scheduler_tick(
     except (OSError, sqlite3.Error, ValueError):
         logging.getLogger(__name__).exception("desktop notification scan failed")
     for ch in changes:
+        if ch.to_state in (JobState.SUCCEEDED, JobState.FAILED) and away_active:
+            # F11: the durable three-consecutive-failure breaker folds every
+            # finished away task, so a killed scheduler resumes with the same
+            # count and a halt is never lost with the process.
+            from saberops import away as away_module
+
+            outcome = away_module.record_job_outcome(
+                project_id=away_module.project_scope_id(ch.job.repo),
+                task_id=ch.job_id,
+                passed=ch.to_state == JobState.SUCCEEDED,
+                journal=away_journal,
+            )
+            if outcome.get("kind") == "outcome" and outcome.get("progress", {}).get("halted"):
+                _notify_away(
+                    db,
+                    f"away-halt:{away_module.project_scope_id(ch.job.repo)}",
+                    "SaberOps halted away work",
+                    "Three consecutive task failures open the away circuit breaker. "
+                    "Only the owner clears it with `orch away reset-breaker`.",
+                )
         if ch.to_state == JobState.SUCCEEDED:
             settle(db, ch.run_id, total_tokens=None, now=moment)
         elif ch.to_state in (JobState.FAILED, JobState.CANCELLED):
@@ -1195,6 +1249,21 @@ def scheduler_tick(
             plan_lanes_submitted=plan_lanes_submitted,
         )
 
+    # F11: the plan graph a park is measured against, built from durable queued
+    # jobs only.  One parked task holds its dependents; independent work stays.
+    away_scopes: tuple[Any, ...] = ()
+    if away_active:
+        from saberops import away as away_module
+        from saberops.unattended import DecisionScope
+
+        away_scopes = tuple(
+            DecisionScope(
+                project_id=away_module.project_scope_id(job.repo),
+                task_id=job.job_id,
+            )
+            for job in queued_jobs
+        )
+
     # 4. Execute decisions
     for dec in decisions:
         if isinstance(dec, ProbeDecision):
@@ -1256,6 +1325,42 @@ def scheduler_tick(
                 except (JobConflictError, JobTransitionError, JobNotFoundError, ValueError):
                     pass
                 continue
+
+            if away_active:
+                from saberops import away as away_module
+
+                # F11: the circuit breaker, the deterministic preflight and
+                # every open question blocking this job.  A never-delegable or
+                # unhandled decision parks only this job; the loop continues so
+                # independent work still dispatches.
+                gate = away_module.evaluate_dispatch(
+                    job_id=dec.job.job_id,
+                    repo=dec.job.repo,
+                    plan_tasks=away_scopes,
+                    active_workers=len(running_jobs),
+                    now=moment,
+                    journal=away_journal,
+                )
+                if not gate.allowed:
+                    try:
+                        store.set_waiting(
+                            db,
+                            dec.job.job_id,
+                            reason=WaitingReason.AWAY_PARKED,
+                            details=gate.as_dict(),
+                            now=moment,
+                        )
+                        waited_count += 1
+                    except (JobConflictError, JobTransitionError, JobNotFoundError, ValueError):
+                        pass
+                    _notify_away(
+                        db,
+                        f"away-parked:{dec.job.job_id}:{gate.code}:"
+                        f"{gate.details.get('question_id') or ''}",
+                        "SaberOps away mode parked a task",
+                        f"{dec.job.job_id}: {gate.reason}",
+                    )
+                    continue
 
             # Check lease before dispatch
             if not check_lease(db, lease, now=_current_moment()):
@@ -1411,6 +1516,19 @@ def scheduler_tick(
                     )
                 except Exception:
                     pass
+
+    if away_active and away_journal is not None:
+        # The same durable summary `catch_up` reads, delivered once per
+        # journal revision while the owner is away.
+        from saberops import away as away_module
+
+        try:
+            away_module.deliver_return_summary(
+                away_module.build_return_summary(away_journal),
+                _notification_ledger(db),
+            )
+        except Exception:
+            logging.getLogger(__name__).exception("away return summary delivery failed")
 
     return TickResult(
         ran=True,

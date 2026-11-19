@@ -545,6 +545,12 @@ def _job_guidance(job: Any) -> str | None:
         from saberops.jobs.dependencies import DEPENDENCY_FAILED_GUIDANCE
 
         return DEPENDENCY_FAILED_GUIDANCE
+    if waiting == WaitingReason.AWAY_PARKED:
+        return (
+            "Away mode parked this task on its own branch. Answer the blocking "
+            "owner question (or set the away preflight policy) and the job "
+            "starts again; independent jobs were not stopped."
+        )
     return None
 
 
@@ -1049,6 +1055,20 @@ def _catch_up_next_action(
     }
 
 
+def _catch_up_return_summary() -> dict[str, Any]:
+    """The one durable "while you were away" summary, shared with the notifier.
+
+    Read-only: it is assembled from the append-only away journal, so a killed
+    scheduler and a fresh CLI session read exactly the same records.
+    """
+    try:
+        from saberops.away import build_return_summary
+
+        return build_return_summary().as_dict()
+    except Exception as exc:
+        return {"error": f"{exc.__class__.__name__}: {exc}"}
+
+
 def _catch_up(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
     """Read-only "catch me up" lookup: saved request, candidate and next action.
 
@@ -1143,6 +1163,7 @@ def _catch_up(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str,
         "open_questions": questions,
         "self_answered": _catch_up_self_answered(context, job),
         "steering_notes": _catch_up_steering_notes(db, job),
+        "return_summary": _catch_up_return_summary(),
         "failure": failure,
         "report": result.get("report"),
         "next_action": _catch_up_next_action(job, view, result, projection, questions),
