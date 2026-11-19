@@ -2934,6 +2934,26 @@ class Orchestrator:
                 db=self.db,
                 strong_start=strong_start_active,
             )
+            # F27: a direct scout run prefers the cheapest plan model of each
+            # subscription on the build route.  Scheduler-dispatched scout jobs
+            # arrive pinned to the route the scheduler already chose, so this
+            # never overrides an explicit owner/scheduler choice.
+            if (
+                config.kind == SCOUT_RUN_KIND
+                and config.model_override is None
+                and config.provider_override is None
+                and not strong_start_active
+            ):
+                from saberops.scout_routing import (
+                    load_scout_route,
+                    order_candidates_for_scout,
+                )
+
+                candidates = order_candidates_for_scout(
+                    candidates,
+                    route=load_scout_route(config.target_repo),
+                    effort=config.effort,
+                )
             # F4: the provider a provider/model pin names, captured once.
             # A scheduler-dispatched job's admitted route arrives as this
             # pin; it is a preference, never a command to re-dispatch a

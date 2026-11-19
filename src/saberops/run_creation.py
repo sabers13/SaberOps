@@ -455,6 +455,8 @@ def effective_policy_summary(repo_path: Path | str) -> dict[str, object]:
         "accept_target_branch": settings.accept_target_branch,
         "accept_target_branch_explicit": settings.accept_target_branch is not None,
         "accept_target_branch_effective": effective_branch,
+        "scout_route": settings.scout_route or "cheap",
+        "scout_route_explicit": settings.scout_route is not None,
     }
 
 

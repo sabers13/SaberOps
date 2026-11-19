@@ -58,6 +58,11 @@ is the cost this record removes.
 7. **Dependencies.** A succeeded scout satisfies a dependant directly: there is
    no candidate to accept. The report is available to the dependant through the
    job record.
+8. **Cheap default route.** Scouts prefer the cheapest plan model of each
+   subscription on the build route, with a per-project (`scout_route`) and
+   per-job (`effort`/`size_hint`) override. Admission, read-only enforcement
+   and every candidate as a fallback are unchanged; see
+   [ADR-0035](0035-cheap-scout-route.md).
 
 ## 3. Consequences
 

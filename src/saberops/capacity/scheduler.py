@@ -28,6 +28,7 @@ from saberops.jobs.models import (
     NO_ROUTE_FOR_REQUIREMENTS,
     DependencyBlocker,
     Job,
+    JobKind,
     JobRole,
     Priority,
     WaitingReason,
@@ -126,6 +127,7 @@ def schedule(
     readiness_states: Mapping[Any, Any] | None = None,
     dependency_blockers: Mapping[str, DependencyBlocker] | None = None,
     blocked_providers: Mapping[str, str] | None = None,
+    scout_routes: Mapping[str, str] | None = None,
 ) -> list[SchedulerDecision]:
     """Pure deterministic pacing scheduler (ADR-0002 D7).
 
@@ -138,6 +140,9 @@ def schedule(
       with admitted candidates.
     - BACKGROUND jobs require binding pace >= background_min_pace.
     - Honors prefer_wait_minutes on fallback groups when exact/parsed ETA matches.
+    - A scout job (F19) prefers the cheapest plan model of each subscription
+      present on the build route (F27), keeping every candidate as a fallback;
+      ``scout_routes[job_id]`` carries its project override.
     - A global aggregate ceiling (``global_slot_limit``) blocks dispatch once
       the number of top-level RUNNING jobs plus same-tick simulated starts
       reaches the ceiling, independent of pool mapping.
@@ -250,6 +255,19 @@ def schedule(
             continue
 
         pacing_meta = routing_snapshot.prefer_wait_minutes_for(role)
+        scout_preferred: frozenset[tuple[str, str]] | None = None
+        if job.kind is JobKind.SCOUT:
+            from saberops.scout_routing import scout_candidate_view
+
+            view = scout_candidate_view(
+                groups,
+                pacing_meta,
+                route=(scout_routes or {}).get(job.job_id),
+                requirements=job.requirements,
+            )
+            groups = view.groups
+            pacing_meta = view.pacing
+            scout_preferred = view.preferred
         size_bucket = job.requirements.size_hint or SizeBucket.M
         all_group_decisions: list[list[AdmissionDecision]] = []
         job_dispatched = False
@@ -302,6 +320,14 @@ def schedule(
                 )
             all_group_decisions.append(decisions_for_group)
             admitted_in_group = [d for d in decisions_for_group if d.admitted]
+            if scout_preferred and admitted_in_group:
+                cheap_admitted = [
+                    d
+                    for d in admitted_in_group
+                    if (d.candidate.provider, d.candidate.model) in scout_preferred
+                ]
+                if cheap_admitted:
+                    admitted_in_group = cheap_admitted
 
             if admitted_in_group:
                 # First group with ANY admitted candidate wins!

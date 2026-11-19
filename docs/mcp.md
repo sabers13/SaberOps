@@ -163,6 +163,15 @@ goal carries the report as starting context and records the lineage on both
 jobs. A plan lane may also set `kind: "scout"`: its report becomes starting
 context for the lanes that depend on it.
 
+By default a scout prefers the cheapest plan model of each subscription already
+on the build route (Codex `gpt-*-luna`, Claude Haiku, OpenCode Go
+`deepseek-v4*-flash`); every other candidate stays a fallback, and read-only
+admission is unchanged (F27, ADR-0035). Override it per project with
+`orch project set-scout-route <cheap|build|provider/model>` (and
+`clear-scout-route`), or per job with `size_hint: "L"` or `effort: high` /
+`xhigh` to keep the ordinary build route. The chosen route and per-job usage are
+shown by `get_job` and `catch_up` like any other job.
+
 `plan_status` returns the record-derived plan ledger: one row per lane with its
 computed status (`planned`, `owner`, `ready`, `queued`, `running`,
 `needs-attention`, `candidate`, `stale`, `accepted`, `failed`, `blocked`,

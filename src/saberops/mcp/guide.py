@@ -211,7 +211,10 @@ CLI (`orch mode set`) or the Questions page.
    `kind` is `BUILD` (default) or `SCOUT`: a scout investigates read-only and
    returns a Markdown report instead of a change, with no gate, independent
    review or owner acceptance; promote its report into a build job with
-   `promote_scout`.
+   `promote_scout`. A scout prefers the cheapest plan model of each
+   subscription on the build route by default (F27); a project can set
+   `scout_route` to `cheap`, `build` or an exact `provider/model`, and an
+   `effort: high` or `size_hint: "L"` job keeps the ordinary build route.
    `acceptance` is a string or list of strings.
    `requirements` may include `role`, `effort`, `size_hint`, `required_capabilities`,
    `read_only`, `model_family_include`, and `model_family_exclude`. The role

@@ -113,6 +113,16 @@ list of `{"routes": [...]}` groups. The check binding keeps its ordered list in
 `orch reviewer show`, and the plan role is the connected agent: see `orch
 orchestrator show` (`orch routing show` points there too).
 
+### Scout route (F27)
+
+Scout jobs (`kind: SCOUT`, ADR-0026) prefer the cheapest plan model of each
+subscription already on the build route (ADR-0035): Codex `gpt-*-luna`, Claude
+Haiku, and OpenCode Go `deepseek-v4*-flash`. It only reorders the owner's
+candidates; every one remains a fallback and read-only admission is unchanged.
+Override per project with `orch project set-scout-route <cheap|build|provider/model>`
+(`orch project clear-scout-route` returns to `cheap`); a `size_hint: "L"` or
+`effort: high|xhigh` job keeps the ordinary build route.
+
 ### Model-family tokens (cross-CLI proxy requests)
 
 A job asks for one worker family with `requirements.model_family_include`;

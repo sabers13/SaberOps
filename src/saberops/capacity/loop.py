@@ -804,6 +804,23 @@ def _default_run_launcher(
     return run_id
 
 
+def _scout_routes_for(jobs: Sequence[Job]) -> dict[str, str] | None:
+    """Per-job F27 scout route from each project's setting (never raises)."""
+    from saberops.jobs.models import JobKind
+    from saberops.scout_routing import load_scout_route
+
+    routes: dict[str, str] = {}
+    by_repo: dict[str, str] = {}
+    for job in jobs:
+        if job.kind is not JobKind.SCOUT:
+            continue
+        repo = str(job.repo)
+        if repo not in by_repo:
+            by_repo[repo] = load_scout_route(repo)
+        routes[job.job_id] = by_repo[repo]
+    return routes or None
+
+
 def _notification_ledger(db: Any) -> Path:
     """The durable once-per-key desktop notice ledger for this owner store."""
     owner_db = getattr(db, "owner_db", db)
@@ -1329,6 +1346,7 @@ def scheduler_tick(
         readiness_states=readiness_map if readiness_map else None,
         dependency_blockers=blockers,
         blocked_providers=blocked_vendors if blocked_vendors else None,
+        scout_routes=_scout_routes_for(queued_jobs),
     )
 
     dispatched_count = 0

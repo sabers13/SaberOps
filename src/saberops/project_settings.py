@@ -93,6 +93,9 @@ class ProjectSettings:
     review_disabled: bool = False
     review_mode: str | None = None
     review_limit: int | None = None
+    #: F27: ``cheap`` (default), ``build``, or one exact ``provider/model`` on
+    #: the build route.  ``None`` means the documented cheap default.
+    scout_route: str | None = None
 
     def as_dict(self) -> dict[str, object]:
         """Serialize for durable storage (only explicit decisions persist)."""
@@ -108,6 +111,8 @@ class ProjectSettings:
             payload["review_mode"] = self.review_mode
         if self.review_limit is not None:
             payload["review_limit"] = self.review_limit
+        if self.scout_route is not None:
+            payload["scout_route"] = self.scout_route
         return payload
 
 
@@ -151,6 +156,16 @@ def _coerce_branch(value: object, source: str) -> str:
     return text
 
 
+def _coerce_scout_route(value: object, source: str) -> str:
+    """Validate the F27 scout-route setting (``cheap``, ``build`` or route id)."""
+    from saberops.scout_routing import validate_scout_route
+
+    try:
+        return validate_scout_route(str(value))
+    except ValueError as exc:
+        raise ProjectSettingsError(f"project settings at {source}: {exc}") from exc
+
+
 def _parse_document(data: object, source: str) -> ProjectSettings:
     if not isinstance(data, dict):
         raise ProjectSettingsError(f"project settings at {source}: payload must be a JSON object")
@@ -167,6 +182,7 @@ def _parse_document(data: object, source: str) -> ProjectSettings:
     review_disabled = data.get("review_disabled", False)
     review_mode = data.get("review_mode")
     review_limit = data.get("review_limit")
+    scout_route = data.get("scout_route")
     if (
         type(gate_enabled) is not bool
         or type(review_disabled) is not bool
@@ -179,6 +195,9 @@ def _parse_document(data: object, source: str) -> ProjectSettings:
         review_disabled=review_disabled,
         review_mode=review_mode,
         review_limit=review_limit,
+        scout_route=(
+            _coerce_scout_route(scout_route, source) if scout_route is not None else None
+        ),
         gate_command=(_coerce_gate_command(gate_raw, source) if gate_raw is not None else None),
         data_policy=(_coerce_data_policy(data_raw, source) if data_raw is not None else None),
         accept_target_branch=(
@@ -276,20 +295,24 @@ def set_project_settings_for_state_dir(
     gate_command: str | None | _UnsetType = _UNSET,
     data_policy: DataPolicy | str | None = None,
     accept_target_branch: str | None = None,
+    scout_route: str | None = None,
     _clear_gate: bool = False,
     _clear_branch: bool = False,
+    _clear_scout_route: bool = False,
 ) -> Path:
     """Merge owner decisions into the persisted document and return its path.
 
     Only the supplied fields are updated; all others are preserved
     byte-for-byte in intent (the file is rewritten deterministically).
-    Pass ``_clear_gate=True`` / ``_clear_branch=True`` to remove an
-    explicit decision and return that field to unset.
+    Pass ``_clear_gate=True`` / ``_clear_branch=True`` /
+    ``_clear_scout_route=True`` to remove an explicit decision and return that
+    field to unset.
     """
     current = load_project_settings_for_state_dir(state_dir)
     gate = current.gate_command
     policy = current.data_policy
     branch = current.accept_target_branch
+    scout = current.scout_route
     if gate_command is not _UNSET:
         if _clear_gate or gate_command is None:
             gate = None
@@ -305,7 +328,17 @@ def set_project_settings_for_state_dir(
         branch = None
     elif accept_target_branch is not None:
         branch = _coerce_branch(accept_target_branch, str(state_dir))
-    merged = replace(current, gate_command=gate, data_policy=policy, accept_target_branch=branch)
+    if _clear_scout_route:
+        scout = None
+    elif scout_route is not None:
+        scout = _coerce_scout_route(scout_route, str(state_dir))
+    merged = replace(
+        current,
+        gate_command=gate,
+        data_policy=policy,
+        accept_target_branch=branch,
+        scout_route=scout,
+    )
     path = project_settings_path(state_dir)
     _atomic_write_json(path, merged.as_dict())
     return path
@@ -339,6 +372,20 @@ def clear_project_gate_command(repo_path: Path | str) -> Path:
     path = project_settings_path(state_dir)
     _atomic_write_json(path, merged.as_dict())
     return path
+
+
+def set_project_scout_route(repo_path: Path | str, route: str) -> Path:
+    """Persist the project's scout route (``cheap``, ``build`` or a route id)."""
+    state_dir = _resolve_state_dir(repo_path)
+    return set_project_settings_for_state_dir(
+        state_dir, scout_route=_coerce_scout_route(route, str(repo_path))
+    )
+
+
+def clear_project_scout_route(repo_path: Path | str) -> Path:
+    """Remove the explicit scout-route decision (returns to the cheap default)."""
+    state_dir = _resolve_state_dir(repo_path)
+    return set_project_settings_for_state_dir(state_dir, _clear_scout_route=True)
 
 
 def set_project_data_policy(repo_path: Path | str, policy: DataPolicy | str) -> Path:
@@ -494,6 +541,7 @@ __all__ = [
     "ProjectSettingsError",
     "clear_project_accept_target_branch",
     "clear_project_gate_command",
+    "clear_project_scout_route",
     "detect_authoritative_gate",
     "is_project_positively_public",
     "load_project_settings",
@@ -505,6 +553,7 @@ __all__ = [
     "set_project_data_policy",
     "set_project_gate_command",
     "set_project_review_policy",
+    "set_project_scout_route",
     "set_project_settings_for_state_dir",
 ]
 

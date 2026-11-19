@@ -2660,6 +2660,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_repo_arg(project_clear_branch)
 
+    project_set_scout_route = project_sub.add_parser(
+        "set-scout-route",
+        help="Persist the scout-job route (cheap|build|provider/model).",
+    )
+    _add_repo_arg(project_set_scout_route)
+    project_set_scout_route.add_argument(
+        "route",
+        type=str,
+        help=(
+            "cheap (default; each subscription's cheapest plan model), "
+            "build (ordinary build route), or an exact provider/model."
+        ),
+    )
+
+    project_clear_scout_route = project_sub.add_parser(
+        "clear-scout-route",
+        help="Remove the explicit scout route (returns to the cheap default).",
+    )
+    _add_repo_arg(project_clear_scout_route)
+
     project_notes = project_sub.add_parser(
         "notes",
         help="Show, set or clear the per-project note handed to every worker attempt.",
@@ -5222,6 +5242,11 @@ def handle_project_show(args: argparse.Namespace) -> int:
         "  explicit      : "
         f"{'yes' if summary['accept_target_branch_explicit'] else 'no (live branch)'}"
     )
+    print(f"Scout route     : {summary['scout_route']}")
+    print(
+        "  explicit      : "
+        f"{'yes' if summary['scout_route_explicit'] else 'no (cheap default)'}"
+    )
     return 0
 
 
@@ -5531,6 +5556,40 @@ def handle_project_set_target_branch(args: argparse.Namespace) -> int:
         print(f"[!] {exc}", file=sys.stderr)
         return 1
     print(f"Project target branch set to '{str(args.branch).strip()}' at {path}")
+    return 0
+
+
+def handle_project_set_scout_route(args: argparse.Namespace) -> int:
+    """Handle ``orch project set-scout-route <cheap|build|provider/model>``."""
+    from saberops.project_settings import ProjectSettingsError, set_project_scout_route
+
+    try:
+        repo = _resolve_repo_for_project_settings(args)
+    except SystemExit:
+        return 2
+    try:
+        path = set_project_scout_route(repo, str(args.route))
+    except ProjectSettingsError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    print(f"Project scout route set to '{str(args.route).strip()}' at {path}")
+    return 0
+
+
+def handle_project_clear_scout_route(args: argparse.Namespace) -> int:
+    """Handle ``orch project clear-scout-route``."""
+    from saberops.project_settings import ProjectSettingsError, clear_project_scout_route
+
+    try:
+        repo = _resolve_repo_for_project_settings(args)
+    except SystemExit:
+        return 2
+    try:
+        path = clear_project_scout_route(repo)
+    except ProjectSettingsError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    print(f"Project scout route cleared (cheap default) at {path}")
     return 0
 
 
@@ -8372,6 +8431,10 @@ def _dispatch(args: argparse.Namespace) -> int:
             return handle_project_set_target_branch(args)
         elif args.project_command == "clear-target-branch":
             return handle_project_clear_target_branch(args)
+        elif args.project_command == "set-scout-route":
+            return handle_project_set_scout_route(args)
+        elif args.project_command == "clear-scout-route":
+            return handle_project_clear_scout_route(args)
         elif args.project_command == "notes":
             if args.project_notes_command == "show":
                 return handle_project_notes_show(args)
