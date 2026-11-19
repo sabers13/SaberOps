@@ -2,8 +2,8 @@
 
 The following tools are exposed::
 
-    preflight submit_job get_job catch_up tail_job wait_job list_jobs cancel_job
-    note_job capacity read_evidence list_questions answer_question
+    preflight submit_job submit_plan get_job catch_up tail_job wait_job list_jobs
+    cancel_job note_job capacity read_evidence list_questions answer_question
     propose_config_change list_proposals
 
 Everything else is either not modelled or on the **never-exposed** list, which
@@ -97,6 +97,7 @@ FORBIDDEN_OPERATIONS: dict[str, str] = {
 MUTATING_TOOLS: frozenset[str] = frozenset(
     {
         "submit_job",
+        "submit_plan",
         "refresh_candidate",
         "cancel_job",
         "note_job",
@@ -126,6 +127,7 @@ READ_TOOLS: frozenset[str] = frozenset(
 TOOL_NAMES: tuple[str, ...] = (
     "preflight",
     "submit_job",
+    "submit_plan",
     "refresh_candidate",
     "get_job",
     "catch_up",
@@ -422,6 +424,83 @@ def _submit_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[st
         {"job_id": result.job.job_id, "state": result.job.state.value},
         key=f"job:{result.job.job_id}",
     )
+    return payload
+
+
+def _submit_plan(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    """Activate a repository ``PLAN.md`` and submit its ready lanes (P2).
+
+    Path-only: the handler reads the file from inside the caller's repository,
+    never raw bytes over the wire, and returns a parsed summary.  Each ready
+    lane becomes an ordinary job; dependent lanes wait for acceptance and
+    ``run: "owner"`` lanes are never dispatched.
+    """
+    from saberops.plan_runner import PlanRunnerError, submit_plan_file
+
+    repo = _require_text(arguments, "repo", what="repo")
+    plan_path = _require_text(arguments, "plan_path", what="plan_path")
+    base_ref = arguments.get("base_ref")
+    db = context.database(read_only=False)
+    assert db is not None
+    try:
+        submission = submit_plan_file(
+            db,
+            repo=repo,
+            plan_path=plan_path,
+            base_ref=str(base_ref).strip() if base_ref else None,
+            owner_initiated=True,
+        )
+    except PlanRunnerError as exc:
+        raise InvalidParamsError(f"invalid plan: {exc}") from exc
+    lanes = [
+        {
+            "id": view.lane_id,
+            "state": view.state,
+            "status": view.status,
+            "reasons": list(view.reasons),
+            "job_id": view.job_id,
+            "owner": view.owner,
+        }
+        for view in submission.lanes
+    ]
+    payload: dict[str, Any] = {
+        "v": SNAPSHOT_SCHEMA_VERSION,
+        "plan_id": submission.plan.plan_id,
+        "project_id": submission.plan.project_id,
+        "version": submission.revision.version,
+        "sha256": submission.revision.sha256,
+        "submitted": list(submission.submitted),
+        "paused": submission.paused,
+        "error": submission.error,
+        "lanes": lanes,
+    }
+    context.ledger.append(
+        "plan_submitted",
+        {
+            "plan_id": submission.plan.plan_id,
+            "project_id": submission.plan.project_id,
+            "version": submission.revision.version,
+            "sha256": submission.revision.sha256,
+            "lane_ids": [view.lane_id for view in submission.lanes],
+        },
+        key=f"plan:{submission.plan.plan_id}:{submission.revision.sha256}",
+    )
+    for view in submission.lanes:
+        if view.job_id is None:
+            continue
+        context.ledger.append(
+            "plan_lane_submitted",
+            {
+                "plan_id": submission.plan.plan_id,
+                "lane_id": view.lane_id,
+                "job_id": view.job_id,
+                "version": submission.revision.version,
+            },
+            key=(
+                f"plan:{submission.plan.plan_id}:v{submission.revision.version}:"
+                f"lane:{view.lane_id}"
+            ),
+        )
     return payload
 
 
@@ -1471,6 +1550,21 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
             required=("repo", "goal"),
         ),
         _submit_job,
+        mutating=True,
+    )
+    register(
+        "submit_plan",
+        "Activate a repository PLAN.md (path-only) and submit every lane whose "
+        "dependencies are accepted; owner-held lanes are never dispatched.",
+        _schema(
+            {
+                "repo": {"type": "string", "minLength": 1},
+                "plan_path": {"type": "string", "minLength": 1},
+                "base_ref": {"type": "string", "minLength": 1},
+            },
+            required=("repo", "plan_path"),
+        ),
+        _submit_plan,
         mutating=True,
     )
     register(

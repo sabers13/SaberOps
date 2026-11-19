@@ -48,6 +48,7 @@ served, and an unknown requested revision falls back to `2025-06-18`.
 | Tool | Mutating | Key arguments | Calls |
 | --- | --- | --- | --- |
 | `submit_job` | yes | `repo`, `goal`, `acceptance`, `base_ref`, `priority`, `deadline`, `not_before`, `depends_on`, `idempotency_key`, `requirements` | `saberops.jobs.service.submit_job` |
+| `submit_plan` | yes | `repo`, `plan_path`, `base_ref` | `saberops.plan_runner.submit_plan_file` (path-only, repository-confined) |
 | `get_job` | no | `job_id` | `saberops.jobs.service.get_job` |
 | `catch_up` | no | `job_id` | read-only handoff over saved job, run, check, review and question records |
 | `list_jobs` | no | `state`, `limit` | `saberops.jobs.service.list_jobs` |
@@ -107,6 +108,14 @@ being submitted later by hand: it stays QUEUED with the `DEPENDENCY` reason and
 starts only after the owner accepts every dependency. A dependency that fails
 or is cancelled parks the dependant with `DEPENDENCY_FAILED`, which `wait_job`
 returns as needs-attention; cancel or resubmit it.
+
+`submit_plan` is the plan-file form of the same submission. It reads a tracked
+`PLAN.md` from inside the repository (the path is resolved, symlink-escaped and
+size-capped; the bytes are never sent over the wire) and submits one ordinary
+job per lane whose dependencies are already accepted. Independent lanes run in
+parallel; a `run: "owner"` lane is never dispatched and waits for the owner's
+`orch plan-file done`. Lanes submit only while a live planning session holds
+the planning lease, so closing the planning CLI pauses them.
 
 `catch_up` is the read-only handoff for a new planning session. It returns the
 original request, the current candidate commit, the latest gate check and
@@ -187,10 +196,11 @@ exclusive `flock` during each read-modify-write.
 * The first client to acquire becomes the writer; the lease is acquired during
   `initialize` and released at EOF.
 * A second live client (a different, live `pid` holds the record) is read-only:
-  calls to `submit_job`, `cancel_job`, `note_job`, `answer_question`,
-  `propose_config_change` and `propose_mode_change` are refused with JSON-RPC
-  error `-32020`. Its read tools (`get_job`, `catch_up`, `list_jobs`, `capacity`,
-  `read_evidence`, `list_questions`, `list_proposals`, `get_mode`) keep working.
+  calls to `submit_job`, `submit_plan`, `cancel_job`, `note_job`,
+  `answer_question`, `propose_config_change` and `propose_mode_change` are
+  refused with JSON-RPC error `-32020`. Its read tools (`get_job`, `catch_up`,
+  `list_jobs`, `capacity`, `read_evidence`, `list_questions`, `list_proposals`,
+  `get_mode`) keep working.
 * **Stale self-healing:** a record whose `pid` is dead is stale and is stolen by
   the next client (`os.kill(pid, 0)` is the liveness probe), so a crashed client
   never locks out future writers. A non-empty but unreadable/malformed record is

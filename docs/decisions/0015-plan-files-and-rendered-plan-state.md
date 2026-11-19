@@ -2,8 +2,8 @@
 
 - **Status:** Accepted. The file format, parser, activation, format-2 revision
   and `PLAN.md` renderer are implemented in Phase 1 lane P1 (Wave 3). Lane
-  submission, the rendered `STATE.md` and the scheduler reconciler remain
-  pending in lanes P2 and P3.
+  submission, the owner-database plan mapping and the scheduler reconciler are
+  implemented in lane P2. The rendered `STATE.md` remains pending in lane P3.
 - **Date:** 2026-11-19
 - **Decider:** Saber (owner), Phase 1 plan lane P1 after the owner approved
   every recommended choice for the plan-file design
@@ -83,12 +83,20 @@ the repository's one-record-of-truth rule and avoids a second plan database.
    acceptance. The projection distinguishes `candidate` from `accepted` and
    `owner` from `queued`; `SUCCEEDED` never renders as done.
 9. **The plan layer starts lanes; the scheduler decides capacity.** The
-   reconciler runs inside the scheduler tick so an activated plan advances with
-   the planning CLI closed. A lane is ready only when every dependency is
-   accepted (`run_accepted`), not merely completed. It submits one ordinary job
-   per ready lane; parallelism, memory, quota, routes, retries and worktree
-   lifecycle stay in the existing scheduler. There is no wave executor and no
-   second scheduler.
+   reconciler runs inside the scheduler tick so an activated plan can advance
+   while the owner works in another window. A lane is ready only when every
+   dependency is accepted (`run_accepted`), not merely completed. It submits
+   one ordinary job per ready lane; parallelism, memory, quota, routes, retries
+   and worktree lifecycle stay in the existing scheduler. There is no wave
+   executor and no second scheduler. Every lane submission passes through the
+   single function `submit_lane_job`, which consults the bounded pause gate
+   (`LANE_SUBMIT_GATE`) and, for scheduler-driven submission, refuses when no
+   live planning session holds the MCP planning lease. The scheduler lease is
+   not a planning session: closing the planning CLI pauses plan lanes, as the
+   owner required for lane F17. F17 extends that same pause to all other work;
+   the plan never outranks an owner pause. An owner-invoked activation or
+   `orch plan-file done` is a present owner action and is exempt only from the
+   planning-session check, never from the pause gate.
 10. **Automation is bounded and owner-controlled.** Auto-advance submits jobs
     an activated plan already allows. Auto-refresh may refresh stale
     candidate-ready siblings in deterministic landing order (wave, then lane

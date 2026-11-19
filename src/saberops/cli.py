@@ -1177,6 +1177,39 @@ def build_parser() -> argparse.ArgumentParser:
         "--store", type=str, default=None, help="Plan-store root directory."
     )
     plan_file_activate.add_argument("--json", action="store_true", help="JSON output")
+    plan_file_submit = plan_file_sub.add_parser(
+        "submit",
+        help="Activate a PLAN.md and submit every lane whose dependencies are accepted.",
+    )
+    plan_file_submit.add_argument("path", type=str, help="Plan file to activate and submit.")
+    plan_file_submit.add_argument(
+        "--project", type=str, default=None, help="Stable project ID (default: derive it)."
+    )
+    plan_file_submit.add_argument(
+        "--repo",
+        type=str,
+        default=None,
+        help="Checkout that owns the plan and receives the jobs (default: the file's).",
+    )
+    plan_file_submit.add_argument(
+        "--base-ref", type=str, default=None, help="Base ref for lane jobs (default: plan base)."
+    )
+    plan_file_submit.add_argument(
+        "--store", type=str, default=None, help="Plan-store root directory."
+    )
+    plan_file_submit.add_argument("--json", action="store_true", help="JSON output")
+    plan_file_done = plan_file_sub.add_parser(
+        "done",
+        help='Record owner completion of one run: "owner" lane.',
+    )
+    plan_file_done.add_argument("lane", type=str, help="Owner lane id to mark done.")
+    plan_file_done.add_argument(
+        "--plan", type=str, required=True, help="Plan ID that owns the lane."
+    )
+    plan_file_done.add_argument(
+        "--evidence", type=str, required=True, help="What the owner did or decided."
+    )
+    plan_file_done.add_argument("--json", action="store_true", help="JSON output")
     handoff_parser = subparsers.add_parser(
         "handoff", help="Show latest immutable handoff or resume capsule."
     )
@@ -3358,6 +3391,105 @@ def handle_plan_file_activate(args: argparse.Namespace) -> int:
         f"activated plan {revision.plan_id} as {revision.project_id} "
         f"{revision.version} (sha256 {revision.sha256[:16]}...)"
     )
+    return 0
+
+
+def handle_plan_file_submit(args: argparse.Namespace) -> int:
+    """Handle ``orch plan-file submit`` (activate + submit ready lanes)."""
+    from saberops.plan_file import PlanFileError, resolve_repo_root
+    from saberops.plan_runner import PlanRunnerError, submit_plan_file
+    from saberops.project_scope.plan_store import PlanStore
+
+    path = str(args.path)
+    try:
+        repo = resolve_repo_root(path, getattr(args, "repo", None))
+        store = PlanStore(Path(args.store).expanduser()) if getattr(args, "store", None) else None
+        submission = submit_plan_file(
+            Database(),
+            repo=repo,
+            plan_path=Path(path).expanduser().resolve(),
+            project_id=getattr(args, "project", None),
+            base_ref=getattr(args, "base_ref", None),
+            store=store,
+            owner_initiated=True,
+        )
+    except (PlanFileError, PlanRunnerError) as exc:
+        if getattr(args, "json", False):
+            print(json.dumps({"ok": False, "errors": [str(exc)]}, indent=2, sort_keys=True))
+        else:
+            print(f"[!] {exc}", file=sys.stderr)
+        return 2
+    lanes = [
+        {"id": view.lane_id, "state": view.state, "job_id": view.job_id}
+        for view in submission.lanes
+    ]
+    if getattr(args, "json", False):
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "plan_id": submission.plan.plan_id,
+                    "project": submission.plan.project_id,
+                    "version": submission.revision.version,
+                    "sha256": submission.revision.sha256,
+                    "submitted": list(submission.submitted),
+                    "paused": submission.paused,
+                    "lanes": lanes,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    print(
+        f"activated plan {submission.plan.plan_id} as {submission.plan.project_id} "
+        f"{submission.revision.version} (sha256 {submission.revision.sha256[:16]}...)"
+    )
+    if submission.submitted:
+        print("submitted: " + ", ".join(submission.submitted))
+    if submission.paused:
+        print(f"paused: {submission.paused}")
+    if submission.error:
+        print(f"warning: reconciler error: {submission.error}")
+    for view in submission.lanes:
+        if view.state in {"held", "owner"}:
+            reason = ", ".join(view.reasons) if view.reasons else view.state
+            print(f"  {view.lane_id} [{view.wave or '-'}] {view.state}: {reason}")
+    return 0
+
+
+def handle_plan_file_done(args: argparse.Namespace) -> int:
+    """Handle ``orch plan-file done`` (owner-lane completion)."""
+    from saberops.plan_runner import PlanRunnerError, mark_owner_lane_done
+
+    try:
+        view = mark_owner_lane_done(
+            Database(),
+            plan_id=str(args.plan),
+            lane_id=str(args.lane),
+            evidence=str(args.evidence),
+        )
+    except PlanRunnerError as exc:
+        if getattr(args, "json", False):
+            print(json.dumps({"ok": False, "errors": [str(exc)]}, indent=2, sort_keys=True))
+        else:
+            print(f"[!] {exc}", file=sys.stderr)
+        return 2
+    if getattr(args, "json", False):
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "lane": view.lane_id,
+                    "state": view.state,
+                    "status": view.status,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    print(f"owner lane {view.lane_id} marked done ({view.state})")
     return 0
 
 
@@ -7017,6 +7149,10 @@ def _dispatch(args: argparse.Namespace) -> int:
             return handle_plan_file_export(args)
         elif args.plan_file_command == "activate":
             return handle_plan_file_activate(args)
+        elif args.plan_file_command == "submit":
+            return handle_plan_file_submit(args)
+        elif args.plan_file_command == "done":
+            return handle_plan_file_done(args)
     elif args.command == "handoff":
         return handle_handoff(args)
     elif args.command in ("wait", "watch"):

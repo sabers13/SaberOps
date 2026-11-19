@@ -192,6 +192,18 @@ CLI (`orch mode set`) or the Questions page.
    refreshed candidate receives fresh checks and review; the owner accepts it
    separately.
 
+## Plans
+- When the owner works from a tracked `PLAN.md`, call `submit_plan` with the
+  repository and the plan file path instead of one `submit_job` per task. The
+  file is read inside the checkout; you do not paste its contents.
+- Each lane without unsettled dependencies becomes one ordinary job. A lane
+  starts automatically only after every dependency is accepted; independent
+  lanes run in parallel. Do not resubmit a dependent lane by hand.
+- `run: "owner"` lanes are never dispatched. They are completed only by the
+  owner with `orch plan-file done <lane> --plan <id> --evidence "<what happened>"`.
+- Lanes pause when the owner closes the planning CLI; they resume when a
+  planning session is open again.
+
 ## Following it
 - Call `wait_job` after each submission; it returns on a final outcome, blocking
   question, or timeout. Call again after a timeout if needed.

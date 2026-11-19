@@ -251,6 +251,8 @@ class TickResult:
     #: reported healthy.  A non-``None`` value is an INFRA park, never a code
     #: failure and never a pass.
     storage_infra_reason: str | None = None
+    #: Plan lanes newly submitted this tick, as ``"<plan_id>:<lane_id>"`` (P2).
+    plan_lanes_submitted: tuple[str, ...] = ()
 
 
 def acquire_lease(
@@ -1064,6 +1066,26 @@ def scheduler_tick(
     except Exception:
         preempt_recon = None
 
+    # 1c. Plan lanes (P2).  Submit every eligible lane of each active plan
+    # BEFORE the queue is read, so a lane that becomes ready in this tick can
+    # also dispatch in it.  Submission goes through the single gated function
+    # in ``plan_runner`` (F17's pause seam); a no-planning-session or F17 pause
+    # submits nothing.  A malformed plan is a plan-level failure and must never
+    # stop unrelated jobs, so the reconciler records it and returns.
+    plan_lanes_submitted: tuple[str, ...] = ()
+    try:
+        from saberops.plan_runner import reconcile_plan_lanes
+
+        plan_results = reconcile_plan_lanes(db, now=moment)
+    except Exception:
+        logging.getLogger(__name__).exception("plan lane reconciliation failed")
+        plan_results = ()
+    plan_lanes_submitted = tuple(
+        f"{result.plan_id}:{lane_id}"
+        for result in plan_results
+        for lane_id in result.submitted
+    )
+
     # 2. Collect scheduling inputs
     queued_jobs, _ = store.list_jobs_tolerant(db, state=JobState.QUEUED, limit=100_000)
     running_jobs, _ = store.list_jobs_tolerant(db, state=JobState.RUNNING, limit=100_000)
@@ -1170,6 +1192,7 @@ def scheduler_tick(
             dispatched=dispatched_count, probed=probed_count, waited=waited_count,
             decisions=tuple(decisions),
             dispatch_window_repaired=repaired_job_ids,
+            plan_lanes_submitted=plan_lanes_submitted,
         )
 
     # 4. Execute decisions
@@ -1406,6 +1429,7 @@ def scheduler_tick(
         preemption_blocked=(
             preempt_recon.blocked if preempt_recon is not None else ()
         ),
+        plan_lanes_submitted=plan_lanes_submitted,
     )
 
 
