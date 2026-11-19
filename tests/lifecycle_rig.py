@@ -191,14 +191,23 @@ class RigEnvironment:
         )
 
     def wait_for_run(self, run_id: str, *, timeout: float = 30.0) -> Run:
-        """Poll the owner DB until *run_id* reaches a terminal status."""
+        """Wait on the run's durable wake channel until it reaches a terminal status."""
+        from saberops.wake import RunWakeSubscription
+
         deadline = time.monotonic() + timeout
         db = self.db()
-        while time.monotonic() < deadline:
-            run = db.get_run(run_id)
-            if run is not None and run.status in TERMINAL_RUN_STATUSES:
-                return run
-            time.sleep(0.05)
+        with RunWakeSubscription(db.db_path, run_id) as wake:
+            while True:
+                run = db.get_run(run_id)
+                if run is not None and run.status in TERMINAL_RUN_STATUSES:
+                    return run
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                # A wake byte means "look at the durable log again"; the DB
+                # remains authoritative.  The bounded wait is the coarse
+                # fallback for an event written before the subscription.
+                wake.wait(min(0.5, remaining))
         run = db.get_run(run_id)
         status_str = run.status.value if run is not None else "missing"
         raise TimeoutError(
@@ -231,6 +240,12 @@ def build_lifecycle_rig(
     monkeypatch.setenv("XDG_CACHE_HOME", str(cache_home))
     monkeypatch.setenv("XDG_DATA_HOME", str(data_home))
     monkeypatch.setenv("TMPDIR", "/var/tmp")
+    # Memory admission reads the real host.  Other lanes run heavy tests on
+    # this machine, so an unrelated process can park a scheduler dispatch with
+    # MEMORY_LOW and turn a deterministic lifecycle test into a flaky one.
+    # The rig admits without the host guard; the guard's own tests
+    # (tests/test_c1_memory_ledger.py) re-enable it explicitly.
+    monkeypatch.setenv("SABEROPS_GATE_MEMORY_GUARD", "0")
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
     for var in (
         "SABEROPS_PROFILE",

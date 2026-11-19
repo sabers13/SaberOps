@@ -370,25 +370,21 @@ def test_slot_pool_concurrent_small_reservations(
     seed_pool.ledger.record_peak("affected", "small", 500 * gt.MIB)
     monkeypatch.setenv("SABEROPS_GATE_SLOT_WAIT", "5")
     held: list[int] = []
-    guard = threading.Lock()
+    guard = threading.Condition()
     release = threading.Event()
 
     def holder() -> None:
         with GateSlotPool(common).light():
             with guard:
                 held.append(1)
+                guard.notify_all()
             assert release.wait(timeout=5)
 
     threads = [threading.Thread(target=holder) for _ in range(2)]
     for thread in threads:
         thread.start()
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
-        with guard:
-            if len(held) == 2:
-                break
-        time.sleep(0.05)
     with guard:
+        assert guard.wait_for(lambda: len(held) == 2, timeout=5)
         assert len(held) == 2
     # Two small holders (1000 MiB) leave 100 MiB < 500 MiB -> third waits and times out.
     monkeypatch.setenv("SABEROPS_GATE_SLOT_WAIT", "0.2")
@@ -487,8 +483,7 @@ def test_slot_pool_waits_for_budget_then_runs(
 
     worker = threading.Thread(target=run_heavy)
     worker.start()
-    time.sleep(0.2)
-    assert not entered.is_set()
+    assert not entered.wait(timeout=0.2)
     avail_kb = (gt.DESKTOP_RESERVE_BYTES + gt.COLD_START_PEAK_BYTES + 200 * gt.MIB) // 1024
     meminfo.write_text(f"MemTotal: {avail_kb * 4} kB\nMemAvailable: {avail_kb} kB\n")
     assert entered.wait(timeout=5)

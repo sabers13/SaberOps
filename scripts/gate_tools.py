@@ -1994,6 +1994,15 @@ class Runner:
         self.memory_wait_seconds = 0.0
         self.memory_freeze_count = 0
         self.memory_workers = 1
+        # One selection implementation for every per-change gate: both
+        # ``lane-check.sh`` and ``gate-affected.sh`` reach scripts/select_tests.py
+        # through ``Runner``.  ``lane_full`` is the selector's conservative
+        # FULL answer.
+        self.strategy = "auto"
+        self.map_path: str | None = None
+        self.pytest_args: list[str] = []
+        self.lane_full = False
+        self.selector_all_ghosts = False
         self._next_cmd_meta: tuple[str, str, bool, bool, bool] | None = None
         self.stop_monitor = threading.Event()
         self.monitor = threading.Thread(target=self.measure_loop, daemon=True)
@@ -2133,6 +2142,7 @@ class Runner:
             rerun_if_stopped=rerun_stopped,
             on_lease=lambda active: lease_ref.__setitem__(0, active),
         )
+        print(stats.format_line(), flush=True)
         self.memory_peak_bytes = max(self.memory_peak_bytes, stats.measured_peak_bytes)
         active_now = lease_ref[0]
         if active_now is not None:
@@ -2259,6 +2269,55 @@ class Runner:
         print(f"{label} OUTCOME: {outcome}{suffix}", flush=True)
         return code
 
+    def _select_targets(self, base: str, also: list[str]) -> list[str] | None:
+        """Run the shared selector; return targets or ``None`` for FULL.
+
+        One selection path (T4): the engine lane check and the developer
+        ``gate-affected.sh`` both use scripts/select_tests.py, so the same diff
+        always selects the same tests.  ``--also`` stays an explicit override.
+        A selector failure fails closed to the full suite, never to "no tests".
+        """
+        argv = [
+            self.python,
+            "scripts/select_tests.py",
+            "--base",
+            base,
+            "--strategy",
+            self.strategy,
+            "--resolve",
+            "--explain",
+            "--exclude-slow",
+        ]
+        if self.map_path:
+            argv.extend(["--map", self.map_path])
+        try:
+            completed = subprocess.run(
+                argv,
+                cwd=self.repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError as error:
+            print(f"select_tests failed: {error}; running the full suite", flush=True)
+            return None
+        if completed.stderr:
+            print(completed.stderr, end="", flush=True)
+        if completed.returncode != 0:
+            print(
+                f"select_tests exited {completed.returncode}; running the full suite",
+                flush=True,
+            )
+            return None
+        lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+        if lines == ["FULL"]:
+            return None
+        if "ghost IDs dropped" in completed.stderr and not lines and not also:
+            self.selector_all_ghosts = True
+        targets = set(also)
+        targets.update(lines)
+        return sorted(targets)
+
     def _compute_lane_targets(self, base: str, also: list[str]) -> list[str]:
         changed = set(git(self.repo, "diff", "--name-only", f"{base}..HEAD").splitlines())
         for git_args in [
@@ -2268,7 +2327,11 @@ class Runner:
         ]:
             changed.update(git(self.repo, *git_args).splitlines())
         print("changed files:\n" + "\n".join(sorted(changed)))
-        targets = lane_targets(self.repo, sorted(changed), also)
+        targets = self._select_targets(base, also)
+        if targets is None:
+            self.lane_full = True
+            print("lane targets: FULL suite required by the shared selector")
+            return []
         print(f"lane targets ({len(targets)}):\n" + "\n".join(targets))
         return targets
 
@@ -2281,7 +2344,10 @@ class Runner:
             precomputed_targets: list[str] | None = None
             if self.kind == "lane":
                 precomputed_targets = self._compute_lane_targets(base, also)
-                if precomputed_targets:
+                if self.lane_full:
+                    self.memory_step = "affected"
+                    self.memory_bucket = "full"
+                elif precomputed_targets:
                     self.memory_step = "affected"
                     self.memory_bucket = selection_size_bucket(
                         "affected", len(precomputed_targets)
@@ -2349,7 +2415,10 @@ class Runner:
                 else self._compute_lane_targets(base, also)
             )
             if self.memory_grant_bytes <= 0:
-                if targets:
+                if self.lane_full:
+                    self.memory_step = "affected"
+                    self.memory_bucket = "full"
+                elif targets:
                     self.memory_step = "affected"
                     self.memory_bucket = selection_size_bucket("affected", len(targets))
                 else:
@@ -2388,12 +2457,24 @@ class Runner:
             ):
                 self.memory_workers = 1
                 rerun = self.pytest("rerun", ["-p", "no:xdist", *sorted(initial.failed)])
+        elif self.lane_full:
+            self.selected = True
+            workers = str(self.memory_workers)
+            args = [*self.pytest_args, "-n", workers, "--dist", "worksteal"]
+            initial = self.pytest(
+                "lane",
+                args,
+                float(os.environ.get("SABEROPS_LANE_TIMEOUT", "1200")),
+            )
+        elif self.selector_all_ghosts:
+            self.selected = True
+            initial = Evidence(codes=[5], count=0)
         elif targets:
             self.selected = True
-            args = [*targets]
+            args = [*self.pytest_args, *targets]
             if len(targets) > 1 and self.memory_workers > 1:
                 workers = str(self.memory_workers)
-                args = ["-n", workers, "--dist", "worksteal", *targets]
+                args = ["-n", workers, "--dist", "worksteal", *args]
             initial = self.pytest(
                 "lane",
                 args,
@@ -2415,7 +2496,7 @@ class Runner:
             rerun,
             quarantine,
             lint == 0 and types == 0,
-            self.kind == "full" or bool(targets),
+            self.kind == "full" or self.lane_full or self.selector_all_ghosts or bool(targets),
         )
         merged = ET.Element("testsuites")
         for path in self.result.glob("*.xml"):
@@ -2496,6 +2577,16 @@ def main() -> int:
     parser.add_argument("kind", choices=["full", "lane"])
     parser.add_argument("--base")
     parser.add_argument("--also", nargs="+", action="extend", default=[])
+    parser.add_argument(
+        "--strategy", default="auto", choices=("auto", "coverage", "static")
+    )
+    parser.add_argument("--map", dest="map_path", default=None)
+    parser.add_argument(
+        "--pytest-arg",
+        action="append",
+        default=[],
+        help="extra pytest argument forwarded to the lane selection (repeatable)",
+    )
     parser.add_argument("--out", type=Path)
     parser.add_argument("--result-dir", type=Path)
     args = parser.parse_args()
@@ -2514,6 +2605,16 @@ def main() -> int:
                     "--base",
                     args.base,
                     *(["--also", *args.also] if args.also else []),
+                    "--strategy",
+                    args.strategy,
+                    *(["--map", args.map_path] if args.map_path else []),
+                    *(
+                        [
+                            item
+                            for arg in args.pytest_arg
+                            for item in ("--pytest-arg", arg)
+                        ]
+                    ),
                     *(["--result-dir", str(args.result_dir)] if args.result_dir else []),
                 ],
                 stdout=subprocess.PIPE,
@@ -2529,7 +2630,11 @@ def main() -> int:
                 output.write(line)
                 output.flush()
             return child.wait()
-    return Runner(Path.cwd(), args.kind, args.result_dir).execute(args.base, args.also)
+    runner = Runner(Path.cwd(), args.kind, args.result_dir)
+    runner.strategy = args.strategy
+    runner.map_path = args.map_path
+    runner.pytest_args = list(args.pytest_arg)
+    return runner.execute(args.base, args.also)
 
 
 if __name__ == "__main__":

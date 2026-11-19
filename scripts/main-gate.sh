@@ -263,14 +263,50 @@ fi
 
 # 5. Map rebuild when the gate is satisfied (PASS or quarantined-only FLAKY_PASS).
 # FAIL, TIMEOUT and INFRA never rebuild the map.
+#
+# The rebuild no longer holds the exclusive gate slot after every landing
+# (T5).  It is launched detached under its own non-blocking flock and a normal
+# memory-ledger reservation, so the main gate returns immediately and other
+# lanes' gates are not blocked behind a five-minute coverage run.  A rebuild
+# already in flight wins the lock; the next landing starts a fresh one.  The
+# test hook SABEROPS_MAIN_GATE_MAP_CMD and SABEROPS_MAIN_GATE_MAP_MODE=sync
+# keep the synchronous path for tests.
 MAP_REBUILT="no"
 if [[ "$OUTCOME" == "PASS" || "$OUTCOME" == "FLAKY_PASS" ]]; then
-    if [[ -n "${SABEROPS_MAIN_GATE_MAP_CMD:-}" ]]; then
-        (cd -- "$MAIN_GATE_WT" && "$PYBIN" scripts/gate_tools.py exclusive -- bash -c "$SABEROPS_MAIN_GATE_MAP_CMD" >"$OUT_DIR/map.txt" 2>&1) || true
-    else
-        (cd -- "$MAIN_GATE_WT" && "$PYBIN" scripts/gate_tools.py exclusive -- .venv/bin/python scripts/build_test_map.py >"$OUT_DIR/map.txt" 2>&1) || true
+    MAP_MODE="${SABEROPS_MAIN_GATE_MAP_MODE:-}"
+    if [[ -z "$MAP_MODE" ]]; then
+        if [[ -n "${SABEROPS_MAIN_GATE_MAP_CMD:-}" ]]; then
+            MAP_MODE="sync"
+        else
+            MAP_MODE="background"
+        fi
     fi
-    MAP_REBUILT="yes"
+    if [[ "$MAP_MODE" == "sync" ]]; then
+        if [[ -n "${SABEROPS_MAIN_GATE_MAP_CMD:-}" ]]; then
+            (cd -- "$MAIN_GATE_WT" && "$PYBIN" scripts/gate_tools.py step --step coverage-map --full --compute-workers -- bash -c "$SABEROPS_MAIN_GATE_MAP_CMD" >"$OUT_DIR/map.txt" 2>&1) || true
+        else
+            (cd -- "$MAIN_GATE_WT" && "$PYBIN" scripts/gate_tools.py step --step coverage-map --full --compute-workers -- .venv/bin/python scripts/build_test_map.py >"$OUT_DIR/map.txt" 2>&1) || true
+        fi
+        MAP_REBUILT="yes"
+    else
+        map_lock="$COMMON/saberops-test-map/.rebuild.lock"
+        mkdir -p "$(dirname -- "$map_lock")"
+        if [[ -n "${SABEROPS_MAIN_GATE_MAP_CMD:-}" ]]; then
+            map_argv=(bash -c "$SABEROPS_MAIN_GATE_MAP_CMD")
+        else
+            map_argv=(
+                "$PYBIN" scripts/gate_tools.py step --step coverage-map --full
+                --compute-workers -- .venv/bin/python scripts/build_test_map.py
+            )
+        fi
+        (
+            cd -- "$MAIN_GATE_WT"
+            setsid nohup flock -n "$map_lock" "${map_argv[@]}" \
+                >"$OUT_DIR/map.txt" 2>&1 &
+            echo "$!" >"$OUT_DIR/map.pid"
+        )
+        MAP_REBUILT="background"
+    fi
 fi
 
 # 6. Flaky report.

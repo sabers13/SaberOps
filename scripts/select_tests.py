@@ -200,6 +200,7 @@ class Selection:
     map_stale: bool = False
     map_missing: bool = False
     ghosts: list[str] = field(default_factory=list)
+    slow: list[str] = field(default_factory=list)
     map_age_commits: int = -1
     unmapped_lines: int = 0
     changed_line_total: int = 0
@@ -1585,6 +1586,92 @@ def coverage_gap(
     return unmapped, total
 
 
+def _is_slow_marker(node: ast.expr) -> bool:
+    """True for ``pytest.mark.slow`` (attribute or call form)."""
+    target: ast.expr = node.func if isinstance(node, ast.Call) else node
+    if not isinstance(target, ast.Attribute) or target.attr != "slow":
+        return False
+    owner = target.value
+    return isinstance(owner, ast.Attribute) and owner.attr == "mark"
+
+
+def _module_marks_slow(tree: ast.Module) -> bool:
+    for statement in tree.body:
+        if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets: list[ast.expr]
+        value: ast.expr | None
+        if isinstance(statement, ast.Assign):
+            targets = list(statement.targets)
+            value = statement.value
+        else:
+            targets = [statement.target]
+            value = statement.value
+        if not any(isinstance(item, ast.Name) and item.id == "pytestmark" for item in targets):
+            continue
+        if value is None:
+            continue
+        candidates = value.elts if isinstance(value, (ast.List, ast.Tuple)) else [value]
+        if any(_is_slow_marker(item) for item in candidates):
+            return True
+    return False
+
+
+def slow_targets(repo: Path, targets: list[str]) -> set[str]:
+    """Return the targets marked ``pytest.mark.slow`` (module, class or test).
+
+    The per-change gate skips slow tests; the full gate still runs them.  A
+    text/AST scan avoids importing the tests or collecting them just to learn
+    their markers.
+    """
+    by_file: dict[str, list[str]] = {}
+    for target in targets:
+        path = target.split("::", 1)[0]
+        by_file.setdefault(path, []).append(target)
+    slow: set[str] = set()
+    for path, file_targets in by_file.items():
+        try:
+            source = (repo / path).read_text(encoding="utf-8")
+            tree = ast.parse(source, filename=path)
+        except (OSError, SyntaxError):
+            continue
+        module_slow = _module_marks_slow(tree)
+        non_slow_tests: list[str] = []
+
+        def walk(
+            nodes: list[ast.stmt],
+            prefix: list[str],
+            inherited_slow: bool,
+            *,
+            path: str = path,
+            file_targets: list[str] = file_targets,
+            non_slow_tests: list[str] = non_slow_tests,
+        ) -> None:
+            for node in nodes:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    name = [*prefix, node.name]
+                    node_id = f"{path}::{'::'.join(name)}"
+                    is_slow = inherited_slow or any(
+                        _is_slow_marker(item) for item in node.decorator_list
+                    )
+                    if isinstance(node, ast.ClassDef):
+                        walk(node.body, name, is_slow)
+                    elif node.name.startswith("test"):
+                        if is_slow:
+                            for target in file_targets:
+                                if target == node_id or target.startswith(node_id + "["):
+                                    slow.add(target)
+                        else:
+                            non_slow_tests.append(node_id)
+
+        walk(tree.body, [], module_slow)
+        if module_slow or not non_slow_tests:
+            # A file target can only be dropped whole: it is slow when the
+            # module is marked slow or it contains no non-slow test.
+            slow.update(target for target in file_targets if "::" not in target)
+    return slow
+
+
 def select(
     repo: Path,
     base: str,
@@ -1592,6 +1679,7 @@ def select(
     map_path: Path | str | None = None,
     resolve: bool = False,
     python: str | None = None,
+    exclude_slow: bool = False,
 ) -> Selection:
     """changed paths -> the tests that must run for this diff."""
     changed = changed_paths(repo, base)
@@ -1714,16 +1802,21 @@ def select(
         for path in changed_tests:
             targets[path] = SelectedTest(target=path, via=path, detail="changed test file")
 
-        if stale and covmap is not None and strategy != STRATEGY_STATIC:
-            # Stale map: executed-code reachability is untrustworthy, but the
-            # current import graph is not, so every changed src module selects
-            # its direct importers (depth 1) rather than the legacy transitive
-            # closure. Missing map or explicit --strategy static keeps legacy.
+        narrow_missing = missing and strategy == STRATEGY_AUTO
+        if (stale and covmap is not None and strategy != STRATEGY_STATIC) or narrow_missing:
+            # Stale or absent map under automatic selection: executed-code
+            # reachability is untrustworthy, but the current import graph is
+            # not, so every changed src module selects its direct importers
+            # (depth 1) rather than the legacy transitive closure.  An explicit
+            # --strategy static keeps the legacy closure as the conservative
+            # opt-in; a hub module no longer pulls most of the suite by default
+            # when the map has not been built yet (T2).
+            reason = "static fallback (stale map)" if stale else "static fallback (no map)"
             for module_name, changed_path in sorted(changed_modules.items()):
                 if is_test_path(changed_path):
                     continue
                 for target, item in _direct_importing_tests(
-                    graph, module_name, changed_path, "static fallback (stale map)"
+                    graph, module_name, changed_path, reason
                 ).items():
                     targets.setdefault(target, item)
         else:
@@ -1767,6 +1860,12 @@ def select(
         keep = set(kept)
         ordered = [item for item in ordered if item.target in keep]
 
+    slow: list[str] = []
+    if exclude_slow and ordered:
+        marked = slow_targets(repo, [item.target for item in ordered])
+        slow = sorted(marked)
+        ordered = [item for item in ordered if item.target not in marked]
+
     return Selection(
         base=base,
         changed=changed,
@@ -1778,6 +1877,7 @@ def select(
         map_stale=stale,
         map_missing=missing,
         ghosts=sorted(ghosts),
+        slow=slow,
         map_age_commits=age,
         unmapped_lines=unmapped,
         changed_line_total=line_total,
@@ -1820,7 +1920,10 @@ def format_explain(selection: Selection) -> str:
             "stale map, static selection"
         )
     elif selection.map_missing:
-        lines.append("no coverage map: static selection")
+        lines.append(
+            "no coverage map: static direct-importer selection "
+            "(use --strategy static for the legacy transitive closure)"
+        )
     lines.append(f"changed files ({len(selection.changed)}):")
     lines.extend(f"  {path}" for path in selection.changed)
     if selection.full:
@@ -1829,6 +1932,9 @@ def format_explain(selection: Selection) -> str:
     if selection.ghosts:
         lines.append(f"ghost IDs dropped ({len(selection.ghosts)}):")
         lines.extend(f"  {target}" for target in selection.ghosts)
+    if selection.slow:
+        lines.append(f"slow tests excluded ({len(selection.slow)}):")
+        lines.extend(f"  {target}" for target in selection.slow)
     if selection.ignored:
         lines.append(f"no tests for ({len(selection.ignored)}):")
         lines.extend(f"  {path}" for path in selection.ignored)
@@ -1860,6 +1966,7 @@ def selection_json(selection: Selection) -> str:
                 "changed_line_total": selection.changed_line_total,
             },
             "ghosts": selection.ghosts,
+            "slow": selection.slow,
             "tests": [
                 {
                     "target": item.target,
@@ -1917,6 +2024,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=("check selected node IDs against the current tree "
               "(pytest --collect-only) and drop ghost IDs"),
     )
+    parser.add_argument(
+        "--exclude-slow",
+        action="store_true",
+        help="drop tests marked pytest.mark.slow (the per-change gate)",
+    )
     parser.add_argument("--json", action="store_true", help="emit JSON on stdout")
     return parser.parse_args(argv)
 
@@ -1928,7 +2040,7 @@ def main(argv: list[str] | None = None) -> int:
         base = args.base or default_base(repo)
         selection = select(
             repo, base, strategy=args.strategy, map_path=args.map,
-            resolve=args.resolve,
+            resolve=args.resolve, exclude_slow=args.exclude_slow,
         )
     except SelectorError as error:
         print(f"select_tests: {error}", file=sys.stderr)

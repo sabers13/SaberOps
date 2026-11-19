@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import threading
 from dataclasses import replace
@@ -85,9 +86,26 @@ def _seed_verified_codex_posture(config_home: Path) -> None:
     (cfg_dir / "control_plane.json").write_text(json.dumps(cp_doc), encoding="utf-8")
 
 
+@pytest.fixture(scope="module")
+def project_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """One committed toy repository copied per test (T6)."""
+    root = tmp_path_factory.mktemp("continue-template")
+    repo = root / "project"
+    repo.mkdir()
+    git(repo, "init", "-b", "main")
+    git(repo, "config", "user.name", "Continue Test")
+    git(repo, "config", "user.email", "test@localhost")
+    (repo / "README.md").write_text("Original project\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-m", "base")
+    return repo
+
+
 @pytest.fixture
 def failed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    project_template: Path,
 ) -> tuple[Database, Path, str, AdapterRegistry]:
     for key in ("XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"):
         monkeypatch.setenv(key, str(tmp_path / key))
@@ -101,13 +119,7 @@ def failed(
         monkeypatch.delenv(key, raising=False)
     _seed_verified_codex_posture(tmp_path / "XDG_CONFIG_HOME")
     repo = tmp_path / "project"
-    repo.mkdir()
-    git(repo, "init", "-b", "main")
-    git(repo, "config", "user.name", "Continue Test")
-    git(repo, "config", "user.email", "test@localhost")
-    (repo / "README.md").write_text("Original project\n")
-    git(repo, "add", ".")
-    git(repo, "commit", "-m", "base")
+    shutil.copytree(project_template, repo)
     db = Database(tmp_path / "project-state" / "runs.db")
     adapter = CodexAdapter()
     monkeypatch.setattr(adapter, "is_available", lambda: True)

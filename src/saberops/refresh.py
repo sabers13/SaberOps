@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 from saberops.accept import _lineage_base_sha, _select_final_candidate
 from saberops.config import reconstruct_run_config
 from saberops.db import current_iso_timestamp
+from saberops.gate_receipt import record_receipt
 from saberops.git import GitManager
 from saberops.models import Attempt, AttemptStatus, CheckResult, ReviewVerdict, RunStatus
 from saberops.orchestrator import _run_configured_gate
@@ -167,6 +168,19 @@ def refresh_candidate(service: OrchestratorService, run_id: str) -> dict[str, An
             attempt_id=attempt_id,
             payload={"candidate_sha": new_sha, "exit_code": gate.exit_code},
         )
+        if gate.passed and not gate.skipped:
+            finished = current_iso_timestamp()
+            record_receipt(
+                db,
+                run_id=new_id,
+                attempt_id=attempt_id,
+                config=config,
+                base_sha=base,
+                candidate_sha=new_sha,
+                started_at=now,
+                finished_at=finished,
+                passed=True,
+            )
         if (
             not gate.passed
             or gate.skipped

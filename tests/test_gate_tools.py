@@ -1148,7 +1148,7 @@ def test_lane_checks_run_parallel_when_multiple_targets(
     monkeypatch.setattr(g, "cpu_core_count", lambda: 8)
     runner, calls = _capture_runner(repo, "lane", tmp_path, monkeypatch)
     runner.ledger.record_peak("affected", "small", int(1.0 * g.GB), workers=2)  # type: ignore[attr-defined]
-    monkeypatch.setattr(g, "lane_targets", lambda repo, changed, also: ["a", "b"])
+    monkeypatch.setattr(runner, "_select_targets", lambda base, also: ["a", "b"])
     runner.run_checks("HEAD", [])  # type: ignore[attr-defined]
     assert calls[0][1][:4] == ["-n", "2", "--dist", "worksteal"]
     assert calls[0][1][4:] == ["a", "b"]
@@ -1163,7 +1163,7 @@ def test_lane_single_target_stays_single_process(
     repo.mkdir()
     _init_main_repo(repo)
     runner, calls = _capture_runner(repo, "lane", tmp_path, monkeypatch)
-    monkeypatch.setattr(g, "lane_targets", lambda repo, changed, also: ["only"])
+    monkeypatch.setattr(runner, "_select_targets", lambda base, also: ["only"])
     runner.run_checks("HEAD", [])  # type: ignore[attr-defined]
     assert calls[0][1] == ["only"]
 
@@ -1390,3 +1390,145 @@ def test_map_wave_barrier_policy(tmp_path: Path) -> None:
 
 
 
+
+
+def test_lane_selection_uses_the_one_shared_selector(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: T4 -- lane checks and gate-affected share select_tests.py."""
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_main_repo(repo)
+    runner = _make_runner(repo, "lane", tmp_path, monkeypatch)
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        _ = kwargs
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(
+            argv, 0, "tests/test_selected.py\n", "strategy: coverage\n"
+        )
+
+    monkeypatch.setattr(g.subprocess, "run", fake_run)
+    assert runner._select_targets("HEAD", ["tests/test_extra.py"]) == [  # type: ignore[attr-defined]
+        "tests/test_extra.py",
+        "tests/test_selected.py",
+    ]
+    assert "scripts/select_tests.py" in calls[0]
+    assert calls[0][calls[0].index("--strategy") + 1] == "auto"
+    assert "--exclude-slow" in calls[0]
+
+
+def test_lane_selection_full_and_failure_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: T4 -- FULL and selector errors run the full suite, never nothing."""
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_main_repo(repo)
+    runner = _make_runner(repo, "lane", tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        g.subprocess,
+        "run",
+        lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, "FULL\n", ""),
+    )
+    assert runner._select_targets("HEAD", []) is None  # type: ignore[attr-defined]
+    monkeypatch.setattr(
+        g.subprocess,
+        "run",
+        lambda argv, **kwargs: subprocess.CompletedProcess(argv, 2, "", "boom\n"),
+    )
+    assert runner._select_targets("HEAD", []) is None  # type: ignore[attr-defined]
+
+
+def test_lane_full_selection_runs_the_whole_suite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: T4 -- a FULL selector answer runs pytest without target paths."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_main_repo(repo)
+    monkeypatch.setattr(g, "cpu_core_count", lambda: 8)
+    runner, calls = _capture_runner(repo, "lane", tmp_path, monkeypatch)
+    monkeypatch.setattr(runner, "_select_targets", lambda base, also: None)
+    runner.lane_full = True  # type: ignore[attr-defined]
+    runner.run_checks("HEAD", [])  # type: ignore[attr-defined]
+    assert calls[0][0] == "lane"
+    assert "-n" in calls[0][1]
+    assert not any(item.startswith("tests/") for item in calls[0][1])
+
+
+def test_selector_all_ghosts_fails_the_lane_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: a non-empty selection resolving to nothing is FAIL 5."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_main_repo(repo)
+    runner, _calls = _capture_runner(repo, "lane", tmp_path, monkeypatch)
+    monkeypatch.setattr(runner, "_select_targets", lambda base, also: [])
+    runner.selector_all_ghosts = True  # type: ignore[attr-defined]
+    code = runner.run_checks("HEAD", [])  # type: ignore[attr-defined]
+    assert code == 5
+
+
+def test_main_gate_map_rebuild_can_run_detached(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: T5 -- the map rebuild does not hold the gate after landing."""
+    import os
+    import time
+
+    main = _setup_main_gate_repo(tmp_path / "main")
+    wt = tmp_path / "_main-gate"
+    cache = tmp_path / "cache"
+    orch = tmp_path / "orch"
+    script = Path(__file__).resolve().parents[1] / "scripts/main-gate.sh"
+    gate_stub = (
+        'mkdir -p "$OUT_DIR/result" && '
+        "printf '{\"outcome\":\"PASS\",\"reason\":\"\",\"counts\":{\"tests\":1,\"failed\":0,"
+        "\"flaky\":0},\"wall_time\":0.1,\"head_sha\":\"x\",\"peak_bytes\":1}' "
+        '> "$OUT_DIR/result/outcome.json"'
+    )
+    env = dict(os.environ)
+    env.update(
+        {
+            "SABEROPS_MAIN_GATE_REPO": str(main),
+            "SABEROPS_MAIN_GATE_WT": str(wt),
+            "SABEROPS_ORCH_DIR": str(orch),
+            "SABEROPS_MAIN_GATE_CACHE": str(cache),
+            "SABEROPS_MAIN_GATE_SKIP_VENV": "1",
+            "SABEROPS_MAIN_GATE_GATE_CMD": gate_stub,
+            "SABEROPS_MAIN_GATE_MAP_CMD": "echo detached-map-build",
+            "SABEROPS_MAIN_GATE_MAP_MODE": "background",
+        }
+    )
+    code, output = _run_main_gate(env, script)
+    assert code == 0, output
+    out_dir = next(p for p in cache.iterdir() if p.is_dir())
+    map_file = out_dir / "map.txt"
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if map_file.exists() and "detached-map-build" in map_file.read_text():
+            break
+        time.sleep(0.02)
+    assert "detached-map-build" in map_file.read_text()
+    assert "map rebuilt: background" in (out_dir / "summary.md").read_text()
+
+
+def test_all_slow_selection_skips_pytest_without_failing_the_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: B2 -- an all-slow selection is a clean skip, not FAIL 5."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_main_repo(repo)
+    runner, calls = _capture_runner(repo, "lane", tmp_path, monkeypatch)
+    monkeypatch.setattr(runner, "_select_targets", lambda base, also: [])
+    code = runner.run_checks("HEAD", [])  # type: ignore[attr-defined]
+    assert code == 0
+    assert calls == []

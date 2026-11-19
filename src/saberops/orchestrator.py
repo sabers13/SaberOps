@@ -77,6 +77,7 @@ from saberops.dispatch import (
 )
 from saberops.dispatch import control_plane_decision as control_plane_decision
 from saberops.execution_failover import FailoverEngine
+from saberops.gate_receipt import record_receipt as _record_gate_receipt
 from saberops.gate_runner import (
     EngineGateExecutor,
     EngineGateRequest,
@@ -957,6 +958,48 @@ def _classify_gate_outcome(
         candidate_sha=candidate_sha,
         source_tree_hash=gate_res.verification_tree,
     )
+
+
+def _record_full_gate_receipt(
+    db: Database,
+    *,
+    run_id: str,
+    attempt_id: str | None,
+    config: RunConfig,
+    base_sha: str | None,
+    candidate_sha: str | None,
+    gate_result: ProcessResult,
+) -> None:
+    """Persist one passing full-gate receipt for acceptance (ADR-0010).
+
+    The receipt is evidence only: acceptance re-checks every condition.  A
+    receipt write failure must not fail a completed attempt -- without the
+    receipt acceptance simply re-runs the gate, which is the safe default.
+    """
+    if not config.gate_enabled or gate_result.skipped or not gate_result.passed:
+        return
+    if not base_sha or not candidate_sha:
+        return
+    finished = datetime.now(UTC)
+    started = finished - timedelta(
+        seconds=max(0.0, float(gate_result.duration_seconds))
+    )
+    try:
+        _record_gate_receipt(
+            db,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            config=config,
+            base_sha=base_sha,
+            candidate_sha=candidate_sha,
+            started_at=started.isoformat(),
+            finished_at=finished.isoformat(),
+            passed=True,
+        )
+    except Exception:
+        # Evidence loss can only make acceptance re-run the gate; never fail
+        # the attempt because the receipt could not be written.
+        return
 
 
 def _gate_disposition_payload(disposition: GateDisposition) -> dict[str, object]:
@@ -5423,6 +5466,15 @@ class Orchestrator:
                     )
                     self.db.create_check(check)
                     checks.append(check)
+                    _record_full_gate_receipt(
+                        self.db,
+                        run_id=run_id,
+                        attempt_id=attempt_id,
+                        config=config,
+                        base_sha=lineage_base_sha,
+                        candidate_sha=commit_sha,
+                        gate_result=gate_res,
+                    )
 
                     is_clean_pass = disposition.outcome in (
                         GateOutcome.PASS,
@@ -5915,6 +5967,7 @@ class Orchestrator:
                                 findings_cnt: int,
                                 repair_requirements: str,
                                 package_local: Any = current_package,
+                                base_sha_local: str = lineage_base_sha,
                             ) -> tuple[Attempt | None, str | None, Path | None, bool]:
                                 """Execute repair worktree cycle with continuation support."""
                                 nonlocal attempt_number, active_attempt_id, branch_name
@@ -7113,6 +7166,15 @@ class Orchestrator:
                                 )
                                 self.db.create_check(check_local)
                                 checks.append(check_local)
+                                _record_full_gate_receipt(
+                                    self.db,
+                                    run_id=run_id,
+                                    attempt_id=local_attempt_id,
+                                    config=config,
+                                    base_sha=base_sha_local,
+                                    candidate_sha=to_sha_local,
+                                    gate_result=gate_res_local,
+                                )
                                 if rep_disposition.outcome not in (
                                     GateOutcome.PASS,
                                     GateOutcome.SKIPPED,

@@ -225,22 +225,35 @@ def run_selector(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
 def test_direct_import(repo: Path, selector: ModuleType) -> None:
     write(repo, CORE, BASE_TREE[CORE].replace("VALUE = 1", "VALUE = 5"))
     targets = selected(repo, selector)
+    # Automatic selection without a coverage map uses the narrower
+    # direct-importer fallback (T2), not the legacy transitive closure.
     assert targets == {
         "tests/test_direct.py",
-        "tests/test_relative.py",
         "tests/test_string_target.py",
-        "tests/test_transitive.py",
     }
-    assert details(repo, selector)["tests/test_direct.py"] == "direct import"
+    assert details(repo, selector)["tests/test_direct.py"].startswith(
+        "static fallback (no map): direct importer"
+    )
 
 
 def test_transitive_import(repo: Path, selector: ModuleType) -> None:
     """A test imports mid, mid imports core: a core change is two hops away."""
     write(repo, CORE, BASE_TREE[CORE].replace("VALUE = 1", "VALUE = 5"))
-    targets = selected(repo, selector)
+    targets = {
+        item.target
+        for item in selector.select(repo, "HEAD", strategy="static").tests
+    }
     assert "tests/test_transitive.py" in targets
-    assert details(repo, selector)["tests/test_transitive.py"] == "transitive import"
-    assert len(chains(repo, selector)["tests/test_transitive.py"]) == 3
+    static_details = {
+        item.target: item.detail
+        for item in selector.select(repo, "HEAD", strategy="static").tests
+    }
+    assert static_details["tests/test_transitive.py"] == "transitive import"
+    static_chains = {
+        item.target: tuple(str(link) for link in item.chain)
+        for item in selector.select(repo, "HEAD", strategy="static").tests
+    }
+    assert len(static_chains["tests/test_transitive.py"]) == 3
 
 
 def test_relative_import(repo: Path, selector: ModuleType) -> None:
@@ -250,10 +263,11 @@ def test_relative_import(repo: Path, selector: ModuleType) -> None:
 
 def test_string_literal_patch_target(repo: Path, selector: ModuleType) -> None:
     write(repo, CORE, BASE_TREE[CORE].replace("VALUE = 1", "VALUE = 7"))
-    assert "tests/test_string_target.py" in selected(repo, selector)
-    detail = details(repo, selector)["tests/test_string_target.py"]
-    assert detail.startswith("patch target")
-    assert len(chains(repo, selector)["tests/test_string_target.py"]) == 2
+    selection = selector.select(repo, "HEAD", strategy="static")
+    by_target = {item.target: item for item in selection.tests}
+    assert "tests/test_string_target.py" in by_target
+    assert by_target["tests/test_string_target.py"].detail.startswith("patch target")
+    assert len(by_target["tests/test_string_target.py"].chain) == 2
 
 
 def test_type_checking_only_import_is_not_a_runtime_dependency(
@@ -939,3 +953,76 @@ def test_stale_for_diff_message_when_most_lines_unmapped(
     assert payload["map"]["unmapped_lines"] == 1
     assert payload["map"]["changed_line_total"] == 1
     assert payload["ghosts"] == []
+
+
+def test_exclude_slow_drops_marked_tests_but_keeps_the_rest(
+    repo: Path, selector: ModuleType
+) -> None:
+    """Covers: B2 -- the per-change gate skips pytest.mark.slow tests."""
+    write(
+        repo,
+        "tests/test_leaf.py",
+        "import pytest\n\n"
+        "from fakepkg.leaf import LEAF\n\n\n"
+        "@pytest.mark.slow\n"
+        "def test_leaf() -> None:\n"
+        "    assert LEAF == 1\n",
+    )
+    commit(repo, "mark leaf slow")
+    write(repo, LEAF, "LEAF = 2\n")
+    selection = selector.select(repo, "HEAD", exclude_slow=True)
+    assert selection.tests == []
+    assert selection.slow == ["tests/test_leaf.py"]
+
+
+def test_exclude_slow_module_marker_and_class_marker(
+    repo: Path, selector: ModuleType
+) -> None:
+    """Covers: module-level pytestmark and class decorators count as slow."""
+    write(
+        repo,
+        "tests/test_leaf.py",
+        "import pytest\n\n"
+        "pytestmark = pytest.mark.slow\n\n"
+        "from fakepkg.leaf import LEAF\n\n\n"
+        "def test_leaf() -> None:\n"
+        "    assert LEAF == 1\n",
+    )
+    write(
+        repo,
+        "tests/test_direct.py",
+        "import pytest\n\n"
+        "from fakepkg.core import core_value\n\n\n"
+        "@pytest.mark.slow\n"
+        "class TestSlow:\n"
+        "    def test_direct(self) -> None:\n"
+        "        assert core_value() == 1\n",
+    )
+    commit(repo, "slow markers")
+    write(repo, LEAF, "LEAF = 3\n")
+    write(repo, CORE, BASE_TREE[CORE].replace("VALUE = 1", "VALUE = 11"))
+    selection = selector.select(repo, "HEAD", exclude_slow=True)
+    assert {item.target for item in selection.tests} == {"tests/test_string_target.py"}
+    assert set(selection.slow) == {
+        "tests/test_leaf.py",
+        "tests/test_direct.py",
+    }
+
+
+def test_explicit_static_strategy_still_keeps_slow_tests(
+    repo: Path, selector: ModuleType
+) -> None:
+    """Covers: exclusion is opt-in; the full gate still selects slow tests."""
+    write(
+        repo,
+        "tests/test_leaf.py",
+        "import pytest\n\n"
+        "from fakepkg.leaf import LEAF\n\n\n"
+        "@pytest.mark.slow\n"
+        "def test_leaf() -> None:\n"
+        "    assert LEAF == 1\n",
+    )
+    commit(repo, "mark leaf slow")
+    write(repo, LEAF, "LEAF = 4\n")
+    selection = selector.select(repo, "HEAD", strategy="static")
+    assert "tests/test_leaf.py" in {item.target for item in selection.tests}

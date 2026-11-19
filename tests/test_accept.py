@@ -22,7 +22,7 @@ import json
 import subprocess
 from collections.abc import Callable
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +30,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from saberops.accept import AcceptEngine, AcceptResult
+from saberops.config import RunConfig
 from saberops.control_plane import (
     BindingRole,
     OwnerBindings,
@@ -38,6 +39,11 @@ from saberops.control_plane import (
     upsert_owner_binding,
 )
 from saberops.db import Database
+from saberops.gate_receipt import (
+    FULL_GATE_RECEIPT_EVENT,
+    record_receipt,
+    run_config_for_receipt,
+)
 from saberops.gate_runner import (
     GateReceipt,
     GateRunner,
@@ -219,8 +225,41 @@ def _final_candidate_sha(db_path: Path, run_id: str) -> str:
     raise AssertionError(f"no candidate for {run_id}")
 
 
+def _record_receipt_for(
+    db_path: Path,
+    run_id: str,
+    *,
+    base_sha: str | None = None,
+    candidate_sha: str | None = None,
+    config: RunConfig | None = None,
+    finished_at: datetime | None = None,
+    passed: bool = True,
+) -> None:
+    db = Database(db_path)
+    run = db.get_run(run_id)
+    assert run is not None
+    candidate = candidate_sha or _final_candidate_sha(db_path, run_id)
+    effective = config or run_config_for_receipt(run)
+    finished = finished_at or datetime.now(UTC)
+    record_receipt(
+        db,
+        run_id=run_id,
+        attempt_id=f"{run_id}-a1",
+        config=effective,
+        base_sha=base_sha or run.base_commit,
+        candidate_sha=candidate,
+        started_at=(finished - timedelta(seconds=1)).isoformat(),
+        finished_at=finished.isoformat(),
+        passed=passed,
+    )
+
+
 def _accept_with_mocked_tail(
-    monkeypatch: pytest.MonkeyPatch, db_path: Path, run_id: str
+    monkeypatch: pytest.MonkeyPatch,
+    db_path: Path,
+    run_id: str,
+    *,
+    gate_calls: list[str] | None = None,
 ) -> AcceptResult:
     """Run accept_run() with a non-destructive tail seam.
 
@@ -267,6 +306,8 @@ def _accept_with_mocked_tail(
         post_gate_sha_resolver: Callable[[], tuple[str, bool]] | None = None,
     ) -> GateReceipt:
         _ = (self, gate_run_id, runner, post_gate_sha_resolver)
+        if gate_calls is not None:
+            gate_calls.append(request.candidate_sha)
         return GateReceipt(
             requested_scratch_mode=GateScratchMode.DISK,
             actual_scratch_backend=GateScratchBackend.DISK,
@@ -933,3 +974,182 @@ def test_ported_custom_workflow_gate_and_review_are_independent(
     accepted = AcceptEngine(db).accept_run(result.run_id)
     assert accepted.accepted
     assert accepted.gate_passed is gate_enabled
+
+
+# ---------------------------------------------------------------------------
+# ADR-0010: receipt-bound duplicate-gate skip.
+# ---------------------------------------------------------------------------
+
+
+def _seed_eligible_run(tmp_path: Path, name: str) -> tuple[Path, Path, str, str, str]:
+    repo, base, candidate = _make_repo(tmp_path, name)
+    db_path = tmp_path / f"{name}.db"
+    _seed_run(db_path, f"run_{name}", repo, base, candidate)
+    _add_review(db_path, f"run_{name}", ReviewVerdict.PASS)
+    return repo, db_path, f"run_{name}", base, candidate
+
+
+def test_receipt_bound_fast_forward_skips_the_duplicate_gate(
+    isolated_xdg: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: ADR-0010 condition satisfied -> no second full gate."""
+    repo, db_path, run_id, base, candidate = _seed_eligible_run(tmp_path, "skip")
+    _record_receipt_for(db_path, run_id, base_sha=base, candidate_sha=candidate)
+    gate_calls: list[str] = []
+    accepted = _accept_with_mocked_tail(
+        monkeypatch, db_path, run_id, gate_calls=gate_calls
+    )
+    assert accepted.accepted is True
+    assert accepted.gate_passed is True
+    assert gate_calls == []
+    db = Database(db_path)
+    skipped = db.get_events_by_type(run_id, "post_integration_gate_skipped")
+    assert len(skipped) == 1
+    payload = skipped[0].payload
+    assert payload is not None
+    assert payload["reason"] == "receipt-bound-fast-forward"
+    assert payload["receipt_digest"]
+    accepted_event = db.get_events_by_type(run_id, "run_accepted")[-1].payload
+    assert accepted_event is not None
+    assert accepted_event["gate_skip"] is not None
+    assert accepted_event["gate_skipped"] is True
+    assert "receipt" in accepted.summary
+
+
+def test_receipt_for_a_different_base_reruns_the_gate(
+    isolated_xdg: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: ADR-0010 condition 3 -- a different base SHA re-runs."""
+    repo, db_path, run_id, base, candidate = _seed_eligible_run(tmp_path, "base")
+    _record_receipt_for(db_path, run_id, base_sha="f" * 40, candidate_sha=candidate)
+    gate_calls: list[str] = []
+    accepted = _accept_with_mocked_tail(
+        monkeypatch, db_path, run_id, gate_calls=gate_calls
+    )
+    assert accepted.accepted is True
+    assert gate_calls == [candidate]
+
+
+def test_receipt_for_a_different_candidate_reruns_the_gate(
+    isolated_xdg: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: ADR-0010 condition 1/4 -- a merge or refresh makes a new SHA."""
+    repo, db_path, run_id, base, candidate = _seed_eligible_run(tmp_path, "sha")
+    _record_receipt_for(db_path, run_id, base_sha=base, candidate_sha="e" * 40)
+    gate_calls: list[str] = []
+    accepted = _accept_with_mocked_tail(
+        monkeypatch, db_path, run_id, gate_calls=gate_calls
+    )
+    assert accepted.accepted is True
+    assert gate_calls == [candidate]
+
+
+def test_receipt_for_a_different_gate_command_reruns_the_gate(
+    isolated_xdg: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: ADR-0010 condition 4 -- a changed command re-runs."""
+    repo, db_path, run_id, base, candidate = _seed_eligible_run(tmp_path, "cmd")
+    db = Database(db_path)
+    run = db.get_run(run_id)
+    assert run is not None
+    changed = replace(run_config_for_receipt(run), gate_command="bash scripts/other.sh")
+    _record_receipt_for(
+        db_path, run_id, base_sha=base, candidate_sha=candidate, config=changed
+    )
+    gate_calls: list[str] = []
+    accepted = _accept_with_mocked_tail(
+        monkeypatch, db_path, run_id, gate_calls=gate_calls
+    )
+    assert accepted.accepted is True
+    assert gate_calls == [candidate]
+
+
+def test_receipt_for_a_different_gate_configuration_reruns_the_gate(
+    isolated_xdg: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: ADR-0010 condition 4 -- a changed configuration re-runs."""
+    repo, db_path, run_id, base, candidate = _seed_eligible_run(tmp_path, "cfg")
+    db = Database(db_path)
+    run = db.get_run(run_id)
+    assert run is not None
+    changed = replace(run_config_for_receipt(run), gate_timeout=1.0)
+    _record_receipt_for(
+        db_path, run_id, base_sha=base, candidate_sha=candidate, config=changed
+    )
+    gate_calls: list[str] = []
+    accepted = _accept_with_mocked_tail(
+        monkeypatch, db_path, run_id, gate_calls=gate_calls
+    )
+    assert accepted.accepted is True
+    assert gate_calls == [candidate]
+
+
+def test_expired_receipt_reruns_the_gate(
+    isolated_xdg: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: ADR-0010 condition 5 -- older than 24 hours re-runs."""
+    repo, db_path, run_id, base, candidate = _seed_eligible_run(tmp_path, "old")
+    _record_receipt_for(
+        db_path,
+        run_id,
+        base_sha=base,
+        candidate_sha=candidate,
+        finished_at=datetime.now(UTC) - timedelta(hours=25),
+    )
+    gate_calls: list[str] = []
+    accepted = _accept_with_mocked_tail(
+        monkeypatch, db_path, run_id, gate_calls=gate_calls
+    )
+    assert accepted.accepted is True
+    assert gate_calls == [candidate]
+
+
+@pytest.mark.parametrize("mutation", ["digest", "passed", "schema"])
+def test_tampered_receipt_reruns_the_gate(
+    isolated_xdg: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    """Covers: a receipt is only trusted after its own integrity checks."""
+    repo, db_path, run_id, base, candidate = _seed_eligible_run(tmp_path, f"bad-{mutation}")
+    _record_receipt_for(db_path, run_id, base_sha=base, candidate_sha=candidate)
+    db = Database(db_path)
+    events = db.get_events_by_type(run_id, FULL_GATE_RECEIPT_EVENT)
+    assert len(events) == 1
+    payload = dict(events[0].payload or {})
+    if mutation == "digest":
+        payload["receipt_digest"] = "0" * 64
+    elif mutation == "passed":
+        payload["passed"] = False
+    else:
+        payload["schema_version"] = 99
+    # Replace the durable row with the tampered payload by rewriting it through
+    # the same event stream (newer event wins by finished_at only if valid).
+    with db.write_transaction() as conn:
+        conn.execute(
+            "UPDATE events SET payload_json = ? WHERE id = ?",
+            (json.dumps(payload), events[0].id),
+        )
+        conn.commit()
+    gate_calls: list[str] = []
+    accepted = _accept_with_mocked_tail(
+        monkeypatch, db_path, run_id, gate_calls=gate_calls
+    )
+    assert accepted.accepted is True
+    assert gate_calls == [candidate]
+
+
+def test_receipt_from_another_run_does_not_skip(
+    isolated_xdg: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: receipts are run-scoped; another run's evidence never skips."""
+    repo, db_path, run_id, base, candidate = _seed_eligible_run(tmp_path, "mine")
+    _seed_run(db_path, "run_other", repo, base, candidate)
+    _record_receipt_for(db_path, "run_other", base_sha=base, candidate_sha=candidate)
+    gate_calls: list[str] = []
+    accepted = _accept_with_mocked_tail(
+        monkeypatch, db_path, run_id, gate_calls=gate_calls
+    )
+    assert accepted.accepted is True
+    assert gate_calls == [candidate]

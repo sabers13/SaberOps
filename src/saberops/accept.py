@@ -6,10 +6,11 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NoReturn
+from typing import Any, NoReturn
 
 from saberops.candidate_lifecycle import find_matching_rejection_event
 from saberops.db import Database
+from saberops.gate_receipt import find_valid_receipt, receipt_summary
 from saberops.gate_runner import (
     GateReceipt,
     GateRunner,
@@ -1341,6 +1342,20 @@ class AcceptEngine:
         # repairing a corrupted owner decision would silently weaken
         # what the engine is about to execute.
         frozen_mode = self._frozen_gate_scratch_mode(run)
+        gate_enabled = self._validation_policy(run_id)[0]
+
+        # ADR-0010: the post-integration gate may be skipped only for an exact
+        # fast-forward to the candidate SHA that holds a passing full-gate
+        # receipt for this base, this command and this configuration, less
+        # than 24 hours old.  The receipt is re-validated here, at acceptance
+        # time; nothing is skipped on a caller's say-so.  Any merge, refresh,
+        # changed command/configuration or expired receipt leaves this None
+        # and the gate runs as before.
+        skip_receipt = (
+            find_valid_receipt(self.db, run, candidate_sha=candidate_sha)
+            if gate_enabled
+            else None
+        )
 
         # ---- PRE-CAS PREPARATION ------------------------------------
         # Everything that can reasonably be resolved WITHOUT mutating the
@@ -1439,9 +1454,19 @@ class AcceptEngine:
         #
         # There is no ordinary Exception path around it.  (BaseException,
         # KeyboardInterrupt and SystemExit are deliberately NOT caught.)
-        gate_enabled = self._validation_policy(run_id)[0]
         gate_receipt: GateReceipt | None = None
-        if gate_enabled:
+        gate_skip: dict[str, Any] | None = None
+        if gate_enabled and skip_receipt is not None:
+            gate_skip = receipt_summary(skip_receipt)
+            gate_skip["candidate_sha"] = new_sha
+            gate_skip["post_gate_candidate_sha"] = new_sha
+            gate_skip["post_gate_worktree_clean"] = True
+            self.db.record_event(
+                run_id,
+                "post_integration_gate_skipped",
+                payload=dict(gate_skip),
+            )
+        elif gate_enabled:
             try:
                 outcome = self._execute_gate_phase(
                     run_id,
@@ -1473,13 +1498,19 @@ class AcceptEngine:
                 "candidate_sha": new_sha, "reason": "owner-disabled"})
 
         final_branch = GitManager.get_current_branch(target_repo) or "HEAD"
+        if gate_skip is not None:
+            gate_summary = (
+                f"Post-integration gate '{run.gate_command}' skipped: the exact "
+                "candidate SHA holds a passing full-gate receipt for this base "
+                "and configuration (ADR-0010)."
+            )
+        elif gate_enabled:
+            gate_summary = f"Post-integration gate '{run.gate_command}' PASSED."
+        else:
+            gate_summary = "Gate skipped by project policy."
         summary = (
             f"Candidate commit {new_sha[:8]} successfully integrated into '{final_branch}'. "
-            + (
-                f"Post-integration gate '{run.gate_command}' PASSED."
-                if gate_enabled
-                else "Gate skipped by project policy."
-            )
+            + gate_summary
         )
 
         self.db.record_event(
@@ -1491,7 +1522,8 @@ class AcceptEngine:
                 "gate_command": run.gate_command,
                 "provenance": provenance.as_dict(),
                 "gate_receipt": gate_receipt.as_dict() if gate_receipt is not None else None,
-                "gate_skipped": not gate_enabled,
+                "gate_skipped": not gate_enabled or gate_skip is not None,
+                "gate_skip": gate_skip,
             },
         )
 
