@@ -2067,7 +2067,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_repo_arg(project_set_gate)
     project_set_gate.add_argument(
-        "command",
+        "gate_command",
+        metavar="command",
         type=str,
         help="Exact gate command to freeze into future runs (e.g. 'make gate').",
     )
@@ -4280,11 +4281,11 @@ def handle_project_set_gate(args: argparse.Namespace) -> int:
     except SystemExit:
         return 2
     try:
-        path = set_project_gate_command(repo, str(args.command))
+        path = set_project_gate_command(repo, str(args.gate_command))
     except ProjectSettingsError as exc:
         print(f"[!] {exc}", file=sys.stderr)
         return 1
-    print(f"Project gate set to '{str(args.command).strip()}' at {path}")
+    print(f"Project gate set to '{str(args.gate_command).strip()}' at {path}")
     return 0
 
 

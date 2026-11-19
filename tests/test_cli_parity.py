@@ -9,6 +9,7 @@ never HTML.
 
 from __future__ import annotations
 
+import argparse
 import json
 import subprocess
 from dataclasses import replace
@@ -1150,3 +1151,69 @@ def test_deprecated_tier_flags_warn_and_supervisor_forwards_selectively(
     capped_args = supervisor._build_cli_args("run_capped", capped)
     assert "--tier" not in capped_args
     assert capped_args[capped_args.index("--max-tier") + 1] == "T2"
+
+
+# ---------------------------------------------------------------------------
+# project set-gate and parser dest shadow guard (A3)
+# ---------------------------------------------------------------------------
+
+
+def test_project_set_gate_persists_and_shows_in_fresh_store(
+    isolated: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = _git_repo(isolated / "set-gate-repo")
+    code, out, err = _cli(
+        "project", "set-gate", "--repo", str(repo), "pytest -q", capsys=capsys
+    )
+    assert code == 0, err
+    assert "pytest -q" in out
+
+    code, show_out, show_err = _cli(
+        "project", "show", "--repo", str(repo), capsys=capsys
+    )
+    assert code == 0, show_err
+    assert "pytest -q" in show_out
+    assert "configured    : yes" in show_out
+
+    code, json_out, json_err = _cli(
+        "project", "show", "--repo", str(repo), "--json", capsys=capsys
+    )
+    assert code == 0, json_err
+    payload = json.loads(json_out)
+    assert payload["gate_effective"] == "pytest -q"
+    assert payload["gate_configured"] is True
+
+
+def test_cli_subparsers_do_not_shadow_command_dests() -> None:
+    from saberops.cli import build_parser
+
+    root = build_parser()
+    clashes: list[tuple[tuple[str, ...], str, str, tuple[str, ...]]] = []
+
+    def walk(
+        parser: argparse.ArgumentParser,
+        path: tuple[str, ...],
+        ancestor_subparser_dests: tuple[tuple[tuple[str, ...], str], ...],
+    ) -> None:
+        sub_actions = [
+            action
+            for action in parser._actions
+            if isinstance(action, argparse._SubParsersAction)
+        ]
+        sub_dests = ancestor_subparser_dests + tuple(
+            (path, sa.dest) for sa in sub_actions
+        )
+        for action in parser._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                continue
+            if action.dest == "help":
+                continue
+            for sp_path, sp_dest in sub_dests:
+                if action.dest == sp_dest:
+                    clashes.append((path, action.dest, sp_dest, sp_path))
+        for sa in sub_actions:
+            for name, subp in sa.choices.items():
+                walk(subp, path + (name,), sub_dests)
+
+    walk(root, (), ())
+    assert clashes == []
