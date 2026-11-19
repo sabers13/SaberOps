@@ -53,6 +53,10 @@ class WaitingReason(StrEnum):
     PREEMPTED = "PREEMPTED"
     CONCURRENCY = "CONCURRENCY"
     MEMORY_LOW = "MEMORY_LOW"
+    #: A scheduler died between the dispatch compare-and-swap and its run row.
+    #: Nothing ran, so the job is requeued once with this reason (and failed
+    #: with the same-named failure reason if it happens again).
+    DISPATCH_WINDOW_LOST = "DISPATCH_WINDOW_LOST"
 
 
 class Priority(StrEnum):
@@ -83,9 +87,22 @@ CORRUPT_JOB_ROW = "CORRUPT_JOB_ROW"
 # (default 5).  Recorded on the JOB as the terminal failure reason when the
 # limit is reached instead of a silent 6th preemption.
 PREEMPTION_LIMIT = "PREEMPTION_LIMIT"
+#: A RUNNING job was dispatched by a scheduler that died before it created the
+#: run row.  The job holds a reserved capacity row but no run ever started; the
+#: scheduler requeues it once under :attr:`WaitingReason.DISPATCH_WINDOW_LOST`
+#: and records this as the terminal failure reason if it loses a second
+#: dispatch the same way.
+DISPATCH_WINDOW_LOST = "DISPATCH_WINDOW_LOST"
 
 FAILURE_REASONS: frozenset[str] = frozenset(
-    {NO_ROUTE_FOR_REQUIREMENTS, RUN_FAILED, RUN_MISSING, PREEMPTION_LIMIT, CORRUPT_JOB_ROW}
+    {
+        NO_ROUTE_FOR_REQUIREMENTS,
+        RUN_FAILED,
+        RUN_MISSING,
+        PREEMPTION_LIMIT,
+        CORRUPT_JOB_ROW,
+        DISPATCH_WINDOW_LOST,
+    }
 )
 
 

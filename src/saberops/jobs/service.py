@@ -527,10 +527,17 @@ def serialize_capacity_view(
 
 
 def mark_dispatched(
-    db: Any, job_id: str, run_id: str, *, now: datetime | None = None
+    db: Any,
+    job_id: str,
+    run_id: str,
+    *,
+    dispatch_context: dict[str, Any] | None = None,
+    now: datetime | None = None,
 ) -> Job:
     """QUEUED -> RUNNING (dispatch side; the scheduler owns the loop)."""
-    return store.mark_dispatched(db, job_id, run_id, now=now)
+    return store.mark_dispatched(
+        db, job_id, run_id, dispatch_context=dispatch_context, now=now
+    )
 
 
 def set_waiting(

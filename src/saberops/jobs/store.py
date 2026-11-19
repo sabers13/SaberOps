@@ -469,14 +469,29 @@ def _require_state(job: Job, *allowed: JobState) -> None:
 
 
 def mark_dispatched(
-    db: Any, job_id: str, run_id: str, *, now: datetime | None = None
+    db: Any,
+    job_id: str,
+    run_id: str,
+    *,
+    dispatch_context: dict[str, Any] | None = None,
+    now: datetime | None = None,
 ) -> Job:
-    """QUEUED -> RUNNING: attach ``run_id``, clear the waiting reason."""
+    """QUEUED -> RUNNING: attach ``run_id``, clear the waiting reason.
+
+    ``dispatch_context`` is the dispatching scheduler's durable identity (lease
+    holder, fencing token, lease expiry and the store the run row will be
+    written to).  It is stored on the ``dispatched`` event beside ``run_id`` so
+    a later tick can prove the dispatch was abandoned between this
+    compare-and-swap and the run row, instead of guessing.
+    """
     if not run_id or not run_id.strip():
         raise ValueError("run_id must be a non-empty string")
     clean_run_id = run_id.strip()
     ensure_tables(db)
     at = _utcnow_iso(now)
+    payload: dict[str, Any] = {"run_id": clean_run_id}
+    if dispatch_context is not None:
+        payload["dispatch"] = dict(dispatch_context)
     with _owner_conn(db) as conn:
         try:
             conn.execute("BEGIN IMMEDIATE")
@@ -514,7 +529,7 @@ def mark_dispatched(
                 kind="dispatched",
                 from_state=JobState.QUEUED.value,
                 to_state=JobState.RUNNING.value,
-                payload={"run_id": clean_run_id},
+                payload=payload,
             )
         except sqlite3.IntegrityError as exc:
             raise JobConflictError(f"event sequence conflict for {job_id}: {exc}") from exc

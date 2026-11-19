@@ -1,10 +1,10 @@
 # ADR-0011: What the engine may do without an owner request
 
-- **Status:** Accepted. Scheduler presence, dead-run reconciliation, the wait
-  tool, desktop delivery, read-only quota probing and the `catch_up` lookup are
-  implemented.
+- **Status:** Accepted. Scheduler presence, dead-run reconciliation, dispatch
+  window recovery, the wait tool, desktop delivery, read-only quota probing and
+  the `catch_up` lookup are implemented.
 - **Date:** 2026-11-19
-- **Decider:** Saber (owner), Phase 1 plan lanes C1, C2, C3, A5 and E5
+- **Decider:** Saber (owner), Phase 1 plan lanes C1, C2, C2B, C3, A5 and E5
 - **Related:** [ADR-0001](0001-saberops-engine-mcp-first.md) §3.3–§3.4,
   [ADR-0005](0005-mcp-first-engine-and-phase-2-board.md),
   [ADR-0007](0007-dynamic-memory-budget.md)
@@ -33,6 +33,19 @@ vendor settings on the owner's behalf.
    failures become visible and actionable within 120 seconds, and a killed
    worker reaches a final state within 60 seconds, including across a scheduler
    restart.
+   **Dispatch window.** A scheduler killed after the dispatch compare-and-swap
+   (job RUNNING) but before its run row leaves a reserved capacity row with
+   nothing running. That residue is repaired from durable records, never
+   guessed: the dispatch event carries the dispatching lease generation and the
+   store the run would have been written to, so a later tick acts only when the
+   run row is provably absent from that store, the lease generation is
+   superseded, and the dispatch is older than a short grace bound. The job is
+   requeued exactly once with a recorded reason (it never started, so nothing
+   ran), and failed with that reason if it loses a second dispatch the same way.
+   A dispatch that recorded no such identity, or whose run is visible in
+   another store, is held for owner resolution instead. One such row never
+   blocks the rest of the tick, and the continuous scheduler keeps polling on
+   that hold instead of exiting.
 3. **Outcome delivery has no model in the loop.** An MCP wait tool returns a
    job's final or needs-attention outcome, or a timeout. A notifier sends a
    desktop notice on finished, failed, needs attention and question asked; it is
@@ -57,6 +70,9 @@ vendor settings on the owner's behalf.
   automatic read is never the only way to obtain evidence.
 - A missing scheduler, a dead worker or a missing quota reading is a reported
   state with a remedy, not a silent stall.
+- A kill inside the dispatch window costs one re-dispatch, not a stranded job;
+  an unprovable residue stays visible and actionable instead of being
+  terminalized on a guess.
 - The 60-second and 120-second bounds are the phase's acceptance targets; the
   benchmark lanes prove them on real clients, so this record does not itself
   certify them.

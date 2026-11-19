@@ -7,9 +7,11 @@ a vendor CLI.  The real-mode tests only exercise the refusal guards.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -37,9 +39,10 @@ from saberops.capacity.loop import run_scheduler_loop
 from saberops.capacity.store import ensure_tables as ensure_capacity_tables
 from saberops.db import current_iso_timestamp
 from saberops.jobs import store
-from saberops.jobs.models import JobState
+from saberops.jobs.models import JobState, WaitingReason
 from saberops.jobs.service import get_job, submit_job
 from saberops.model_access.readiness_service import ReadinessService
+from saberops.ownership import Liveness, ProcessIdentity, probe_liveness
 from saberops.paths import owner_state_dir
 
 pytestmark = [
@@ -277,28 +280,57 @@ def test_benchmark_script_real_mode_dry_run_creates_nothing(tmp_path: Path) -> N
 
 
 # --------------------------------------------------------------------------
-# Engine defect exposed by the kill-scheduler drill (filed in the lane notes)
+# Dispatch-window kill (defect found by the kill-scheduler drill, lane C2B)
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "engine defect: a scheduler killed between the dispatch CAS and run "
-        "creation leaves a RUNNING job with a RESERVED capacity row but no run "
-        "row; the next tick exits with running_run_status_unresolved and never "
-        "repairs or fails the job, so the stall is silent"
-    ),
-)
+def _dead_scheduler_holder() -> str:
+    """Lease holder identity of a scheduler process that is provably gone."""
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    identity = ProcessIdentity.for_pid(proc.pid)
+    assert identity is not None
+    proc.wait()
+    assert probe_liveness(identity) is Liveness.DEAD
+    return "process:" + json.dumps(identity.to_dict())
+
+
+def _reservation_states(db: object, run_id: str) -> list[str]:
+    with db._get_connection() as conn:  # type: ignore[attr-defined]
+        rows = conn.execute(
+            "SELECT state FROM capacity_reservations WHERE run_id = ? ORDER BY id",
+            (run_id,),
+        ).fetchall()
+    return [str(row["state"]) for row in rows]
+
+
 def test_scheduler_killed_inside_the_dispatch_window_recovers(
     rig: RigEnvironment,
 ) -> None:
-    """A dispatch-window kill must not leave a permanently RUNNING job."""
+    """A kill between the dispatch CAS and the run row must not strand the job.
+
+    The residue is exactly what the dispatcher durably leaves when it dies in
+    that window: the job is RUNNING with the ``dispatched`` event carrying the
+    dead scheduler's lease generation, its capacity row is RESERVED, and no run
+    row exists.  A restarted scheduler must release the reservation and requeue
+    the never-started job once, then dispatch it on a fresh run.
+    """
     db = rig.db()
     submitted = submit_job(db, repo=rig.repo, goal="dispatch window kill")
     job_id = submitted.job.job_id
     run_id = "run_dispatch_window"
-    store.mark_dispatched(db, job_id, run_id)
+    dispatched_at = datetime.now(UTC)
+    store.mark_dispatched(
+        db,
+        job_id,
+        run_id,
+        dispatch_context={
+            "holder_id": _dead_scheduler_holder(),
+            "fencing_token": 4,
+            "lease_expires_at": (dispatched_at + timedelta(seconds=30)).isoformat(),
+            "run_store": str(Path(db.db_path).resolve()),
+        },
+        now=dispatched_at,
+    )
     ensure_capacity_tables(db)
     now = current_iso_timestamp()
     with db._get_connection() as conn:
@@ -327,8 +359,38 @@ def test_scheduler_killed_inside_the_dispatch_window_recovers(
         conn.commit()
 
     readiness = ReadinessService.for_owner_state(owner_state_dir())
-    for _ in range(3):
-        run_scheduler_loop(db, once=True, readiness_service=readiness)
+    # The restarted scheduler runs well past the dead dispatch's lease expiry.
+    restarted_at = dispatched_at + timedelta(seconds=60)
+
+    # The restart repairs the residue and re-dispatches the never-started job
+    # in the same tick: release the reserved capacity, requeue once, dispatch.
+    first = run_scheduler_loop(
+        db, once=True, readiness_service=readiness, now_fn=lambda: restarted_at
+    )
+    assert first is not None and first.ran
+    assert first.dispatch_window_repaired == (job_id,)
+    assert first.dispatched == 1
 
     job = get_job(db, job_id)
-    assert job is not None and job.state in {JobState.FAILED, JobState.SUCCEEDED}
+    assert job is not None
+    assert job.state is JobState.RUNNING
+    assert job.current_run_id not in (None, run_id)
+    new_run_id = job.current_run_id
+    assert db.get_run(new_run_id) is not None
+
+    # The dead dispatch's reservation is released and the requeue is recorded.
+    assert _reservation_states(db, run_id) == ["RELEASED"]
+    requeued = [
+        event for event in store.list_events(db, job_id) if event["kind"] == "requeued"
+    ]
+    assert requeued, "the repair is recorded, not silent"
+    assert json.loads(requeued[-1]["payload_json"])["waiting_reason"] == (
+        WaitingReason.DISPATCH_WINDOW_LOST.value
+    )
+
+    # It really ran: the fresh run completes, and the next tick settles the job.
+    rig.wait_for_run(new_run_id, timeout=60.0)
+    third = run_scheduler_loop(db, once=True, readiness_service=readiness)
+    assert third is not None and third.ran
+    final = get_job(db, job_id)
+    assert final is not None and final.state is JobState.SUCCEEDED

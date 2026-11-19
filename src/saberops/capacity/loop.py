@@ -21,7 +21,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -58,6 +58,7 @@ from saberops.control_plane.policy import (
 )
 from saberops.jobs import store
 from saberops.jobs.models import (
+    DISPATCH_WINDOW_LOST,
     Job,
     JobState,
     WaitingReason,
@@ -77,6 +78,12 @@ from saberops.routing_config import RoutingSnapshot, load_effective_routing
 DEFAULT_LEASE_NAME = "scheduler"
 DEFAULT_LEASE_TTL = 30.0
 DEFAULT_TICK_INTERVAL = 2.0
+
+#: Tick holds that clear from durable state or a live run alone.  The
+#: continuous loop logs and keeps polling on these instead of exiting: a
+#: dispatch-window residue becomes repairable as soon as its lease expiry and
+#: grace bound pass, and a live split-store run can finish on a later tick.
+_RESUMABLE_HOLD_REASONS = frozenset({"running_run_status_unresolved"})
 
 
 def _utcnow(now: datetime | None) -> datetime:
@@ -235,6 +242,10 @@ class TickResult:
     # tick reports the same diagnostics without any side effect.
     legacy_running_jobs: tuple[str, ...] = ()
     unresolved_running_jobs: tuple[str, ...] = ()
+    #: RUNNING jobs repaired by dispatch-window recovery in this tick (job ids):
+    #: their reserved capacity was released and each was requeued once, or
+    #: failed with ``DISPATCH_WINDOW_LOST`` if it already lost a dispatch.
+    dispatch_window_repaired: tuple[str, ...] = ()
     #: Typed GS-1 storage/SQLite infrastructure reason for this tick (ADR-0003
     #: D7 / Amendment 1).  ``None`` when storage maintenance was not invoked or
     #: reported healthy.  A non-``None`` value is an INFRA park, never a code
@@ -464,6 +475,208 @@ def _lookup_run_status(db: Any, run_id: str) -> RunStatus | None:
         return run.status if run is not None else None
     except Exception:
         return None
+
+
+#: How long after a dispatch (and after its lease expiry) a RUNNING job with no
+#: run row may still be launching.  A residue younger than this is never
+#: reconciled: its dispatching scheduler could still be inside the launch
+#: window.
+DISPATCH_WINDOW_GRACE_SECONDS = 15.0
+
+
+def _store_path(db: Any) -> str | None:
+    """Canonical path of the SQLite store *db* writes runs to, when known."""
+    path = getattr(db, "db_path", None)
+    if path is None:
+        return None
+    try:
+        return str(Path(path).resolve())
+    except OSError:  # pragma: no cover - defensive: unreadable path
+        return str(path)
+
+
+def _dispatch_context(db: Any, lease: SchedulerLease) -> dict[str, Any]:
+    """Durable identity of one dispatch generation, stored on its event.
+
+    Recorded beside ``run_id`` inside the same transaction as the QUEUED ->
+    RUNNING compare-and-swap, so a later tick can tell *which* scheduler took
+    the job and *where* it was about to write the run row.
+    """
+    return {
+        "holder_id": lease.holder_id,
+        "fencing_token": lease.fencing_token,
+        "lease_expires_at": lease.expires_at,
+        "run_store": _store_path(db),
+    }
+
+
+def _event_payload(event: dict[str, Any]) -> dict[str, Any]:
+    raw = event.get("payload_json")
+    if not isinstance(raw, str):
+        return {}
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _run_row_absent(run_id: str, run_store: Any, db: Any) -> bool | None:
+    """True only when the run row is *provably* absent from its store.
+
+    ``False`` means the run row exists; ``None`` means the answer cannot be
+    proven (unreadable store, unknown path) and the caller must not act.
+    """
+    current = _store_path(db)
+    if not isinstance(run_store, str) or not run_store:
+        try:
+            return db.get_run(run_id) is None
+        except Exception:
+            return None
+    if run_store == current:
+        try:
+            return db.get_run(run_id) is None
+        except Exception:
+            return None
+    try:
+        with sqlite3.connect(
+            f"{Path(run_store).as_uri()}?mode=ro", uri=True, timeout=1
+        ) as conn:
+            row = conn.execute("SELECT 1 FROM runs WHERE id = ?", (run_id,)).fetchone()
+            return row is None
+    except (sqlite3.Error, OSError, ValueError):
+        return None
+
+
+def reconcile_dispatch_window(
+    db: Any,
+    *,
+    lease: SchedulerLease,
+    running_jobs: Sequence[Job],
+    unresolved_job_ids: Sequence[str],
+    now: datetime | None = None,
+) -> list[ReconcileChange]:
+    """Repair jobs whose scheduler died between the dispatch CAS and its run.
+
+    A scheduler that is killed after ``mark_dispatched`` (job RUNNING) but
+    before the run row exists leaves a RUNNING job holding a RESERVED capacity
+    row with nothing running.  Such a job is provable, never guessed:
+
+    * the latest ``dispatched`` event must carry the dispatching lease identity
+      (holder, fencing token, lease expiry) and the store the run was going to
+      be written to;
+    * the run row must be provably absent from that store;
+    * that lease must be superseded (this tick holds a different generation)
+      and both the dispatch and the recorded lease expiry must be older than
+      :data:`DISPATCH_WINDOW_GRACE_SECONDS`.
+
+    A dispatch without that record (an older engine, or a row inserted by hand)
+    is never repaired: its dispatching scheduler is unknowable.  A job that
+    already lost one dispatch this way is failed instead of requeued a second
+    time, so a persistent fault cannot loop.  The caller releases the reserved
+    capacity for every returned change.
+    """
+    if not unresolved_job_ids:
+        return []
+    moment = _utcnow(now)
+    by_id = {job.job_id: job for job in running_jobs}
+    changes: list[ReconcileChange] = []
+    logger = logging.getLogger(__name__)
+    for job_id in unresolved_job_ids:
+        job = by_id.get(job_id)
+        if job is None or not job.current_run_id:
+            continue
+        run_id = job.current_run_id
+        try:
+            events = store.list_events(db, job_id)
+        except (sqlite3.OperationalError, sqlite3.DatabaseError):
+            continue
+        dispatched = next(
+            (event for event in reversed(events) if event.get("kind") == "dispatched"),
+            None,
+        )
+        if dispatched is None:
+            continue
+        payload = _event_payload(dispatched)
+        if payload.get("run_id") != run_id:
+            continue
+        context = payload.get("dispatch")
+        if not isinstance(context, dict):
+            # A pre-fix dispatch: the dispatching scheduler is unknowable.
+            continue
+        holder = context.get("holder_id")
+        token = context.get("fencing_token")
+        dispatched_at = parse_iso(str(dispatched.get("at") or ""))
+        recorded_expires = parse_iso(str(context.get("lease_expires_at") or ""))
+        if (
+            not isinstance(holder, str)
+            or not holder
+            or isinstance(token, bool)
+            or not isinstance(token, int)
+            or dispatched_at is None
+            or recorded_expires is None
+        ):
+            continue
+        if holder == lease.holder_id and token == lease.fencing_token:
+            # This scheduler generation took the job: it is launching it, or
+            # the in-tick compensation path already handled the failure.
+            continue
+        if dispatched_at >= recorded_expires:
+            # Inconsistent record (an unleased or already-expired dispatch).
+            continue
+        bound = max(dispatched_at, recorded_expires) + timedelta(
+            seconds=DISPATCH_WINDOW_GRACE_SECONDS
+        )
+        if moment < bound:
+            continue
+        if _run_row_absent(run_id, context.get("run_store"), db) is not True:
+            continue
+        already_requeued = any(
+            event.get("kind") == "requeued"
+            and _event_payload(event).get("waiting_reason")
+            == WaitingReason.DISPATCH_WINDOW_LOST.value
+            for event in events
+        )
+        try:
+            if already_requeued:
+                updated = store.reconcile_transition(
+                    db,
+                    job_id,
+                    to=JobState.FAILED,
+                    failure_reason=DISPATCH_WINDOW_LOST,
+                    now=moment,
+                )
+            else:
+                updated = store.requeue_exact(
+                    db,
+                    job_id,
+                    WaitingReason.DISPATCH_WINDOW_LOST,
+                    expected_run_id=run_id,
+                    expected_preemptions=job.preemptions,
+                    now=moment,
+                )
+        except (JobConflictError, JobTransitionError, JobNotFoundError):
+            # A concurrent cancel/transition owns the row; never fight it.
+            continue
+        logger.warning(
+            "dispatch window lost: job %s run %s -> %s (%s)",
+            job_id,
+            run_id,
+            updated.state.value,
+            DISPATCH_WINDOW_LOST,
+        )
+        changes.append(
+            ReconcileChange(
+                job_id=job_id,
+                run_id=run_id,
+                to_state=updated.state,
+                failure_reason=(
+                    DISPATCH_WINDOW_LOST if updated.state is JobState.FAILED else None
+                ),
+                job=updated,
+            )
+        )
+    return changes
 
 
 def _load_all_cost_states(db: Any) -> dict[tuple[str, str, str, str], CostState]:
@@ -731,7 +944,8 @@ def scheduler_tick(
             # the reconciler above) release a reservation that may still belong
             # to a live project-local run held in a different store.  An
             # unknown run is never proof the run is gone, so hold instead and
-            # retain the job and its reservation for owner resolution.
+            # retain the job and its reservation for owner resolution --
+            # unless the dispatch itself is proven abandoned below.
             unresolved_running_jobs.append(running_job.job_id)
 
     if legacy_running_jobs:
@@ -740,11 +954,46 @@ def scheduler_tick(
             reason="legacy_running_without_reservation",
             legacy_running_jobs=tuple(legacy_running_jobs),
         )
+
+    # 0b. Dispatch-window recovery (ADR-0011 §2.2).  A scheduler killed between
+    # the dispatch CAS and its run row leaves a RUNNING job with a RESERVED
+    # capacity row and no run.  When that dispatch is proven abandoned from
+    # durable records (dispatcher lease identity, superseded generation, run
+    # row absent from the recorded store, older than the grace bound) the job
+    # is released and requeued once -- or failed with a reason if it already
+    # lost a dispatch this way.  An unprovable row still holds the tick as
+    # before, but never silently: the continuous loop keeps running on this
+    # hold reason instead of exiting.
+    dispatch_window_changes: tuple[ReconcileChange, ...] = ()
+    if unresolved_running_jobs:
+        try:
+            dispatch_window_changes = tuple(
+                reconcile_dispatch_window(
+                    db,
+                    lease=lease,
+                    running_jobs=running_snapshot,
+                    unresolved_job_ids=unresolved_running_jobs,
+                    now=moment,
+                )
+            )
+        except (sqlite3.OperationalError, sqlite3.DatabaseError):
+            return TickResult(ran=False, reason="ledger_read_error")
+        repaired = {change.job_id for change in dispatch_window_changes}
+        for change in dispatch_window_changes:
+            if change.to_state in (JobState.FAILED, JobState.QUEUED):
+                release(db, change.run_id, now=moment)
+        unresolved_running_jobs = [
+            job_id for job_id in unresolved_running_jobs if job_id not in repaired
+        ]
+
     if unresolved_running_jobs:
         return TickResult(
             ran=False,
             reason="running_run_status_unresolved",
             unresolved_running_jobs=tuple(unresolved_running_jobs),
+            dispatch_window_repaired=tuple(
+                change.job_id for change in dispatch_window_changes
+            ),
         )
 
     # Reconcile execution owners before projecting terminal runs into jobs.
@@ -906,11 +1155,14 @@ def scheduler_tick(
 
     pool_policies = effective_pool_plans(effective_pol)
 
+    repaired_job_ids = tuple(change.job_id for change in dispatch_window_changes)
+
     def lost_during_tick() -> TickResult:
         return TickResult(
             ran=False, reason="lost_lease", reconciled_changes=tuple(changes),
             dispatched=dispatched_count, probed=probed_count, waited=waited_count,
             decisions=tuple(decisions),
+            dispatch_window_repaired=repaired_job_ids,
         )
 
     # 4. Execute decisions
@@ -969,10 +1221,17 @@ def scheduler_tick(
 
             run_id = f"run_{uuid.uuid4().hex[:12]}"
 
-            # Step A: CAS state transition QUEUED -> RUNNING
+            # Step A: CAS state transition QUEUED -> RUNNING.  The same
+            # transaction records this scheduler's lease generation and the
+            # store the run row will be written to, so a kill inside the launch
+            # window is recoverable from durable evidence (ADR-0011 §2.2).
             try:
                 dispatched_job = store.mark_dispatched(
-                    db, dec.job.job_id, run_id=run_id, now=moment
+                    db,
+                    dec.job.job_id,
+                    run_id=run_id,
+                    dispatch_context=_dispatch_context(db, lease),
+                    now=moment,
                 )
             except (JobConflictError, JobTransitionError, JobNotFoundError):
                 memory_lease.release()
@@ -1102,6 +1361,7 @@ def scheduler_tick(
         probed=probed_count,
         waited=waited_count,
         decisions=tuple(decisions),
+        dispatch_window_repaired=repaired_job_ids,
         preemption_settled=(
             preempt_recon.settlement.released if preempt_recon is not None else 0
         ),
@@ -1236,6 +1496,7 @@ def run_scheduler_loop(
     last_tick: TickResult | None = None
     stop = stop_event or threading.Event()
     wake = wake_event if wake_event is not None else _SCHEDULER_WAKE_EVENT
+    hold_logged: str | None = None
 
     try:
         while not stop.is_set():
@@ -1275,7 +1536,23 @@ def run_scheduler_loop(
                 launch_guard=launch_guard,
             )
             if not last_tick.ran:
-                break
+                if last_tick.reason in _RESUMABLE_HOLD_REASONS:
+                    # The hold is reported (reason + job ids) and re-evaluated
+                    # on the next tick; exiting here would make the residue a
+                    # silent stall that nothing ever repairs.  Log once per
+                    # distinct hold so a long-lived hold does not flood.
+                    if last_tick.reason != hold_logged:
+                        logging.getLogger(__name__).warning(
+                            "scheduler hold: %s unresolved=%s repaired=%s",
+                            last_tick.reason,
+                            last_tick.unresolved_running_jobs,
+                            last_tick.dispatch_window_repaired,
+                        )
+                        hold_logged = last_tick.reason
+                else:
+                    break
+            else:
+                hold_logged = None
 
             # Bound the poll even when a caller requests a longer cadence: jobs
             # can be submitted by another process which cannot signal this event.
