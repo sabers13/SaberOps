@@ -50,9 +50,7 @@ def _git_repo(path: Path) -> Path:
     subprocess.run(["git", "config", "user.name", "MCP"], cwd=path, check=True)
     (path / "README.md").write_text("# repo\n", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=path, check=True)
-    subprocess.run(
-        ["git", "commit", "-m", "initial"], cwd=path, check=True, capture_output=True
-    )
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=path, check=True, capture_output=True)
     return path
 
 
@@ -213,9 +211,7 @@ def test_submit_job_returns_job_id_and_state(
 
 
 @pytest.mark.parametrize("field", ["provider", "model", "tier", "billing", "route", "quota"])
-def test_submit_job_refuses_requirement_denylisted_fields(
-    tmp_path: Path, field: str
-) -> None:
+def test_submit_job_refuses_requirement_denylisted_fields(tmp_path: Path, field: str) -> None:
     """Covers: ADR-0001 invariant 3 (callers state requirements, not routes)."""
     server = _server(tmp_path)
     response = _call(server, "submit_job", {"repo": "/tmp", "goal": "g", field: "x"})
@@ -460,3 +456,86 @@ def test_no_tool_can_approve_a_config_proposal(tmp_path: Path) -> None:
         response = _call(server, name, {})
         assert response["error"]["code"] == -32010, name
     assert ConfigLedger(tmp_path / "config.jsonl").entries() == ()
+
+
+def test_c5_schema_messages_and_guide(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from saberops.mcp.guide import GUIDE
+    from saberops.mcp.tools import build_default_registry
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    server = _server(tmp_path)
+    repo = _git_repo(tmp_path / "repo")
+    response = _call(server, "submit_job", {"repo": str(repo), "goal": "x", "priority": "bad"})
+    assert "priority" in response["result"]["structuredContent"]["error"]["message"]
+    payload = _payload(
+        server, "submit_job", {"repo": str(repo), "goal": "x", "acceptance": ["one", "two"]}
+    )
+    assert payload["job"]["acceptance"] == "one\ntwo"
+    failed = _payload(
+        server,
+        "submit_job",
+        {"repo": str(repo), "goal": "unroutable", "requirements": {"role": "REVIEWER"}},
+    )
+    assert "set requirements.role to WORKER" in failed["guidance"]
+    from types import SimpleNamespace
+
+    from saberops.mcp.tools import _job_guidance
+
+    unroutable = SimpleNamespace(
+        failure_reason="NO_ROUTE_FOR_REQUIREMENTS",
+        requirements=SimpleNamespace(role=SimpleNamespace(value="WORKER")),
+    )
+    guidance = _job_guidance(unroutable)
+    assert guidance is not None and "orch routing add worker <provider/model>" in guidance
+    assert payload["result"]["run_id"] is None
+    assert payload["state"] == "QUEUED"
+    retrieved = _payload(server, "get_job", {"job_id": payload["job_id"]})
+    assert retrieved["result"] == payload["result"]
+    text_job = _payload(
+        server, "submit_job", {"repo": str(repo), "goal": "text", "acceptance": "one"}
+    )
+    assert text_job["job"]["acceptance"] == "one"
+    schema = build_default_registry(_context(tmp_path / "other")).get("submit_job")
+    assert schema is not None
+    properties = schema.input_schema["properties"]
+    for field in properties:
+        assert f"`{field}`" in GUIDE
+    for field in properties["requirements"]["properties"]:
+        assert f"`{field}`" in GUIDE
+    for role in properties["requirements"]["properties"]["role"]["enum"]:
+        assert role in GUIDE
+
+
+def test_c5_result_identifies_eligible_candidate(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    from saberops.accept import AcceptEngine
+    from saberops.candidate_lifecycle import project_candidate_state
+    from saberops.mcp.tools import _job_result
+
+    del project_candidate_state
+    monkeypatch.setattr(
+        "saberops.candidate_lifecycle.project_candidate_state",
+        lambda db, run_id: SimpleNamespace(candidate_sha="a" * 40),
+    )
+    monkeypatch.setattr(
+        AcceptEngine, "check_accept_eligibility",
+        lambda self, run_id: SimpleNamespace(eligible=True),
+    )
+    job = SimpleNamespace(run_ids=("run-1",), repo="/repo", base_sha="b" * 40)
+    result = _job_result(None, job)
+    assert result == {
+        "run_id": "run-1", "candidate_sha": "a" * 40,
+        "diff": {"repo": "/repo", "base_sha": "b" * 40, "candidate_sha": "a" * 40},
+        "owner_action": "orch accept run-1",
+    }
+
+
+def test_c5_version(capsys: pytest.CaptureFixture[str]) -> None:
+    from saberops import __version__
+    from saberops.cli import build_parser
+
+    with pytest.raises(SystemExit) as exc:
+        build_parser().parse_args(["--version"])
+    assert exc.value.code == 0
+    assert capsys.readouterr().out.strip() == f"orch {__version__}"

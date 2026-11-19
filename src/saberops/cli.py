@@ -650,6 +650,9 @@ def build_parser() -> argparse.ArgumentParser:
             "Git worktree isolation and deterministic gate verification."
         ),
     )
+    from saberops import __version__
+
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # orch tools: deterministic logical tool inspection and invocation.

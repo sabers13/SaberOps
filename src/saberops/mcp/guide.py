@@ -110,6 +110,14 @@ model review it, and leaves the result for the owner to accept or reject.
    - `acceptance`: checks a reviewer can verify ("pytest tests/test_webhook.py passes",
      "retries 3 times with backoff", "no change to the public API"),
    - `idempotency_key`: a stable key, so a retry never submits twice.
+   Optional `base_ref`, `priority`, `deadline`, `not_before`, and `caller_id`
+   select the base, scheduling and caller. `acceptance` is a string or list of strings.
+   `requirements` may include `role`, `effort`, `size_hint`, `required_capabilities`,
+   `read_only`, `model_family_include`, and `model_family_exclude`. Only WORKER
+   is dispatchable; ORCHESTRATOR, INTEGRATOR, SURGEON and REVIEWER are accepted
+   role values but cannot be dispatched as jobs. `effort` is low, medium or high;
+   `size_hint` is S, M or L and informs capacity estimates. Family inclusion and
+   exclusion filter candidates at admission.
    Never send `provider`, `model`, `tier`, `billing`, `route`, `quota` or `account`:
    they are refused. SaberOps picks the model.
 3. Several independent tasks: submit one `submit_job` per independent task, each

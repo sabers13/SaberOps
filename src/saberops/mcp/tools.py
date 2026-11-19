@@ -232,9 +232,7 @@ class ToolRegistry:
 
     def register(self, spec: ToolSpec) -> None:
         if spec.name in FORBIDDEN_OPERATIONS:
-            raise ToolError(
-                f"refusing to register the never-exposed operation {spec.name!r}"
-            )
+            raise ToolError(f"refusing to register the never-exposed operation {spec.name!r}")
         if spec.name in self._tools:
             raise ToolError(f"tool already registered: {spec.name!r}")
         self._tools[spec.name] = spec
@@ -280,7 +278,9 @@ class ToolRegistry:
             )
         errors = validate_instance(spec.input_schema, dict(arguments))
         if errors:
-            raise InvalidParamsError(f"{name}: invalid arguments", data={"errors": errors})
+            raise InvalidParamsError(
+                f"{name}: invalid arguments: {'; '.join(errors)}", data={"errors": errors}
+            )
         if self._lease is None:
             return spec.handler(arguments)
         with self._lease.guarded_call(mutating=spec.mutating) as owned:
@@ -371,7 +371,11 @@ def _submit_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[st
             db,
             repo=_require_text(arguments, "repo", what="repo"),
             goal=_require_text(arguments, "goal", what="goal"),
-            acceptance=arguments.get("acceptance"),
+            acceptance=(
+                "\n".join(arguments["acceptance"])
+                if isinstance(arguments.get("acceptance"), list)
+                else arguments.get("acceptance")
+            ),
             base_ref=str(arguments.get("base_ref") or "HEAD"),
             requirements=requirements,
             priority=Priority(str(arguments.get("priority") or Priority.NORMAL.value)),
@@ -387,6 +391,8 @@ def _submit_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[st
         raise InvalidParamsError(f"invalid job: {exc}") from exc
     payload = {
         "v": SNAPSHOT_SCHEMA_VERSION,
+        "result": _job_result(db, result.job),
+        "guidance": _job_guidance(result.job),
         "job_id": result.job.job_id,
         "state": result.job.state.value,
         "created": result.created,
@@ -400,6 +406,51 @@ def _submit_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[st
     return payload
 
 
+def _job_guidance(job: Any) -> str | None:
+    if job.failure_reason == "NO_ROUTE_FOR_REQUIREMENTS":
+        if job.requirements.role.value != "WORKER":
+            return "Only WORKER jobs dispatch; set requirements.role to WORKER."
+        return (
+            "No worker route satisfies the requirements. Configure one with "
+            "`orch routing add worker <provider/model>`; inspect with `orch routing show` "
+            "and adjust capability requirements if needed. Only WORKER jobs dispatch."
+        )
+    return None
+
+
+def _job_result(db: Any, job: Any) -> dict[str, Any]:
+    """Read-only result projection, reusable by completion tools."""
+    from saberops.accept import AcceptEngine
+    from saberops.candidate_lifecycle import project_candidate_state
+
+    result: dict[str, Any] = {
+        "run_id": None,
+        "candidate_sha": None,
+        "diff": None,
+        "owner_action": None,
+    }
+    for run_id in reversed(job.run_ids):
+        projection = project_candidate_state(db, run_id)
+        if projection.candidate_sha is None:
+            continue
+        eligible = AcceptEngine(db).check_accept_eligibility(run_id).eligible
+        if result["candidate_sha"] is not None and not eligible:
+            continue
+        result.update(
+            run_id=run_id,
+            candidate_sha=projection.candidate_sha,
+            diff={
+                "repo": job.repo,
+                "base_sha": job.base_sha,
+                "candidate_sha": projection.candidate_sha,
+            },
+        )
+        if eligible:
+            result["owner_action"] = f"orch accept {run_id}"
+            break
+    return result
+
+
 def _get_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
     from saberops.jobs.service import get_job
 
@@ -408,7 +459,12 @@ def _get_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, 
     job = None if db is None else get_job(db, job_id)
     if job is None:
         raise NotFoundError(f"unknown job: {job_id}", data={"job_id": job_id})
-    return {"v": SNAPSHOT_SCHEMA_VERSION, "job": job.to_dict()}
+    return {
+        "v": SNAPSHOT_SCHEMA_VERSION,
+        "job": job.to_dict(),
+        "result": _job_result(db, job),
+        "guidance": _job_guidance(job),
+    }
 
 
 def _list_jobs(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
@@ -481,9 +537,7 @@ def _capacity(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str,
         }
     return {
         "v": SNAPSHOT_SCHEMA_VERSION,
-        "capacity": serialize_capacity_view(
-            capacity(db), scheduler_alive=scheduler_alive(db)
-        ),
+        "capacity": serialize_capacity_view(capacity(db), scheduler_alive=scheduler_alive(db)),
     }
 
 
@@ -517,9 +571,7 @@ def _list_questions(context: ServerContext, arguments: Mapping[str, Any]) -> dic
     }
 
 
-def _answer_question(
-    context: ServerContext, arguments: Mapping[str, Any]
-) -> dict[str, Any]:
+def _answer_question(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
     from saberops.questions import (
         AnswerAuthority,
         AskRole,
@@ -578,9 +630,7 @@ def _answer_question(
     return {"v": SNAPSHOT_SCHEMA_VERSION, "question": question_view(updated)}
 
 
-def _propose_config_change(
-    context: ServerContext, arguments: Mapping[str, Any]
-) -> dict[str, Any]:
+def _propose_config_change(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
     from saberops.config import (
         ConfigError,
         current_workflow_settings,
@@ -666,7 +716,7 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
             {
                 "repo": {"type": "string", "minLength": 1},
                 "goal": {"type": "string", "minLength": 1},
-                "acceptance": {"type": "string"},
+                "acceptance": {"type": ["string", "array"], "items": {"type": "string"}},
                 "base_ref": {"type": "string", "minLength": 1},
                 "priority": {"type": "string", "enum": _PRIORITIES},
                 "deadline": {"type": "string"},
