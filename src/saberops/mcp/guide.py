@@ -124,8 +124,11 @@ steps, not model roles. There are no selectable modes.
    - `acceptance`: checks a reviewer can verify ("pytest tests/test_webhook.py passes",
      "retries 3 times with backoff", "no change to the public API"),
    - `idempotency_key`: a stable key, so a retry never submits twice.
-   Optional `base_ref`, `priority`, `deadline`, `not_before`, and `caller_id`
-   select the base, scheduling and caller. `acceptance` is a string or list of strings.
+   Optional `base_ref`, `priority`, `deadline`, `not_before`, `depends_on`, and
+   `caller_id` select the base, scheduling, dependency and caller. A dependant
+   starts only after every job it names in `depends_on` has been accepted by the
+   owner; a dependency that fails or is cancelled parks the dependant for good.
+   `acceptance` is a string or list of strings.
    `requirements` may include `role`, `effort`, `size_hint`, `required_capabilities`,
    `read_only`, `model_family_include`, and `model_family_exclude`. The role
    values are PLAN, BUILD and CHECK; only BUILD is dispatchable, and every
@@ -139,11 +142,13 @@ steps, not model roles. There are no selectable modes.
    with its own distinct `idempotency_key` and non-overlapping scope. The
    scheduler dispatches admitted jobs in parallel across available providers.
 4. Keep tasks small: one reviewable change each. A task that needs another
-   task's result goes in a later job after the first is accepted.
-   If two jobs start from the same repository base and the first is accepted,
-   the second will report a stale base with its work and evidence preserved;
-   request `refresh_candidate` with the stale run ID. The refreshed candidate
-   receives fresh checks and review; the owner accepts it separately.
+   task's result names it in `depends_on`: the dependent job waits in the queue
+   until the owner accepts the earlier job, and you do not have to stay in the
+   chat to submit it afterwards. If you submitted it without `depends_on` and the
+   first job is accepted, the second reports a stale base with its work and
+   evidence preserved; request `refresh_candidate` with the stale run ID. The
+   refreshed candidate receives fresh checks and review; the owner accepts it
+   separately.
 
 ## Following it
 - Call `wait_job` after each submission; it returns on a final outcome, blocking

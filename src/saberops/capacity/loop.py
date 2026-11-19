@@ -1067,6 +1067,12 @@ def scheduler_tick(
     # 2. Collect scheduling inputs
     queued_jobs, _ = store.list_jobs_tolerant(db, state=JobState.QUEUED, limit=100_000)
     running_jobs, _ = store.list_jobs_tolerant(db, state=JobState.RUNNING, limit=100_000)
+    # F8: resolve dependency gating from durable records before any routing
+    # work.  A dependency is satisfied only by an accepted candidate, never by
+    # "its run completed earlier".
+    from saberops.jobs.dependencies import dependency_blockers
+
+    blockers = dependency_blockers(db, queued_jobs)
     effective_routes = routes or load_effective_routing()
     effective_pol = policy or load_control_plane_policy()
 
@@ -1147,6 +1153,7 @@ def scheduler_tick(
         global_slot_limit=effective_global_limit,
         background_min_pace=background_min_pace,
         readiness_states=readiness_map if readiness_map else None,
+        dependency_blockers=blockers,
     )
 
     dispatched_count = 0
@@ -1192,6 +1199,7 @@ def scheduler_tick(
                     reason=storable_reason,
                     eta=eta_iso,
                     eta_confidence=dec.confidence,
+                    details=dec.details or None,
                     now=moment,
                 )
                 waited_count += 1

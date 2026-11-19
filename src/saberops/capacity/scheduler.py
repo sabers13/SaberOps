@@ -26,6 +26,7 @@ from saberops.control_plane.policy import ControlPlanePolicy
 from saberops.jobs.models import (
     DISPATCHABLE_ROLES,
     NO_ROUTE_FOR_REQUIREMENTS,
+    DependencyBlocker,
     Job,
     JobRole,
     Priority,
@@ -123,10 +124,13 @@ def schedule(
     global_slot_limit: int | None = None,
     background_min_pace: float = 4.0,
     readiness_states: Mapping[Any, Any] | None = None,
+    dependency_blockers: Mapping[str, DependencyBlocker] | None = None,
 ) -> list[SchedulerDecision]:
     """Pure deterministic pacing scheduler (ADR-0002 D7).
 
     Evaluates queued jobs in strict D7 order:
+    - Dependency-blocked jobs wait with their recorded reason (F8) before any
+      routing, capacity or pacing evaluation.
     - URGENT > NORMAL > BACKGROUND
     - Within class: earliest deadline first, then FIFO by created_at
     - Evaluates role fallback groups: best score ONLY within the first group
@@ -152,6 +156,26 @@ def schedule(
     sorted_jobs = sorted(queued, key=_job_sort_key)
 
     for job in sorted_jobs:
+        # F8: a job whose dependencies are not all accepted never reaches
+        # routing.  The reason is decided by the caller (DEPENDENCY, or
+        # DEPENDENCY_FAILED when a dependency can never be accepted).
+        blocker = (dependency_blockers or {}).get(job.job_id)
+        if blocker is not None:
+            decisions.append(
+                WaitDecision(
+                    job=job,
+                    reason=blocker.reason.value,
+                    eta=None,
+                    confidence=None,
+                    details={
+                        "depends_on": list(job.depends_on),
+                        "blocked_by": list(blocker.blocked_by),
+                        "detail": blocker.detail,
+                    },
+                )
+            )
+            continue
+
         # Check not_before delay
         if job.not_before:
             nb_dt = parse_iso(job.not_before)

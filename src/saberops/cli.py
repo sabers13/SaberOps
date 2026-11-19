@@ -1941,6 +1941,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     job_submit.add_argument("--deadline", type=str, default=None, help="Aware ISO-8601.")
     job_submit.add_argument("--not-before", type=str, default=None, help="Aware ISO-8601.")
+    job_submit.add_argument(
+        "--depends-on",
+        dest="depends_on",
+        action="append",
+        default=[],
+        metavar="JOB_ID",
+        help="Start only after this job is accepted; repeat for multiple.",
+    )
     job_submit.add_argument("--idempotency-key", type=str, default=None)
     job_submit.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
     job_submit.add_argument("--json", action="store_true", help="JSON output")
@@ -5443,6 +5451,7 @@ def handle_job_submit(args: argparse.Namespace) -> int:
             priority=_Priority(str(args.priority)),
             deadline=args.deadline,
             not_before=args.not_before,
+            depends_on=tuple(args.depends_on or ()),
             idempotency_key=args.idempotency_key,
             routing=None,
         )
@@ -5460,6 +5469,8 @@ def handle_job_submit(args: argparse.Namespace) -> int:
     print(f"Job        : {result.job.job_id}")
     print(f"State      : {result.job.state.value}")
     print(f"Created    : {'yes' if result.created else 'no (idempotent replay)'}")
+    if result.job.depends_on:
+        print(f"Depends on : {', '.join(result.job.depends_on)}")
     if failed:
         print(f"Reason     : {result.job.failure_reason}")
         return 3
@@ -5495,6 +5506,10 @@ def handle_job_get(args: argparse.Namespace) -> int:
     print(f"State      : {job.state.value}")
     print(f"Goal       : {job.goal}")
     print(f"Repo       : {job.repo} @ {job.base_ref} ({job.base_sha})")
+    if job.waiting_reason is not None:
+        print(f"Waiting    : {job.waiting_reason.value}")
+    if job.depends_on:
+        print(f"Depends on : {', '.join(job.depends_on)}")
     for note in notes:
         status = (
             f"delivered to attempt {note.delivered_attempt_id}"

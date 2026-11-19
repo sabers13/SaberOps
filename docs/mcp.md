@@ -47,7 +47,7 @@ served, and an unknown requested revision falls back to `2025-06-18`.
 
 | Tool | Mutating | Key arguments | Calls |
 | --- | --- | --- | --- |
-| `submit_job` | yes | `repo`, `goal`, `acceptance`, `base_ref`, `priority`, `deadline`, `not_before`, `idempotency_key`, `requirements` | `saberops.jobs.service.submit_job` |
+| `submit_job` | yes | `repo`, `goal`, `acceptance`, `base_ref`, `priority`, `deadline`, `not_before`, `depends_on`, `idempotency_key`, `requirements` | `saberops.jobs.service.submit_job` |
 | `get_job` | no | `job_id` | `saberops.jobs.service.get_job` |
 | `catch_up` | no | `job_id` | read-only handoff over saved job, run, check, review and question records |
 | `list_jobs` | no | `state`, `limit` | `saberops.jobs.service.list_jobs` |
@@ -70,6 +70,12 @@ distinct `idempotency_key` and non-overlapping scope. If an accepted sibling
 makes another job stale, request `refresh_candidate` with its run ID (or use
 `orch refresh <run-id>`). The owner accepts the newly checked and reviewed
 candidate separately.
+
+A job that needs an earlier job's result names it in `depends_on` instead of
+being submitted later by hand: it stays QUEUED with the `DEPENDENCY` reason and
+starts only after the owner accepts every dependency. A dependency that fails
+or is cancelled parks the dependant with `DEPENDENCY_FAILED`, which `wait_job`
+returns as needs-attention; cancel or resubmit it.
 
 `catch_up` is the read-only handoff for a new planning session. It returns the
 original request, the current candidate commit, the latest gate check and

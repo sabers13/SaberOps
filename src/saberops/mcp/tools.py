@@ -394,6 +394,7 @@ def _submit_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[st
             priority=Priority(str(arguments.get("priority") or Priority.NORMAL.value)),
             deadline=arguments.get("deadline"),
             not_before=arguments.get("not_before"),
+            depends_on=arguments.get("depends_on"),
             idempotency_key=arguments.get("idempotency_key"),
             caller_id=str(arguments.get("caller_id") or "orchestrator"),
             mcp_session_id=context.lease.session_id,
@@ -420,6 +421,8 @@ def _submit_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[st
 
 
 def _job_guidance(job: Any) -> str | None:
+    from saberops.jobs.models import WaitingReason
+
     if job.failure_reason == "NO_ROUTE_FOR_REQUIREMENTS":
         if job.requirements.role.value != "BUILD":
             return "Only BUILD jobs dispatch; set requirements.role to BUILD."
@@ -428,6 +431,17 @@ def _job_guidance(job: Any) -> str | None:
             "`orch routing add build <provider/model>`; inspect with `orch routing show` "
             "and adjust capability requirements if needed. Only BUILD jobs dispatch."
         )
+    waiting = getattr(job, "waiting_reason", None)
+    depends_on = tuple(getattr(job, "depends_on", ()) or ())
+    if waiting == WaitingReason.DEPENDENCY:
+        return (
+            "Waiting until the owner accepts these dependency jobs: "
+            f"{', '.join(depends_on)}. It starts by itself after that; no action needed."
+        )
+    if waiting == WaitingReason.DEPENDENCY_FAILED:
+        from saberops.jobs.dependencies import DEPENDENCY_FAILED_GUIDANCE
+
+        return DEPENDENCY_FAILED_GUIDANCE
     return None
 
 
@@ -862,6 +876,17 @@ def _wait_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str,
         job = result["job"]
         if job["state"] in {"SUCCEEDED", "FAILED", "CANCELLED"}:
             return {**result, "timed_out": False, "outcome": "final"}
+        if job.get("waiting_reason") == "DEPENDENCY_FAILED":
+            # The job can never start, so waiting cannot change anything.
+            # Return immediately instead of burning the caller's timeout.
+            from saberops.jobs.dependencies import DEPENDENCY_FAILED_GUIDANCE
+
+            return {
+                **result,
+                "timed_out": False,
+                "outcome": "needs_attention",
+                "reason": DEPENDENCY_FAILED_GUIDANCE,
+            }
         for question in context.question_queue().questions(status=QuestionStatus.OPEN):
             request = question.request
             if job["job_id"] in request.blocks or (
@@ -1213,6 +1238,7 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
                 "priority": {"type": "string", "enum": _PRIORITIES},
                 "deadline": {"type": "string"},
                 "not_before": {"type": "string"},
+                "depends_on": {"type": "array", "items": {"type": "string", "minLength": 1}},
                 "idempotency_key": {"type": "string"},
                 "caller_id": {"type": "string"},
                 "requirements": _schema(

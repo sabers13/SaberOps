@@ -85,6 +85,7 @@ def ensure_tables(db: Any) -> None:
                 priority TEXT NOT NULL,
                 deadline TEXT,
                 not_before TEXT,
+                depends_on_json TEXT NOT NULL DEFAULT '[]',
                 state TEXT NOT NULL,
                 waiting_reason TEXT,
                 failure_reason TEXT,
@@ -102,6 +103,7 @@ def ensure_tables(db: Any) -> None:
             )
             """
         )
+        _ensure_depends_on_column(conn)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS job_events (
@@ -147,6 +149,21 @@ def ensure_tables(db: Any) -> None:
         conn.commit()
 
 
+def _ensure_depends_on_column(conn: sqlite3.Connection) -> None:
+    """Add ``depends_on_json`` to a ``jobs`` table created before F8.
+
+    ``CREATE TABLE IF NOT EXISTS`` never alters an existing table, and stores
+    created by an earlier version keep dispatching, so the F8 column is added
+    in place with the same default a fresh store gets.  Jobs written before
+    this column existed carry no dependencies.
+    """
+    columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(jobs)")}
+    if "depends_on_json" not in columns:
+        conn.execute(
+            "ALTER TABLE jobs ADD COLUMN depends_on_json TEXT NOT NULL DEFAULT '[]'"
+        )
+
+
 def _job_to_columns(job: Job) -> dict[str, Any]:
     return {
         "job_id": job.job_id,
@@ -163,6 +180,7 @@ def _job_to_columns(job: Job) -> dict[str, Any]:
         "priority": job.priority.value,
         "deadline": job.deadline,
         "not_before": job.not_before,
+        "depends_on_json": json.dumps(list(job.depends_on), separators=(",", ":")),
         "state": job.state.value,
         "waiting_reason": job.waiting_reason.value if job.waiting_reason else None,
         "failure_reason": job.failure_reason,
@@ -186,6 +204,10 @@ def _row_to_job(row: sqlite3.Row) -> Job:
     resume_raw = row["resume_from_json"]
     resume = ResumeFrom.from_dict(json.loads(str(resume_raw))) if resume_raw else None
     waiting_raw = row["waiting_reason"]
+    # A read-only connection can read a store created before F8, whose jobs
+    # table has no ``depends_on_json``; those jobs carry no dependencies.
+    depends_raw = row["depends_on_json"] if "depends_on_json" in row.keys() else None
+    depends_on = tuple(json.loads(str(depends_raw))) if depends_raw else ()
     return Job(
         job_id=str(row["job_id"]),
         idempotency_key=str(row["idempotency_key"])
@@ -201,6 +223,7 @@ def _row_to_job(row: sqlite3.Row) -> Job:
         priority=Priority(str(row["priority"])),
         deadline=str(row["deadline"]) if row["deadline"] is not None else None,
         not_before=str(row["not_before"]) if row["not_before"] is not None else None,
+        depends_on=depends_on,
         state=JobState(str(row["state"])),
         waiting_reason=WaitingReason(str(waiting_raw)) if waiting_raw else None,
         failure_reason=str(row["failure_reason"])
@@ -259,8 +282,15 @@ def insert_job(
     db: Any, job: Job, *, event_kind: str = "submitted", now: datetime | None = None,
     mcp_session_id: str | None = None,
 ) -> Job:
-    """Insert a new job row plus its first event atomically."""
+    """Insert a new job row plus its first event atomically.
+
+    The dependency graph is validated here, at the single durable choke point,
+    so no caller can persist a job whose ``depends_on`` closes a cycle.
+    """
+    from saberops.jobs.dependencies import validate_job_dependencies
+
     ensure_tables(db)
+    validate_job_dependencies(db, job_id=job.job_id, depends_on=job.depends_on)
     at = _utcnow_iso(now)
     cols = _job_to_columns(job)
     names = ", ".join(cols)
@@ -703,14 +733,26 @@ def set_waiting(
     *,
     eta: str | None = None,
     eta_confidence: str | None = None,
+    details: dict[str, Any] | None = None,
     now: datetime | None = None,
 ) -> Job:
-    """QUEUED -> QUEUED: reason change only (M2-4b pacing)."""
+    """QUEUED -> QUEUED: reason change only (M2-4b pacing).
+
+    ``details`` is durable audit evidence for the reason (F8 records which
+    dependencies block a job); it never changes the transition itself.
+    """
     want = reason if isinstance(reason, WaitingReason) else WaitingReason(str(reason))
     current = get_job(db, job_id)
     if current is None:
         raise JobNotFoundError(f"unknown job: {job_id}")
     _require_state(current, JobState.QUEUED)
+    payload: dict[str, Any] = {
+        "waiting_reason": want.value,
+        "eta": eta,
+        "eta_confidence": eta_confidence,
+    }
+    if details:
+        payload["details"] = dict(details)
     return _cas(
         db,
         job_id,
@@ -723,7 +765,7 @@ def set_waiting(
         },
         kind="waiting",
         to_state=JobState.QUEUED,
-        payload={"waiting_reason": want.value, "eta": eta, "eta_confidence": eta_confidence},
+        payload=payload,
         now=now,
     )
 

@@ -11,13 +11,14 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from saberops.jobs import store
+from saberops.jobs.dependencies import normalize_depends_on, validate_job_dependencies
 from saberops.jobs.feasibility import feasible
 from saberops.jobs.ids import new_job_id
 from saberops.jobs.models import (
@@ -233,12 +234,14 @@ def _request_digest(
     priority: Priority,
     deadline: str | None,
     not_before: str | None,
+    depends_on: tuple[str, ...] = (),
 ) -> str:
     canonical = {
         "acceptance": acceptance,
         "base_ref": base_ref,
         "caller_id": caller_id,
         "deadline": deadline,
+        "depends_on": list(depends_on),
         "goal": goal,
         "not_before": not_before,
         "priority": priority.value,
@@ -260,6 +263,7 @@ def submit_job(
     priority: Priority | str = Priority.NORMAL,
     deadline: str | None = None,
     not_before: str | None = None,
+    depends_on: Sequence[str] | None = None,
     idempotency_key: str | None = None,
     caller_id: str = "owner",
     routing: RoutingSnapshot | None = None,
@@ -288,7 +292,10 @@ def submit_job(
     base_sha = _resolve_base_sha(repo_abs, ref_given)
     deadline_iso = _parse_aware_instant(deadline, field="deadline")
     not_before_iso = _parse_aware_instant(not_before, field="not_before")
+    depends = normalize_depends_on(depends_on)
     snapshot = routing if routing is not None else load_effective_routing()
+    # Dependencies are part of the request identity: the same idempotency key
+    # with a different dependency list is a different request, not a replay.
     digest = _request_digest(
         caller_id=caller,
         repo=repo_abs,
@@ -299,7 +306,10 @@ def submit_job(
         priority=prio,
         deadline=deadline_iso,
         not_before=not_before_iso,
+        depends_on=depends,
     )
+    new_id = new_job_id(now=now)
+    validate_job_dependencies(db, job_id=new_id, depends_on=depends)
     if key is not None:
         existing = store.find_by_idempotency(db, caller, key)
         if existing is not None:
@@ -312,7 +322,7 @@ def submit_job(
     stamp = _utcnow_iso(now)
     if ok:
         job = Job(
-            job_id=new_job_id(now=now),
+            job_id=new_id,
             idempotency_key=key,
             caller_id=caller,
             repo=repo_abs,
@@ -324,6 +334,7 @@ def submit_job(
             priority=prio,
             deadline=deadline_iso,
             not_before=not_before_iso,
+            depends_on=depends,
             state=JobState.QUEUED,
             waiting_reason=WaitingReason.NEW,
             created_at=stamp,
@@ -332,7 +343,7 @@ def submit_job(
         )
     else:
         job = Job(
-            job_id=new_job_id(now=now),
+            job_id=new_id,
             idempotency_key=key,
             caller_id=caller,
             repo=repo_abs,
@@ -344,6 +355,7 @@ def submit_job(
             priority=prio,
             deadline=deadline_iso,
             not_before=not_before_iso,
+            depends_on=depends,
             state=JobState.FAILED,
             waiting_reason=None,
             failure_reason=NO_ROUTE_FOR_REQUIREMENTS,

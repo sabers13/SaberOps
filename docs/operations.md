@@ -301,9 +301,21 @@ stay QUEUED for now.
 
 States: QUEUED → RUNNING → SUCCEEDED | FAILED | CANCELLED, and
 RUNNING → QUEUED on preemption. QUEUED carries a waiting reason: NEW |
-NO_CAPACITY | PROBE_PENDING | PREEMPTED | CONCURRENCY. Requirements no
-route could ever satisfy, even with full capacity, store FAILED with
-`NO_ROUTE_FOR_REQUIREMENTS` at submit, so jobs never park forever.
+NO_CAPACITY | PROBE_PENDING | PREEMPTED | CONCURRENCY | MEMORY_LOW |
+DEPENDENCY | DEPENDENCY_FAILED. Requirements no route could ever satisfy,
+even with full capacity, store FAILED with `NO_ROUTE_FOR_REQUIREMENTS` at
+submit, so jobs never park forever.
+
+Dependencies: `depends_on` (CLI `--depends-on JOB_ID`, repeatable; MCP
+`submit_job` `depends_on`) names jobs that must be **accepted** first, not
+merely finished. The scheduler parks a dependant with `DEPENDENCY`, naming the
+outstanding dependencies on its `waiting` event, until every one carries a
+durable `run_accepted` event from the owner's acceptance. A dependency that
+ends FAILED or CANCELLED parks the dependant with `DEPENDENCY_FAILED` for good:
+it never starts, and `wait_job` returns it as needs-attention instead of
+waiting out its timeout. Unknown dependencies and any dependency edge that
+would close a cycle are refused at submit. Independent jobs keep dispatching in
+parallel beside a parked dependant.
 
 Requirements state what the work needs: `role` (`PLAN`, `BUILD` or `CHECK`;
 only `BUILD` is dispatchable, and retired names `WORKER`/`SURGEON`/

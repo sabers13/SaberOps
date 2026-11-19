@@ -87,6 +87,13 @@ class WaitingReason(StrEnum):
     PREEMPTED = "PREEMPTED"
     CONCURRENCY = "CONCURRENCY"
     MEMORY_LOW = "MEMORY_LOW"
+    #: F8: at least one job named in ``Job.depends_on`` has not been accepted
+    #: yet, so this job must not start.  Clears by itself once the dependency
+    #: is accepted.
+    DEPENDENCY = "DEPENDENCY"
+    #: F8: a dependency ended FAILED or CANCELLED, so this job can never start.
+    #: It never clears by itself; the owner cancels or resubmits it.
+    DEPENDENCY_FAILED = "DEPENDENCY_FAILED"
     #: A scheduler died between the dispatch compare-and-swap and its run row.
     #: Nothing ran, so the job is requeued once with this reason (and failed
     #: with the same-named failure reason if it happens again).
@@ -315,6 +322,20 @@ class SteeringNote:
 
 
 @dataclass(frozen=True)
+class DependencyBlocker:
+    """Why a queued job's F8 dependencies do not let it start (pure contract).
+
+    ``reason`` is the :class:`WaitingReason` the scheduler parks the job with;
+    ``blocked_by`` names the dependencies responsible, sorted for determinism so
+    the same durable state always produces the same decision.
+    """
+
+    reason: WaitingReason
+    blocked_by: tuple[str, ...] = ()
+    detail: str | None = None
+
+
+@dataclass(frozen=True)
 class Job:
     """One durable job. ``base_sha`` travels beside ``base_ref`` (section H):
 
@@ -334,6 +355,7 @@ class Job:
     priority: Priority = Priority.NORMAL
     deadline: str | None = None
     not_before: str | None = None
+    depends_on: tuple[str, ...] = ()
     state: JobState = JobState.QUEUED
     waiting_reason: WaitingReason | None = None
     failure_reason: str | None = None
@@ -382,6 +404,16 @@ class Job:
         object.__setattr__(self, "run_ids", tuple(self.run_ids))
         if self.preemptions < 0:
             raise ValueError("preemptions must be >= 0")
+        depends_on: list[str] = []
+        for raw in self.depends_on:
+            if not isinstance(raw, str) or not raw.strip():
+                raise ValueError("depends_on entries must be non-empty job ids")
+            dependency = raw.strip()
+            if dependency == self.job_id:
+                raise ValueError(f"job {self.job_id} cannot depend on itself")
+            if dependency not in depends_on:
+                depends_on.append(dependency)
+        object.__setattr__(self, "depends_on", tuple(depends_on))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -397,6 +429,7 @@ class Job:
             "priority": self.priority.value,
             "deadline": self.deadline,
             "not_before": self.not_before,
+            "depends_on": list(self.depends_on),
             "state": self.state.value,
             "waiting_reason": self.waiting_reason.value if self.waiting_reason else None,
             "failure_reason": self.failure_reason,
@@ -429,6 +462,7 @@ class Job:
             priority=_coerce_priority(str(data.get("priority", Priority.NORMAL.value))),
             deadline=data.get("deadline"),
             not_before=data.get("not_before"),
+            depends_on=tuple(data.get("depends_on", ())),
             state=JobState(str(data["state"])),
             waiting_reason=WaitingReason(str(waiting_raw)) if waiting_raw else None,
             failure_reason=data.get("failure_reason"),
@@ -457,6 +491,7 @@ __all__ = [
     "RUN_MISSING",
     "SIZE_HINTS",
     "TERMINAL_JOB_STATES",
+    "DependencyBlocker",
     "Effort",
     "Job",
     "JobRequirements",
