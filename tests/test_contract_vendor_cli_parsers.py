@@ -22,6 +22,7 @@ from saberops.capacity.probes import duration_to_window, parse_claude_reset_text
 from saberops.cli_usage import parse_limits
 from saberops.native_usage_panel import parse_panel
 from saberops.opencode_go_usage import parse_go_limits
+from saberops.telemetry import extract_opencode_identity, parse_opencode_jsonl
 from saberops.vendor_cli_fixtures import (
     FIXTURES_ROOT,
     MANIFEST_PATH,
@@ -45,6 +46,7 @@ EXPECTED_CONSUMERS: dict[str, Any] = {
     "saberops.native_usage_panel.parse_panel": parse_panel,
     "saberops.cli_usage.parse_limits": parse_limits,
     "saberops.opencode_go_usage.parse_go_limits": parse_go_limits,
+    "saberops.telemetry:parse_opencode_jsonl": parse_opencode_jsonl,
     "saberops.capacity.probes.parse_claude_reset_text": parse_claude_reset_text,
     "saberops.capacity.probes.duration_to_window": duration_to_window,
     "saberops.workers.exhaustion.classify_codex": classify_codex,
@@ -113,6 +115,26 @@ def _invoke(fixture: Fixture, text: str) -> Any:
         return target(fixture.provider, json.loads(text))
     if consumer == "saberops.opencode_go_usage.parse_go_limits":
         return target(json.loads(text))
+    if consumer == "saberops.telemetry:parse_opencode_jsonl":
+        display_text, usages = parse_opencode_jsonl(text)
+        model, variant = extract_opencode_identity(text)
+        return {
+            "text": display_text,
+            "usages": [
+                {
+                    "input_tokens": usage.input_tokens,
+                    "output_tokens": usage.output_tokens,
+                    "cached_tokens": usage.cached_tokens,
+                    "total_tokens": usage.total_tokens,
+                    "cache_read_tokens": usage.cache_read_tokens,
+                    "cache_write_tokens": usage.cache_write_tokens,
+                    "reasoning_tokens": usage.reasoning_tokens,
+                    "usage_source": usage.usage_source,
+                }
+                for usage in usages
+            ],
+            "identity": {"model": model, "variant": variant},
+        }
     if consumer == "saberops.capacity.probes.parse_claude_reset_text":
         reset, confidence = parse_claude_reset_text(text, now=_now(fixture), tz=_tz(fixture))
         return {"reset_at": reset.isoformat() if reset else None, "confidence": confidence}

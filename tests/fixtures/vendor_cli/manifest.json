@@ -86,6 +86,38 @@
         ]
       },
       "provenance": "Installed CLI on the HV-1 host, 2026-10-16: `opencode --version`, `opencode --help`, `opencode run --help`, `opencode models --help` (token-free, owner-kept D-0015). HV-1 finding F1: the v2.0.29 help has no --pure/--dir. Step 024 (HV-2): the capture was extended token-free with `opencode serve --help` so the serve site's flags (--hostname/--port) are covered, and the F1 flags were removed from the adapters."
+    },
+    {
+      "vendor": "opencode",
+      "cli": "opencode",
+      "cli_version": "opencode v2.3.2",
+      "captured_on": "2026-11-19",
+      "kind": "usage_json",
+      "source": "real-capture",
+      "redacted": true,
+      "file": "opencode/opencode-v2.3.2/run_json.jsonl",
+      "consumer": "saberops.telemetry:parse_opencode_jsonl",
+      "provider": "opencode",
+      "expect": {
+        "text": "OK",
+        "usages": [
+          {
+            "input_tokens": 3521,
+            "output_tokens": 3,
+            "cached_tokens": 1664,
+            "total_tokens": null,
+            "cache_read_tokens": 1664,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "usage_source": "opencode_step_finish_json"
+          }
+        ],
+        "identity": {
+          "model": null,
+          "variant": null
+        }
+      },
+      "provenance": "Owner-approved one-prompt smoke on the dogfood host, 2026-11-19, under the SaberOps adapter's own hermetic environment and private OpenCode config/home root: `opencode run --standalone --format json -m opencode-go/deepseek-v4.1-flash --archived \"Reply with the single word OK.\"`. Session/part ids redacted; no credential value was read or emitted. The 2.3.2 JSONL stream carries step_finish.part.tokens but no provider/model identity fields, so the adapter's reported-model evidence stays `unreported` for this CLI version."
     }
   ],
   "fake_only": [
@@ -117,7 +149,7 @@
       "vendor": "opencode",
       "kind": "usage_json",
       "consumer": "saberops.opencode_go_usage.parse_go_limits",
-      "reason": "No real OpenCode Go usage JSON: read_go_limits returns parsed rows only. Owner-declined 2026-10-16 (D-0016)."
+      "reason": "No real OpenCode Go subscription-limit JSON: read_go_limits returns parsed rows only, so the quota-window payload has no byte capture. This is the plan-limit document, not the checked-in v2.3.2 `run --format json` token stream (`saberops.telemetry:parse_opencode_jsonl`). Owner-declined 2026-10-16 (D-0016)."
     },
     {
       "vendor": "codex",
