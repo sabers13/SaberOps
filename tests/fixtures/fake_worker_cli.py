@@ -560,8 +560,14 @@ def _handle_claude(
     if switched is not None:
         return switched
 
+    prompt_text = ""
     if not sys.stdin.isatty():
-        _ = sys.stdin.read()
+        prompt_text = sys.stdin.read()
+    # A prompt-level instruction lets a multi-job test mix passing and failing
+    # reviews in one batch (the control file is global to the rig).  The
+    # control file still wins for every prompt that does not carry it.
+    if "FAKE-REVIEW: BLOCK" in prompt_text:
+        review_verdict = "BLOCK"
     model = _get_arg_value(args, "--model") or "claude-sonnet-4-6"
     body = _review_text(review_verdict)
     print(json.dumps({"type": "system", "subtype": "init", "model": model}))

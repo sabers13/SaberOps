@@ -330,6 +330,31 @@ key always creates a new job.
   QUEUED cancels at once; RUNNING first cancels the live run through
   the supervisor and only then marks the job CANCELLED.
 
+## Phase 1 benchmark (`scripts/benchmark.py`)
+
+Ten fixed small tasks measure the full job, scheduler, worker, gate, review and
+acceptance path and print one results table: final state, accepted commit,
+submit-to-start, time to the accepted commit, completion-notice delay, owner
+actions and the subscription used.
+
+- **Fake mode** (default) runs the lifecycle rig's fake worker and reviewer
+  inside the test suite: `scripts/benchmark.py --mode fake`. It also covers five
+  failure drills (killed worker, killed scheduler, exhausted quota, unroutable
+  job, duplicate submission) and a combined recovery drill in which the planner
+  closes, a fake worker dies, the scheduler restarts and a fresh MCP session's
+  `catch_up` reports the failed job, its reason and the preserved work location.
+- **Real mode** drives real Codex, Claude and OpenCode Go CLIs and is run by
+  hand with the owner present (lane B3). It refuses without `--yes-real-cli` and
+  an empty isolated `--store`, never reuses the owner's real SaberOps state or
+  config, drops pay-per-token credentials from the child environment, and
+  refuses to submit until the isolated store's preflight is green. Models are
+  configurable; the defaults are OpenCode Go `opencode-go/deepseek-v4.1-flash`,
+  Claude `claude-haiku-5-5` and Codex `gpt-6-luna`. Use `--dry-run` to print the
+  plan without starting anything.
+
+The benchmark tests are marked `slow`: the full gate runs them; the per-change
+gate may skip that marker.
+
 ## Main gate
 
 `scripts/main-gate.sh` runs the full gate on `main` — by hand, before a wave, or
