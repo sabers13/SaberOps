@@ -97,6 +97,7 @@ _TASK_V2_KEYS = _TASK_V1_KEYS | {
     "model_family_exclude",
     "priority",
     "run",
+    "kind",
     "wave",
 }
 
@@ -193,6 +194,10 @@ class PlanTaskDef:
     model_family_exclude: tuple[str, ...] = ()
     priority: str = ""
     run: str = "job"
+    #: F19 job kind delivered by a dispatched lane: ``job`` (default, a
+    #: candidate) or ``scout`` (a read-only report).  Owner-held lanes never
+    #: dispatch, so they always stay ``job``.
+    kind: str = "job"
     wave: str = ""
 
     def __post_init__(self) -> None:
@@ -217,6 +222,7 @@ class PlanTaskDef:
             "effort",
             "priority",
             "run",
+            "kind",
             "wave",
         ):
             value = getattr(self, name)
@@ -254,6 +260,10 @@ class PlanTaskDef:
                 "wave": self.wave,
             }
         )
+        # ``kind`` is written only for a scout lane: a format-2 revision stored
+        # before F19 hashes exactly as it did, so it still verifies.
+        if self.kind and self.kind != "job":
+            legacy["kind"] = self.kind
         return legacy
 
     @classmethod
@@ -288,7 +298,17 @@ class PlanTaskDef:
                 owns=_require_str_tuple(data.get("owns", ()), task_id),
             )
         detail: dict[str, str] = {}
-        for name in ("why", "goal", "out_of_scope", "size", "effort", "priority", "run", "wave"):
+        for name in (
+            "why",
+            "goal",
+            "out_of_scope",
+            "size",
+            "effort",
+            "priority",
+            "run",
+            "kind",
+            "wave",
+        ):
             value = data.get(name, "")
             if not isinstance(value, str):
                 raise PlanValidationError(f"task {task_id!r}: {name} must be a string")
@@ -316,6 +336,7 @@ class PlanTaskDef:
             ),
             priority=detail["priority"],
             run=detail["run"],
+            kind=detail["kind"] or "job",
             wave=detail["wave"],
         )
 
@@ -513,6 +534,15 @@ def validate_plan_tasks(project_id: str, tasks: tuple[PlanTaskDef, ...]) -> None
                 raise PlanValidationError(
                     f"task {task.task_id!r} depends on unknown task {target!r}"
                 )
+        if task.kind not in ("job", "scout"):
+            raise PlanValidationError(
+                f"task {task.task_id!r}: kind must be 'job' or 'scout'"
+            )
+        if task.kind == "scout" and task.run == "owner":
+            raise PlanValidationError(
+                f"task {task.task_id!r}: an owner-held lane never dispatches, so it "
+                "cannot be a scout"
+            )
     if _has_start_cycle(tasks):
         raise PlanValidationError("hard START dependencies contain a cycle")
 

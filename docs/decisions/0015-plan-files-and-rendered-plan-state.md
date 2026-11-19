@@ -47,9 +47,12 @@ the repository's one-record-of-truth rule and avoids a second plan database.
    `### <id>. <title>` lane carries `Why`, `Do`, `Out of scope`, `Done when`
    and `Needs` prose plus exactly one machine block holding structure only:
    `id`, `wave`, `depends_on`, `owns`, `size`, `effort`, model-family
-   include/exclude, `priority` and `run`. Unknown machine fields are refused so
-   a typo cannot silently do nothing. Waves are presentation labels; only
-   `depends_on` is an edge.
+   include/exclude, `priority`, `run` and `kind`. Unknown machine fields are
+   refused so a typo cannot silently do nothing. Waves are presentation labels;
+   only `depends_on` is an edge. `kind: "scout"` (F19, ADR-0026) makes a lane a
+   read-only report lane; its report becomes the starting context of the lanes
+   that depend on it. An owner-held lane cannot be a scout because it never
+   dispatches.
 3. **A lane may state bounded routing preferences, never a route.** `size`,
    `effort` and model-family include/exclude map onto the existing
    `JobRequirements` shape. Provider, model, tier, billing, route, quota and

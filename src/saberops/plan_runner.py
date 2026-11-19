@@ -1020,6 +1020,55 @@ def _lane_goal(task: PlanTaskDef) -> str:
     return f"{title}\n\n{body}" if body else title
 
 
+#: Bound on each scout report carried into a dependant lane's goal (F19).
+MAX_ATTACHED_SCOUT_REPORT_CHARS = 20_000
+
+
+def _scout_report_context(
+    db: Any, plan: PlanRecord, task: PlanTaskDef, rows: dict[str, _LaneRow]
+) -> tuple[str, tuple[dict[str, str], ...]]:
+    """Attach the reports of a lane's scout dependencies (F19).
+
+    A scout lane has no candidate to accept, so its report *is* what a
+    dependant inherits.  The report is read from its durable E4 path and its
+    path and digest are recorded on the dependant's submission event.
+    """
+    if not task.start_dependencies:
+        return "", ()
+    from saberops.scout import latest_report
+
+    revision = plan.plan_store().get_revision(plan.project_id, plan.active_version)
+    tasks = {item.task_id: item for item in revision.tasks}
+    blocks: list[str] = []
+    refs: list[dict[str, str]] = []
+    for edge in task.start_dependencies:
+        dependency = tasks.get(edge)
+        row = rows.get(edge)
+        if dependency is None or dependency.kind != "scout" or row is None or not row.job_id:
+            continue
+        report = latest_report(db, row.job_id)
+        if not report or not report.get("report_path"):
+            continue
+        try:
+            body = Path(str(report["report_path"])).read_text(encoding="utf-8")
+        except OSError:
+            continue
+        blocks.append(
+            f"[SCOUT REPORT from lane {edge} (job {row.job_id})]\n"
+            f"Path: {report['report_path']}\n\n"
+            f"{body.strip()[:MAX_ATTACHED_SCOUT_REPORT_CHARS]}"
+        )
+        refs.append(
+            {
+                "lane_id": edge,
+                "job_id": str(row.job_id),
+                "report_path": str(report["report_path"]),
+                "report_digest": str(report.get("digest") or ""),
+            }
+        )
+    return "\n\n".join(blocks), tuple(refs)
+
+
 def submit_lane_job(
     db: Any,
     *,
@@ -1050,15 +1099,20 @@ def submit_lane_job(
     digest = lane_digest(task)
     caller = f"plan:{plan.plan_id}"
     key = f"plan:{plan.plan_id}:{digest}"
+    goal = _lane_goal(task)
+    report_context, scout_reports = _scout_report_context(db, plan, task, rows)
+    if report_context:
+        goal = f"{goal}\n\n{report_context}"
     try:
         result = submit_job(
             db,
             repo=plan.repo,
-            goal=_lane_goal(task),
+            goal=goal,
             acceptance="\n".join(task.acceptance) or None,
             base_ref=_base_ref(plan),
             requirements=_lane_requirements(task),
             priority=task.priority if task.priority in _PRIORITIES else Priority.NORMAL,
+            kind="SCOUT" if task.kind == "scout" else "BUILD",
             idempotency_key=key,
             caller_id=caller,
             now=now,
@@ -1081,6 +1135,8 @@ def submit_lane_job(
             "base_sha": job.base_sha,
             "revision": plan.active_version,
             "created": result.created,
+            "kind": job.kind.value,
+            "scout_reports": list(scout_reports),
         },
         now=now,
     )

@@ -41,6 +41,7 @@ __all__ = [
     "PLAN_FORMAT",
     "ParsedPlan",
     "PlanFileError",
+    "LANE_KINDS",
     "PlanLane",
     "activate_plan_file",
     "load_plan_file",
@@ -66,6 +67,8 @@ SIZES = frozenset({"S", "M", "L"})
 EFFORTS = frozenset({"low", "medium", "high", "xhigh"})
 PRIORITIES = frozenset({"URGENT", "NORMAL", "BACKGROUND"})
 RUN_KINDS = frozenset({"job", "owner"})
+#: F19 job kind a dispatched lane delivers; roles stay PLAN / BUILD / CHECK.
+LANE_KINDS = frozenset({"job", "scout"})
 
 _HEADER_KEYS = frozenset({"format", "plan_id", "base", "title"})
 _MACHINE_KEYS = frozenset(
@@ -80,6 +83,7 @@ _MACHINE_KEYS = frozenset(
         "model_family_exclude",
         "priority",
         "run",
+        "kind",
     }
 )
 _FIELD_LABELS = {
@@ -123,6 +127,9 @@ class PlanLane:
     model_family_exclude: tuple[str, ...] = ()
     priority: str = ""
     run: str = "job"
+    #: ``job`` (default) or ``scout`` (F19): a scout lane's report becomes the
+    #: starting context of the lanes that depend on it.
+    kind: str = "job"
 
     def to_task(self) -> PlanTaskDef:
         """Convert the lane into the stored task shape."""
@@ -142,6 +149,7 @@ class PlanLane:
             model_family_exclude=self.model_family_exclude,
             priority=self.priority,
             run=self.run,
+            kind=self.kind,
             wave=self.wave,
         )
 
@@ -353,6 +361,13 @@ def _parse_lane(lane_id: str, title: str, chunk: list[str]) -> PlanLane:
     run = str(machine.get("run", "job") or "job").strip().lower()
     if run not in RUN_KINDS:
         raise PlanFileError(f"lane {lane_id}: run must be 'job' or 'owner'")
+    kind = str(machine.get("kind", "job") or "job").strip().lower()
+    if kind not in LANE_KINDS:
+        raise PlanFileError(f"lane {lane_id}: kind must be 'job' or 'scout'")
+    if kind == "scout" and run == "owner":
+        raise PlanFileError(
+            f"lane {lane_id}: an owner-held lane never dispatches, so it cannot be a scout"
+        )
 
     include = _string_list(
         machine.get("model_family_include"),
@@ -412,6 +427,7 @@ def _parse_lane(lane_id: str, title: str, chunk: list[str]) -> PlanLane:
         model_family_exclude=exclude,
         priority=priority,
         run=run,
+        kind=kind,
     )
 
 
@@ -634,6 +650,8 @@ def render_plan_markdown(revision: PlanRevision) -> str:
                 machine["model_family_exclude"] = list(task.model_family_exclude)
             if task.priority:
                 machine["priority"] = task.priority
+            if task.kind and task.kind != "job":
+                machine["kind"] = task.kind
             lines.extend(
                 [
                     "```plan",

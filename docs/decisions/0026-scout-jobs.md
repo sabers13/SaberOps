@@ -69,8 +69,10 @@ is the cost this record removes.
 - The report is captured from the worker's final answer rather than written by
   the worker, because a read-only CLI sandbox cannot allow one writable path.
   The engine is the only writer, and only inside the job's own folder.
-- Plan-file lanes of `kind: scout` and the automatic CLI-update check as a
-  scout job wait for their own lanes (P2 and F18); this record does not claim
-  them.
+- Plan lanes may set `kind: "scout"` (ADR-0015 format). A scout lane's report
+  is attached to the goal of the lanes that depend on it, and its path and
+  digest are recorded on the dependant's submission event. The automatic
+  CLI-update check as a scout job still waits for lane F18; this record does
+  not claim it.
 - Stores created before this change gain the `jobs.kind` column in place on the
   next writable open; existing rows are `BUILD`.
