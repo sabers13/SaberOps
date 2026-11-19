@@ -38,7 +38,12 @@ from saberops.models import (
     Attempt,
     AttemptStatus,
     CandidateState,
+    DispatchEvidence,
     DispatchOutcome,
+    DispatchReason,
+    DispatchRole,
+    DispatchStage,
+    ReviewResult,
     ReviewVerdict,
     Run,
     RunStatus,
@@ -354,13 +359,6 @@ def test_fake_worker_switch_quota_exhausted(
     assert res.interruption_reason is WorkerInterruptionReason.QUOTA_EXHAUSTED
 
 
-@pytest.mark.xfail(
-    reason=(
-        "C10: AcceptEngine reads run-wide latest review rather than candidate-linked "
-        "review, so replacement candidate B is erroneously eligible using A's PASS."
-    ),
-    strict=True,
-)
 def test_acceptance_fixture_refuses_unreviewed_replacement_b(
     acceptance_rig: AcceptanceFixture,
 ) -> None:
@@ -375,6 +373,10 @@ def test_acceptance_fixture_refuses_unreviewed_replacement_b(
 
     eligibility = AcceptEngine(db=db).check_accept_eligibility(acceptance_rig.run_id)
     assert eligibility.eligible is False
+    assert any("historical only" in check.reason for check in eligibility.checks)
+    with pytest.raises(RuntimeError, match="no candidate-linked review"):
+        AcceptEngine(db=db).accept_run(acceptance_rig.run_id)
+    assert _git(acceptance_rig.rig.repo, "rev-parse", "HEAD") == acceptance_rig.base_sha
 
 
 def test_acceptance_fixture_qualifies_b_after_own_review(
@@ -391,3 +393,39 @@ def test_acceptance_fixture_qualifies_b_after_own_review(
 
     eligibility = AcceptEngine(db=db).check_accept_eligibility(acceptance_rig.run_id)
     assert eligibility.eligible is True
+    result = AcceptEngine(db=db).accept_run(acceptance_rig.run_id)
+    assert result.accepted and result.final_sha == acceptance_rig.candidate_b_sha
+
+
+@pytest.mark.parametrize("verdict", [ReviewVerdict.PASS, ReviewVerdict.BLOCK])
+@pytest.mark.parametrize("review_b", [False, True])
+def test_unrelated_review_does_not_change_replacement_acceptance(
+    acceptance_rig: AcceptanceFixture, verdict: ReviewVerdict, review_b: bool
+) -> None:
+    db = acceptance_rig.rig.db()
+    if review_b:
+        acceptance_rig.record_passing_review_for_b()
+    review_id = f"{acceptance_rig.run_id}-later-a"
+    now = current_iso_timestamp()
+    db.create_dispatch_evidence(
+        DispatchEvidence(
+            id=f"dispatch-{review_id}", run_id=acceptance_rig.run_id,
+            association_id=review_id, review_id=review_id,
+            stage=DispatchStage.REVIEW, role=DispatchRole.REVIEW, tier=Tier.T1,
+            dispatch_reason=DispatchReason.INDEPENDENT_REVIEW,
+            requested_provider="anthropic", requested_model="reviewer",
+            candidate_sha=acceptance_rig.candidate_a_sha, started_at=now, completed_at=now,
+        )
+    )
+    db.create_review(ReviewResult(
+        id=review_id, run_id=acceptance_rig.run_id, provider="anthropic",
+        model="reviewer", verdict=verdict, summary="Later review of A", created_at=now,
+    ))
+    engine = AcceptEngine(db=db)
+    assert engine.check_accept_eligibility(acceptance_rig.run_id).eligible is review_b
+    if review_b:
+        assert engine.accept_run(acceptance_rig.run_id).final_sha == acceptance_rig.candidate_b_sha
+    else:
+        with pytest.raises(RuntimeError, match="no candidate-linked review"):
+            engine.accept_run(acceptance_rig.run_id)
+        assert _git(acceptance_rig.rig.repo, "rev-parse", "HEAD") == acceptance_rig.base_sha

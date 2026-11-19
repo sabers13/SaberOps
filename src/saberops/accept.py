@@ -21,7 +21,9 @@ from saberops.git import GitManager, GitRefRaceError
 from saberops.models import (
     Attempt,
     AttemptStatus,
+    DispatchStage,
     GateScratchMode,
+    ReviewResult,
     ReviewVerdict,
     Run,
     RunStatus,
@@ -1057,18 +1059,27 @@ class AcceptEngine:
                 _fail("review", "Review requirement satisfied", str(exc))
             )
             return AcceptEligibility(run_id=run_id, eligible=False, checks=tuple(checks))
-        latest_review = self.db.get_latest_review(run_id)
-        if latest_review is None and review_required:
+        bound_review, historical_review = self._resolve_candidate_review(
+            run_id, candidate_sha
+        )
+        if bound_review is None and review_required:
+            hist_note = (
+                f" (older review {historical_review.id} is historical only and "
+                f"does not cover candidate {candidate_sha[:8]})"
+                if historical_review is not None
+                else ""
+            )
             checks.append(
                 _fail(
                     "review",
                     "Review requirement satisfied",
-                    "Independent review is required by the persisted run "
-                    "configuration but no review exists",
+                    f"Independent review is required by the persisted run "
+                    f"configuration for candidate {candidate_sha[:8]} but no "
+                    f"candidate-linked review exists{hist_note}",
                 )
             )
             return AcceptEligibility(run_id=run_id, eligible=False, checks=tuple(checks))
-        if latest_review is not None and latest_review.verdict not in (
+        if bound_review is not None and bound_review.verdict not in (
             ReviewVerdict.PASS,
             ReviewVerdict.PASS_WITH_BACKLOG,
         ):
@@ -1077,17 +1088,23 @@ class AcceptEngine:
                     "review",
                     "Review requirement satisfied",
                     f"Independent review verdict is "
-                    f"{latest_review.verdict.value}, not a substantive approval: "
-                    f"{latest_review.summary}",
+                    f"{bound_review.verdict.value}, not a substantive approval: "
+                    f"{bound_review.summary}",
                 )
             )
             return AcceptEligibility(run_id=run_id, eligible=False, checks=tuple(checks))
-        if latest_review is None:
+        if bound_review is None:
+            hist_note = (
+                f" (older review {historical_review.id} shown as historical evidence only)"
+                if historical_review is not None
+                else ""
+            )
             checks.append(
                 _pass(
                     "review",
                     "Review requirement satisfied",
-                    "Review not required by policy and none exists",
+                    f"Review not required by policy and none exists for candidate "
+                    f"{candidate_sha[:8]}{hist_note}",
                 )
             )
         else:
@@ -1095,8 +1112,8 @@ class AcceptEngine:
                 _pass(
                     "review",
                     "Review requirement satisfied",
-                    f"Review verdict {latest_review.verdict.value} is a "
-                    "substantive approval",
+                    f"Review verdict {bound_review.verdict.value} is a "
+                    f"substantive approval for candidate {candidate_sha[:8]}",
                 )
             )
 
@@ -1158,6 +1175,37 @@ class AcceptEngine:
         # never a static eligibility blocker.
 
         return AcceptEligibility(run_id=run_id, eligible=True, checks=tuple(checks))
+
+    def _resolve_candidate_review(
+        self, run_id: str, candidate_sha: str
+    ) -> tuple[ReviewResult | None, ReviewResult | None]:
+        """Return ``(bound_review, historical_review)`` for ``candidate_sha``.
+
+        Matches :func:`saberops.candidate_lifecycle.project_candidate_state`:
+        only reviews linked to a ``REVIEW`` dispatch for ``candidate_sha``
+        count as current review evidence.  Any older/unbound review is returned
+        solely as historical context and never qualifies a new candidate.
+        """
+        dispatches = [
+            dispatch
+            for dispatch in self.db.get_dispatch_evidence_for_run(run_id)
+            if dispatch.stage == DispatchStage.REVIEW
+            and dispatch.candidate_sha == candidate_sha
+        ]
+        bound_associations = {dispatch.association_id for dispatch in dispatches}
+        bound_review_ids = {
+            dispatch.review_id for dispatch in dispatches if dispatch.review_id
+        }
+        reviews = self.db.get_reviews_for_run(run_id)
+        bound_reviews = [
+            review
+            for review in reviews
+            if review.id in bound_associations or review.id in bound_review_ids
+        ]
+        if bound_reviews:
+            return bound_reviews[-1], None
+        historical = reviews[-1] if reviews else None
+        return None, historical
 
     def accept_run(self, run_id: str, gate_timeout: float = 300.0) -> AcceptResult:
         """Safely fast-forward integrate a completed candidate run and verify canonical gate.
@@ -1254,20 +1302,29 @@ class AcceptEngine:
         # and be substantive; any present non-substantive verdict
         # remains a hard rejection for legacy safety.
         review_required = self._resolve_review_required_from_persisted_run(run_id)
-        latest_review = self.db.get_latest_review(run_id)
-        if latest_review is None and review_required:
+        bound_review, historical_review = self._resolve_candidate_review(
+            run_id, candidate_sha
+        )
+        if bound_review is None and review_required:
+            hist_note = (
+                f" (older review {historical_review.id} is historical only and "
+                f"does not cover candidate {candidate_sha[:8]})"
+                if historical_review is not None
+                else ""
+            )
             raise RuntimeError(
                 f"Cannot accept run '{run_id}': independent review is required "
-                "by the persisted run configuration but no review exists"
+                f"by the persisted run configuration for candidate {candidate_sha[:8]} "
+                f"but no candidate-linked review exists{hist_note}"
             )
-        if latest_review is not None and latest_review.verdict not in (
+        if bound_review is not None and bound_review.verdict not in (
             ReviewVerdict.PASS,
             ReviewVerdict.PASS_WITH_BACKLOG,
         ):
             raise RuntimeError(
                 f"Cannot accept run '{run_id}': independent review verdict is "
-                f"{latest_review.verdict.value}, not a substantive approval: "
-                f"{latest_review.summary}"
+                f"{bound_review.verdict.value}, not a substantive approval: "
+                f"{bound_review.summary}"
             )
 
         if not GitManager.is_ancestor(target_repo, current_head, candidate_sha):

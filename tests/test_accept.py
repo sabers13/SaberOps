@@ -48,6 +48,10 @@ from saberops.git import GitManager
 from saberops.models import (
     Attempt,
     AttemptStatus,
+    DispatchEvidence,
+    DispatchReason,
+    DispatchRole,
+    DispatchStage,
     GateScratchMode,
     ReviewResult,
     ReviewVerdict,
@@ -180,9 +184,11 @@ def _seed_run(
 def _add_review(
     db_path: Path, run_id: str, verdict: ReviewVerdict, created_at: str = _CREATED
 ) -> None:
-    Database(db_path).create_review(
+    db = Database(db_path)
+    review_id = f"{run_id}-{verdict.value}-{created_at}"
+    db.create_review(
         ReviewResult(
-            id=f"{run_id}-{verdict.value}-{created_at}",
+            id=review_id,
             run_id=run_id,
             provider="opencode",
             model="reviewer",
@@ -190,6 +196,16 @@ def _add_review(
             summary=f"summary {verdict.value}",
             details="",
             created_at=created_at,
+        )
+    )
+    db.create_dispatch_evidence(
+        DispatchEvidence(
+            id=f"dispatch-{review_id}", run_id=run_id, association_id=review_id,
+            review_id=review_id, stage=DispatchStage.REVIEW, role=DispatchRole.REVIEW,
+            tier=Tier.T1, dispatch_reason=DispatchReason.INDEPENDENT_REVIEW,
+            requested_provider="opencode", requested_model="reviewer",
+            candidate_sha=_final_candidate_sha(db_path, run_id),
+            started_at=created_at, completed_at=created_at,
         )
     )
 
@@ -394,7 +410,7 @@ def test_r0b1_missing_review_blocks_both(
     assert any(c.key == "review" for c in failing)
     _no_projection_only_blocker("run_r0b1_d", db_path)
 
-    with pytest.raises(RuntimeError, match="no review exists"):
+    with pytest.raises(RuntimeError, match="no candidate-linked review exists"):
         AcceptEngine(db=Database(db_path)).accept_run("run_r0b1_d")
     assert _git(repo, "rev-parse", "HEAD") == base
     assert Database(db_path).get_events_by_type("run_r0b1_d", "run_accepted") == []
@@ -597,7 +613,7 @@ def test_r0b_required_review_missing_blocks_accept(
 
     checks = _checks_by_key(db_path, "run_r0b_d")
     assert checks["review"]["status"] == "fail"
-    assert "no review exists" in checks["review"]["reason"]
+    assert "no candidate-linked review exists" in checks["review"]["reason"]
 
     page = _client(db_path).get("/runs/run_r0b_d")
     assert 'data-check-key="review" data-check-status="fail"' in page.text
