@@ -73,6 +73,31 @@ def pause_running_jobs(db: Any, *, reason: str, detail: str = "") -> list[str]:
         run_id = job.current_run_id
         if not run_id:
             continue
+        from saberops.native_workers import native_run_marker, request_native_stop
+
+        if native_run_marker(db, run_id) is not None:
+            # F16/F17: SaberOps cannot kill a native child and there is no
+            # supervised worker to terminate or checkpoint.  Post the stop the
+            # orchestrator acts on and keep the job RUNNING so its committed
+            # worktree is preserved; the closed gate refuses any new native
+            # claim and any report until `orch resume`.  It is deliberately not
+            # reported as parked: the child may still be alive.
+            try:
+                request_native_stop(
+                    db,
+                    job,
+                    reason=reason,
+                    detail=(
+                        detail
+                        or "the work gate is closed; stop this native child and keep "
+                        "its worktree"
+                    ),
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                logging.getLogger(__name__).warning(
+                    "native pause stop for %s failed: %s", run_id, exc
+                )
+            continue
         try:
             stopped = supervisor.pause(run_id, reason=reason)
         except Exception as exc:  # pragma: no cover - defensive

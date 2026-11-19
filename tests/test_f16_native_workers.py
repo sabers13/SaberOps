@@ -446,6 +446,66 @@ def test_native_candidate_is_accept_eligible_after_the_real_review(rig: RigEnvir
 
 
 # --------------------------------------------------------------------------- #
+# F17 work gate
+# --------------------------------------------------------------------------- #
+
+
+def test_paused_gate_refuses_new_native_claims_and_reports(rig: RigEnvironment) -> None:
+    from saberops.runtime_gate import PauseReason, clear_pause, set_pause
+
+    job_id = _job(rig)
+    set_pause(PauseReason.OWNER, "owner paused the engine")
+    with pytest.raises(NativeWorkerError) as excinfo:
+        _claim(rig, job_id)
+    assert excinfo.value.code == "NATIVE_WORK_GATE_CLOSED"
+    assert _load(rig, job_id).state is JobState.QUEUED
+
+    clear_pause()
+    claim = _claim(rig, job_id)
+    candidate = _commit(rig, Path(claim["worktree"]))
+    set_pause(PauseReason.OWNER, "owner paused during the attempt")
+    with pytest.raises(NativeWorkerError) as excinfo:
+        _report(rig, job_id, claim, candidate=candidate)
+    assert excinfo.value.code == "NATIVE_WORK_GATE_CLOSED"
+    # Nothing was mutated: the worktree, the run and the job survive the pause.
+    assert _load(rig, job_id).state is JobState.RUNNING
+    run = rig.db().get_run(claim["run_id"])
+    assert run is not None and run.status is RunStatus.RUNNING
+    assert git(Path(claim["worktree"]), "rev-parse", "HEAD") == candidate
+
+    clear_pause()
+    result = _report(rig, job_id, claim, candidate=candidate)
+    assert result["state"] == "SUCCEEDED"
+
+
+def test_engine_pause_posts_a_native_stop_without_parking_the_work(
+    rig: RigEnvironment,
+) -> None:
+    from saberops.pause_work import pause_running_jobs
+
+    job_id = _job(rig)
+    claim = _claim(rig, job_id)
+    worktree = Path(claim["worktree"])
+    candidate = _commit(rig, worktree)
+    from saberops.runtime_gate import PauseReason
+
+    parked = pause_running_jobs(
+        rig.db(),
+        reason=PauseReason.NO_PLANNING_SESSION.value,
+        detail="CLI closed",
+    )
+    # A native child cannot be proven stopped, so it is never reported parked.
+    assert job_id not in parked
+    controls = native_controls(rig.db(), job_id)
+    assert controls["stop_requested"] is True
+    assert controls["stop_reason"] == PauseReason.NO_PLANNING_SESSION.value
+    assert _load(rig, job_id).state is JobState.RUNNING
+    run = rig.db().get_run(claim["run_id"])
+    assert run is not None and run.status is RunStatus.RUNNING
+    assert git(worktree, "rev-parse", "HEAD") == candidate
+
+
+# --------------------------------------------------------------------------- #
 # Heartbeat, steering and stop
 # --------------------------------------------------------------------------- #
 

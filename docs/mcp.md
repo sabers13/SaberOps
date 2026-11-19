@@ -393,7 +393,13 @@ subagent, and only the owner accepts.
 Control is cooperative: SaberOps cannot kill a native child, see it once it
 stops calling, or measure its quota independently. A native child stops when
 its host CLI closes (SaberOps-side jobs are separate); do not restart one from a
-new session without checking its record. Owner cancellation posts a
+new session without checking its record.
+
+A closed F17 work gate (owner pause, no planning session, or an away session
+that ran out) refuses `native_claim` and `record_native_attempt`, and posts a
+stop on every running native job. Its committed worktree is preserved and the
+orchestrator stops the child with its own native control; after `orch resume`
+the child may report again. Owner cancellation posts a
 stop request and cancels the job (a later report is refused); the orchestrator
 stops the child with its own native control. Each attempt is labelled
 `supervision: host` and `quota: measured|estimated|unknown`.

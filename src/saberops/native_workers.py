@@ -204,6 +204,24 @@ def _clean_vendor(value: object) -> str:
     return vendor
 
 
+def _require_work_gate(db: Database, *, action: str) -> None:
+    """Refuse a new start while the F17 work gate is closed (ADR-0029)."""
+    from saberops.runtime_gate import evaluate_gate
+
+    try:
+        state = evaluate_gate(db=db)
+    except Exception as exc:  # fail closed: an unreadable gate is closed
+        raise NativeWorkerError(
+            "NATIVE_WORK_GATE_CLOSED", f"cannot start {action}: the work gate is unreadable: {exc}"
+        ) from exc
+    if state.closed:
+        raise NativeWorkerError(
+            "NATIVE_WORK_GATE_CLOSED",
+            f"cannot {action}: work is paused ({state.label})",
+            data={"reason": state.reason, "detail": state.detail, "resume": "orch resume"},
+        )
+
+
 def _require_sha(value: object, what: str) -> str:
     text = _text(value, what).lower()
     if len(text) != 40 or any(ch not in "0123456789abcdef" for ch in text):
@@ -446,6 +464,7 @@ def claim_native_job(
     job = job_store.get_job(db, job_id)
     if job is None:
         raise NativeWorkerError("NATIVE_JOB_UNKNOWN", f"unknown job: {job_id}")
+    _require_work_gate(db, action="claim a native job")
     if job.state is not JobState.QUEUED:
         raise NativeWorkerError(
             "NATIVE_JOB_NOT_QUEUED",
@@ -916,6 +935,11 @@ def record_native_attempt(
             f"job {job_id} is {job.state.value}; its result can no longer be recorded",
             data={"job_id": job_id, "state": job.state.value},
         )
+    # F17: a report runs the project gate and a fresh reviewer, which is new
+    # work.  While the work gate is closed nothing new starts, so the report is
+    # refused before any durable mutation and can be retried after `orch
+    # resume`; the child's committed worktree is preserved meanwhile.
+    _require_work_gate(db, action="record a native attempt")
     if marker.get("vendor") != clean_vendor or marker.get("model") != clean_model:
         raise NativeWorkerError(
             "NATIVE_IDENTITY_MISMATCH",

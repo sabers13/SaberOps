@@ -281,6 +281,10 @@ workers. The tools below exist only while that flag is on.
   control (subagent stop / task stop): SaberOps cannot kill it.
 - Silence past the deadline marks the job needs-attention. Never re-launch a
   stopped or silent native child, and never treat its silence as success.
+- A closed work gate (the owner paused, or this CLI closed) refuses new native
+  claims and native reports, and posts a stop on running native jobs. Stop the
+  child yourself; a report refused while paused can be retried after the owner
+  resumes.
 - A native result reaches the owner only through the project gate and an
   independent different-family review; missing or mismatched evidence fails
   closed. Never accept, push or merge.

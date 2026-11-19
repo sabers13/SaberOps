@@ -97,6 +97,13 @@ resort for stops, because only the host CLI can stop its child.
 10. **Concurrency is capped per host.** `ORCH_NATIVE_MAX_CONCURRENT` (default 1)
     bounds concurrent native attempts; a further claim is refused with
     `NATIVE_CONCURRENCY_LIMIT`.
+11. **The F17 work gate binds native work.** While the work gate is closed
+    (owner pause, no planning session, or an away session that ran out),
+    `native_claim` and `record_native_attempt` are refused with
+    `NATIVE_WORK_GATE_CLOSED`, and the pause coordinator posts a stop on every
+    running native job without pretending to have terminated it or parking it
+    for a checkpoint resume. The committed worktree is preserved; a refused
+    report can be retried after `orch resume`.
 
 ## 3. Consequences
 
@@ -109,11 +116,11 @@ resort for stops, because only the host CLI can stop its child.
   child. It promises that a silent child becomes needs-attention, that a stop is
   posted for the orchestrator, and that nothing it cannot verify reaches
   acceptance. Those limits are labelled on every attempt.
-- Closing the host CLI stops its native children by construction, so a closed
-  CLI cannot leave a native worker running. SaberOps-side jobs run outside the
-  CLI and are not stopped by it; pausing SaberOps-side dispatch when the
-  planning CLI closes is a separate guarantee (lane F17). This lane never
-  restarts native work on its own.
+- Closing the host CLI stops its native children by construction; if it does
+  not, the F17 gate closes, refuses further native starts and posts a stop the
+  orchestrator acts on. SaberOps-side dispatch pausing is F17's guarantee
+  (ADR-0029); this lane binds to the same gate and never restarts native work on
+  its own.
 - The generated worker definition depends on the native tools existing. With the
   flag off the definition says so; it never falls back to editing files outside
   SaberOps.
