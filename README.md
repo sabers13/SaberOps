@@ -331,8 +331,10 @@ scripts/               gate wrappers and tooling
   wave executor and slot policy, not yet by the job scheduler itself.
 - **Waves at runtime.** The wave executor does not yet replace the older
   parallel-team path for every run. For parallel MCP work, submit one job per
-  independent task with a distinct `idempotency_key`. Until E6 lands, resubmit
-  a stale-base sibling from the current base with a fresh `idempotency_key`.
+  independent task with a distinct `idempotency_key`. If an accepted sibling
+  makes another job stale, request `refresh_candidate` with its run ID (or run
+  `orch refresh <run-id>`); the refreshed candidate gets fresh checks and review
+  and the owner accepts it separately.
 - **No governed publication.** Accepted work is not pushed automatically;
   `full_autonomy_publish` stops at the accepted state.
 - **Adapter coverage.** Not every adapter/account combination has been

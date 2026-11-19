@@ -2006,13 +2006,19 @@ def build_parser() -> argparse.ArgumentParser:
     capacity_show.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
     capacity_show.add_argument("--json", action="store_true", help="JSON output")
 
-    # orch retry|continue|try-worker
+    # orch retry|refresh|continue|try-worker
     retry_parser = subparsers.add_parser(
         "retry", help="Start a fresh attempt of a run's frozen task and policy."
     )
     retry_parser.add_argument("run_id", type=str, help="Run identifier (e.g. run_abc123).")
     retry_parser.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
     retry_parser.add_argument("--json", action="store_true", help="JSON output")
+    refresh_parser = subparsers.add_parser(
+        "refresh", help="Refresh a stale candidate onto the current target."
+    )
+    refresh_parser.add_argument("run_id", type=str, help="Source run identifier.")
+    refresh_parser.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
+    refresh_parser.add_argument("--json", action="store_true", help="JSON output")
     continue_parser = subparsers.add_parser(
         "continue", help="Continue a failed run from its immutable saved candidate."
     )
@@ -5830,7 +5836,7 @@ def handle_project_set_workflow(args: argparse.Namespace) -> int:
 def _handle_run_operation(
     args: argparse.Namespace, operation: str, binding_id: str | None = None
 ) -> int:
-    """Shared thin wrapper for `orch retry|continue|try-worker`."""
+    """Shared thin wrapper for `orch retry|refresh|continue|try-worker`."""
     from saberops.service import RunOperationError
 
     db = db_for_run(args, args.run_id)
@@ -5838,6 +5844,8 @@ def _handle_run_operation(
     try:
         if operation == "retry":
             result = service.retry_run(str(args.run_id))
+        elif operation == "refresh":
+            result = service.refresh_run(str(args.run_id))
         elif operation == "continue":
             result = service.continue_run(str(args.run_id))
         else:
@@ -6372,6 +6380,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         return handle_connect(args)
     elif args.command == "retry":
         return handle_retry(args)
+    elif args.command == "refresh":
+        return _handle_run_operation(args, "refresh")
     elif args.command == "continue":
         return handle_continue(args)
     elif args.command == "try-worker":

@@ -3,7 +3,7 @@
 Public surface:
 
 * :class:`~saberops.mcp.protocol.McpServer` -- the JSON-RPC/MCP server;
-* :func:`~saberops.mcp.tools.build_default_registry` -- the twelve D7 tools;
+* :func:`~saberops.mcp.tools.build_default_registry` -- the D7 tools;
 * :class:`~saberops.mcp.lease.OrchestratorLease` -- single-writer lease;
 * :class:`~saberops.mcp.ledger.EventLedger` -- append-only event ledger;
 * :func:`~saberops.mcp.redaction.redact_secrets` -- the read-boundary guard.

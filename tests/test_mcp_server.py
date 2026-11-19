@@ -143,8 +143,10 @@ def test_tools_list_exposes_registered_tools(tmp_path: Path) -> None:
     _ready(server)
     result = _call(server, "tools/list")["result"]
     names = [tool["name"] for tool in result["tools"]]
-    # Registered tools plus the user's in-agent switch to turn SaberOps off.
+    # Registered tools (including E6's explicit refresh and C6's preflight)
+    # plus the user's in-agent switch to turn SaberOps off.
     assert sorted(n for n in names if n != "saberops_off") == sorted(TOOL_NAMES)
+    assert "refresh_candidate" in names
     assert "preflight" in names and "saberops_off" in names
     for tool in result["tools"]:
         assert tool["inputSchema"]["type"] == "object"

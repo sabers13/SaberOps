@@ -133,7 +133,7 @@ def test_cli_mcp_serve_roundtrip(
     )
     assert [response["id"] for response in responses] == [1, 2]
     names = [tool["name"] for tool in responses[1]["result"]["tools"]]  # type: ignore[index]
-    # Once SaberOps is on, the twelve D7 tools are offered, plus saberops_off.
+    # Once SaberOps is on, the D7 tools are offered, plus saberops_off.
     assert sorted(n for n in names if n != "saberops_off") == sorted(TOOL_NAMES)
 
 

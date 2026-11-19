@@ -64,9 +64,10 @@ inside `requirements` (ADR-0001 invariant 3), and the tool schema sets
 `additionalProperties: false`, so an unknown field is never silently ignored.
 
 For parallel work, submit one `submit_job` per independent task, with a
-distinct `idempotency_key` and non-overlapping scope. Until E6 lands, if an
-accepted sibling makes another job stale, resubmit the stale-base sibling from
-the current base with a fresh `idempotency_key`.
+distinct `idempotency_key` and non-overlapping scope. If an accepted sibling
+makes another job stale, request `refresh_candidate` with its run ID (or use
+`orch refresh <run-id>`). The owner accepts the newly checked and reviewed
+candidate separately.
 
 `answer_question` accepts only `authority: "ORCHESTRATOR"`. Owner authority is
 not exercisable over MCP: `authority: "OWNER"` is refused with `-32010`, and a

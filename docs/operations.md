@@ -54,20 +54,27 @@ effective gate requires `--gate-command` (or `quick`, which needs none).
 `--review`, `--mode` and `--limit` flags. Runs freeze the effective
 policy at creation; changing the preset affects future runs only.
 
-## Run operations (retry / continue / try-worker)
+## Run operations (retry / continue / refresh / try-worker)
 
 `orch retry RUN_ID` starts a fresh attempt of a run's frozen task and
 policy against the repository the run was created for (validated against
 its persisted project identity, never a current selection).
 `orch continue RUN_ID` continues a failed run from its immutable saved
 candidate; a run that already has a continuation returns the existing id
-without launching anything. `orch try-worker RUN_ID --binding ID`
+without launching anything. `orch refresh RUN_ID` applies a stale
+candidate's changes in a fresh isolated worktree based on the current
+target commit, runs the gate and the required independent review for the
+new SHA, and leaves the result for separate owner acceptance. It never
+moves the target branch; the original candidate and its evidence stay
+intact for repair if the refresh conflicts. `orch try-worker RUN_ID --binding ID`
 explicitly retries a failed run with one blocked `UNKNOWN` worker: the
 binding must name the exact skipped candidate from the run's termination
 evidence and still be present in the current routing chain with the same
 provider/model, and the frozen validation and acceptance policy are kept.
-All three launch through the durable supervisor like `orch run`; the new
-run id is printed with `orch wait` / `orch status` hints.
+Retry, continue and try-worker launch through the durable supervisor like
+`orch run`; refresh runs in the foreground and returns the new run id when
+its checks and review finish. The new run id is printed with `orch wait` /
+`orch status` hints.
 
 ## Worker routing policy
 

@@ -868,6 +868,15 @@ class OrchestratorService:
             "run_id": started.run_id,
         }
 
+    def refresh_run(self, run_id: str) -> dict[str, Any]:
+        """Refresh a stale candidate without moving its target."""
+        from saberops.refresh import refresh_candidate
+
+        try:
+            return refresh_candidate(self, run_id)
+        except (ValueError, RuntimeError) as exc:
+            raise RunOperationError("REFRESH_REFUSED", str(exc)) from exc
+
     def continue_run(self, run_id: str) -> dict[str, Any]:
         """Continue a failed run from its immutable saved candidate.
 

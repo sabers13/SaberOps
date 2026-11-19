@@ -97,6 +97,7 @@ FORBIDDEN_OPERATIONS: dict[str, str] = {
 MUTATING_TOOLS: frozenset[str] = frozenset(
     {
         "submit_job",
+        "refresh_candidate",
         "cancel_job",
         "answer_question",
         "propose_config_change",
@@ -120,6 +121,7 @@ READ_TOOLS: frozenset[str] = frozenset(
 TOOL_NAMES: tuple[str, ...] = (
     "preflight",
     "submit_job",
+    "refresh_candidate",
     "get_job",
     "wait_job",
     "list_jobs",
@@ -707,6 +709,39 @@ def _propose_config_change(context: ServerContext, arguments: Mapping[str, Any])
     return payload
 
 
+def _run_database(context: ServerContext, run_id: str) -> Any:
+    """Return the database that owns ``run_id``.
+
+    Jobs and capacity live in the owner database, while run state may live in
+    the owning project's store.  Resolution uses the run ID's own project
+    segment (never a current selection); an unresolvable project-scoped run
+    fails closed in :func:`saberops.runtime.db_path_for_run`.
+    """
+    from saberops.db import Database
+    from saberops.runtime import db_path_for_run
+
+    owner = context.database(read_only=False)
+    assert owner is not None
+    if owner.get_run(run_id) is not None:
+        return owner
+    resolved = db_path_for_run(run_id)
+    if resolved is None:
+        return owner
+    return Database(resolved, owner_db=owner)
+
+
+def _refresh_candidate(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    from saberops.service import OrchestratorService, RunOperationError
+
+    run_id = _require_text(arguments, "run_id", what="run_id")
+    db = _run_database(context, run_id)
+    try:
+        result = OrchestratorService(db=db).refresh_run(run_id)
+    except RunOperationError as exc:
+        raise ToolError(str(exc)) from exc
+    return {"v": SNAPSHOT_SCHEMA_VERSION, **result}
+
+
 def _list_proposals(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
     from saberops.config import ConfigError
 
@@ -728,7 +763,7 @@ def _list_proposals(context: ServerContext, arguments: Mapping[str, Any]) -> dic
 
 
 def build_default_registry(context: ServerContext) -> ToolRegistry:
-    """Return the twelve-tool registry bound to ``context``."""
+    """Return the current tool registry bound to ``context``."""
     registry = ToolRegistry(lease=context.lease)
 
     def register(
@@ -787,6 +822,13 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
             required=("repo", "goal"),
         ),
         _submit_job,
+        mutating=True,
+    )
+    register(
+        "refresh_candidate",
+        "Refresh a stale run candidate with fresh checks and review; acceptance remains separate.",
+        _schema({"run_id": {"type": "string", "minLength": 1}}, required=("run_id",)),
+        _refresh_candidate,
         mutating=True,
     )
     register(

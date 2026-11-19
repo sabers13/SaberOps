@@ -128,7 +128,8 @@ model review it, and leaves the result for the owner to accept or reject.
    task's result goes in a later job after the first is accepted.
    If two jobs start from the same repository base and the first is accepted,
    the second will report a stale base with its work and evidence preserved;
-   resubmit it from the current base with a fresh `idempotency_key`.
+   request `refresh_candidate` with the stale run ID. The refreshed candidate
+   receives fresh checks and review; the owner accepts it separately.
 
 ## Following it
 - Call `wait_job` after each submission; it returns on a final outcome, blocking
