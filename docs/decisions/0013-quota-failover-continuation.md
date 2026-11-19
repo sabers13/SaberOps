@@ -44,10 +44,11 @@ candidate.
    a worker checkpoint of this run exists for that source with exactly that
    checkpoint SHA, and the start is the anchor or a proven descendant of it. Any
    gap grants nothing and the candidate stays unacceptable.
-5. **The handoff is visible without the run page.** `catch_up` returns per-attempt
-   identity (`attempts`) and the latest handoff (`switch`: reason, from/to
-   provider, model and binding when recorded, checkpoint and its inheritance, and
-   whether the interrupted work location is preserved). The lookup stays
+5. **The handoff is visible without the run page.** `catch_up` returns the latest
+   handoff (`switch`: reason, from/to provider, model and binding when recorded,
+   checkpoint and its inheritance, and whether the interrupted work location is
+   preserved). Per-attempt subscription and token usage come from the existing
+   `usage` projection, so this adds no second source of truth. The lookup stays
    read-only.
 6. **No admitted fallback is a visible parking, not a loop.** When every route
    is exhausted, the run parks through the existing preemption path with its work

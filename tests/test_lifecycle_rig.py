@@ -536,7 +536,10 @@ def test_quota_exhausted_attempt_continues_on_another_binding_from_checkpoint(
 
     # The switch is visible in catch_up from a read-only lookup.
     catch_up = _catch_up(_catch_up_context(rig), {"job_id": job_id})
-    assert [row["provider"] for row in catch_up["attempts"]] == ["codex", "opencode"]
+    assert [row["provider"] for row in catch_up["usage"]["attempts"]] == [
+        "codex",
+        "opencode",
+    ]
     switch = catch_up["switch"]
     assert switch is not None
     assert switch["reason"] == WorkerInterruptionReason.QUOTA_EXHAUSTED.value

@@ -618,42 +618,6 @@ def _catch_up_review(
     }
 
 
-def _catch_up_attempts(db: Any, run_id: str, attempts: list[Any]) -> list[dict[str, Any]]:
-    """Per-attempt durable identity, in execution order.
-
-    Read-only.  A caller recovering a job from another session needs to see
-    that a replacement attempt continued an earlier one, on which provider and
-    (when the engine recorded it) which exact binding or quota pool.
-    """
-    from saberops.models import DispatchStage
-
-    dispatches: dict[str, Any] = {}
-    for dispatch in db.get_dispatch_evidence_for_run(run_id):
-        if dispatch.attempt_id is None or dispatch.stage is DispatchStage.REVIEW:
-            continue
-        dispatches.setdefault(dispatch.attempt_id, dispatch)
-    rows: list[dict[str, Any]] = []
-    for attempt in attempts:
-        dispatch = dispatches.get(attempt.id)
-        rows.append(
-            {
-                "attempt_id": attempt.id,
-                "attempt_number": attempt.attempt_number,
-                "provider": attempt.provider,
-                "model": attempt.model,
-                "binding_id": getattr(dispatch, "binding_id", None),
-                "quota_pool_id": getattr(dispatch, "quota_pool_id", None),
-                "status": attempt.status.value,
-                "interruption_reason": attempt.interruption_reason,
-                "dispatch_reason": getattr(dispatch, "dispatch_reason", None),
-                "base_sha": attempt.base_sha,
-                "candidate_sha": attempt.commit_sha,
-                "work_location": attempt.worktree_path,
-            }
-        )
-    return rows
-
-
 def _catch_up_switch(db: Any, run_id: str, attempts: list[Any]) -> dict[str, Any] | None:
     """The latest handoff from one attempt to its replacement, for ``catch_up``.
 
@@ -676,9 +640,20 @@ def _catch_up_switch(db: Any, run_id: str, attempts: list[Any]) -> dict[str, Any
         for dispatch in db.get_dispatch_evidence_for_run(run_id)
         if dispatch.attempt_id is not None
     }
-    from_attempt, to_attempt = attempts[-2], attempts[-1]
-    if from_attempt.status not in (AttemptStatus.FAILED, AttemptStatus.TIMEOUT):
+    # The latest resource interruption is the handoff the owner cares about;
+    # later repair attempts on the same binding must not hide it.
+    pair: tuple[Any, Any] | None = None
+    for index in range(len(attempts) - 1, 0, -1):
+        previous, following = attempts[index - 1], attempts[index]
+        if (
+            previous.status in (AttemptStatus.FAILED, AttemptStatus.TIMEOUT)
+            and previous.interruption_reason
+        ):
+            pair = (previous, following)
+            break
+    if pair is None:
         return None
+    from_attempt, to_attempt = pair
     checkpoint = checkpoints.get(from_attempt.id)
     dispatch = dispatches.get(to_attempt.id)
     inherited = getattr(dispatch, "inherited_checkpoint_sha", None)
@@ -912,7 +887,6 @@ def _catch_up(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str,
         else None
     )
     questions = _catch_up_questions(context, job)
-    attempt_rows = _catch_up_attempts(db, run_id, attempts) if run_id is not None else []
     switch = _catch_up_switch(db, run_id, attempts) if run_id is not None else None
 
     failure = None
@@ -960,7 +934,6 @@ def _catch_up(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str,
         ),
         "check": check,
         "review": review,
-        "attempts": attempt_rows,
         "switch": switch,
         "open_questions": questions,
         "steering_notes": _catch_up_steering_notes(db, job),

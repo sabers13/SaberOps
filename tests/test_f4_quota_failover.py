@@ -187,3 +187,110 @@ def test_record_for_another_runs_attempt_never_authorizes(db: Database, repo: Pa
     )
 
     assert failover_authorized_bases(db, RUN_ID) == set()
+
+
+def test_catch_up_switch_reports_the_resource_handoff(db: Database, repo: Path) -> None:
+    """A later repair attempt never hides the quota handoff in ``catch_up``."""
+    from saberops.mcp.tools import _catch_up_switch
+    from saberops.models import DispatchEvidence, DispatchReason, DispatchRole, DispatchStage
+
+    checkpoint = _checkpoint(db, repo)
+    now = current_iso_timestamp()
+    replacement = Attempt(
+        id=f"{RUN_ID}_a2",
+        run_id=RUN_ID,
+        attempt_number=2,
+        provider="opencode",
+        model="opencode-go/deepseek-v4-flash",
+        worktree_path=str(repo),
+        branch_name=f"orch/{RUN_ID}/a2",
+        status=AttemptStatus.SUCCESS,
+        base_sha=checkpoint.checkpoint_sha,
+        commit_sha=checkpoint.checkpoint_sha,
+        created_at=now,
+        completed_at=now,
+    )
+    db.create_attempt(replacement)
+    db.create_dispatch_evidence(
+        DispatchEvidence(
+            id="disp-a2",
+            run_id=RUN_ID,
+            association_id=replacement.id,
+            attempt_id=replacement.id,
+            stage=DispatchStage.RETRY,
+            role=DispatchRole.BUILD,
+            tier=Tier.T1,
+            dispatch_reason=DispatchReason.CONTINUATION_AFTER_QUOTA,
+            requested_provider="opencode",
+            requested_model="opencode-go/deepseek-v4-flash",
+            inherited_checkpoint_sha=checkpoint.checkpoint_sha,
+            started_at=now,
+        )
+    )
+    # A later repair attempt that failed for a non-resource reason.
+    db.create_attempt(
+        Attempt(
+            id=f"{RUN_ID}_a3",
+            run_id=RUN_ID,
+            attempt_number=3,
+            provider="opencode",
+            model="opencode-go/deepseek-v4-flash",
+            worktree_path=str(repo),
+            branch_name=f"orch/{RUN_ID}/a3",
+            status=AttemptStatus.FAILED,
+            worker_error="gate failed",
+            base_sha=checkpoint.checkpoint_sha,
+            created_at=now,
+            completed_at=now,
+        )
+    )
+
+    switch = _catch_up_switch(db, RUN_ID, db.get_attempts_for_run(RUN_ID))
+    assert switch is not None
+    assert switch["reason"] == "QUOTA_EXHAUSTED"
+    assert switch["from"]["attempt_id"] == SOURCE_ATTEMPT_ID
+    assert switch["to"]["attempt_id"] == replacement.id
+    assert switch["different_provider"] is True
+    assert switch["checkpoint_sha"] == checkpoint.checkpoint_sha
+    assert switch["inherited_checkpoint_sha"] == checkpoint.checkpoint_sha
+    assert switch["continued_from_checkpoint"] is True
+    assert switch["work_location_preserved"] is True
+
+
+def test_catch_up_switch_absent_without_an_interruption(db: Database, repo: Path) -> None:
+    from saberops.mcp.tools import _catch_up_switch
+
+    base_sha = _git(repo, "rev-parse", "HEAD")
+    now = current_iso_timestamp()
+    clean_run_id = "run-f4-clean"
+    db.create_run(
+        Run(
+            id=clean_run_id,
+            task="No interruption",
+            target_repo=str(repo),
+            base_commit=base_sha,
+            tier=Tier.T1,
+            training_allowed=True,
+            gate_command="true",
+            status=RunStatus.RUNNING,
+            created_at=now,
+        )
+    )
+    for number in (1, 2):
+        db.create_attempt(
+            Attempt(
+                id=f"{clean_run_id}_a{number}",
+                run_id=clean_run_id,
+                attempt_number=number,
+                provider="codex",
+                model="gpt-5.6-terra",
+                worktree_path=str(repo),
+                branch_name=f"orch/{clean_run_id}/a{number}",
+                status=AttemptStatus.SUCCESS,
+                base_sha=base_sha,
+                created_at=now,
+                completed_at=now,
+            )
+        )
+
+    assert _catch_up_switch(db, clean_run_id, db.get_attempts_for_run(clean_run_id)) is None

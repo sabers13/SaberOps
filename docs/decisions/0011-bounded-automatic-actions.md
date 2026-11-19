@@ -61,9 +61,8 @@ vendor settings on the owner's behalf.
    allows, plus the reason and preserved work location on failure. It changes
    nothing, sends no notice and takes no lease, so a session without the writer
    lease can call it. The planner guide teaches the phrase "catch me up". It also
-   reports each attempt's provider, model and binding and the latest handoff
-   between attempts (for example a quota-exhausted attempt continued on another
-   subscription from its checkpoint; see
+   reports the latest handoff between attempts (for example a quota-exhausted
+   attempt continued on another subscription from its checkpoint; see
    [ADR-0013](0013-quota-failover-continuation.md)).
 
 ## 3. Consequences
