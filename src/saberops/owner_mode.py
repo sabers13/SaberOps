@@ -134,8 +134,9 @@ _ACTION_POLICY_FIELD: Final[dict[ModeAction, str]] = {
 }
 
 #: Actions a live code path actually consults the decision for today.  The
-#: others (accept, publish, safe cleanup) are recorded intent only and must be
-#: labelled advisory until their own lanes wire them.
+#: others (publish, safe cleanup) are recorded intent only and must be
+#: labelled advisory until their own lanes wire them.  Acceptance is enforced
+#: by the F15 auto-accept pass (:mod:`saberops.auto_accept`).
 ENFORCED_ACTIONS: Final[frozenset[ModeAction]] = frozenset(
     {
         ModeAction.DISPATCH,
@@ -143,6 +144,7 @@ ENFORCED_ACTIONS: Final[frozenset[ModeAction]] = frozenset(
         ModeAction.RETRY,
         ModeAction.REPAIR,
         ModeAction.ESCALATION,
+        ModeAction.ACCEPT,
         ModeAction.PUBLISH_CANDIDATE,
     }
 )

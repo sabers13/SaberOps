@@ -516,8 +516,8 @@ _AUTHORITY_EFFECTS: dict[str, str] = {
     "ask_before_actions": "Runs behave like Supervised. Your synced OpenCode agent asks before every action.",
     "supervised": "Gate and review run automatically. You accept every candidate.",
     "autonomous": "Like Supervised, and every candidate that passes the gate is pushed to the repository's origin as orch/<run>/a<n>. You still accept.",
-    "full_autonomy": "Same as Autonomous today. Automatic acceptance is not wired yet.",
-    "full_autonomy_publish": "Same as Autonomous today. Automatic acceptance and publishing are not wired yet.",
+    "full_autonomy": "Like Autonomous. When the owner mode is Away or Critical only, a candidate that passed the gate and an independent review of that exact commit is accepted as a local commit; never in Ask me, and nothing is pushed.",
+    "full_autonomy_publish": "Like Full autonomy, and a verified candidate branch may be published to origin for external review. Acceptance stays local and is never automatic in Ask me.",
 }
 
 

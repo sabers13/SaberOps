@@ -899,8 +899,9 @@ def plan_notice_messages(
       body names the exact next owner action.
     * ``plan:<id>:needs-decision:<lane>`` -- in ``away`` or ``critical-only``
       the plan has no moving lane left and a candidate (or owner lane) waits
-      for the owner.  This is why an away plan never looks silently stalled:
-      v1 has no auto-accept, so the first candidate is the stopping point.
+      for the owner.  Auto-accept (F15) only clears a candidate when the
+      authority preset grants it; otherwise the first candidate is the
+      stopping point, so a waiting plan never looks silently stalled.
 
     No notice is emitted when a lane starts; per-lane terminal notices already
     come from the job notifier.

@@ -50,8 +50,10 @@ the owner is away (`away`), and required that only the owner switch modes.
 5. **Recorded intent stays advisory until wired.** A policy dimension or action
    that no live code reads is labelled advisory, never `LIVE`. This covers the
    `unattended.py` standing permissions and the authority fields
-   (`auto_accept`, `auto_publish`, `auto_gate`, `auto_review`,
-   `auto_safe_cleanup`, `routine_questions`) that have no reader yet.
+   (`auto_publish`, `auto_gate`, `auto_review`, `auto_safe_cleanup`,
+   `routine_questions`) that have no reader yet. `auto_accept` is wired by F15
+   ([ADR-0008](0008-candidate-bound-acceptance.md) §4) and is enforced only in
+   `away`/`critical-only` with a granting preset.
 
 ## 3. Consequences
 
@@ -65,14 +67,10 @@ the owner is away (`away`), and required that only the owner switch modes.
   close-the-CLI pausing. Standing decisions and the return summary were wired
   in F11 ([ADR-0028](0028-away-mode-standing-decisions.md)); critical-only
   question delegation is wired in
-  [ADR-0027](0027-critical-only-questions.md); auto-accept (F15) and
-  close-the-CLI pausing (F17) remain separate lanes that build on the same
-  store and decision function.
-- This lane does not wire auto-accept, standing decisions or a return summary.
-  Those remain separate lanes (F15 and F11) and build on the same store and
-  decision function. Critical-only question delegation is wired in
-  [ADR-0027](0027-critical-only-questions.md); close-the-CLI pausing in every
-  mode is wired in [ADR-0029](0029-no-work-without-a-planning-session.md).
+  [ADR-0027](0027-critical-only-questions.md); auto-accept (F15) is wired in
+  [ADR-0008](0008-candidate-bound-acceptance.md) §4; close-the-CLI pausing
+  (F17/F24) is wired in
+  [ADR-0029](0029-no-work-without-a-planning-session.md).
 - The safety and truth boundary is narrow and testable: the scheduler parks an
   `away` dispatch the preset forbids, the supervisor's recovery properties
   follow the mode, and no page or CLI promises an unread permission as live.

@@ -6,7 +6,8 @@ the owner-visible behaviour the lane promises:
 * plan auto-advance asks F1's typed effective-permission function; a narrower
   authority preset refuses a start with the reason visible in ``STATE.md``;
 * ``away`` keeps submitting unblocked lanes and then parks at the first
-  candidate (v1 has no auto-accept) with the accept as the next action;
+  candidate when the preset does not grant auto-accept, with the accept as the
+  next action;
 * a stall and a completion each notify once, and a repeated tick sends nothing;
 * M3's return summary carries the plan section, and ``catch_up`` exposes it;
 * the planner guide/skill and the MCP docs no longer claim a ledger wave or an
@@ -308,8 +309,9 @@ def test_away_keeps_starting_unblocked_lanes_then_parks_at_the_accept(
     assert {a_job.job_id, c_job.job_id} <= set(_dispatched(tick))
     assert _lane_job(db, "B") is None
 
-    # Both unblocked lanes reach candidate-ready.  V1 has no auto-accept, so
-    # the plan parks here instead of pretending to progress.
+    # Both unblocked lanes reach candidate-ready.  The default supervised
+    # preset does not grant auto-accept, so the plan parks here instead of
+    # pretending to progress.
     _complete_candidate(rig, db, a_job)
     _complete_candidate(rig, db, c_job)
     _tick(db)

@@ -993,6 +993,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Post-integration gate timeout in seconds (default: 300).",
     )
     accept_parser.add_argument(
+        "--undo",
+        action="store_true",
+        help=(
+            "Undo an automatic auto-accept: restore the target branch to the "
+            "candidate's base and keep the candidate branch and evidence."
+        ),
+    )
+    accept_parser.add_argument(
         "--action-id",
         type=str,
         default=None,
@@ -3451,6 +3459,21 @@ def handle_review(args: argparse.Namespace) -> int:
 
 def handle_accept(args: argparse.Namespace) -> int:
     """Handle `orch accept <run-id>` command."""
+    if getattr(args, "undo", False):
+        from saberops.auto_accept import undo_auto_accept
+
+        undo = undo_auto_accept(db=db_for_run(args, args.run_id), run_id=args.run_id)
+        if not undo.undone:
+            print(f"[!] Undo refused: {undo.reason}", file=sys.stderr)
+            return 1
+        print("─" * 60)
+        print("AUTO-ACCEPT UNDONE")
+        print(f"Target Repo  : {undo.target_repo}")
+        print(f"Restored SHA : {undo.restored_sha}")
+        print(f"Kept Branch  : {undo.kept_branch or '(none)'}")
+        print(f"Kept SHA     : {undo.candidate_sha}")
+        print(f"Detail       : {undo.reason}")
+        return 0
     action_id = getattr(args, "action_id", None)
     expected_candidate = getattr(args, "expected_candidate", None)
     if action_id:

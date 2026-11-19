@@ -211,7 +211,7 @@ def test_full_autonomy_plus_ask_me_never_auto_accepts(isolated: Path) -> None:
     assert effective_authority_policy(
         load_authority_policy(), OwnerMode.ASK_ME
     ).auto_accept is False
-    # Away is where the preset's acceptance grant may later be wired (F15).
+    # Away is where the preset's acceptance grant is wired by F15.
     set_owner_mode("away", max_jobs=10)
     assert decide_owner_action(ModeAction.ACCEPT).allowed is True
 
@@ -236,11 +236,11 @@ def test_decision_view_labels_unenforced_actions_advisory(isolated: Path) -> Non
     set_owner_mode("away", max_jobs=10)
     view = mode_view()
     assert view["decisions"]["accept"]["allowed"] is True
-    assert view["decisions"]["accept"]["enforced"] is False
+    assert view["decisions"]["accept"]["enforced"] is True
     for action in ENFORCED_ACTIONS:
         assert view["decisions"][action.value]["enforced"] is True
-    assert "auto_accept" in ADVISORY_POLICY_FIELDS
-    assert "auto_accept" not in ENFORCED_POLICY_FIELDS
+    assert "auto_accept" not in ADVISORY_POLICY_FIELDS
+    assert "auto_accept" in ENFORCED_POLICY_FIELDS
 
 
 # --------------------------------------------------------------------------- #
@@ -340,7 +340,7 @@ def test_cli_mode_show_set_and_clear(
     capsys.readouterr()
     assert main(["authority", "show", "--json"]) == 0
     shown = json.loads(capsys.readouterr().out)
-    assert "auto_accept" in shown["advisory_fields"]
+    assert "auto_accept" in shown["enforced_fields"]
     assert "auto_retry" in shown["enforced_fields"]
 
     assert main(["mode", "clear"]) == 0

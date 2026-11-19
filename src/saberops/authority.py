@@ -190,13 +190,15 @@ AUTHORITY_PRESETS: Final[dict[AuthorityMode, AuthorityPolicy]] = {
 #: Policy dimensions a live decision path reads today.  Everything else in
 #: :class:`AuthorityPolicy` is a recorded intent only: no engine code consults
 #: it, so the CLI and web surfaces must label it advisory rather than promise
-#: it as a live permission.
+#: it as a live permission.  ``auto_accept`` is read by the F15 auto-accept
+#: pass (:mod:`saberops.auto_accept`) together with the owner mode.
 ENFORCED_POLICY_FIELDS: Final[frozenset[str]] = frozenset(
     {
         "auto_start",
         "auto_retry",
         "auto_repair",
         "auto_escalate_when_policy_justifies",
+        "auto_accept",
         "auto_publish_candidate",
     }
 )

@@ -1279,5 +1279,19 @@ def _verify_accept_engine_evidence(
             f"Project projection refused: 'run_accepted' event {event_id} "
             f"for run '{run_id}' has inconsistent provenance.candidate_sha."
         )
+    # F15: an explicit undo of this exact acceptance (``orch accept <run> --undo``)
+    # makes the acceptance no longer describe the target.  Later evidence may
+    # re-establish acceptance; only an undo that follows this event counts.
+    from saberops.auto_accept import ACCEPT_UNDONE_EVENT
+
+    for undone in db.get_events_by_type(run_id, ACCEPT_UNDONE_EVENT):
+        undone_payload = undone.payload or {}
+        if int(undone.id) <= event_id:
+            continue
+        if undone_payload.get("candidate_sha") == candidate_sha:
+            raise AcceptanceAuthorityError(
+                f"Project projection refused: acceptance of candidate "
+                f"{candidate_sha} was undone by event {undone.id}."
+            )
     return payload
 

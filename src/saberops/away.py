@@ -1004,9 +1004,9 @@ def evaluate_dispatch(
             question=request.subject,
             never_delegable=never_delegable_for_question(request.decision_class),
         )
-        # Away applies the decision sheet; the autonomous classes that need
-        # auto-accept (F15) are not active in this lane, so an unanswered
-        # decision parks instead of being taken.
+        # Away applies the decision sheet to questions.  Candidate acceptance is
+        # a separate engine stage (F15 auto-accept) and never flows through this
+        # question resolver, so an unanswered question still parks its branch.
         resolution = resolve_decision(
             sheet,
             decision,

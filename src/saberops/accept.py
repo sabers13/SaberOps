@@ -1208,13 +1208,40 @@ class AcceptEngine:
         historical = reviews[-1] if reviews else None
         return None, historical
 
-    def accept_run(self, run_id: str, gate_timeout: float = 300.0) -> AcceptResult:
+    def candidate_review_evidence(
+        self, run_id: str, candidate_sha: str
+    ) -> tuple[ReviewResult | None, ReviewResult | None]:
+        """Public read-only view of the exact candidate's review evidence.
+
+        Returns ``(bound_review, historical_review)`` with the same matching
+        rules acceptance enforces, so a caller that needs stricter evidence
+        (for example F15 auto-accept, which always requires a review) never
+        re-implements the dispatch association.
+        """
+        return self._resolve_candidate_review(run_id, candidate_sha)
+
+    def accept_run(
+        self,
+        run_id: str,
+        gate_timeout: float = 300.0,
+        *,
+        automatic: dict[str, Any] | None = None,
+    ) -> AcceptResult:
         """Safely fast-forward integrate a completed candidate run and verify canonical gate.
 
         Older acceptance policy is preserved: there is no
         "accepted only once" engine precondition here.  Candidate
         lifecycle / accepted-state policy belongs to the candidate lifecycle.
+
+        ``automatic`` (F15) is the deterministic auto-accept audit record.  When
+        present it is embedded in the durable ``run_accepted`` payload, so the
+        acceptance and its reason are written atomically and an interrupted
+        process cannot leave an unmarked acceptance behind.  It changes no
+        acceptance check; the caller is responsible for the mode and evidence
+        decision.
         """
+        if automatic is not None and not isinstance(automatic, dict):
+            raise ValueError("automatic acceptance audit must be an object")
         run = self.db.get_run(run_id)
         if not run:
             raise ValueError(f"Run '{run_id}' not found")
@@ -1524,6 +1551,7 @@ class AcceptEngine:
                 "gate_receipt": gate_receipt.as_dict() if gate_receipt is not None else None,
                 "gate_skipped": not gate_enabled or gate_skip is not None,
                 "gate_skip": gate_skip,
+                **({"automatic": dict(automatic)} if automatic is not None else {}),
             },
         )
 

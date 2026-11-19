@@ -46,8 +46,11 @@ yet a routine class could still be escalated on judgment and had no durable tag.
 
 ## 3. Consequences
 
-- An owner-only class is never made answerable by a mode, and acceptance stays
-  owner-only. The tag can only add criticality, so a planner cannot talk its way
+- An owner-only class is never made answerable by a mode, and a planning session
+  can never accept: acceptance through this question path stays owner-only. The
+  separate F15 auto-accept pass is a deterministic mode-scoped engine stage
+  ([ADR-0008](0008-candidate-bound-acceptance.md) §4), not a delegated question
+  answer. The tag can only add criticality, so a planner cannot talk its way
   into an owner decision.
 - `ask-me` keeps the manual answer path: the owner answers through the CLI or the
   local web surface, never through the planner.

@@ -126,4 +126,5 @@ terminal session is open: `orch watch` (F23) while a terminal is attached, or
 - A planning lease left behind by a dead session no longer blocks takeover once
   its jobs are parked: `active_work` counts executing work, not parked work.
 - No provider, model, billing-posture or acceptance decision is made or
-  bypassed here. Acceptance stays owner-only; this lane only stops spending.
+  bypassed here. This lane only stops spending; F15's local auto-accept is a
+  separate, mode-scoped stage (ADR-0008 §4) and is paused like all other work.

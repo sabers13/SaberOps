@@ -1671,6 +1671,18 @@ def scheduler_tick(
     except Exception:
         logging.getLogger(__name__).exception("plan landing refresh failed")
 
+    # 1f. F15 auto-accept.  Deliberately after dispatch and the landing refresh:
+    # accepting a local candidate runs the post-integration gate, so it must
+    # never delay this tick's dispatch.  At most one candidate is accepted per
+    # tick.  The pass refuses unless the effective owner mode is away or
+    # critical-only and the work gate is open, and it never pushes.
+    try:
+        from saberops.auto_accept import auto_accept_next_candidate
+
+        auto_accept_next_candidate(db=db, now=moment)
+    except Exception:
+        logging.getLogger(__name__).exception("auto-accept pass failed")
+
     return TickResult(
         ran=True,
         reconciled_changes=tuple(changes),

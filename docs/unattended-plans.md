@@ -419,4 +419,7 @@ orch away reset-breaker --repo .
 ```
 
 This lane deliberately leaves auto-accept (F15) and close-the-CLI pausing (F17)
-out; away never pushes and never resumes a paused run by itself.
+out of its own scope; both are separate engine stages recorded in
+[ADR-0008](decisions/0008-candidate-bound-acceptance.md) §4 and
+[ADR-0029](decisions/0029-no-work-without-a-planning-session.md). Away never
+pushes and never resumes a paused run by itself.

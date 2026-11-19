@@ -139,10 +139,12 @@ holds the planning lease **and** the typed owner-mode decision
 (`owner_mode.decide_owner_action(DISPATCH)`) allows a start; a mode can only
 narrow the authority preset, never widen it. Ask-me still allows a start (it is
 not an owner judgment); `ask_before_actions` refuses it with the reason shown in
-`STATE.md`. Closing the planning CLI pauses lane submission. V1 has no
-auto-accept, so `away` keeps starting unblocked lanes and then parks at the
-first candidate; the next owner action names that accept instead of looking
-stalled.
+`STATE.md`. Closing the planning CLI pauses lane submission. In `away` or
+`critical-only` with a full-autonomy preset, a lane candidate that passed its
+gate and an independent review of that exact commit is auto-accepted as a local
+commit (never pushed) and `STATE.md` shows the undo command; in ask-me, or with
+a preset that does not grant auto-accept, `away` parks at the first candidate
+and the next owner action names that accept instead of looking stalled.
 
 ### Scout jobs (F19)
 

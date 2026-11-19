@@ -180,7 +180,7 @@ usage so far. See [ADR-0029](docs/decisions/0029-no-work-without-a-planning-sess
 **Authority preset** is the ceiling. Unknown values fail closed and never degrade
 into a more permissive setting.
 
-| Setting | Recovery (retry / repair / escalation) | Candidate branch publication | Acceptance policy (recorded intent) |
+| Setting | Recovery (retry / repair / escalation) | Candidate branch publication | Auto-accept a local commit (away / critical-only) |
 | --- | :---: | :---: | :---: |
 | `ask_before_actions` | No | No | No |
 | `supervised` (default) | No | No | No |
@@ -188,11 +188,14 @@ into a more permissive setting.
 | `full_autonomy` | Yes | Yes | Yes |
 | `full_autonomy_publish` | Yes | Yes | Yes |
 
-Recovery, candidate-branch publication and the owner-mode decisions are enforced
-today. The acceptance column is **recorded intent only**: acceptance stays
-owner-only until the away/critical-only auto-accept lane lands, and `ask-me`
-never auto-accepts. Inspect or change the preset with
-`orch authority show|list|set` and the mode with `orch mode show|set|clear`.
+Recovery, candidate-branch publication, the owner-mode decisions and
+auto-accept are enforced today. Auto-accept applies only while the owner mode is
+`away` or `critical-only` **and** the preset grants it. It accepts only a
+candidate whose gate passed and whose exact commit holds an independent review,
+as a local commit: it never pushes. `ask-me` never auto-accepts. Undo one with
+`orch accept <run-id> --undo`, which restores the target branch and keeps the
+candidate. Inspect or change the preset with `orch authority show|list|set` and
+the mode with `orch mode show|set|clear`.
 
 ---
 
