@@ -5366,6 +5366,13 @@ class Orchestrator:
                         "role": effective_role.value,
                     }
                     completed_gate_payload.update(_gate_disposition_payload(disposition))
+                    if gate_res.memory_grant_bytes or gate_res.memory_peak_bytes:
+                        completed_gate_payload["memory_budget"] = {
+                            "grant_bytes": gate_res.memory_grant_bytes,
+                            "measured_peak_bytes": gate_res.memory_peak_bytes,
+                            "wait_seconds": round(gate_res.memory_wait_seconds, 3),
+                            "freeze_count": gate_res.memory_freeze_count,
+                        }
                     if not has_changes:
                         completed_gate_payload["no_changes"] = True
                     self.db.record_event(
@@ -7047,6 +7054,18 @@ class Orchestrator:
                                 completed_local_payload.update(
                                     _gate_disposition_payload(rep_disposition)
                                 )
+                                if (
+                                    gate_res_local.memory_grant_bytes
+                                    or gate_res_local.memory_peak_bytes
+                                ):
+                                    completed_local_payload["memory_budget"] = {
+                                        "grant_bytes": gate_res_local.memory_grant_bytes,
+                                        "measured_peak_bytes": gate_res_local.memory_peak_bytes,
+                                        "wait_seconds": round(
+                                            gate_res_local.memory_wait_seconds, 3
+                                        ),
+                                        "freeze_count": gate_res_local.memory_freeze_count,
+                                    }
                                 self.db.record_event(
                                     run_id,
                                     "gate_completed",
@@ -9031,20 +9050,67 @@ def _run_configured_gate(
     if config.gate_enabled:
         from dataclasses import replace
 
+        from saberops._gate_tools import gate_tools as gt
         from saberops.verification_snapshot import fixed_snapshot, source_tree
 
         try:
             with fixed_snapshot(cwd) as snapshot:
-                result = run_process(args, cwd=snapshot.path, timeout=timeout)
-                mutated = (source_tree(snapshot.path) != snapshot.tree
-                           or source_tree(cwd) != snapshot.tree)
-                return replace(result, verification_tree=snapshot.tree,
-                               verification_commit=snapshot.commit,
-                               verification_mutated=mutated)
+                ledger = gt.MemoryLedger(gt.default_ledger_root(repo=cwd))
+
+                def invoke(
+                    scoped_cmd: list[str],
+                    env_updates: dict[str, str],
+                    _grant: int,
+                    _workers: int,
+                ) -> tuple[int, bool, bool, ProcessResult]:
+                    res = run_process(
+                        scoped_cmd, cwd=snapshot.path, env=env_updates, timeout=timeout
+                    )
+                    return res.exit_code, res.timed_out, res.control_interrupted, res
+
+                result, stats = gt.run_with_lease(
+                    ledger=ledger,
+                    step="configured-gate",
+                    size_bucket="default",
+                    invoke=invoke,
+                    cmd=args,
+                    worktree=str(cwd),
+                    env={gt.EXTERNAL_LEASE_ENV: "1"},
+                    rerun_if_stopped=True,
+                )
+                assert isinstance(result, ProcessResult)
+                mutated = (
+                    source_tree(snapshot.path) != snapshot.tree
+                    or source_tree(cwd) != snapshot.tree
+                )
+                return replace(
+                    result,
+                    verification_tree=snapshot.tree,
+                    verification_commit=snapshot.commit,
+                    verification_mutated=mutated,
+                    memory_grant_bytes=stats.grant_bytes,
+                    memory_peak_bytes=stats.measured_peak_bytes,
+                    memory_wait_seconds=stats.wait_seconds,
+                    memory_freeze_count=stats.freeze_count,
+                )
+        except TimeoutError as exc:
+            return ProcessResult(
+                args=args,
+                exit_code=-1,
+                stdout="",
+                stderr="Memory budget timeout: " + str(exc),
+                duration_seconds=0,
+                launch_failed=True,
+            )
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
-            return ProcessResult(args=args, exit_code=-1, stdout="",
+            return ProcessResult(
+                args=args,
+                exit_code=-1,
+                stdout="",
                 stderr="Verification snapshot unavailable: " + str(exc),
-                duration_seconds=0, launch_failed=True)
+                duration_seconds=0,
+                launch_failed=True,
+            )
     return ProcessResult(
         args=[],
         exit_code=0,

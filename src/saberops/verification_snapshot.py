@@ -33,7 +33,13 @@ def source_tree(path: Path) -> str | None:
     import os
 
     try:
-        with tempfile.TemporaryDirectory(prefix="saberops-source-index-") as directory:
+        from saberops._gate_tools import gate_tools
+
+        scratch_base = gate_tools.disk_scratch_base()
+        scratch_base.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix="saberops-source-index-", dir=str(scratch_base)
+        ) as directory:
             env = dict(os.environ, GIT_INDEX_FILE=str(Path(directory) / "index"))
             for args in (["git", "read-tree", "HEAD"], ["git", "add", "-A", "--", "."]):
                 subprocess.run(args, cwd=path, env=env, capture_output=True, timeout=30, check=True)
@@ -57,7 +63,13 @@ def fixed_snapshot(source: Path) -> Iterator[VerificationSnapshot]:
     tree = git_read(source, "rev-parse", "HEAD^{tree}")
     if source_tree(source) != tree:
         raise ValueError("Candidate has uncommitted changes; verification must be restarted.")
-    with tempfile.TemporaryDirectory(prefix="saberops-verification-") as directory:
+    from saberops._gate_tools import gate_tools
+
+    scratch_base = gate_tools.disk_scratch_base()
+    scratch_base.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix="saberops-verification-", dir=str(scratch_base)
+    ) as directory:
         target = Path(directory) / "candidate"
         git_read(source, "worktree", "add", "--detach", str(target), commit)
         try:

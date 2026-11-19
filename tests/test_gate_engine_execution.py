@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from saberops._gate_tools import gate_tools as gt
 from saberops.gate_history import (
     GateHistoryError,
     GateKind,
@@ -26,14 +27,12 @@ from saberops.gate_profiles import (
     GateProfileName,
 )
 from saberops.gate_runner import (
-    MAX_LIGHT_SLOTS,
     EngineGateExecutor,
     EngineGateRequest,
     EngineGateResult,
     GateSlotPool,
     GateSlotWaitTimeout,
     host_disk_admission,
-    resolve_slot_capacity,
 )
 from saberops.gate_scope import RetirementAction, RetirementEntry
 
@@ -296,10 +295,19 @@ def test_engine_gate_disk_low_is_infra_and_recorded(tmp_path: Path) -> None:
     assert read_entries(result.history_path)[0]["outcome"] == "INFRA"
 
 
+def _pin_mem(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, budget_bytes: int) -> Path:
+    avail_kb = (gt.DESKTOP_RESERVE_BYTES + budget_bytes) // 1024
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text(f"MemTotal: {avail_kb * 4} kB\nMemAvailable: {avail_kb} kB\n")
+    monkeypatch.setenv(gt.PROC_MEMINFO_ENV, str(meminfo))
+    return meminfo
+
+
 def test_engine_gate_slot_timeout_is_infra(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Covers: ADR-0003 D3 (slot wait exceeded -> INFRA SLOT_WAIT_TIMEOUT)."""
+    """Covers: ADR-0003 D3 (budget wait exceeded -> INFRA SLOT_WAIT_TIMEOUT)."""
     repo = _init_repo(tmp_path / "repo")
     common = (repo / ".git").resolve()
+    _pin_mem(tmp_path, monkeypatch, gt.COLD_START_PEAK_BYTES + 100 * gt.MIB)
     pool = GateSlotPool(common)
     monkeypatch.setenv("SABEROPS_GATE_SLOT_WAIT", "0.1")
     with pool.heavy():
@@ -336,26 +344,31 @@ def test_engine_gate_rejects_profile_lowering(tmp_path: Path) -> None:
     assert "requires at least" in str(excinfo.value)
 
 
-def test_slot_pool_heavy_excludes_light(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Covers: ADR-0003 D3 (heavy = 1 exclusive; lane waits while held)."""
+def test_slot_pool_heavy_excludes_light_when_budget_tight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: heavy reservation blocks additional cold-start run when budget is tight."""
+    _pin_mem(tmp_path, monkeypatch, gt.COLD_START_PEAK_BYTES + 100 * gt.MIB)
     common = tmp_path / "common"
     pool = GateSlotPool(common)
     monkeypatch.setenv("SABEROPS_GATE_SLOT_WAIT", "0.2")
     with pool.heavy():
         with pytest.raises(GateSlotWaitTimeout):
             with pool.light():
-                pytest.fail("lane entered while heavy held")
+                pytest.fail("lane entered without available budget")
     with pool.light():
         pass
 
 
-def test_slot_pool_two_light_slots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Covers: ADR-0003 D3 (light slots = 2 concurrent)."""
+def test_slot_pool_concurrent_small_reservations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: small learned steps share host budget side by side while third waits."""
+    _pin_mem(tmp_path, monkeypatch, 1_100 * gt.MIB)
     common = tmp_path / "common"
+    seed_pool = GateSlotPool(common)
+    seed_pool.ledger.record_peak("affected", "small", 500 * gt.MIB)
     monkeypatch.setenv("SABEROPS_GATE_SLOT_WAIT", "5")
-    # Pin the light count: the D-0076 default is RAM-derived and this test
-    # asserts exactly two concurrent light slots.
-    monkeypatch.setenv("SABEROPS_LANE_SLOTS", "2")
     held: list[int] = []
     guard = threading.Lock()
     release = threading.Event()
@@ -377,11 +390,11 @@ def test_slot_pool_two_light_slots(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         time.sleep(0.05)
     with guard:
         assert len(held) == 2
-    # Both light slots are held -> a third waits and times out fast.
+    # Two small holders (1000 MiB) leave 100 MiB < 500 MiB -> third waits and times out.
     monkeypatch.setenv("SABEROPS_GATE_SLOT_WAIT", "0.2")
     with pytest.raises(GateSlotWaitTimeout):
         with GateSlotPool(common).light():
-            pytest.fail("third light slot acquired")
+            pytest.fail("third light reservation entered beyond budget")
     release.set()
     for thread in threads:
         thread.join(timeout=5)
@@ -450,27 +463,36 @@ def test_orchestrator_seam_forwards(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert isinstance(request, EngineGateRequest)
     assert request.kind == "G1"
 
-def test_slot_pool_refuses_invalid_configuration(
+def test_slot_pool_refuses_invalid_wait_configuration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: malformed slot configuration fails closed as SLOT_WAIT_TIMEOUT."""
-    monkeypatch.setenv("SABEROPS_GATE_SLOTS", "zero")
+    """Covers: malformed memory wait configuration fails closed as SLOT_WAIT_TIMEOUT."""
+    monkeypatch.setenv("SABEROPS_GATE_SLOT_WAIT", "-1")
     with pytest.raises(GateSlotWaitTimeout):
         with GateSlotPool(tmp_path / "c").light():
             pass
 
 
-def test_slot_pool_env_overrides_dynamic_capacity(
+def test_slot_pool_waits_for_budget_then_runs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: D-0076 (engine pool honours explicit knobs; drains the ceiling)."""
-    monkeypatch.setenv("SABEROPS_GATE_SLOTS", "2")
-    monkeypatch.setenv("SABEROPS_LANE_SLOTS", "3")
-    capacity = resolve_slot_capacity()
-    assert (capacity.heavy, capacity.light) == (2, 3)
-    assert capacity.source == "env"
-    # The heavy gate drains every potential light index, not just three.
-    assert capacity.drain_lock_count >= MAX_LIGHT_SLOTS + 1
+    """Covers: heavy reservation waits while predicted peak > budget, runs once freed."""
+    meminfo = _pin_mem(tmp_path, monkeypatch, 100 * gt.MIB)
+    pool = GateSlotPool(tmp_path / "c")
+    entered = threading.Event()
+
+    def run_heavy() -> None:
+        with pool.heavy(wait=5.0):
+            entered.set()
+
+    worker = threading.Thread(target=run_heavy)
+    worker.start()
+    time.sleep(0.2)
+    assert not entered.is_set()
+    avail_kb = (gt.DESKTOP_RESERVE_BYTES + gt.COLD_START_PEAK_BYTES + 200 * gt.MIB) // 1024
+    meminfo.write_text(f"MemTotal: {avail_kb * 4} kB\nMemAvailable: {avail_kb} kB\n")
+    assert entered.wait(timeout=5)
+    worker.join(timeout=5)
 
 
 def test_engine_history_refuses_producer_after_append(tmp_path: Path) -> None:

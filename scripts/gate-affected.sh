@@ -27,8 +27,8 @@
 # stale and the selector falls back to static selection. With no map at all, the
 # header says so and the selector uses the static graph.
 #
-# Parallel pytest: when more than 50 tests are selected (or the FULL suite is
-# required) and pytest-xdist is installed, pytest runs with -n auto.
+# Parallel pytest and per-step cgroup ceilings are computed dynamically from the
+# host-wide memory budget in scripts/gate_tools.py.
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 
@@ -86,9 +86,29 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-explain_file=$(mktemp "${TMPDIR:-/tmp}/saberops-gate-affected.XXXXXX")
-targets_file=$(mktemp "${TMPDIR:-/tmp}/saberops-gate-targets.XXXXXX")
-trap 'rm -f -- "$explain_file" "$targets_file"' EXIT
+disk_tmp=$("$gate_python" scripts/gate_tools.py disk-tmp)
+scratch_manifest=$(mktemp "$disk_tmp/saberops-affected-owner.XXXXXX")
+if ! "$gate_python" scripts/gate_tools.py scratch-start "$scratch_manifest" "$$"; then
+    rc=$?
+    rm -f -- "$scratch_manifest"
+    exit "$rc"
+fi
+gate_scratch=$(cat "$scratch_manifest")
+rm -f -- "$scratch_manifest"
+mkdir -p "$gate_scratch/tmp"
+export TMPDIR="$gate_scratch/tmp"
+export TMP="$gate_scratch/tmp"
+export TEMP="$gate_scratch/tmp"
+cleanup_gate_scratch() {
+    local exit_rc=$?
+    "$gate_python" scripts/gate_tools.py scratch-finish "$gate_scratch" "$exit_rc" || true
+}
+trap cleanup_gate_scratch EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
+
+explain_file="$gate_scratch/explain.txt"
+targets_file="$gate_scratch/targets.txt"
 
 selector_args=(--base "$base" --strategy "$strategy" --resolve)
 if [[ -n "$map_path" ]]; then
@@ -157,13 +177,9 @@ if (( ${#pytest_args[@]} > 0 )); then
     pytest_argv+=("${pytest_args[@]}")
 fi
 
-if [[ "$selection" == FULL* ]] || { [[ -n "$selection" ]] && (( $(printf '%s\n' "$selection" | wc -l) > 50 )); }; then
-    if "$gate_python" -c "import xdist" 2>/dev/null; then
-        echo "(>50 tests selected: pytest runs with -n auto)"
-        pytest_argv+=(-n auto)
-    else
-        echo "(>50 tests selected but pytest-xdist is not installed: serial run)"
-    fi
+has_xdist=0
+if "$gate_python" -c "import xdist" 2>/dev/null; then
+    has_xdist=1
 fi
 
 echo "--- ruff check . ---"
@@ -181,12 +197,19 @@ if ! mkdir -p "$mypy_cache_dir" 2>/dev/null; then
     echo "(shared mypy cache unavailable; using default .mypy_cache)"
     mypy_cache_dir=".mypy_cache"
 fi
-"$gate_python" -m mypy --strict --cache-dir "$mypy_cache_dir" src tests
+"$gate_python" scripts/gate_tools.py step --step mypy -- \
+    "$gate_python" -m mypy --strict --cache-dir "$mypy_cache_dir" src tests
 
 echo
 if [[ "$selection" == FULL* ]]; then
     echo "--- pytest -q (full suite required) ---"
-    "$gate_python" -m pytest "${pytest_argv[@]}"
+    step_worker_flags=(--compute-workers)
+    if (( has_xdist == 1 )); then
+        step_worker_flags=(--with-workers)
+    fi
+    "$gate_python" scripts/gate_tools.py step --step affected --full \
+        "${step_worker_flags[@]}" --rerun-if-stopped -- \
+        "$gate_python" -m pytest "${pytest_argv[@]}" --basetemp "$gate_scratch/pytest-affected"
 elif [[ -z "$selection" ]]; then
     if grep -q "^ghost IDs dropped" "$explain_file"; then
         echo "gate-affected: FAIL: the selection was non-empty but every selected" >&2
@@ -199,18 +222,28 @@ elif [[ -z "$selection" ]]; then
 else
     echo "--- pytest (affected tests only) ---"
     mapfile -t targets <<<"$selection"
+    target_count=${#targets[@]}
     # Targets go through a file, not argv: parametrized node IDs can exceed the
     # kernel's single-argument limit (MAX_ARG_STRLEN). pytest.main is in-process,
     # so argv limits never apply; flags behave exactly as on the CLI.
     printf '%s\n' "${targets[@]}" >"$targets_file"
     set +e
-    "$gate_python" - "$targets_file" "${pytest_argv[@]}" <<'PYEOF'
-import sys
+    "$gate_python" scripts/gate_tools.py step --step affected \
+        --size-count "$target_count" --compute-workers --rerun-if-stopped -- \
+        "$gate_python" -c '
+import os, sys
 from pathlib import Path
 import pytest
+
 targets = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
-raise SystemExit(pytest.main([*sys.argv[2:], *targets]))
-PYEOF
+has_xdist = sys.argv[2] == "1"
+basetemp = sys.argv[3]
+extra = [*sys.argv[4:], "--basetemp", basetemp]
+workers = int(os.environ.get("SABEROPS_GRANTED_WORKERS", "1") or "1")
+if len(targets) > 1 and has_xdist and workers > 1 and "-n" not in extra:
+    extra.extend(["-n", str(workers), "--dist", "worksteal"])
+raise SystemExit(pytest.main([*extra, *targets]))
+' "$targets_file" "$has_xdist" "$gate_scratch/pytest-affected" "${pytest_argv[@]}"
     pytest_rc=$?
     set -e
     if (( pytest_rc == 5 )); then

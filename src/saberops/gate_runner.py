@@ -31,7 +31,6 @@ accepted identity-binding invariant.
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import hashlib
 import json
 import os
@@ -39,16 +38,18 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Final, Protocol, TextIO
+from typing import Any, Final, Protocol
 
+from saberops._gate_tools import gate_tools as _gt
 from saberops.gate_history import (
     GateHistoryEntry,
     GateKind,
@@ -111,9 +112,10 @@ _POLICY_TMP_PREFIX: Final[str] = ".gate-runner-policy-"
 _DEFAULT_TMPFS_CANDIDATE: Final[Path] = Path("/dev/shm")
 
 # Deterministic safety floor (bytes) that must remain free on the chosen
-# backend AFTER preflight reserves its own scratch directory.  This keeps
-# the host from being driven into tmpfs pressure by a single gate launch.
-_DEFAULT_SAFETY_FLOOR_BYTES: Final[int] = 16 * 1024 * 1024  # 16 MiB
+# backend AFTER preflight reserves its own scratch directory.  Uses a real
+# multi-GiB reserve derived from the desktop baseline so tmpfs scratch can
+# never starve interactive applications.
+_DEFAULT_SAFETY_FLOOR_BYTES: Final[int] = max(2 * 1024**3, _gt.DESKTOP_RESERVE_BYTES)
 
 # Minimum free-space required to satisfy the preflight before the safety
 # floor check is even attempted.  Anything below this is refused outright.
@@ -419,46 +421,8 @@ class GateScratchPreflightResult:
 
 
 def _tmpfs_mount_for(path: Path) -> str:
-    """Return the canonical filesystem kind string for ``path``.
-
-    Reads ``/proc/self/mountinfo`` (the Linux kernel's authoritative
-    mount table for the current process) and locates the mount point
-    that contains ``path``.  Returns an empty string when nothing can be
-    determined -- the preflight treats that as a non-tmpfs backend.
-    """
-    try:
-        text = Path("/proc/self/mountinfo").read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return ""
-    try:
-        resolved = str(path.resolve())
-    except OSError:
-        return ""
-    best: str = ""
-    best_len = -1
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        # mountinfo format (abridged):
-        #   mount_id parent_id major:minor root mount_point options - fstype source super_opts
-        parts = line.split()
-        if len(parts) < 10:
-            continue
-        # Find the separator between option fields and the post-option fields
-        try:
-            sep_index = parts.index("-")
-        except ValueError:
-            continue
-        if sep_index + 2 > len(parts):
-            continue
-        fstype = parts[sep_index + 2].strip().upper()
-        mount_point = parts[4]
-        if mount_point == resolved or resolved.startswith(mount_point.rstrip("/") + "/"):
-            if len(mount_point) > best_len:
-                best = fstype
-                best_len = len(mount_point)
-    return best
+    """Return the canonical filesystem kind string for ``path`` via ``gate_tools``."""
+    return str(_gt._tmpfs_mount_for(path))
 
 
 def _verify_is_tmpfs(candidate: Path) -> str:
@@ -995,6 +959,10 @@ class GateReceipt:
             min_usable_bytes=_MIN_USABLE_BYTES,
         )
     )
+    memory_grant_bytes: int = 0
+    memory_peak_bytes: int = 0
+    memory_wait_seconds: float = 0.0
+    memory_freeze_count: int = 0
     receipt_digest: str = ""
 
     def as_dict(self) -> dict[str, Any]:
@@ -1020,6 +988,10 @@ class GateReceipt:
             "launch_failed": self.launch_failed,
             "termination_incomplete": self.termination_incomplete,
             "evidence_persistence_failed": self.evidence_persistence_failed,
+            "memory_grant_bytes": self.memory_grant_bytes,
+            "memory_peak_bytes": self.memory_peak_bytes,
+            "memory_wait_seconds": self.memory_wait_seconds,
+            "memory_freeze_count": self.memory_freeze_count,
             "preflight_evidence": {
                 "backend": self.preflight_evidence.backend.value,
                 "candidate_path": self.preflight_evidence.candidate_path,
@@ -1273,12 +1245,23 @@ class GateRunner:
                 "TMP": str(scratch_dir),
                 "TEMP": str(scratch_dir),
             }
-        elif preflight is not None and not preflight.eligible:
-            # RAM_PREFERRED preflight fallback to DISK -- pre-launch
-            # decision; the preflight IS the fallback decision.
-            fallback_reason = (
-                f"RAM_PREFERRED preflight fallback to DISK: {preflight.failure_reason}"
-            )
+        elif backend == GateScratchBackend.DISK:
+            if preflight is not None and not preflight.eligible:
+                # RAM_PREFERRED preflight fallback to DISK -- pre-launch
+                # decision; the preflight IS the fallback decision.
+                fallback_reason = (
+                    f"RAM_PREFERRED preflight fallback to DISK: {preflight.failure_reason}"
+                )
+            disk_base = _gt.disk_scratch_base()
+            disk_base.mkdir(parents=True, exist_ok=True)
+            scratch_dir = _make_private_scratch(disk_base)
+            if scratch_dir is not None:
+                write_scratch_owner(scratch_dir, repo=str(target))
+                env_extras = {
+                    "TMPDIR": str(scratch_dir),
+                    "TMP": str(scratch_dir),
+                    "TEMP": str(scratch_dir),
+                }
 
         # Mutable counters used for the durable evidence below.
         start_iso = _utc_now_iso()
@@ -1290,24 +1273,61 @@ class GateRunner:
         termination_incomplete = False
         result: ProcessResult | None = None
         evidence_persistence_failed = False
+        memory_grant_bytes = 0
+        memory_peak_bytes = 0
+        memory_wait_seconds = 0.0
+        memory_freeze_count = 0
         log_id = uuid.uuid4().hex
         log_path = evidence_dir / f"{request.log_digest_label}.{log_id}.log"
 
         try:
             gate_args = split_command(request.gate_command)
-            self._record_invocation()
-            result = run_process(
-                gate_args,
-                cwd=target,
-                env=env_extras,
-                timeout=request.timeout if request.timeout > 0 else None,
-            )
+            ledger = _ledger_for_repo_or_dir(target, evidence_dir)
+
+            def _invoke_once(
+                scoped_cmd: list[str],
+                lease_env: dict[str, str],
+                _grant: int,
+                _workers: int,
+            ) -> tuple[int, bool, bool, ProcessResult]:
+                self._record_invocation()
+                # Preserve RAM scratch TMPDIR over disk fallback when RAM was selected.
+                merged_env = {**lease_env, **env_extras}
+                proc = run_process(
+                    scoped_cmd,
+                    cwd=target,
+                    env=merged_env,
+                    timeout=request.timeout if request.timeout > 0 else None,
+                )
+                return proc.exit_code, proc.timed_out, proc.control_interrupted, proc
+
+            try:
+                proc_payload, mem_stats = _gt.run_with_lease(
+                    ledger=ledger,
+                    step="accept-gate",
+                    size_bucket="default",
+                    invoke=_invoke_once,
+                    cmd=gate_args,
+                    worktree=str(target),
+                    env={_gt.EXTERNAL_LEASE_ENV: "1"},
+                    rerun_if_stopped=False,
+                )
+            except TimeoutError as exc:
+                raise GateRunnerInfrastructureError(
+                    f"Gate Runner memory budget wait exceeded: {exc}"
+                ) from exc
+            assert isinstance(proc_payload, ProcessResult)
+            result = proc_payload
             stdout_text = result.stdout
             stderr_text = result.stderr
             timed_out = result.timed_out
             exit_code = int(result.exit_code)
             launch_failed = result.launch_failed
             termination_incomplete = result.termination_incomplete
+            memory_grant_bytes = mem_stats.grant_bytes
+            memory_peak_bytes = mem_stats.measured_peak_bytes
+            memory_wait_seconds = mem_stats.wait_seconds
+            memory_freeze_count = mem_stats.freeze_count
         finally:
             # Persist the raw gate log to a disk-backed path BEFORE
             # any RAM scratch cleanup, so a crash or post-launch
@@ -1332,6 +1352,10 @@ class GateRunner:
                 preflight_evidence=preflight.evidence
                 if preflight is not None
                 else _default_preflight_evidence(request),
+                memory_grant_bytes=memory_grant_bytes,
+                memory_peak_bytes=memory_peak_bytes,
+                memory_wait_seconds=memory_wait_seconds,
+                memory_freeze_count=memory_freeze_count,
             )
             try:
                 log_path.write_text(
@@ -1405,6 +1429,10 @@ class GateRunner:
             preflight_evidence=preflight.evidence
             if preflight is not None
             else _default_preflight_evidence(request),
+            memory_grant_bytes=memory_grant_bytes,
+            memory_peak_bytes=memory_peak_bytes,
+            memory_wait_seconds=memory_wait_seconds,
+            memory_freeze_count=memory_freeze_count,
         )
         receipt = _attach_receipt_digest(receipt)
         try:
@@ -1559,6 +1587,23 @@ def _default_preflight_evidence(
     )
 
 
+def _ledger_for_repo_or_dir(target: Path, fallback_dir: Path) -> _gt.MemoryLedger:
+    if os.environ.get(_gt.LEDGER_ENV, "").strip():
+        return _gt.MemoryLedger(_gt.default_ledger_root(repo=target))
+    completed = subprocess.run(
+        ["git", "rev-parse", "--git-common-dir"],
+        cwd=target,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode == 0 and completed.stdout.strip():
+        raw = completed.stdout.strip()
+        common = (target / raw).resolve() if not Path(raw).is_absolute() else Path(raw)
+        return _gt.MemoryLedger(_gt.default_ledger_root(common))
+    return _gt.MemoryLedger(fallback_dir / _gt.LEDGER_DIRNAME)
+
+
 def _build_gate_log_blob(
     *,
     gate_command: str,
@@ -1574,6 +1619,10 @@ def _build_gate_log_blob(
     requested_mode: GateScratchMode,
     actual_backend: GateScratchBackend,
     preflight_evidence: GateScratchPreflightEvidence,
+    memory_grant_bytes: int = 0,
+    memory_peak_bytes: int = 0,
+    memory_wait_seconds: float = 0.0,
+    memory_freeze_count: int = 0,
 ) -> dict[str, Any]:
     return {
         "gate_command": gate_command,
@@ -1586,6 +1635,12 @@ def _build_gate_log_blob(
         "termination_incomplete": termination_incomplete,
         "requested_scratch_mode": requested_mode.value,
         "actual_scratch_backend": actual_backend.value,
+        "memory_budget": {
+            "grant_bytes": memory_grant_bytes,
+            "measured_peak_bytes": memory_peak_bytes,
+            "wait_seconds": round(memory_wait_seconds, 3),
+            "freeze_count": memory_freeze_count,
+        },
         "preflight": {
             "backend": preflight_evidence.backend.value,
             "candidate_path": preflight_evidence.candidate_path,
@@ -1693,383 +1748,23 @@ class GateSlotWaitTimeout(RuntimeError):
 
 
 # ---------------------------------------------------------------------------
-# D-0076: dynamic RAM-based capacity (hermetic, zero extra dependencies)
+# Host-wide dynamic memory budget pool (delegated to scripts/gate_tools.py)
 # ---------------------------------------------------------------------------
-#
-# Slot counts used to be static (``SABEROPS_GATE_SLOTS=1``,
-# ``SABEROPS_LANE_SLOTS=2``).  On a large host that throttles parallel
-# progress; on a small one it can drive the machine into OOM.  The dynamic
-# policy reads live memory from ``/proc/meminfo`` (``MemAvailable`` /
-# ``MemTotal``) with an ``os.sysconf`` fallback and derives the slot and worker
-# budgets from it.  Explicit environment knobs still win, so an owner can pin a
-# value when needed.
 
-GIB: Final[int] = 1024 ** 3
+GIB: Final[int] = _gt.GB
+DEFAULT_SLOT_WAIT_SECONDS: Final[float] = _gt.DEFAULT_MEMORY_WAIT
 
-#: Reserved for the OS, editor/UI and interactive shells before any slot is
-#: handed out.
-SAFETY_FLOOR_GIB: Final[float] = 2.0
-#: Memory cost of one light (G1/G2 lane) slot and one heavy (G3/main) slot.
-LIGHT_SLOT_GIB: Final[float] = 1.0
-HEAVY_SLOT_GIB: Final[float] = 3.0
-#: Per worker-session estimate used for pytest worker auto-scaling.
-WORKER_SESSION_GIB: Final[float] = 0.6
-
-#: Absolute ceiling on light slots; the heavy gate drains indices
-#: ``0..MAX_LIGHT_SLOTS`` so this is the monopoly-invariant bound.
-MAX_LIGHT_SLOTS: Final[int] = 8
-
-#: The heavy slot may double only on a large, otherwise-idle machine.
-HEAVY_DOUBLE_MIN_TOTAL_GIB: Final[float] = 32.0
-HEAVY_DOUBLE_MIN_AVAILABLE_GIB: Final[float] = 8.0
-HEAVY_DOUBLE_MIN_CORES: Final[int] = 12
-
-DEFAULT_SLOT_WAIT_SECONDS: Final[float] = 3600.0
-
-#: Pre-admission memory guard knobs.
-MEMORY_GUARD_ENV: Final[str] = "SABEROPS_GATE_MEMORY_GUARD"
-MIN_AVAILABLE_GB_ENV: Final[str] = "SABEROPS_GATE_MIN_AVAILABLE_GB"
-
-_MEMINFO_PATH: Final[Path] = Path("/proc/meminfo")
-_GUARD_DISABLED: Final[frozenset[str]] = frozenset({"0", "off", "no", "false", "none"})
-
-
-def read_meminfo(path: Path | str = _MEMINFO_PATH) -> dict[str, int]:
-    """Parse ``/proc/meminfo`` into ``{field: bytes}``; empty when unreadable.
-
-    ``/proc/meminfo`` reports kB values; each is multiplied by 1024 so every
-    number this module exposes is in bytes.
-    """
-    try:
-        text = Path(path).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return {}
-    values: dict[str, int] = {}
-    for line in text.splitlines():
-        key, sep, rest = line.partition(":")
-        if not sep:
-            continue
-        parts = rest.split()
-        if not parts:
-            continue
-        try:
-            values[key.strip()] = int(parts[0]) * 1024
-        except ValueError:
-            continue
-    return values
-
-
-def _sysconf_bytes(pages_key: str) -> int | None:
-    """Return ``SC_*_PAGES * SC_PAGE_SIZE`` bytes, or ``None`` on any failure."""
-    try:
-        pages = int(os.sysconf(pages_key))
-        size = int(os.sysconf("SC_PAGE_SIZE"))
-    except (ValueError, OSError, AttributeError):
-        return None
-    if pages <= 0 or size <= 0:
-        return None
-    return pages * size
-
-
-def total_memory_bytes() -> int | None:
-    """Total physical memory in bytes via ``/proc/meminfo`` then ``sysconf``."""
-    info = read_meminfo()
-    if "MemTotal" in info:
-        return info["MemTotal"]
-    return _sysconf_bytes("SC_PHYS_PAGES")
-
-
-def available_memory_bytes() -> int | None:
-    """Available memory in bytes via ``MemAvailable`` then a free-memory fallback."""
-    info = read_meminfo()
-    if "MemAvailable" in info:
-        return info["MemAvailable"]
-    if {"MemFree", "Buffers", "Cached"} <= info.keys():
-        return info["MemFree"] + info["Buffers"] + info["Cached"]
-    return _sysconf_bytes("SC_AVPHYS_PAGES")
-
-
-def cpu_core_count() -> int:
-    """Return the logical CPU count, clamped to at least one."""
-    return max(1, os.cpu_count() or 1)
-
-
-def dynamic_light_slots(
-    *,
-    available_bytes: int | None = None,
-    cpu_cores: int | None = None,
-) -> int:
-    """``max(1, min(MAX_LIGHT_SLOTS, (MemAvailable - 2GiB) // 1GiB, cores // 2))``."""
-    available = available_memory_bytes() if available_bytes is None else available_bytes
-    cores = cpu_core_count() if cpu_cores is None else cpu_cores
-    if available is None:
-        return 1
-    usable = available - int(SAFETY_FLOOR_GIB * GIB)
-    if usable <= 0:
-        return 1
-    by_ram = usable // int(LIGHT_SLOT_GIB * GIB)
-    by_cpu = cores // 2
-    return max(1, min(MAX_LIGHT_SLOTS, by_ram, by_cpu))
-
-
-def dynamic_heavy_slots(
-    *,
-    total_bytes: int | None = None,
-    available_bytes: int | None = None,
-    cpu_cores: int | None = None,
-) -> int:
-    """Return 1 by default, 2 only on a large, idle, many-core host (D-0076)."""
-    total = total_memory_bytes() if total_bytes is None else total_bytes
-    available = available_memory_bytes() if available_bytes is None else available_bytes
-    cores = cpu_core_count() if cpu_cores is None else cpu_cores
-    if total is None or available is None:
-        return 1
-    if (
-        total >= int(HEAVY_DOUBLE_MIN_TOTAL_GIB * GIB)
-        and available >= int(HEAVY_DOUBLE_MIN_AVAILABLE_GIB * GIB)
-        and cores >= HEAVY_DOUBLE_MIN_CORES
-    ):
-        return 2
-    return 1
-
-
-def dynamic_worker_count(
-    *,
-    available_bytes: int | None = None,
-    cpu_cores: int | None = None,
-) -> int:
-    """``max(1, min(cpu_cores, int(MemAvailable // 0.6GiB)))`` (D-0076)."""
-    available = available_memory_bytes() if available_bytes is None else available_bytes
-    cores = cpu_core_count() if cpu_cores is None else cpu_cores
-    if available is None:
-        return cores
-    by_ram = int(available // int(WORKER_SESSION_GIB * GIB))
-    return max(1, min(cores, by_ram))
-
-
-def memory_guard_enabled() -> bool:
-    """False when ``SABEROPS_GATE_MEMORY_GUARD`` explicitly disables the guard."""
-    return os.environ.get(MEMORY_GUARD_ENV, "1").strip().lower() not in _GUARD_DISABLED
-
-
-def heavy_gate_memory_floor_bytes() -> int:
-    """Live headroom a heavy gate needs before it may start (2 GiB + 3 GiB).
-
-    ``SABEROPS_GATE_MIN_AVAILABLE_GB`` overrides the floor in GiB.
-    """
-    floor = int((SAFETY_FLOOR_GIB + HEAVY_SLOT_GIB) * GIB)
-    raw = os.environ.get(MIN_AVAILABLE_GB_ENV, "").strip()
-    if not raw:
-        return floor
-    try:
-        override = float(raw)
-    except ValueError:
-        return floor
-    return max(0, int(override * GIB))
-
-
-def wait_for_memory_budget(
-    floor_bytes: int,
-    *,
-    wait: float,
-    notify: Callable[[str], None] | None = None,
-    clock: Callable[[], float] | None = None,
-    sleep: Callable[[float], None] | None = None,
-) -> bool:
-    """Soft-queue until available RAM clears ``floor_bytes``, bounded by ``wait``.
-
-    Returns ``True`` when the floor is satisfied (or memory cannot be read --
-    the guard never turns an unreadable ``/proc/meminfo`` into a failure) and
-    ``False`` when the budget elapsed while memory stayed below the floor.  It
-    is a queue, never an OOM crash: the caller then proceeds with its normal
-    slot wait.
-    """
-    if floor_bytes <= 0:
-        return True
-    moment = clock if clock is not None else time.monotonic
-    pause = sleep if sleep is not None else time.sleep
-    announce = notify if notify is not None else (lambda _message: None)
-    deadline = moment() + max(0.0, wait)
-    announced = False
-    while True:
-        available = available_memory_bytes()
-        if available is None or available >= floor_bytes:
-            return True
-        if not announced:
-            announce(
-                f"waiting for memory budget: available={available} bytes "
-                f"floor={floor_bytes} bytes"
-            )
-            announced = True
-        if moment() >= deadline:
-            return False
-        pause(min(0.5, max(0.0, deadline - moment())))
-
-
-def purge_stale_slot_metadata(root: Path | str, indices: Sequence[int]) -> tuple[int, ...]:
-    """Unlink ``<index>.json`` whose recorded holder PID is provably dead.
-
-    Self-healing (D-0076): a process that died or was interrupted leaves its
-    ``<index>.json`` behind, which then produces a misleading "waiting for ..."
-    notice naming a dead PID.  Because ``flock`` is released on process death,
-    a dead recorded PID always means the metadata is phantom, so it can be
-    removed immediately and the phantom display cleared.
-    """
-    base = Path(root)
-    purged: list[int] = []
-    for index in indices:
-        meta = base / f"{index}.json"
-        try:
-            raw = meta.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        try:
-            record = json.loads(raw)
-        except ValueError:
-            continue
-        if not isinstance(record, dict):
-            continue
-        pid = record.get("pid")
-        if not isinstance(pid, int) or isinstance(pid, bool) or _pid_alive(pid):
-            continue
-        try:
-            meta.unlink()
-        except OSError:
-            continue
-        purged.append(index)
-    return tuple(purged)
-
-
-@dataclass(frozen=True)
-class SlotCapacity:
-    """Resolved heavy/light slot counts and the slot-wait budget."""
-
-    heavy: int
-    light: int
-    wait: float
-    source: str
-
-    @property
-    def drain_lock_count(self) -> int:
-        """Lock count the heavy gate must hold to drain every light index.
-
-        The heavy gate drains ``0..max(light, MAX_LIGHT_SLOTS)`` so a lane can
-        never acquire an index the heavy gate has not drained, whichever light
-        count that lane computed.
-        """
-        return max(self.light, MAX_LIGHT_SLOTS) + 1
-
-
-def resolve_slot_capacity(env: Mapping[str, str] | None = None) -> SlotCapacity:
-    """Resolve slot counts from the environment or the dynamic D-0076 policy.
-
-    ``SABEROPS_GATE_SLOTS`` / ``SABEROPS_LANE_SLOTS`` / ``SABEROPS_GATE_SLOT_WAIT``
-    remain authoritative when set; otherwise heavy/light come from the live
-    memory policy.  A malformed value fails closed as
-    :class:`GateSlotWaitTimeout`, exactly as the previous static parser did.
-    """
-    environ = os.environ if env is None else env
-    source = "dynamic"
-    heavy_raw = environ.get("SABEROPS_GATE_SLOTS", "")
-    light_raw = environ.get("SABEROPS_LANE_SLOTS", "")
-    wait_raw = environ.get("SABEROPS_GATE_SLOT_WAIT", "")
-    try:
-        wait = float(wait_raw) if wait_raw.strip() else DEFAULT_SLOT_WAIT_SECONDS
-    except ValueError as exc:
-        raise GateSlotWaitTimeout(f"invalid slot wait configuration: {exc}") from exc
-    if wait < 0:
-        raise GateSlotWaitTimeout("slot wait must be >= 0")
-    if heavy_raw.strip():
-        try:
-            heavy = int(heavy_raw)
-        except ValueError as exc:
-            raise GateSlotWaitTimeout(f"invalid heavy slot configuration: {exc}") from exc
-        if heavy < 1:
-            raise GateSlotWaitTimeout("heavy slot count must be >= 1")
-        source = "env"
-    else:
-        heavy = dynamic_heavy_slots()
-    if light_raw.strip():
-        try:
-            light = int(light_raw)
-        except ValueError as exc:
-            raise GateSlotWaitTimeout(f"invalid light slot configuration: {exc}") from exc
-        if light < 1:
-            raise GateSlotWaitTimeout("light slot count must be >= 1")
-        # An explicit light count above the documented ceiling would be usable
-        # beyond the index range the heavy gate drains, so it is clamped to
-        # MAX_LIGHT_SLOTS; the drained and usable bounds can then never
-        # disagree (a lane can never use an index the heavy gate skips).
-        light = min(light, MAX_LIGHT_SLOTS)
-        source = "env"
-    else:
-        light = dynamic_light_slots()
-    return SlotCapacity(heavy=heavy, light=light, wait=wait, source=source)
-
-
-def _acquire_all(paths: Sequence[Path], count: int, deadline: float) -> list[TextIO]:
-    """Acquire ``count`` exclusive flocks from ``paths`` before ``deadline``."""
-    handles: list[TextIO] = []
-    for path in paths[:count]:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        handles.append(path.open("a+"))
-    try:
-        while True:
-            acquired: list[TextIO] = []
-            for handle in handles:
-                try:
-                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    acquired.append(handle)
-                except BlockingIOError:
-                    pass
-            if len(acquired) == count:
-                return handles
-            for handle in acquired:
-                fcntl.flock(handle, fcntl.LOCK_UN)
-            if time.monotonic() >= deadline:
-                raise GateSlotWaitTimeout("host-gates slot wait exceeded")
-            time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
-    except BaseException:
-        for handle in handles:
-            handle.close()
-        raise
-
-
-def _release(handles: Sequence[TextIO]) -> None:
-    for handle in handles:
-        try:
-            fcntl.flock(handle, fcntl.LOCK_UN)
-        finally:
-            handle.close()
-
-
-def _acquire_one(paths: Sequence[Path], deadline: float) -> list[TextIO]:
-    """Acquire exactly one exclusive flock from the ``paths`` pool."""
-    handles: list[TextIO] = []
-    for path in paths:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        handles.append(path.open("a+"))
-    try:
-        while True:
-            for handle in handles:
-                try:
-                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    return [handle]
-                except BlockingIOError:
-                    pass
-            if time.monotonic() >= deadline:
-                raise GateSlotWaitTimeout("host-gates slot wait exceeded")
-            time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
-    except BaseException:
-        for handle in handles:
-            handle.close()
-        raise
+read_meminfo = _gt.read_meminfo
+total_memory_bytes = _gt.total_memory_bytes
+available_memory_bytes = _gt.available_memory_bytes
+cpu_core_count = _gt.cpu_core_count
+memory_guard_enabled = _gt.memory_guard_enabled
 
 
 class GateSlotPoolProtocol(Protocol):
-    """Structural contract for the engine's host-gates slot pool.
+    """Structural contract for the engine's host-gates memory reservation pool.
 
-    Lets the executor accept the real file-lock pool or an equivalent test
+    Lets the executor accept the real ledger pool or an equivalent test
     double without importing a concrete implementation.
     """
 
@@ -2079,87 +1774,62 @@ class GateSlotPoolProtocol(Protocol):
 
 
 class GateSlotPool:
-    """The engine's ``host-gates`` local capacity pool (ADR-0003 D3).
+    """The engine's host-wide memory reservation pool (ADR-0003 D3 + A8).
 
-    Uses exactly the heavy/light flock files the developer gate uses, so an
-    engine gate and a shell gate never run past each other:
-
-    * heavy (``saberops-gate-slots``, default 1) -- exclusive, held for the
-      whole of G3 / main-gate runs, which then drain every light slot;
-    * light (``saberops-gate-light-slots``, default 2) -- held by G1/G2 runs,
-      which wait for a free heavy slot (observe) before taking one light.
+    Delegates directly to :class:`gate_tools.MemoryLedger` so every SaberOps
+    copy, shell gate, and engine gate draws from one shared memory ledger.
     """
 
     def __init__(self, common_dir: Path | str) -> None:
         self.common = Path(common_dir)
-        self.heavy_root = self.common / "saberops-gate-slots"
-        self.light_root = self.common / "saberops-gate-light-slots"
+        self.ledger = _gt.MemoryLedger(_gt.default_ledger_root(self.common))
+        self._local = threading.local()
+
+    def current_lease(self) -> Any | None:
+        """Return the innermost active ``MemoryLease`` on the current thread."""
+        stack = getattr(self._local, "leases", None)
+        return stack[-1] if stack else None
+
+    @contextlib.contextmanager
+    def _reserve(
+        self, step: str, size_bucket: str, *, wait: float | None = None
+    ) -> Iterator[None]:
+        try:
+            budget_wait = _gt.resolve_wait_seconds(wait)
+        except ValueError as exc:
+            raise GateSlotWaitTimeout(f"invalid slot wait configuration: {exc}") from exc
+        try:
+            lease = self.ledger.acquire(
+                step,
+                size_bucket,
+                worktree=str(self.common),
+                wait=budget_wait,
+                notify=print,
+            )
+        except TimeoutError as exc:
+            raise GateSlotWaitTimeout("host-gates slot wait exceeded") from exc
+        stack = getattr(self._local, "leases", None)
+        if stack is None:
+            stack = []
+            self._local.leases = stack
+        stack.append(lease)
+        try:
+            yield
+        finally:
+            stack.pop()
+            lease.release()
 
     @contextlib.contextmanager
     def heavy(self, *, wait: float | None = None) -> Any:
-        """Hold the exclusive heavy slot and every potential light slot (drain)."""
-        capacity = resolve_slot_capacity()
-        budget = capacity.wait if wait is None else wait
-        if memory_guard_enabled():
-            wait_for_memory_budget(
-                heavy_gate_memory_floor_bytes(), wait=budget, notify=print
-            )
-        deadline = time.monotonic() + budget
-        heavy_indices = list(range(capacity.heavy))
-        light_indices = list(range(capacity.drain_lock_count))
-        purge_stale_slot_metadata(self.heavy_root, heavy_indices)
-        purge_stale_slot_metadata(self.light_root, light_indices)
-        heavy = _acquire_all(
-            [self.heavy_root / f"{i}.lock" for i in heavy_indices],
-            capacity.heavy,
-            deadline,
-        )
-        try:
-            light = _acquire_all(
-                [self.light_root / f"{i}.lock" for i in light_indices],
-                len(light_indices),
-                deadline,
-            )
-            try:
-                # We hold every exclusive lock, so any metadata here is phantom.
-                purge_stale_slot_metadata(self.heavy_root, heavy_indices)
-                purge_stale_slot_metadata(self.light_root, light_indices)
-                yield
-            finally:
-                _release(light)
-        finally:
-            _release(heavy)
+        """Reserve a full-gate memory grant."""
+        with self._reserve("full", "full", wait=wait):
+            yield
 
     @contextlib.contextmanager
     def light(self, *, wait: float | None = None) -> Any:
-        """Wait for a free heavy slot, then hold exactly one light slot."""
-        capacity = resolve_slot_capacity()
-        budget = capacity.wait if wait is None else wait
-        deadline = time.monotonic() + budget
-        heavy_indices = list(range(capacity.heavy))
-        light_indices = list(range(capacity.light))
-        # Observe the heavy slot: block until it is free, then release so the
-        # order matches the developer gate (heavy before light, never both
-        # while waiting) and cannot deadlock against it.  The heavy gate drains
-        # every potential light index, so a free heavy slot also clears the
-        # light pool once we observe and drop it.
-        purge_stale_slot_metadata(self.heavy_root, heavy_indices)
-        observed = _acquire_all(
-            [self.heavy_root / f"{i}.lock" for i in heavy_indices],
-            capacity.heavy,
-            deadline,
-        )
-        _release(observed)
-        purge_stale_slot_metadata(self.light_root, light_indices)
-        light = _acquire_one(
-            [self.light_root / f"{i}.lock" for i in light_indices], deadline
-        )
-        try:
-            # We hold one light lock; any dead metadata in the pool is phantom.
-            purge_stale_slot_metadata(self.light_root, light_indices)
+        """Reserve an affected-gate memory grant."""
+        with self._reserve("affected", "small", wait=wait):
             yield
-        finally:
-            _release(light)
 
 
 def host_disk_admission(
@@ -2468,6 +2138,10 @@ class EngineGateResult:
     retirement: RetirementCheck | None = None
     protection: GateProtectionResult | None = None
     findings: tuple[str, ...] = ()
+    memory_grant_bytes: int = 0
+    memory_peak_bytes: int = 0
+    memory_wait_seconds: float = 0.0
+    memory_freeze_count: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -2484,6 +2158,12 @@ class EngineGateResult:
             "wall_time": self.wall_time,
             "history_path": self.history_path,
             "findings": list(self.findings),
+            "memory_budget": {
+                "grant_bytes": self.memory_grant_bytes,
+                "measured_peak_bytes": self.memory_peak_bytes,
+                "wait_seconds": round(self.memory_wait_seconds, 3),
+                "freeze_count": self.memory_freeze_count,
+            },
         }
         if self.scope is not None:
             payload["write_scope"] = self.scope.as_dict()
@@ -2631,15 +2311,38 @@ class EngineGateExecutor:
                 findings=(*findings, disk_reason),
             )
 
-        # --- host-gates slot + profile execution ---------------------------
+        # --- host-gates memory reservation + profile execution -------------
         pool = self._slot_pool or GateSlotPool(common)
+        active_lease: Any | None = None
         try:
             if kind in _HEAVY_GATE_KINDS:
                 with pool.heavy(wait=request.slot_wait):
-                    process = self._run_profile(request, kind, profile, repo, evidence_dir)
+                    active_lease = (
+                        pool.current_lease() if isinstance(pool, GateSlotPool) else None
+                    )
+                    process = self._run_profile(
+                        request,
+                        kind,
+                        profile,
+                        repo,
+                        evidence_dir,
+                        common=common,
+                        lease=active_lease,
+                    )
             else:
                 with pool.light(wait=request.slot_wait):
-                    process = self._run_profile(request, kind, profile, repo, evidence_dir)
+                    active_lease = (
+                        pool.current_lease() if isinstance(pool, GateSlotPool) else None
+                    )
+                    process = self._run_profile(
+                        request,
+                        kind,
+                        profile,
+                        repo,
+                        evidence_dir,
+                        common=common,
+                        lease=active_lease,
+                    )
         except GateSlotWaitTimeout as exc:
             return self._record(
                 request, kind, profile, common, evidence_dir, started,
@@ -2674,6 +2377,9 @@ class EngineGateExecutor:
         if decision.decision is ProjectedDecisionKind.BLOCKED:
             outcome_word = "BLOCKED"
             findings.append(decision.reason)
+        mem_grant, mem_peak, mem_wait, mem_freezes = _extract_memory_visibility(
+            process=process, artifact=artifact
+        )
         return self._record(
             request, kind, profile, common, evidence_dir, started,
             outcome=outcome_word,
@@ -2687,6 +2393,10 @@ class EngineGateExecutor:
             protection=protection,
             findings=tuple(findings),
             wall=wall,
+            memory_grant_bytes=mem_grant,
+            memory_peak_bytes=mem_peak,
+            memory_wait_seconds=mem_wait,
+            memory_freeze_count=mem_freezes,
         )
 
     # -- helpers ------------------------------------------------------------
@@ -2745,26 +2455,49 @@ class EngineGateExecutor:
         profile: GateProfile,
         repo: Path,
         evidence_dir: Path,
+        *,
+        common: Path | None = None,
+        lease: Any | None = None,
     ) -> ProcessResult | None:
+        from dataclasses import replace
+
         result_dir = evidence_dir / "result"
         result_dir.mkdir(parents=True, exist_ok=True)
+        disk_tmp = str(_gt.disk_scratch_base())
         env = {
             "SABEROPS_GATE_KIND": kind.value,
             "SABEROPS_GATE_PRODUCER": GateProducer.ENGINE.value,
             "SABEROPS_GATE_PROFILE": profile.name.value,
             "SABEROPS_GATE_LABEL": kind.value,
-            # The engine already holds the host-gates slot, and it owns the
+            # The engine already holds the host-gates memory lease, and it owns the
             # single history line; the child must not re-acquire or duplicate.
             "SABEROPS_GATE_EXTERNAL_SLOT": "1",
             "SABEROPS_GATE_NO_HISTORY": "1",
             "SABEROPS_GATE_RESULT_DIR": str(result_dir),
+            "TMPDIR": disk_tmp,
+            "TMP": disk_tmp,
+            "TEMP": disk_tmp,
             **dict(request.extra_env),
         }
+        if lease is not None:
+            env[_gt.GRANTED_MEMORY_ENV] = str(lease.grant_bytes)
         selector_nodes: list[str] = []
         if profile.selector_command:
             selector_nodes = self._run_selector(profile, repo, env)
         deadline = time.monotonic() + profile.wall_budget_seconds
         last: ProcessResult | None = None
+        ledger = (
+            _gt.MemoryLedger(_gt.default_ledger_root(common, repo=repo))
+            if lease is not None
+            else None
+        )
+        step_name = "full" if kind in _HEAVY_GATE_KINDS else "affected"
+        bucket_name = (
+            "full"
+            if kind in _HEAVY_GATE_KINDS
+            else _gt.selection_size_bucket("affected", len(selector_nodes) or None)
+        )
+        max_peak = 0
         for command in profile.render_commands(
             repo=str(repo),
             base=request.base,
@@ -2776,7 +2509,44 @@ class EngineGateExecutor:
             if not command:
                 continue
             remaining = max(1.0, deadline - time.monotonic())
-            last = run_process(command, cwd=repo, env=env, timeout=remaining)
+            if lease is not None and ledger is not None:
+
+                def _invoke(
+                    scoped_cmd: list[str],
+                    lease_env: dict[str, str],
+                    _grant: int,
+                    _workers: int,
+                    cmd_timeout: float = remaining,
+                ) -> tuple[int, bool, bool, ProcessResult]:
+                    proc = run_process(
+                        scoped_cmd,
+                        cwd=repo,
+                        env={**env, **lease_env},
+                        timeout=cmd_timeout,
+                    )
+                    return proc.exit_code, proc.timed_out, proc.control_interrupted, proc
+
+                payload, stats = _gt.run_with_lease(
+                    ledger=ledger,
+                    step=step_name,
+                    size_bucket=bucket_name,
+                    invoke=_invoke,
+                    cmd=command,
+                    worktree=str(repo),
+                    existing_lease=lease,
+                    rerun_if_stopped=True,
+                )
+                assert isinstance(payload, ProcessResult)
+                max_peak = max(max_peak, stats.measured_peak_bytes)
+                last = replace(
+                    payload,
+                    memory_grant_bytes=stats.grant_bytes,
+                    memory_peak_bytes=max_peak,
+                    memory_wait_seconds=stats.wait_seconds,
+                    memory_freeze_count=stats.freeze_count,
+                )
+            else:
+                last = run_process(command, cwd=repo, env=env, timeout=remaining)
             if last.exit_code != 0 or last.launch_failed or last.timed_out:
                 break
         return last
@@ -2817,6 +2587,10 @@ class EngineGateExecutor:
         findings: tuple[str, ...],
         protection: GateProtectionResult | None = None,
         wall: float | None = None,
+        memory_grant_bytes: int = 0,
+        memory_peak_bytes: int = 0,
+        memory_wait_seconds: float = 0.0,
+        memory_freeze_count: int = 0,
     ) -> EngineGateResult:
         wall = wall if wall is not None else round(time.monotonic() - started, 2)
         head_sha = _resolve_head(request, common)
@@ -2840,6 +2614,10 @@ class EngineGateExecutor:
             retirement=retirement,
             protection=protection,
             findings=findings,
+            memory_grant_bytes=memory_grant_bytes,
+            memory_peak_bytes=memory_peak_bytes,
+            memory_wait_seconds=memory_wait_seconds,
+            memory_freeze_count=memory_freeze_count,
         )
         outcome_path.write_text(json.dumps(result.as_dict(), indent=2) + "\n", encoding="utf-8")
         try:
@@ -2863,6 +2641,33 @@ class EngineGateExecutor:
         except OSError as exc:
             print(f"warning: could not append engine gate history: {exc}", flush=True)
         return result
+
+
+def _extract_memory_visibility(
+    *, process: ProcessResult | None, artifact: Mapping[str, Any] | None
+) -> tuple[int, int, float, int]:
+    """Read grant, peak, wait, and freeze counts from profile outcome or ProcessResult."""
+    if isinstance(artifact, Mapping):
+        mb = artifact.get("memory_budget")
+        if isinstance(mb, Mapping):
+            raw_grant = mb.get("grant_bytes", 0)
+            raw_peak = mb.get("measured_peak_bytes", 0)
+            raw_wait = mb.get("wait_seconds", 0.0)
+            raw_freezes = mb.get("freeze_count", 0)
+            return (
+                int(raw_grant) if isinstance(raw_grant, (int, float)) else 0,
+                int(raw_peak) if isinstance(raw_peak, (int, float)) else 0,
+                float(raw_wait) if isinstance(raw_wait, (int, float)) else 0.0,
+                int(raw_freezes) if isinstance(raw_freezes, int) else 0,
+            )
+    if process is not None:
+        return (
+            process.memory_grant_bytes,
+            process.memory_peak_bytes,
+            process.memory_wait_seconds,
+            process.memory_freeze_count,
+        )
+    return 0, 0, 0.0, 0
 
 
 def _git_common_dir(repo: Path) -> Path:
@@ -2977,10 +2782,6 @@ def _resolve_head(request: EngineGateRequest, common: Path) -> str:
 __all__ = [
     "GATE_SCRATCH_LABELS",
     "GIB",
-    "HEAVY_SLOT_GIB",
-    "LIGHT_SLOT_GIB",
-    "MAX_LIGHT_SLOTS",
-    "SAFETY_FLOOR_GIB",
     "EngineGateExecutor",
     "EngineGateRequest",
     "EngineGateResult",
@@ -2999,7 +2800,6 @@ __all__ = [
     "GateSlotPool",
     "GateSlotPoolProtocol",
     "GateSlotWaitTimeout",
-    "SlotCapacity",
     "_DEFAULT_SAFETY_FLOOR_BYTES",
     "_DEFAULT_TMPFS_CANDIDATE",
     "_MIN_USABLE_BYTES",
@@ -3007,10 +2807,6 @@ __all__ = [
     "cpu_core_count",
     "default_gate_disk_guard",
     "disk_floor_ok",
-    "dynamic_heavy_slots",
-    "dynamic_light_slots",
-    "dynamic_worker_count",
-    "heavy_gate_memory_floor_bytes",
     "host_disk_admission",
     "load_base_gate_definitions",
     "load_project_gate_scratch_policy",
@@ -3018,12 +2814,9 @@ __all__ = [
     "memory_guard_enabled",
     "preflight_ram_scratch",
     "project_policy_path",
-    "purge_stale_slot_metadata",
     "read_meminfo",
-    "resolve_slot_capacity",
     "set_project_gate_scratch_policy",
     "sweep_gate_scratch",
     "total_memory_bytes",
     "verify_gate_definitions",
-    "wait_for_memory_budget",
 ]

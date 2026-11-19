@@ -47,6 +47,10 @@ class ProcessResult:
     verification_tree: str | None = None
     verification_commit: str | None = None
     verification_mutated: bool = False
+    memory_grant_bytes: int = 0
+    memory_peak_bytes: int = 0
+    memory_wait_seconds: float = 0.0
+    memory_freeze_count: int = 0
 
     @property
     def passed(self) -> bool:

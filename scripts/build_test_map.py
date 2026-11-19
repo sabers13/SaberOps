@@ -39,18 +39,21 @@ and the map is rebuilt once at the consolidation barrier with ``--wave-barrier``
 so concurrent integrators do not each monopolise the heavy slot.
 
 The full suite runs once under coverage.py with pytest-xdist
-(``-n <SABEROPS_MAP_WORKERS|SABEROPS_GATE_WORKERS|4> --dist worksteal``);
-``parallel = true`` plus ``coverage combine`` merge the per-worker shard
-contexts.  The run holds the exclusive heavy-gate slot (via
-``scripts/gate_tools.py exclusive``) so it never competes with another gate;
+(``-n <workers> --dist worksteal``), sized from the host-wide memory budget
+grant; ``parallel = true`` plus ``coverage combine`` merge the per-worker shard
+contexts.  The run holds a reservation on the shared memory ledger (via
+``scripts/gate_tools.py exclusive``) so it never competes blindly;
 ``--no-slot`` skips that for recovery/seed runs only.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
+import importlib.util
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -60,106 +63,43 @@ from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as package_version
 from pathlib import Path, PurePosixPath
+from types import ModuleType
 
 MAP_DIRNAME = "saberops-test-map"
 MAP_META = "meta.json"
 MAP_FILES = "files"
 MAP_VERSION = 2
 
-# D-0061: a conservative default cap keeps coverage-map peak RAM in the
-# owner-declared ~1.8-2.4 GiB band instead of the uncapped serial/8-worker run.
-DEFAULT_MAP_WORKERS = 4
-SABEROPS_MAP_WORKERS_ENV = "SABEROPS_MAP_WORKERS"
-SABEROPS_GATE_WORKERS_ENV = "SABEROPS_GATE_WORKERS"
+
+def _gate_tools() -> ModuleType:
+    """Load the sibling ``scripts/gate_tools.py`` module without product imports."""
+    existing = sys.modules.get("gate_tools")
+    if existing is not None:
+        return existing
+    tools_path = Path(__file__).resolve().parent / "gate_tools.py"
+    spec = importlib.util.spec_from_file_location("gate_tools", tools_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load {tools_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["gate_tools"] = module
+    spec.loader.exec_module(module)
+    return module
 
 
-def positive_int_env(name: str, default: int) -> int:
-    """Return a positive int from ``name``; malformed values keep the cap."""
-    raw = os.environ.get(name)
-    if raw is None or not raw.strip():
-        return default
-    try:
-        value = int(raw.strip())
-    except ValueError:
-        print(f"warning: {name}={raw!r} is not an integer; using {default}", flush=True)
-        return default
-    if value < 1:
-        print(f"warning: {name}={raw!r} must be >= 1; using {default}", flush=True)
-        return default
-    return value
-
-
-def map_workers() -> int:
-    """Worker count for the coverage suite: map knob, then gate knob, then RAM.
-
-    The final fallback is the D-0076 worker auto-scaling
-    (``max(1, min(cores, MemAvailable // 0.6 GiB))``) so the map build sizes
-    itself to the live machine; an explicit env knob still wins.
-    """
-    if os.environ.get(SABEROPS_MAP_WORKERS_ENV, "").strip():
-        return positive_int_env(SABEROPS_MAP_WORKERS_ENV, DEFAULT_MAP_WORKERS)
-    if os.environ.get(SABEROPS_GATE_WORKERS_ENV, "").strip():
-        return positive_int_env(SABEROPS_GATE_WORKERS_ENV, DEFAULT_MAP_WORKERS)
-    return dynamic_worker_count()
-
-
-#: Per worker-session memory estimate used by the D-0076 auto-scaling formula.
-WORKER_SESSION_GIB = 0.6
-_MEMINFO_PATH = Path("/proc/meminfo")
-
-
-def _read_meminfo_bytes() -> dict[str, int]:
-    """Parse ``/proc/meminfo`` into ``{field: bytes}``; empty when unreadable."""
-    try:
-        text = _MEMINFO_PATH.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return {}
-    values: dict[str, int] = {}
-    for line in text.splitlines():
-        key, sep, rest = line.partition(":")
-        if not sep:
-            continue
-        parts = rest.split()
-        if not parts:
-            continue
-        try:
-            values[key.strip()] = int(parts[0]) * 1024
-        except ValueError:
-            continue
-    return values
-
-
-def available_memory_bytes() -> int | None:
-    """Available memory in bytes via ``MemAvailable`` then an ``sysconf`` fallback."""
-    info = _read_meminfo_bytes()
-    if "MemAvailable" in info:
-        return info["MemAvailable"]
-    try:
-        pages = int(os.sysconf("SC_AVPHYS_PAGES"))
-        size = int(os.sysconf("SC_PAGE_SIZE"))
-    except (ValueError, OSError, AttributeError):
-        return None
-    return pages * size if pages > 0 and size > 0 else None
-
-
-def cpu_core_count() -> int:
-    return max(1, os.cpu_count() or 1)
-
-
-def dynamic_worker_count(
-    available_bytes: int | None = None, cpu_cores: int | None = None
-) -> int:
-    """``max(1, min(cpu_cores, int(MemAvailable // 0.6GiB)))`` (D-0076).
-
-    An unreadable ``/proc/meminfo`` keeps the conservative ``DEFAULT_MAP_WORKERS``
-    cap instead of restoring uncapped parallelism.
-    """
-    available = available_memory_bytes() if available_bytes is None else available_bytes
-    cores = cpu_core_count() if cpu_cores is None else cpu_cores
-    if available is None:
-        return min(cores, DEFAULT_MAP_WORKERS)
-    by_ram = int(available // int(WORKER_SESSION_GIB * 1024**3))
-    return max(1, min(cores, by_ram))
+def map_workers(repo: Path | None = None) -> int:
+    """Worker count from active ledger grant or predicted ``coverage-map`` grant."""
+    gt = _gate_tools()
+    raw_granted = os.environ.get(gt.GRANTED_WORKERS_ENV, "").strip()
+    if raw_granted.isdigit() and int(raw_granted) >= 1:
+        return int(raw_granted)
+    ledger = gt.MemoryLedger(gt.default_ledger_root(repo=repo))
+    raw_mem = os.environ.get(gt.GRANTED_MEMORY_ENV, "").strip()
+    grant = (
+        int(raw_mem)
+        if raw_mem.isdigit() and int(raw_mem) > 0
+        else ledger.predict_peak("coverage-map", "full")
+    )
+    return int(ledger.workers_for_grant(grant, "coverage-map", "full"))
 
 
 # ---------------------------------------------------------------------------
@@ -566,102 +506,117 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
-    if args.from_data:
-        if args.build_seconds is None:
-            print("--from-data needs --build-seconds (the reused suite runtime)")
-            return 2
-        print(f"repository: {repo}")
-        print(f"commit: {commit}")
-        print(f"map: {map_dir}")
-        print("--- pytest --collect-only ---")
-        node_ids = collect_node_ids(python, repo)
-        print(f"collected {len(node_ids)} test node IDs")
-        data_path = Path(args.from_data)
-        duration_s = args.build_seconds
-        pytest_exit = args.pytest_exit
-        print(f"reused {data_path} (suite {duration_s:.1f}s, pytest exit {pytest_exit})")
-    else:
-        tmpdir = Path(tempfile.mkdtemp(prefix="saberops-test-map-"))
-        rcfile = tmpdir / "coveragerc"
-        rcfile.write_text(
-            RC_TEMPLATE.format(
-                data_file=(tmpdir / ".coverage").as_posix(),
-                source=(repo / "src").as_posix(),
-            ),
-            encoding="utf-8",
-        )
-        env = dict(os.environ)
-        plugindir = tmpdir / "plugins"
-        plugindir.mkdir()
-        (plugindir / f"{PLUGIN_MODULE}.py").write_text(SETUP_CONTEXT_PLUGIN, encoding="utf-8")
-        env["PYTHONPATH"] = str(plugindir) + os.pathsep + env.get("PYTHONPATH", "")
-        if with_subprocesses:
-            sitedir = tmpdir / "site"
-            sitedir.mkdir()
-            (sitedir / "sitecustomize.py").write_text(SITECUSTOMIZE, encoding="utf-8")
-            env["COVERAGE_PROCESS_START"] = str(rcfile)
-            env["PYTHONPATH"] = str(sitedir) + os.pathsep + env["PYTHONPATH"]
-
-        print(f"repository: {repo}")
-        print(f"commit: {commit}")
-        print(f"map: {map_dir}")
-        print(f"subprocess capture: {'on' if with_subprocesses else 'off'}")
-        print(f"setup-context plugin: {PLUGIN_MODULE} (attributes fixture lines)")
-
-        print("--- pytest --collect-only ---")
-        node_ids = collect_node_ids(python, repo)
-        print(f"collected {len(node_ids)} test node IDs")
-
-        workers = map_workers()
-        print(
-            f"--- full suite under coverage (parallel, -n {workers} --dist worksteal; "
-            "xdist shards merged by coverage combine) ---"
-        )
-        started = time.monotonic()
-        suite_cmd = suite_command(python, rcfile, PLUGIN_MODULE, workers)
-        if args.no_slot:
-            print("exclusive heavy-gate slot: disabled by --no-slot")
+    with contextlib.ExitStack() as stack:
+        if args.from_data:
+            if args.build_seconds is None:
+                print("--from-data needs --build-seconds (the reused suite runtime)")
+                return 2
+            print(f"repository: {repo}")
+            print(f"commit: {commit}")
+            print(f"map: {map_dir}")
+            print("--- pytest --collect-only ---")
+            node_ids = collect_node_ids(python, repo)
+            print(f"collected {len(node_ids)} test node IDs")
+            data_path = Path(args.from_data)
+            duration_s = args.build_seconds
+            pytest_exit = args.pytest_exit
+            print(f"reused {data_path} (suite {duration_s:.1f}s, pytest exit {pytest_exit})")
         else:
-            suite_cmd = exclusive_command(sys.executable, suite_cmd)
-        suite = subprocess.run(
-            suite_cmd,
-            cwd=repo,
-            check=False,
-            env=env,
+            gt = _gate_tools()
+            disk_base = gt.disk_scratch_base()
+            disk_base.mkdir(parents=True, exist_ok=True)
+            tmpdir = Path(tempfile.mkdtemp(prefix="saberops-test-map-", dir=str(disk_base)))
+            stack.callback(shutil.rmtree, tmpdir, ignore_errors=True)
+            rcfile = tmpdir / "coveragerc"
+            rcfile.write_text(
+                RC_TEMPLATE.format(
+                    data_file=(tmpdir / ".coverage").as_posix(),
+                    source=(repo / "src").as_posix(),
+                ),
+                encoding="utf-8",
+            )
+            env = dict(os.environ)
+            for tmp_key in ("TMPDIR", "TMP", "TEMP"):
+                env[tmp_key] = str(tmpdir)
+            plugindir = tmpdir / "plugins"
+            plugindir.mkdir()
+            (plugindir / f"{PLUGIN_MODULE}.py").write_text(
+                SETUP_CONTEXT_PLUGIN, encoding="utf-8"
+            )
+            env["PYTHONPATH"] = str(plugindir) + os.pathsep + env.get("PYTHONPATH", "")
+            if with_subprocesses:
+                sitedir = tmpdir / "site"
+                sitedir.mkdir()
+                (sitedir / "sitecustomize.py").write_text(SITECUSTOMIZE, encoding="utf-8")
+                env["COVERAGE_PROCESS_START"] = str(rcfile)
+                env["PYTHONPATH"] = str(sitedir) + os.pathsep + env["PYTHONPATH"]
+
+            print(f"repository: {repo}")
+            print(f"commit: {commit}")
+            print(f"map: {map_dir}")
+            print(f"subprocess capture: {'on' if with_subprocesses else 'off'}")
+            print(f"setup-context plugin: {PLUGIN_MODULE} (attributes fixture lines)")
+
+            print("--- pytest --collect-only ---")
+            node_ids = collect_node_ids(python, repo)
+            print(f"collected {len(node_ids)} test node IDs")
+
+            workers = map_workers(repo)
+            print(
+                f"--- full suite under coverage (parallel, -n {workers} --dist worksteal; "
+                "xdist shards merged by coverage combine) ---"
+            )
+            started = time.monotonic()
+            suite_cmd = suite_command(python, rcfile, PLUGIN_MODULE, workers)
+            if args.no_slot or os.environ.get(gt.EXTERNAL_LEASE_ENV) == "1":
+                if args.no_slot:
+                    print("memory ledger reservation: disabled by --no-slot")
+                else:
+                    print("memory ledger reservation: held by calling gate")
+            else:
+                suite_cmd = exclusive_command(sys.executable, suite_cmd)
+            suite = subprocess.run(
+                suite_cmd,
+                cwd=repo,
+                check=False,
+                env=env,
+            )
+            duration_s = time.monotonic() - started
+            print(f"pytest exit: {suite.returncode} in {duration_s:.1f}s")
+            if suite.returncode != 0:
+                print("warning: suite failed; the map still records what executed", flush=True)
+            pytest_exit = suite.returncode
+
+            subprocess.run(
+                [python, "-m", "coverage", "combine", f"--rcfile={rcfile}"],
+                cwd=repo,
+                check=False,
+                capture_output=True,
+                env=env,
+            )
+            data_path = tmpdir / ".coverage"
+            if not data_path.exists():
+                print("coverage combine produced no data file")
+                return 2
+
+        print("--- building map ---")
+        meta = build_shards(
+            repo, data_path, node_ids, commit, duration_s, pytest_exit,
+            with_subprocesses, map_dir,
         )
-        duration_s = time.monotonic() - started
-        print(f"pytest exit: {suite.returncode} in {duration_s:.1f}s")
-        if suite.returncode != 0:
-            print("warning: suite failed; the map still records what executed", flush=True)
-        pytest_exit = suite.returncode
 
-        subprocess.run(
-            [python, "-m", "coverage", "combine", f"--rcfile={rcfile}"],
-            cwd=repo,
-            check=False,
-            capture_output=True,
+        size = sum(path.stat().st_size for path in map_dir.rglob("*") if path.is_file())
+        print(f"wrote {map_dir} ({size} bytes in {meta['shard_count'] + 1} files)")
+        print(
+            f"build time: {duration_s:.1f}s, tests: {meta['test_count']}, "
+            f"contexts: {meta['context_count']}, "
+            f"unmatched nodes: {meta['unmatched_nodes']}, "
+            f"src files in map: {meta['shard_count']}"
         )
-        data_path = tmpdir / ".coverage"
-        if not data_path.exists():
-            print("coverage combine produced no data file")
-            return 2
-
-    print("--- building map ---")
-    meta = build_shards(
-        repo, data_path, node_ids, commit, duration_s, pytest_exit,
-        with_subprocesses, map_dir,
-    )
-
-    size = sum(path.stat().st_size for path in map_dir.rglob("*") if path.is_file())
-    print(f"wrote {map_dir} ({size} bytes in {meta['shard_count'] + 1} files)")
-    print(f"build time: {duration_s:.1f}s, tests: {meta['test_count']}, "
-          f"contexts: {meta['context_count']}, "
-          f"unmatched nodes: {meta['unmatched_nodes']}, "
-          f"src files in map: {meta['shard_count']}")
-    print(f"blind spots ({len(meta['blind'])} src modules with zero covering contexts):")
-    for rel in meta["blind"]:
-        print(f"  {rel}")
-    return 0
+        print(f"blind spots ({len(meta['blind'])} src modules with zero covering contexts):")
+        for rel in meta["blind"]:
+            print(f"  {rel}")
+        return 0
 
 
 if __name__ == "__main__":  # pragma: no cover - CLI entry point

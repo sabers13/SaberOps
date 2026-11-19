@@ -60,167 +60,71 @@ def test_keep_failed_cap(tmp_path: Path) -> None:
     assert not new.exists()
 
 
-def test_slot_waits(tmp_path: Path) -> None:
+def test_memory_ledger_waits_and_acquires_when_released(tmp_path: Path) -> None:
+    """Holding predicted budget blocks a second reservation until released."""
+    avail = g.DESKTOP_RESERVE_BYTES + 2 * g.GB
+    ledger = g.MemoryLedger(
+        tmp_path / "ledger",
+        cold_start_peak_bytes=2 * g.GB,
+        available_memory_fn=lambda: avail,
+        pressure_fn=lambda: g.MemoryPressure(0.0, 0.0),
+    )
     notices: list[str] = []
     started = time.monotonic()
-    with g.slot(tmp_path, {"pid": os.getpid()}):
-        with pytest.raises(TimeoutError):
-            with g.slot(tmp_path, {}, wait=0.2, notify=notices.append):
-                pytest.fail("second slot acquired")
+    with ledger.acquire("full", "full"):
+        with pytest.raises(TimeoutError, match="MEMORY_BUDGET_TIMEOUT"):
+            with ledger.acquire("full", "full", wait=0.2, notify=notices.append):
+                pytest.fail("second reservation acquired without free budget")
     assert 0.15 <= time.monotonic() - started < 2
-    assert notices and "waiting" in notices[0]
-    with g.slot(tmp_path, {}, wait=0):
+    assert notices and "waiting for memory budget" in notices[0]
+    with ledger.acquire("full", "full", wait=0):
         pass
 
 
-def test_light_slots_third_waits(tmp_path: Path) -> None:
+def test_small_steps_run_concurrently_while_heavy_waits(tmp_path: Path) -> None:
+    """Small learned steps share remaining budget concurrently while heavy waits."""
     import threading
 
-    light = tmp_path / "light"
-    entered = threading.Event()
-    release = threading.Event()
+    avail = g.DESKTOP_RESERVE_BYTES + int(1.5 * g.GB)
+    ledger = g.MemoryLedger(
+        tmp_path / "ledger",
+        cold_start_peak_bytes=3 * g.GB,
+        available_memory_fn=lambda: avail,
+        pressure_fn=lambda: g.MemoryPressure(0.0, 0.0),
+    )
+    ledger.record_peak("affected", "small", int(0.5 * g.GB))
+    heavy_entered = threading.Event()
+    heavy_thread_done = threading.Event()
+    small_barrier = threading.Barrier(2, timeout=5)
+    both_small_concurrent = threading.Event()
 
-    def holder() -> None:
-        with g.slot(
-            light,
-            {"pid": os.getpid()},
-            count=2,
-            wait=5,
-            message="waiting for lane slot: ",
-            slot_env="SABEROPS_LANE_SLOTS",
-        ):
-            entered.set()
-            assert release.wait(timeout=5)
+    def run_heavy() -> None:
+        with ledger.acquire("full", "full", wait=5):
+            heavy_entered.set()
+        heavy_thread_done.set()
 
-    threads = [threading.Thread(target=holder) for _ in range(2)]
-    for thread in threads:
-        thread.start()
-    assert entered.wait(timeout=5)
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
-        if (light / "0.json").exists() and (light / "1.json").exists():
-            break
-        time.sleep(0.05)
-    assert (light / "0.json").exists() and (light / "1.json").exists()
-    notices: list[str] = []
-    with pytest.raises(TimeoutError):
-        with g.slot(
-            light,
-            {},
-            count=2,
-            wait=0.3,
-            message="waiting for lane slot: ",
-            slot_env="SABEROPS_LANE_SLOTS",
-            notify=notices.append,
-        ):
-            pytest.fail("third light slot acquired")
-    assert notices and "waiting for lane slot:" in notices[0]
-    release.set()
-    for thread in threads:
-        thread.join(timeout=5)
-    with g.slot(
-        light,
-        {},
-        count=2,
-        wait=1,
-        message="waiting for lane slot: ",
-        slot_env="SABEROPS_LANE_SLOTS",
-    ):
-        pass
-    with pytest.raises(ValueError):
-        with g.slot(light, {}, count=0, slot_env="SABEROPS_LANE_SLOTS"):
-            pass
+    def run_small() -> None:
+        with ledger.acquire("affected", "small", wait=2):
+            small_barrier.wait()
+            both_small_concurrent.set()
 
-
-def test_lane_waits_while_heavy_held(tmp_path: Path) -> None:
-    heavy = tmp_path / "heavy"
-    notices: list[str] = []
-    with g.slot(heavy, {"pid": os.getpid()}, count=1, wait=5):
-        with pytest.raises(TimeoutError):
-            with g.slot(
-                heavy, {}, count=1, wait=0.3, observe=True, notify=notices.append
-            ):
-                pass
-    assert notices and "waiting for full-gate slot:" in notices[0]
-
-
-def test_full_gate_drains_light_slots(tmp_path: Path) -> None:
-    import threading
-
-    heavy = tmp_path / "heavy"
-    light = tmp_path / "light"
-    release = threading.Event()
-    light_held = threading.Event()
-
-    def lane_holder() -> None:
-        with g.slot(
-            light,
-            {"pid": os.getpid()},
-            count=2,
-            wait=5,
-            message="waiting for lane slot: ",
-            slot_env="SABEROPS_LANE_SLOTS",
-        ):
-            light_held.set()
-            assert release.wait(timeout=5)
-
-    thread = threading.Thread(target=lane_holder)
-    thread.start()
-    assert light_held.wait(timeout=5)
-    time.sleep(0.2)
-    notices: list[str] = []
-    with g.slot(heavy, {"pid": os.getpid()}, count=1, wait=5):
-        with pytest.raises(TimeoutError):
-            with g.slot(
-                light,
-                {"pid": os.getpid()},
-                count=2,
-                wait=0.3,
-                acquire_all=True,
-                message="waiting for running lane checks: ",
-                slot_env="SABEROPS_LANE_SLOTS",
-                notify=notices.append,
-            ):
-                pytest.fail("drain acquired while lane holds light")
-        assert notices and "waiting for running lane checks:" in notices[0]
-        release.set()
-        thread.join(timeout=5)
-        with g.slot(
-            light,
-            {"pid": os.getpid()},
-            count=2,
-            wait=5,
-            acquire_all=True,
-            message="waiting for running lane checks: ",
-            slot_env="SABEROPS_LANE_SLOTS",
-        ):
-            assert (light / "0.json").exists() and (light / "1.json").exists()
-            blocked: list[str] = []
-            with pytest.raises(TimeoutError):
-                with g.slot(
-                    light,
-                    {},
-                    count=2,
-                    wait=0.3,
-                    message="waiting for lane slot: ",
-                    slot_env="SABEROPS_LANE_SLOTS",
-                    notify=blocked.append,
-                ):
-                    pass
-            assert blocked and "waiting for lane slot:" in blocked[0]
-    assert not (light / "0.json").exists() and not (light / "1.json").exists()
-
-
-def test_lane_queues_behind_draining_full_gate(tmp_path: Path) -> None:
-    heavy = tmp_path / "heavy"
-    with g.slot(heavy, {"pid": os.getpid()}, count=1, wait=5):
-        notices: list[str] = []
-        with pytest.raises(TimeoutError):
-            with g.slot(
-                heavy, {}, count=1, wait=0.3, observe=True, notify=notices.append
-            ):
-                pytest.fail("lane passed heavy while full gate holds it")
-        assert notices and "waiting for full-gate slot:" in notices[0]
+    heavy_t = threading.Thread(target=run_heavy)
+    heavy_t.start()
+    time.sleep(0.15)
+    assert not heavy_entered.is_set()
+    s1 = threading.Thread(target=run_small)
+    s2 = threading.Thread(target=run_small)
+    s1.start()
+    s2.start()
+    s1.join(timeout=5)
+    s2.join(timeout=5)
+    assert both_small_concurrent.is_set()
+    assert not heavy_entered.is_set()
+    # Now free memory so heavy step completes.
+    avail = g.DESKTOP_RESERVE_BYTES + 4 * g.GB
+    assert heavy_thread_done.wait(timeout=5)
+    heavy_t.join(timeout=5)
+    assert heavy_entered.is_set()
 
 
 def test_lane_floor_default_is_10(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -557,30 +461,38 @@ def test_flaky_report_missing_and_main_gate_failures(
 def test_exclusive_passthrough_and_timeout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: prompt section C (exit passthrough, slot timeout exit 3)."""
+    """Covers: exclusive CLI exit passthrough and memory budget timeout (exit 3)."""
     import subprocess
 
     repo = tmp_path / "repo"
     repo.mkdir()
     _init_main_repo(repo)
     monkeypatch.chdir(repo)
+    monkeypatch.setenv("SABEROPS_GATE_TMP", str(tmp_path / "gate-tmp"))
+    meminfo = tmp_path / "meminfo"
+    avail_kb = (g.DESKTOP_RESERVE_BYTES + 2 * g.COLD_START_PEAK_BYTES) // 1024
+    meminfo.write_text(f"MemTotal: {avail_kb * 2} kB\nMemAvailable: {avail_kb} kB\n")
+    monkeypatch.setenv(g.PROC_MEMINFO_ENV, str(meminfo))
     assert g.exclusive_cli(["--", "true"]) == 0
     assert g.exclusive_cli(["--", "bash", "-c", "exit 7"]) == 7
-    # Hold the heavy slot, then exclusive must time out.
+
+    # Reduce available memory so holding one heavy lease exhausts remaining budget.
+    tight_kb = (g.DESKTOP_RESERVE_BYTES + g.COLD_START_PEAK_BYTES + 100 * g.MIB) // 1024
+    meminfo.write_text(f"MemTotal: {avail_kb * 2} kB\nMemAvailable: {tight_kb} kB\n")
     common = (repo / subprocess.check_output(
         ["git", "rev-parse", "--git-common-dir"], cwd=repo, text=True
     ).strip()).resolve()
-    heavy = common / "saberops-gate-slots"
+    ledger = g.MemoryLedger(g.default_ledger_root(common, repo=repo))
     monkeypatch.setenv("SABEROPS_GATE_SLOT_WAIT", "0.2")
-    with g.slot(heavy, {"pid": os.getpid()}, 1, 5):
+    with ledger.acquire("full", "full"):
         code = g.exclusive_cli(["--", "true"])
         assert code == 3
 
 
-def test_exclusive_orders_after_heavy_and_blocks_lane(
+def test_exclusive_orders_after_heavy_release(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: prompt section C (waits for heavy release, blocks lane)."""
+    """Covers: exclusive waits when budget is tight and runs once memory frees."""
     import subprocess
     import threading
 
@@ -588,17 +500,22 @@ def test_exclusive_orders_after_heavy_and_blocks_lane(
     repo.mkdir()
     _init_main_repo(repo)
     monkeypatch.chdir(repo)
+    monkeypatch.setenv("SABEROPS_GATE_TMP", str(tmp_path / "gate-tmp"))
+    meminfo = tmp_path / "meminfo"
+    tight_kb = (g.DESKTOP_RESERVE_BYTES + g.COLD_START_PEAK_BYTES + 100 * g.MIB) // 1024
+    meminfo.write_text(f"MemTotal: {tight_kb * 4} kB\nMemAvailable: {tight_kb} kB\n")
+    monkeypatch.setenv(g.PROC_MEMINFO_ENV, str(meminfo))
+
     common = (repo / subprocess.check_output(
         ["git", "rev-parse", "--git-common-dir"], cwd=repo, text=True
     ).strip()).resolve()
-    heavy = common / "saberops-gate-slots"
-    light = common / "saberops-gate-light-slots"
+    ledger = g.MemoryLedger(g.default_ledger_root(common, repo=repo))
     marker = tmp_path / "exclusive-ran"
     release = threading.Event()
     started = threading.Event()
 
     def hold_heavy() -> None:
-        with g.slot(heavy, {"pid": os.getpid()}, 1, 5):
+        with ledger.acquire("full", "full"):
             started.set()
             assert release.wait(timeout=10)
 
@@ -609,52 +526,18 @@ def test_exclusive_orders_after_heavy_and_blocks_lane(
 
     def run_exclusive() -> None:
         result["code"] = g.exclusive_cli(
-            ["--", "python3", "-c", f"open({str(marker)!r}, 'w').write('x')"]
+            ["--", sys.executable, "-c", f"open({str(marker)!r}, 'w').write('x')"]
         )
 
     worker = threading.Thread(target=run_exclusive)
     worker.start()
-    # CMD runs only after the held heavy slot is released.
-    time.sleep(0.5)
+    time.sleep(0.4)
     assert not marker.exists()
     release.set()
     holder.join(timeout=10)
     worker.join(timeout=10)
     assert marker.exists()
     assert result.get("code") == 0
-    # While exclusive holds every slot, a lane observer waits.
-    got = tmp_path / "exclusive-held"
-    entered = threading.Event()
-    leave = threading.Event()
-
-    def hold_exclusive() -> None:
-        repo_local = Path.cwd()
-        common_local = (repo_local / subprocess.check_output(
-            ["git", "rev-parse", "--git-common-dir"], cwd=repo_local, text=True
-        ).strip()).resolve()
-        heavy_local = common_local / "saberops-gate-slots"
-        light_local = common_local / "saberops-gate-light-slots"
-        with g.slot(heavy_local, {"pid": os.getpid()}, 1, 5):
-            with g.slot(
-                light_local,
-                {"pid": os.getpid()},
-                2,
-                5,
-                acquire_all=True,
-                slot_env="SABEROPS_LANE_SLOTS",
-            ):
-                entered.set()
-                assert leave.wait(timeout=10)
-
-    holder2 = threading.Thread(target=hold_exclusive)
-    holder2.start()
-    assert entered.wait(timeout=10)
-    with pytest.raises(TimeoutError):
-        with g.slot(light, {}, count=2, wait=0.3, slot_env="SABEROPS_LANE_SLOTS"):
-            pass
-    leave.set()
-    holder2.join(timeout=10)
-    assert got is not None
 
 
 def _setup_main_gate_repo(path: Path) -> Path:
@@ -1192,16 +1075,13 @@ def _capture_runner(
 def test_full_gate_is_one_parallel_pass_without_serial(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: D-0061 (no serial pass; single bounded xdist worksteal run)."""
+    """Covers: single xdist worksteal pass with workers derived from grant."""
     repo = tmp_path / "repo"
     repo.mkdir()
     _init_main_repo(repo)
-    monkeypatch.delenv("SABEROPS_GATE_WORKERS", raising=False)
-    # D-0076: the worker default is RAM-derived; pin it for determinism
-    # (2.4 GiB / 0.6 GiB = 4 workers on 8 cores).
-    monkeypatch.setattr(g, "available_memory_bytes", lambda: int(2.4 * g.GB))
     monkeypatch.setattr(g, "cpu_core_count", lambda: 8)
     runner, calls = _capture_runner(repo, "full", tmp_path, monkeypatch)
+    runner.ledger.record_peak("full", "full", int(2.0 * g.GB), workers=4)  # type: ignore[attr-defined]
     code = runner.run_checks("HEAD", [])  # type: ignore[attr-defined]
     assert code == 0
     assert [name for name, _ in calls] == ["parallel"]
@@ -1209,27 +1089,23 @@ def test_full_gate_is_one_parallel_pass_without_serial(
     assert args[:2] == ["-n", "4"], args
     assert "--dist" in args and args[args.index("--dist") + 1] == "worksteal"
     assert "-p" not in args and "no:xdist" not in args
-    assert "-m" not in args  # no marker exclusion: every test runs in one pass
+    assert "-m" not in args
 
 
-def test_gate_workers_cap_from_env_and_malformed_falls_back(
+def test_workers_follow_grant_without_configured_caps(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: D-0061 (SABEROPS_GATE_WORKERS cap; malformed keeps the cap)."""
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _init_main_repo(repo)
-    monkeypatch.setenv("SABEROPS_GATE_WORKERS", "3")
-    runner, calls = _capture_runner(repo, "full", tmp_path, monkeypatch)
-    runner.run_checks("HEAD", [])  # type: ignore[attr-defined]
-    assert calls[0][1][:2] == ["-n", "3"]
-    # D-0076: a malformed knob falls back to the RAM-derived default.
-    monkeypatch.setattr(g, "available_memory_bytes", lambda: int(2.4 * g.GB))
+    """Workers scale from grant // per_worker_peak, clamped between 1 and CPU cores."""
     monkeypatch.setattr(g, "cpu_core_count", lambda: 8)
-    monkeypatch.setenv("SABEROPS_GATE_WORKERS", "auto")
-    runner2, calls2 = _capture_runner(repo, "full", tmp_path, monkeypatch)
-    runner2.run_checks("HEAD", [])  # type: ignore[attr-defined]
-    assert calls2[0][1][:2] == ["-n", "4"]
+    ledger = g.MemoryLedger(tmp_path / "ledger")
+    ledger.record_peak("full", "full", int(2.0 * g.GB), workers=4)  # per_worker = 512 MiB
+    assert ledger.workers_for_grant(int(2.0 * g.GB), "full", "full") == 4
+    assert ledger.workers_for_grant(int(1.0 * g.GB), "full", "full") == 2
+    assert ledger.workers_for_grant(int(0.2 * g.GB), "full", "full") == 1
+    assert ledger.workers_for_grant(int(16.0 * g.GB), "full", "full") == 8
+    # Configured env worker knobs are ignored (none remain in gate code).
+    monkeypatch.setenv("SABEROPS_GATE_WORKERS", "1")
+    assert ledger.workers_for_grant(int(2.0 * g.GB), "full", "full") == 4
 
 
 def test_full_gate_reruns_only_failing_ids_serially(
@@ -1260,12 +1136,13 @@ def test_full_gate_reruns_only_failing_ids_serially(
 def test_lane_checks_run_parallel_when_multiple_targets(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: D-0061 (lane checks no longer fall back to serial)."""
+    """Covers: multi-target lane checks scale workers from grant."""
     repo = tmp_path / "repo"
     repo.mkdir()
     _init_main_repo(repo)
-    monkeypatch.delenv("SABEROPS_LANE_WORKERS", raising=False)
+    monkeypatch.setattr(g, "cpu_core_count", lambda: 8)
     runner, calls = _capture_runner(repo, "lane", tmp_path, monkeypatch)
+    runner.ledger.record_peak("affected", "small", int(1.0 * g.GB), workers=2)  # type: ignore[attr-defined]
     monkeypatch.setattr(g, "lane_targets", lambda repo, changed, also: ["a", "b"])
     runner.run_checks("HEAD", [])  # type: ignore[attr-defined]
     assert calls[0][1][:4] == ["-n", "2", "--dist", "worksteal"]
@@ -1307,23 +1184,28 @@ def test_positive_int_env() -> None:
             _os.environ["SABEROPS_TEST_WORKERS"] = previous
 
 
-def test_cgroup_prefix_disabled_by_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Covers: D-0061 (cgroup isolation can be disabled explicitly)."""
-    monkeypatch.setattr(g, "_cgroup_cache", None)
+def test_cgroup_prefix_disabled_by_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Covers: cgroup isolation can be disabled explicitly."""
+    monkeypatch.setattr(g, "_systemd_run_probed", False)
+    monkeypatch.setattr(g, "_systemd_run_cache", None)
     monkeypatch.setenv("SABEROPS_GATE_CGROUP", "0")
-    assert g.cgroup_prefix() == []
+    assert g.build_cgroup_scope_prefix(2 * g.GB, unit_name="u", meta_dir=tmp_path) == []
 
 
-def test_cgroup_prefix_used_when_probe_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Covers: D-0061 (systemd-run scope wraps the gate child tree)."""
+def test_cgroup_scope_sets_dynamic_memory_high(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Covers: each step scope sets MemoryHigh to its grant (no fixed 6G/8G ceiling)."""
     class _Probe:
         returncode = 0
 
-    monkeypatch.setattr(g, "_cgroup_cache", None)
+    monkeypatch.setattr(g, "_systemd_run_probed", False)
+    monkeypatch.setattr(g, "_systemd_run_cache", None)
     monkeypatch.delenv("SABEROPS_GATE_CGROUP", raising=False)
     monkeypatch.setattr(g.shutil, "which", lambda name: "/usr/bin/systemd-run")
     monkeypatch.setattr(g.subprocess, "run", lambda *a, **k: _Probe())
-    prefix = g.cgroup_prefix()
+    grant = 1_500_000_000
+    prefix = g.build_cgroup_scope_prefix(grant, unit_name="saberops-test-unit", meta_dir=tmp_path)
     assert prefix[:5] == [
         "/usr/bin/systemd-run",
         "--user",
@@ -1331,31 +1213,41 @@ def test_cgroup_prefix_used_when_probe_succeeds(monkeypatch: pytest.MonkeyPatch)
         "--quiet",
         "--collect",
     ]
-    assert f"MemoryHigh={g.CGROUP_MEMORY_HIGH}" in prefix
-    assert f"MemoryMax={g.CGROUP_MEMORY_MAX}" in prefix
-    assert prefix[-1] == "--"
+    assert f"MemoryHigh={grant}" in prefix
+    assert not any(part.startswith("MemoryMax=") for part in prefix)
+    assert "--unit=saberops-test-unit" in prefix
 
 
-def test_cgroup_prefix_probe_failure_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Covers: D-0061 (no usable user manager -> plain spawn, never a failure)."""
+def test_cgroup_prefix_probe_failure_falls_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Covers: no usable user manager -> plain spawn, never a failure."""
     class _Probe:
         returncode = 1
 
-    monkeypatch.setattr(g, "_cgroup_cache", None)
+    monkeypatch.setattr(g, "_systemd_run_probed", False)
+    monkeypatch.setattr(g, "_systemd_run_cache", None)
     monkeypatch.delenv("SABEROPS_GATE_CGROUP", raising=False)
     monkeypatch.setattr(g.shutil, "which", lambda name: "/usr/bin/systemd-run")
     monkeypatch.setattr(g.subprocess, "run", lambda *a, **k: _Probe())
-    assert g.cgroup_prefix() == []
+    assert g.build_cgroup_scope_prefix(2 * g.GB, unit_name="u", meta_dir=tmp_path) == []
 
 
 def test_external_slot_env_skips_acquisition_without_blocking(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: engine holds host-gates; child must not re-acquire (no deadlock)."""
+    """Covers: engine holds host-gates lease; child must not re-acquire (no deadlock)."""
     repo = tmp_path / "repo"
     repo.mkdir()
     _init_main_repo(repo)
+    tight_avail = g.DESKTOP_RESERVE_BYTES + g.COLD_START_PEAK_BYTES + 10 * g.MIB
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text(
+        f"MemTotal: {tight_avail * 2 // 1024} kB\nMemAvailable: {tight_avail // 1024} kB\n"
+    )
+    monkeypatch.setenv(g.PROC_MEMINFO_ENV, str(meminfo))
     monkeypatch.setenv("SABEROPS_GATE_EXTERNAL_SLOT", "1")
+    monkeypatch.setenv(g.GRANTED_MEMORY_ENV, str(g.COLD_START_PEAK_BYTES))
     runner = _make_runner(repo, "full", tmp_path, monkeypatch)
     monkeypatch.setattr(runner, "command", lambda args, name, timeout=None: (0, ""))
     monkeypatch.setattr(
@@ -1363,12 +1255,9 @@ def test_external_slot_env_skips_acquisition_without_blocking(
         "pytest",
         lambda name, args, budget=None: g.Evidence(codes=[0], count=2),
     )
-    common = runner.common  # type: ignore[attr-defined]
-    heavy = common / "saberops-gate-slots"
     started = time.monotonic()
-    with g.slot(heavy, {"pid": os.getpid()}, 1, 5):
+    with runner.ledger.acquire("full", "full"):  # type: ignore[attr-defined]
         code = runner.execute("HEAD", [])  # type: ignore[attr-defined]
-    # The held heavy slot would have blocked acquisition; returning proves bypass.
     assert code == 0
     assert time.monotonic() - started < 5
 
@@ -1422,20 +1311,21 @@ def test_map_suite_command_is_parallel() -> None:
     assert "-p" in command and "plugin" in command
 
 
-def test_map_workers_env_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Covers: D-0061/D-0076 (map knob, then gate knob, then RAM-derived default)."""
-    monkeypatch.delenv("SABEROPS_MAP_WORKERS", raising=False)
-    monkeypatch.delenv("SABEROPS_GATE_WORKERS", raising=False)
-    # Pin the memory reading so the RAM-derived default is deterministic.
-    monkeypatch.setattr(m, "available_memory_bytes", lambda: int(2.4 * 1024**3))
-    monkeypatch.setattr(m, "cpu_core_count", lambda: 8)
-    assert m.map_workers() == 4
-    monkeypatch.setenv("SABEROPS_GATE_WORKERS", "3")
-    assert m.map_workers() == 3
-    monkeypatch.setenv("SABEROPS_MAP_WORKERS", "2")
-    assert m.map_workers() == 2
-    monkeypatch.setenv("SABEROPS_MAP_WORKERS", "nonsense")
-    assert m.map_workers() == 4
+def test_map_workers_follow_memory_grant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: map workers derive from active memory grant or learned ledger peaks."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_main_repo(repo)
+    monkeypatch.setenv(g.GRANTED_WORKERS_ENV, "5")
+    assert m.map_workers(repo) == 5
+    monkeypatch.delenv(g.GRANTED_WORKERS_ENV, raising=False)
+    monkeypatch.setenv(g.GRANTED_MEMORY_ENV, str(2 * g.GB))
+    monkeypatch.setattr(g, "cpu_core_count", lambda: 8)
+    ledger = g.MemoryLedger(g.default_ledger_root(repo=repo))
+    ledger.record_peak("coverage-map", "full", int(2.0 * g.GB), workers=4)
+    assert m.map_workers(repo) == 4
 
 
 def test_map_exclusive_wraps_the_canonical_slot(tmp_path: Path) -> None:

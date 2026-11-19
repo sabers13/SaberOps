@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # UI-only entry points into the same owned scratch lifecycle as full/lane gates.
 gate_scratch_start() {
-    local scratch_manifest
-    scratch_manifest=$(mktemp "${TMPDIR:-/tmp}/saberops-ui-owner.XXXXXX")
+    local disk_tmp scratch_manifest
+    disk_tmp=$("$gate_python" scripts/gate_tools.py disk-tmp)
+    scratch_manifest=$(mktemp "$disk_tmp/saberops-ui-owner.XXXXXX")
     if "$gate_python" scripts/gate_tools.py scratch-start "$scratch_manifest" "$$"; then
         :
     else
