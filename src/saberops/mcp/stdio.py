@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import sys
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any, TextIO
 
 from saberops.mcp.lease import OrchestratorLease
@@ -53,8 +53,15 @@ def serve_stdio(
     *,
     stdin: Iterable[str] | None = None,
     stdout: TextIO | None = None,
+    restart_probe: Callable[[], bool] | None = None,
 ) -> int:
-    """Serve ``server`` until the input stream ends; returns an exit code."""
+    """Serve ``server`` until the input stream ends; returns an exit code.
+
+    ``restart_probe`` (``orch self-update``, ADR-0031) is consulted after each
+    handled message.  When it reports a newer engine revision the server
+    finishes the in-flight call and returns, so the client reconnects to the
+    reinstalled code; no request is dropped mid-flight.
+    """
     source: Iterable[str] = sys.stdin if stdin is None else stdin
     sink: TextIO = sys.stdout if stdout is None else stdout
     server.start_heartbeat()
@@ -76,6 +83,8 @@ def serve_stdio(
             for notification in server.drain_notifications():
                 sink.write(json.dumps(notification, sort_keys=True) + "\n")
             sink.flush()
+            if restart_probe is not None and restart_probe():
+                break
     finally:
         server.close()
     return 0
@@ -83,5 +92,12 @@ def serve_stdio(
 
 def run_stdio(context: ServerContext, **kwargs: Any) -> int:
     """Construct a server for ``context`` and serve stdio."""
+    from saberops.self_update import marker_revision, restart_requested
+
     server = McpServer(context)
-    return serve_stdio(server, **kwargs)
+    started_revision = marker_revision()
+    return serve_stdio(
+        server,
+        restart_probe=lambda: restart_requested(started_revision),
+        **kwargs,
+    )

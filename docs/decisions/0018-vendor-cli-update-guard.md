@@ -78,3 +78,7 @@ blocked on a guess.
 - The fixtures now match the versions installed on the owner host, so the
   committed contract tests exercise the current help text. Refreshing them is
   still an explicit, token-free `capture` step rather than an assumption.
+- Lane F18 ([ADR-0031](0031-vendor-cli-self-healing.md)) acts on this guard:
+  a drifted CLI parks its providers, the guard plus one smoke prompt decide
+  whether to re-verify, and a failed check files one repair job. The guard's
+  own rule 4 (never decide on a guess) is unchanged there.

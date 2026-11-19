@@ -2006,6 +2006,59 @@ def build_parser() -> argparse.ArgumentParser:
     )
     provider_block.add_argument("--json", action="store_true", help="JSON output")
 
+    # orch vendor status|check|smoke|pin|unpin|smoke-model (F18, ADR-0031).
+    vendor_parser = subparsers.add_parser(
+        "vendor",
+        help="Vendor CLI health after an update: status, check, smoke, pin.",
+    )
+    vendor_parser.add_argument("--db", type=str, default=None, help="Owner database path.")
+    vendor_sub = vendor_parser.add_subparsers(dest="vendor_command", required=True)
+    vendor_status = vendor_sub.add_parser("status", help="Show each vendor CLI's verdict.")
+    vendor_status.add_argument("--db", type=str, default=argparse.SUPPRESS)
+    vendor_status.add_argument("--json", action="store_true", help="JSON output")
+    vendor_check = vendor_sub.add_parser(
+        "check", help="Run the allowlisted interface check and the smoke prompt now."
+    )
+    vendor_check.add_argument("--db", type=str, default=argparse.SUPPRESS)
+    vendor_check.add_argument(
+        "--vendor", choices=("codex", "claude", "opencode"), default=None
+    )
+    vendor_check.add_argument(
+        "--force", action="store_true", help="Re-check an already verified vendor."
+    )
+    vendor_check.add_argument("--json", action="store_true", help="JSON output")
+    vendor_smoke = vendor_sub.add_parser(
+        "smoke", help="Turn the automatic smoke prompt on or off."
+    )
+    vendor_smoke.add_argument("state", choices=("on", "off"))
+    vendor_smoke.add_argument("--db", type=str, default=argparse.SUPPRESS)
+    vendor_pin = vendor_sub.add_parser(
+        "pin", help="Pin a vendor CLI version (warn instead of adapting)."
+    )
+    vendor_pin.add_argument("vendor", choices=("codex", "claude", "opencode"))
+    vendor_pin.add_argument("version", type=str)
+    vendor_pin.add_argument("--db", type=str, default=argparse.SUPPRESS)
+    vendor_unpin = vendor_sub.add_parser("unpin", help="Clear a vendor CLI version pin.")
+    vendor_unpin.add_argument("vendor", choices=("codex", "claude", "opencode"))
+    vendor_unpin.add_argument("--db", type=str, default=argparse.SUPPRESS)
+    vendor_smoke_model = vendor_sub.add_parser(
+        "smoke-model", help="Name the plan model the smoke prompt uses for a vendor."
+    )
+    vendor_smoke_model.add_argument("vendor", choices=("codex", "claude", "opencode"))
+    vendor_smoke_model.add_argument("model", type=str)
+    vendor_smoke_model.add_argument("--db", type=str, default=argparse.SUPPRESS)
+
+    # orch self-update: reinstall only from an accepted, green commit.
+    self_update_parser = subparsers.add_parser(
+        "self-update",
+        help="Reinstall orch from an accepted commit that passed the full gate.",
+    )
+    self_update_parser.add_argument("--repo", type=str, default=None)
+    self_update_parser.add_argument("--target", type=str, default="main")
+    self_update_parser.add_argument("--commit", type=str, default=None)
+    self_update_parser.add_argument("--db", type=str, default=None)
+    self_update_parser.add_argument("--json", action="store_true", help="JSON output")
+
     # orch questions ask|list|show|answer|defer|moot|diverge|divergences|
     # standing-rules|audit (Q-1 owner question queue).
     questions_parser = subparsers.add_parser(
@@ -7092,6 +7145,8 @@ def handle_scheduler_run(args: argparse.Namespace) -> int:
 
     try:
         storage_maintenance_cb, launch_guard_cb = _scheduler_storage_callbacks(db)
+        from saberops.self_update import marker_revision
+
         result = run_scheduler_loop(
             db,
             tick_interval=interval,
@@ -7100,7 +7155,11 @@ def handle_scheduler_run(args: argparse.Namespace) -> int:
             max_concurrent_override=max_concurrent,
             storage_maintenance=storage_maintenance_cb,
             launch_guard=launch_guard_cb,
+            revision_probe=marker_revision,
         )
+        if result is not None and result.reason == "engine_updated" and not run_once:
+            # Re-exec into the just-installed engine; the lease was released.
+            os.execv(sys.executable, [sys.executable, *sys.argv])
         if result is None or (not result.ran and result.reason in ("lease_held_by_other", "lost_lease")):
             reason = result.reason if result is not None else "lease_held_by_other"
             print(f"[!] Scheduler lease held by another instance ({reason})", file=sys.stderr)
@@ -7151,6 +7210,119 @@ def handle_scheduler_run(args: argparse.Namespace) -> int:
     except Exception as exc:
         print(f"[!] Scheduler loop failed: {exc}", file=sys.stderr)
         return 1
+
+
+def handle_vendor(args: argparse.Namespace) -> int:
+    """Handle `orch vendor status|check|smoke|pin|unpin|smoke-model` (F18)."""
+    from saberops import vendor_health
+    from saberops.db import Database as _Database
+
+    db_path = getattr(args, "db", None)
+    command = str(getattr(args, "vendor_command", ""))
+    if command == "status":
+        db = _Database(db_path) if db_path else _Database()
+        health = vendor_health.load_health(db)
+        if getattr(args, "json", False):
+            print(
+                json.dumps(
+                    {
+                        "vendors": {
+                            vendor: record.to_dict()
+                            for vendor, record in sorted(health.items())
+                        },
+                        "smoke_enabled": vendor_health.smoke_enabled(db),
+                        "pins": {
+                            vendor: vendor_health.pinned_version(db, vendor)
+                            for vendor in vendor_health.VENDORS
+                            if vendor_health.pinned_version(db, vendor)
+                        },
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 0
+        print(vendor_health.render_status(db))
+        return 0
+    db = _Database(db_path) if db_path else _Database()
+    if command == "smoke":
+        enabled = str(args.state) == "on"
+        vendor_health.set_smoke_enabled(db, enabled)
+        print(f"automatic smoke prompt: {'on' if enabled else 'off'}")
+        return 0
+    if command == "pin":
+        vendor_health.set_pin(db, str(args.vendor), str(args.version))
+        vendor_health.detect_changes(db)
+        print(f"pinned {args.vendor} to {args.version}")
+        return 0
+    if command == "unpin":
+        vendor_health.clear_pin(db, str(args.vendor))
+        vendor_health.detect_changes(db)
+        print(f"pin cleared for {args.vendor}")
+        return 0
+    if command == "smoke-model":
+        vendor_health.set_smoke_model(db, str(args.vendor), str(args.model))
+        print(f"smoke model for {args.vendor}: {args.model}")
+        return 0
+    if command == "check":
+        selected = getattr(args, "vendor", None)
+        vendor_health.detect_changes(db)
+        results = vendor_health.run_checks(
+            db,
+            vendors=(selected,) if selected else None,
+            force=bool(getattr(args, "force", False)),
+        )
+        if getattr(args, "json", False):
+            print(
+                json.dumps(
+                    [result.to_dict() for result in results],
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        else:
+            if not results:
+                print("nothing to check: every vendor CLI is verified")
+            for result in results:
+                suffix = f" repair_job={result.repair_job_id}" if result.repair_job_id else ""
+                print(f"{result.vendor}: {result.state.value}: {result.detail}{suffix}")
+        return 0 if all(result.state is vendor_health.VendorState.VERIFIED for result in results) else 1
+    print(f"[!] unknown vendor command: {command}", file=sys.stderr)
+    return 2
+
+
+def handle_self_update(args: argparse.Namespace) -> int:
+    """Handle `orch self-update`: reinstall only from an accepted green commit."""
+    from saberops import vendor_health
+    from saberops.db import Database as _Database
+    from saberops.self_update import perform_self_update
+
+    db_path = getattr(args, "db", None)
+    db = _Database(db_path) if db_path else _Database()
+
+    def recheck() -> list[dict[str, object]]:
+        vendor_health.detect_changes(db)
+        return [item.to_dict() for item in vendor_health.run_checks(db)]
+
+    result = perform_self_update(
+        db,
+        repo=getattr(args, "repo", None),
+        target_ref=str(getattr(args, "target", "main") or "main"),
+        commit=getattr(args, "commit", None),
+        recheck=recheck,
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+    else:
+        if result.ok:
+            print(f"{result.summary}")
+            print(f"commit : {result.commit}")
+            print(f"orch   : {result.old_version or 'unknown'} -> {result.new_version or 'unknown'}")
+            if result.paused_jobs:
+                print(f"parked while reinstalling: {', '.join(result.paused_jobs)}")
+        else:
+            print(f"[!] self-update refused ({result.code}): {result.summary}", file=sys.stderr)
+    return 0 if result.ok else 1
 
 
 def handle_capacity_show(args: argparse.Namespace) -> int:
@@ -8022,6 +8194,10 @@ def _dispatch(args: argparse.Namespace) -> int:
     elif args.command == "capacity":
         if args.capacity_command == "show":
             return handle_capacity_show(args)
+    elif args.command == "vendor":
+        return handle_vendor(args)
+    elif args.command == "self-update":
+        return handle_self_update(args)
     elif args.command == "mcp":
         return handle_mcp(args)
     elif args.command == "connect":

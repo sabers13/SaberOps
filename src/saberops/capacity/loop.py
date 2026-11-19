@@ -264,6 +264,9 @@ class TickResult:
     paused_jobs: tuple[str, ...] = ()
     #: F17: the pause reason id when ``reason == "paused"``.
     pause_reason: str | None = None
+    #: F18: vendor CLIs whose version change is unverified; their providers
+    #: received no new work this tick.
+    vendor_unverified: tuple[str, ...] = ()
 
 
 def acquire_lease(
@@ -1297,6 +1300,19 @@ def scheduler_tick(
         except Exception:
             pass
 
+    # F18: a vendor CLI whose version change is unverified (or whose repair is
+    # outstanding) receives no new work.  Detection runs here; the expensive
+    # allowlisted help capture and the one smoke prompt run under the single
+    # check claim in a detached process.
+    blocked_vendors: dict[str, str] = {}
+    try:
+        from saberops import vendor_health
+
+        vendor_health.maybe_check(db, now=moment)
+        blocked_vendors = vendor_health.blocked_providers(db)
+    except Exception:
+        logging.getLogger(__name__).exception("vendor CLI health step failed; dispatch continues")
+
     # 3. Pure deterministic schedule evaluation
     decisions = schedule(
         now=moment,
@@ -1312,6 +1328,7 @@ def scheduler_tick(
         background_min_pace=background_min_pace,
         readiness_states=readiness_map if readiness_map else None,
         dependency_blockers=blockers,
+        blocked_providers=blocked_vendors if blocked_vendors else None,
     )
 
     dispatched_count = 0
@@ -1321,6 +1338,7 @@ def scheduler_tick(
     pool_policies = effective_pool_plans(effective_pol)
 
     repaired_job_ids = tuple(change.job_id for change in dispatch_window_changes)
+    vendor_unverified = tuple(sorted(blocked_vendors))
 
     def lost_during_tick() -> TickResult:
         return TickResult(
@@ -1329,6 +1347,7 @@ def scheduler_tick(
             decisions=tuple(decisions),
             dispatch_window_repaired=repaired_job_ids,
             plan_lanes_submitted=plan_lanes_submitted,
+            vendor_unverified=vendor_unverified,
         )
 
     # F11: the plan graph a park is measured against, built from durable queued
@@ -1634,6 +1653,7 @@ def scheduler_tick(
             preempt_recon.blocked if preempt_recon is not None else ()
         ),
         plan_lanes_submitted=plan_lanes_submitted,
+        vendor_unverified=vendor_unverified,
     )
 
 
@@ -1685,6 +1705,7 @@ def run_scheduler_loop(
     readiness_service: Any = None,
     storage_maintenance: Callable[[str], str | None] | None = None,
     launch_guard: Callable[[], str | None] | None = None,
+    revision_probe: Callable[[], str] | None = None,
 ) -> TickResult | None:
     """Run the scheduler loop or a single tick (--once).
 
@@ -1760,9 +1781,16 @@ def run_scheduler_loop(
     stop = stop_event or threading.Event()
     wake = wake_event if wake_event is not None else _SCHEDULER_WAKE_EVENT
     hold_logged: str | None = None
+    started_revision = revision_probe() if revision_probe is not None else ""
 
     try:
         while not stop.is_set():
+            if revision_probe is not None and revision_probe() != started_revision:
+                # ``orch self-update`` installed a new engine.  Release the
+                # lease cleanly; the CLI handler re-execs this process so the
+                # new code starts and parked work resumes from the same gate.
+                last_tick = TickResult(ran=False, reason="engine_updated")
+                break
             now = now_fn() if now_fn else _utcnow(None)
             active_lease = renew_lease(db, lease, ttl_seconds=lease_ttl, now=now)
             if active_lease is None:

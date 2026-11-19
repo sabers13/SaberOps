@@ -33,6 +33,10 @@ def _v040_routing_default(
     if request.node.get_closest_marker("packaged_routing_default") is None:
         monkeypatch.setattr(routing_config, "_packaged_default_path", lambda: _V040_DEFAULT)
     monkeypatch.setenv("SABEROPS_DISABLE_AUTO_SCHEDULER", "1")
+    # F18: never probe a real vendor CLI or start a detached check process from
+    # an ordinary test.  tests/test_f18_vendor_self_healing.py drives detection
+    # and the checks directly with fake versions.
+    monkeypatch.setenv("SABEROPS_VENDOR_CHECKS", "0")
     yield
 
 

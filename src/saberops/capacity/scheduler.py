@@ -125,6 +125,7 @@ def schedule(
     background_min_pace: float = 4.0,
     readiness_states: Mapping[Any, Any] | None = None,
     dependency_blockers: Mapping[str, DependencyBlocker] | None = None,
+    blocked_providers: Mapping[str, str] | None = None,
 ) -> list[SchedulerDecision]:
     """Pure deterministic pacing scheduler (ADR-0002 D7).
 
@@ -140,6 +141,10 @@ def schedule(
     - A global aggregate ceiling (``global_slot_limit``) blocks dispatch once
       the number of top-level RUNNING jobs plus same-tick simulated starts
       reaches the ceiling, independent of pool mapping.
+    - ``blocked_providers`` (F18) is a provider -> reason map for vendor CLIs
+      whose version change is unverified or whose repair is outstanding.  A
+      blocked candidate is never admitted; the job falls through to the next
+      candidate or waits, and the reason is reported on the wait decision.
     """
     moment = _utcnow(now)
     decisions: list[SchedulerDecision] = []
@@ -248,11 +253,27 @@ def schedule(
         size_bucket = job.requirements.size_hint or SizeBucket.M
         all_group_decisions: list[list[AdmissionDecision]] = []
         job_dispatched = False
+        vendor_blocked: dict[str, str] = {}
 
         for g_idx, group in enumerate(groups):
             # Evaluate admission for every candidate in this group
             decisions_for_group: list[AdmissionDecision] = []
             for cand in group:
+                if blocked_providers and cand.provider in blocked_providers:
+                    vendor_blocked[cand.provider] = blocked_providers[cand.provider]
+                    decisions_for_group.append(
+                        AdmissionDecision(
+                            admitted=False,
+                            candidate=cand,
+                            reason="VENDOR_CLI_UNVERIFIED",
+                            details={
+                                "diagnostic": "VENDOR_CLI_UNVERIFIED",
+                                "provider": cand.provider,
+                                "detail": blocked_providers[cand.provider],
+                            },
+                        )
+                    )
+                    continue
                 rd = None
                 if readiness_states:
                     rd = (
@@ -429,6 +450,12 @@ def schedule(
             )
             eta = dec_for_wait.eta if dec_for_wait else None
             confidence = dec_for_wait.wait_confidence if dec_for_wait else None
+            details: dict[str, Any] = {}
+            if vendor_blocked:
+                details = {
+                    "diagnostic": "VENDOR_CLI_UNVERIFIED",
+                    "vendor_unverified": dict(sorted(vendor_blocked.items())),
+                }
             decisions.append(
                 WaitDecision(
                     job=job,
@@ -438,6 +465,7 @@ def schedule(
                     candidate=dec_for_wait.candidate if dec_for_wait else None,
                     pool_id=dec_for_wait.pool_id if dec_for_wait else None,
                     binding_window=dec_for_wait.binding_window if dec_for_wait else None,
+                    details=details,
                 )
             )
 

@@ -98,6 +98,8 @@ class PauseReason(StrEnum):
     AWAY_CAP = "away_cap"
     #: Away mode was selected without an end time or a job budget.
     AWAY_UNBOUNDED = "away_unbounded"
+    #: ``orch self-update`` parks running workers before reinstalling the engine.
+    SELF_UPDATE = "self_update"
     #: The gate document exists but cannot be read; fail closed, never open.
     GATE_UNREADABLE = "gate_unreadable"
 
@@ -111,6 +113,7 @@ PAUSE_REASON_LABELS: Final[dict[str, str]] = {
     PauseReason.AWAY_UNBOUNDED.value: (
         "paused: away mode needs an end time or a job budget"
     ),
+    PauseReason.SELF_UPDATE.value: "paused: the engine is reinstalling itself",
     PauseReason.GATE_UNREADABLE.value: "paused: the work gate record is unreadable",
 }
 

@@ -424,6 +424,47 @@ command falls back to `orch monitor` for one selected running job.
 `orch wait RUN_ID` still blocks until a persisted state change; `watch` is a
 separate command, not an alias.
 
+## Vendor CLI updates and `orch self-update` (ADR-0031)
+
+A vendor CLI update is detected on the next scheduler tick (also periodically,
+default every 10 minutes). While the new version is unverified, no new job is
+started on that vendor: queued work routes to another admitted candidate or
+waits with `VENDOR_CLI_UNVERIFIED` naming the update. Running jobs are not
+touched.
+
+The automatic check runs the allowlisted `--help` guard from ADR-0018, then one
+tiny smoke prompt through the vendor's own isolated worker adapter. Both pass:
+the new version is recorded as verified and routing resumes with one notice. A
+removed flag or a failed smoke parks the vendor and files exactly one repair job
+on the SaberOps repository with the evidence; that job goes through the normal
+gate and review, and the owner accepts it explicitly.
+
+```bash
+orch vendor status                 # verdict, versions and the smoke setting
+orch vendor status --json
+orch vendor check [--vendor opencode] [--force]
+orch vendor smoke on|off           # automatic smoke prompt (on by default)
+orch vendor pin codex "codex-cli 0.170.0"   # warn instead of adapting
+orch vendor unpin codex
+orch vendor smoke-model opencode deepseek-v4-flash
+```
+
+After an accepted repair (or any accepted engine change), reinstall the daily
+build from that exact commit:
+
+```bash
+orch self-update --target main                 # tip of main
+orch self-update --commit <sha> --json
+```
+
+`self-update` refuses a commit that is not on the target branch, a commit with
+no passing `full` gate receipt for the exact SHA, a dirty checkout, or a
+checkout that is not at that commit. It never pushes. Running workers are
+parked through the same safe pause path as `orch pause` and resumed after the
+reinstall, so no worktree, checkpoint or job is discarded; the scheduler
+re-execs into the new build, a running MCP server finishes its current call and
+exits, and the command reports the old and new `orch --version`.
+
 ## Phase 1 benchmark (`scripts/benchmark.py`)
 
 Ten fixed small tasks measure the full job, scheduler, worker, gate, review and
