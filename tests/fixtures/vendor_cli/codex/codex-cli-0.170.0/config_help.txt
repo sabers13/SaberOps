@@ -7,7 +7,7 @@ Usage: codex [OPTIONS] [PROMPT]
        codex [OPTIONS] <COMMAND> [ARGS]
 
 Commands:
-  agents            Browse all agent sessions on the shared local app-server daemon
+  agents            Open the agent command center to browse and switch sessions
   exec              Run Codex non-interactively [aliases: e]
   review            Run a code review non-interactively
   login             Manage login
@@ -29,6 +29,7 @@ Commands:
   archive           Archive a saved session by id or session name
   delete            Permanently delete a saved session by id or session name
   migrate-rollouts  Inspect or migrate legacy local sessions to paginated thread history
+  migrate-nfs-db    [experimental] Migrate configured SQLite databases to DELETE mode in place
   unarchive         Unarchive a saved session by id or session name
   fork              Fork a previous interactive session (picker by default; use --last to fork the
                     most recent)
@@ -225,6 +226,10 @@ Options:
 
       --skip-git-repo-check
           Allow running Codex outside a Git repository
+
+      --trust
+          Save trust for this project and future chats, including MCP commands outside the sandbox.
+          Persists even with --ephemeral. Does not override an explicitly untrusted project
 
       --ephemeral
           Run without persisting session files to disk

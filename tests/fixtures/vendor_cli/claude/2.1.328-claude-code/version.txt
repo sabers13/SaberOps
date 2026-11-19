@@ -1,0 +1,2 @@
+$ claude --version
+2.1.328 (Claude Code)

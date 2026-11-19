@@ -209,8 +209,8 @@ class OpenCodeAdapter(WorkerAdapter):
         # max_prompt_bytes docstring). This never risks E2BIG for a large
         # prompt: the oversized text never enters argv.
         #
-        # The installed opencode v2.0.29 ``run --help`` (committed at
-        # tests/fixtures/vendor_cli/opencode/opencode-v2.0.29/config_help.txt)
+        # The installed opencode v2.3.2 ``run --help`` (committed at
+        # tests/fixtures/vendor_cli/opencode/opencode-v2.3.2/config_help.txt)
         # documents neither ``--dir`` nor ``--pure`` (HV-1 finding F1, fixed in
         # Step 024/HV-2).  The worktree is carried by the child ``cwd`` below --
         # not by an argv flag -- and config/plugin isolation comes from

@@ -1,2 +1,0 @@
-$ opencode --version
-opencode v2.0.29

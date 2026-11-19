@@ -15,6 +15,10 @@ behaviours are:
   called (never at import time) and does not contact a vendor.
 * :func:`detect_drift` compares the manifest's fixture versions against the
   installed versions and reports every CLI whose fixtures are stale.
+* :func:`check_version_support` runs the allowlisted ``--help`` invocations
+  only when a version drift was observed and reports whether the adapter's
+  pinned flags are still documented.  It never sends a prompt; when a help
+  capture is incomplete the result is ``unverified``, never ``unsupported``.
 * :func:`capture` (owner-run, token-free) records ``--version``, the
   ``--help`` text the adapters pin, and the native usage rows read through the
   existing readers, writing only outside the repository.
@@ -31,6 +35,7 @@ import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -42,8 +47,11 @@ __all__ = [
     "Fixture",
     "Manifest",
     "RedactionError",
+    "VersionCheck",
+    "VersionSupport",
     "assert_redacted",
     "capture",
+    "check_version_support",
     "detect_drift",
     "load_manifest",
     "main",
@@ -432,23 +440,250 @@ def detect_drift(manifest: Manifest, installed: Mapping[str, str]) -> list[Drift
 
 
 # ---------------------------------------------------------------------------
-# Owner-run capture (token-free)
+# Version-change guard: allowlisted help check
 # ---------------------------------------------------------------------------
 
+#: One allowlisted invocation: (exit code, stdout, stderr).
 RunFn = Callable[[Sequence[str], float], tuple[int, str, str]]
 ReaderFn = Callable[[str, str], "list[dict[str, Any]]"]
 
 
-def _default_run(cmd: Sequence[str], timeout: float) -> tuple[int, str, str]:
-    try:
-        process = subprocess.run(
-            list(cmd), capture_output=True, text=True, timeout=timeout, check=False
+class VersionSupport(StrEnum):
+    """Outcome of checking a drifted CLI against the adapter's pinned flags.
+
+    ``SUPPORTED`` and ``UNSUPPORTED`` need positive evidence from a complete
+    allowlisted ``--help`` capture.  ``UNVERIFIED`` is the fail-open state: the
+    CLI could not be probed, so nothing is known and dispatch must not treat
+    the CLI as unsupported on a guess.
+    """
+
+    SUPPORTED = "supported"
+    UNSUPPORTED = "unsupported"
+    UNVERIFIED = "unverified"
+
+
+@dataclass(frozen=True)
+class VersionCheck:
+    """Result of the version-change guard for one CLI."""
+
+    cli: str
+    vendor: str
+    installed_version: str
+    fixture_versions: tuple[str, ...]
+    state: VersionSupport
+    missing: tuple[str, ...] = ()
+    commands: tuple[str, ...] = ()
+    detail: str = ""
+
+
+def _version_shape(version: str) -> re.Pattern[str]:
+    """Regex matching ``version`` with every number run treated as a number.
+
+    ``codex-cli 0.162.1`` becomes ``^codex-cli \\d+\\.\\d+\\.\\d+$``.  The
+    recorded format is what makes a genuine vendor update recognisable; a
+    wrapper or fake CLI that answers ``--version`` with a different shape is
+    never probed for help.
+    """
+    parts = re.split(r"\d+", version)
+    return re.compile("^" + r"\d+".join(re.escape(part) for part in parts) + "$")
+
+
+def _expected_flags(fixtures: Sequence[Fixture]) -> tuple[str, ...]:
+    """Union of the adapter-pinned flags recorded on ``config_help`` fixtures."""
+    flags: list[str] = []
+    for fixture in fixtures:
+        if fixture.kind != "config_help" or not isinstance(fixture.expect, Mapping):
+            continue
+        for flag in fixture.expect.get("flags", []):
+            if isinstance(flag, str) and flag not in flags:
+                flags.append(flag)
+    return tuple(flags)
+
+
+def check_version_support(
+    manifest: Manifest,
+    cli: str,
+    installed_version: str,
+    *,
+    which: Callable[[str], str | None] = shutil.which,
+    run: RunFn | None = None,
+    timeout: float = HELP_TIMEOUT,
+) -> VersionCheck:
+    """Check a drifted CLI against the allowlisted ``--help`` fixtures.
+
+    Called only when :func:`detect_drift` reported a version change.  It runs
+    exactly the ``HELP_COMMANDS`` allowlist for the vendor (no prompt, no
+    vendor setting, no credential) and returns:
+
+    * ``SUPPORTED`` when every recorded adapter flag still appears in a
+      complete help capture;
+    * ``UNSUPPORTED`` when a complete capture omits one or more recorded
+      flags — the clear unsupported-version state;
+    * ``UNVERIFIED`` when no complete capture could be read (CLI missing,
+      probe failed, no recorded flags), so nothing is inferred from a guess.
+    """
+    fixtures = tuple(
+        fixture
+        for fixture in manifest.fixtures
+        if fixture.cli == cli and fixture.cli_version != UNKNOWN_VERSION
+    )
+    versions = tuple(sorted({fixture.cli_version for fixture in fixtures}))
+    if not fixtures:
+        return VersionCheck(
+            cli=cli,
+            vendor=cli,
+            installed_version=installed_version,
+            fixture_versions=(),
+            state=VersionSupport.UNVERIFIED,
+            detail="no versioned fixture for this CLI",
         )
+    vendor = fixtures[0].vendor
+    if installed_version == MISSING:
+        return VersionCheck(
+            cli=cli,
+            vendor=vendor,
+            installed_version=installed_version,
+            fixture_versions=versions,
+            state=VersionSupport.UNVERIFIED,
+            detail="CLI not installed or version unreadable",
+        )
+    if installed_version in versions:
+        return VersionCheck(
+            cli=cli,
+            vendor=vendor,
+            installed_version=installed_version,
+            fixture_versions=versions,
+            state=VersionSupport.SUPPORTED,
+            detail="fixtures match the installed version",
+        )
+    if not any(_version_shape(recorded).match(installed_version) for recorded in versions):
+        return VersionCheck(
+            cli=cli,
+            vendor=vendor,
+            installed_version=installed_version,
+            fixture_versions=versions,
+            state=VersionSupport.UNVERIFIED,
+            detail=(
+                "installed version does not match the recorded vendor version "
+                "format; help probe skipped"
+            ),
+        )
+    commands = HELP_COMMANDS.get(vendor)
+    if not commands:
+        return VersionCheck(
+            cli=cli,
+            vendor=vendor,
+            installed_version=installed_version,
+            fixture_versions=versions,
+            state=VersionSupport.UNVERIFIED,
+            detail=f"no allowlisted help commands for {vendor!r}",
+        )
+    expected = _expected_flags(
+        tuple(fixture for fixture in fixtures if fixture.cli_version != installed_version)
+    )
+    if not expected:
+        return VersionCheck(
+            cli=cli,
+            vendor=vendor,
+            installed_version=installed_version,
+            fixture_versions=versions,
+            state=VersionSupport.UNVERIFIED,
+            commands=tuple(" ".join(command) for command in commands),
+            detail="no recorded adapter flags to check",
+        )
+    executable = which(cli)
+    if not executable:
+        return VersionCheck(
+            cli=cli,
+            vendor=vendor,
+            installed_version=installed_version,
+            fixture_versions=versions,
+            state=VersionSupport.UNVERIFIED,
+            commands=tuple(" ".join(command) for command in commands),
+            detail="CLI executable not found",
+        )
+    runner = run or _default_run
+    outputs: list[str] = []
+    for command in commands:
+        try:
+            code, stdout, stderr = runner([executable, *command], timeout)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return VersionCheck(
+                cli=cli,
+                vendor=vendor,
+                installed_version=installed_version,
+                fixture_versions=versions,
+                state=VersionSupport.UNVERIFIED,
+                commands=tuple(" ".join(item) for item in commands),
+                detail=f"help capture failed: {type(exc).__name__}",
+            )
+        text = (stdout or stderr).strip()
+        if code != 0 or not text:
+            return VersionCheck(
+                cli=cli,
+                vendor=vendor,
+                installed_version=installed_version,
+                fixture_versions=versions,
+                state=VersionSupport.UNVERIFIED,
+                commands=tuple(" ".join(item) for item in commands),
+                detail=f"help capture failed: {cli} {' '.join(command)} (exit {code})",
+            )
+        outputs.append(stdout or stderr)
+    combined = "\n".join(outputs)
+    missing = tuple(flag for flag in expected if flag not in combined)
+    state = VersionSupport.UNSUPPORTED if missing else VersionSupport.SUPPORTED
+    detail = (
+        "recorded adapter flags are absent from --help"
+        if missing
+        else "recorded adapter flags are still documented"
+    )
+    return VersionCheck(
+        cli=cli,
+        vendor=vendor,
+        installed_version=installed_version,
+        fixture_versions=versions,
+        state=state,
+        missing=missing,
+        commands=tuple(" ".join(command) for command in commands),
+        detail=detail,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Owner-run capture (token-free)
+# ---------------------------------------------------------------------------
+
+
+def _default_run(cmd: Sequence[str], timeout: float) -> tuple[int, str, str]:
+    """Run one allowlisted command with file-backed capture.
+
+    Output goes to temporary files rather than pipes: at least one vendor CLI
+    (Claude Code 2.1.328) emits only a pipe-buffer prefix of its ``--help``
+    text when stdout is a pipe, which would make a help capture look like a
+    removed flag.  A regular file gets the complete text.
+    """
+    import tempfile
+
+    try:
+        with (
+            tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stdout_file,
+            tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stderr_file,
+        ):
+            process = subprocess.run(
+                list(cmd),
+                stdout=stdout_file,
+                stderr=stderr_file,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+            stdout_file.seek(0)
+            stderr_file.seek(0)
+            return process.returncode, stdout_file.read(), stderr_file.read()
     except subprocess.TimeoutExpired:
         return 124, "", "timed out"
     except OSError as exc:
         return 127, "", str(exc)
-    return process.returncode, process.stdout or "", process.stderr or ""
 
 
 def _slug(version: str) -> str:
@@ -601,9 +836,10 @@ def run_check(
     manifest_path: str | Path = MANIFEST_PATH,
     *,
     which: Callable[[str], str | None] = shutil.which,
+    run: RunFn | None = None,
     stream: Any = None,
 ) -> int:
-    """Validate the manifest, then print drift records.
+    """Validate the manifest, print drift records, then guard each drift.
 
     Returns ``0`` when the validated manifest matches every installed version,
     ``1`` when a fixture is stale, and :data:`CHECK_INVALID_MANIFEST_EXIT` when
@@ -612,6 +848,12 @@ def run_check(
     manifest stops the check before any ``--version`` probe: a drift
     comparison over an unverified manifest could otherwise print a misleading
     ``no drift``.
+
+    A drifted CLI also gets the no-prompt :func:`check_version_support` guard:
+    the allowlisted ``--help`` capture runs and its ``SUPPORTED``/
+    ``UNSUPPORTED``/``UNVERIFIED`` state is printed.  The exit code still
+    reports drift only; the guard never turns an unverified probe into a
+    failure.
     """
     out = stream if stream is not None else sys.stdout
     path = Path(manifest_path)
@@ -638,6 +880,17 @@ def run_check(
             f"{'s' if len(drift.expected_versions) > 1 else ''} "
             f"{', '.join(drift.expected_versions)} != installed "
             f"{drift.installed_version}; files: {', '.join(drift.fixtures)}",
+            file=out,
+        )
+        check = check_version_support(
+            manifest, drift.cli, drift.installed_version, which=which, run=run
+        )
+        detail = f"; {check.detail}" if check.detail else ""
+        if check.missing:
+            detail += f"; missing: {', '.join(check.missing)}"
+        print(
+            f"{check.state.value.upper()} {drift.vendor} ({drift.cli}): "
+            f"installed {drift.installed_version}{detail}",
             file=out,
         )
     if not drifts:

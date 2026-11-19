@@ -7,6 +7,10 @@ import shlex
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from saberops.vendor_cli_fixtures import Manifest
 
 
 @dataclass(frozen=True)
@@ -72,6 +76,56 @@ def sign_in_remedy(provider: str, reason: str, connection: str) -> str:
     return check
 
 
+def vendor_cli_version_findings(
+    provider: str, executable: str, version: str, manifest: Manifest
+) -> list[Finding]:
+    """Report version drift and the allowlisted-help update-guard state.
+
+    Drift stays the existing ``WARN``.  The guard runs the allowlisted
+    ``--help`` capture only for a drifted CLI; an ``UNSUPPORTED`` result (a
+    complete capture omits a flag the adapter pins) is the clear ``FAIL``
+    unsupported-version state.  An unverified probe stays a ``WARN`` so no
+    dispatch decision is ever made on a guess.
+    """
+    from saberops.vendor_cli_fixtures import (
+        VersionSupport,
+        check_version_support,
+        detect_drift,
+    )
+
+    relevant = [
+        item
+        for item in detect_drift(manifest, {executable: version})
+        if item.cli == executable
+    ]
+    if not relevant:
+        return []
+    findings = [Finding("WARN", f"{provider} CLI version differs from recorded fixtures")]
+    check = check_version_support(manifest, executable, version)
+    if check.state is VersionSupport.UNSUPPORTED:
+        findings.append(
+            Finding(
+                "FAIL",
+                f"{provider} CLI version unsupported: "
+                f"{', '.join(check.missing)} missing from --help",
+                f"python -m saberops.vendor_cli_fixtures capture "
+                f"--vendor {relevant[0].vendor} --out <outside-repo>",
+            )
+        )
+    elif check.state is VersionSupport.SUPPORTED:
+        findings.append(
+            Finding(
+                "OK",
+                f"{provider} CLI update guard: recorded adapter flags still documented",
+            )
+        )
+    else:
+        findings.append(
+            Finding("WARN", f"{provider} CLI update guard: not verified ({check.detail})")
+        )
+    return findings
+
+
 def collect_preflight(repo: Path, db_path: Path | None = None) -> list[Finding]:
     """Inspect current project setup without sending a model prompt."""
     from datetime import UTC, date, datetime
@@ -102,7 +156,6 @@ def collect_preflight(repo: Path, db_path: Path | None = None) -> list[Finding]:
     from saberops.routing_config import load_effective_routing
     from saberops.vendor_cli_fixtures import (
         MISSING,
-        detect_drift,
         load_manifest,
         read_installed_version,
     )
@@ -251,12 +304,9 @@ def collect_preflight(repo: Path, db_path: Path | None = None) -> list[Finding]:
             )
         )
         if installed and manifest is not None:
-            drift = detect_drift(manifest, {descriptor.executable: version})
-            relevant = [item for item in drift if item.cli == descriptor.executable]
-            if relevant:
-                results.append(
-                    Finding("WARN", f"{provider} CLI version differs from recorded fixtures")
-                )
+            results.extend(
+                vendor_cli_version_findings(provider, descriptor.executable, version, manifest)
+            )
         admission = readiness.admission_for(provider=provider)
         ready = admission.state is ProviderReadiness.READY
         results.append(

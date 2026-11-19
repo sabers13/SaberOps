@@ -184,9 +184,9 @@ class AgentSessionRuntime:
 
         def serve() -> None:
             try:
-                # No ``--pure``: the installed opencode v2.0.29 ``serve --help``
+                # No ``--pure``: the installed opencode v2.3.2 ``serve --help``
                 # (committed at
-                # tests/fixtures/vendor_cli/opencode/opencode-v2.0.29/config_help.txt)
+                # tests/fixtures/vendor_cli/opencode/opencode-v2.3.2/config_help.txt)
                 # documents no such flag (HV-1 F1, fixed in Step 024/HV-2).
                 # Config/plugin isolation comes from ``child_env`` (a private
                 # config/home root owned until the server stops); the worktree

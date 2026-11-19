@@ -4,12 +4,12 @@
     {
       "vendor": "codex",
       "cli": "codex",
-      "cli_version": "codex-cli 0.162.1",
-      "captured_on": "2026-10-16",
+      "cli_version": "codex-cli 0.170.0",
+      "captured_on": "2026-11-19",
       "kind": "config_help",
       "source": "real-capture",
       "redacted": true,
-      "file": "codex/codex-cli-0.162.1/config_help.txt",
+      "file": "codex/codex-cli-0.170.0/config_help.txt",
       "consumer": "saberops.workers.codex:CodexAdapter",
       "expect": {
         "flags": [
@@ -26,17 +26,17 @@
           "resume"
         ]
       },
-      "provenance": "Installed CLI on the HV-1 host, 2026-10-16: `codex --version`, `codex --help`, `codex exec --help`, `codex resume --help` (token-free, owner-kept D-0015)."
+      "provenance": "Installed CLI on the owner host, refreshed 2026-11-19 for codex-cli 0.170.0: `codex --version`, `codex --help`, `codex exec --help`, `codex resume --help` only (token-free, owner-kept D-0015). Original capture 2026-10-16."
     },
     {
       "vendor": "claude",
       "cli": "claude",
-      "cli_version": "2.1.301 (Claude Code)",
-      "captured_on": "2026-10-16",
+      "cli_version": "2.1.328 (Claude Code)",
+      "captured_on": "2026-11-19",
       "kind": "config_help",
       "source": "real-capture",
       "redacted": true,
-      "file": "claude/2.1.301-claude-code/config_help.txt",
+      "file": "claude/2.1.328-claude-code/config_help.txt",
       "consumer": "saberops.workers.claude:ClaudeCodeAdapter",
       "expect": {
         "flags": [
@@ -60,17 +60,17 @@
           "status"
         ]
       },
-      "provenance": "Installed CLI on the HV-1 host, 2026-10-16: `claude --version`, `claude --help`, `claude auth --help` (token-free, owner-kept D-0015)."
+      "provenance": "Installed CLI on the owner host, refreshed 2026-11-19 for 2.1.328 (Claude Code): `claude --version`, `claude --help`, `claude auth --help` only (token-free, owner-kept D-0015). Original capture 2026-10-16."
     },
     {
       "vendor": "opencode",
       "cli": "opencode",
-      "cli_version": "opencode v2.0.29",
-      "captured_on": "2026-10-16",
+      "cli_version": "opencode v2.3.2",
+      "captured_on": "2026-11-19",
       "kind": "config_help",
       "source": "real-capture",
       "redacted": true,
-      "file": "opencode/opencode-v2.0.29/config_help.txt",
+      "file": "opencode/opencode-v2.3.2/config_help.txt",
       "consumer": "saberops.workers.opencode:OpenCodeAdapter",
       "expect": {
         "flags": [
@@ -85,7 +85,7 @@
           "serve"
         ]
       },
-      "provenance": "Installed CLI on the HV-1 host, 2026-10-16: `opencode --version`, `opencode --help`, `opencode run --help`, `opencode models --help` (token-free, owner-kept D-0015). HV-1 finding F1: the v2.0.29 help has no --pure/--dir. Step 024 (HV-2): the capture was extended token-free with `opencode serve --help` so the serve site's flags (--hostname/--port) are covered, and the F1 flags were removed from the adapters."
+      "provenance": "Installed CLI on the owner host, refreshed 2026-11-19 for opencode v2.3.2: `opencode --version`, `opencode --help`, `opencode run --help`, `opencode models --help`, `opencode serve --help` only (token-free, owner-kept D-0015). Original capture 2026-10-16 at v2.0.29; HV-1 finding F1 removed the undocumented --pure/--dir from the adapters, and the serve help was added in step 024 (HV-2)."
     },
     {
       "vendor": "opencode",
