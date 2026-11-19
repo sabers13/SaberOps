@@ -1,0 +1,548 @@
+"""Reusable lifecycle test rig for SaberOps Phase 1 lanes.
+
+Builds an isolated fresh empty store (``XDG_*`` + ``HOME`` under ``tmp_path``),
+a small toy Git repository, executable shims on ``PATH`` for our deterministic
+fake worker/reviewer CLI, two separately routable worker providers (``codex``
+and ``opencode``), and an independent ``anthropic`` (``claude``) reviewer.
+
+Setup runs through the same public functions/commands an owner uses, with
+narrow, explicitly tagged workarounds for the Wave 0 defects (findings §3
+items 1-3) so they can be removed cleanly as A3-A5 land.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import stat
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Literal
+
+import pytest
+
+from saberops.access_ops import (
+    discover_access_models,
+    test_access_connection,
+    verify_access_model,
+)
+from saberops.cli import main as cli_main
+from saberops.control_plane.policy import ProviderPolicyState, set_provider_policy
+from saberops.db import Database, current_iso_timestamp
+from saberops.models import (
+    TERMINAL_RUN_STATUSES,
+    Attempt,
+    AttemptStatus,
+    CheckResult,
+    DispatchEvidence,
+    DispatchReason,
+    DispatchRole,
+    DispatchStage,
+    ReviewPolicyMode,
+    ReviewResult,
+    ReviewVerdict,
+    Run,
+    RunStatus,
+    Tier,
+)
+from saberops.plans_ops import verify_posture
+from saberops.project_settings import set_project_review_policy
+from saberops.provenance import mint_run_provenance
+from saberops.routing_config import (
+    add_candidate_to_chain,
+    init_user_config,
+    load_effective_routing_payload,
+    save_user_routing,
+)
+from saberops.service import OrchestratorService
+
+FAKE_CLI_SCRIPT = Path(__file__).resolve().parent / "fixtures" / "fake_worker_cli.py"
+
+WORKER_CANDIDATE_CODEX = "codex/gpt-5.6-terra"
+WORKER_CANDIDATE_OPENCODE = "opencode/opencode-go/deepseek-v4-flash"
+REVIEWER_BINDING_ID = "discovered-binding:reviewer:claude-code-subscription:claude-sonnet-4-6"
+
+
+def _git(repo: Path, *args: str) -> str:
+    proc = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return proc.stdout.strip()
+
+
+def _install_shim(bin_dir: Path, name: str) -> Path:
+    shim = bin_dir / name
+    shim.write_text(
+        "#!/bin/sh\n"
+        f'exec "{sys.executable}" "{FAKE_CLI_SCRIPT}" --fake-harness {name} "$@"\n',
+        encoding="utf-8",
+    )
+    shim.chmod(shim.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return shim
+
+
+def create_toy_repo(root: Path, name: str = "toy-repo") -> tuple[Path, str]:
+    """Create a small clean Git repository on ``main`` and return ``(path, base_sha)``."""
+    repo = root / name
+    repo.mkdir(parents=True, exist_ok=True)
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.name", "Toy Owner")
+    _git(repo, "config", "user.email", "toy-owner@example.com")
+    (repo / "README.md").write_text("# Toy Repository\n", encoding="utf-8")
+    (repo / "app.py").write_text("def greet() -> str:\n    return 'hello'\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "initial commit")
+    return repo, _git(repo, "rev-parse", "HEAD")
+
+
+@dataclass
+class RigEnvironment:
+    """Isolated SaberOps store, toy Git repository, and fake CLI controls."""
+
+    root: Path
+    home_dir: Path
+    state_home: Path
+    config_home: Path
+    cache_home: Path
+    data_home: Path
+    bin_dir: Path
+    repo: Path
+    base_sha: str
+    gate_command: str
+    reviewer_binding_id: str
+    worker_candidates: tuple[str, str]
+    reviewer_control_path: Path
+    monkeypatch: pytest.MonkeyPatch
+
+    def db(self) -> Database:
+        """Open the global owner database for this isolated store."""
+        return Database()
+
+    def service(self) -> OrchestratorService:
+        """Construct an ``OrchestratorService`` bound to the isolated owner DB."""
+        return OrchestratorService(db=self.db())
+
+    def set_worker_mode(
+        self,
+        mode: Literal["commit", "hang", "crash", "quota_exhausted"],
+        *,
+        hang_seconds: float | None = None,
+        exit_code: int | None = None,
+        target_file: str | None = None,
+        content: str | None = None,
+    ) -> None:
+        """Configure fake worker behaviour via ``ORCH_FAKE_*`` env vars."""
+        self.monkeypatch.setenv("ORCH_FAKE_WORKER_MODE", mode)
+        if hang_seconds is not None:
+            self.monkeypatch.setenv("ORCH_FAKE_WORKER_HANG_SECONDS", str(hang_seconds))
+        else:
+            self.monkeypatch.delenv("ORCH_FAKE_WORKER_HANG_SECONDS", raising=False)
+        if exit_code is not None:
+            self.monkeypatch.setenv("ORCH_FAKE_WORKER_EXIT_CODE", str(exit_code))
+        else:
+            self.monkeypatch.delenv("ORCH_FAKE_WORKER_EXIT_CODE", raising=False)
+        if target_file is not None:
+            self.monkeypatch.setenv("ORCH_FAKE_WORKER_FILE", target_file)
+        else:
+            self.monkeypatch.delenv("ORCH_FAKE_WORKER_FILE", raising=False)
+        if content is not None:
+            self.monkeypatch.setenv("ORCH_FAKE_WORKER_CONTENT", content)
+        else:
+            self.monkeypatch.delenv("ORCH_FAKE_WORKER_CONTENT", raising=False)
+
+    def set_reviewer_verdict(self, verdict: Literal["PASS", "BLOCK"]) -> None:
+        """Persist fake reviewer verdict instruction inside isolated state dir."""
+        self.reviewer_control_path.parent.mkdir(parents=True, exist_ok=True)
+        self.reviewer_control_path.write_text(
+            json.dumps({"verdict": verdict}),
+            encoding="utf-8",
+        )
+
+    def run_cli(self, *args: str) -> subprocess.CompletedProcess[str]:
+        """Run ``python -m saberops.cli`` inside the isolated rig environment."""
+        return subprocess.run(
+            [sys.executable, "-m", "saberops.cli", *args],
+            cwd=str(self.repo),
+            env=dict(os.environ),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def wait_for_run(self, run_id: str, *, timeout: float = 15.0) -> Run:
+        """Poll the owner DB until *run_id* reaches a terminal status."""
+        deadline = time.monotonic() + timeout
+        db = self.db()
+        while time.monotonic() < deadline:
+            run = db.get_run(run_id)
+            if run is not None and run.status in TERMINAL_RUN_STATUSES:
+                return run
+            time.sleep(0.05)
+        run = db.get_run(run_id)
+        status_str = run.status.value if run is not None else "missing"
+        raise TimeoutError(f"Run {run_id} did not terminate within {timeout}s (status={status_str})")
+
+
+def build_lifecycle_rig(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    gate_command: str | None = None,
+) -> RigEnvironment:
+    """Create a fresh empty store + toy repo wired with fake workers and reviewer.
+
+    Every setup step uses the public functions/commands an owner uses, except
+    where Wave 0 defects (findings §3 items 1-3) block fresh setup; those are
+    marked with ``# WORKAROUND(defect #N)``.
+    """
+    home_dir = tmp_path / "home"
+    state_home = tmp_path / "state"
+    config_home = tmp_path / "config"
+    cache_home = tmp_path / "cache"
+    data_home = tmp_path / "data"
+    bin_dir = tmp_path / "bin"
+    for directory in (home_dir, state_home, config_home, cache_home, data_home, bin_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setenv("HOME", str(home_dir))
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(cache_home))
+    monkeypatch.setenv("XDG_DATA_HOME", str(data_home))
+    monkeypatch.setenv("TMPDIR", "/var/tmp")
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    for var in (
+        "SABEROPS_PROFILE",
+        "ORCH_ACCESS_STORE",
+        "ORCH_ACCESS_MODELS_STORE",
+        "ORCH_BINDING_STORE",
+        "ORCH_READINESS_STORE",
+        "ORCH_EXECUTABLE",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "ORCH_FAKE_WORKER_MODE",
+        "ORCH_FAKE_WORKER_HANG_SECONDS",
+        "ORCH_FAKE_WORKER_EXIT_CODE",
+        "ORCH_FAKE_WORKER_FILE",
+        "ORCH_FAKE_WORKER_CONTENT",
+        "ORCH_FAKE_REVIEWER_VERDICT",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    for cli_name in ("codex", "opencode", "claude"):
+        _install_shim(bin_dir, cli_name)
+
+    repo, base_sha = create_toy_repo(tmp_path)
+    resolved_gate = (
+        gate_command
+        if gate_command is not None
+        else f"{sys.executable} -c 'import pathlib; assert pathlib.Path(\"app.py\").is_file()'"
+    )
+
+    # 1. Verify account-backed CLI connections and discover models (public access ops).
+    codex_test = test_access_connection("codex-chatgpt-account")
+    assert codex_test["readiness_state"] == "READY", codex_test
+    claude_test = test_access_connection("claude-code-subscription")
+    assert claude_test["readiness_state"] == "READY", claude_test
+
+    assert discover_access_models("codex-chatgpt-account")["ok"] is True
+    assert discover_access_models("opencode-account")["ok"] is True
+    assert discover_access_models("claude-code-subscription")["ok"] is True
+
+    opencode_verify = verify_access_model("opencode-account", "opencode-go/deepseek-v4-flash")
+    assert opencode_verify["readiness_state"] == "READY", opencode_verify
+
+    # 2. Initialize user routing and add TWO separately routable worker providers.
+    init_user_config()
+    payload = load_effective_routing_payload()
+    payload = add_candidate_to_chain(payload, role="WORKER", candidate_id=WORKER_CANDIDATE_CODEX)
+    payload = add_candidate_to_chain(payload, role="WORKER", candidate_id=WORKER_CANDIDATE_OPENCODE)
+    save_user_routing(payload)
+
+    # 3. Select the independent fake reviewer (anthropic/claude != codex or opencode).
+    service = OrchestratorService(db=Database())
+    service.set_reviewer_binding(REVIEWER_BINDING_ID)
+
+    # 4. Confirm billing postures for workers and reviewer.
+    today = datetime.now(UTC).date().isoformat()
+    verify_posture(
+        "codex",
+        ("https://learn.chatgpt.com/docs/pricing",),
+        "rig attestation",
+        "A",
+        today,
+    )
+    verify_posture(
+        "opencode/opencode-go/*",
+        ("https://opencode.ai/docs/go/",),
+        "rig attestation",
+        "A",
+        today,
+    )
+    verify_posture(
+        "anthropic",
+        ("https://code.claude.com/docs/en/legal-and-compliance",),
+        "rig attestation",
+        "A",
+        today,
+    )
+    # WORKAROUND(defect #1): verify_posture writes control_plane.json with an
+    # empty ``providers`` mapping, leaving every provider in ALLOWED_WITH_WARNING
+    # (refused unattended), and ``anthropic`` is absent from policy._default().
+    # No CLI command marks a provider ALLOWED yet (A4).
+    for provider in ("codex", "opencode", "anthropic"):
+        set_provider_policy(provider, ProviderPolicyState.ALLOWED)
+
+    # 5. Supply fresh quota evidence for overage_possible pools.
+    # WORKAROUND(defect #2): Fresh stores hold no quota reading and nothing
+    # gathers quota evidence automatically (A5), so overage_possible pools
+    # refuse admission with QUOTA_EVIDENCE_REQUIRED / NO_CAPACITY.
+    future_reset = (datetime.now(UTC) + timedelta(hours=4)).isoformat()
+    service.set_quota("codex", "chatgpt-plus", 80.0, reset_at=future_reset)
+    service.set_quota("opencode", "opencode-go", 80.0, reset_at=future_reset)
+    service.set_quota("anthropic", "claude-pro", 80.0, reset_at=future_reset)
+
+    # 6. Configure project review policy and check command via public CLI.
+    set_project_review_policy(repo, ReviewPolicyMode.ALWAYS_REQUIRED)
+    assert cli_main(["project", "set-gate", "--repo", str(repo), resolved_gate]) == 0
+
+    reviewer_control_path = state_home / "saberops" / "fake-reviewer-mode.json"
+    rig = RigEnvironment(
+        root=tmp_path,
+        home_dir=home_dir,
+        state_home=state_home,
+        config_home=config_home,
+        cache_home=cache_home,
+        data_home=data_home,
+        bin_dir=bin_dir,
+        repo=repo,
+        base_sha=base_sha,
+        gate_command=resolved_gate,
+        reviewer_binding_id=REVIEWER_BINDING_ID,
+        worker_candidates=(WORKER_CANDIDATE_CODEX, WORKER_CANDIDATE_OPENCODE),
+        reviewer_control_path=reviewer_control_path,
+        monkeypatch=monkeypatch,
+    )
+    rig.set_worker_mode("commit")
+    rig.set_reviewer_verdict("PASS")
+    return rig
+
+
+@dataclass
+class AcceptanceFixture:
+    """Candidate A (reviewed PASS) followed by unreviewed gate-passed candidate B.
+
+    Built for C10 and A7 verification on a real toy repository and database.
+    """
+
+    rig: RigEnvironment
+    run_id: str
+    base_sha: str
+    candidate_a_sha: str
+    candidate_b_sha: str
+    review_a_id: str
+    candidate_branch_b: str
+
+    def record_passing_review_for_b(self) -> str:
+        """Record a candidate-linked passing review for replacement candidate B."""
+        db = self.rig.db()
+        review_b_id = f"rev_{self.run_id}_b"
+        assoc_id = review_b_id
+        now = current_iso_timestamp()
+        db.create_dispatch_evidence(
+            DispatchEvidence(
+                id=f"disp_{assoc_id}",
+                run_id=self.run_id,
+                association_id=assoc_id,
+                review_id=review_b_id,
+                stage=DispatchStage.REVIEW,
+                role=DispatchRole.REVIEW,
+                tier=Tier.T1,
+                dispatch_reason=DispatchReason.INDEPENDENT_REVIEW,
+                requested_provider="anthropic",
+                requested_model="claude-sonnet-4-6",
+                candidate_sha=self.candidate_b_sha,
+                started_at=now,
+                completed_at=now,
+            )
+        )
+        db.create_review(
+            ReviewResult(
+                id=review_b_id,
+                run_id=self.run_id,
+                provider="anthropic",
+                model="claude-sonnet-4-6",
+                verdict=ReviewVerdict.PASS,
+                summary="Candidate B passed independent review.",
+                details="Verified candidate B commit.",
+                created_at=now,
+            )
+        )
+        db.link_model_calls_to_review(self.run_id, [assoc_id], review_b_id)
+        return review_b_id
+
+
+def build_acceptance_fixture(rig: RigEnvironment) -> AcceptanceFixture:
+    """Seed a completed run with reviewed candidate A and unreviewed replacement B.
+
+    Target repository HEAD remains clean on ``main`` at ``base_sha``.  Candidate A
+    and replacement candidate B are real descending commits on their own
+    candidate branches.
+    """
+    task = "Implement greeting update"
+    provenance = mint_run_provenance(rig.repo, task)
+    run_id = provenance.run_id
+    base_sha = rig.base_sha
+
+    branch_a = f"orch/{run_id}/a1"
+    branch_b = f"orch/{run_id}/a2"
+    _git(rig.repo, "checkout", "-b", branch_a, base_sha)
+    (rig.repo / "candidate_a.txt").write_text("candidate A\n", encoding="utf-8")
+    _git(rig.repo, "add", "candidate_a.txt")
+    _git(rig.repo, "commit", "-m", "candidate A")
+    candidate_a_sha = _git(rig.repo, "rev-parse", "HEAD")
+
+    _git(rig.repo, "checkout", "-b", branch_b, base_sha)
+    (rig.repo / "candidate_b.txt").write_text("candidate B\n", encoding="utf-8")
+    _git(rig.repo, "add", "candidate_b.txt")
+    _git(rig.repo, "commit", "-m", "candidate B")
+    candidate_b_sha = _git(rig.repo, "rev-parse", "HEAD")
+
+    _git(rig.repo, "checkout", "main")
+    assert _git(rig.repo, "rev-parse", "HEAD") == base_sha
+
+    now = current_iso_timestamp()
+    db = rig.db()
+    db.create_run(
+        Run(
+            id=run_id,
+            task=task,
+            target_repo=str(rig.repo),
+            base_commit=base_sha,
+            tier=Tier.T1,
+            training_allowed=True,
+            gate_command=rig.gate_command,
+            status=RunStatus.COMPLETED,
+            created_at=now,
+            completed_at=now,
+            project_id=provenance.project_id,
+            project_identity_json=provenance.identity.to_json(),
+            objective_id=provenance.objective_id,
+            config_json=json.dumps({"review_enabled": True}),
+        )
+    )
+
+    attempt_a_id = f"{run_id}_a1"
+    db.create_attempt(
+        Attempt(
+            id=attempt_a_id,
+            run_id=run_id,
+            attempt_number=1,
+            provider="codex",
+            model="gpt-5.6-terra",
+            worktree_path=str(rig.repo),
+            branch_name=branch_a,
+            status=AttemptStatus.SUCCESS,
+            commit_sha=candidate_a_sha,
+            created_at=now,
+            completed_at=now,
+            project_id=provenance.project_id,
+            objective_id=provenance.objective_id,
+            base_sha=base_sha,
+        )
+    )
+    db.create_check(
+        CheckResult(
+            id=f"check_{attempt_a_id}",
+            attempt_id=attempt_a_id,
+            gate_command=rig.gate_command,
+            exit_code=0,
+            stdout="gate ok",
+            stderr="",
+            passed=True,
+            created_at=now,
+        )
+    )
+
+    review_a_id = f"rev_{run_id}_a"
+    db.create_dispatch_evidence(
+        DispatchEvidence(
+            id=f"disp_{review_a_id}",
+            run_id=run_id,
+            association_id=review_a_id,
+            review_id=review_a_id,
+            stage=DispatchStage.REVIEW,
+            role=DispatchRole.REVIEW,
+            tier=Tier.T1,
+            dispatch_reason=DispatchReason.INDEPENDENT_REVIEW,
+            requested_provider="anthropic",
+            requested_model="claude-sonnet-4-6",
+            candidate_sha=candidate_a_sha,
+            started_at=now,
+            completed_at=now,
+        )
+    )
+    db.create_review(
+        ReviewResult(
+            id=review_a_id,
+            run_id=run_id,
+            provider="anthropic",
+            model="claude-sonnet-4-6",
+            verdict=ReviewVerdict.PASS,
+            summary="Candidate A passed independent review.",
+            details="Verified candidate A commit.",
+            created_at=now,
+        )
+    )
+    db.link_model_calls_to_review(run_id, [review_a_id], review_a_id)
+
+    attempt_b_id = f"{run_id}_a2"
+    db.create_attempt(
+        Attempt(
+            id=attempt_b_id,
+            run_id=run_id,
+            attempt_number=2,
+            provider="codex",
+            model="gpt-5.6-terra",
+            worktree_path=str(rig.repo),
+            branch_name=branch_b,
+            status=AttemptStatus.SUCCESS,
+            commit_sha=candidate_b_sha,
+            created_at=now,
+            completed_at=now,
+            project_id=provenance.project_id,
+            objective_id=provenance.objective_id,
+            base_sha=base_sha,
+        )
+    )
+    db.create_check(
+        CheckResult(
+            id=f"check_{attempt_b_id}",
+            attempt_id=attempt_b_id,
+            gate_command=rig.gate_command,
+            exit_code=0,
+            stdout="gate ok",
+            stderr="",
+            passed=True,
+            created_at=now,
+        )
+    )
+
+    return AcceptanceFixture(
+        rig=rig,
+        run_id=run_id,
+        base_sha=base_sha,
+        candidate_a_sha=candidate_a_sha,
+        candidate_b_sha=candidate_b_sha,
+        review_a_id=review_a_id,
+        candidate_branch_b=branch_b,
+    )
