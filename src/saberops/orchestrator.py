@@ -2869,8 +2869,8 @@ class Orchestrator:
             # pin; it is a preference, never a command to re-dispatch a
             # subscription that already ran out mid-run.
             pinned_candidate_provider: str | None = (
-                candidates[0].provider
-                if config.model_override is not None and candidates
+                base_candidates[0].provider
+                if config.model_override is not None and base_candidates
                 else None
             )
             pinned_failover_installed = False

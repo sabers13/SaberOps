@@ -493,7 +493,13 @@ def _serve_opencode(
                 if mode == "crash":
                     self._send_json(500, {"error": f"Fake opencode crash (code {exit_code})"})
                     return
-                if mode == "quota_exhausted":
+                if mode in {"quota_exhausted", "partial_quota"}:
+                    if mode == "partial_quota":
+                        # Interrupted mid-turn: uncommitted work, then the limit.
+                        try:
+                            _write_partial_change(workdir, "opencode", target_file, content)
+                        except OSError:
+                            pass
                     with lock:
                         messages.append(
                             {
