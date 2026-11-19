@@ -2546,9 +2546,45 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     connect_parser.add_argument(
+        "--agents",
+        dest="agents_mode",
+        action="store_true",
+        help=(
+            "Install the SaberOps proxy subagent definitions for each named CLI "
+            "(or all supported CLIs) and change nothing else."
+        ),
+    )
+    connect_parser.add_argument(
         "--profile", type=str, default=None, help="SaberOps profile the agents should use."
     )
     connect_parser.add_argument("--json", action="store_true", help="JSON output.")
+
+    # orch disconnect [agent ...] (remove SaberOps from agent CLIs).
+    disconnect_parser = subparsers.add_parser(
+        "disconnect",
+        help="Remove SaberOps from agent CLIs (the same as `orch connect --remove`).",
+        description=(
+            "Disconnect each agent and remove the SaberOps skill it owns. With --agents, "
+            "remove only the generated proxy subagent definitions."
+        ),
+    )
+    disconnect_parser.add_argument(
+        "agents", nargs="*", help="claude, codex, antigravity, opencode, cursor, or all."
+    )
+    disconnect_parser.add_argument(
+        "--agents",
+        dest="agents_mode",
+        action="store_true",
+        help="Remove only the SaberOps proxy subagent definitions.",
+    )
+    disconnect_parser.add_argument(
+        "--project",
+        nargs="?",
+        const=".",
+        default=None,
+        help="Disconnect only for this project folder (default: current folder).",
+    )
+    disconnect_parser.add_argument("--json", action="store_true", help="JSON output.")
 
     # orch certify check|run|report|approve (END production certification).
     certify_parser = subparsers.add_parser(
@@ -6424,10 +6460,14 @@ def _handle_mcp_switch(args: argparse.Namespace, action: str) -> int:
 
 def handle_connect(args: argparse.Namespace) -> int:
     """`orch connect [agent ...] [--remove] [--project [DIR]] [--dry-run]`."""
+    from dataclasses import asdict
+
     from saberops.agent_connect import AGENTS, agent_rows, connect, disconnect
 
     wanted = [a.strip().lower() for a in (getattr(args, "agents", None) or []) if a.strip()]
     project = Path(args.project).expanduser().resolve() if args.project else None
+    if getattr(args, "agents_mode", False):
+        return _handle_agent_definitions(args, wanted)
     if not wanted:
         rows = agent_rows()
         if args.json:
@@ -6453,7 +6493,7 @@ def handle_connect(args: argparse.Namespace) -> int:
         for slug in wanted
     ]
     if args.json:
-        print(json.dumps({"results": [r.__dict__ for r in results]}, indent=2, sort_keys=True))
+        print(json.dumps({"results": [asdict(r) for r in results]}, indent=2, sort_keys=True))
     else:
         for result in results:
             print(("✓ " if result.ok else "✗ ") + result.message)
@@ -6473,6 +6513,53 @@ def handle_connect(args: argparse.Namespace) -> int:
                     "Add --skill to also install the instruction file that makes "
                     "\"turn on saberops\" discoverable."
                 )
+    return 0 if all(r.ok for r in results) else 1
+
+
+def _handle_agent_definitions(args: argparse.Namespace, wanted: list[str]) -> int:
+    """`orch connect --agents`: write or remove proxy subagent definitions only."""
+    from dataclasses import asdict
+
+    from saberops.agent_connect import AGENTS, install_agents, is_connected, remove_agents
+
+    supported = [agent.slug for agent in AGENTS if agent.agent_dir]
+    hosts = list(supported) if not wanted or wanted == ["all"] else wanted
+    known = {agent.slug for agent in AGENTS}
+    unknown = [slug for slug in hosts if slug not in known]
+    if unknown:
+        print(f"[!] Unknown agent(s): {', '.join(unknown)}", file=sys.stderr)
+        return 2
+    if args.remove:
+        results = [remove_agents(slug) for slug in hosts]
+    else:
+        results = [install_agents(slug, dry_run=args.dry_run) for slug in hosts]
+    if args.json:
+        print(json.dumps({"results": [asdict(r) for r in results]}, indent=2, sort_keys=True))
+    else:
+        for result in results:
+            print(("✓ " if result.ok else "✗ ") + result.message)
+            for item in result.agent_files:
+                if item.content:
+                    print(f"    Agent file: {item.path}")
+                    print("    " + item.content.replace("\n", "\n    "))
+                else:
+                    print(f"    Agent file: {item.path}")
+    if not args.remove and not args.dry_run:
+        agents_by_slug = {agent.slug: agent for agent in AGENTS}
+        missing = [
+            agents_by_slug[slug]
+            for slug in hosts
+            if slug in agents_by_slug
+            and agents_by_slug[slug].agent_dir
+            and not is_connected(agents_by_slug[slug])
+        ]
+        if missing:
+            names = " ".join(agent.slug for agent in missing)
+            print(
+                "\nConnect the SaberOps MCP server first for: "
+                + ", ".join(agent.name for agent in missing)
+                + f".\nRun: orch connect {names}"
+            )
     return 0 if all(r.ok for r in results) else 1
 
 
@@ -7065,6 +7152,11 @@ def _dispatch(args: argparse.Namespace) -> int:
     elif args.command == "mcp":
         return handle_mcp(args)
     elif args.command == "connect":
+        return handle_connect(args)
+    elif args.command == "disconnect":
+        args.remove = True
+        args.dry_run = False
+        args.skill = True
         return handle_connect(args)
     elif args.command == "retry":
         return handle_retry(args)

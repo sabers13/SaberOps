@@ -246,6 +246,9 @@ orch connect claude --project # only for the current repository (.mcp.json)
 orch connect --remove codex   # undo (also removes the instruction skill)
 orch connect codex --dry-run  # show what would change
 orch connect codex --skill    # also install the "turn on saberops" instruction file
+orch connect --agents         # install proxy subagents for every supported CLI
+orch connect codex --agents   # install only that CLI's proxy subagents
+orch disconnect --agents      # remove only the generated proxy subagents
 ```
 
 `--skill` installs one small `SKILL.md` per agent where the CLI supports local
@@ -256,6 +259,49 @@ engine connection. Paths: `~/.claude/skills/saberops/`, `~/.codex/skills/saberop
 Cursor has no local skill format, so it reports **unsupported**. `--dry-run`
 prints the exact file and path; a file SaberOps did not write is never
 overwritten or removed.
+
+### Proxy subagents
+
+A **proxy subagent** makes another vendor's subscription reachable from the CLI
+you are sitting in. The host CLI shows the delegation in its own subagent list,
+the proxy runs on the host's cheapest model, and its only action is to hand one
+job to SaberOps with a model-family requirement. SaberOps then runs the work on
+the target vendor's own CLI and subscription, and keeps the job record, the
+gate, the independent review and the owner's acceptance.
+
+`orch connect --agents` writes one marker-guarded definition per proxy (with no
+agent named, for every supported CLI). `--dry-run` prints the exact path and
+full content and writes nothing; `orch disconnect --agents` removes only the
+generated files and keeps any sibling the owner wrote. Re-running `connect
+--agents` is idempotent, and a file without the `saberops-managed-agent`
+marker is never overwritten or deleted. Definitions are generated from the live
+MCP tool list, so a renamed tool cannot leave a stale proxy behind.
+
+| Host CLI | Proxy subagents | Cheapest host model | Target family token |
+| --- | --- | --- | --- |
+| Claude Code | `codex-worker`, `opencode-go-worker` | `haiku` | `codex`, `opencode-go` |
+| Codex | `claude-worker`, `opencode-go-worker` | `gpt-6-luna` | `anthropic`, `opencode-go` |
+| OpenCode | `claude-worker`, `codex-worker` | `opencode-go/deepseek-v4.1-flash` | `anthropic`, `codex` |
+| Antigravity | `claude-worker`, `codex-worker`, `opencode-go-worker` | `flash` | `anthropic`, `codex`, `opencode-go` |
+
+Paths: `~/.claude/agents/`, `~/.codex/agents/`, `~/.config/opencode/agents/`
+and `~/.gemini/config/agents/`. Cursor has no subagent format, so it reports
+**unsupported**. The first Claude install creates `~/.claude/agents/`; Claude
+Code only watches that folder after a restart, so the command says so.
+
+Two rules keep a proxy honest:
+
+* It **references the session's existing `saberops` MCP server** and never
+  starts a second one. A second server process does not share the session
+  lease, so its `submit_job` would be refused as read-only.
+* It sends one of the three unambiguous family tokens (`anthropic`, `codex`,
+  `opencode-go`) and, when SaberOps reports no eligible candidate for that
+  family, stops and reports the reason. It never retries another family, so a
+  request to use one subscription cannot silently become another.
+
+Antigravity can host the proxies, but there is never an `agy-worker` proxy:
+SaberOps does not launch `agy` as an automated worker. A host never gets a
+proxy for its own subscription.
 
 The Setup page offers the same as one **Connect** button per agent. Supported:
 Claude Code, Codex, Antigravity, OpenCode and Cursor; any other MCP client can
