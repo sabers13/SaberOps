@@ -10,7 +10,10 @@
   signalled — are implemented in lane P4. Lane P5 implemented the typed
   owner-mode start decision for auto-advance, plan complete/stalled/
   needs-decision notices, the plan section of the away return summary, and the
-  planner/skill and MCP documentation.
+  planner/skill and MCP documentation. The deterministic landing queue, stale
+  marking and owner-enabled `auto_refresh` (one refreshed sibling per scheduler
+  tick, after dispatch; a failed refresh is a visible lane failure) are
+  implemented in lane P6.
 - **Date:** 2026-11-19
 - **Decider:** Saber (owner), Phase 1 plan lane P1 after the owner approved
   every recommended choice for the plan-file design
@@ -111,9 +114,14 @@ the repository's one-record-of-truth rule and avoids a second plan database.
 10. **Automation is bounded and owner-controlled.** Auto-advance submits jobs
     an activated plan already allows. Auto-refresh may refresh stale
     candidate-ready siblings in deterministic landing order (wave, then lane
-    id), but it never accepts and never pushes. Pause, resume, abandon,
-    auto-advance, auto-refresh, owner-lane completion and acceptance remain
-    owner-only.
+    id), but it never accepts and never pushes. One sibling refreshes per
+    scheduler tick, in a pass after dispatch, so a gate and review never delay
+    that tick's own dispatch; a refresh that fails records
+    `plan_lane_refresh_failed`, stops the queue and shows as `refresh-failed`
+    with the exact manual command instead of retrying forever or stalling
+    silently. Auto-refresh obeys the work gate, so closing the planning CLI
+    pauses it with all other work. Pause, resume, abandon, auto-advance,
+    auto-refresh, owner-lane completion and acceptance remain owner-only.
 11. **Running work is never cut off.** A lane edited or removed mid-run that is
     already running finishes under its original brief. A changed lane with a
     candidate-ready result becomes an owner decision, never an automatic

@@ -1653,6 +1653,24 @@ def scheduler_tick(
         except Exception:
             logging.getLogger(__name__).exception("away return summary delivery failed")
 
+    # 1e. Plan landing refresh (P6).  Deliberately after dispatch: a refresh
+    # runs a gate and an independent review, and it must never delay this
+    # tick's dispatch or its newly unblocked lanes.  At most one stale sibling
+    # is refreshed per tick, in landing order (wave, then lane id); a failed
+    # refresh is recorded on the lane and shown by the next render, so nothing
+    # stalls silently.  The pass refuses to start while the work gate is closed
+    # (F17), so closing the planning CLI pauses refresh spending too.
+    try:
+        from saberops.plan_runner import refresh_stale_plan_candidates
+
+        refresh_results = refresh_stale_plan_candidates(db, now=moment)
+        if any(result.outcomes for result in refresh_results):
+            from saberops.plan_state import render_active_plan_states
+
+            render_active_plan_states(db, now=moment)
+    except Exception:
+        logging.getLogger(__name__).exception("plan landing refresh failed")
+
     return TickResult(
         ran=True,
         reconciled_changes=tuple(changes),

@@ -18,6 +18,10 @@ ordinary jobs, one ``submit_job`` per lane, and nothing else.
 * The plan layer chooses *what may start*.  Routing, quota, the memory budget,
   worktrees, retries and acceptance stay exactly where they are: the scheduler
   and the owner.
+* P6 adds the deterministic landing queue (wave, then lane id), stale marking
+  for a candidate built on an old target and an owner-enabled refresh pass that
+  rebuilds at most one stale sibling per tick through E6.  It never accepts and
+  never pushes; a failed refresh is recorded on the lane, not retried forever.
 
 Two owner decisions shape this lane:
 
@@ -56,8 +60,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from saberops.git import GitManager
 from saberops.jobs import store
-from saberops.jobs.dependencies import job_is_accepted
+from saberops.jobs.dependencies import job_is_accepted, run_is_accepted
 from saberops.jobs.models import (
     Effort,
     Job,
@@ -67,6 +72,7 @@ from saberops.jobs.models import (
     Priority,
 )
 from saberops.jobs.service import cancel_job, submit_job
+from saberops.models import Run, RunStatus
 from saberops.plan_file import (
     ParsedPlan,
     PlanFileError,
@@ -101,26 +107,38 @@ from saberops.ready_frontier import (
 
 __all__ = [
     "LANE_SUBMIT_GATE",
+    "LaneRefresh",
     "LaneSubmitResult",
     "LaneView",
     "PlanProjection",
     "PlanReconcileResult",
     "PlanRecord",
+    "PlanRefreshResult",
     "PlanRunnerError",
     "PlanSubmission",
+    "RefreshOutcome",
     "ensure_plan_tables",
     "lane_digest",
+    "lane_refresh_failure",
+    "lane_run",
+    "latest_lane_refresh_event",
     "list_active_plans",
     "mark_owner_lane_done",
     "plan_lane_rows",
+    "plan_target_head",
     "planning_session_active",
     "project_plan",
     "reconcile_plan_lanes",
+    "refresh_stale_plan_candidates",
     "resolve_plan_path",
     "resolve_project_id",
+    "run_store",
+    "set_auto_refresh",
     "set_lane_submit_gate",
+    "stale_candidate_lanes",
     "submit_lane_job",
     "submit_plan_file",
+    "wave_sort_key",
 ]
 
 #: Upper bound on an authored plan file read over MCP or the CLI.
@@ -128,6 +146,11 @@ MAX_PLAN_FILE_BYTES = 256 * 1024
 
 #: At most this many plans are reconciled per scheduler tick (report §4.1).
 MAX_ACTIVE_PLANS_PER_TICK = 3
+
+#: At most one stale sibling is refreshed per scheduler tick.  A refresh runs
+#: a gate and an independent review, so the queue advances one lane per tick
+#: instead of blocking the tick for a whole wave.
+MAX_REFRESHES_PER_TICK = 1
 
 #: F17 seam: a callable returning a pause reason, or ``None`` to allow work.
 #: It receives the owner database.  A raising gate fails closed.
@@ -445,6 +468,38 @@ class PlanSubmission:
         return tuple(view for view in self.lanes if view.state in {"held", "owner"})
 
 
+@dataclass(frozen=True)
+class LaneRefresh:
+    """One stale candidate awaiting refresh, in deterministic landing order."""
+
+    lane_id: str
+    wave: str
+    job_id: str
+    run_id: str
+    base_commit: str
+
+
+@dataclass(frozen=True)
+class RefreshOutcome:
+    """The result of one automatic refresh attempt."""
+
+    lane_id: str
+    source_run_id: str
+    target_base_sha: str
+    refreshed_run_id: str | None = None
+    candidate_sha: str | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class PlanRefreshResult:
+    """What one tick's landing-refresh pass did to one plan."""
+
+    plan_id: str
+    outcomes: tuple[RefreshOutcome, ...] = ()
+    stopped: str | None = None
+
+
 # ---------------------------------------------------------------------------
 # Planning-session gate (F17 seam)
 # ---------------------------------------------------------------------------
@@ -660,6 +715,46 @@ def list_active_plans(db: Any) -> tuple[PlanRecord, ...]:
     return tuple(PlanRecord.from_row(row) for row in rows)
 
 
+def set_auto_refresh(
+    db: Any, *, plan_id: str, enabled: bool, now: datetime | None = None
+) -> PlanRecord:
+    """Turn automatic stale-sibling refresh on or off for one active plan.
+
+    Owner-only: no MCP tool calls this.  Turning it on only authorises the
+    bounded refresh pass; it never accepts a candidate and never pushes.
+    """
+    plan = get_plan(db, plan_id)
+    if plan is None:
+        raise PlanRunnerError(f"unknown plan {plan_id!r}")
+    if plan.status != "ACTIVE":
+        raise PlanRunnerError(
+            f"plan {plan_id!r} is {plan.status.lower()}; only an active plan "
+            "refreshes candidates"
+        )
+    if plan.auto_refresh == enabled:
+        return plan
+    stamp = _iso(now)
+    with _owner_conn(db) as conn:
+        conn.execute(
+            "UPDATE plans SET auto_refresh = ?, updated_at = ? WHERE plan_id = ?",
+            (1 if enabled else 0, stamp, plan_id),
+        )
+        conn.commit()
+    _event(
+        db,
+        plan_id=plan_id,
+        kind="plan_auto_refresh_set",
+        event_key=f"plan:{plan_id}:auto_refresh:{'on' if enabled else 'off'}:{stamp}",
+        payload={"plan_id": plan_id, "enabled": enabled},
+        now=now,
+    )
+    _notify_scheduler(db)
+    updated = get_plan(db, plan_id)
+    if updated is None:  # pragma: no cover - just updated in this transaction
+        raise PlanRunnerError(f"plan {plan_id!r} disappeared after update")
+    return updated
+
+
 def _upsert_plan(
     db: Any,
     *,
@@ -765,6 +860,92 @@ def _lane_rows(db: Any, plan_id: str) -> dict[str, _LaneRow]:
 def plan_lane_rows(db: Any, plan_id: str) -> dict[str, _LaneRow]:
     """Public read-only accessor for one plan's lane rows (P3 projection)."""
     return _lane_rows(db, plan_id)
+
+
+# ---------------------------------------------------------------------------
+# Landing order and the lane's live run (shared by the ledger and P6)
+# ---------------------------------------------------------------------------
+
+
+def wave_sort_key(wave: str) -> tuple[int, int, str]:
+    """Deterministic wave order: numeric waves ascending, then labels by name.
+
+    Landing order is ``(wave, lane id)``; this is the one wave key both the
+    rendered ledger and the refresh queue use, so they cannot disagree.
+    """
+    text = (wave or "").strip()
+    if text.isdigit():
+        return (0, int(text), "")
+    return (1, 0, text.lower())
+
+
+def plan_target_head(plan: PlanRecord) -> str | None:
+    """Current target commit of the plan's checkout, or ``None`` if unreadable."""
+    try:
+        root = canonical_repo_root(plan.repo)
+        if root is None:
+            return None
+        return GitManager.get_head_commit(root)
+    except Exception:
+        return None
+
+
+def run_store(db: Any, run_id: str) -> Any:
+    """The store that owns ``run_id``: the caller's, else its project store.
+
+    Jobs live in the owner database while run state may live in the owning
+    project's store.  Resolution follows the run id's own project segment and
+    fails back to the caller's store when the run is unknown, so a read-only
+    client never writes and a missing project store never hides a job row.
+    """
+    try:
+        if db.get_run(run_id) is not None:
+            return db
+    except Exception:  # pragma: no cover - unreadable run row falls back
+        return db
+    try:
+        from saberops.db import Database
+        from saberops.runtime import db_path_for_run
+
+        path = db_path_for_run(run_id)
+        if path is None:
+            return db
+        caller_path = getattr(db, "db_path", None)
+        if caller_path is not None and Path(caller_path).resolve() == Path(path).resolve():
+            return db
+        read_only = bool(getattr(db, "_read_only", False))
+        owner = getattr(db, "owner_db", db)
+        return Database(path, owner_db=owner, read_only=read_only)
+    except Exception:
+        return db
+
+
+def lane_run(db: Any, job: Job | None, *, accepted: bool) -> tuple[Run | None, Any]:
+    """Follow the job's run chain, including refreshed runs linked to it.
+
+    Returns the newest completed run (the accepted one when the lane is
+    accepted), else the newest run of any status, together with the store that
+    holds it.  A refreshed run is appended to ``job.run_ids`` (P3), so a
+    projection and the refresh queue see the same candidate.
+    """
+    if job is None or not job.run_ids:
+        return None, db
+    found: list[tuple[Run, Any]] = []
+    for run_id in job.run_ids:
+        store_for_run = run_store(db, run_id)
+        run = store_for_run.get_run(run_id)
+        if run is not None:
+            found.append((run, store_for_run))
+    completed = [item for item in found if item[0].status is RunStatus.COMPLETED]
+    if accepted:
+        accepted_runs = [item for item in completed if run_is_accepted(db, item[0].id)]
+        if accepted_runs:
+            return accepted_runs[-1]
+    if completed:
+        return completed[-1]
+    if found:
+        return found[-1]
+    return None, db
 
 
 def _sync_lane_rows(
@@ -2128,6 +2309,252 @@ def reconcile_plan_lanes(
                     revision=plan.active_version,
                     error=reason,
                 )
+            )
+    return tuple(results)
+
+
+# ---------------------------------------------------------------------------
+# Landing queue and stale-sibling refresh (P6)
+# ---------------------------------------------------------------------------
+
+
+def _short_error(exc: BaseException) -> str:
+    text = " ".join(str(exc).split())
+    return text if len(text) <= 400 else text[:397] + "..."
+
+
+def latest_lane_refresh_event(
+    db: Any, plan_id: str, lane_id: str
+) -> dict[str, Any] | None:
+    """Return the newest refresh outcome recorded for one lane, if any.
+
+    Reads ``plan_events`` only; it never creates a table, so the read-only
+    ``plan_status`` projection stays read-only.
+    """
+    try:
+        with _owner_conn(db) as conn:
+            row = conn.execute(
+                "SELECT kind, payload_json FROM plan_events"
+                " WHERE plan_id = ? AND lane_id = ?"
+                " AND kind IN ('plan_lane_refreshed', 'plan_lane_refresh_failed')"
+                " ORDER BY id DESC LIMIT 1",
+                (plan_id, lane_id),
+            ).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None
+    try:
+        payload = json.loads(str(row["payload_json"]))
+    except ValueError:
+        payload = {}
+    return {"kind": str(row["kind"]), **payload}
+
+
+def lane_refresh_failure(
+    db: Any, plan_id: str, lane_id: str, *, run_id: str, target_head: str
+) -> str | None:
+    """The recorded refresh failure for this exact stale pair, if still current.
+
+    A failure is current only for the same source run and the same target
+    commit; a newer successful refresh or a moved target clears it.  This is
+    what keeps a failed refresh visible without retrying it every tick.
+    """
+    event = latest_lane_refresh_event(db, plan_id, lane_id)
+    if event is None or event.get("kind") != "plan_lane_refresh_failed":
+        return None
+    if event.get("source_run_id") != run_id:
+        return None
+    if event.get("target_base_sha") != target_head:
+        return None
+    return str(event.get("error") or "refresh failed")
+
+
+def stale_candidate_lanes(db: Any, plan: PlanRecord) -> tuple[LaneRefresh, ...]:
+    """Candidate-ready lanes whose run base differs from the current target.
+
+    Ordered by ``(wave, lane id)``.  An accepted lane, a running lane, a queued
+    lane, an owner lane and a scout job are never refresh candidates.
+    """
+    head = plan_target_head(plan)
+    if not head:
+        return ()
+    try:
+        revision = plan.plan_store().get_revision(plan.project_id, plan.active_version)
+    except (PlanNotFoundError, PlanTamperError, PlanValidationError) as exc:
+        raise PlanRunnerError(
+            f"plan {plan.plan_id!r} revision {plan.active_version!r} is unreadable: {exc}"
+        ) from exc
+    rows = _lane_rows(db, plan.plan_id)
+    stale: list[LaneRefresh] = []
+    for task in revision.tasks:
+        if task.run == "owner":
+            continue
+        row = rows.get(task.task_id)
+        if row is None or not row.job_id:
+            continue
+        if row.superseded_by:
+            # P4: a changed lane's old candidate is an owner decision, never
+            # something the refresh pass silently rebuilds.
+            continue
+        job = store.get_job(db, row.job_id)
+        if job is None or job.state is not JobState.SUCCEEDED:
+            continue
+        if job_is_accepted(db, job):
+            continue
+        run, _ = lane_run(db, job, accepted=False)
+        if run is None or run.status is not RunStatus.COMPLETED:
+            continue
+        if run.base_commit == head:
+            continue
+        stale.append(
+            LaneRefresh(
+                lane_id=task.task_id,
+                wave=task.wave or task.phase,
+                job_id=job.job_id,
+                run_id=run.id,
+                base_commit=str(run.base_commit),
+            )
+        )
+    stale.sort(key=lambda lane: (*wave_sort_key(lane.wave), lane.lane_id))
+    return tuple(stale)
+
+
+def _refresh_lane(
+    db: Any, plan: PlanRecord, lane: LaneRefresh, *, target_head: str, now: datetime | None
+) -> RefreshOutcome:
+    """Refresh one stale candidate through E6 and record the outcome."""
+    try:
+        from saberops.refresh import refresh_candidate
+        from saberops.service import OrchestratorService
+
+        service = OrchestratorService(db=run_store(db, lane.run_id))
+        result = refresh_candidate(service, lane.run_id)
+    except Exception as exc:
+        message = _short_error(exc)
+        _event(
+            db,
+            plan_id=plan.plan_id,
+            lane_id=lane.lane_id,
+            kind="plan_lane_refresh_failed",
+            event_key=(
+                f"plan:{plan.plan_id}:lane:{lane.lane_id}:refresh:"
+                f"{lane.run_id}:{target_head}:failed:"
+                f"{hashlib.sha256(message.encode()).hexdigest()[:12]}"
+            ),
+            payload={
+                "lane_id": lane.lane_id,
+                "source_run_id": lane.run_id,
+                "source_base_sha": lane.base_commit,
+                "target_base_sha": target_head,
+                "error": message,
+            },
+            now=now,
+        )
+        return RefreshOutcome(
+            lane_id=lane.lane_id,
+            source_run_id=lane.run_id,
+            target_base_sha=target_head,
+            error=message,
+        )
+    refreshed_id = str(result.get("run_id") or "") or None
+    candidate_sha = str(result.get("candidate_sha") or "") or None
+    _event(
+        db,
+        plan_id=plan.plan_id,
+        lane_id=lane.lane_id,
+        kind="plan_lane_refreshed",
+        event_key=(
+            f"plan:{plan.plan_id}:lane:{lane.lane_id}:refresh:"
+            f"{lane.run_id}:{target_head}:refreshed:{refreshed_id or 'unknown'}"
+        ),
+        payload={
+            "lane_id": lane.lane_id,
+            "source_run_id": lane.run_id,
+            "refreshed_run_id": refreshed_id,
+            "source_base_sha": lane.base_commit,
+            "target_base_sha": target_head,
+            "candidate_sha": candidate_sha,
+        },
+        now=now,
+    )
+    return RefreshOutcome(
+        lane_id=lane.lane_id,
+        source_run_id=lane.run_id,
+        target_base_sha=target_head,
+        refreshed_run_id=refreshed_id,
+        candidate_sha=candidate_sha,
+    )
+
+
+def _refresh_plan(
+    db: Any, plan: PlanRecord, *, now: datetime | None
+) -> PlanRefreshResult:
+    refusal = _submission_refusal(db, plan=plan, owner_initiated=False)
+    if refusal is not None:
+        return PlanRefreshResult(plan.plan_id, stopped=f"paused:{refusal}")
+    stale = stale_candidate_lanes(db, plan)
+    if not stale:
+        return PlanRefreshResult(plan.plan_id)
+    head = plan_target_head(plan)
+    if not head:  # pragma: no cover - stale_candidate_lanes already proved a head
+        return PlanRefreshResult(plan.plan_id, stopped="target_unreadable")
+    outcomes: list[RefreshOutcome] = []
+    for lane in stale[:MAX_REFRESHES_PER_TICK]:
+        failure = lane_refresh_failure(
+            db, plan.plan_id, lane.lane_id, run_id=lane.run_id, target_head=head
+        )
+        if failure is not None:
+            # The queue stops at the first failed refresh; the lane shows the
+            # failure and the exact manual command until the pair changes.
+            outcomes.append(
+                RefreshOutcome(
+                    lane_id=lane.lane_id,
+                    source_run_id=lane.run_id,
+                    target_base_sha=head,
+                    error=failure,
+                )
+            )
+            return PlanRefreshResult(
+                plan.plan_id, outcomes=tuple(outcomes), stopped="refresh_failed"
+            )
+        outcome = _refresh_lane(db, plan, lane, target_head=head, now=now)
+        outcomes.append(outcome)
+        if outcome.error is not None:
+            return PlanRefreshResult(
+                plan.plan_id, outcomes=tuple(outcomes), stopped="refresh_failed"
+            )
+    return PlanRefreshResult(
+        plan.plan_id,
+        outcomes=tuple(outcomes),
+        stopped=(
+            "refresh_limit" if len(stale) > MAX_REFRESHES_PER_TICK else None
+        ),
+    )
+
+
+def refresh_stale_plan_candidates(
+    db: Any, *, now: datetime | None = None
+) -> tuple[PlanRefreshResult, ...]:
+    """Refresh stale candidate-ready siblings in landing order (P6).
+
+    Runs only for plans whose owner turned ``auto_refresh`` on, only while work
+    is not paused (the same gate and planning-session check lane submission
+    uses), and at most :data:`MAX_REFRESHES_PER_TICK` lane per tick.  It reuses
+    :func:`saberops.refresh.refresh_candidate`, which re-gates and re-reviews
+    the new candidate in isolation; it never accepts and never pushes.  A
+    failed refresh records ``plan_lane_refresh_failed`` and stops the queue.
+    """
+    ensure_plan_tables(db)
+    results: list[PlanRefreshResult] = []
+    for plan in list_active_plans(db):
+        if not plan.auto_refresh:
+            continue
+        try:
+            results.append(_refresh_plan(db, plan, now=now))
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "plan %s landing refresh failed", plan.plan_id
             )
     return tuple(results)
 

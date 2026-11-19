@@ -1251,6 +1251,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--plan", type=str, default=None, help="Plan ID (default: the only active plan)."
     )
     plan_file_adopt.add_argument("--json", action="store_true", help="JSON output")
+    plan_file_auto_refresh = plan_file_sub.add_parser(
+        "auto-refresh",
+        help="Turn automatic refresh of stale sibling candidates on or off (owner only).",
+    )
+    plan_file_auto_refresh.add_argument(
+        "setting", choices=["on", "off"], help="Enable or disable automatic refresh."
+    )
+    plan_file_auto_refresh.add_argument(
+        "--plan", type=str, default=None, help="Plan ID (default: the only active plan)."
+    )
+    plan_file_auto_refresh.add_argument(
+        "--project", type=str, default=None, help="Project whose active plan to update."
+    )
+    plan_file_auto_refresh.add_argument("--json", action="store_true", help="JSON output")
     handoff_parser = subparsers.add_parser(
         "handoff", help="Show latest immutable handoff or resume capsule."
     )
@@ -3936,6 +3950,54 @@ def handle_plan_file_adopt(args: argparse.Namespace) -> int:
         print(json.dumps({"ok": True, **result}, indent=2, sort_keys=True))
         return 0
     print(f"adopted {result['link']} -> {result['canonical']}")
+    return 0
+
+
+def handle_plan_file_auto_refresh(args: argparse.Namespace) -> int:
+    """Handle ``orch plan-file auto-refresh on|off`` (owner-only, ADR-0015)."""
+    from saberops.plan_runner import PlanRunnerError, set_auto_refresh
+    from saberops.plan_state import resolve_plan
+
+    db = Database()
+    try:
+        plan = resolve_plan(
+            db,
+            plan_id=getattr(args, "plan", None),
+            project_id=getattr(args, "project", None),
+        )
+        updated = set_auto_refresh(
+            db, plan_id=plan.plan_id, enabled=str(args.setting) == "on"
+        )
+    except (PlanRunnerError, sqlite3.OperationalError) as exc:
+        if getattr(args, "json", False):
+            print(json.dumps({"ok": False, "errors": [str(exc)]}, indent=2, sort_keys=True))
+        else:
+            print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "plan_id": updated.plan_id,
+                    "auto_refresh": updated.auto_refresh,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    if updated.auto_refresh:
+        print(
+            f"auto-refresh on for plan {updated.plan_id}: stale sibling candidates "
+            "refresh in landing order (wave, then lane id), one lane per tick; "
+            "nothing is accepted or pushed"
+        )
+    else:
+        print(
+            f"auto-refresh off for plan {updated.plan_id}: STATE.md names the exact "
+            "`orch refresh <run>` command for each stale candidate"
+        )
     return 0
 
 
@@ -8159,6 +8221,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             return handle_plan_file_render(args)
         elif args.plan_file_command == "adopt":
             return handle_plan_file_adopt(args)
+        elif args.plan_file_command == "auto-refresh":
+            return handle_plan_file_auto_refresh(args)
     elif args.command == "handoff":
         return handle_handoff(args)
     elif args.command == "wait":

@@ -174,16 +174,28 @@ shown by `get_job` and `catch_up` like any other job.
 
 `plan_status` returns the record-derived plan ledger: one row per lane with its
 computed status (`planned`, `owner`, `ready`, `queued`, `running`,
-`needs-attention`, `candidate`, `stale`, `accepted`, `failed`, `blocked`,
-`cancelled`, `superseded`), the final attempt's worker and model, branch, commit
-and evidence identifiers, plus the ready set, held lanes, deterministic landing
-queue and the next owner action. It is exactly the projection rendered into
+`needs-attention`, `candidate`, `stale`, `refresh-failed`, `accepted`, `failed`,
+`blocked`, `cancelled`, `superseded`), the final attempt's worker and model,
+branch, commit and evidence identifiers, plus the ready set, held lanes,
+deterministic landing queue and the next owner action. It is exactly the
+projection rendered into
 `STATE.md`, so the file and the tool cannot disagree. The tool is read-only: it
 takes no lease, writes no file and acts on nothing. The canonical file lives in
 the owner state directory and the checkout's `STATE.md` is a git-ignored
 symlink created by `orch plan-file adopt`; it is never committed and never
 created in a worker worktree, so `git status --porcelain` stays empty and
 acceptance keeps working.
+
+The landing queue is ordered by wave, then lane id. Accepting one sibling makes
+the others stale; the queue names each stale candidate's exact
+`orch refresh <run>` command. The owner may turn on bounded refresh with
+`orch plan-file auto-refresh on` (an owner-only CLI verb, never MCP): at most
+one stale sibling per scheduler tick is rebuilt through the same isolated
+refresh, re-gated and independently re-reviewed, and recorded as
+`plan_lane_refreshed`; it is never accepted and the target is never pushed. A
+failed refresh shows as `refresh-failed` with its error and stops the queue
+until the pair changes, rather than retrying every tick. With auto-refresh off,
+`STATE.md` and the next action give the exact manual command.
 
 `catch_up` is the read-only handoff for a new planning session. It returns the
 original request, the current candidate commit, the latest gate check and

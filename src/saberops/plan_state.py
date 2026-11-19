@@ -15,6 +15,9 @@ Every value comes from durable records: the immutable plan revision, the
 ``plans``/``plan_lanes`` rows, jobs, runs, attempts, checks, reviews and the
 ``run_accepted`` events.  Nothing here invents progress, and nothing here acts
 on the view.  Acceptance, dispatch and repair stay exactly where they are.
+P6's landing order (wave, then lane id), ``stale`` marking and the
+``refresh-failed`` outcome are derived the same way, from the lane's current run
+and the ``plan_lane_refreshed`` / ``plan_lane_refresh_failed`` events.
 
 Placement matters (ADR-0015).  The canonical file lives outside the repository
 so a render never moves the target ``HEAD``; the in-repo view is a symlink
@@ -38,7 +41,6 @@ from typing import Any, cast
 
 from saberops.git import GitManager
 from saberops.jobs import store
-from saberops.jobs.dependencies import run_is_accepted
 from saberops.jobs.models import Job, JobState
 from saberops.models import (
     Attempt,
@@ -46,7 +48,6 @@ from saberops.models import (
     CheckResult,
     ReviewResult,
     Run,
-    RunStatus,
 )
 from saberops.paths import owner_state_dir
 from saberops.plan_runner import (
@@ -54,9 +55,13 @@ from saberops.plan_runner import (
     PlanRecord,
     PlanRunnerError,
     get_plan,
+    lane_refresh_failure,
+    lane_run,
     list_active_plans,
     plan_lane_rows,
+    plan_target_head,
     project_plan,
+    wave_sort_key,
 )
 from saberops.project import ProjectRegistry, canonical_repo_root
 from saberops.project_scope.plan_store import PlanRevision, PlanTaskDef
@@ -85,7 +90,7 @@ _DIGEST_RE = re.compile(
 )
 
 #: Lane states that mean "a candidate exists and the owner has not accepted it".
-_CANDIDATE_STATES = frozenset({"candidate", "stale"})
+_CANDIDATE_STATES = frozenset({"candidate", "stale", "refresh-failed"})
 
 #: Lane states shown under ``Held``: work the owner or a dependency must move.
 _HELD_STATES = frozenset(
@@ -97,6 +102,7 @@ _HELD_STATES = frozenset(
         "cancelled",
         "superseded",
         "needs-decision",
+        "refresh-failed",
     }
 )
 
@@ -120,6 +126,7 @@ class LaneState:
     job_id: str | None = None
     waiting_reason: str | None = None
     failure_reason: str | None = None
+    refresh_error: str | None = None
     worker: str | None = None
     model: str | None = None
     branch: str | None = None
@@ -158,6 +165,7 @@ class LaneState:
             "job_id": self.job_id,
             "waiting_reason": self.waiting_reason,
             "failure_reason": self.failure_reason,
+            "refresh_error": self.refresh_error,
             "worker": self.worker,
             "model": self.model,
             "branch": self.branch,
@@ -288,54 +296,6 @@ def _project_id_for(root: Path) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _wave_sort_key(wave: str) -> tuple[int, int, str]:
-    text = (wave or "").strip()
-    if text.isdigit():
-        return (0, int(text), "")
-    return (1, 0, text.lower())
-
-
-def _target_head(plan: PlanRecord) -> str | None:
-    """Current target commit, or ``None`` when the checkout is unreadable."""
-    try:
-        root = canonical_repo_root(plan.repo)
-        if root is None:
-            return None
-        return GitManager.get_head_commit(root)
-    except Exception:
-        return None
-
-
-def _run_database(db: Any, run_id: str) -> Any:
-    """The store that owns ``run_id``: the caller's, else its project store.
-
-    Jobs live in the owner database while run state may live in the owning
-    project's store.  Resolution follows the run id's own project segment and
-    fails back to the caller's store when the run is unknown, so a read-only
-    client never writes and a missing project store never hides a job row.
-    """
-    try:
-        if db.get_run(run_id) is not None:
-            return db
-    except Exception:  # pragma: no cover - unreadable run row falls back
-        return db
-    try:
-        from saberops.db import Database
-        from saberops.runtime import db_path_for_run
-
-        path = db_path_for_run(run_id)
-        if path is None:
-            return db
-        caller_path = getattr(db, "db_path", None)
-        if caller_path is not None and Path(caller_path).resolve() == Path(path).resolve():
-            return db
-        read_only = bool(getattr(db, "_read_only", False))
-        owner = getattr(db, "owner_db", db)
-        return Database(path, owner_db=owner, read_only=read_only)
-    except Exception:
-        return db
-
-
 def _final_attempt(db: Any, run: Run | None) -> Attempt | None:
     if run is None:
         return None
@@ -358,24 +318,7 @@ def _final_attempt(db: Any, run: Run | None) -> Attempt | None:
 
 def _lane_run(db: Any, job: Job | None, accepted: bool) -> tuple[Run | None, Any]:
     """Follow the job's run chain, including refreshed runs linked to it."""
-    if job is None or not job.run_ids:
-        return None, db
-    found: list[tuple[Run, Any]] = []
-    for run_id in job.run_ids:
-        run_db = _run_database(db, run_id)
-        run = cast(Run | None, run_db.get_run(run_id))
-        if run is not None:
-            found.append((run, run_db))
-    completed = [item for item in found if item[0].status is RunStatus.COMPLETED]
-    if accepted:
-        accepted_runs = [item for item in completed if run_is_accepted(db, item[0].id)]
-        if accepted_runs:
-            return accepted_runs[-1]
-    if completed:
-        return completed[-1]
-    if found:
-        return found[-1]
-    return None, db
+    return lane_run(db, job, accepted=accepted)
 
 
 def _last_check_id(db: Any, attempt: Attempt | None, run: Run | None) -> str | None:
@@ -406,7 +349,25 @@ def _job_detail(job: Job | None, state: str) -> tuple[str | None, str | None]:
     return waiting, failure
 
 
-def _refine_state(db: Any, view: LaneView, job: Job | None, target_head: str | None) -> str:
+def _lane_refresh_error(
+    db: Any, plan_id: str, lane_id: str, job: Job | None, target_head: str | None
+) -> str | None:
+    """The recorded automatic-refresh error for a currently stale candidate."""
+    if not target_head:
+        return None
+    run, _ = _lane_run(db, job, False)
+    if run is None or run.base_commit == target_head:
+        return None
+    return lane_refresh_failure(db, plan_id, lane_id, run_id=run.id, target_head=target_head)
+
+
+def _refine_state(
+    db: Any,
+    view: LaneView,
+    job: Job | None,
+    target_head: str | None,
+    refresh_error: str | None,
+) -> str:
     """Extend the frontier state with the owner-facing status vocabulary."""
     state = view.state
     if state == "running" and job is not None:
@@ -420,10 +381,10 @@ def _refine_state(db: Any, view: LaneView, job: Job | None, target_head: str | N
     elif state == "candidate" and target_head:
         run, _ = _lane_run(db, job, False)
         if run is not None and run.base_commit != target_head:
-            state = "stale"
+            state = "refresh-failed" if refresh_error is not None else "stale"
     if view.superseded_by:
         # P4: a changed lane never silently inherits its old result.
-        if state in {"candidate", "stale"}:
+        if state in {"candidate", "stale", "refresh-failed"}:
             return "needs-decision"
         if state in {"queued", "running", "needs-attention"}:
             return "superseded"
@@ -432,6 +393,7 @@ def _refine_state(db: Any, view: LaneView, job: Job | None, target_head: str | N
 
 def _lane_state(
     db: Any,
+    plan_id: str,
     task: PlanTaskDef,
     view: LaneView,
     *,
@@ -439,7 +401,14 @@ def _lane_state(
     owner_evidence: str | None = None,
 ) -> LaneState:
     job = store.get_job(db, view.job_id) if view.job_id else None
-    state = _refine_state(db, view, job, target_head)
+    # The refresh-failure lookup only applies to a candidate the owner has not
+    # accepted; running, accepted and held lanes never read the event table.
+    refresh_error = (
+        _lane_refresh_error(db, plan_id, view.lane_id, job, target_head)
+        if view.state == "candidate"
+        else None
+    )
+    state = _refine_state(db, view, job, target_head, refresh_error)
     waiting, failure = _job_detail(job, state)
     accepted = state == "accepted"
     run, run_db = _lane_run(db, job, accepted)
@@ -458,6 +427,7 @@ def _lane_state(
         job_id=view.job_id,
         waiting_reason=waiting,
         failure_reason=failure,
+        refresh_error=refresh_error,
         worker=attempt.provider if attempt is not None else None,
         model=attempt.model if attempt is not None else None,
         branch=attempt.branch_name if attempt is not None else None,
@@ -484,11 +454,28 @@ def _next_action(
     def first(*states: str) -> LaneState | None:
         return next((lane for lane in ordered if lane.state in states), None)
 
+    lane = first("refresh-failed")
+    if lane is not None:
+        command = f"orch refresh {lane.run_id}" if lane.run_id else "orch refresh RUN_ID"
+        reason = lane.refresh_error or "automatic refresh failed"
+        return (
+            f"Automatic refresh of lane {lane.lane_id} failed ({reason}); "
+            f"fix the conflict, then run `{command}`."
+        )
+
     lane = first("stale")
     if lane is not None:
         command = f"orch refresh {lane.run_id}" if lane.run_id else "orch refresh RUN_ID"
+        if plan.auto_refresh:
+            return (
+                f"Auto-refresh is on: lane {lane.lane_id}'s stale candidate is "
+                f"rebuilt in landing order (one per scheduler tick); accept it "
+                f"once it is fresh, or run `{command}` now."
+            )
         return (
-            f"Refresh lane {lane.lane_id}'s stale candidate, then accept it: `{command}`."
+            f"Refresh lane {lane.lane_id}'s stale candidate, then accept it: "
+            f"`{command}` (auto-refresh is off; turn it on with "
+            f"`orch plan-file auto-refresh on --plan {plan.plan_id}`)."
         )
 
     lane = first("needs-decision")
@@ -518,7 +505,7 @@ def _next_action(
             f"({lane.failure_reason or 'job failed'}); its dependants stay held."
         )
 
-    lane = next(
+    blocked_lane = next(
         (
             item
             for item in ordered
@@ -527,8 +514,11 @@ def _next_action(
         ),
         None,
     )
-    if lane is not None:
-        return f"Lane {lane.lane_id} is blocked by a failed dependency; replace the dependency."
+    if blocked_lane is not None:
+        return (
+            f"Lane {blocked_lane.lane_id} is blocked by a failed dependency; "
+            "replace the dependency."
+        )
 
     moving = [
         item
@@ -559,7 +549,7 @@ def project_plan_state(
     """Build the ledger from durable records only (no writes)."""
     projection = project_plan(db, plan)
     revision: PlanRevision = projection.revision
-    head = _target_head(plan) if target_head is None else target_head
+    head = plan_target_head(plan) if target_head is None else target_head
     rows = plan_lane_rows(db, plan.plan_id)
     lanes: list[LaneState] = []
     for task in revision.tasks:
@@ -570,6 +560,7 @@ def project_plan_state(
         lanes.append(
             _lane_state(
                 db,
+                plan.plan_id,
                 task,
                 view,
                 target_head=head,
@@ -637,7 +628,7 @@ def _advance_refusal(plan: PlanRecord, db: Any) -> str | None:
 
 
 def _in_landing_order(lanes: list[LaneState]) -> list[LaneState]:
-    return sorted(lanes, key=lambda lane: (*_wave_sort_key(lane.wave), lane.lane_id))
+    return sorted(lanes, key=lambda lane: (*wave_sort_key(lane.wave), lane.lane_id))
 
 
 def _projection_digest(state: PlanState) -> str:
@@ -731,6 +722,8 @@ def render_plan_state_markdown(state: PlanState) -> str:
         for lane in held:
             if lane.state == "failed" and lane.failure_reason:
                 detail = f"failed ({lane.failure_reason})"
+            elif lane.state == "refresh-failed":
+                detail = f"refresh-failed ({lane.refresh_error or 'automatic refresh failed'})"
             else:
                 detail = lane.state
                 if lane.reasons:
@@ -751,10 +744,30 @@ def render_plan_state_markdown(state: PlanState) -> str:
         lines.append("- (empty)")
     else:
         for index, lane in enumerate(landing, start=1):
-            if lane.state == "stale" and lane.run_id:
-                lines.append(
-                    f"{index}. {lane.lane_id} - stale; `orch refresh {lane.run_id}`"
+            if lane.state == "refresh-failed":
+                command = (
+                    f"`orch refresh {lane.run_id}`"
+                    if lane.run_id
+                    else "`orch refresh RUN_ID`"
                 )
+                error = lane.refresh_error or "automatic refresh failed"
+                lines.append(
+                    f"{index}. {lane.lane_id} - refresh failed ({error}); "
+                    f"fix it and run {command}"
+                )
+            elif lane.state == "stale" and lane.run_id:
+                if state.auto_refresh:
+                    lines.append(
+                        f"{index}. {lane.lane_id} - stale; auto-refresh is on and "
+                        f"rebuilds it in landing order (`orch refresh {lane.run_id}` "
+                        "to do it now)"
+                    )
+                else:
+                    lines.append(
+                        f"{index}. {lane.lane_id} - stale; `orch refresh "
+                        f"{lane.run_id}` (auto-refresh is off: `orch plan-file "
+                        f"auto-refresh on --plan {state.plan_id}`)"
+                    )
             else:
                 commit = f" at {lane.commit[:12]}" if lane.commit else ""
                 lines.append(f"{index}. {lane.lane_id} - candidate ready for accept{commit}")
