@@ -1344,6 +1344,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to SQLite database.",
     )
 
+    notifications_parser = subparsers.add_parser("notifications", help="Manage desktop notices.")
+    notifications_sub = notifications_parser.add_subparsers(dest="notifications_command", required=True)
+    notifications_show = notifications_sub.add_parser("show", help="Show desktop notice settings.")
+    notifications_show.add_argument("--json", action="store_true", help="JSON output")
+    notifications_set = notifications_sub.add_parser("set", help="Set desktop notices on or off.")
+    notifications_set.add_argument("value", choices=("on", "off"))
+
     # orch routing show|validate|init|migrate|add|remove|move|reorder
     routing_parser = subparsers.add_parser(
         "routing",
@@ -6399,6 +6406,31 @@ def _dispatch(args: argparse.Namespace) -> int:
             return handle_authority_set(args)
         elif args.authority_command == "set-host-access":
             return handle_authority_set_host_access(args)
+    elif args.command == "notifications":
+        from saberops.notifications import (
+            notification_settings_path,
+            notifications_enabled,
+            saved_notifications_enabled,
+            set_notifications_enabled,
+        )
+
+        try:
+            if args.notifications_command == "set":
+                set_notifications_enabled(args.value == "on")
+            payload = {
+                "enabled": saved_notifications_enabled(),
+                "effective": notifications_enabled(),
+                "config_path": str(notification_settings_path()),
+            }
+        except (OSError, ValueError) as exc:
+            print(f"[!] Notification settings: {exc}", file=sys.stderr)
+            return 1
+        if getattr(args, "json", False):
+            print(json.dumps(payload, indent=2))
+        else:
+            print(f"Desktop notifications: {'on' if payload['enabled'] else 'off'} "
+                  f"(effective: {'on' if payload['effective'] else 'off'})")
+        return 0
     elif args.command == "project":
         if args.project_command == "gate-scratch":
             if args.project_gate_scratch_command == "show":

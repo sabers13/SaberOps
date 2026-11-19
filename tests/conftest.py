@@ -34,3 +34,13 @@ def _v040_routing_default(
         monkeypatch.setattr(routing_config, "_packaged_default_path", lambda: _V040_DEFAULT)
     monkeypatch.setenv("SABEROPS_DISABLE_AUTO_SCHEDULER", "1")
     yield
+
+
+@pytest.fixture(autouse=True)
+def _disable_desktop_notifications(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never send a real desktop notice from an ordinary test.
+
+    Tests that need delivery point ``PATH`` at a stub ``notify-send`` and opt
+    back in with ``SABEROPS_DESKTOP_NOTIFICATIONS=1``.
+    """
+    monkeypatch.setenv("SABEROPS_DESKTOP_NOTIFICATIONS", "0")

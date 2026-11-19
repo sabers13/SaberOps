@@ -364,5 +364,9 @@ scripts/               gate wrappers and tooling
 
 Apache License 2.0. See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-Desktop notifications are enabled by default when `notify-send` is available. Set
-`SABEROPS_DESKTOP_NOTIFICATIONS=0` in the scheduler environment to disable them.
+Desktop notifications are enabled by default when `notify-send` is available. Run
+`orch notifications set off` to disable them persistently (or `set on` to enable
+them); `orch notifications show` displays the saved and effective settings. The
+profile-scoped setting is read by the scheduler on each scan. The scheduler
+environment variable `SABEROPS_DESKTOP_NOTIFICATIONS` overrides it: use `0`,
+`false` or `off` to disable, or `1` to enable.

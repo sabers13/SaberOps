@@ -2,20 +2,63 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
 import sqlite3
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
+def notification_settings_path() -> Path:
+    from saberops.paths import saberops_config_dir
+
+    return saberops_config_dir() / "notifications.json"
+
+
+def saved_notifications_enabled() -> bool:
+    path = notification_settings_path()
+    if not path.exists():
+        return True
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or not isinstance(data.get("enabled"), bool):
+        raise ValueError(f"invalid notification settings: {path}")
+    return bool(data["enabled"])
+
+
+def notifications_enabled() -> bool:
+    override = os.environ.get("SABEROPS_DESKTOP_NOTIFICATIONS")
+    if override is not None:
+        return override.lower() not in {"0", "false", "off"}
+    return saved_notifications_enabled()
+
+
+def set_notifications_enabled(enabled: bool) -> None:
+    path = notification_settings_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=".notifications-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps({"enabled": enabled}) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(name, path)
+    finally:
+        Path(name).unlink(missing_ok=True)
+
+
 def notify_once(ledger: Path, key: str, title: str, body: str) -> None:
     """Send a notice once per key, serialized across scheduler processes."""
-    if os.environ.get("SABEROPS_DESKTOP_NOTIFICATIONS", "1").lower() in {"0", "false", "off"}:
+    try:
+        if not notifications_enabled():
+            return
+    except (OSError, ValueError) as exc:
+        logger.warning("invalid desktop notification settings: %s", exc)
         return
     command = shutil.which("notify-send")
     if command is None:

@@ -25,7 +25,7 @@ def test_wait_timeout_on_queued_job(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 def test_notices_are_deduplicated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from saberops.notifications import notify_once
 
-    monkeypatch.delenv("SABEROPS_DESKTOP_NOTIFICATIONS", raising=False)
+    monkeypatch.setenv("SABEROPS_DESKTOP_NOTIFICATIONS", "1")
     log = tmp_path / "notices"
     command = tmp_path / "notify-send"
     command.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$NOTICE_LOG"\n', encoding="utf-8")
@@ -117,7 +117,7 @@ def test_question_wakes_wait_and_delivery_survives_restart(
     stub.chmod(0o755)
     monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
     monkeypatch.setenv("NOTICE_LOG", str(log))
-    monkeypatch.delenv("SABEROPS_DESKTOP_NOTIFICATIONS", raising=False)
+    monkeypatch.setenv("SABEROPS_DESKTOP_NOTIFICATIONS", "1")
     deliver_pending(db)
     deliver_pending(rig.db())
     assert len(log.read_text().splitlines()) == 2
@@ -159,7 +159,7 @@ def test_wait_real_scheduler_outcome(
     stub.chmod(0o755)
     monkeypatch.setenv("PATH", f"{tmp_path}:{__import__('os').environ['PATH']}")
     monkeypatch.setenv("NOTICE_LOG", str(log))
-    monkeypatch.delenv("SABEROPS_DESKTOP_NOTIFICATIONS", raising=False)
+    monkeypatch.setenv("SABEROPS_DESKTOP_NOTIFICATIONS", "1")
     db = rig.db()
     job = submit_job(db, repo=rig.repo, goal="real wait lifecycle").job
     readiness = ReadinessService.for_owner_state(owner_state_dir())
@@ -192,3 +192,54 @@ def test_wait_real_scheduler_outcome(
             assert result["result"]["owner_action"]
     finally:
         thread.join(timeout=60)
+
+
+def test_ordinary_lifecycle_delivery_is_disabled_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from saberops.jobs import store
+    from saberops.jobs.models import JobState
+    from saberops.notifications import deliver_pending
+
+    rig = build_lifecycle_rig(tmp_path, monkeypatch)
+    log = tmp_path / "notice-log"
+    stub = tmp_path / "notify-send"
+    stub.write_text('#!/bin/sh\ntouch "$NOTICE_LOG"\n', encoding="utf-8")
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    monkeypatch.setenv("NOTICE_LOG", str(log))
+    db = rig.db()
+    job = submit_job(db, repo=rig.repo, goal="ordinary lifecycle").job
+    store.mark_dispatched(db, job.job_id, "run-test")
+    store.reconcile_transition(db, job.job_id, to=JobState.SUCCEEDED)
+    deliver_pending(db)
+    assert not log.exists()
+
+
+def test_persistent_notifications_setting_and_environment_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from saberops.cli import main
+    from saberops.notifications import notify_once
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.delenv("SABEROPS_DESKTOP_NOTIFICATIONS", raising=False)
+    log = tmp_path / "log"
+    stub = tmp_path / "notify-send"
+    stub.write_text('#!/bin/sh\ntouch "$NOTICE_LOG"\n', encoding="utf-8")
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    monkeypatch.setenv("NOTICE_LOG", str(log))
+    assert main(["notifications", "set", "off"]) == 0
+    assert main(["notifications", "show", "--json"]) == 0
+    assert '"enabled": false' in capsys.readouterr().out
+    notify_once(tmp_path / "ledger", "a", "title", "body")
+    assert not log.exists()
+    monkeypatch.setenv("SABEROPS_DESKTOP_NOTIFICATIONS", "1")
+    notify_once(tmp_path / "ledger", "a", "title", "body")
+    assert log.exists()
+    log.unlink()
+    assert main(["notifications", "set", "on"]) == 0
+    monkeypatch.setenv("SABEROPS_DESKTOP_NOTIFICATIONS", "0")
+    notify_once(tmp_path / "ledger", "b", "title", "body")
+    assert not log.exists()
