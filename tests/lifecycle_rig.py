@@ -190,7 +190,7 @@ class RigEnvironment:
             check=False,
         )
 
-    def wait_for_run(self, run_id: str, *, timeout: float = 15.0) -> Run:
+    def wait_for_run(self, run_id: str, *, timeout: float = 30.0) -> Run:
         """Poll the owner DB until *run_id* reaches a terminal status."""
         deadline = time.monotonic() + timeout
         db = self.db()

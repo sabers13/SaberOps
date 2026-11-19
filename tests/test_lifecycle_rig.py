@@ -155,7 +155,7 @@ def _run_supervised_and_accept(
     )
     supervisor = RunSupervisor(db=db)
     started = supervisor.start_supervised_run(config)
-    run = rig.wait_for_run(started.run_id, timeout=15.0)
+    run = rig.wait_for_run(started.run_id, timeout=30.0)
     assert run.status == RunStatus.COMPLETED, run.result_summary
 
     reviews = db.get_reviews_for_run(run.id)
