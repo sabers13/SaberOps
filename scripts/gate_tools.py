@@ -964,10 +964,10 @@ class MemoryLedger:
         )
         cores = max(1, int(self._cpu_cores()))
         affordable = max(1, min(cores, remaining // per_worker))
-        # One worker's worth of headroom keeps the step's own cgroup ceiling
-        # (MemoryHigh = grant) from throttling the controller and workers when
-        # the estimate is exactly right.
-        desired = per_worker * (affordable + 1)
+        # Headroom keeps the step's own cgroup ceiling (MemoryHigh = grant)
+        # from throttling the controller and workers: one worker's worth plus
+        # 25% covers the per-worker estimate's own noise.
+        desired = int(per_worker * (affordable + 1) * 1.25)
         if desired <= predicted:
             return predicted
         return min(remaining, desired)

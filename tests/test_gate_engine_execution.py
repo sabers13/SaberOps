@@ -300,6 +300,14 @@ def _pin_mem(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, budget_bytes: int)
     meminfo = tmp_path / "meminfo"
     meminfo.write_text(f"MemTotal: {avail_kb * 4} kB\nMemAvailable: {avail_kb} kB\n")
     monkeypatch.setenv(gt.PROC_MEMINFO_ENV, str(meminfo))
+    # The host's real PSI can be non-zero while other lanes run heavy tests.
+    # These tests reason about a pinned budget, so pin pressure to zero too.
+    pressure = tmp_path / "memory.pressure"
+    pressure.write_text(
+        "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
+        "full avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
+    )
+    monkeypatch.setenv(gt.PROC_PRESSURE_MEMORY_ENV, str(pressure))
     return meminfo
 
 
