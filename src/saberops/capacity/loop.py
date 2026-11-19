@@ -732,6 +732,7 @@ def scheduler_tick(
                 probes=probes,
                 pool_policies=pool_policies,
                 now=moment,
+                auto_only=(probes is None),
             )
             probed_count += 1
 

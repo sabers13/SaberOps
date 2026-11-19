@@ -211,6 +211,19 @@ _READERS = {
     "opencode-go": read_go_windows,
 }
 
+# Readers safe to invoke automatically without user interaction, prompt
+# submission, or vendor settings mutation.  `claude` drives an interactive PTY
+# and answers a trust dialog, so it is excluded from automatic runs.
+AUTO_SAFE_HARNESSES: frozenset[str] = frozenset({"codex", "opencode-go"})
+
+_PROVIDER_TO_PROBE_HARNESS: dict[str, str] = {
+    "codex": "codex",
+    "anthropic": "claude",
+    "claude": "claude",
+    "opencode": "opencode-go",
+    "opencode-go": "opencode-go",
+}
+
 
 def pools_for_probe(
     harness: str, pool_policies: dict[str, Any] | None
@@ -388,6 +401,7 @@ def run_due_probes(
     pool_policies: dict[str, Any] | None = None,
     deadline: float | None = None,
     force_harnesses: Iterable[str] = (),
+    auto_only: bool = False,
 ) -> dict[str, str]:
     """Run probes only for harnesses with a PROBE_DUE exclusion; never raises.
 
@@ -458,6 +472,9 @@ def run_due_probes(
                 continue
         # Custom injected probe (tests) takes precedence.
         custom = (probes or {}).get(harness) if probes else None
+        if auto_only and custom is None and harness not in AUTO_SAFE_HARNESSES:
+            outcomes[harness] = "unsafe-auto-probe"
+            continue
         if custom is None and under_test:
             # Under pytest, real CLIs must never launch: tests would depend
             # on owner logins and account state.
@@ -553,7 +570,39 @@ def probe_available_for(
     return False
 
 
+def try_safe_quota_probe(
+    db: Any,
+    *,
+    provider: str,
+    now: datetime | None = None,
+    probes: dict[str, Any] | None = None,
+    pool_policies: dict[str, Any] | None = None,
+) -> str:
+    """Attempt one safe automatic quota reading for ``provider``.
+
+    Skips any harness whose native reader drives an interactive PTY or mutates
+    vendor settings (such as ``claude``).  Never raises; returns the probe
+    outcome string (``"ran"``, ``"unsafe-auto-probe"``, ``"no-probe"``,
+    ``"no-executable"``, ``"disabled-under-test"``, or ``"failed"``).
+    """
+    harness = _PROVIDER_TO_PROBE_HARNESS.get(provider.strip().lower())
+    if harness is None:
+        return "no-probe"
+    if harness not in AUTO_SAFE_HARNESSES:
+        return "unsafe-auto-probe"
+    outcomes = run_due_probes(
+        db,
+        now=now,
+        probes=probes,
+        pool_policies=pool_policies,
+        force_harnesses=(harness,),
+        auto_only=True,
+    )
+    return outcomes.get(harness, "failed")
+
+
 __all__ = [
+    "AUTO_SAFE_HARNESSES",
     "HARNESS_PROVIDER",
     "REGISTERED_HARNESSES",
     "Probe",
@@ -566,4 +615,5 @@ __all__ = [
     "probe_available_for",
     "handle_probe_result",
     "run_due_probes",
+    "try_safe_quota_probe",
 ]

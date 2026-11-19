@@ -5766,7 +5766,11 @@ def handle_quota_list(args: argparse.Namespace) -> int:
     service = OrchestratorService(db=Database(args.db))
     states = service.list_quota()
     if not states:
-        print("No quota state configured. Providers without quota state are treated as NORMAL.")
+        print(
+            "No quota state recorded. Providers without quota evidence are refused "
+            "(QUOTA_EVIDENCE_REQUIRED) until a safe probe succeeds or you run "
+            "`orch quota set <provider> <remaining_percent>`."
+        )
         return 0
 
     header = f"{'PROVIDER':<12} {'POOL':<12} {'REMAINING':<11} {'RESET':<26} {'ROUTING STATE'}"

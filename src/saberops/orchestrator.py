@@ -4260,55 +4260,10 @@ class Orchestrator:
                 # to the next candidate.  The adapter only reports the
                 # evidence -- never chooses a replacement model or alters
                 # the routing chain.
-                decision_pre = control_plane_decision(
-                    candidate=candidate,
-                    adapter=adapter_pre,
-                    training_allowed=config.training_allowed,
-                    routing_snapshot=routing_snapshot,
-                    quota_states=quota_states,
-                    prompt_bytes=prompt_bytes_pre,
-                    reserve_override=frozen_control_plane.reserve_override,
-                    policy=control_plane_policy,
-                    required_capabilities=frozen_control_plane.required_capabilities,
-                    control_plane_digest=frozen_control_plane.digest,
-                    # The exact binding's quota pool gates the
-                    # canonical quota evaluation (never a provider-wide
-                    # default); ordinary dispatches keep legacy behavior.
-                    binding_pool_id=(
-                        auto_resolved.quota_pool_id if auto_resolved is not None else None
-                    ),
-                    requires_governed_instructions=True,
-                    readiness_state=(
-                        readiness_pre.state if readiness_pre is not None else None
-                    ),
-                    readiness_reason=(
-                        readiness_pre.reason if readiness_pre is not None else None
-                    ),
-                    readiness_executable_available=(
-                        readiness_pre.executable_available
-                        if readiness_pre is not None
-                        else True
-                    ),
-                    explicit_unknown_readiness=is_explicit,
-                    db=self.db,
-                )
-                # Keep the legacy string at this boundary for existing event
-                # consumers while persisting the authoritative typed decision
-                # alongside it.
-                with measure_phase(
-                    self.db,
-                    run_id=run_id,
-                    phase=PhaseKind.ROUTING_POLICY,
-                    source_kind="orchestrator._run_core",
-                    boundary_kind="evaluate_eligibility",
-                    package_id=(current_package.id if current_package is not None else None),
-                    notes="eligibility-evaluation sub-boundary only -- "
-                    "time spent inside the quota evaluate_eligibility() call. "
-                    "The preceding control_plane_decision() call happens "
-                    "before this timing boundary and is NOT included in the "
-                    "measurement.",
-                ):
-                    reason_pre = evaluate_eligibility(
+                decision_pre: Any = None
+                reason_pre: str | None = None
+                for _probe_attempt in (0, 1):
+                    decision_pre = control_plane_decision(
                         candidate=candidate,
                         adapter=adapter_pre,
                         training_allowed=config.training_allowed,
@@ -4319,28 +4274,100 @@ class Orchestrator:
                         policy=control_plane_policy,
                         required_capabilities=frozen_control_plane.required_capabilities,
                         control_plane_digest=frozen_control_plane.digest,
+                        # The exact binding's quota pool gates the
+                        # canonical quota evaluation (never a provider-wide
+                        # default); ordinary dispatches keep legacy behavior.
                         binding_pool_id=(
                             auto_resolved.quota_pool_id if auto_resolved is not None else None
                         ),
                         requires_governed_instructions=True,
-                        explicit_override=is_explicit,
                         readiness_state=(
-                            readiness_pre.state
-                            if readiness_pre is not None
-                            else None
+                            readiness_pre.state if readiness_pre is not None else None
                         ),
                         readiness_reason=(
-                            readiness_pre.reason
-                            if readiness_pre is not None
-                            else None
+                            readiness_pre.reason if readiness_pre is not None else None
                         ),
                         readiness_executable_available=(
                             readiness_pre.executable_available
                             if readiness_pre is not None
                             else True
                         ),
+                        explicit_unknown_readiness=is_explicit,
                         db=self.db,
                     )
+                    # Keep the legacy string at this boundary for existing event
+                    # consumers while persisting the authoritative typed decision
+                    # alongside it.
+                    with measure_phase(
+                        self.db,
+                        run_id=run_id,
+                        phase=PhaseKind.ROUTING_POLICY,
+                        source_kind="orchestrator._run_core",
+                        boundary_kind="evaluate_eligibility",
+                        package_id=(current_package.id if current_package is not None else None),
+                        notes="eligibility-evaluation sub-boundary only -- "
+                        "time spent inside the quota evaluate_eligibility() call. "
+                        "The preceding control_plane_decision() call happens "
+                        "before this timing boundary and is NOT included in the "
+                        "measurement.",
+                    ):
+                        reason_pre = evaluate_eligibility(
+                            candidate=candidate,
+                            adapter=adapter_pre,
+                            training_allowed=config.training_allowed,
+                            routing_snapshot=routing_snapshot,
+                            quota_states=quota_states,
+                            prompt_bytes=prompt_bytes_pre,
+                            reserve_override=frozen_control_plane.reserve_override,
+                            policy=control_plane_policy,
+                            required_capabilities=frozen_control_plane.required_capabilities,
+                            control_plane_digest=frozen_control_plane.digest,
+                            binding_pool_id=(
+                                auto_resolved.quota_pool_id
+                                if auto_resolved is not None
+                                else None
+                            ),
+                            requires_governed_instructions=True,
+                            explicit_override=is_explicit,
+                            readiness_state=(
+                                readiness_pre.state
+                                if readiness_pre is not None
+                                else None
+                            ),
+                            readiness_reason=(
+                                readiness_pre.reason
+                                if readiness_pre is not None
+                                else None
+                            ),
+                            readiness_executable_available=(
+                                readiness_pre.executable_available
+                                if readiness_pre is not None
+                                else True
+                            ),
+                            db=self.db,
+                        )
+                    if (
+                        _probe_attempt == 0
+                        and decision_pre.exclusion_reason == "QUOTA_EVIDENCE_REQUIRED"
+                    ):
+                        from saberops.capacity.probes import try_safe_quota_probe
+                        from saberops.control_plane.plans import effective_quota_pools
+
+                        probe_outcome = try_safe_quota_probe(
+                            self.db,
+                            provider=candidate.provider,
+                            probes=getattr(self, "quota_probes", None),
+                            pool_policies=effective_quota_pools(control_plane_policy),
+                        )
+                        if probe_outcome == "ran":
+                            try:
+                                from saberops.capacity.snapshot import effective_quota_states
+
+                                quota_states = effective_quota_states(self.db)
+                            except Exception:
+                                quota_states = self.db.list_quota()
+                            continue
+                    break
                 self.db.record_event(
                     run_id,
                     "control_plane_decision",
@@ -4460,7 +4487,17 @@ class Orchestrator:
                         elif reason_pre == "training_policy_excludes_model":
                             msg = f"explicit model is ineligible: training policy excludes model {candidate.model}"  # noqa: E501
                         elif reason_pre == "quota_blocked":
-                            msg = f"explicit model is ineligible: provider {candidate.provider} quota blocked"  # noqa: E501
+                            if decision_pre.exclusion_reason == "QUOTA_EVIDENCE_REQUIRED":
+                                msg = (
+                                    f"explicit model is ineligible: provider {candidate.provider} "
+                                    f"requires quota evidence; run "
+                                    f"`orch quota set {candidate.provider} <remaining_percent>`"
+                                )
+                            else:
+                                msg = (
+                                    f"explicit model is ineligible: provider "
+                                    f"{candidate.provider} quota blocked"
+                                )
                         else:
                             msg = f"explicit model is ineligible: {reason_pre}"
                         now_fail = current_iso_timestamp()
