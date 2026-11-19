@@ -55,6 +55,10 @@ class ControlPlanePolicy:
     #: has not set one, so the deterministic interim default
     #: :data:`DEFAULT_MAX_GLOBAL_CONCURRENT` applies at the scheduler seam.
     max_global_concurrent: int | None = None
+    #: OpenCode provider ids the owner explicitly enabled for API-key billing
+    #: (``api_billing.providers``).  Empty by default: plan limits only.  A
+    #: stored API key can never bill unless the owner named its provider here.
+    api_billing_providers: frozenset[str] = field(default_factory=frozenset)
 
     def provider(self, name: str) -> ProviderPolicy:
         return self.provider_policies.get(
@@ -155,6 +159,12 @@ class FrozenControlPlane:
             # Covered only when the owner set it, so snapshots frozen before
             # this key existed keep their historical digest byte-for-byte.
             payload["concurrency"] = {"max_global": self.policy.max_global_concurrent}
+        if self.policy.api_billing_providers:
+            # Covered only when the owner enabled API billing, for the same
+            # historical-digest reason.
+            payload["api_billing"] = {
+                "providers": sorted(self.policy.api_billing_providers)
+            }
         return payload
 
     def as_dict(self) -> dict[str, object]:
@@ -290,6 +300,9 @@ def _policy_payload(policy: ControlPlanePolicy) -> dict[str, object]:
         # Conditional so a document without the owner key hashes exactly as
         # it did before the key existed (legacy content_hash stability).
         payload["concurrency"] = {"max_global": policy.max_global_concurrent}
+    if policy.api_billing_providers:
+        # Conditional for the same legacy-digest stability reason.
+        payload["api_billing"] = {"providers": sorted(policy.api_billing_providers)}
     return payload
 
 
@@ -337,6 +350,27 @@ def _build(data: object, source: str) -> ControlPlanePolicy:
                 " must be an int >= 1"
             )
         max_global_concurrent = raw_max
+    # Owner API-billing allowlist (``api_billing.providers``).  Absent -> the
+    # plan-only default (empty).  A malformed block fails closed here so an
+    # unreadable owner intent can never widen billing.
+    api_billing_providers: frozenset[str] = frozenset()
+    api_billing = data.get("api_billing")
+    if api_billing is not None:
+        if not isinstance(api_billing, dict):
+            raise ValueError(
+                f"Control-plane config at {source}: api_billing must be an object"
+            )
+        raw_api_providers = api_billing.get("providers", [])
+        if not isinstance(raw_api_providers, list) or not all(
+            isinstance(item, str) and item.strip() for item in raw_api_providers
+        ):
+            raise ValueError(
+                f"Control-plane config at {source}: api_billing.providers"
+                " must be a list of provider names"
+            )
+        api_billing_providers = frozenset(
+            item.strip().lower() for item in raw_api_providers
+        )
     parsed_pools: dict[str, QuotaPoolPolicy] = {}
     for pool_id, raw in pools.items():
         if not isinstance(pool_id, str) or not isinstance(raw, dict):
@@ -370,7 +404,14 @@ def _build(data: object, source: str) -> ControlPlanePolicy:
             float(raw.get("red_line_pct", 15.0)),
             member_routes,
         )
-    policy = ControlPlanePolicy(parsed, parsed_pools, "", plans, max_global_concurrent)
+    policy = ControlPlanePolicy(
+        parsed,
+        parsed_pools,
+        "",
+        plans,
+        max_global_concurrent,
+        api_billing_providers,
+    )
     canonical = json.dumps(
         _policy_payload(policy),
         sort_keys=True,
@@ -383,6 +424,7 @@ def _build(data: object, source: str) -> ControlPlanePolicy:
         hashlib.sha256(canonical.encode()).hexdigest(),
         plans,
         max_global_concurrent,
+        api_billing_providers,
     )
 
 
@@ -480,7 +522,7 @@ def reconstruct_frozen_control_plane(
         "providers": provider_data,
         "quota_pools": _merge_snapshot_pools(pools, raw.get("pool_plans")),
     }
-    for key in ("accounts", "postures", "reserves", "concurrency"):
+    for key in ("accounts", "postures", "reserves", "concurrency", "api_billing"):
         if key in raw:
             policy_data[key] = raw[key]
     policy = _build(policy_data, "frozen run snapshot")
@@ -600,7 +642,7 @@ def _dump_v2(policy: ControlPlanePolicy, raw: dict[str, object]) -> dict[str, ob
         },
         "quota_pools": pools,
     }
-    for key in ("accounts", "postures", "reserves", "concurrency"):
+    for key in ("accounts", "postures", "reserves", "concurrency", "api_billing"):
         if key in raw:
             data[key] = raw[key]
     return data
@@ -649,6 +691,7 @@ def set_provider_policy(provider: str, state: str, warning: str | None = None) -
         current.content_hash,
         current.plans,
         current.max_global_concurrent,
+        current.api_billing_providers,
     )
     return _write_policy(updated, raw)
 
@@ -672,6 +715,7 @@ def set_quota_pool_policy(
         current.content_hash,
         current.plans,
         current.max_global_concurrent,
+        current.api_billing_providers,
     )
     # The caller replaces this pool's member list outright (plain strings);
     # every other section and this pool's non-member extras are preserved.

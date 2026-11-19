@@ -242,6 +242,37 @@ def test_codex_direct_path_ignores_user_config(
     assert argv.index("--ignore-user-config") < argv.index("--model")
 
 
+def test_codex_direct_path_disables_hooks(
+    stub_bin: tuple[Path, Path], tmp_path: Path
+) -> None:
+    # User-level Codex hooks (``features.hooks = true`` plus the
+    # ``[hooks.state]`` trust table in ``$CODEX_HOME/config.toml``) must be
+    # disabled explicitly on every invocation, not only by the coincidence
+    # that ``--ignore-user-config`` drops the config file holding the flag.
+    bindir, outfile = stub_bin
+    _write_recording_stub(bindir, "stub-codex", outfile)
+    adapter = CodexAdapter(codex_bin="stub-codex")
+    adapter.run(WorkerRequest("do the thing", tmp_path, "gpt-6.1-sol"))
+    argv = _codex_argv(_child(outfile))
+    assert "features.hooks=false" in argv
+
+
+def test_codex_resume_path_disables_hooks(
+    stub_bin: tuple[Path, Path], tmp_path: Path
+) -> None:
+    bindir, outfile = stub_bin
+    _write_recording_stub(bindir, "stub-codex", outfile)
+    adapter = CodexAdapter(codex_bin="stub-codex")
+    adapter.run(
+        WorkerRequest(
+            "follow up", tmp_path, "gpt-6.1-sol", native_resume_id="session-123"
+        )
+    )
+    argv = _codex_argv(_child(outfile))
+    assert "resume" in argv
+    assert "features.hooks=false" in argv
+
+
 def test_codex_resume_path_ignores_user_config(
     stub_bin: tuple[Path, Path], tmp_path: Path
 ) -> None:
@@ -376,3 +407,161 @@ def test_overlay_forwards_only_saberops_opencode_names() -> None:
     assert env["OPENCODE_SERVER_PASSWORD"] == "server-secret"
     assert env["OPENCODE_SERVER_USERNAME"] == "opencode"
     assert env["OPENCODE_CONFIG_CONTENT"] == "shell-canary"
+
+
+# ---------------------------------------------------------------------------
+# opencode run lifecycle: private server + session resume
+# ---------------------------------------------------------------------------
+
+
+def test_opencode_run_uses_standalone_server(
+    stub_bin: tuple[Path, Path], tmp_path: Path
+) -> None:
+    # A worker turn must run on a private server, never the owner's
+    # user-level OpenCode background service (the model-listing path already
+    # passes ``--standalone`` for the same reason).
+    bindir, outfile = stub_bin
+    _write_recording_stub(bindir, "stub-opencode", outfile)
+    adapter = OpenCodeAdapter(opencode_bin="stub-opencode")
+    adapter.run(WorkerRequest("do the thing", tmp_path, MODEL))
+    argv = _child(outfile)["argv"]
+    assert "--standalone" in argv
+
+
+def test_opencode_resume_passes_standalone_and_session(
+    stub_bin: tuple[Path, Path], tmp_path: Path
+) -> None:
+    # Resume keeps working with ``--standalone``: the session id still
+    # travels as ``--session`` and the session database lives in the real
+    # XDG_DATA_HOME that isolation passes through.
+    bindir, outfile = stub_bin
+    _write_recording_stub(bindir, "stub-opencode", outfile)
+    adapter = OpenCodeAdapter(opencode_bin="stub-opencode")
+    adapter.run(
+        WorkerRequest(
+            "follow up", tmp_path, MODEL, native_resume_id="ses_existing_123"
+        )
+    )
+    argv = _child(outfile)["argv"]
+    assert "--standalone" in argv
+    assert argv[argv.index("--session") + 1] == "ses_existing_123"
+
+
+# ---------------------------------------------------------------------------
+# OpenCode stored-credential billing guard
+# ---------------------------------------------------------------------------
+
+
+def _write_opencode_auth(data_home: Path, entries: dict[str, str]) -> None:
+    """Write a structural OpenCode auth file (type only, fake secrets)."""
+    auth_dir = data_home / "opencode"
+    auth_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        provider: {"type": kind, "key": f"fake-secret-{provider}"}
+        for provider, kind in entries.items()
+    }
+    (auth_dir / "auth.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("model", "auth", "allowed", "launches"),
+    [
+        # OpenCode has no Anthropic subscription sign-in: the stored API key
+        # must never bill, even though a fake secret is present.
+        ("anthropic/claude-sonnet-4-5", {"anthropic": "api"}, frozenset(), False),
+        ("anthropic/claude-sonnet-4-5", {}, frozenset(), False),
+        # The only escape is an explicit owner API-billing entry.
+        ("anthropic/claude-sonnet-4-5", {"anthropic": "api"}, frozenset({"anthropic"}), True),
+        # openai is admitted only as the ChatGPT-plan OAuth sign-in.
+        ("openai/gpt-5.5", {"openai": "oauth"}, frozenset(), True),
+        ("openai/gpt-5.5", {"openai": "api"}, frozenset(), False),
+        ("openai/gpt-5.5", {}, frozenset(), False),
+        # A plan-backed provider keeps its subscription credential.
+        ("opencode-go/deepseek-v4-flash", {"opencode-go": "api"}, frozenset(), True),
+        ("opencode/big-pickle", {"opencode": "api"}, frozenset(), True),
+        # A provider with no packaged plan account is refused on an API key.
+        ("zhipuai/glm-5", {"zhipuai": "api"}, frozenset(), False),
+        ("zhipuai/glm-5", {"zhipuai": "api"}, frozenset({"zhipuai"}), True),
+    ],
+)
+def test_opencode_stored_credential_billing_guard(
+    stub_bin: tuple[Path, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    model: str,
+    auth: dict[str, str],
+    allowed: frozenset[str],
+    launches: bool,
+) -> None:
+    bindir, outfile = stub_bin
+    _write_recording_stub(bindir, "stub-opencode", outfile)
+    data_home = tmp_path / "data"
+    _write_opencode_auth(data_home, auth)
+    monkeypatch.setenv("XDG_DATA_HOME", str(data_home))
+    adapter = OpenCodeAdapter(
+        opencode_bin="stub-opencode", api_billing_providers=allowed
+    )
+    result = adapter.run(WorkerRequest("do the thing", tmp_path, model))
+    if launches:
+        assert result.status == AttemptStatus.SUCCESS, result.error
+        assert outfile.is_file()
+    else:
+        assert result.status == AttemptStatus.FAILED
+        assert result.outcome == DispatchOutcome.ELIGIBILITY_SKIP
+        assert "OPENCODE_API_KEY_REFUSED" in (result.error or "")
+        assert not outfile.is_file(), "refused route must not launch a process"
+
+
+def test_opencode_stored_credential_refusal_never_leaks_secret(
+    stub_bin: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bindir, outfile = stub_bin
+    _write_recording_stub(bindir, "stub-opencode", outfile)
+    data_home = tmp_path / "data"
+    _write_opencode_auth(data_home, {"anthropic": "api"})
+    monkeypatch.setenv("XDG_DATA_HOME", str(data_home))
+    adapter = OpenCodeAdapter(opencode_bin="stub-opencode", api_billing_providers=frozenset())
+    result = adapter.run(WorkerRequest("do the thing", tmp_path, "anthropic/claude-sonnet-4-5"))
+    assert result.status == AttemptStatus.FAILED
+    for field in (result.summary, result.error, result.stdout, result.stderr):
+        assert "fake-secret" not in (field or "")
+
+
+def test_owner_policy_api_billing_allowlist_loads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from saberops.control_plane.policy import load_control_plane_policy
+
+    config_dir = tmp_path / "config" / "saberops"
+    config_dir.mkdir(parents=True)
+    (config_dir / "control_plane.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "providers": {},
+                "api_billing": {"providers": ["Anthropic"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    policy = load_control_plane_policy()
+    assert policy.api_billing_providers == frozenset({"anthropic"})
+
+    # The allowlist travels through a frozen run snapshot, so in-run
+    # dispatch sees the same owner decision as the scheduler seam.
+    from saberops.control_plane.policy import (
+        freeze_control_plane_policy,
+        reconstruct_frozen_control_plane,
+    )
+
+    frozen = freeze_control_plane_policy(policy)
+    rebuilt = reconstruct_frozen_control_plane(frozen.as_json(), frozen.digest)
+    assert rebuilt.policy.api_billing_providers == frozenset({"anthropic"})
+
+    (config_dir / "control_plane.json").write_text(
+        json.dumps({"version": 1, "providers": {}, "api_billing": {"providers": "anthropic"}}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="api_billing"):
+        load_control_plane_policy()

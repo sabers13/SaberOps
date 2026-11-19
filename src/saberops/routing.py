@@ -88,6 +88,31 @@ def is_muse_model(model_name: str) -> bool:
     return "muse" in model_name.lower()
 
 
+#: The owner's rule (2026-11-19): "live gemini out we need to run it from agy
+#: only".  Gemini models therefore run only through Antigravity -- never
+#: through ``GEMINI_API_KEY``, OpenCode, a proxy provider or any other
+#: harness.  Antigravity may serve them only as an explicit owner override;
+#: automatic chains never select it (see :data:`ATTENDED_ONLY_PROVIDERS`).
+GEMINI_PROVIDER = "antigravity"
+
+GEMINI_REQUIRES_ANTIGRAVITY = (
+    "Gemini models run only through Antigravity (owner rule, 2026-11-19): "
+    "no SaberOps route may reach Gemini through GEMINI_API_KEY, OpenCode or "
+    "any other provider. Select provider 'antigravity' explicitly (attended) "
+    "instead."
+)
+
+
+def is_gemini_family_model(model: str) -> bool:
+    """Return True when ``model`` belongs to the Gemini model family."""
+    return "gemini" in model.strip().lower()
+
+
+def gemini_requires_antigravity(provider: str, model: str) -> bool:
+    """Return True when a Gemini-family model is routed away from Antigravity."""
+    return is_gemini_family_model(model) and provider.strip().lower() != GEMINI_PROVIDER
+
+
 def parse_candidate_override(
     model_override: str,
     provider_override: str | None = None,
@@ -100,7 +125,21 @@ def parse_candidate_override(
       - 'opencode/opencode-go/deepseek-v4-pro'
       - 'opencode-go/deepseek-v4-pro' (inferred as opencode)
       - 'custom_provider/custom_model'
+
+    Raises:
+        ValueError: when the resolved identity is a Gemini-family model whose
+            provider is not Antigravity (see :func:`gemini_requires_antigravity`).
     """
+    candidate = _parse_candidate(model_override, provider_override)
+    if gemini_requires_antigravity(candidate.provider, candidate.model):
+        raise ValueError(GEMINI_REQUIRES_ANTIGRAVITY)
+    return candidate
+
+
+def _parse_candidate(
+    model_override: str,
+    provider_override: str | None,
+) -> WorkerCandidate:
     model_clean = model_override.strip()
     if provider_override:
         return WorkerCandidate(provider=provider_override.strip().lower(), model=model_clean)
@@ -228,6 +267,12 @@ def resolve_candidate_chain(
     # is a valid owner decision: dispatch terminates with structured
     # no-eligible-candidate evidence, never a substituted default.
     chain = [c for c in chain if c.provider not in ATTENDED_ONLY_PROVIDERS]
+    # Gemini models run only through Antigravity (owner rule, 2026-11-19):
+    # a frozen snapshot or owner route that points a Gemini-family model at
+    # another provider is never eligible.
+    chain = [
+        c for c in chain if not gemini_requires_antigravity(c.provider, c.model)
+    ]
 
     if provider_override:
         provider_norm = provider_override.strip().lower()

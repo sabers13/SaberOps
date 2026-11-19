@@ -7,7 +7,9 @@
 - **Decider:** Saber (owner), Phase 1 plan lanes C1, C2, C2B, C3, A5, E5 and F14
 - **Related:** [ADR-0001](0001-saberops-engine-mcp-first.md) §3.3–§3.4,
   [ADR-0005](0005-mcp-first-engine-and-phase-2-board.md),
-  [ADR-0007](0007-dynamic-memory-budget.md)
+  [ADR-0007](0007-dynamic-memory-budget.md),
+  [ADR-0019](0019-gemini-and-stored-key-billing.md) (Gemini and stored-key
+  billing rules)
 
 ## 1. Context
 

@@ -27,6 +27,11 @@ from saberops.workers.instruction_compat import (
     InstructionCompatibility,
     instruction_compatibility_for_opencode_model,
 )
+from saberops.workers.opencode_auth import (
+    api_billing_refusal,
+    auth_requires_owner_api_billing,
+    stored_auth_type,
+)
 from saberops.workers.opencode_isolation import (
     OpenCodeIsolationUnavailable,
     opencode_isolation,
@@ -63,9 +68,15 @@ class OpenCodeAdapter(WorkerAdapter):
         self,
         runner: Callable[..., ProcessResult] = run_process,
         opencode_bin: str = "opencode",
+        *,
+        api_billing_providers: frozenset[str] | None = None,
     ) -> None:
         self.runner = runner
         self.opencode_bin = opencode_bin
+        #: Injected owner API-billing allowlist.  ``None`` reads the owner
+        #: control-plane document at dispatch time; tests inject the value so
+        #: the guard never touches real owner configuration.
+        self.api_billing_providers = api_billing_providers
 
     @property
     def provider_name(self) -> str:
@@ -137,6 +148,36 @@ class OpenCodeAdapter(WorkerAdapter):
             outcome=DispatchOutcome.ELIGIBILITY_SKIP,
         )
 
+    def _owner_api_billing_providers(self) -> frozenset[str]:
+        """Return the owner's explicit OpenCode API-billing allowlist.
+
+        Reads the owner control-plane document only when a route actually
+        needs consent.  An unreadable or invalid document fails closed (no
+        API-key route is admitted).
+        """
+        if self.api_billing_providers is not None:
+            return self.api_billing_providers
+        from saberops.control_plane.policy import load_control_plane_policy
+
+        try:
+            return load_control_plane_policy().api_billing_providers
+        except (OSError, ValueError):
+            return frozenset()
+
+    def _stored_auth_refusal(self, request: WorkerRequest, provider: str) -> str | None:
+        """Return a refusal when the stored credential may bill per token.
+
+        The credential file is inspected structurally (type only); no secret
+        value is read into a message.  No process is launched by this check.
+        """
+        base_env = hermetic_env("opencode", request.env)
+        auth_type = stored_auth_type(provider, env=base_env)
+        if not auth_requires_owner_api_billing(provider, auth_type):
+            return None
+        if provider in self._owner_api_billing_providers():
+            return None
+        return api_billing_refusal(provider, auth_type)
+
     def _cli_version(self) -> str:
         """Return the installed CLI version for dispatch evidence.
 
@@ -195,6 +236,12 @@ class OpenCodeAdapter(WorkerAdapter):
                 outcome=DispatchOutcome.ELIGIBILITY_SKIP,
             )
 
+        refusal = self._stored_auth_refusal(request, provider)
+        if refusal is not None:
+            # Typed fail-closed refusal: no process is launched, so a stored
+            # pay-per-token credential can never bill.
+            return self._isolation_refusal(request, refusal)
+
         if request.session_runtime is not None and self.runner is run_process:
             return request.session_runtime.run_opencode(request, self.opencode_bin)
 
@@ -218,7 +265,14 @@ class OpenCodeAdapter(WorkerAdapter):
         # and ancestor discovery disabled, ambient config selectors removed and
         # inline deny policies.  Do not re-add a flag that the installed CLI's
         # help does not document.
-        cmd = [self.opencode_bin, "run"]
+        #
+        # ``--standalone`` matches the model-listing path: it runs the turn on
+        # a private server instead of OpenCode's background service.  A worker
+        # must never attach to (or start) the owner's user-level service, whose
+        # root is outside the dispatch isolation.  Session resume still works
+        # because ``--session`` and the session database live in the real
+        # ``XDG_DATA_HOME`` that isolation passes through.
+        cmd = [self.opencode_bin, "run", "--standalone"]
         if not use_stdin:
             cmd.append(request.task)
         cmd.extend(["--model", request.model, "--format", "json"])

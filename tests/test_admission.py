@@ -1283,3 +1283,96 @@ def test_admit_partial_capacity_schema_fails_closed(tmp_path: Path) -> None:
 
 
 
+
+
+def test_admission_refuses_gemini_outside_antigravity() -> None:
+    """Covers: owner rule 2026-11-19 (Gemini only through Antigravity).
+
+    A Gemini-family model routed through OpenCode, a proxy provider or any
+    other harness is refused even when a verified posture record and quota
+    evidence exist.  Only the Antigravity provider may carry it.
+    """
+    from saberops.capacity.admission import GEMINI_REQUIRES_ANTIGRAVITY
+
+    now = datetime(2026, 10, 14, 12, 0, tzinfo=UTC)
+    # A generous, verified posture record for the OpenCode Google selector:
+    # the guard must not depend on the absence of a posture record.
+    postures = {
+        "opencode/google/*": PostureRecord(
+            "opencode/google/*", "C", ttl_days=30, verified_on="2026-10-01"
+        ),
+        "antigravity": PostureRecord(
+            "antigravity", "B", ttl_days=30, verified_on="2026-10-01"
+        ),
+    }
+    policy = _make_policy(postures=postures)
+
+    for provider, model in (
+        ("opencode", "google/gemini-3.7-pro"),
+        ("opencode", "gemini-3.5-flash-lite"),
+        ("proxy", "gemini-3.7-pro"),
+        ("cline", "cline-pass/gemini-x"),
+    ):
+        decision = admit(
+            _make_candidate(provider=provider, model=model),
+            now=now,
+            policy=policy,
+            explicit_override=True,
+        )
+        assert decision.admitted is False, (provider, model)
+        assert decision.reason == GEMINI_REQUIRES_ANTIGRAVITY, (provider, model)
+
+    # An explicit Antigravity Gemini override is not refused by this rule
+    # (Antigravity's own attended-only posture still applies).
+    antigravity = admit(
+        _make_candidate(provider="antigravity", model="gemini-3.7-flash"),
+        now=now,
+        policy=policy,
+        explicit_override=True,
+    )
+    assert antigravity.reason != GEMINI_REQUIRES_ANTIGRAVITY
+
+
+def test_parse_candidate_override_refuses_gemini_outside_antigravity() -> None:
+    """Covers: routing refuses an explicit OpenCode/proxy Gemini identity."""
+    import re
+
+    from saberops.routing import (
+        GEMINI_REQUIRES_ANTIGRAVITY,
+        parse_candidate_override,
+    )
+
+    for model, provider in (
+        ("opencode/google/gemini-3.7-pro", None),
+        ("proxy/gemini-3.7-pro", None),
+        ("gemini-3.7-pro", "opencode"),
+        ("cline-pass/gemini-x", None),
+    ):
+        with pytest.raises(ValueError, match=re.escape(GEMINI_REQUIRES_ANTIGRAVITY)):
+            parse_candidate_override(model, provider_override=provider)
+
+    # Antigravity, explicit or inferred, still resolves.
+    assert parse_candidate_override("antigravity/gemini-3.7-flash").provider == "antigravity"
+    assert parse_candidate_override("gemini-3.7-flash").provider == "antigravity"
+
+
+def test_resolve_candidate_chain_drops_snapshot_gemini_route() -> None:
+    """Covers: a frozen/owner chain cannot smuggle Gemini to another provider."""
+    from saberops.control_plane.plans import PlanSet  # noqa: F401
+    from saberops.models import WorkerCandidate
+    from saberops.routing import resolve_candidate_chain
+
+    class _Snapshot:
+        strong_start = ()
+        approved_candidates = ()
+
+        def chain_for_role(self, role: str, *, strong_start: bool = False) -> list[WorkerCandidate]:
+            return [
+                WorkerCandidate(provider="opencode", model="google/gemini-3.7-pro"),
+                WorkerCandidate(provider="opencode", model="opencode-go/deepseek-v4-flash"),
+            ]
+
+    chain = resolve_candidate_chain(role="BUILD", snapshot=_Snapshot())
+    assert [(c.provider, c.model) for c in chain] == [
+        ("opencode", "opencode-go/deepseek-v4-flash")
+    ]

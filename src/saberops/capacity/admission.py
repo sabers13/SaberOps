@@ -72,8 +72,14 @@ from saberops.control_plane.quota_policy import (
 )
 from saberops.jobs.models import JobRequirements, JobRole
 from saberops.models import ProviderReadiness, QuotaState, WorkerCandidate
+from saberops.routing import gemini_requires_antigravity
 from saberops.training_policy import is_training_permitted
 from saberops.workers.base import WorkerAdapter
+
+#: Admission reason: a Gemini-family model was routed away from Antigravity.
+#: Owner rule (2026-11-19): Gemini runs only through ``agy``; no stored key,
+#: OpenCode route, proxy provider or other harness may serve it.
+GEMINI_REQUIRES_ANTIGRAVITY = "GEMINI_REQUIRES_ANTIGRAVITY"
 
 # Known zero-inference harnesses matching capacity.probes
 _KNOWN_PROBE_HARNESSES: frozenset[str] = frozenset({"codex", "claude", "opencode-go"})
@@ -401,6 +407,22 @@ def admit(
             admitted=False,
             candidate=candidate,
             reason="INVALID_CANDIDATE",
+        )
+
+    # 1b. Gemini family is Antigravity-only (owner rule, 2026-11-19).  This
+    # holds regardless of provider, posture record, override or arrival path:
+    # a Gemini-family model routed to OpenCode (``opencode/google/*``), a
+    # proxy provider or any other harness is refused before any other check.
+    if gemini_requires_antigravity(candidate.provider, candidate.model):
+        return AdmissionDecision(
+            admitted=False,
+            candidate=candidate,
+            reason=GEMINI_REQUIRES_ANTIGRAVITY,
+            details={
+                "provider": candidate.provider,
+                "family": "gemini",
+                "required_provider": "antigravity",
+            },
         )
 
     # 2. Requirements: role, capabilities, read_only, model_family

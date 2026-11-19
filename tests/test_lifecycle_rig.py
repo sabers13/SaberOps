@@ -573,3 +573,24 @@ def test_every_route_exhausted_keeps_the_job_and_its_work(rig: RigEnvironment) -
     assert Path(catch_up["failure"]["work_location"]).parent.is_dir()
     assert catch_up["next_action"]["action"] in {"wait", "inspect"}
 
+
+
+def test_opencode_standalone_resume_dispatches_on_the_rig(rig: RigEnvironment) -> None:
+    """``opencode run --standalone`` still resumes a session on the real rig.
+
+    The fake CLI receives both ``--standalone`` and ``--session`` and completes
+    the turn, so the private-server switch does not break session resume.
+    """
+    res = OpenCodeAdapter().run(
+        WorkerRequest(
+            task="resume under standalone server",
+            worktree_path=rig.repo,
+            model="opencode-go/deepseek-v4-flash",
+            native_resume_id="ses_fake_resume_001",
+            timeout_seconds=20.0,
+        )
+    )
+    assert res.status == AttemptStatus.SUCCESS, res.error
+    output_file = rig.repo / "fake_worker_output.txt"
+    assert output_file.is_file()
+    assert "opencode:" in output_file.read_text(encoding="utf-8")

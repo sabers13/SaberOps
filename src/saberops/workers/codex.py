@@ -35,7 +35,11 @@ __all__ = ["CodexAdapter", "ORCH_PROMPT_ARG_LIMIT"]
 # * ``model_provider="openai"`` pins the built-in OpenAI provider so a
 #   user config cannot redirect the turn to another provider;
 # * ``service_tier="default"`` pins the standard service tier so a user
-#   config cannot opt the turn into separately billed Fast mode.
+#   config cannot opt the turn into separately billed Fast mode;
+# * ``features.hooks=false`` disables the Codex hook feature for the turn,
+#   so a worker can never run the user-level opencode-console hooks that
+#   report usage to a third party.  It is explicit rather than relying on
+#   ``--ignore-user-config`` dropping the ``[features] hooks = true`` flag.
 # ``-c`` overrides have the highest config precedence (above project and
 # user config files), and project ``.codex/`` layers cannot override
 # ``model_provider``/``model_providers`` at all.
@@ -52,6 +56,8 @@ _DIRECT_COVERRIDE_FLAGS: tuple[str, ...] = (
     'model_provider="openai"',
     "-c",
     'service_tier="default"',
+    "-c",
+    "features.hooks=false",
 )
 
 
