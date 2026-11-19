@@ -66,8 +66,39 @@ ACTIVE_FILENAME = "active"
 #: Directory name of the plan store under the owner state dir.
 DEFAULT_PLAN_STORE_DIRNAME = "plan-store"
 
-#: Format version of each persisted revision document.
-PLAN_REVISION_FORMAT_VERSION = 1
+#: Format version written for new revisions. Format 1 stays readable and
+#: verifiable so revisions stored before lane detail existed never fail.
+PLAN_REVISION_FORMAT_VERSION = 2
+
+#: Oldest persisted revision format this module can still verify.
+MIN_PLAN_REVISION_FORMAT_VERSION = 1
+
+#: Keys a format-1 task definition carried.
+_TASK_V1_KEYS = frozenset(
+    {
+        "task_id",
+        "title",
+        "phase",
+        "start_dependencies",
+        "integration_prerequisites",
+        "owns",
+    }
+)
+
+#: Keys a format-2 task definition may carry.
+_TASK_V2_KEYS = _TASK_V1_KEYS | {
+    "why",
+    "goal",
+    "out_of_scope",
+    "acceptance",
+    "size",
+    "effort",
+    "model_family_include",
+    "model_family_exclude",
+    "priority",
+    "run",
+    "wave",
+}
 
 _VERSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 _SLUG_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?")
@@ -118,6 +149,23 @@ def _stripped(values: tuple[Any, ...]) -> tuple[Any, ...]:
     return tuple(item.strip() if isinstance(item, str) else item for item in values)
 
 
+def _has_lane_detail(task: PlanTaskDef) -> bool:
+    """True when a task carries any format-2-only lane field."""
+    return bool(
+        task.why
+        or task.goal
+        or task.out_of_scope
+        or task.acceptance
+        or task.size
+        or task.effort
+        or task.model_family_include
+        or task.model_family_exclude
+        or task.priority
+        or task.run != "job"
+        or task.wave
+    )
+
+
 @dataclass(frozen=True)
 class PlanTaskDef:
     """One task definition inside a stored plan revision.
@@ -135,6 +183,17 @@ class PlanTaskDef:
     start_dependencies: tuple[str, ...] = ()
     integration_prerequisites: tuple[str, ...] = ()
     owns: tuple[str, ...] = ()
+    why: str = ""
+    goal: str = ""
+    out_of_scope: str = ""
+    acceptance: tuple[str, ...] = ()
+    size: str = ""
+    effort: str = ""
+    model_family_include: tuple[str, ...] = ()
+    model_family_exclude: tuple[str, ...] = ()
+    priority: str = ""
+    run: str = "job"
+    wave: str = ""
 
     def __post_init__(self) -> None:
         """Canonicalize benign spelling so hashing and validation agree."""
@@ -145,10 +204,32 @@ class PlanTaskDef:
             self, "integration_prerequisites", _stripped(self.integration_prerequisites)
         )
         object.__setattr__(self, "owns", _stripped(self.owns))
+        object.__setattr__(self, "acceptance", _stripped(self.acceptance))
+        object.__setattr__(self, "model_family_include", _stripped(self.model_family_include))
+        object.__setattr__(self, "model_family_exclude", _stripped(self.model_family_exclude))
+        for name in (
+            "title",
+            "phase",
+            "why",
+            "goal",
+            "out_of_scope",
+            "size",
+            "effort",
+            "priority",
+            "run",
+            "wave",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, str):
+                object.__setattr__(self, name, value.strip())
 
-    def as_dict(self) -> dict[str, object]:
-        """Serialize deterministically for hashing and storage."""
-        return {
+    def as_dict(self, *, format_version: int = PLAN_REVISION_FORMAT_VERSION) -> dict[str, object]:
+        """Serialize deterministically for hashing and storage.
+
+        Format 1 keeps the original six keys so an old revision's content hash
+        still verifies after lane detail was added.
+        """
+        legacy: dict[str, object] = {
             "task_id": self.task_id,
             "title": self.title,
             "phase": self.phase,
@@ -156,17 +237,62 @@ class PlanTaskDef:
             "integration_prerequisites": list(self.integration_prerequisites),
             "owns": list(self.owns),
         }
+        if format_version <= 1:
+            return legacy
+        legacy.update(
+            {
+                "why": self.why,
+                "goal": self.goal,
+                "out_of_scope": self.out_of_scope,
+                "acceptance": list(self.acceptance),
+                "size": self.size,
+                "effort": self.effort,
+                "model_family_include": list(self.model_family_include),
+                "model_family_exclude": list(self.model_family_exclude),
+                "priority": self.priority,
+                "run": self.run,
+                "wave": self.wave,
+            }
+        )
+        return legacy
 
     @classmethod
-    def from_dict(cls, data: object) -> PlanTaskDef:
+    def from_dict(
+        cls, data: object, *, format_version: int = PLAN_REVISION_FORMAT_VERSION
+    ) -> PlanTaskDef:
         """Reconstruct from a persisted mapping, validating shapes."""
         if not isinstance(data, dict):
             raise PlanValidationError("plan task definition must be a mapping")
+        allowed = _TASK_V1_KEYS if format_version <= 1 else _TASK_V2_KEYS
+        unknown = sorted(set(data) - allowed)
+        if unknown:
+            raise PlanValidationError(
+                f"unknown task field(s) {', '.join(unknown)} in a format-{format_version} revision"
+            )
         task_id = _require_task_id(data.get("task_id"))
         title = data.get("title", "")
         phase = data.get("phase", "")
         if not isinstance(title, str) or not isinstance(phase, str):
             raise PlanValidationError(f"task {task_id!r}: title/phase must be strings")
+        if format_version <= 1:
+            return cls(
+                task_id=task_id,
+                title=title,
+                phase=phase,
+                start_dependencies=_require_str_tuple(
+                    data.get("start_dependencies", ()), task_id
+                ),
+                integration_prerequisites=_require_str_tuple(
+                    data.get("integration_prerequisites", ()), task_id
+                ),
+                owns=_require_str_tuple(data.get("owns", ()), task_id),
+            )
+        detail: dict[str, str] = {}
+        for name in ("why", "goal", "out_of_scope", "size", "effort", "priority", "run", "wave"):
+            value = data.get(name, "")
+            if not isinstance(value, str):
+                raise PlanValidationError(f"task {task_id!r}: {name} must be a string")
+            detail[name] = value
         return cls(
             task_id=task_id,
             title=title,
@@ -176,6 +302,21 @@ class PlanTaskDef:
                 data.get("integration_prerequisites", ()), task_id
             ),
             owns=_require_str_tuple(data.get("owns", ()), task_id),
+            why=detail["why"],
+            goal=detail["goal"],
+            out_of_scope=detail["out_of_scope"],
+            acceptance=_require_str_tuple(data.get("acceptance", ()), task_id),
+            size=detail["size"],
+            effort=detail["effort"],
+            model_family_include=_require_str_tuple(
+                data.get("model_family_include", ()), task_id
+            ),
+            model_family_exclude=_require_str_tuple(
+                data.get("model_family_exclude", ()), task_id
+            ),
+            priority=detail["priority"],
+            run=detail["run"],
+            wave=detail["wave"],
         )
 
 
@@ -191,19 +332,39 @@ def _require_str_tuple(value: object, task_id: str) -> tuple[str, ...]:
 
 
 def compute_revision_hash(
-    version: str, project_id: str, tasks: tuple[PlanTaskDef, ...], created_at: str
+    version: str,
+    project_id: str,
+    tasks: tuple[PlanTaskDef, ...],
+    created_at: str,
+    *,
+    format_version: int = MIN_PLAN_REVISION_FORMAT_VERSION,
+    plan_id: str = "",
+    base: str = "",
 ) -> str:
-    """Return the canonical SHA-256 over a revision's content fields."""
-    canonical = json.dumps(
-        {
+    """Return the canonical SHA-256 over a revision's content fields.
+
+    Format 1 hashes exactly the payload it always hashed, so revisions stored
+    before lane detail existed keep verifying. Format 2 folds the format
+    version, plan identity and lane detail into the same digest.
+    """
+    if format_version <= 1:
+        payload: dict[str, object] = {
             "version": version,
             "project_id": project_id,
-            "tasks": [task.as_dict() for task in tasks],
+            "tasks": [task.as_dict(format_version=1) for task in tasks],
             "created_at": created_at,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
+        }
+    else:
+        payload = {
+            "format_version": format_version,
+            "version": version,
+            "project_id": project_id,
+            "plan_id": plan_id,
+            "base": base,
+            "tasks": [task.as_dict(format_version=format_version) for task in tasks],
+            "created_at": created_at,
+        }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -216,22 +377,35 @@ class PlanRevision:
     tasks: tuple[PlanTaskDef, ...] = field(default=())
     created_at: str = ""
     sha256: str = ""
+    plan_id: str = ""
+    base: str = ""
+    format_version: int = MIN_PLAN_REVISION_FORMAT_VERSION
 
     def verify(self) -> bool:
-        """Recompute the content hash; ``True`` only when untampered."""
+        """Recompute the content hash in this revision's own format; untampered only."""
         if not self.sha256:
             return False
         return self.sha256 == compute_revision_hash(
-            self.version, self.project_id, self.tasks, self.created_at
+            self.version,
+            self.project_id,
+            self.tasks,
+            self.created_at,
+            format_version=self.format_version,
+            plan_id=self.plan_id,
+            base=self.base,
         )
 
     def as_dict(self) -> dict[str, object]:
         """Serialize for durable storage, including the content hash."""
         return {
-            "format_version": PLAN_REVISION_FORMAT_VERSION,
+            "format_version": self.format_version,
             "version": self.version,
             "project_id": self.project_id,
-            "tasks": [task.as_dict() for task in self.tasks],
+            "plan_id": self.plan_id,
+            "base": self.base,
+            "tasks": [
+                task.as_dict(format_version=self.format_version) for task in self.tasks
+            ],
             "created_at": self.created_at,
             "sha256": self.sha256,
         }
@@ -243,13 +417,32 @@ class PlanRevision:
             raise PlanTamperError("stored plan revision must be a mapping")
         version = _require_version(data.get("version"))
         project_id = _require_slug(data.get("project_id"), "project_id")
+        raw_format = data.get("format_version", MIN_PLAN_REVISION_FORMAT_VERSION)
+        if (
+            not isinstance(raw_format, int)
+            or isinstance(raw_format, bool)
+            or not MIN_PLAN_REVISION_FORMAT_VERSION <= raw_format <= PLAN_REVISION_FORMAT_VERSION
+        ):
+            raise PlanTamperError(
+                f"revision {version!r}: unsupported format_version {raw_format!r}"
+            )
         raw_tasks = data.get("tasks", ())
         if not isinstance(raw_tasks, (list, tuple)):
             raise PlanTamperError(f"revision {version!r}: tasks must be a list")
-        tasks = tuple(PlanTaskDef.from_dict(entry) for entry in raw_tasks)
+        tasks = tuple(
+            PlanTaskDef.from_dict(entry, format_version=raw_format) for entry in raw_tasks
+        )
         created_at = data.get("created_at", "")
         if not isinstance(created_at, str):
             raise PlanTamperError(f"revision {version!r}: created_at must be a string")
+        if raw_format <= 1:
+            plan_id = ""
+            base = ""
+        else:
+            plan_id = _require_slug(data.get("plan_id"), "plan_id")
+            base = data.get("base", "")
+            if not isinstance(base, str):
+                raise PlanTamperError(f"revision {version!r}: base must be a string")
         sha256 = data.get("sha256", "")
         if not isinstance(sha256, str) or not sha256:
             raise PlanTamperError(f"revision {version!r}: missing content hash")
@@ -259,6 +452,9 @@ class PlanRevision:
             tasks=tasks,
             created_at=created_at,
             sha256=sha256,
+            plan_id=plan_id,
+            base=base,
+            format_version=raw_format,
         )
         if not revision.verify():
             raise PlanTamperError(
@@ -396,15 +592,38 @@ class PlanStore:
         *,
         version: str | None = None,
         created_at: str | None = None,
+        plan_id: str | None = None,
+        base: str = "",
+        format_version: int = PLAN_REVISION_FORMAT_VERSION,
     ) -> PlanRevision:
         """Validate and persist a new immutable revision, returning it.
 
         ``version`` defaults to the next ``v<N>`` for the project;
         re-saving an existing version is refused. ``created_at`` defaults
         to the current UTC time; pass it explicitly for determinism.
+        Format 2 (the default) records lane detail and plan identity; format 1
+        is accepted only for a plain task DAG so old documents round-trip.
         """
         slug = _require_slug(project_id, "project_id")
         task_tuple = tuple(tasks)
+        if format_version not in (1, 2):
+            raise PlanValidationError(
+                f"unsupported plan format_version {format_version!r}: use 1 or 2"
+            )
+        if format_version <= 1:
+            if plan_id:
+                raise PlanValidationError("format-1 revisions cannot carry a plan_id")
+            if base:
+                raise PlanValidationError("format-1 revisions cannot carry a base")
+            if any(_has_lane_detail(task) for task in task_tuple):
+                raise PlanValidationError(
+                    "format-1 revisions cannot carry lane detail; save a format-2 revision"
+                )
+            effective_plan_id = ""
+        else:
+            effective_plan_id = _require_slug(
+                plan_id if plan_id is not None else slug, "plan_id"
+            )
         validate_plan_tasks(slug, task_tuple)
         if version is None:
             existing = self.list_revisions(slug)
@@ -428,7 +647,18 @@ class PlanStore:
             project_id=slug,
             tasks=task_tuple,
             created_at=stamp,
-            sha256=compute_revision_hash(version, slug, task_tuple, stamp),
+            sha256=compute_revision_hash(
+                version,
+                slug,
+                task_tuple,
+                stamp,
+                format_version=format_version,
+                plan_id=effective_plan_id,
+                base=base,
+            ),
+            plan_id=effective_plan_id,
+            base=base,
+            format_version=format_version,
         )
         self._write_text(path, json.dumps(revision.as_dict(), indent=2, sort_keys=True) + "\n")
         return revision

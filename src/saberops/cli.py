@@ -1078,6 +1078,69 @@ def build_parser() -> argparse.ArgumentParser:
     plan_validate.add_argument("--version", type=str, default=None, help="Plan version (default: active).")
     plan_validate.add_argument("--store", type=str, default=None, help="Plan-store root directory.")
     plan_validate.add_argument("--json", action="store_true", help="JSON output")
+    plan_file_parser = subparsers.add_parser(
+        "plan-file",
+        help="Validate, create, export or activate a tracked PLAN.md (lane format).",
+    )
+    plan_file_sub = plan_file_parser.add_subparsers(
+        dest="plan_file_command", required=True
+    )
+    plan_file_validate = plan_file_sub.add_parser(
+        "validate", help="Validate a PLAN.md file (exit 2 when invalid)."
+    )
+    plan_file_validate.add_argument("path", type=str, help="Plan file to validate.")
+    plan_file_validate.add_argument(
+        "--project", type=str, default=None, help="Project ID used for cross-project refs."
+    )
+    plan_file_validate.add_argument("--json", action="store_true", help="JSON output")
+    plan_file_init = plan_file_sub.add_parser(
+        "init", help="Write a valid starting PLAN.md template."
+    )
+    plan_file_init.add_argument(
+        "--out", type=str, default="PLAN.md", help="Output path (default: PLAN.md)."
+    )
+    plan_file_init.add_argument(
+        "--plan-id", type=str, default="example", help="Plan ID for the template."
+    )
+    plan_file_init.add_argument(
+        "--force", action="store_true", help="Overwrite an existing file."
+    )
+    plan_file_export = plan_file_sub.add_parser(
+        "export", help="Render a stored plan revision back to PLAN.md format."
+    )
+    plan_file_export.add_argument(
+        "--project", type=str, required=True, help="Stable project ID."
+    )
+    plan_file_export.add_argument(
+        "--version", type=str, default=None, help="Plan version (default: active)."
+    )
+    plan_file_export.add_argument(
+        "--store", type=str, default=None, help="Plan-store root directory."
+    )
+    plan_file_export.add_argument(
+        "--out", type=str, default=None, help="Output path (default: stdout)."
+    )
+    plan_file_export.add_argument(
+        "--force", action="store_true", help="Overwrite an existing file."
+    )
+    plan_file_activate = plan_file_sub.add_parser(
+        "activate",
+        help="Validate a PLAN.md file and make it the active stored revision.",
+    )
+    plan_file_activate.add_argument("path", type=str, help="Plan file to activate.")
+    plan_file_activate.add_argument(
+        "--project", type=str, required=True, help="Stable project ID."
+    )
+    plan_file_activate.add_argument(
+        "--repo",
+        type=str,
+        default=None,
+        help="Checkout whose clean tree gates activation (default: the plan file's).",
+    )
+    plan_file_activate.add_argument(
+        "--store", type=str, default=None, help="Plan-store root directory."
+    )
+    plan_file_activate.add_argument("--json", action="store_true", help="JSON output")
     handoff_parser = subparsers.add_parser(
         "handoff", help="Show latest immutable handoff or resume capsule."
     )
@@ -3015,6 +3078,145 @@ def handle_plan_validate(args: argparse.Namespace) -> int:
     for error in errors:
         print(f"[!] {error}", file=sys.stderr)
     return 2
+
+
+def _plan_file_summary(parsed: Any) -> dict[str, Any]:
+    """Return the machine-readable summary of a parsed plan."""
+    return {
+        "plan_id": parsed.plan_id,
+        "base": parsed.base,
+        "lanes": [
+            {
+                "id": lane.lane_id,
+                "title": lane.title,
+                "wave": lane.wave,
+                "depends_on": list(lane.depends_on),
+                "run": lane.run,
+            }
+            for lane in parsed.lanes
+        ],
+        "count": len(parsed.lanes),
+    }
+
+
+def handle_plan_file_validate(args: argparse.Namespace) -> int:
+    """Handle ``orch plan-file validate`` (exit 2 on validation errors)."""
+    from saberops.plan_file import PlanFileError, load_plan_file
+
+    try:
+        parsed = load_plan_file(args.path, project_id=getattr(args, "project", None))
+    except PlanFileError as exc:
+        if getattr(args, "json", False):
+            print(json.dumps({"ok": False, "errors": [str(exc)]}, indent=2, sort_keys=True))
+        else:
+            print(f"[!] {exc}", file=sys.stderr)
+        return 2
+    summary = _plan_file_summary(parsed)
+    if getattr(args, "json", False):
+        print(json.dumps({"ok": True, **summary}, indent=2, sort_keys=True))
+        return 0
+    print(f"plan: {parsed.plan_id}  lanes: {len(parsed.lanes)}")
+    for lane in parsed.lanes:
+        needs = ", ".join(lane.depends_on) if lane.depends_on else "none"
+        print(f"  {lane.lane_id} [{lane.wave or '-'}] {lane.title}  needs: {needs}")
+    return 0
+
+
+def handle_plan_file_init(args: argparse.Namespace) -> int:
+    """Handle ``orch plan-file init`` (never overwrites without --force)."""
+    from saberops.plan_file import render_init_plan
+
+    path = Path(str(args.out)).expanduser()
+    if path.exists() and not getattr(args, "force", False):
+        print(f"[!] {path} already exists; pass --force to overwrite", file=sys.stderr)
+        return 1
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(render_init_plan(str(args.plan_id)), encoding="utf-8")
+    except OSError as exc:
+        print(f"[!] cannot write {path}: {exc}", file=sys.stderr)
+        return 1
+    print(f"wrote {path}")
+    return 0
+
+
+def handle_plan_file_export(args: argparse.Namespace) -> int:
+    """Handle ``orch plan-file export`` (render a stored revision)."""
+    from saberops.plan_file import render_plan_markdown
+    from saberops.project_scope.plan_store import PlanNotFoundError, PlanTamperError
+
+    try:
+        store = _plan_store_for(args)
+        project_id = str(args.project)
+        version = str(args.version) if getattr(args, "version", None) else None
+        revision = (
+            store.load_active(project_id)
+            if version is None
+            else store.get_revision(project_id, version)
+        )
+    except (PlanNotFoundError, PlanTamperError) as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    text = render_plan_markdown(revision)
+    out = str(getattr(args, "out", "") or "").strip()
+    if not out:
+        print(text, end="")
+        return 0
+    path = Path(out).expanduser()
+    if path.exists() and not getattr(args, "force", False):
+        print(f"[!] {path} already exists; pass --force to overwrite", file=sys.stderr)
+        return 1
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    except OSError as exc:
+        print(f"[!] cannot write {path}: {exc}", file=sys.stderr)
+        return 1
+    print(f"wrote {path}")
+    return 0
+
+
+def handle_plan_file_activate(args: argparse.Namespace) -> int:
+    """Handle ``orch plan-file activate`` (dirty tree refused with the remedy)."""
+    from saberops.plan_file import (
+        PlanFileError,
+        activate_plan_file,
+        load_plan_file,
+        resolve_repo_root,
+    )
+
+    try:
+        parsed = load_plan_file(args.path, project_id=str(args.project))
+        repo = resolve_repo_root(args.path, getattr(args, "repo", None))
+        revision = activate_plan_file(
+            _plan_store_for(args), parsed, str(args.project), repo=repo
+        )
+    except PlanFileError as exc:
+        if getattr(args, "json", False):
+            print(json.dumps({"ok": False, "errors": [str(exc)]}, indent=2, sort_keys=True))
+        else:
+            print(f"[!] {exc}", file=sys.stderr)
+        return 2
+    if getattr(args, "json", False):
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "project": revision.project_id,
+                    "plan_id": revision.plan_id,
+                    "version": revision.version,
+                    "sha256": revision.sha256,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    print(
+        f"activated plan {revision.plan_id} as {revision.project_id} "
+        f"{revision.version} (sha256 {revision.sha256[:16]}...)"
+    )
+    return 0
 
 
 def handle_handoff(args: argparse.Namespace) -> int:
@@ -6395,6 +6597,15 @@ def _dispatch(args: argparse.Namespace) -> int:
             return handle_plan_show(args)
         elif args.plan_store_command == "validate":
             return handle_plan_validate(args)
+    elif args.command == "plan-file":
+        if args.plan_file_command == "validate":
+            return handle_plan_file_validate(args)
+        elif args.plan_file_command == "init":
+            return handle_plan_file_init(args)
+        elif args.plan_file_command == "export":
+            return handle_plan_file_export(args)
+        elif args.plan_file_command == "activate":
+            return handle_plan_file_activate(args)
     elif args.command == "handoff":
         return handle_handoff(args)
     elif args.command in ("wait", "watch"):
