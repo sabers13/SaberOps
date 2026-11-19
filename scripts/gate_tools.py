@@ -61,6 +61,13 @@ SEED_STEP_PEAKS_BYTES: dict[str, int] = {
     "accept-gate:default": int(1161 * MIB),
 }
 COLD_START_PEAK_BYTES = max(SEED_STEP_PEAKS_BYTES.values())
+WORKER_CLI_SEED_BYTES = int(200 * MIB)
+WORKER_CLI_SEED_BY_BUCKET: dict[str, int] = {
+    "S": int(150 * MIB),
+    "M": int(200 * MIB),
+    "L": int(250 * MIB),
+    "default": WORKER_CLI_SEED_BYTES,
+}
 
 PRESSURE_APPEARS_SOME_AVG10 = 5.0
 PRESSURE_APPEARS_FULL_AVG10 = 1.0
@@ -763,6 +770,12 @@ class MemoryLease:
             self.holder_id, self._lock_file, self._meta_path, self._lock_path
         )
 
+    def handoff(self) -> None:
+        """Close this copy after a child inherited the locked file descriptor."""
+        if not self._released:
+            self._released = True
+            self._lock_file.close()
+
 
 class MemoryLedger:
     """Host-wide flock-protected memory budget, peak learner, and PSI feedback engine."""
@@ -870,9 +883,14 @@ class MemoryLedger:
             peak = entry.get("peak_bytes", 0)
             if isinstance(samples, int) and samples >= 1 and isinstance(peak, int) and peak > 0:
                 return peak
+        if step == "worker_cli" or step.startswith("worker:"):
+            bucket = (size_bucket or "default").strip() or "default"
+            return WORKER_CLI_SEED_BY_BUCKET.get(bucket, WORKER_CLI_SEED_BYTES)
         # Before history exists for this (step, size_bucket), assume largest seen so far.
         largest = self.cold_start_peak_bytes
-        for item in steps.values():
+        for item_key, item in steps.items():
+            if str(item_key).startswith("worker:") or str(item_key).startswith("worker_cli:"):
+                continue
             if isinstance(item, dict):
                 item_peak = item.get("peak_bytes")
                 if isinstance(item_peak, int) and item_peak > largest:
@@ -1091,6 +1109,80 @@ class MemoryLedger:
         except OSError:
             with contextlib.suppress(OSError):
                 lock_file.close()
+
+    def try_acquire_nonblocking(
+        self,
+        step: str,
+        size_bucket: str = "default",
+        *,
+        worktree: str = "",
+    ) -> tuple[MemoryLease | None, str | None]:
+        """Try once to reserve ``step:size_bucket`` without blocking.
+
+        Returns ``(lease, None)`` when granted, or ``(None, "MEMORY_LOW")`` when
+        memory pressure is active or remaining budget is below the predicted peak.
+        """
+        guard_enabled = memory_guard_enabled()
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.holders_dir.mkdir(parents=True, exist_ok=True)
+        holder_id = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
+        lock_path = self.holders_dir / f"{holder_id}.lock"
+        meta_path = self.holders_dir / f"{holder_id}.json"
+        lock_file = lock_path.open("a+", encoding="utf-8")
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BaseException:
+            lock_file.close()
+            raise
+        try:
+            avail = self._avail_mem()
+            now_wall = float(self._wall_clock())
+            with self._locked():
+                live = self._reap_dead_holders_locked(exclude_holder_id=holder_id)
+                pstate = self._evaluate_pressure_locked(now_wall, live)
+                predicted = self._predict_peak_locked(step, size_bucket)
+                remaining = self._remaining_budget_locked(avail, live)
+                if guard_enabled and pstate.get("pressure_active"):
+                    fcntl.flock(lock_file, fcntl.LOCK_UN)
+                    lock_file.close()
+                    lock_path.unlink(missing_ok=True)
+                    return None, "MEMORY_LOW"
+                if guard_enabled and remaining is not None and predicted > remaining:
+                    fcntl.flock(lock_file, fcntl.LOCK_UN)
+                    lock_file.close()
+                    lock_path.unlink(missing_ok=True)
+                    return None, "MEMORY_LOW"
+                record: dict[str, Any] = {
+                    "holder_id": holder_id,
+                    "pid": os.getpid(),
+                    "worktree": worktree,
+                    "step": step,
+                    "size_bucket": size_bucket,
+                    "grant_bytes": predicted,
+                    "started_at": now_wall,
+                    "unit_name": "",
+                    "cgroup_path": "",
+                    "frozen": False,
+                    "freeze_count": 0,
+                }
+                _atomic_write_json(meta_path, record)
+                return (
+                    MemoryLease(
+                        self,
+                        holder_id=holder_id,
+                        step=step,
+                        size_bucket=size_bucket,
+                        grant_bytes=predicted,
+                        wait_seconds=0.0,
+                        lock_file=lock_file,
+                        meta_path=meta_path,
+                        lock_path=lock_path,
+                    ),
+                    None,
+                )
+        except BaseException:
+            self.release_holder(holder_id, lock_file, meta_path, lock_path)
+            raise
 
     def acquire(
         self,

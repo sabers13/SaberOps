@@ -359,11 +359,13 @@ def submit_job(
                 ) from None
         raise
     try:
-        from saberops.capacity.loop import wake_scheduler
+        from saberops.capacity.loop import notify_scheduler_submission
 
-        wake_scheduler()
+        notify_scheduler_submission(db)
     except Exception:
-        pass
+        import logging
+
+        logging.getLogger(__name__).exception("Could not start or notify scheduler")
     return SubmitResult(job=job, created=True)
 
 
@@ -452,6 +454,7 @@ def serialize_capacity_view(
     view: CapacityView,
     *,
     policy: Any | None = None,
+    scheduler_alive: bool | None = None,
 ) -> dict[str, Any]:
     """Serialize a CapacityView with source, age, and explicit ``'unknown'`` entries."""
     from saberops.capacity.exclusions import parse_iso
@@ -513,11 +516,14 @@ def serialize_capacity_view(
                 }
             )
     entries.sort(key=lambda item: (str(item["pool_id"]), str(item["window_id"])))
-    return {
+    payload: dict[str, Any] = {
         "generated_at": view.generated_at,
         "ledger_wired": view.ledger_wired,
         "pools": entries,
     }
+    if scheduler_alive is not None:
+        payload["scheduler_alive"] = bool(scheduler_alive)
+    return payload
 
 
 def mark_dispatched(
@@ -859,7 +865,9 @@ def reconcile_preemptions(
     if recover is None:
         return PreemptionReconciliation(settlement=settlement)
     try:
-        running_jobs = store.list_jobs_raw(db, state=JobState.RUNNING, limit=job_scan_limit)
+        running_jobs, _ = store.list_jobs_tolerant(
+            db, state=JobState.RUNNING, limit=job_scan_limit
+        )
     except Exception:
         running_jobs = []
     for job in running_jobs:
@@ -913,7 +921,8 @@ def reconcile_jobs(
     via the same compare-and-set (the loser is skipped).
     """
     changes: list[ReconcileChange] = []
-    for job in store.list_jobs_raw(db, state=JobState.RUNNING, limit=100_000):
+    running_jobs, _ = store.list_jobs_tolerant(db, state=JobState.RUNNING, limit=100_000)
+    for job in running_jobs:
         run_id = job.current_run_id
         if run_id is None:  # pragma: no cover - invariant: RUNNING holds a run
             continue

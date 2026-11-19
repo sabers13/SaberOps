@@ -64,6 +64,7 @@ class _ProcEntry:
     # evidence_incomplete when they could not be read (never silently zero)
     io_read_bytes: int = 0
     io_write_bytes: int = 0
+    rss_bytes: int = 0
 
 
 def _read_stat_fields(stat_text: str) -> list[str] | None:
@@ -141,6 +142,10 @@ class ProcessGroupSnapshot:
     def total_io_bytes(self) -> int:
         return sum(m.io_read_bytes + m.io_write_bytes for m in self.members)
 
+    @property
+    def total_rss_bytes(self) -> int:
+        return sum(m.rss_bytes for m in self.members if m.state not in ("Z", "X", "x"))
+
 
 def snapshot_process_group(pgid: int) -> ProcessGroupSnapshot:
     """Build a whole-tree snapshot for all /proc entries with the given PGID.
@@ -189,7 +194,10 @@ def snapshot_process_group(pgid: int) -> ProcessGroupSnapshot:
                 state = fields[0]
                 utime = int(fields[11])
                 stime = int(fields[12])
-            except (ValueError, IndexError):
+                rss_pages = int(fields[21]) if len(fields) > 21 else 0
+                page_size = os.sysconf("SC_PAGE_SIZE") if hasattr(os, "sysconf") else 4096
+                rss_bytes = max(0, rss_pages * page_size)
+            except (ValueError, IndexError, OSError):
                 snap.evidence_incomplete = True
                 continue
 
@@ -224,6 +232,7 @@ def snapshot_process_group(pgid: int) -> ProcessGroupSnapshot:
                     state=state,
                     io_read_bytes=io_read_bytes,
                     io_write_bytes=io_write_bytes,
+                    rss_bytes=rss_bytes,
                 )
             )
     except PermissionError:
@@ -264,6 +273,8 @@ class MonitorEvidence:
     io_bytes: int = 0
     member_count: int = 0
     evidence_incomplete: bool = False
+    rss_bytes: int = 0
+    peak_rss_bytes: int = 0
 
 
 # ── WorkerMonitor ────────────────────────────────────────────────────────────
@@ -307,6 +318,7 @@ class WorkerMonitor:
         # first time output merely went quiet.
         self._last_activity: float = now
         self._prev_snap: ProcessGroupSnapshot | None = None
+        self._peak_rss_bytes: int = 0
 
     # Backwards-compatible alias: historically the anchor was called
     # ``_quiet_since`` (first-quiet timestamp).  It is now the
@@ -340,6 +352,11 @@ class WorkerMonitor:
         """Reason/evidence summary for the most recent state decision."""
         return self._state_reason
 
+    @property
+    def peak_rss_bytes(self) -> int:
+        """Peak process-tree RSS observed across samples (for C1/C2)."""
+        return self._peak_rss_bytes
+
     def touch_stdout(self) -> None:
         """Record that stdout was emitted (called from streaming callbacks)."""
         now = time.monotonic()
@@ -370,6 +387,9 @@ class WorkerMonitor:
         snap = snapshot_process_group(self._pgid)
         prev_snap = self._prev_snap
         self._prev_snap = snap
+        sample_rss = snap.total_rss_bytes
+        if sample_rss > self._peak_rss_bytes:
+            self._peak_rss_bytes = sample_rss
 
         # 1. Extinction check
         if not snap.has_live_members and not snap.evidence_incomplete:
@@ -381,6 +401,8 @@ class WorkerMonitor:
                 stdout_at=self._last_stdout,
                 stderr_at=self._last_stderr,
                 evidence_incomplete=snap.evidence_incomplete,
+                rss_bytes=sample_rss,
+                peak_rss_bytes=self._peak_rss_bytes,
             )
             return self._state
 
@@ -461,6 +483,8 @@ class WorkerMonitor:
             io_bytes=snap.total_io_bytes,
             member_count=snap.live_count,
             evidence_incomplete=snap.evidence_incomplete,
+            rss_bytes=sample_rss,
+            peak_rss_bytes=self._peak_rss_bytes,
         )
         return self._state
 

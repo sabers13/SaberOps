@@ -32,4 +32,5 @@ def _v040_routing_default(
 ) -> Iterator[None]:
     if request.node.get_closest_marker("packaged_routing_default") is None:
         monkeypatch.setattr(routing_config, "_packaged_default_path", lambda: _V040_DEFAULT)
+    monkeypatch.setenv("SABEROPS_DISABLE_AUTO_SCHEDULER", "1")
     yield

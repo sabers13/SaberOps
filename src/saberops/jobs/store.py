@@ -11,12 +11,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
 
 from saberops.jobs.models import (
+    CORRUPT_JOB_ROW,
     TERMINAL_JOB_STATES,
     Job,
     JobRequirements,
@@ -309,6 +311,79 @@ def list_jobs_raw(
                 (state.value, limit),
             ).fetchall()
         return [_row_to_job(r) for r in rows]
+
+
+def list_jobs_tolerant(
+    db: Any,
+    *,
+    state: JobState | None = None,
+    limit: int = 50,
+    quarantine: bool = True,
+    now: datetime | None = None,
+) -> tuple[list[Job], tuple[str, ...]]:
+    """Read jobs while quarantining unreadable/corrupt rows instead of crashing."""
+    ensure_tables(db)
+    with _owner_conn(db) as conn:
+        if state is None:
+            rows = conn.execute(
+                "SELECT * FROM jobs ORDER BY"
+                " CASE priority WHEN 'URGENT' THEN 0 WHEN 'NORMAL' THEN 1"
+                " WHEN 'BACKGROUND' THEN 2 ELSE 3 END,"
+                " created_at ASC, job_id ASC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM jobs WHERE state = ? ORDER BY"
+                " CASE priority WHEN 'URGENT' THEN 0 WHEN 'NORMAL' THEN 1"
+                " WHEN 'BACKGROUND' THEN 2 ELSE 3 END,"
+                " created_at ASC, job_id ASC LIMIT ?",
+                (state.value, limit),
+            ).fetchall()
+
+        valid: list[Job] = []
+        quarantined: list[str] = []
+        at = _utcnow_iso(now)
+        for r in rows:
+            try:
+                valid.append(_row_to_job(r))
+            except (ValueError, TypeError, KeyError, AttributeError, OverflowError) as exc:
+                raw_id = r["job_id"] if "job_id" in r.keys() else None
+                job_id = str(raw_id) if raw_id is not None else "<unknown>"
+                quarantined.append(job_id)
+                print(
+                    f"[!] Quarantining corrupt job row {job_id}: {exc}",
+                    file=sys.stderr,
+                )
+                if quarantine and raw_id is not None and not getattr(db, "_read_only", False):
+                    conn.execute(
+                        "CREATE TABLE IF NOT EXISTS jobs_quarantine ("
+                        "job_id TEXT PRIMARY KEY, quarantined_at TEXT NOT NULL, "
+                        "raw_json TEXT NOT NULL, error TEXT NOT NULL)"
+                    )
+                    conn.execute(
+                        "INSERT OR REPLACE INTO jobs_quarantine VALUES (?, ?, ?, ?)",
+                        (job_id, at, json.dumps(dict(r), default=str), str(exc)),
+                    )
+                    conn.execute(
+                        "UPDATE jobs SET state = ?, failure_reason = ?, updated_at = ?, "
+                        "waiting_reason = NULL, requirements_json = '{}', priority = 'NORMAL', "
+                        "run_ids_json = '[]', resume_from_json = NULL, preemptions = 0 "
+                        "WHERE job_id = ?",
+                        (JobState.FAILED.value, CORRUPT_JOB_ROW, at, job_id),
+                    )
+                    _append_event(
+                        conn,
+                        job_id=job_id,
+                        at=at,
+                        kind="QUARANTINED",
+                        from_state=str(r["state"]) if "state" in r.keys() else None,
+                        to_state=JobState.FAILED.value,
+                        payload={"reason": CORRUPT_JOB_ROW, "error": str(exc)},
+                    )
+        if quarantined and quarantine and not getattr(db, "_read_only", False):
+            conn.commit()
+        return valid, tuple(quarantined)
 
 
 def list_events(db: Any, job_id: str) -> list[dict[str, Any]]:

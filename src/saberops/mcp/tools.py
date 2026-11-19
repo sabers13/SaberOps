@@ -469,6 +469,7 @@ def _cancel_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[st
 
 
 def _capacity(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    from saberops.capacity.loop import scheduler_alive
     from saberops.jobs.service import CapacityView, capacity, serialize_capacity_view
 
     db = context.database(read_only=True)
@@ -476,9 +477,14 @@ def _capacity(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str,
         empty_view = CapacityView(generated_at=_now_iso(), ledger_wired=False, pools=())
         return {
             "v": SNAPSHOT_SCHEMA_VERSION,
-            "capacity": serialize_capacity_view(empty_view),
+            "capacity": serialize_capacity_view(empty_view, scheduler_alive=False),
         }
-    return {"v": SNAPSHOT_SCHEMA_VERSION, "capacity": serialize_capacity_view(capacity(db))}
+    return {
+        "v": SNAPSHOT_SCHEMA_VERSION,
+        "capacity": serialize_capacity_view(
+            capacity(db), scheduler_alive=scheduler_alive(db)
+        ),
+    }
 
 
 def _read_evidence(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:

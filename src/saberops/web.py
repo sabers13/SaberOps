@@ -2679,6 +2679,15 @@ def create_app(
     service = pinned.service
     supervisor = pinned.supervisor
 
+    try:
+        from saberops.capacity.loop import ensure_scheduler_running
+
+        ensure_scheduler_running(db)
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).exception("Could not start scheduler")
+
     app = FastAPI(title="SaberOps Status")
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
     templates.env.globals["fmt"] = format_timestamp

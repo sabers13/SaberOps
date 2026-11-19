@@ -1502,6 +1502,8 @@ class Orchestrator:
                         "reason": reason,
                         "member_count": payload.get("member_count"),
                         "evidence_incomplete": payload.get("evidence_incomplete"),
+                        "rss_bytes": payload.get("rss_bytes"),
+                        "peak_rss_bytes": payload.get("peak_rss_bytes"),
                         "timestamp": current_iso_timestamp(),
                     },
                 )

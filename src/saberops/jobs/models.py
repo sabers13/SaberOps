@@ -52,6 +52,7 @@ class WaitingReason(StrEnum):
     PROBE_PENDING = "PROBE_PENDING"
     PREEMPTED = "PREEMPTED"
     CONCURRENCY = "CONCURRENCY"
+    MEMORY_LOW = "MEMORY_LOW"
 
 
 class Priority(StrEnum):
@@ -77,13 +78,14 @@ class Effort(StrEnum):
 NO_ROUTE_FOR_REQUIREMENTS = "NO_ROUTE_FOR_REQUIREMENTS"
 RUN_FAILED = "RUN_FAILED"
 RUN_MISSING = "RUN_MISSING"
+CORRUPT_JOB_ROW = "CORRUPT_JOB_ROW"
 # ADR-0002 D8 (M2-5): the owning job exhausted its bounded preemption budget
 # (default 5).  Recorded on the JOB as the terminal failure reason when the
 # limit is reached instead of a silent 6th preemption.
 PREEMPTION_LIMIT = "PREEMPTION_LIMIT"
 
 FAILURE_REASONS: frozenset[str] = frozenset(
-    {NO_ROUTE_FOR_REQUIREMENTS, RUN_FAILED, RUN_MISSING, PREEMPTION_LIMIT}
+    {NO_ROUTE_FOR_REQUIREMENTS, RUN_FAILED, RUN_MISSING, PREEMPTION_LIMIT, CORRUPT_JOB_ROW}
 )
 
 

@@ -1399,6 +1399,8 @@ def run_process(
 
     # Streaming path: concurrent stdout/stderr draining with line discipline.
     try:
+        memory_fd = os.environ.get("SABEROPS_WORKER_MEMORY_FD")
+        inherited_fds = (int(memory_fd),) if memory_fd and on_monitor_transition else ()
         proc = subprocess.Popen(
             args,
             cwd=resolved_cwd,
@@ -1412,6 +1414,7 @@ def run_process(
             bufsize=1,
             shell=False,
             start_new_session=True,
+            pass_fds=inherited_fds,
         )
     except OSError as exc:
         exit_code = -1
@@ -1517,6 +1520,8 @@ def run_process(
             "pgid": getattr(_monitor, "pgid", None),
             "member_count": getattr(evidence, "member_count", None),
             "evidence_incomplete": bool(getattr(evidence, "evidence_incomplete", False)),
+            "rss_bytes": getattr(evidence, "rss_bytes", None),
+            "peak_rss_bytes": getattr(evidence, "peak_rss_bytes", None),
             "timestamp": time.time(),
         }
         _fire_callback(on_monitor_transition, (payload,), drain_errors, "monitor_transition")
@@ -1857,6 +1862,18 @@ def run_process(
         stderr = f"[Execution error: {exc}]"
 
     duration = time.monotonic() - start_time
+    if _monitor is not None and on_monitor_transition is not None:
+        ledger_root = os.environ.get("SABEROPS_WORKER_LEDGER_ROOT")
+        bucket = os.environ.get("SABEROPS_WORKER_SIZE_BUCKET")
+        if ledger_root and bucket:
+            try:
+                from saberops._gate_tools import gate_tools
+
+                gate_tools.MemoryLedger(Path(ledger_root)).record_peak(
+                    "worker_cli", bucket, _monitor.peak_rss_bytes
+                )
+            except Exception:
+                pass
     return ProcessResult(
         args=args,
         exit_code=exit_code,

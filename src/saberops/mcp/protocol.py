@@ -387,6 +387,22 @@ class McpServer:
         if changed:
             self._tools_changed()
         if turn_on:
+            if not self.read_only:
+                try:
+                    db = self.context.database(read_only=False)
+                    if db is not None:
+                        from saberops.capacity.loop import ensure_scheduler_running
+
+                        ensure_scheduler_running(db)
+                except Exception as exc:
+                    import logging
+
+                    logging.getLogger(__name__).exception("Could not start scheduler")
+                    if changed:
+                        self._active = False
+                        self._sync_switch()
+                        self._tools_changed()
+                    return self._tool_error_result(ToolError(f"Could not start scheduler: {exc}"))
             role = (
                 "This session plans the work."
                 if not self.read_only

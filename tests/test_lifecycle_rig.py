@@ -102,14 +102,6 @@ def test_rig_fresh_store_registers_two_providers_and_reviewer(rig: RigEnvironmen
     assert settings.gate_command == rig.gate_command
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Scheduler _default_run_launcher creates pending Run without frozen "
-        "control_plane_snapshot_json/routing_snapshot_json/provenance, causing "
-        "adopted Orchestrator run to fail with posture_unverified (C1)."
-    ),
-    strict=True,
-)
 def test_lifecycle_happy_path_via_scheduler(rig: RigEnvironment) -> None:
     """Job submitted -> scheduler dispatches -> worker commits -> review -> owner accepts."""
     db = rig.db()

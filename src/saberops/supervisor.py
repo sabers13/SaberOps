@@ -160,11 +160,13 @@ class RunSupervisor:
         worktree_base: Path | None = None,
         registry: AdapterRegistry | None = None,
         tool_registry: ToolRegistry | None = None,
+        memory_lease: Any = None,
     ) -> None:
         self.db = db
         self.worktree_base = worktree_base
         self.registry = registry
         self.tool_registry = tool_registry or ToolRegistry.from_environment()
+        self.memory_lease = memory_lease
         self._processes: dict[str, subprocess.Popen[Any]] = {}
         self._lock = threading.Lock()
         self._run_locks: dict[str, threading.Lock] = {}
@@ -1705,6 +1707,15 @@ class RunSupervisor:
             env["PYTHONPATH"] = (src_path + os.pathsep + current_pp).rstrip(os.pathsep)
         env[OWNER_ENV_ID] = owner.owner_id
         env[OWNER_ENV_GENERATION] = str(owner.generation)
+        memory_fds: tuple[int, ...] = ()
+        for key in ("SABEROPS_WORKER_MEMORY_FD", "SABEROPS_WORKER_LEDGER_ROOT",
+                    "SABEROPS_WORKER_SIZE_BUCKET"):
+            env.pop(key, None)
+        if self.memory_lease is not None:
+            memory_fds = (self.memory_lease._lock_file.fileno(),)
+            env["SABEROPS_WORKER_MEMORY_FD"] = str(memory_fds[0])
+            env["SABEROPS_WORKER_LEDGER_ROOT"] = str(self.memory_lease._ledger.root)
+            env["SABEROPS_WORKER_SIZE_BUCKET"] = self.memory_lease.size_bucket
 
         proc: subprocess.Popen[Any] | None = None
         failure: Exception | None = None
@@ -1725,6 +1736,7 @@ class RunSupervisor:
                 cwd=str(Path(config.target_repo).resolve()),
                 close_fds=True,
                 start_new_session=True,
+                pass_fds=memory_fds,
                 env=env,
             )
         except Exception as exc:

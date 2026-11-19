@@ -560,6 +560,24 @@ def test_run_scheduler_loop_once_clean_exit(owner_db: Database) -> None:
         assert len(rows) == 0
 
 
+def test_loop_reports_lease_loss_after_successful_tick(
+    owner_db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from saberops.capacity import loop
+
+    original_renew = loop.renew_lease
+    calls = 0
+
+    def lose_after_first(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        return original_renew(*args, **kwargs) if calls == 1 else None
+
+    monkeypatch.setattr(loop, "renew_lease", lose_after_first)
+    result = run_scheduler_loop(owner_db, tick_interval=0, now_fn=lambda: _NOW)
+    assert result is not None and not result.ran and result.reason == "lost_lease"
+
+
 def test_run_scheduler_loop_can_be_stopped(owner_db: Database) -> None:
     """Covers: ADR-0002 D7 scheduler loop can be stopped via stop_event without busy spin."""
     t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
@@ -1096,14 +1114,21 @@ def test_scheduler_tick_aborts_on_ledger_read_error(
     assert j_after.state == JobState.QUEUED
 
 
-def test_scheduler_tick_default_global_ceiling_blocks_16th_job(
-    owner_db: Database, tmp_path: Path
+def test_scheduler_tick_no_default_global_ceiling(
+    owner_db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: ADR-0002 D7 / F3 scheduler_tick resolves the deterministic interim
-    default global ceiling (15) from owner policy (max_global_concurrent absent)
-    and blocks the next top-level job without launching it.
-    """
+    """An absent owner cap does not impose the former default of 15."""
+    from saberops.capacity import loop
+    from saberops.capacity.scheduler import schedule as original_schedule
     from saberops.models import RunStatus
+
+    seen_limits: list[int | None] = []
+
+    def capture_schedule(**kwargs: Any) -> Any:
+        seen_limits.append(kwargs["global_slot_limit"])
+        return original_schedule(**kwargs)
+
+    monkeypatch.setattr(loop, "schedule", capture_schedule)
 
     t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
     lease = acquire_lease(owner_db, "instance_g", ttl_seconds=30.0, now=t0)
@@ -1155,7 +1180,7 @@ def test_scheduler_tick_default_global_ceiling_blocks_16th_job(
     record_owner_quota(owner_db, "openai", "chatgpt-plus", 100.0, None, source="OWNER", now=t0)
     routes = _make_routes(((_make_candidate("openai", "gpt-5"),),))
     policy = _make_policy()
-    assert policy.max_global_concurrent is None  # owner key absent -> default 15
+    assert policy.max_global_concurrent is None
 
     launched: list[str] = []
     res = scheduler_tick(
@@ -1171,10 +1196,7 @@ def test_scheduler_tick_default_global_ceiling_blocks_16th_job(
     assert res.ran is True
     assert res.dispatched == 0
     assert launched == []
-    assert any(
-        isinstance(d, WaitDecision) and d.reason == WaitingReason.CONCURRENCY.value
-        for d in res.decisions
-    )
+    assert seen_limits == [None]
     queued = store.get_job(owner_db, "queued_over_ceiling")
     assert queued is not None
     assert queued.state == JobState.QUEUED

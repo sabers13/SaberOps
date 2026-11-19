@@ -1960,8 +1960,8 @@ def build_parser() -> argparse.ArgumentParser:
     scheduler_run.add_argument(
         "--interval-seconds",
         type=float,
-        default=60.0,
-        help="Seconds between ticks (default: 60.0).",
+        default=2.0,
+        help="Seconds between ticks (default: 2.0).",
     )
     scheduler_run.add_argument(
         "--max-concurrent",
@@ -5488,7 +5488,7 @@ def handle_scheduler_run(args: argparse.Namespace) -> int:
     db_path = getattr(args, "db", None)
     db = _Database(db_path) if db_path else _Database()
     run_once = bool(getattr(args, "once", False))
-    interval = float(getattr(args, "interval_seconds", 60.0) or 60.0)
+    interval = float(getattr(args, "interval_seconds", 2.0) or 2.0)
     max_concurrent = getattr(args, "max_concurrent", None)
 
     readiness_svc: Any = None
@@ -5530,6 +5530,12 @@ def handle_scheduler_run(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 3
+        if not result.ran:
+            print(
+                f"[!] Scheduler exited with error: {result.reason or 'unknown'}",
+                file=sys.stderr,
+            )
+            return 1
 
         if getattr(args, "json", False):
             payload: list[dict[str, Any]] = []

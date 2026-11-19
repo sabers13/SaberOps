@@ -6,18 +6,24 @@ Implements:
 - Scheduler tick: startup/periodic reconciliation of terminal runs, pure
   schedule() evaluation, probe dispatch, wait status updates, and atomic
   job dispatch with idempotent ledger reservations and rollback compensation.
-- Scheduler loop runner with 60s ticks, wake-event support, and --once mode.
+- Scheduler loop runner with bounded polling, wake-event support, and --once mode.
 """
 
 from __future__ import annotations
 
+import fcntl
 import json
+import os
 import sqlite3
+import subprocess
+import sys
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from saberops.capacity.cost_model import CostState
@@ -47,7 +53,6 @@ from saberops.capacity.store import (
 from saberops.control_plane.plans import effective_pool_plans
 from saberops.control_plane.policy import (
     ControlPlanePolicy,
-    effective_global_slot_limit,
     load_control_plane_policy,
 )
 from saberops.jobs import store
@@ -70,7 +75,7 @@ from saberops.routing_config import RoutingSnapshot, load_effective_routing
 
 DEFAULT_LEASE_NAME = "scheduler"
 DEFAULT_LEASE_TTL = 30.0
-DEFAULT_TICK_INTERVAL = 60.0
+DEFAULT_TICK_INTERVAL = 2.0
 
 
 def _utcnow(now: datetime | None) -> datetime:
@@ -85,6 +90,114 @@ _SCHEDULER_WAKE_EVENT = threading.Event()
 def wake_scheduler() -> None:
     """Signal the scheduler loop to evaluate a tick immediately."""
     _SCHEDULER_WAKE_EVENT.set()
+
+
+_STARTED_SCHEDULERS: dict[str, subprocess.Popen[Any]] = {}
+_START_LOCK = threading.Lock()
+
+
+def _scheduler_path(db: Any) -> Path:
+    owner = getattr(db, "owner_db", db)
+    return Path(owner.db_path).resolve()
+
+
+def _holder_dead(holder: str) -> bool:
+    """Prove death only for scheduler holders with a recorded process identity."""
+    if not holder.startswith("process:"):
+        return False
+    try:
+        from saberops.ownership import Liveness, ProcessIdentity, probe_liveness
+
+        identity = ProcessIdentity.from_json(holder[len("process:"):])
+        return identity is not None and probe_liveness(identity) is Liveness.DEAD
+    except (ValueError, TypeError, KeyError):
+        return False
+
+
+def scheduler_alive(db: Any) -> bool:
+    """Report an unexpired scheduler lease without mutating the store."""
+    path = _scheduler_path(db)
+    if not path.exists():
+        return False
+    try:
+        with sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=1) as conn:
+            row = conn.execute(
+                "SELECT expires_at, holder_id FROM capacity_scheduler_lease WHERE lease_name = ?",
+                (DEFAULT_LEASE_NAME,),
+            ).fetchone()
+        expires = parse_iso(row[0]) if row and isinstance(row[0], str) else None
+        return (expires is not None and expires > datetime.now(UTC)
+                and not _holder_dead(str(row[1])))
+    except sqlite3.Error:
+        return False
+
+
+def ensure_scheduler_running(db: Any) -> bool:
+    """Start one detached scheduler per owner store, returning whether we started it."""
+    if os.environ.get("SABEROPS_DISABLE_AUTO_SCHEDULER") == "1":
+        return False
+    path = _scheduler_path(db)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _START_LOCK:
+        if scheduler_alive(db):
+            return False
+        lock = open(str(path) + ".scheduler.lock", "a+", encoding="utf-8")
+        try:
+            deadline = time.monotonic() + 5.0
+            while True:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if scheduler_alive(db):
+                        return False
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            f"Scheduler startup lock held without a lease: {path}"
+                        ) from None
+                    time.sleep(0.05)
+            env = dict(os.environ)
+            source = str(Path(__file__).resolve().parents[2])
+            env["PYTHONPATH"] = os.pathsep.join((source, env.get("PYTHONPATH", "")))
+            with open(str(path) + ".scheduler.log", "ab", buffering=0) as log:
+                proc = subprocess.Popen(
+                    [sys.executable, "-m", "saberops.cli", "scheduler", "run", "--db",
+                     str(path), "--interval-seconds", "2"],
+                    stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                    start_new_session=True, pass_fds=(lock.fileno(),), env=env,
+                )
+            _STARTED_SCHEDULERS[str(path)] = proc
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if scheduler_alive(db):
+                    return True
+                if proc.poll() is not None:
+                    raise RuntimeError(
+                        f"Scheduler exited with code {proc.returncode}; "
+                        f"see {path}.scheduler.log"
+                    )
+                time.sleep(0.05)
+            raise TimeoutError(f"Scheduler did not acquire its lease; see {path}.scheduler.log")
+        finally:
+            lock.close()
+
+
+def stop_scheduler(db: Any) -> None:
+    """Stop and reap a scheduler started by this process (useful for tests)."""
+    proc = _STARTED_SCHEDULERS.pop(str(_scheduler_path(db)), None)
+    if proc is not None and proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+
+
+def notify_scheduler_submission(db: Any) -> None:
+    """Ensure a scheduler exists and prompt local loops; remote loops poll."""
+    ensure_scheduler_running(db)
+    wake_scheduler()
 
 
 
@@ -199,7 +312,8 @@ def acquire_lease(
             if isinstance(current_expires_raw, str)
             else None
         )
-        is_expired = current_expires is None or moment >= current_expires
+        is_expired = (current_expires is None or moment >= current_expires
+                      or _holder_dead(current_holder))
 
         if current_holder == clean_holder:
             # Same holder: extend expiration
@@ -373,13 +487,19 @@ def _load_all_cost_states(db: Any) -> dict[tuple[str, str, str, str], CostState]
 
 
 def _default_run_launcher(
-    db: Any, job: Job, decision: DispatchDecision, run_id: str
+    db: Any, job: Job, decision: DispatchDecision, run_id: str, memory_lease: Any = None
 ) -> Any:
+    from saberops.authority import load_authority_settings
+    from saberops.config import freeze_owner_binding_registry_payload
+    from saberops.control_plane import freeze_control_plane_policy
     from saberops.jobs.service import job_dispatch_spec
     from saberops.models import Run
     from saberops.preemption import prepare_resume
+    from saberops.provenance import mint_run_provenance
+    from saberops.routing_config import snapshot_references_exact_bindings, snapshot_to_payload
     from saberops.run_creation import resolve_effective_run_config
     from saberops.supervisor import RunSupervisor
+    from saberops.tooling import freeze_tool_contract
 
     spec = job_dispatch_spec(job)
     cand = decision.candidate
@@ -403,6 +523,19 @@ def _default_run_launcher(
         effort=effort_value,
     )
     config = resolve_effective_run_config(req)
+    snapshot = load_effective_routing()
+    if config.worker_binding_registry is None and snapshot_references_exact_bindings(snapshot):
+        config = replace(config, worker_binding_registry=freeze_owner_binding_registry_payload())
+    supervisor = RunSupervisor(db=db, memory_lease=memory_lease)
+    frozen_policy = freeze_control_plane_policy(
+        load_control_plane_policy(),
+        required_capabilities=config.required_capabilities,
+        reserve_override=config.reserve_override,
+        host_access=load_authority_settings().host_access.value,
+    )
+    frozen_tools = freeze_tool_contract(config.tool_refs, supervisor.tool_registry)
+    provenance = mint_run_provenance(config.target_repo, config.task)
+    created_at = datetime.now(UTC).isoformat()
 
     run = Run(
         id=run_id,
@@ -413,8 +546,16 @@ def _default_run_launcher(
         training_allowed=config.training_allowed,
         gate_command=config.gate_command,
         status=RunStatus.PENDING,
-        created_at=datetime.now(UTC).isoformat(),
+        created_at=created_at,
         config_json=json.dumps(config.as_dict()),
+        routing_snapshot_json=json.dumps(snapshot_to_payload(snapshot, created_at)),
+        control_plane_snapshot_json=frozen_policy.as_json(),
+        control_plane_snapshot_digest=frozen_policy.digest,
+        tool_contract_json=frozen_tools.to_json(),
+        tool_contract_digest=frozen_tools.digest,
+        project_id=provenance.project_id,
+        project_identity_json=provenance.identity.to_json(),
+        objective_id=provenance.objective_id,
     )
     db.create_run(run)
     # ADR-0002 D8 (M2-5) durable resume wiring -- and ONLY resume wiring:
@@ -428,8 +569,8 @@ def _default_run_launcher(
     # ledger, pool scheduler, and capacity safety invariants are untouched.
     if job.resume_from is not None:
         prepare_resume(db, job=job, new_run_id=run_id, repo_path=job.repo)
-    supervisor = RunSupervisor(db=db)
-    supervisor.ensure_running(run_id, config)
+    if not supervisor.ensure_running(run_id, config):
+        raise RuntimeError(f"Failed to start execution owner for {run_id}")
     return run_id
 
 
@@ -551,7 +692,9 @@ def scheduler_tick(
         )
 
     try:
-        running_snapshot = store.list_jobs_raw(db, state=JobState.RUNNING, limit=100_000)
+        running_snapshot, _ = store.list_jobs_tolerant(
+            db, state=JobState.RUNNING, limit=100_000
+        )
     except (sqlite3.OperationalError, sqlite3.DatabaseError):
         return TickResult(ran=False, reason="ledger_read_error")
 
@@ -644,23 +787,19 @@ def scheduler_tick(
         preempt_recon = None
 
     # 2. Collect scheduling inputs
-    queued_jobs = store.list_jobs_raw(db, state=JobState.QUEUED, limit=100_000)
-    running_jobs = store.list_jobs_raw(db, state=JobState.RUNNING, limit=100_000)
+    queued_jobs, _ = store.list_jobs_tolerant(db, state=JobState.QUEUED, limit=100_000)
+    running_jobs, _ = store.list_jobs_tolerant(db, state=JobState.RUNNING, limit=100_000)
     effective_routes = routes or load_effective_routing()
     effective_pol = policy or load_control_plane_policy()
 
-    # Resolve the effective aggregate top-level job ceiling (D7/F3).
-    # The owner-configured concurrency.max_global (or the deterministic
-    # default) is the authority; the CLI --max-concurrent override and any
-    # explicit programmatic global_slot_limit are LOWERING-ONLY additional
-    # inputs (effective = min of all), so neither can raise admission above
-    # the owner's cap. Invalid inputs fail closed.
+    # Respect explicit owner and caller caps, but do not impose a default
+    # job-count ceiling: the memory ledger controls host admission.
     try:
-        effective_global_limit: int = effective_global_slot_limit(
-            effective_pol,
-            override=max_concurrent_override,
-            injected=global_slot_limit,
-        )
+        limits = [v for v in (effective_pol.max_global_concurrent,
+                              max_concurrent_override, global_slot_limit) if v is not None]
+        if any(isinstance(v, bool) or not isinstance(v, int) or v < 1 for v in limits):
+            raise ValueError("invalid concurrency limit")
+        effective_global_limit = min(limits) if limits else None
     except ValueError:
         # Invalid override / injected limit / config fails closed: no
         # dispatch this tick, never "unlimited".
@@ -738,6 +877,13 @@ def scheduler_tick(
 
     pool_policies = effective_pool_plans(effective_pol)
 
+    def lost_during_tick() -> TickResult:
+        return TickResult(
+            ran=False, reason="lost_lease", reconciled_changes=tuple(changes),
+            dispatched=dispatched_count, probed=probed_count, waited=waited_count,
+            decisions=tuple(decisions),
+        )
+
     # 4. Execute decisions
     for dec in decisions:
         if isinstance(dec, ProbeDecision):
@@ -774,7 +920,23 @@ def scheduler_tick(
         elif isinstance(dec, DispatchDecision):
             # Check lease before dispatch
             if not check_lease(db, lease, now=_current_moment()):
-                break
+                return lost_during_tick()
+
+            from saberops._gate_tools import gate_tools
+
+            memory_ledger = gate_tools.MemoryLedger(
+                gate_tools.default_ledger_root(repo=Path(dec.job.repo))
+            )
+            memory_lease, memory_reason = memory_ledger.try_acquire_nonblocking(
+                "worker_cli", dec.job.requirements.size_hint or "M", worktree=dec.job.repo
+            )
+            if memory_lease is None:
+                store.set_waiting(
+                    db, dec.job.job_id, reason=memory_reason or WaitingReason.MEMORY_LOW.value,
+                    eta=None, eta_confidence=None, now=moment,
+                )
+                waited_count += 1
+                continue
 
             run_id = f"run_{uuid.uuid4().hex[:12]}"
 
@@ -784,10 +946,12 @@ def scheduler_tick(
                     db, dec.job.job_id, run_id=run_id, now=moment
                 )
             except (JobConflictError, JobTransitionError, JobNotFoundError):
+                memory_lease.release()
                 continue
 
             # Step B: Re-verify lease before reservation
             if not check_lease(db, lease, now=_current_moment()):
+                memory_lease.release()
                 try:
                     store.requeue(
                         db,
@@ -797,7 +961,7 @@ def scheduler_tick(
                     )
                 except Exception:
                     pass
-                break
+                return lost_during_tick()
 
             # Step C: Idempotent reservation in ledger across ALL drawn pools (F2)
             draws: list[PoolDraw] = list(dec.draws) if dec.draws else []
@@ -833,6 +997,7 @@ def scheduler_tick(
                     now=moment,
                 )
             except Exception:
+                memory_lease.release()
                 # Reservation failed; compensate partial dispatch
                 release(db, run_id=run_id, now=_current_moment())
                 try:
@@ -848,6 +1013,7 @@ def scheduler_tick(
 
             # Step D: Re-verify lease right before launch
             if not check_lease(db, lease, now=_current_moment()):
+                memory_lease.release()
                 # Lost lease between reservation and launch; compensate immediately
                 release(db, run_id=run_id, now=_current_moment())
                 try:
@@ -859,14 +1025,16 @@ def scheduler_tick(
                     )
                 except Exception:
                     pass
-                break
+                return lost_during_tick()
 
             # Step E: Launch run
             try:
                 if run_launcher is not None:
                     run_launcher(dispatched_job, dec, run_id)
+                    memory_lease.release()
                 else:
-                    _default_run_launcher(db, dispatched_job, dec, run_id)
+                    _default_run_launcher(db, dispatched_job, dec, run_id, memory_lease)
+                    memory_lease.handoff()
                 dispatched_count += 1
             except Exception:
                 # Launch failed; inspect durable run existence (F11)
@@ -878,11 +1046,15 @@ def scheduler_tick(
                     run_exists = True
 
                 if run_exists:
+                    # A spawned owner may still hold the inherited lock.  Do
+                    # not unlock it while its execution state is uncertain.
+                    memory_lease.handoff()
                     # Run row exists or status unknown: do NOT requeue, do NOT release reservation.
                     # Leave job in RUNNING for reconciler / supervisor recovery.
                     continue
 
                 # Proven no side effects occurred: safe to compensate partial dispatch
+                memory_lease.release()
                 release(db, run_id=run_id, now=_current_moment())
                 try:
                     store.requeue(
@@ -979,7 +1151,13 @@ def run_scheduler_loop(
     storage/SQLite infra reason code (or ``None`` when healthy).  Neither
     callable may raise into the loop.
     """
-    clean_holder = holder_id or f"sched_{uuid.uuid4().hex[:8]}"
+    if holder_id is None:
+        from saberops.ownership import ProcessIdentity
+
+        identity_data = ProcessIdentity.for_self().to_dict()
+        identity_data["instance"] = uuid.uuid4().hex
+        holder_id = "process:" + json.dumps(identity_data)
+    clean_holder = holder_id
     now = now_fn() if now_fn else _utcnow(None)
 
     lease = acquire_lease(db, clean_holder, ttl_seconds=lease_ttl, now=now)
@@ -1036,6 +1214,7 @@ def run_scheduler_loop(
             active_lease = renew_lease(db, lease, ttl_seconds=lease_ttl, now=now)
             if active_lease is None:
                 # Lost lease to another instance
+                last_tick = TickResult(ran=False, reason="lost_lease")
                 break
             lease = active_lease
 
@@ -1069,10 +1248,12 @@ def run_scheduler_loop(
             if not last_tick.ran:
                 break
 
-            # Wait for wake event or periodic tick timeout
+            # Bound the poll even when a caller requests a longer cadence: jobs
+            # can be submitted by another process which cannot signal this event.
+            poll_interval = min(tick_interval, DEFAULT_TICK_INTERVAL)
             waited = 0.0
-            step = min(tick_interval, 0.5)
-            while waited < tick_interval and not stop.is_set():
+            step = min(poll_interval, 0.5)
+            while waited < poll_interval and not stop.is_set():
                 if wake.wait(timeout=step):
                     wake.clear()
                     break
