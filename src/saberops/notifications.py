@@ -86,12 +86,18 @@ def notify_once(ledger: Path, key: str, title: str, body: str) -> None:
 
 
 def deliver_pending(db: Any) -> None:
-    """Scan durable job and question records; repeated ticks are idempotent."""
+    """Scan durable job and question records; repeated ticks are idempotent.
+
+    The scan is read-only: ``quarantine=False`` keeps it from rewriting a row
+    it cannot materialise.  Delivery runs before the scheduler tick's
+    fail-closed RUNNING guards, and quarantining a legacy RUNNING row there
+    would erase the evidence those guards base their owner-visible hold on.
+    """
     from saberops.jobs.store import list_jobs_tolerant
     from saberops.questions import OwnerQuestionQueue
 
     ledger = db.owner_db.db_path.with_name(db.owner_db.db_path.name + ".notifications.sqlite3")
-    jobs, _ = list_jobs_tolerant(db, limit=100_000)
+    jobs, _ = list_jobs_tolerant(db, limit=100_000, quarantine=False)
     for job in jobs:
         if job.state.value in {"SUCCEEDED", "FAILED"}:
             label = "finished" if job.state.value == "SUCCEEDED" else "failed"

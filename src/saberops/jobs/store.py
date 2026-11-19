@@ -365,7 +365,8 @@ def list_jobs_tolerant(
                 job_id = str(raw_id) if raw_id is not None else "<unknown>"
                 quarantined.append(job_id)
                 print(
-                    f"[!] Quarantining corrupt job row {job_id}: {exc}",
+                    f"[!] {'Quarantining' if quarantine else 'Skipping'}"
+                    f" corrupt job row {job_id}: {exc}",
                     file=sys.stderr,
                 )
                 if quarantine and raw_id is not None and not getattr(db, "_read_only", False):
