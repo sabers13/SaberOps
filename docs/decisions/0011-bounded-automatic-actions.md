@@ -65,7 +65,12 @@ vendor settings on the owner's behalf.
    lease can call it. The planner guide teaches the phrase "catch me up". It also
    reports the latest handoff between attempts (for example a quota-exhausted
    attempt continued on another subscription from its checkpoint; see
-   [ADR-0013](0013-quota-failover-continuation.md)).
+   [ADR-0013](0013-quota-failover-continuation.md)). Its `pause` block reports
+   the gate state, the reason, the parked work and the one resume call -- the
+   facts every session shares -- and omits the reader's live presence (pid,
+   session id, heartbeat age), which is an observation of the caller rather
+   than a fact about the job; the session's own `get_pause` keeps the full
+   view.
 6. **One bounded continue before a live, idle job needs attention.**
    Observationally quiet workers are attention evidence, and the engine may act
    on that evidence once and only through durable state. When the owner enables

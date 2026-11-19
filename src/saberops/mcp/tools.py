@@ -1123,7 +1123,7 @@ def _catch_up(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str,
     """
     from saberops.candidate_lifecycle import project_candidate_state
     from saberops.jobs.service import get_job, job_status_view
-    from saberops.runtime_gate import gate_view
+    from saberops.runtime_gate import gate_facts
 
     plan_id = arguments.get("plan_id")
     if plan_id is not None:
@@ -1212,7 +1212,9 @@ def _catch_up(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str,
         "switch": switch,
         # F17: what the gate is holding, so a returning session sees the pause
         # and the one call that resumes it before it assumes work is running.
-        "pause": gate_view(db=db),
+        # Stable facts only: the reader's own presence would make two sessions
+        # disagree about the same store (ADR-0011 §5); `get_pause` has it.
+        "pause": gate_facts(db=db),
         "open_questions": questions,
         "self_answered": _catch_up_self_answered(context, job),
         "steering_notes": _catch_up_steering_notes(db, job),

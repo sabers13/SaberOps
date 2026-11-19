@@ -1207,3 +1207,22 @@ def gate_view(
     """Render the gate for CLI, web and MCP readers."""
     state = evaluate_gate(db=db, now=now)
     return state.as_dict()
+
+
+def gate_facts(
+    *,
+    db: Any | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Render the gate without the reader's own live presence.
+
+    The gate view carries ``presence``: which session is connected, its pid,
+    session id, last heartbeat and heartbeat age.  That is an observation of
+    the caller, not a fact about the gate or the parked work, so two sessions
+    reading the same store legitimately disagree on it.  A shared lookup such
+    as ``catch_up`` (ADR-0011 §5: a second lookup returns the same facts) uses
+    this projection; the session's own ``get_pause`` keeps the full view.
+    """
+    view = gate_view(db=db, now=now)
+    view.pop("presence", None)
+    return view

@@ -416,6 +416,13 @@ def test_fresh_session_catches_up_and_changes_nothing(store: dict[str, Any]) -> 
         again = _catch_up(fresh, "job-failed-check")
         assert first == failed == again
 
+        # The pause block is a fact about the gate, not about the reader: it
+        # carries the gate state and the one resume call, never live
+        # per-session presence, which differs between observers of one store.
+        assert "presence" not in failed["pause"]
+        assert failed["pause"]["closed"] is False
+        assert failed["pause"]["resume_tool"] == "resume_work"
+
         # Catch-up works from a session that does NOT hold the writer lease.
         bystander, message = _start(store)
         assert "read-only" in message
