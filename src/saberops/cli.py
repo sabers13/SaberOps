@@ -1219,7 +1219,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     handoff_parser.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
     wait_parser = subparsers.add_parser(
-        "wait", aliases=["watch"], help="Block until a persisted meaningful state change."
+        "wait", help="Block until a persisted meaningful state change."
     )
     wait_parser.add_argument("run_id", type=str)
     wait_parser.add_argument("--after", type=int, default=0, help="Last event id already observed.")
@@ -1350,6 +1350,53 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.0,
         help="Maximum follow time in seconds (default: 0 = no limit).",
+    )
+
+    # orch watch [--repo] [--job ID] [--session NAME]
+    watch_parser = subparsers.add_parser(
+        "watch",
+        help=(
+            "Open a read-only tmux view: one window per running job plus a summary "
+            "(falls back to `orch monitor` without tmux)."
+        ),
+    )
+    watch_parser.add_argument(
+        "--repo", type=str, default=None, help="Only jobs for this git work tree."
+    )
+    watch_parser.add_argument(
+        "--job", dest="job_id", type=str, default=None, help="Only this job id."
+    )
+    watch_parser.add_argument(
+        "--session",
+        type=str,
+        default=None,
+        help="tmux session name (default: a stable `saberops-watch-*` name).",
+    )
+    watch_parser.add_argument(
+        "--db", type=str, default=None, help="Path to SQLite database."
+    )
+    watch_parser.add_argument(
+        "--interval",
+        type=float,
+        default=2.0,
+        help="Refresh interval in seconds (default: 2.0).",
+    )
+    watch_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=0.0,
+        help="Monitor-fallback follow time in seconds (default: 0 = no limit).",
+    )
+    watch_parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Print the summary once and exit without opening tmux.",
+    )
+    watch_parser.add_argument(
+        "--follow", action="store_true", help=argparse.SUPPRESS
+    )
+    watch_parser.add_argument(
+        "--summary", action="store_true", help=argparse.SUPPRESS
     )
 
     # orch list
@@ -7257,7 +7304,7 @@ def _dispatch(args: argparse.Namespace) -> int:
             return handle_plan_file_done(args)
     elif args.command == "handoff":
         return handle_handoff(args)
-    elif args.command in ("wait", "watch"):
+    elif args.command == "wait":
         return handle_wait(args)
     elif args.command == "reconcile":
         return handle_reconcile(args)
@@ -7273,6 +7320,10 @@ def _dispatch(args: argparse.Namespace) -> int:
         return handle_report(args)
     elif args.command == "monitor":
         return handle_monitor(args)
+    elif args.command == "watch":
+        from saberops.watch import handle_watch
+
+        return handle_watch(args)
     elif args.command == "list":
         return handle_list(args)
     elif args.command == "models":

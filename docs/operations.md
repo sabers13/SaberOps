@@ -377,7 +377,6 @@ key always creates a new job.
   the supervisor and only then marks the job CANCELLED.
 
 ## Per-job worker evidence and project notes
-
 Each run keeps a plain folder beside its store:
 `<state dir>/jobs/<run_id>/` holds `request.md`, each attempt's exact
 `attempt-N.prompt.md`, the project note that attempt received
@@ -400,6 +399,30 @@ The note lives in the project state directory, outside the repository, so it
 never enters a reviewed diff. Editing it changes the next attempt only; earlier
 attempts keep their own snapshot and digest. See
 [ADR-0021](decisions/0021-worker-evidence-and-project-notes.md).
+
+## Watching running jobs (`orch watch`)
+
+`orch watch [--repo PATH] [--job JOB_ID] [--session NAME] [--interval SECONDS]`
+opens, or attaches to, a SaberOps-owned tmux session with one window per
+RUNNING job and one summary window. Each job window follows the same read-only
+tail as `tail_job` (event log plus terminal transcript) and prints route,
+subscription, attempt and elapsed time. A job that starts later gets a window
+on the summary window's next tick; a job that finishes keeps its window with a
+final state and the exact next owner action, renamed with an `-ok`, `-failed`,
+`-cancelled` or `-queued` suffix. The summary lists every job and the owner
+pause state.
+
+The view is read-only: the store is opened read-only and no window has a
+worker input path, so keystrokes cannot reach a worker. Steering is unchanged
+(`orch job note JOB_ID --text ...`). The session is marked with the tmux user
+option `@saberops_watch=1`; a default name that belongs to another session is
+skipped with a numeric suffix, and an explicit `--session` name that already
+exists without the marker is refused rather than touched. Use `--once` to
+print the summary without opening tmux. Without a usable tmux binary the
+command falls back to `orch monitor` for one selected running job.
+
+`orch wait RUN_ID` still blocks until a persisted state change; `watch` is a
+separate command, not an alias.
 
 ## Phase 1 benchmark (`scripts/benchmark.py`)
 
