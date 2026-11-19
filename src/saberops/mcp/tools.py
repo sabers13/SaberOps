@@ -431,6 +431,15 @@ def _job_guidance(job: Any) -> str | None:
     if job.failure_reason == "NO_ROUTE_FOR_REQUIREMENTS":
         if job.requirements.role.value != "BUILD":
             return "Only BUILD jobs dispatch; set requirements.role to BUILD."
+        include = tuple(getattr(job.requirements, "model_family_include", ()) or ())
+        if include:
+            from saberops.mcp.guide import FAMILY_TOKEN_GUIDANCE
+
+            return (
+                f"{FAMILY_TOKEN_GUIDANCE} Add a matching build route with "
+                "`orch routing add build <provider/model>`; inspect it with "
+                "`orch routing show`."
+            )
         return (
             "No build route satisfies the requirements. Configure one with "
             "`orch routing add build <provider/model>`; inspect with `orch routing show` "
@@ -450,6 +459,20 @@ def _job_guidance(job: Any) -> str | None:
     return None
 
 
+def _chosen_worker(db: Any, job: Any) -> dict[str, Any] | None:
+    """The provider/model the build route actually dispatched for ``job``."""
+    for run_id in reversed(job.run_ids):
+        attempts = db.get_attempts_for_run(run_id)
+        if attempts:
+            attempt = attempts[-1]
+            return {
+                "provider": attempt.provider,
+                "model": attempt.model,
+                "route": f"{attempt.provider}/{attempt.model}",
+            }
+    return None
+
+
 def _job_result(db: Any, job: Any) -> dict[str, Any]:
     """Read-only result projection, reusable by completion tools."""
     from saberops.accept import AcceptEngine
@@ -461,6 +484,7 @@ def _job_result(db: Any, job: Any) -> dict[str, Any]:
         "candidate_sha": None,
         "diff": None,
         "owner_action": None,
+        "worker": _chosen_worker(db, job),
         "usage": job_usage_view(db, job),
     }
     for run_id in reversed(job.run_ids):

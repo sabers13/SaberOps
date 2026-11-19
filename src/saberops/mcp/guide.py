@@ -12,6 +12,8 @@ from __future__ import annotations
 from typing import Any
 
 __all__ = [
+    "AMBIGUOUS_FAMILY_TOKENS",
+    "FAMILY_TOKENS",
     "GUIDE",
     "GUIDE_PROMPT",
     "GUIDE_URI",
@@ -26,6 +28,25 @@ __all__ = [
 
 GUIDE_URI = "saberops://guide"
 GUIDE_PROMPT = "saberops-guide"
+
+#: The family tokens a cross-CLI proxy may request. Each names exactly one
+#: worker family (see ``matches_model_family``).
+FAMILY_TOKENS = ("anthropic", "codex", "opencode-go")
+
+#: Tokens that look natural but are not supported: ``claude`` also matches a
+#: Go-hosted Claude model, and ``opencode`` matches every OpenCode model
+#: including ChatGPT-plan ones.
+AMBIGUOUS_FAMILY_TOKENS = ("claude", "opencode")
+
+FAMILY_TOKEN_GUIDANCE = (
+    "Supported family tokens for a cross-CLI proxy request are `anthropic` "
+    "(Claude Code worker), `codex` (Codex worker) and `opencode-go` (OpenCode "
+    "worker on the Go subscription). `claude` and `opencode` are ambiguous and "
+    "are not supported tokens: `claude` also matches a Go-hosted Claude model, "
+    "and `opencode` matches every OpenCode model including ChatGPT-plan ones. "
+    "A `model_family_include` no build route can satisfy is refused at submit "
+    "with NO_ROUTE_FOR_REQUIREMENTS."
+)
 
 #: Every message that comes from SaberOps starts with this, so the user can
 #: tell SaberOps apart from the agent's own words.
@@ -151,7 +172,12 @@ CLI (`orch mode set`) or the Questions page.
    submitted job builds (reasoning and any repair happen on the build route).
    A failed check is repaired by the same build route. `effort` is low, medium or high;
    `size_hint` is S, M or L and informs capacity estimates. Family inclusion and
-   exclusion filter candidates at admission.
+   exclusion filter candidates at admission. Supported family tokens for a
+   cross-CLI proxy request are `anthropic` (Claude Code worker), `codex` (Codex
+   worker) and `opencode-go` (OpenCode worker on the Go subscription); `claude`
+   and `opencode` are ambiguous and are not supported tokens. A
+   `model_family_include` no build route can satisfy is refused at submit with
+   NO_ROUTE_FOR_REQUIREMENTS.
    Never send `provider`, `model`, `tier`, `billing`, `route`, `quota` or `account`:
    they are refused. SaberOps picks the model on the build route.
 3. Several independent tasks: submit one `submit_job` per independent task, each

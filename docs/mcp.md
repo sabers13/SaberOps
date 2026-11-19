@@ -67,6 +67,35 @@ served, and an unknown requested revision falls back to `2025-06-18`.
 inside `requirements` (ADR-0001 invariant 3), and the tool schema sets
 `additionalProperties: false`, so an unknown field is never silently ignored.
 
+### Asking for a worker family
+
+A job selects a worker only through `requirements.model_family_include` (and
+`model_family_exclude`). Three family tokens are supported for cross-CLI proxy
+requests: `anthropic`, `codex` and `opencode-go` (ADR-0024).
+
+| Token | Selects | Use |
+| --- | --- | --- |
+| `anthropic` | the Claude Code worker, and nothing else | **supported** |
+| `codex` | the Codex worker, and nothing else | **supported** |
+| `opencode-go` | OpenCode workers whose model is a Go model | **supported** |
+| `claude` | the Claude Code worker **and** a Go-hosted Claude model such as `opencode-go/claude-haiku-5-5` | ambiguous, not supported |
+| `opencode` | every OpenCode worker, including ChatGPT-plan models | ambiguous, not supported |
+
+`claude` and `opencode` are not supported tokens: they silently match more than
+one subscription. Only `anthropic`, `codex` and `opencode-go` are.
+
+A non-empty `model_family_include` is checked at submit against the build route
+with the same matcher admission uses. When no build-route candidate matches, the
+job is refused immediately as `FAILED` / `NO_ROUTE_FOR_REQUIREMENTS` (with the
+three supported tokens in `guidance`) instead of being accepted and parking with
+no eligible candidate. A family request never adds a candidate: the owner's
+build route must already contain that family.
+
+The result projection that `get_job`, `wait_job`, `submit_job` and `catch_up`
+return carries `result.worker` with the chosen `provider`, `model` and
+`provider/model` route once a worker attempt exists, so a proxy can report
+"ran on `anthropic/<model>`" rather than just "succeeded".
+
 For parallel work, submit one `submit_job` per independent task, with a
 distinct `idempotency_key` and non-overlapping scope. If an accepted sibling
 makes another job stale, request `refresh_candidate` with its run ID (or use

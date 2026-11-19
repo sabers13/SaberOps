@@ -96,6 +96,27 @@ list of `{"routes": [...]}` groups. The check binding keeps its ordered list in
 `orch reviewer show`, and the plan role is the connected agent: see `orch
 orchestrator show` (`orch routing show` points there too).
 
+### Model-family tokens (cross-CLI proxy requests)
+
+A job asks for one worker family with `requirements.model_family_include`;
+`provider`/`model` stay refused (ADR-0001). Three tokens are supported
+(ADR-0024): `anthropic` (the Claude Code worker, and nothing else), `codex`
+(the Codex worker, and nothing else) and `opencode-go` (OpenCode workers whose
+model is a Go model, `opencode-go/...`).
+
+`claude` and `opencode` are ambiguous and are **not** supported tokens: `claude`
+also matches a Go-hosted Claude model such as `opencode-go/claude-haiku-5-5`,
+and `opencode` matches every OpenCode worker including ChatGPT-plan models.
+
+Feasibility is checked at submit against the same build-route candidates with
+the same matcher admission uses. An include no candidate satisfies is refused
+immediately as `NO_ROUTE_FOR_REQUIREMENTS`, with the three supported tokens in
+the guidance; it never parks as "no eligible candidate" later. A family request
+does not add a candidate, so the build route must already contain that family.
+`model_family_exclude` stays an admission filter. Once a worker attempt exists,
+the `get_job` / `catch_up` result carries `result.worker` with the chosen
+provider/model.
+
 ## Pacing scheduler (`orch scheduler run`)
 
 `orch scheduler run [--once] [--interval-seconds INT] [--max-concurrent N]`
