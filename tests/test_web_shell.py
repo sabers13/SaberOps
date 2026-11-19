@@ -16,6 +16,10 @@ from saberops.db import Database
 from saberops.models import (
     Attempt,
     AttemptStatus,
+    DispatchEvidence,
+    DispatchReason,
+    DispatchRole,
+    DispatchStage,
     ReviewResult,
     ReviewVerdict,
     Run,
@@ -159,6 +163,30 @@ def test_r0b_action_state_refreshes_after_lifecycle_change(
             summary="looks good",
             details="",
             created_at=_CREATED,
+        )
+    )
+    # A review with no REVIEW dispatch for this candidate is historical only:
+    # it must not flip Accept.
+    unbound = client.get("/runs/run_r0b_actions/actions")
+    assert unbound.status_code == 200
+    assert unbound.json()["can_accept"] is False
+    # Acceptance credits only a review bound to the candidate commit, so the
+    # fixture records the REVIEW dispatch evidence the real engine persists.
+    Database(db_path).create_dispatch_evidence(
+        DispatchEvidence(
+            id="run_r0b_actions-disp1",
+            run_id="run_r0b_actions",
+            association_id="run_r0b_actions-rev1",
+            review_id="run_r0b_actions-rev1",
+            stage=DispatchStage.REVIEW,
+            role=DispatchRole.REVIEW,
+            tier=Tier.T1,
+            dispatch_reason=DispatchReason.INDEPENDENT_REVIEW,
+            requested_provider="opencode",
+            requested_model="reviewer",
+            candidate_sha=candidate,
+            started_at=_CREATED,
+            completed_at=_CREATED,
         )
     )
 

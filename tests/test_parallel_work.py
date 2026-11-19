@@ -20,9 +20,14 @@ from saberops.db import Database
 from saberops.git import GitManager
 from saberops.models import (
     AttemptStatus,
+    DispatchEvidence,
+    DispatchReason,
+    DispatchRole,
+    DispatchStage,
     ReviewResult,
     ReviewVerdict,
     RunStatus,
+    Tier,
     WorkerRequest,
     WorkerResult,
 )
@@ -376,6 +381,27 @@ def test_final_review_receives_the_full_combined_delta(
             details="PASS",
         )
         db.create_review(verdict)
+        # Acceptance only credits a review bound to the candidate commit, so
+        # this mocked reviewer records the same REVIEW dispatch evidence the
+        # real ReviewEngine persists for the exact candidate it examined.
+        assert candidate.commit_sha
+        db.create_dispatch_evidence(
+            DispatchEvidence(
+                id="dispatch-" + verdict.id,
+                run_id=run_id,
+                association_id=verdict.id,
+                review_id=verdict.id,
+                stage=DispatchStage.REVIEW,
+                role=DispatchRole.REVIEW,
+                tier=Tier.T1,
+                dispatch_reason=DispatchReason.INDEPENDENT_REVIEW,
+                requested_provider="test-reviewer",
+                requested_model="independent",
+                candidate_sha=candidate.commit_sha,
+                started_at=candidate.created_at,
+                completed_at=candidate.created_at,
+            )
+        )
         return verdict
 
     monkeypatch.setattr(registry.get("codex"), "run", implement)
