@@ -53,7 +53,6 @@ Deliberately out of scope (owned elsewhere):
 * wave execution, admission, merges and gate scheduling (WX-1/GS-2);
 * the durable question queue and its owner answers (Q-1);
 * the actual Telegram/log transport (TG-1) and the audit store;
-* the Orchestrator turn and brief machinery (`orchestrator_turn_policy`, OT-1);
 * the git operation that performs a local commit, and any push (owner-only);
 * wiring into run creation and the run-all loop.
 

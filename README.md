@@ -117,7 +117,6 @@ flowchart LR
 | **Gates G1 / G2 / G3** | Base-trusted gate profiles, gate slots sized to free RAM, gate history, coverage-mapped affected gate and a single-pass full gate | [gate](docs/gate.md), [operations](docs/operations.md#engine-run-gates-g1--g2--g3-and-the-history-ledger) |
 | **Owner questions** | The engine never guesses an owner decision: keyed questions with a five-part escalation, answered verbatim from the CLI or web UI | [questions](docs/questions.md) |
 | **Unattended plans** | Frozen decision sheet, never-delegable list, three autonomous decision classes, circuit breaker, stall alarm and morning report. Unattended runs can never push | [unattended](docs/unattended-plans.md) |
-| **Orchestrator memory** | Bounded startup digest, size-bounded notebook with archive, single-writer session lock, turn admission and context rotation at 50% of the window | [memory](docs/orchestrator-memory-restart.md), [turns](docs/orchestrator-turn-policy.md) |
 | **Project entry modes** | Six modes (`new_project`, `develop_existing`, `continue_saberops`, `task`, `resume_run`, `inspect`) qualified from repository facts with a blocker preflight | [project modes](docs/project-modes.md) |
 | **Storage lifecycle** | Owner-aware inventory, retention and guarded GC of worktrees, branches, checkpoint refs and evidence; dry-run first, never `--force` | [storage](docs/storage-lifecycle.md) |
 | **Central configuration** | Declarative workflow settings with an append-only, owner-approved decision ledger | [config](docs/config.md) |
@@ -351,8 +350,6 @@ scripts/               gate wrappers and tooling
   [parallel work](docs/parallel-work.md) · [gate](docs/gate.md) ·
   [unattended plans](docs/unattended-plans.md) · [certification](docs/end-certification.md)
 - Orchestrator: [parallel-first policy](docs/orchestrator-parallel-first.md) ·
-  [turn policy](docs/orchestrator-turn-policy.md) ·
-  [memory and restart](docs/orchestrator-memory-restart.md) ·
   [project modes](docs/project-modes.md) ·
   [questions](docs/questions.md)
 - Interfaces: [MCP](docs/mcp.md) · [first-run web UI](docs/first-run-web-ui.md) ·
