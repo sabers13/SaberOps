@@ -60,6 +60,7 @@ __all__ = [
     "serialize_capacity_view",
     "get_job",
     "job_dispatch_spec",
+    "job_usage_view",
     "list_jobs",
     "mark_dispatched",
     "reconcile_jobs",
@@ -991,6 +992,118 @@ def reconcile_jobs(
         except Exception:
             pass
     return changes
+
+
+#: Explicit absence marker: a provider that reported no counters stays
+#: unknown rather than becoming a false zero.
+USAGE_UNKNOWN = "unknown"
+
+
+def subscription_for_provider(provider: str) -> str:
+    """Owner-facing subscription slug for a provider.
+
+    Unknown providers stay named as themselves: usage is never attributed to
+    a subscription SaberOps cannot prove.
+    """
+    from saberops.accounts_view import ACCOUNTS
+
+    for account in ACCOUNTS:
+        if account.provider == provider:
+            return account.slug
+    return provider
+
+
+def _usage_totals(rows: list[Any]) -> dict[str, Any]:
+    """Aggregate usage events; a counter with no observation stays unknown."""
+
+    def total(field: str) -> int | str:
+        values = [
+            value
+            for row in rows
+            if (value := getattr(row, field, None)) is not None
+        ]
+        return sum(values) if values else USAGE_UNKNOWN
+
+    known = [row for row in rows if row.input_tokens is not None or row.output_tokens is not None]
+    return {
+        "reported": bool(known),
+        "usage_sources": sorted({str(row.usage_source) for row in rows}),
+        "provider_usage_event_count": len(rows),
+        "calls_with_known_usage": len(known),
+        "calls_with_unknown_usage": len(rows) - len(known),
+        "input_tokens": total("input_tokens"),
+        "output_tokens": total("output_tokens"),
+        "cached_tokens": total("cached_tokens"),
+        "cache_read_tokens": total("cache_read_tokens"),
+        "cache_write_tokens": total("cache_write_tokens"),
+        "reasoning_tokens": total("reasoning_tokens"),
+        "total_tokens": total("total_tokens"),
+    }
+
+
+def job_usage_view(db: Any, job: Job) -> dict[str, Any]:
+    """Per-attempt and per-subscription usage from durable records.
+
+    Read-only and presentation-free: the same projection serves ``get_job``,
+    ``catch_up`` and the owner's return summary, so quota truth is stated once.
+    Usage belongs to the attempt that produced it; review dispatches are a
+    separate record and never appear as an attempt.  Token counters the
+    provider did not report stay ``"unknown"``.
+    """
+    usage_by_run: dict[str, list[Any]] = {}
+    attempts: list[dict[str, Any]] = []
+    attempt_rows: dict[str, list[Any]] = {}
+    subscription_rows: dict[str, list[Any]] = {}
+    subscription_attempts: dict[str, list[str]] = {}
+    run_ids = list(job.run_ids)
+    if job.current_run_id and job.current_run_id not in run_ids:
+        run_ids.append(job.current_run_id)
+    seen_runs: set[str] = set()
+    for run_id in run_ids:
+        if not run_id or run_id in seen_runs:
+            continue
+        seen_runs.add(run_id)
+        rows = usage_by_run.get(run_id)
+        if rows is None:
+            rows = db.get_model_call_usage(run_id)
+            usage_by_run[run_id] = rows
+        rows_by_attempt: dict[str, list[Any]] = {}
+        for row in rows:
+            if row.attempt_id:
+                rows_by_attempt.setdefault(str(row.attempt_id), []).append(row)
+        for attempt in db.get_attempts_for_run(run_id):
+            subscription = subscription_for_provider(attempt.provider)
+            attempt_usage = rows_by_attempt.get(attempt.id, [])
+            attempt_rows[attempt.id] = attempt_usage
+            subscription_rows.setdefault(subscription, []).extend(attempt_usage)
+            subscription_attempts.setdefault(subscription, []).append(attempt.id)
+            attempts.append(
+                {
+                    "attempt_id": attempt.id,
+                    "run_id": attempt.run_id,
+                    "attempt_number": attempt.attempt_number,
+                    "provider": attempt.provider,
+                    "subscription": subscription,
+                    "model": attempt.model,
+                    "status": attempt.status.value,
+                    "usage": _usage_totals(attempt_usage),
+                }
+            )
+    all_rows = [row for rows in attempt_rows.values() for row in rows]
+    return {
+        "attempts": attempts,
+        "subscriptions": [
+            {
+                "subscription": subscription,
+                "attempt_ids": subscription_attempts[subscription],
+                "usage": _usage_totals(subscription_rows.get(subscription, [])),
+            }
+            for subscription in sorted(subscription_attempts)
+        ],
+        "total": _usage_totals(all_rows),
+        "coverage_complete": bool(attempts)
+        and all(entry["usage"]["reported"] for entry in attempts),
+    }
 
 
 def job_status_view(db: Any, job: Job) -> dict[str, Any]:

@@ -509,11 +509,14 @@ def test_c5_schema_messages_and_guide(tmp_path: Path, monkeypatch: pytest.Monkey
         assert role in GUIDE
 
 
-def test_c5_result_identifies_eligible_candidate(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_c5_result_identifies_eligible_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from types import SimpleNamespace
 
     from saberops.accept import AcceptEngine
     from saberops.candidate_lifecycle import project_candidate_state
+    from saberops.db import Database
     from saberops.mcp.tools import _job_result
 
     del project_candidate_state
@@ -526,12 +529,14 @@ def test_c5_result_identifies_eligible_candidate(monkeypatch: pytest.MonkeyPatch
         lambda self, run_id: SimpleNamespace(eligible=True),
     )
     job = SimpleNamespace(run_ids=("run-1",), repo="/repo", base_sha="b" * 40)
-    result = _job_result(None, job)
-    assert result == {
+    result = _job_result(Database(tmp_path / "c5.db"), job)
+    assert {key: result[key] for key in ("run_id", "candidate_sha", "diff", "owner_action")} == {
         "run_id": "run-1", "candidate_sha": "a" * 40,
         "diff": {"repo": "/repo", "base_sha": "b" * 40, "candidate_sha": "a" * 40},
         "owner_action": "orch accept run-1",
     }
+    assert result["usage"]["attempts"] == []
+    assert result["usage"]["coverage_complete"] is False
 
 
 def test_c5_version(capsys: pytest.CaptureFixture[str]) -> None:

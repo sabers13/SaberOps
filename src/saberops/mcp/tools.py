@@ -431,12 +431,14 @@ def _job_result(db: Any, job: Any) -> dict[str, Any]:
     """Read-only result projection, reusable by completion tools."""
     from saberops.accept import AcceptEngine
     from saberops.candidate_lifecycle import project_candidate_state
+    from saberops.jobs.service import job_usage_view
 
     result: dict[str, Any] = {
         "run_id": None,
         "candidate_sha": None,
         "diff": None,
         "owner_action": None,
+        "usage": job_usage_view(db, job),
     }
     for run_id in reversed(job.run_ids):
         projection = project_candidate_state(db, run_id)
@@ -468,10 +470,12 @@ def _get_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, 
     job = None if db is None else get_job(db, job_id)
     if job is None:
         raise NotFoundError(f"unknown job: {job_id}", data={"job_id": job_id})
+    result = _job_result(db, job)
     return {
         "v": SNAPSHOT_SCHEMA_VERSION,
         "job": job_status_view(db, job),
-        "result": _job_result(db, job),
+        "result": result,
+        "usage": result["usage"],
         "guidance": _job_guidance(job),
     }
 
@@ -791,6 +795,7 @@ def _catch_up(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str,
         "open_questions": questions,
         "failure": failure,
         "next_action": _catch_up_next_action(job, view, result, projection, questions),
+        "usage": result["usage"],
         "result": result,
         "evidence": {
             "run_page": f"/runs/{run_id}" if run_id is not None else None,

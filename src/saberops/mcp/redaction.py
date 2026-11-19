@@ -25,9 +25,31 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-__all__ = ["REDACTED", "SECRET_KEY_MARKERS", "is_secret_key", "redact_secrets"]
+__all__ = [
+    "REDACTED",
+    "SECRET_KEY_MARKERS",
+    "TOKEN_COUNTER_KEYS",
+    "is_secret_key",
+    "redact_secrets",
+]
 
 REDACTED = "[REDACTED]"
+
+#: Exact mapping keys that count model tokens.  They are usage telemetry, not
+#: credential values, so the ``token`` marker must not erase them.  The list is
+#: an exact allowlist on purpose: credential names such as ``access_token``,
+#: ``api_tokens`` or ``refresh_token`` stay secret.
+TOKEN_COUNTER_KEYS: frozenset[str] = frozenset(
+    {
+        "input_tokens",
+        "output_tokens",
+        "cached_tokens",
+        "total_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "reasoning_tokens",
+    }
+)
 
 #: Normalized substrings that mark a mapping key as carrying a secret value.
 SECRET_KEY_MARKERS: tuple[str, ...] = (
@@ -68,6 +90,8 @@ _KEY_NORMALIZER = re.compile(r"[^a-z0-9]")
 
 def is_secret_key(key: str) -> bool:
     """Return True when ``key`` names something that must never be echoed."""
+    if key.lower() in TOKEN_COUNTER_KEYS:
+        return False
     normalized = _KEY_NORMALIZER.sub("", key.lower())
     if not normalized:
         return False

@@ -32,7 +32,7 @@ from saberops.mcp.protocol import (
     SERVER_VERSION,
     McpServer,
 )
-from saberops.mcp.redaction import REDACTED, redact_secrets
+from saberops.mcp.redaction import REDACTED, is_secret_key, redact_secrets
 from saberops.mcp.stdio import serve_stdio
 from saberops.mcp.tools import TOOL_NAMES, ServerContext
 
@@ -464,6 +464,29 @@ def test_read_evidence_redacts_credential_values(tmp_path: Path) -> None:
     content = result["structuredContent"]["content"]
     assert "sk-ant-abcdefghijklmnopqrstuvwx" not in content
     assert REDACTED in content
+
+
+def test_redaction_keeps_token_counters_and_still_hides_credentials() -> None:
+    """Usage counters are telemetry; credential-named keys stay secret."""
+    payload = {
+        "usage": {
+            "input_tokens": 12,
+            "output_tokens": 8,
+            "total_tokens": 20,
+            "cache_read_tokens": None,
+            "access_tokens": "abc",
+            "api_tokens": "def",
+        }
+    }
+    redacted = redact_secrets(payload)
+    usage = redacted["usage"]
+    assert usage["input_tokens"] == 12
+    assert usage["output_tokens"] == 8
+    assert usage["total_tokens"] == 20
+    assert usage["cache_read_tokens"] is None
+    assert usage["access_tokens"] == REDACTED
+    assert usage["api_tokens"] == REDACTED
+    assert is_secret_key("refresh_token") is True
 
 
 def test_redact_secrets_is_total_on_odd_input() -> None:
