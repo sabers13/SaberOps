@@ -821,6 +821,24 @@ class RunSupervisor:
         run = self.db.get_run(run_id)
         if run is None:
             raise ValueError(f"unknown run: {run_id}")
+        from saberops.native_workers import native_run_marker
+
+        if native_run_marker(self.db, run_id) is not None:
+            # F16: a native child has no execution owner and no supervised
+            # worker identity.  Its liveness is the heartbeat deadline, so the
+            # supervisor must never orphan it; a silent child becomes
+            # needs-attention through the native control path instead.
+            return {
+                "run_id": run_id,
+                "status": run.status.value,
+                "owner_id": None,
+                "generation": None,
+                "owner_pid": None,
+                "liveness": "COOPERATIVE",
+                "live": run.status not in TERMINAL_RUN_STATUSES,
+                "action": "native_cooperative",
+                "reason": "native_child_cooperative",
+            }
         # Recovery acts on the run's own repository, resolved from persisted
         # identity rather than from whatever project is currently selected.
         try:

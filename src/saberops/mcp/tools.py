@@ -4,7 +4,12 @@ The following tools are exposed::
 
     preflight submit_job submit_plan get_job catch_up plan_status tail_job wait_job list_jobs
     cancel_job note_job capacity read_evidence list_questions answer_question
-    propose_config_change list_proposals
+    propose_config_change list_proposals get_mode propose_mode_change
+
+With ``ORCH_NATIVE_WORKERS`` enabled, four more tools exist for the hybrid
+native-worker path (ADR-0030): ``native_claim``, ``native_heartbeat``,
+``native_controls`` and ``record_native_attempt``.  With the flag unset they are
+not registered at all.
 
 Everything else is either not modelled or on the **never-exposed** list, which
 this module pins as data (:data:`FORBIDDEN_OPERATIONS`) and the registry
@@ -50,6 +55,7 @@ from saberops.mcp.schema import validate_instance
 __all__ = [
     "FORBIDDEN_OPERATIONS",
     "MUTATING_TOOLS",
+    "NATIVE_MUTATING_TOOLS",
     "READ_TOOLS",
     "TOOL_NAMES",
     "ServerContext",
@@ -106,6 +112,19 @@ MUTATING_TOOLS: frozenset[str] = frozenset(
         "propose_config_change",
         "propose_mode_change",
         "resume_work",
+    }
+)
+
+#: F16 native-worker tools that mutate durable evidence when the owner flag is
+#: on (``controls`` posts the stop once the heartbeat deadline has passed).
+#: They are kept apart from :data:`MUTATING_TOOLS` because they are only
+#: registered while the flag is enabled.
+NATIVE_MUTATING_TOOLS: frozenset[str] = frozenset(
+    {
+        "native_claim",
+        "native_heartbeat",
+        "native_controls",
+        "record_native_attempt",
     }
 )
 
@@ -1755,6 +1774,109 @@ def _catch_up_plan(context: ServerContext, plan_id: str) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
+def _native_error(exc: Exception) -> ToolError:
+    from saberops.native_workers import NativeWorkerError
+
+    if isinstance(exc, NativeWorkerError):
+        return ToolError(str(exc), data={"code": exc.code, **exc.data})
+    return ToolError(str(exc))
+
+
+def _native_claim(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    """Claim a queued job for a native child of the orchestrating CLI (F16)."""
+    from saberops.native_workers import claim_native_job
+
+    db = context.database(read_only=False)
+    assert db is not None
+    job_id = _require_text(arguments, "job_id", what="job_id")
+    try:
+        result = claim_native_job(
+            db,
+            job_id,
+            vendor=arguments.get("vendor"),
+            model=arguments.get("model"),
+        )
+    except Exception as exc:
+        raise _native_error(exc) from exc
+    context.ledger.append(
+        "native_claimed",
+        {
+            "job_id": job_id,
+            "run_id": result["run_id"],
+            "vendor": result["vendor"],
+            "model": result["model"],
+        },
+    )
+    return {"v": SNAPSHOT_SCHEMA_VERSION, **result}
+
+
+def _native_heartbeat(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    """Record native liveness and deliver steering/stop state (F16)."""
+    from saberops.native_workers import native_heartbeat
+
+    db = context.database(read_only=False)
+    assert db is not None
+    try:
+        return {
+            "v": SNAPSHOT_SCHEMA_VERSION,
+            **native_heartbeat(
+                db,
+                _require_text(arguments, "job_id", what="job_id"),
+                progress=arguments.get("progress"),
+            ),
+        }
+    except Exception as exc:
+        raise _native_error(exc) from exc
+
+
+def _native_controls(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    """Read native control state; posts a stop when the deadline passed (F16)."""
+    from saberops.native_workers import native_controls
+
+    db = context.database(read_only=False)
+    assert db is not None
+    try:
+        return {
+            "v": SNAPSHOT_SCHEMA_VERSION,
+            **native_controls(db, _require_text(arguments, "job_id", what="job_id")),
+        }
+    except Exception as exc:
+        raise _native_error(exc) from exc
+
+
+def _record_native_attempt(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    """Verify, gate and independently review one native report (F16)."""
+    from saberops.native_workers import record_native_attempt
+
+    db = context.database(read_only=False)
+    assert db is not None
+    try:
+        result = record_native_attempt(
+            db,
+            _require_text(arguments, "job_id", what="job_id"),
+            vendor=arguments.get("vendor"),
+            model=arguments.get("model"),
+            base_sha=arguments.get("base_sha"),
+            candidate_sha=arguments.get("candidate_sha"),
+            worktree=arguments.get("worktree"),
+            transcript=arguments.get("transcript"),
+            started_at=arguments.get("started_at"),
+            finished_at=arguments.get("finished_at"),
+            usage=arguments.get("usage") if isinstance(arguments.get("usage"), Mapping) else None,
+        )
+    except Exception as exc:
+        raise _native_error(exc) from exc
+    context.ledger.append(
+        "native_attempt_recorded",
+        {
+            "job_id": result["job_id"],
+            "run_id": result["run_id"],
+            "candidate_sha": result["candidate_sha"],
+        },
+    )
+    return {"v": SNAPSHOT_SCHEMA_VERSION, **result}
+
+
 def build_default_registry(context: ServerContext) -> ToolRegistry:
     """Return the current tool registry bound to ``context``."""
     registry = ToolRegistry(lease=context.lease)
@@ -2080,12 +2202,87 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
         mutating=True,
     )
 
+    from saberops.native_workers import NATIVE_TOOL_NAMES, native_enabled
+
+    if native_enabled():
+        # F16: the hybrid native-worker surface exists only while the owner
+        # flag is on.  Turning it off removes the tools entirely.
+        register(
+            "native_claim",
+            "Claim a queued job for a native subagent of this CLI: SaberOps prepares "
+            "the worktree at the job's pinned base and returns it.",
+            _schema(
+                {
+                    "job_id": {"type": "string", "minLength": 1},
+                    "vendor": {"type": "string", "enum": ["claude", "codex", "opencode"]},
+                    "model": {"type": "string", "minLength": 1, "maxLength": 200},
+                },
+                required=("job_id", "vendor", "model"),
+            ),
+            _native_claim,
+            mutating=True,
+        )
+        register(
+            "native_heartbeat",
+            "Native liveness: record progress, deliver queued steering notes once, and "
+            "return any stop request and the heartbeat deadline.",
+            _schema(
+                {
+                    "job_id": {"type": "string", "minLength": 1},
+                    "progress": {"type": "string", "maxLength": 500},
+                },
+                required=("job_id",),
+            ),
+            _native_heartbeat,
+            mutating=True,
+        )
+        register(
+            "native_controls",
+            "Read native control state while waiting; a missed heartbeat deadline marks "
+            "the job needs-attention and posts a stop for the orchestrator to act on.",
+            _schema({"job_id": {"type": "string", "minLength": 1}}, required=("job_id",)),
+            _native_controls,
+            mutating=True,
+        )
+        register(
+            "record_native_attempt",
+            "Report a native candidate (vendor, model, base and candidate SHA, worktree). "
+            "SaberOps verifies lineage, worktree and canonical isolation, runs the project "
+            "gate and a different-family review, and records an attempt that can reach "
+            "owner acceptance. Missing or mismatched evidence fails closed.",
+            _schema(
+                {
+                    "job_id": {"type": "string", "minLength": 1},
+                    "vendor": {"type": "string", "enum": ["claude", "codex", "opencode"]},
+                    "model": {"type": "string", "minLength": 1, "maxLength": 200},
+                    "base_sha": {"type": "string", "minLength": 40, "maxLength": 40},
+                    "candidate_sha": {"type": "string", "minLength": 40, "maxLength": 40},
+                    "worktree": {"type": "string", "minLength": 1},
+                    "transcript": {"type": "string", "maxLength": 8000},
+                    "started_at": {"type": "string"},
+                    "finished_at": {"type": "string"},
+                    "usage": {"type": "object"},
+                },
+                required=(
+                    "job_id",
+                    "vendor",
+                    "model",
+                    "base_sha",
+                    "candidate_sha",
+                    "worktree",
+                ),
+            ),
+            _record_native_attempt,
+            mutating=True,
+        )
+
     registered = set(registry.names())
-    if registered != set(TOOL_NAMES):
+    expected = set(TOOL_NAMES) | (set(NATIVE_TOOL_NAMES) if native_enabled() else set())
+    if registered != expected:
         raise ToolError(
             "registry does not expose exactly the D7 tool set: "
-            f"missing={sorted(set(TOOL_NAMES) - registered)} "
-            f"extra={sorted(registered - set(TOOL_NAMES))}"
+            f"missing={sorted(expected - registered)} "
+            f"extra={sorted(registered - expected)}"
         )
     if registered & set(FORBIDDEN_OPERATIONS):
         raise ToolError("a never-exposed operation was registered")

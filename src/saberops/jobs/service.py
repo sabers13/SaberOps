@@ -558,7 +558,20 @@ def cancel_job(
             return CancelResult(job=current, cancelled=False)
     if job.state == JobState.RUNNING:
         assert job.current_run_id is not None
-        if run_canceller(job.current_run_id):
+        from saberops.native_workers import native_run_marker, request_native_stop
+
+        native = native_run_marker(db, job.current_run_id) is not None
+        if native:
+            # F16: SaberOps cannot kill a native child.  It posts the stop the
+            # orchestrator acts on, cancels the job so the child's report is
+            # refused, and never claims the process is gone.
+            request_native_stop(
+                db,
+                job,
+                reason="owner_cancelled",
+                detail="the owner cancelled the job; stop the native child",
+            )
+        if native or run_canceller(job.current_run_id):
             try:
                 cancelled_job = store.cancel_transition(db, job_id)
                 try:
@@ -1319,6 +1332,23 @@ def job_status_view(db: Any, job: Job) -> dict[str, Any]:
             ),
             "work_location": attempt.worktree_path,
         }
+    from saberops.native_workers import native_status
+
+    native = native_status(db, job)
+    if native is not None:
+        # F16: a native child has no execution owner to ask; its liveness is
+        # the heartbeat deadline plus the durable stop request.
+        view["native"] = native
+        if job.state == JobState.RUNNING:
+            view["activity"] = "needs_attention" if native["needs_attention"] else "running"
+            if native.get("stop_reason"):
+                view["reason"] = native["stop_reason"]
+        else:
+            run_row = db.get_run(job.current_run_id)
+            view["reason"] = view["reason"] or (
+                run_row.result_summary if run_row is not None else None
+            )
+        return view
     if run is not None:
         view["reason"] = run.result_summary
     if job.state != JobState.RUNNING:

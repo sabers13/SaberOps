@@ -38,6 +38,10 @@ __all__ = [
     "SKILL_DESCRIPTION",
     "SKILL_MARKER",
     "SKILL_NAME",
+    "WORKER_DESCRIPTION",
+    "WORKER_NAME",
+    "WORKER_TOOLS",
+    "WORKER_VENDOR",
     "Agent",
     "AgentFile",
     "ConnectResult",
@@ -50,13 +54,17 @@ __all__ = [
     "disconnect",
     "install_agents",
     "install_skill",
+    "install_worker",
     "is_connected",
     "orch_command",
     "remove_agents",
     "remove_skill",
+    "remove_worker",
     "server_snippet",
     "skill_document",
     "skill_path",
+    "worker_document",
+    "worker_file_path",
 ]
 
 SERVER_NAME = "saberops"
@@ -536,6 +544,275 @@ def agent_document(slug: str, target: str) -> str:
     raise ValueError(f"{agent.name} has no proxy subagent format")
 
 
+#: The native worker subagent `orch connect --skill` installs beside the skill
+#: (F16).  It runs on the host's own vendor and cooperates through the SaberOps
+#: MCP server; SaberOps verifies its evidence and never trusts its process.
+WORKER_NAME = "saberops-worker"
+
+#: Hosts that may run a native worker of their own vendor.  Antigravity is
+#: excluded: it may only be the orchestrator with its own agents, never an
+#: automated SaberOps worker.
+WORKER_VENDOR: dict[str, str] = {
+    "claude": "claude",
+    "codex": "codex",
+    "opencode": "opencode",
+}
+
+#: Tools the native worker calls.  Every name is checked against the live
+#: server before a definition is generated.
+WORKER_TOOLS: tuple[str, ...] = (
+    "get_job",
+    "native_claim",
+    "native_heartbeat",
+    "native_controls",
+    "record_native_attempt",
+)
+
+WORKER_DESCRIPTION = (
+    "Do one SaberOps job natively on this CLI's own subscription. Use only when "
+    "SaberOps hands you a claimed job; SaberOps prepares the worktree and verifies "
+    "the result."
+)
+
+
+def worker_file_path(agent: Agent, *, home: Path | None = None) -> Path | None:
+    """Absolute definition path for the native worker, or ``None`` if unsupported."""
+    if not agent.agent_dir or agent.slug not in WORKER_VENDOR:
+        return None
+    extension = "toml" if agent.slug == "codex" else "md"
+    return _home(home) / agent.agent_dir / f"{WORKER_NAME}.{extension}"
+
+
+def _worker_body(agent: Agent) -> str:
+    from saberops.mcp.tools import TOOL_NAMES
+    from saberops.native_workers import NATIVE_TOOL_NAMES
+
+    known = set(TOOL_NAMES) | set(NATIVE_TOOL_NAMES)
+    missing = [name for name in WORKER_TOOLS if name not in known]
+    if missing:  # a renamed tool must not leave a stale definition behind
+        raise RuntimeError(f"native worker tools are missing from the live server: {missing}")
+    vendor = WORKER_VENDOR[agent.slug]
+    tools = ", ".join(f"`{name}`" for name in WORKER_TOOLS)
+    return (
+        f"You are {WORKER_NAME}, a SaberOps native worker running on {agent.name}'s own\n"
+        "subscription. SaberOps owns the job record, the worktree, the gate, the review\n"
+        "and the owner's acceptance; you only do the work and report evidence.\n\n"
+        "## Hard limits\n\n"
+        "- Work only inside the `worktree` that `native_claim` returns, and commit\n"
+        "  only on the `branch` it returns. Never edit, commit on, or run git in the\n"
+        "  canonical checkout; SaberOps fails the attempt closed if it moves.\n"
+        "  Your edits and shell are confined to that worktree by this CLI's own\n"
+        "  sandbox and permission rules; respect them and never try to escape them.\n"
+        "- Never accept, merge, push, approve billing, or start a second SaberOps\n"
+        "  server. Never claim the owner accepted anything.\n"
+        "- One job per claim. Never claim a second job while this one is unfinished.\n\n"
+        "## The loop\n\n"
+        "1. `native_claim` with the job id SaberOps gave you, your vendor\n"
+        f'   ("{vendor}") and your model name. It returns run_id, worktree, branch,\n'
+        "   base_sha and the heartbeat deadline. If it is refused, report the reason\n"
+        "   verbatim and stop.\n"
+        "2. Work in the worktree. Commit on the branch. Keep the canonical checkout\n"
+        "   untouched.\n"
+        "3. Call `native_heartbeat` at least every few minutes with a short\n"
+        "   `progress` line. It returns any owner `steering_notes` (apply them to the\n"
+        "   current work) and `stop_requested`. If `stop_requested` is true, stop\n"
+        "   immediately and report that you stopped; never continue the task.\n"
+        "4. When the work is committed, call `record_native_attempt` with vendor,\n"
+        "   model, base_sha, candidate_sha, worktree, a short transcript and the\n"
+        "   times. SaberOps verifies lineage and isolation, runs the project gate and\n"
+        "   an independent different-family review. If it refuses, report the exact\n"
+        "   error and stop; do not retry with different evidence.\n"
+        "5. Return the run id, the final state and the exact owner action SaberOps\n"
+        "   reported. Only the owner accepts.\n\n"
+        "The tools this worker calls are: " + tools + ".\n"
+        "They exist only while the owner has enabled native workers\n"
+        "(`ORCH_NATIVE_WORKERS=1`). If they are missing, report that SaberOps native\n"
+        "workers are off and do not fall back to editing files by yourself.\n"
+    )
+
+
+def worker_document(slug: str) -> str:
+    """Generate the ``saberops-worker`` definition in the host CLI's format."""
+    agent = agent_by_slug(slug)
+    if agent is None:
+        raise ValueError(f"unknown agent {slug!r}")
+    if agent.slug not in WORKER_VENDOR:
+        raise ValueError(f"{agent.name} may not run an automated native worker")
+    body = _worker_body(agent)
+    if agent.slug == "codex":
+        instructions = body.replace("\\", "\\\\").replace('"""', '\\"\\"\\"')
+        return (
+            f"{AGENT_MARKER_TOML}\n"
+            f"name = {json.dumps(WORKER_NAME)}\n"
+            f"description = {json.dumps(WORKER_DESCRIPTION)}\n"
+            'sandbox_mode = "workspace-write"\n'
+            "features.apps = false\n"
+            "features.plugins = false\n"
+            "features.memories = false\n"
+            f'developer_instructions = """\n{instructions}"""\n'
+        )
+    if agent.slug == "claude":
+        builtin = ("Read", "Edit", "Write", "Bash", "Glob", "Grep")
+        tool_list = ", ".join(
+            [*builtin, *(f"mcp__{SERVER_NAME}__{name}" for name in WORKER_TOOLS)]
+        )
+        return (
+            "---\n"
+            f"name: {WORKER_NAME}\n"
+            f"description: {WORKER_DESCRIPTION}\n"
+            f"tools: {tool_list}\n"
+            f"mcpServers:\n  - {SERVER_NAME}\n"
+            "model: inherit\n"
+            "permissionMode: acceptEdits\n"
+            "---\n"
+            f"{AGENT_MARKER}\n\n"
+            f"{body}"
+        )
+    if agent.slug == "opencode":
+        rules = ['  - { action: "*", resource: "*", effect: deny }']
+        rules += [
+            f'  - {{ action: "{action}", resource: "*", effect: allow }}'
+            for action in ("read", "edit", "bash")
+        ]
+        rules += [
+            f'  - {{ action: "{SERVER_NAME}_{name}", resource: "*", effect: allow }}'
+            for name in WORKER_TOOLS
+        ]
+        return (
+            "---\n"
+            f"description: {WORKER_DESCRIPTION}\n"
+            "mode: subagent\n"
+            "permissions:\n" + "\n".join(rules) + "\n"
+            "---\n"
+            f"{AGENT_MARKER}\n\n"
+            f"{body}"
+        )
+    raise ValueError(f"{agent.name} has no native worker subagent format")
+
+
+def _write_worker_file(
+    agent: Agent, path: Path, content: str, *, dry_run: bool
+) -> AgentFile:
+    if dry_run:
+        return AgentFile(
+            WORKER_NAME,
+            str(path),
+            content=content,
+            action="would-install",
+            message=f"Would write the SaberOps native worker to {path}.",
+        )
+    if path.exists():
+        if not path.is_file():
+            return AgentFile(
+                WORKER_NAME,
+                str(path),
+                action="refused",
+                message=f"{path} is not a regular file; left untouched.",
+                ok=False,
+            )
+        existing = path.read_text(encoding="utf-8", errors="replace")
+        if AGENT_MARKER not in existing and AGENT_MARKER_TOML not in existing:
+            return AgentFile(
+                WORKER_NAME,
+                str(path),
+                action="refused",
+                message=f"{path} exists and was not written by SaberOps; left untouched.",
+                ok=False,
+            )
+        if existing == content:
+            return AgentFile(
+                WORKER_NAME,
+                str(path),
+                action="unchanged",
+                message=f"SaberOps native worker already up to date at {path}.",
+            )
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(content, encoding="utf-8")
+        tmp.replace(path)
+    except OSError as exc:
+        return AgentFile(
+            WORKER_NAME,
+            str(path),
+            action="refused",
+            message=f"Could not write {path}: {exc}",
+            ok=False,
+        )
+    return AgentFile(
+        WORKER_NAME,
+        str(path),
+        action="installed",
+        message=f"Installed the SaberOps native worker at {path}.",
+    )
+
+
+def install_worker(slug: str, *, home: Path | None = None, dry_run: bool = False) -> ConnectResult:
+    """Install the native worker definition this host CLI supports (F16)."""
+    agent = agent_by_slug(slug)
+    if agent is None:
+        return ConnectResult(slug, False, f"Unknown agent {slug!r}.")
+    path = worker_file_path(agent, home=home)
+    if path is None:
+        return ConnectResult(
+            slug,
+            True,
+            f"{agent.name} may not run an automated SaberOps worker; "
+            "Antigravity stays an orchestrator only.",
+            agent_action="unsupported",
+        )
+    content = worker_document(agent.slug)
+    file = _write_worker_file(agent, path, content, dry_run=dry_run)
+    return ConnectResult(
+        slug,
+        file.ok,
+        file.message,
+        agent_files=(file,),
+        agent_action=file.action,
+    )
+
+
+def remove_worker(slug: str, *, home: Path | None = None) -> ConnectResult:
+    """Remove only a marked native worker definition."""
+    agent = agent_by_slug(slug)
+    if agent is None:
+        return ConnectResult(slug, False, f"Unknown agent {slug!r}.")
+    path = worker_file_path(agent, home=home)
+    if path is None:
+        return ConnectResult(
+            slug, True, f"{agent.name} has no native worker definition.", agent_action="unsupported"
+        )
+    if not path.exists():
+        return ConnectResult(
+            slug,
+            True,
+            f"No SaberOps native worker is installed for {agent.name}.",
+            agent_action="absent",
+        )
+    if not path.is_file():
+        return ConnectResult(
+            slug,
+            False,
+            f"{path} is not a regular file; left untouched.",
+            agent_action="refused",
+        )
+    existing = path.read_text(encoding="utf-8", errors="replace")
+    if AGENT_MARKER not in existing and AGENT_MARKER_TOML not in existing:
+        return ConnectResult(
+            slug,
+            False,
+            f"{path} was not written by SaberOps; left untouched.",
+            agent_action="refused",
+        )
+    path.unlink()
+    return ConnectResult(
+        slug,
+        True,
+        f"Removed the SaberOps native worker at {path}.",
+        agent_action="removed",
+    )
+
+
 def _write_agent_file(
     agent: Agent, proxy: Proxy, path: Path, content: str, *, dry_run: bool
 ) -> AgentFile:
@@ -725,7 +1002,7 @@ def remove_agents(slug: str, *, home: Path | None = None) -> ConnectResult:
     )
 
 
-def install_skill(
+def _install_skill_file(
     slug: str, *, home: Path | None = None, dry_run: bool = False
 ) -> ConnectResult:
     """Install the SaberOps instruction skill for one agent.
@@ -803,7 +1080,7 @@ def install_skill(
     )
 
 
-def remove_skill(slug: str, *, home: Path | None = None) -> ConnectResult:
+def _remove_skill_file(slug: str, *, home: Path | None = None) -> ConnectResult:
     """Remove only the skill file SaberOps wrote, and its now-empty folder."""
     agent = agent_by_slug(slug)
     if agent is None:
@@ -852,6 +1129,40 @@ def remove_skill(slug: str, *, home: Path | None = None) -> ConnectResult:
         f"Removed the SaberOps skill at {path}.",
         skill_path=str(path),
         skill_action="removed",
+    )
+
+
+def install_skill(
+    slug: str, *, home: Path | None = None, dry_run: bool = False
+) -> ConnectResult:
+    """Install the SaberOps skill plus the native worker definition (F16).
+
+    Both files carry an ownership marker, so a file SaberOps did not write is
+    never overwritten or later removed.
+    """
+    skill = _install_skill_file(slug, home=home, dry_run=dry_run)
+    worker = install_worker(slug, home=home, dry_run=dry_run)
+    files = tuple(skill.agent_files) + tuple(worker.agent_files)
+    return replace(
+        skill,
+        ok=skill.ok and worker.ok,
+        message=f"{skill.message} {worker.message}".strip(),
+        agent_files=files,
+        agent_action=worker.agent_action or skill.agent_action,
+    )
+
+
+def remove_skill(slug: str, *, home: Path | None = None) -> ConnectResult:
+    """Remove the SaberOps skill and the native worker definition it owns."""
+    skill = _remove_skill_file(slug, home=home)
+    worker = remove_worker(slug, home=home)
+    files = tuple(skill.agent_files) + tuple(worker.agent_files)
+    return replace(
+        skill,
+        ok=skill.ok and worker.ok,
+        message=f"{skill.message} {worker.message}".strip(),
+        agent_files=files,
+        agent_action=worker.agent_action or skill.agent_action,
     )
 
 
@@ -945,6 +1256,8 @@ def _with_skill(
         skill_path=skill.skill_path,
         skill_content=skill.skill_content,
         skill_action=skill.skill_action,
+        agent_files=skill.agent_files,
+        agent_action=skill.agent_action,
     )
 
 

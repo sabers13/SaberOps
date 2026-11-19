@@ -263,6 +263,31 @@ CLI (`orch mode set`) or the Questions page.
   subscription from its checkpoint). Report both plainly; they are durable
   evidence, not guesses.
 
+## Native workers (hybrid)
+When the owner has enabled native workers (`ORCH_NATIVE_WORKERS=1`), part of the
+work may run on your own subagents while other jobs run as ordinary SaberOps
+workers. The tools below exist only while that flag is on.
+
+- Launch a native worker only from the generated `saberops-worker` definition
+  that `orch connect --skill` installed. Never do SaberOps work in your main
+  session and never claim a job you did not hand to that subagent.
+- Give it one queued job id. It calls `native_claim`, works only in the returned
+  worktree, calls `native_heartbeat` at least every few minutes, and calls
+  `record_native_attempt` when the work is committed.
+- While it works, call `native_controls` with its job id instead of waiting
+  blindly. It returns `stop_requested`, the steering state and the heartbeat
+  deadline. When SaberOps posts a stop (the owner cancelled the job, or a missed
+  heartbeat made it needs-attention), stop the child with your own native
+  control (subagent stop / task stop): SaberOps cannot kill it.
+- Silence past the deadline marks the job needs-attention. Never re-launch a
+  stopped or silent native child, and never treat its silence as success.
+- A native result reaches the owner only through the project gate and an
+  independent different-family review; missing or mismatched evidence fails
+  closed. Never accept, push or merge.
+- Native children stop when this CLI closes, so a closed CLI cannot leave one
+  running. Ordinary SaberOps jobs run outside this CLI and are not stopped by
+  it: check their state before restarting or duplicating anything.
+
 ## Questions and decisions
 - `list_questions` shows what is waiting. You may answer only planner-level
   questions (`answer_question` with authority PLAN).

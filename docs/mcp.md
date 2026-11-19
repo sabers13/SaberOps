@@ -370,6 +370,43 @@ Antigravity can host the proxies, but there is never an `agy-worker` proxy:
 SaberOps does not launch `agy` as an automated worker. A host never gets a
 proxy for its own subscription.
 
+### Native workers (hybrid, off by default)
+
+A **native worker** does the work itself on the orchestrating CLI's own
+subscription, cooperating through the `saberops` MCP server. Set
+`ORCH_NATIVE_WORKERS=1` to expose the four tools; with the variable unset they
+are not registered at all.
+
+| Tool | Key arguments | What it does |
+| --- | --- | --- |
+| `native_claim` | `job_id`, `vendor`, `model` | Claims a QUEUED job, creates the run, the worktree at the pinned base and a RUNNING attempt; returns the worktree, branch and heartbeat deadline |
+| `native_heartbeat` | `job_id`, `progress` | Records liveness, delivers pending steering notes once, and returns any stop request |
+| `native_controls` | `job_id` | Read-only control state; a missed heartbeat deadline marks the job needs-attention and posts one stop request |
+| `record_native_attempt` | `job_id`, `vendor`, `model`, `base_sha`, `candidate_sha`, `worktree`, `transcript`, times, `usage` | Verifies lineage, worktree and canonical isolation, runs the project gate and a different-family review, and completes an attempt that can reach owner acceptance |
+
+`vendor` is the host's own vendor: `claude`, `codex` or `opencode`.
+Antigravity is refused as an automated worker. Missing or mismatched evidence
+fails closed; the job stays unfinished and the rejection is recorded. Review is
+always an external SaberOps reviewer of a different family, never the host's own
+subagent, and only the owner accepts.
+
+Control is cooperative: SaberOps cannot kill a native child, see it once it
+stops calling, or measure its quota independently. A native child stops when
+its host CLI closes (SaberOps-side jobs are separate); do not restart one from a
+new session without checking its record. Owner cancellation posts a
+stop request and cancels the job (a later report is refused); the orchestrator
+stops the child with its own native control. Each attempt is labelled
+`supervision: host` and `quota: measured|estimated|unknown`.
+`ORCH_NATIVE_HEARTBEAT_SECONDS` (default 600) sets the silence deadline and
+`ORCH_NATIVE_MAX_CONCURRENT` (default 1) the per-host cap.
+
+`orch connect --skill` also installs a `saberops-worker` definition per host
+subagent format (Claude Code, Codex, OpenCode) with worktree-confined
+permissions where the CLI has them. The planner guide tells the orchestrating
+CLI to launch native workers only from that definition, to call
+`native_controls` while waiting, and to stop the child itself when SaberOps
+posts a stop. Design: ADR-0030.
+
 The Setup page offers the same as one **Connect** button per agent. Supported:
 Claude Code, Codex, Antigravity, OpenCode and Cursor; any other MCP client can
 use the snippet under "Client configuration" below.

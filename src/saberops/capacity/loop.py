@@ -965,6 +965,7 @@ def scheduler_tick(
         )
     except (sqlite3.OperationalError, sqlite3.DatabaseError):
         return TickResult(ran=False, reason="ledger_read_error")
+    from saberops.native_workers import native_run_marker
 
     reserved_run_ids: set[str] = set()
     if running_snapshot:
@@ -982,6 +983,11 @@ def scheduler_tick(
     unresolved_running_jobs: list[str] = []
     for running_job in running_snapshot:
         run_id = running_job.current_run_id
+        if run_id and native_run_marker(db, run_id) is not None:
+            # F16: a native attempt is not a capacity reservation.  It is
+            # cooperative work labelled quota unknown, so it must not park the
+            # whole store as a legacy RUNNING job without a reservation.
+            continue
         if not run_id or run_id not in reserved_run_ids:
             legacy_running_jobs.append(running_job.job_id)
             continue

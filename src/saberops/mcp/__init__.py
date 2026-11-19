@@ -46,6 +46,7 @@ from saberops.mcp.stdio import build_server_context, run_stdio, serve_stdio
 from saberops.mcp.tools import (
     FORBIDDEN_OPERATIONS,
     MUTATING_TOOLS,
+    NATIVE_MUTATING_TOOLS,
     READ_TOOLS,
     TOOL_NAMES,
     ServerContext,
@@ -57,6 +58,7 @@ from saberops.mcp.tools import (
 __all__ = [
     "FORBIDDEN_OPERATIONS",
     "MUTATING_TOOLS",
+    "NATIVE_MUTATING_TOOLS",
     "PROTOCOL_VERSION",
     "READ_TOOLS",
     "REDACTED",
