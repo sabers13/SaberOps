@@ -149,6 +149,9 @@ steps, not model roles. There are no selectable modes.
 - Call `wait_job` after each submission; it returns on a final outcome, blocking
   question, or timeout. Call again after a timeout if needed.
 - `get_job` / `list_jobs` to inspect jobs.
+- `tail_job` to read a running job's progress and terminal output without
+  waiting: pass the `next_sequence` it returned last time to get only what is
+  new. It is read-only, so it also works in a session that is not the planner.
 - `read_evidence` for check output and review findings when something fails.
 - Report back to the owner in plain words: what finished, what failed and why,
   and what needs their decision. Link them to the run on the SaberOps page.

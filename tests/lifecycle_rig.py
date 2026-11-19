@@ -132,12 +132,14 @@ class RigEnvironment:
 
     def set_worker_mode(
         self,
-        mode: Literal["commit", "hang", "crash", "quota_exhausted"],
+        mode: Literal["commit", "hang", "crash", "quota_exhausted", "live"],
         *,
         hang_seconds: float | None = None,
         exit_code: int | None = None,
         target_file: str | None = None,
         content: str | None = None,
+        live_lines: int | None = None,
+        live_interval: float | None = None,
     ) -> None:
         """Configure fake worker behaviour via control file and ``ORCH_FAKE_*`` env vars."""
         control_path = self.state_home / "saberops" / "fake-worker-mode.json"
@@ -154,6 +156,14 @@ class RigEnvironment:
         control_path.write_text(json.dumps(payload), encoding="utf-8")
 
         self.monkeypatch.setenv("ORCH_FAKE_WORKER_MODE", mode)
+        if live_lines is not None:
+            self.monkeypatch.setenv("ORCH_FAKE_WORKER_LIVE_LINES", str(live_lines))
+        else:
+            self.monkeypatch.delenv("ORCH_FAKE_WORKER_LIVE_LINES", raising=False)
+        if live_interval is not None:
+            self.monkeypatch.setenv("ORCH_FAKE_WORKER_LIVE_INTERVAL", str(live_interval))
+        else:
+            self.monkeypatch.delenv("ORCH_FAKE_WORKER_LIVE_INTERVAL", raising=False)
         if hang_seconds is not None:
             self.monkeypatch.setenv("ORCH_FAKE_WORKER_HANG_SECONDS", str(hang_seconds))
         else:

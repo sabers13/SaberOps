@@ -63,10 +63,13 @@ Use every AI subscription Saber pays for **through plan limits, not pay-per-toke
   `get_job`, `get_result` (commit SHA, diff summary, gate evidence, review verdict),
   `cancel_job`, `list_jobs`, `capacity()`. Logs/evidence as MCP resources.
   Polling must always work; progress notifications are optional. The concrete
-  tool set has since gained a wait-for-outcome tool, a preflight and read-only
+  tool set has since gained a wait-for-outcome tool, a preflight, and read-only
   evidence reads such as `catch_up`; the shipped schemas are the contract, and
   delivery does not depend on the MCP client (see
-  [ADR-0011](0011-bounded-automatic-actions.md)).
+  [ADR-0011](0011-bounded-automatic-actions.md)). The read-only surface also
+  includes a cursor-based live tail (`tail_job`) over the run's existing event
+  log and terminal transcript, so a second session can follow a running
+  worker without the planning lease and without writing anything.
 - **Later, as separate adapters:** ACP (SaberOps appears as an agent/engine in editors and chat apps, e.g. an OpenMausBot custom engine) and A2A (agent-to-agent delegation).
 - **Not a plugin of any host app.** Reasons: host APIs move fast; a host that launches the CLIs itself would void SaberOps' billing guarantees; language mismatch (TS vs Python); a standalone engine is the stronger portfolio artifact.
 

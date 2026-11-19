@@ -142,6 +142,20 @@ def _commit_change(workdir: Path, harness: str, target_file: str, content: str |
 
 
 def _run_failure_switch(harness: str, mode: str, hang_seconds: float, exit_code: int) -> int | None:
+    if mode == "live":
+        # Emit line-oriented output while the process is still running so a
+        # second session can tail the run transcript mid-flight.  Execution
+        # continues normally afterwards (the usual commit walk).
+        lines = int(os.environ.get("ORCH_FAKE_WORKER_LIVE_LINES") or 0)
+        interval = float(os.environ.get("ORCH_FAKE_WORKER_LIVE_INTERVAL") or 0.2)
+        for index in range(lines):
+            print(
+                f"fake {harness} live line {index + 1}/{lines}",
+                flush=True,
+            )
+            if interval > 0:
+                time.sleep(interval)
+        return None
     if mode == "hang":
         time.sleep(hang_seconds)
         return 0

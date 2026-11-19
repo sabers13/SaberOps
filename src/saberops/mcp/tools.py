@@ -2,8 +2,8 @@
 
 The following tools are exposed::
 
-    preflight submit_job get_job catch_up wait_job list_jobs cancel_job capacity
-    read_evidence list_questions answer_question
+    preflight submit_job get_job catch_up tail_job wait_job list_jobs cancel_job
+    capacity read_evidence list_questions answer_question
     propose_config_change list_proposals
 
 Everything else is either not modelled or on the **never-exposed** list, which
@@ -109,6 +109,7 @@ READ_TOOLS: frozenset[str] = frozenset(
     {
         "get_job",
         "catch_up",
+        "tail_job",
         "wait_job",
         "preflight",
         "list_jobs",
@@ -125,6 +126,7 @@ TOOL_NAMES: tuple[str, ...] = (
     "refresh_candidate",
     "get_job",
     "catch_up",
+    "tail_job",
     "wait_job",
     "list_jobs",
     "cancel_job",
@@ -478,6 +480,42 @@ def _get_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, 
         "usage": result["usage"],
         "guidance": _job_guidance(job),
     }
+
+
+def _tail_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    """Read a running job's live progress without touching it (Wave 3 F3)."""
+    from saberops.jobs.service import get_job, job_status_view
+    from saberops.mcp.tail import DEFAULT_TAIL_BYTES, parse_cursor, tail_run
+
+    job_id = _require_text(arguments, "job_id", what="job_id")
+    db = context.database(read_only=True)
+    job = None if db is None else get_job(db, job_id)
+    if job is None:
+        raise NotFoundError(f"unknown job: {job_id}", data={"job_id": job_id})
+    view = job_status_view(db, job)
+    cursor = parse_cursor(arguments.get("after_sequence"))
+    max_bytes = int(arguments.get("max_bytes", DEFAULT_TAIL_BYTES))
+    run_id = job.current_run_id or (job.run_ids[-1] if job.run_ids else None)
+    payload: dict[str, Any] = {
+        "v": SNAPSHOT_SCHEMA_VERSION,
+        "job_id": job.job_id,
+        "state": view["state"],
+        "activity": view["activity"],
+        "reason": view["reason"],
+        "run_id": run_id,
+    }
+    if run_id is None:
+        payload.update(
+            next_sequence=cursor.encode(),
+            events=[],
+            transcript=None,
+            has_more=False,
+        )
+        return payload
+    payload.update(
+        tail_run(db, run_id=run_id, cursor=cursor, max_bytes=max_bytes)
+    )
+    return payload
 
 
 def _excerpt(text: str | None, *, limit: int = 400, tail: bool = False) -> str | None:
@@ -1183,6 +1221,27 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
         "question and the next allowed action for one job.",
         _schema({"job_id": {"type": "string", "minLength": 1}}, required=("job_id",)),
         _catch_up,
+        mutating=False,
+    )
+    register(
+        "tail_job",
+        "Read-only live tail: new events and terminal output for one job after a cursor. "
+        "Follows a running worker without waiting and without changing anything.",
+        _schema(
+            {
+                "job_id": {"type": "string", "minLength": 1},
+                "after_sequence": {
+                    "type": ["integer", "string"],
+                    "description": (
+                        "Cursor returned as next_sequence by the previous call; "
+                        "a plain event id or omitted for the first read."
+                    ),
+                },
+                "max_bytes": {"type": "integer", "minimum": 512, "maximum": 1048576},
+            },
+            required=("job_id",),
+        ),
+        _tail_job,
         mutating=False,
     )
     register(
