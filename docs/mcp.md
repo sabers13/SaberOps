@@ -47,8 +47,9 @@ served, and an unknown requested revision falls back to `2025-06-18`.
 
 | Tool | Mutating | Key arguments | Calls |
 | --- | --- | --- | --- |
-| `submit_job` | yes | `repo`, `goal`, `acceptance`, `base_ref`, `priority`, `deadline`, `not_before`, `depends_on`, `idempotency_key`, `requirements` | `saberops.jobs.service.submit_job` |
+| `submit_job` | yes | `repo`, `goal`, `acceptance`, `base_ref`, `priority`, `kind`, `deadline`, `not_before`, `depends_on`, `idempotency_key`, `requirements` | `saberops.jobs.service.submit_job` |
 | `submit_plan` | yes | `repo`, `plan_path`, `base_ref` | `saberops.plan_runner.submit_plan_file` (path-only, repository-confined) |
+| `promote_scout` | yes | `job_id`, `goal`, `acceptance`, `base_ref`, `idempotency_key` | `saberops.jobs.service.promote_scout` |
 | `get_job` | no | `job_id` | `saberops.jobs.service.get_job` |
 | `catch_up` | no | `job_id` | read-only handoff over saved job, run, check, review and question records |
 | `list_jobs` | no | `state`, `limit` | `saberops.jobs.service.list_jobs` |
@@ -116,6 +117,25 @@ job per lane whose dependencies are already accepted. Independent lanes run in
 parallel; a `run: "owner"` lane is never dispatched and waits for the owner's
 `orch plan-file done`. Lanes submit only while a live planning session holds
 the planning lease, so closing the planning CLI pauses them.
+
+### Scout jobs (F19)
+
+`kind: SCOUT` submits a read-only investigation instead of a change. Roles stay
+PLAN / BUILD / CHECK: a scout is a kind on the build route, and the engine
+enforces read-only rather than trusting `requirements.read_only`. The worker
+runs with the CLI's own read-only permission rules on the run's scratch copy;
+any diff is discarded and recorded as a violation on the job. The deliverable
+is a Markdown report in the job's E4 folder (`jobs/<run_id>/scout-report.md`),
+indexed on the job record.
+
+A scout completes when a non-empty report exists. It has no gate, no independent
+review and no owner acceptance, so `orch accept` never applies. `get_job`,
+`wait_job` and `catch_up` return a `report` block (path, short summary, findings,
+and any violations); each decision in the report's `## Owner decisions` section
+becomes an owner question. `promote_scout` starts an ordinary build job whose
+goal carries the report as starting context and records the lineage on both
+jobs. A plan lane may also set `kind: "scout"`: its report becomes starting
+context for the lanes that depend on it.
 
 `catch_up` is the read-only handoff for a new planning session. It returns the
 original request, the current candidate commit, the latest gate check and
@@ -196,11 +216,11 @@ exclusive `flock` during each read-modify-write.
 * The first client to acquire becomes the writer; the lease is acquired during
   `initialize` and released at EOF.
 * A second live client (a different, live `pid` holds the record) is read-only:
-  calls to `submit_job`, `submit_plan`, `cancel_job`, `note_job`,
-  `answer_question`, `propose_config_change` and `propose_mode_change` are
-  refused with JSON-RPC error `-32020`. Its read tools (`get_job`, `catch_up`,
-  `list_jobs`, `capacity`, `read_evidence`, `list_questions`, `list_proposals`,
-  `get_mode`) keep working.
+  calls to `submit_job`, `submit_plan`, `promote_scout`, `cancel_job`,
+  `note_job`, `answer_question`, `propose_config_change` and
+  `propose_mode_change` are refused with JSON-RPC error `-32020`. Its read tools
+  (`get_job`, `catch_up`, `list_jobs`, `capacity`, `read_evidence`,
+  `list_questions`, `list_proposals`, `get_mode`) keep working.
 * **Stale self-healing:** a record whose `pid` is dead is stale and is stolen by
   the next client (`os.kill(pid, 0)` is the liveness probe), so a crashed client
   never locks out future writers. A non-empty but unreadable/malformed record is

@@ -29,12 +29,15 @@ from saberops.jobs.models import (
     TERMINAL_JOB_STATES,
     Effort,
     Job,
+    JobKind,
     JobRequirements,
     JobState,
     Priority,
     ResumeFrom,
     SteeringNote,
     WaitingReason,
+    coerce_job_kind,
+    read_only_requirements,
 )
 from saberops.jobs.store import (
     IdempotencyConflictError,
@@ -69,6 +72,7 @@ __all__ = [
     "note_job",
     "reconcile_jobs",
     "reconcile_preemptions",
+    "promote_scout",
     "requeue",
     "requeue_preemption",
     "settle_preemption_debts",
@@ -117,6 +121,7 @@ class JobDispatchSpec:
     effort: Effort | None
     size_hint: str | None
     resume_from: ResumeFrom | None
+    kind: JobKind = JobKind.BUILD
 
 
 @dataclass(frozen=True)
@@ -232,6 +237,7 @@ def _request_digest(
     base_ref: str,
     requirements: JobRequirements,
     priority: Priority,
+    kind: JobKind,
     deadline: str | None,
     not_before: str | None,
     depends_on: tuple[str, ...] = (),
@@ -243,6 +249,9 @@ def _request_digest(
         "deadline": deadline,
         "depends_on": list(depends_on),
         "goal": goal,
+        # Only a scout changes the request identity: an ordinary BUILD job's
+        # digest must stay identical to an idempotency key stored before F19.
+        "kind": kind.value if kind is not JobKind.BUILD else None,
         "not_before": not_before,
         "priority": priority.value,
         "repo": repo,
@@ -264,6 +273,7 @@ def submit_job(
     deadline: str | None = None,
     not_before: str | None = None,
     depends_on: Sequence[str] | None = None,
+    kind: JobKind | str = JobKind.BUILD,
     idempotency_key: str | None = None,
     caller_id: str = "owner",
     routing: RoutingSnapshot | None = None,
@@ -286,6 +296,12 @@ def submit_job(
     req = requirements if requirements is not None else JobRequirements()
     if not isinstance(req, JobRequirements):
         raise ValueError("requirements must be a JobRequirements")
+    job_kind = coerce_job_kind(kind)
+    if job_kind is JobKind.SCOUT:
+        # F19: read-only is enforced by the job kind, not requested by the
+        # caller, and the requirement must be in force *before* feasibility so
+        # a scout can never be routed to a provider without read-only support.
+        req = read_only_requirements(req)
     prio = _coerce_priority(priority)
     repo_abs = _resolve_repo(repo)
     ref_given = (base_ref or "").strip() or "HEAD"
@@ -304,6 +320,7 @@ def submit_job(
         base_ref=ref_given,
         requirements=req,
         priority=prio,
+        kind=job_kind,
         deadline=deadline_iso,
         not_before=not_before_iso,
         depends_on=depends,
@@ -332,6 +349,7 @@ def submit_job(
             acceptance=clean_acceptance,
             requirements=req,
             priority=prio,
+            kind=job_kind,
             deadline=deadline_iso,
             not_before=not_before_iso,
             depends_on=depends,
@@ -353,6 +371,7 @@ def submit_job(
             acceptance=clean_acceptance,
             requirements=req,
             priority=prio,
+            kind=job_kind,
             deadline=deadline_iso,
             not_before=not_before_iso,
             depends_on=depends,
@@ -389,6 +408,95 @@ def submit_job(
 def get_job(db: Any, job_id: str) -> Job | None:
     return store.get_job(db, job_id)
 
+
+#: Bound on the scout report text carried into a promoted build job's goal.
+MAX_PROMOTED_REPORT_CHARS: int = 20_000
+
+
+def promote_scout(
+    db: Any,
+    *,
+    scout_job_id: str,
+    goal: str | None = None,
+    acceptance: str | None = None,
+    base_ref: str = "HEAD",
+    priority: Priority | str = Priority.NORMAL,
+    depends_on: Sequence[str] | None = None,
+    idempotency_key: str | None = None,
+    caller_id: str = "owner",
+    routing: RoutingSnapshot | None = None,
+    now: datetime | None = None,
+) -> SubmitResult:
+    """Start a build job whose starting context is a scout report (F19).
+
+    The report is the scout's durable deliverable, so promotion copies its
+    bounded text into the new job's goal and records the lineage on both job
+    records.  Promotion is an explicit owner/planner action; a scout is never
+    promoted automatically.
+    """
+    from saberops.scout import latest_report
+
+    scout = store.get_job(db, scout_job_id)
+    if scout is None:
+        raise JobNotFoundError(f"unknown job: {scout_job_id}")
+    if scout.kind is not JobKind.SCOUT:
+        raise ValueError(f"job {scout_job_id} is not a scout job")
+    if scout.state is not JobState.SUCCEEDED:
+        raise ValueError(
+            f"scout job {scout_job_id} has no completed report (state {scout.state.value})"
+        )
+    report = latest_report(db, scout_job_id)
+    if not report or not report.get("report_path"):
+        raise ValueError(f"scout job {scout_job_id} has no indexed report")
+    try:
+        body = Path(str(report["report_path"])).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(
+            f"scout report is unreadable at {report['report_path']}: {exc}"
+        ) from exc
+    cleaned_goal = (goal or scout.goal).strip()
+    if not cleaned_goal:
+        raise ValueError("a promoted build job needs a non-empty goal")
+    carried = body.strip()[:MAX_PROMOTED_REPORT_CHARS]
+    promoted_goal = (
+        f"{cleaned_goal}\n\n"
+        f"[SCOUT REPORT from job {scout_job_id}]\n"
+        f"Path: {report['report_path']}\n\n"
+        f"{carried}"
+    )
+    result = submit_job(
+        db,
+        repo=scout.repo,
+        goal=promoted_goal,
+        acceptance=acceptance,
+        base_ref=base_ref,
+        requirements=JobRequirements(),
+        priority=priority,
+        depends_on=depends_on,
+        idempotency_key=idempotency_key,
+        caller_id=caller_id,
+        routing=routing,
+        now=now,
+    )
+    store.append_event(
+        db,
+        result.job.job_id,
+        "promoted_from_scout",
+        {
+            "scout_job_id": scout_job_id,
+            "report_path": report["report_path"],
+            "report_digest": report.get("digest"),
+        },
+        now=now,
+    )
+    store.append_event(
+        db,
+        scout_job_id,
+        "scout_promoted",
+        {"job_id": result.job.job_id, "report_path": report["report_path"]},
+        now=now,
+    )
+    return result
 
 def note_job(
     db: Any, job_id: str, body: str, *, now: datetime | None = None
@@ -1161,6 +1269,14 @@ def job_status_view(db: Any, job: Job) -> dict[str, Any]:
     view.update(activity=None, reason=None, work_location=None, last_failed_attempt=None)
     from saberops.observability.run_report import build_roles_view
 
+    try:
+        from saberops.scout import latest_report
+
+        report = latest_report(db, job.job_id)
+    except Exception:  # noqa: BLE001 - a report read never breaks a status view
+        report = None
+    if report is not None:
+        view["report"] = report
     view["steering_notes"] = [note.to_dict() for note in steering_notes(db, job.job_id)]
     roles = (
         build_roles_view(db, job.current_run_id, plan_identity=job.caller_id)
@@ -1256,6 +1372,7 @@ def job_dispatch_spec(job: Job) -> JobDispatchSpec:
         task=task,
         repo_path=job.repo,
         routing_mode="auto",
+        kind=job.kind.value.lower(),
         required_capabilities=tuple(sorted(caps)),
     )
     return JobDispatchSpec(
@@ -1266,4 +1383,5 @@ def job_dispatch_spec(job: Job) -> JobDispatchSpec:
         effort=job.requirements.effort,
         size_hint=job.requirements.size_hint,
         resume_from=job.resume_from,
+        kind=job.kind,
     )

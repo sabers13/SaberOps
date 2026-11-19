@@ -21,12 +21,14 @@ from saberops.jobs.models import (
     CORRUPT_JOB_ROW,
     TERMINAL_JOB_STATES,
     Job,
+    JobKind,
     JobRequirements,
     JobState,
     Priority,
     ResumeFrom,
     SteeringNote,
     WaitingReason,
+    coerce_job_kind,
 )
 
 #: Bounded note body; an owner note is a correction, not a second task.
@@ -87,6 +89,7 @@ def ensure_tables(db: Any) -> None:
                 acceptance TEXT,
                 requirements_json TEXT NOT NULL,
                 priority TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'BUILD',
                 deadline TEXT,
                 not_before TEXT,
                 depends_on_json TEXT NOT NULL DEFAULT '[]',
@@ -108,6 +111,7 @@ def ensure_tables(db: Any) -> None:
             """
         )
         _ensure_depends_on_column(conn)
+        _ensure_kind_column(conn)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS job_events (
@@ -168,6 +172,18 @@ def _ensure_depends_on_column(conn: sqlite3.Connection) -> None:
         )
 
 
+def _ensure_kind_column(conn: sqlite3.Connection) -> None:
+    """Add ``kind`` to a ``jobs`` table created before F19.
+
+    ``CREATE TABLE IF NOT EXISTS`` never alters an existing table, so a store
+    written by an earlier version gains the column in place.  Every existing
+    row is an ordinary BUILD job, which is exactly the column default.
+    """
+    columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(jobs)")}
+    if "kind" not in columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'BUILD'")
+
+
 def _job_to_columns(job: Job) -> dict[str, Any]:
     return {
         "job_id": job.job_id,
@@ -182,6 +198,7 @@ def _job_to_columns(job: Job) -> dict[str, Any]:
             job.requirements.to_dict(), sort_keys=True, separators=(",", ":")
         ),
         "priority": job.priority.value,
+        "kind": job.kind.value,
         "deadline": job.deadline,
         "not_before": job.not_before,
         "depends_on_json": json.dumps(list(job.depends_on), separators=(",", ":")),
@@ -212,6 +229,7 @@ def _row_to_job(row: sqlite3.Row) -> Job:
     # table has no ``depends_on_json``; those jobs carry no dependencies.
     depends_raw = row["depends_on_json"] if "depends_on_json" in row.keys() else None
     depends_on = tuple(json.loads(str(depends_raw))) if depends_raw else ()
+    kind_raw = row["kind"] if "kind" in row.keys() else None
     return Job(
         job_id=str(row["job_id"]),
         idempotency_key=str(row["idempotency_key"])
@@ -225,6 +243,7 @@ def _row_to_job(row: sqlite3.Row) -> Job:
         acceptance=str(row["acceptance"]) if row["acceptance"] is not None else None,
         requirements=requirements,
         priority=Priority(str(row["priority"])),
+        kind=coerce_job_kind(str(kind_raw)) if kind_raw else JobKind.BUILD,
         deadline=str(row["deadline"]) if row["deadline"] is not None else None,
         not_before=str(row["not_before"]) if row["not_before"] is not None else None,
         depends_on=depends_on,
@@ -461,8 +480,33 @@ def list_jobs_tolerant(
         return valid, tuple(quarantined)
 
 
-def list_events(db: Any, job_id: str) -> list[dict[str, Any]]:
+def append_event(
+    db: Any,
+    job_id: str,
+    kind: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    now: datetime | None = None,
+) -> None:
+    """Append one durable job event (used to index a scout report, F19)."""
     ensure_tables(db)
+    at = _utcnow_iso(now)
+    with _owner_conn(db) as conn:
+        _append_event(
+            conn,
+            job_id=job_id,
+            at=at,
+            kind=kind,
+            from_state=None,
+            to_state=None,
+            payload=payload,
+        )
+        conn.commit()
+
+
+def list_events(db: Any, job_id: str) -> list[dict[str, Any]]:
+    if not _prepare_job_read(db):
+        return []
     with _owner_conn(db) as conn:
         rows = conn.execute(
             "SELECT job_id, seq, at, kind, from_state, to_state, payload_json"

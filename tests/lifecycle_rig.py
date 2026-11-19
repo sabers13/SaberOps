@@ -149,6 +149,8 @@ class RigEnvironment:
         turns: list[dict[str, object]] | None = None,
         report_model: str | None = None,
         report_provider: str | None = None,
+        ignore_read_only: bool | None = None,
+        report_text: str | None = None,
     ) -> None:
         """Configure fake worker behaviour via control file and ``ORCH_FAKE_*`` env vars.
 
@@ -173,6 +175,10 @@ class RigEnvironment:
             payload["report_model"] = report_model
         if report_provider is not None:
             payload["report_provider"] = report_provider
+        if ignore_read_only is not None:
+            payload["ignore_read_only"] = bool(ignore_read_only)
+        if report_text is not None:
+            payload["report_text"] = report_text
         if hang_seconds is not None:
             payload["hang_seconds"] = hang_seconds
         if exit_code is not None:

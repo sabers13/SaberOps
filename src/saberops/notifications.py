@@ -95,14 +95,24 @@ def deliver_pending(db: Any) -> None:
     """
     from saberops.jobs.store import list_jobs_tolerant
     from saberops.questions import OwnerQuestionQueue
+    from saberops.scout import latest_report
 
     ledger = db.owner_db.db_path.with_name(db.owner_db.db_path.name + ".notifications.sqlite3")
     jobs, _ = list_jobs_tolerant(db, limit=100_000, quarantine=False)
     for job in jobs:
         if job.state.value in {"SUCCEEDED", "FAILED"}:
             label = "finished" if job.state.value == "SUCCEEDED" else "failed"
+            body = job.job_id
+            if job.kind.value == "SCOUT":
+                try:
+                    report = latest_report(db, job.job_id)
+                except Exception:  # noqa: BLE001 - a notice never breaks delivery
+                    report = None
+                if report and report.get("report_path"):
+                    summary = report.get("summary") or "no summary"
+                    body = f"{job.job_id}\n{summary}\nreport: {report['report_path']}"
             notify_once(
-                ledger, f"job:{job.job_id}:{job.state.value}", f"SaberOps job {label}", job.job_id
+                ledger, f"job:{job.job_id}:{job.state.value}", f"SaberOps job {label}", body
             )
     for question in OwnerQuestionQueue().questions():
         notify_once(

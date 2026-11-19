@@ -189,6 +189,14 @@ from saberops.routing_decision import (
     escalated_decision,
     is_escalation_evidence,
 )
+from saberops.run_creation import SCOUT_RUN_KIND
+from saberops.scout import (
+    SCOUT_PROMPT_SECTION,
+    SCOUT_VIOLATION_EVENT,
+    raise_decision_questions,
+    record_report,
+    write_report,
+)
 from saberops.slicing import resolve_work_packages
 from saberops.steering import (
     append_steering_section,
@@ -4329,6 +4337,13 @@ class Orchestrator:
                 task_for_worker_pre = append_steering_section(
                     rendered.prompt, steering_section
                 )
+                if config.kind == SCOUT_RUN_KIND:
+                    # F19: a scout answers with a report and changes nothing.
+                    # The instruction is appended to the one rendered prompt so
+                    # the saved attempt prompt is exactly what the worker saw.
+                    task_for_worker_pre = append_steering_section(
+                        task_for_worker_pre, SCOUT_PROMPT_SECTION
+                    )
                 prompt_bytes_pre = len(task_for_worker_pre.encode("utf-8"))
                 adapter_pre = (auto_resolved.adapter if auto_resolved is not None
                                else self.registry.get(candidate.provider))
@@ -4926,6 +4941,7 @@ class Orchestrator:
                     task=task_for_worker,
                     worktree_path=wt_path,
                     model=candidate.model,
+                    read_only=config.kind == SCOUT_RUN_KIND,
                     timeout_seconds=worker_timeout_seconds,
                     inactivity_timeout=config.worker_inactivity_timeout,
                     on_stdout=on_stdout,
@@ -5281,6 +5297,25 @@ class Orchestrator:
                         "attempt": attempt_number,
                     },
                 )
+
+                if config.kind == SCOUT_RUN_KIND:
+                    # F19: a scout run ends here.  Its deliverable is the
+                    # report, so the ordinary candidate/gate/review/accept
+                    # spine below does not apply; a worker failure still
+                    # follows the ordinary failure path.
+                    if worker_res.status is AttemptStatus.SUCCESS:
+                        return self._finish_scout_attempt(
+                            run_id=run_id,
+                            attempt_id=attempt_id,
+                            attempt=attempt,
+                            worker_res=worker_res,
+                            wt_path=wt_path,
+                            base_commit=base_commit,
+                            repo=repo,
+                            attempts=attempts,
+                            checks=checks,
+                            reviews=reviews,
+                        )
 
                 if worker_res.interruption_reason is not None:
                     interruption_reason = worker_res.interruption_reason
@@ -9145,6 +9180,214 @@ class Orchestrator:
                 checks=checks,
                 reviews=reviews,
             )
+
+    def _finish_scout_attempt(
+        self,
+        *,
+        run_id: str,
+        attempt_id: str,
+        attempt: Attempt,
+        worker_res: Any,
+        wt_path: Path,
+        base_commit: str,
+        repo: Path,
+        attempts: list[Attempt],
+        checks: list[CheckResult],
+        reviews: list[ReviewResult],
+    ) -> RunResult:
+        """End a scout run with a report and no candidate (F19).
+
+        The worker ran read-only.  Any diff it produced is discarded from the
+        scratch copy and recorded as a violation; the report is the worker's
+        final answer, saved into the run's E4 folder and indexed on the owning
+        job.  There is no gate, no review, no publication and no acceptance.
+        """
+        now = current_iso_timestamp()
+        changed_paths = tuple(GitManager.get_changed_paths(wt_path))
+        head_sha = GitManager.get_head_commit(wt_path)
+        committed_paths = (
+            tuple(GitManager.get_changed_paths_between(wt_path, base_commit, head_sha))
+            if head_sha and head_sha != base_commit
+            else ()
+        )
+        violations: tuple[str, ...] = tuple(
+            dict.fromkeys([*committed_paths, *changed_paths])
+        )
+        if not violations and GitManager.has_diff_against_base(wt_path, base_commit):
+            violations = ("(tracked change against base)",)
+        if violations:
+            self.db.record_event(
+                run_id,
+                SCOUT_VIOLATION_EVENT,
+                attempt_id=attempt_id,
+                payload={
+                    "changed_paths": list(violations),
+                    "detail": (
+                        "a scout run is read-only; the change was discarded and "
+                        "is recorded here"
+                    ),
+                },
+            )
+            self._discard_scout_changes(wt_path, base_commit)
+
+        body = (worker_res.stdout or "").strip() or (worker_res.summary or "").strip()
+        job_id: str | None = None
+        try:
+            from saberops.preemption import find_job_for_run
+
+            owning_job = find_job_for_run(self.db, run_id)
+            job_id = owning_job.job_id if owning_job is not None else None
+        except Exception:  # noqa: BLE001 - the report is evidence, never authority
+            job_id = None
+        report = None
+        if body:
+            current_run = self.db.get_run(run_id)
+            try:
+                _path, report = write_report(
+                    job_folder(self.db.db_path.parent, run_id),
+                    run_id=run_id,
+                    job_id=job_id,
+                    goal=current_run.task if current_run is not None else "",
+                    provider=worker_res.actual_provider or worker_res.provider,
+                    model=worker_res.actual_model or worker_res.model,
+                    body=body,
+                )
+            except (OSError, ValueError) as exc:
+                self.db.record_event(
+                    run_id,
+                    "scout_report_write_failed",
+                    attempt_id=attempt_id,
+                    payload={"error": str(exc)[:500]},
+                )
+        if report is None:
+            err_msg = (
+                "Scout produced no report: the worker's final answer was empty. "
+                "A scout job completes only with a non-empty report."
+            )
+            attempt.status = AttemptStatus.FAILED
+            attempt.worker_error = err_msg
+            attempt.worker_stdout = worker_res.stdout
+            attempt.worker_stderr = worker_res.stderr
+            attempt.completed_at = now
+            self.db.update_attempt(
+                attempt_id=attempt_id,
+                status=AttemptStatus.FAILED,
+                worker_stdout=worker_res.stdout,
+                worker_stderr=worker_res.stderr,
+                worker_error=err_msg,
+                completed_at=now,
+            )
+            self.db.update_run(
+                run_id=run_id,
+                status=RunStatus.FAILED,
+                completed_at=now,
+                result_summary=err_msg,
+            )
+            self.db.record_event(
+                run_id,
+                "run_failed",
+                attempt_id=attempt_id,
+                payload={"summary": err_msg, "reason": "SCOUT_REPORT_EMPTY"},
+            )
+            return RunResult(
+                run_id=run_id,
+                passed=False,
+                status=RunStatus.FAILED,
+                summary=err_msg,
+                target_repo=str(repo),
+                base_commit=base_commit,
+                worktree_path=str(wt_path),
+                has_changes=False,
+                attempts=[*attempts, attempt],
+                checks=checks,
+                reviews=reviews,
+            )
+
+        report = _frozen_replace(report, violations=violations)
+        if job_id is not None:
+            try:
+                record_report(self.db, job_id=job_id, report=report)
+                question_ids = raise_decision_questions(
+                    job_id=job_id,
+                    run_id=run_id,
+                    report_path=report.report_path,
+                    decisions=report.decisions,
+                )
+                if question_ids:
+                    self.db.record_event(
+                        run_id,
+                        "scout_decisions_raised",
+                        attempt_id=attempt_id,
+                        payload={"question_ids": list(question_ids)},
+                    )
+            except Exception as exc:  # noqa: BLE001
+                self.db.record_event(
+                    run_id,
+                    "scout_report_index_failed",
+                    attempt_id=attempt_id,
+                    payload={"error": str(exc)[:500]},
+                )
+
+        attempt.status = AttemptStatus.SUCCESS
+        attempt.worker_stdout = worker_res.stdout
+        attempt.worker_stderr = worker_res.stderr
+        attempt.commit_sha = None
+        attempt.completed_at = now
+        self.db.update_attempt(
+            attempt_id=attempt_id,
+            status=AttemptStatus.SUCCESS,
+            worker_stdout=worker_res.stdout,
+            worker_stderr=worker_res.stderr,
+            commit_sha=None,
+            completed_at=now,
+        )
+        self.db.update_worker_activation_state(
+            run_id, attempt.attempt_number, WorkerActivationState.SUCCEEDED
+        )
+        summary = (
+            f"Scout report saved at {report.report_path}"
+            + (f" ({len(violations)} discarded change(s))" if violations else "")
+        )
+        self.db.update_run(
+            run_id=run_id,
+            status=RunStatus.COMPLETED,
+            completed_at=now,
+            final_attempt_id=attempt_id,
+            result_summary=summary,
+        )
+        self.db.record_event(
+            run_id,
+            "run_completed",
+            attempt_id=attempt_id,
+            payload={
+                "kind": "scout",
+                "report_path": report.report_path,
+                "report_digest": report.digest,
+                "violations": list(violations),
+            },
+        )
+        return RunResult(
+            run_id=run_id,
+            passed=True,
+            status=RunStatus.COMPLETED,
+            summary=summary,
+            target_repo=str(repo),
+            base_commit=base_commit,
+            commit_sha=None,
+            worktree_path=str(wt_path),
+            has_changes=False,
+            attempts=[*attempts, attempt],
+            checks=checks,
+            reviews=reviews,
+        )
+
+    def _discard_scout_changes(self, wt_path: Path, base_commit: str) -> None:
+        """Reset a scout's scratch copy: no change may survive a read-only run."""
+        try:
+            run_process(["git", "reset", "--hard", base_commit], cwd=wt_path)
+            run_process(["git", "clean", "-fd"], cwd=wt_path)
+        except Exception:  # noqa: BLE001 - the scratch copy is disposable
+            pass
 
     def run_engine_gate(
         self,

@@ -439,14 +439,21 @@ def _handle_codex(
         return switched
 
     sandbox = _get_arg_value(args, "--sandbox")
-    if sandbox != "read-only":
+    control = _read_control_json(_worker_control_path())
+    ignore_read_only = bool(control.get("ignore_read_only"))
+    if sandbox != "read-only" or ignore_read_only:
         _commit_change(workdir, "codex", target_file, content)
+    report_text = control.get("report_text")
+    message_text = (
+        report_text if isinstance(report_text, str) and report_text.strip()
+        else "Fake codex worker completed."
+    )
     print(json.dumps({"type": "turn.started"}))
     print(
         json.dumps(
             {
                 "type": "item.completed",
-                "item": {"type": "agent_message", "text": "Fake codex worker completed."},
+                "item": {"type": "agent_message", "text": message_text},
             }
         )
     )

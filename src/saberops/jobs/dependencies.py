@@ -25,6 +25,7 @@ from saberops.jobs import store
 from saberops.jobs.models import (
     DependencyBlocker,
     Job,
+    JobKind,
     JobState,
     WaitingReason,
 )
@@ -146,9 +147,16 @@ def _run_databases(db: Any, run_id: str) -> list[Any]:
 
 
 def job_is_accepted(db: Any, job: Job) -> bool:
-    """True iff the job succeeded and one of its runs was accepted."""
+    """True iff the job succeeded and one of its runs was accepted.
+
+    A scout job (F19) has no candidate to accept: its deliverable is a report,
+    and the engine considers the job complete when the report exists.  A
+    succeeded scout therefore satisfies a dependency directly.
+    """
     if job.state not in _ACCEPTABLE_JOB_STATES:
         return False
+    if job.kind is JobKind.SCOUT:
+        return True
     return any(run_is_accepted(db, run_id) for run_id in job.run_ids)
 
 

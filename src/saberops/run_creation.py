@@ -59,6 +59,19 @@ TARGET_BRANCH_REQUIRED_MESSAGE: str = (
     "--repo <path> <branch>)."
 )
 
+#: F19 run kinds.  A scout is a read-only report run on the build route.
+SCOUT_RUN_KIND: str = "scout"
+BUILD_RUN_KIND: str = "build"
+
+
+def _resolve_run_kind(value: str | None) -> str:
+    cleaned = str(value or BUILD_RUN_KIND).strip().lower()
+    if cleaned not in (BUILD_RUN_KIND, SCOUT_RUN_KIND):
+        raise ValueError(
+            f"kind must be {BUILD_RUN_KIND!r} or {SCOUT_RUN_KIND!r}; got {value!r}"
+        )
+    return cleaned
+
 
 class RunCreationError(RuntimeError):
     """Fail-closed error raised before any worker/model execution."""
@@ -84,6 +97,9 @@ class RunRequest:
     gate_scratch_mode: GateScratchMode | str | None = None
     # Request-level run tuning (kept for compatibility; centralized here).
     routing_mode: str = "auto"
+    # F19: "build" (default) or "scout".  A scout run is read-only and ends
+    # with a report, never a candidate; roles are unchanged.
+    kind: str = "build"
     manual_tier: Tier | str | None = None
     max_auto_tier: Tier | str | None = None
     provider_override: str | None = None
@@ -319,29 +335,50 @@ def resolve_effective_run_config(request: RunRequest) -> RunConfig:
     if review_enabled is None:
         review_enabled = bool(request.review)
     try:
-        return resolve_run_config(
+        kind = _resolve_run_kind(request.kind)
+    except ValueError as exc:
+        raise RunCreationError(str(exc)) from exc
+    required_capabilities = tuple(request.required_capabilities)
+    if kind == SCOUT_RUN_KIND:
+        # A scout is read-only by construction, on the build route: the
+        # capability requirement is what makes admission pick a provider whose
+        # CLI can enforce it.  Gate, review and publication do not apply to a
+        # report, so they are frozen off instead of left to project policy.
+        required_capabilities = tuple(
+            sorted({*required_capabilities, Capability.READ_ONLY.value})
+        )
+    try:
+        config = resolve_run_config(
             task=task,
             repo_path=request.repo_path,
             routing_mode=request.routing_mode,
+            kind=kind,
             manual_tier=request.manual_tier,
             max_auto_tier=request.max_auto_tier,
             training_allowed=training_allowed,
             provider_override=request.provider_override,
             model_override=request.model_override,
             reserve_override=request.reserve_override,
-            required_capabilities=request.required_capabilities,
-            gate_enabled=snapshot.gate_enabled, review_disabled=snapshot.review_disabled,
+            required_capabilities=required_capabilities,
+            gate_enabled=snapshot.gate_enabled and kind != SCOUT_RUN_KIND,
+            review_disabled=snapshot.review_disabled or kind == SCOUT_RUN_KIND,
             workflow_mode=workflow_preset(snapshot, review_policy_mode.value),
             gate_command=gate,
-            max_attempts=request.max_attempts,
+            max_attempts=1 if kind == SCOUT_RUN_KIND else request.max_attempts,
             worker_timeout=request.worker_timeout,
             gate_timeout=request.gate_timeout,
-            review_enabled=review_enabled if not snapshot.review_disabled else False,
+            review_enabled=(
+                review_enabled
+                if not snapshot.review_disabled and kind != SCOUT_RUN_KIND
+                else False
+            ),
             review_timeout=request.review_timeout,
             review_mode=snapshot.review_mode or request.review_mode,
             review_limit=snapshot.review_limit or request.review_limit,
             review_policy_mode=review_policy_mode,
-            publish_candidate=request.publish_candidate,
+            publish_candidate=(
+                False if kind == SCOUT_RUN_KIND else request.publish_candidate
+            ),
             tool_refs=request.tool_refs,
             tier=request.tier,
             effort=request.effort,
@@ -350,6 +387,7 @@ def resolve_effective_run_config(request: RunRequest) -> RunConfig:
         )
     except ValueError as exc:
         raise RunCreationError(str(exc)) from exc
+    return config
 
 
 def effective_policy_summary(repo_path: Path | str) -> dict[str, object]:

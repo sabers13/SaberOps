@@ -98,6 +98,7 @@ MUTATING_TOOLS: frozenset[str] = frozenset(
     {
         "submit_job",
         "submit_plan",
+        "promote_scout",
         "refresh_candidate",
         "cancel_job",
         "note_job",
@@ -128,6 +129,7 @@ TOOL_NAMES: tuple[str, ...] = (
     "preflight",
     "submit_job",
     "submit_plan",
+    "promote_scout",
     "refresh_candidate",
     "get_job",
     "catch_up",
@@ -399,6 +401,7 @@ def _submit_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[st
             base_ref=str(arguments.get("base_ref") or "HEAD"),
             requirements=requirements,
             priority=Priority(str(arguments.get("priority") or Priority.NORMAL.value)),
+            kind=str(arguments.get("kind") or "BUILD"),
             deadline=arguments.get("deadline"),
             not_before=arguments.get("not_before"),
             depends_on=arguments.get("depends_on"),
@@ -510,6 +513,13 @@ def _job_guidance(job: Any) -> str | None:
     if job.failure_reason == "NO_ROUTE_FOR_REQUIREMENTS":
         if job.requirements.role.value != "BUILD":
             return "Only BUILD jobs dispatch; set requirements.role to BUILD."
+        kind = getattr(job, "kind", None)
+        if getattr(kind, "value", kind) == "SCOUT":
+            return (
+                "No build route offers enforced read-only execution, which a scout "
+                "requires. Add a provider whose CLI enforces it (Codex today) to the "
+                "build route with `orch routing add build <provider/model>`."
+            )
         include = tuple(getattr(job.requirements, "model_family_include", ()) or ())
         if include:
             from saberops.mcp.guide import FAMILY_TOKEN_GUIDANCE
@@ -557,13 +567,20 @@ def _job_result(db: Any, job: Any) -> dict[str, Any]:
     from saberops.accept import AcceptEngine
     from saberops.candidate_lifecycle import project_candidate_state
     from saberops.jobs.service import job_usage_view
+    from saberops.scout import latest_report
 
+    report: dict[str, Any] | None = None
+    try:
+        report = latest_report(db, job.job_id)
+    except Exception:  # noqa: BLE001 - a report read never breaks a result view
+        report = None
     result: dict[str, Any] = {
         "run_id": None,
         "candidate_sha": None,
         "diff": None,
         "owner_action": None,
         "worker": _chosen_worker(db, job),
+        "report": report,
         "usage": job_usage_view(db, job),
     }
     for run_id in reversed(job.run_ids):
@@ -604,6 +621,53 @@ def _get_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, 
         "usage": result["usage"],
         "guidance": _job_guidance(job),
     }
+
+
+def _promote_scout(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    """Start a build job carrying a scout report as its starting context (F19)."""
+    from saberops.jobs.service import (
+        IdempotencyConflictError,
+        JobNotFoundError,
+        promote_scout,
+    )
+
+    scout_job_id = _require_text(arguments, "job_id", what="job_id")
+    db = context.database(read_only=False)
+    try:
+        result = promote_scout(
+            db,
+            scout_job_id=scout_job_id,
+            goal=arguments.get("goal"),
+            acceptance=(
+                "\n".join(arguments["acceptance"])
+                if isinstance(arguments.get("acceptance"), list)
+                else arguments.get("acceptance")
+            ),
+            base_ref=str(arguments.get("base_ref") or "HEAD"),
+            idempotency_key=arguments.get("idempotency_key"),
+            caller_id=str(arguments.get("caller_id") or "orchestrator"),
+        )
+    except JobNotFoundError as exc:
+        raise NotFoundError(str(exc), data={"job_id": scout_job_id}) from exc
+    except IdempotencyConflictError as exc:
+        raise ToolError(f"idempotency conflict: {exc}") from exc
+    except ValueError as exc:
+        raise InvalidParamsError(f"cannot promote scout: {exc}") from exc
+    payload = {
+        "v": SNAPSHOT_SCHEMA_VERSION,
+        "result": _job_result(db, result.job),
+        "guidance": _job_guidance(result.job),
+        "job_id": result.job.job_id,
+        "state": result.job.state.value,
+        "created": result.created,
+        "job": result.job.to_dict(),
+    }
+    context.ledger.append(
+        "scout_promoted",
+        {"scout_job_id": scout_job_id, "job_id": result.job.job_id},
+        key=f"scout-promoted:{scout_job_id}:{result.job.job_id}",
+    )
+    return payload
 
 
 def _tail_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
@@ -882,6 +946,20 @@ def _catch_up_next_action(
             "detail": f"Candidate {projection.candidate_sha[:8]} is already accepted.",
             "command": None,
         }
+    report = result.get("report")
+    if isinstance(report, dict) and report.get("report_path"):
+        return {
+            "action": "read_scout_report",
+            "owner_only": False,
+            "detail": (
+                f"The scout report is at {report['report_path']} "
+                f"({report.get('summary') or 'no summary'}). Promote it into a build "
+                "job when the owner wants the work done."
+            ),
+            "command": f"orch promote-scout {job.job_id}",
+            "report_path": report["report_path"],
+            "promote_command": f"orch promote-scout {job.job_id}",
+        }
     if result.get("owner_action"):
         short = str(result.get("candidate_sha") or "")[:8]
         return {
@@ -1046,6 +1124,7 @@ def _catch_up(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str,
         "open_questions": questions,
         "steering_notes": _catch_up_steering_notes(db, job),
         "failure": failure,
+        "report": result.get("report"),
         "next_action": _catch_up_next_action(job, view, result, projection, questions),
         "usage": result["usage"],
         "result": result,
@@ -1521,6 +1600,7 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
                 "acceptance": {"type": ["string", "array"], "items": {"type": "string"}},
                 "base_ref": {"type": "string", "minLength": 1},
                 "priority": {"type": "string", "enum": _PRIORITIES},
+                "kind": {"type": "string", "enum": ["BUILD", "SCOUT"]},
                 "deadline": {"type": "string"},
                 "not_before": {"type": "string"},
                 "depends_on": {"type": "array", "items": {"type": "string", "minLength": 1}},
@@ -1565,6 +1645,24 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
             required=("repo", "plan_path"),
         ),
         _submit_plan,
+        mutating=True,
+    )
+    register(
+        "promote_scout",
+        "Start a build job whose starting context is a completed scout's report; "
+        "records the lineage on both jobs.",
+        _schema(
+            {
+                "job_id": {"type": "string", "minLength": 1},
+                "goal": {"type": "string"},
+                "acceptance": {"type": ["string", "array"], "items": {"type": "string"}},
+                "base_ref": {"type": "string", "minLength": 1},
+                "idempotency_key": {"type": "string"},
+                "caller_id": {"type": "string"},
+            },
+            required=("job_id",),
+        ),
+        _promote_scout,
         mutating=True,
     )
     register(

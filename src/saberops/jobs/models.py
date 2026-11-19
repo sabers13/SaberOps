@@ -64,6 +64,32 @@ def coerce_job_role(value: JobRole | str) -> JobRole:
 
 DISPATCHABLE_ROLES: frozenset[JobRole] = frozenset({JobRole.BUILD})
 
+
+class JobKind(StrEnum):
+    """What a job delivers (F19).  Roles stay PLAN / BUILD / CHECK.
+
+    * ``BUILD`` — the ordinary job: a checked, reviewable candidate the owner
+      can accept.
+    * ``SCOUT`` — a read-only investigation whose deliverable is a markdown
+      report, never a commit.  A scout is a *kind* of BUILD job (same role,
+      same route, same admission), not a fourth role.
+    """
+
+    BUILD = "BUILD"
+    SCOUT = "SCOUT"
+
+
+def coerce_job_kind(value: JobKind | str) -> JobKind:
+    """Return the canonical :class:`JobKind` for ``value``."""
+    if isinstance(value, JobKind):
+        return value
+    try:
+        return JobKind(str(value).strip().upper())
+    except ValueError as exc:
+        known = ", ".join(k.value for k in JobKind)
+        raise ValueError(f"kind must be one of {known}; got {value!r}") from exc
+
+
 SIZE_HINTS: tuple[str, ...] = tuple(b.value for b in SizeBucket)
 
 
@@ -176,6 +202,27 @@ def _coerce_priority(value: Priority | str) -> Priority:
     except ValueError as exc:
         known = ", ".join(p.value for p in Priority)
         raise ValueError(f"priority must be one of {known}; got {value!r}") from exc
+
+
+def read_only_requirements(requirements: JobRequirements) -> JobRequirements:
+    """Return ``requirements`` with the read-only capability enforced.
+
+    A scout's read-only nature is a property of the job kind, so callers cannot
+    submit a writing scout by omitting the flag.  The role stays BUILD: a
+    scout is a kind on the build route, never a second role.
+    """
+    from dataclasses import replace
+
+    from saberops.control_plane.capabilities import Capability
+
+    if requirements.role is not JobRole.BUILD:
+        raise ValueError(
+            "a scout job uses the BUILD role; scout is a job kind, not a role"
+        )
+    capabilities = tuple(
+        sorted({*requirements.required_capabilities, Capability.READ_ONLY.value})
+    )
+    return replace(requirements, read_only=True, required_capabilities=capabilities)
 
 
 def _clean_family_list(values: tuple[str, ...] | list[str], *, field: str) -> tuple[str, ...]:
@@ -346,6 +393,10 @@ class Job:
 
     ``RunRequest`` has no field for it today, so the dispatch spec
     carries both and M2-4b honours them at dispatch.
+
+    ``kind`` is the F19 job kind (BUILD or SCOUT).  A scout is the same BUILD
+    role with an enforced read-only requirement and a report instead of a
+    candidate; it is never a fourth role.
     """
 
     job_id: str
@@ -358,6 +409,7 @@ class Job:
     acceptance: str | None
     requirements: JobRequirements
     priority: Priority = Priority.NORMAL
+    kind: JobKind = JobKind.BUILD
     deadline: str | None = None
     not_before: str | None = None
     depends_on: tuple[str, ...] = ()
@@ -378,6 +430,14 @@ class Job:
     def __post_init__(self) -> None:
         priority = _coerce_priority(self.priority)
         object.__setattr__(self, "priority", priority)
+        kind = coerce_job_kind(self.kind)
+        object.__setattr__(self, "kind", kind)
+        if kind is JobKind.SCOUT:
+            # A scout can never write, whatever the caller asked for: the
+            # read-only requirement is part of the job, not a preference.
+            object.__setattr__(
+                self, "requirements", read_only_requirements(self.requirements)
+            )
         if isinstance(self.state, JobState):
             state = self.state
         else:
@@ -432,6 +492,7 @@ class Job:
             "acceptance": self.acceptance,
             "requirements": self.requirements.to_dict(),
             "priority": self.priority.value,
+            "kind": self.kind.value,
             "deadline": self.deadline,
             "not_before": self.not_before,
             "depends_on": list(self.depends_on),
@@ -465,6 +526,7 @@ class Job:
             acceptance=data.get("acceptance"),
             requirements=JobRequirements.from_dict(dict(data["requirements"])),
             priority=_coerce_priority(str(data.get("priority", Priority.NORMAL.value))),
+            kind=coerce_job_kind(str(data.get("kind", JobKind.BUILD.value))),
             deadline=data.get("deadline"),
             not_before=data.get("not_before"),
             depends_on=tuple(data.get("depends_on", ())),
@@ -486,6 +548,8 @@ class Job:
 
 __all__ = [
     "LEGACY_ROLE_ALIASES",
+    "coerce_job_kind",
+    "read_only_requirements",
     "coerce_job_role",
     "DISPATCHABLE_ROLES",
     "FAILURE_REASONS",
@@ -499,6 +563,7 @@ __all__ = [
     "DependencyBlocker",
     "Effort",
     "Job",
+    "JobKind",
     "JobRequirements",
     "JobRole",
     "JobState",

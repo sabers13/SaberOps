@@ -161,10 +161,16 @@ CLI (`orch mode set`) or the Questions page.
    - `acceptance`: checks a reviewer can verify ("pytest tests/test_webhook.py passes",
      "retries 3 times with backoff", "no change to the public API"),
    - `idempotency_key`: a stable key, so a retry never submits twice.
-   Optional `base_ref`, `priority`, `deadline`, `not_before`, `depends_on`, and
-   `caller_id` select the base, scheduling, dependency and caller. A dependant
-   starts only after every job it names in `depends_on` has been accepted by the
-   owner; a dependency that fails or is cancelled parks the dependant for good.
+   Optional `base_ref`, `priority`, `kind`, `deadline`, `not_before`,
+   `depends_on`, and
+   `caller_id` select the base, scheduling, job kind, dependency and caller. A
+   dependant starts only after every job it names in `depends_on` has been
+   accepted by the owner; a dependency that fails or is cancelled parks the
+   dependant for good. A completed scout dependency satisfies its dependants.
+   `kind` is `BUILD` (default) or `SCOUT`: a scout investigates read-only and
+   returns a Markdown report instead of a change, with no gate, independent
+   review or owner acceptance; promote its report into a build job with
+   `promote_scout`.
    `acceptance` is a string or list of strings.
    `requirements` may include `role`, `effort`, `size_hint`, `required_capabilities`,
    `read_only`, `model_family_include`, and `model_family_exclude`. The role
@@ -208,6 +214,12 @@ CLI (`orch mode set`) or the Questions page.
 - Call `wait_job` after each submission; it returns on a final outcome, blocking
   question, or timeout. Call again after a timeout if needed.
 - `get_job` / `list_jobs` to inspect jobs.
+- A scout (`kind: SCOUT`) finishes with a report, not a candidate. `get_job`,
+  `wait_job` and `catch_up` show its `report` block: the report path, a short
+  summary, its findings and any open owner decisions (which also become owner
+  questions). Do not expect `orch accept` for a scout; when the owner wants the
+  work done, call `promote_scout` with the scout's job id to start a build job
+  whose starting context is that report.
 - `tail_job` to read a running job's progress and terminal output without
   waiting: pass the `next_sequence` it returned last time to get only what is
   new. It is read-only, so it also works in a session that is not the planner.

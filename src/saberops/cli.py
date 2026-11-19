@@ -1256,6 +1256,28 @@ def build_parser() -> argparse.ArgumentParser:
     cancel_parser.add_argument("run_id", type=str)
     cancel_parser.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
 
+    # orch promote-scout <job-id>
+    promote_scout_parser = subparsers.add_parser(
+        "promote-scout",
+        help=(
+            "Start a build job whose starting context is a completed scout's "
+            "report; the lineage is recorded on both jobs."
+        ),
+    )
+    promote_scout_parser.add_argument("job_id", type=str, help="Scout job identifier.")
+    promote_scout_parser.add_argument(
+        "--goal", type=str, default=None, help="Build goal (defaults to the scout's goal)."
+    )
+    promote_scout_parser.add_argument(
+        "--acceptance", type=str, default=None, help="Acceptance text for the build job."
+    )
+    promote_scout_parser.add_argument(
+        "--base-ref", type=str, default="HEAD", help="Base ref resolved to a commit."
+    )
+    promote_scout_parser.add_argument("--idempotency-key", type=str, default=None)
+    promote_scout_parser.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
+    promote_scout_parser.add_argument("--json", action="store_true", help="JSON output")
+
     # orch events <run-id>
     events_parser = subparsers.add_parser(
         "events",
@@ -2068,6 +2090,16 @@ def build_parser() -> argparse.ArgumentParser:
         default="WORKER",
         choices=["PLAN", "BUILD", "CHECK"],
         help="Job role (only BUILD is dispatchable; repair runs on the build route).",
+    )
+    job_submit.add_argument(
+        "--kind",
+        type=str,
+        default="BUILD",
+        choices=["BUILD", "SCOUT"],
+        help=(
+            "Job kind: BUILD (default) delivers a candidate; SCOUT investigates "
+            "read-only and delivers a report with no gate, review or acceptance."
+        ),
     )
     job_submit.add_argument(
         "--effort", type=str, default=None, choices=["low", "medium", "high"]
@@ -6143,6 +6175,7 @@ def handle_job_submit(args: argparse.Namespace) -> int:
             base_ref=str(args.base_ref),
             requirements=requirements,
             priority=_Priority(str(args.priority)),
+            kind=str(args.kind),
             deadline=args.deadline,
             not_before=args.not_before,
             depends_on=tuple(args.depends_on or ()),
@@ -6197,7 +6230,24 @@ def handle_job_get(args: argparse.Namespace) -> int:
         )
         return 0
     print(f"Job        : {job.job_id}")
+    print(f"Kind       : {job.kind.value}")
     print(f"State      : {job.state.value}")
+    if job.kind.value == "SCOUT":
+        from saberops.scout import latest_report as _report
+
+        report = _report(db, job.job_id)
+        if report:
+            print(f"Report     : {report.get('report_path')}")
+            if report.get("summary"):
+                print(f"Summary    : {report['summary']}")
+            for finding in report.get("findings") or ():
+                print(f"Finding    : {finding}")
+            for decision in report.get("decisions") or ():
+                print(f"Decision   : {decision}")
+            for violation in report.get("violations") or ():
+                print(f"Violation  : {violation}")
+        else:
+            print("Report     : (not written yet)")
     print(f"Goal       : {job.goal}")
     print(f"Repo       : {job.repo} @ {job.base_ref} ({job.base_sha})")
     if job.waiting_reason is not None:
@@ -6211,6 +6261,44 @@ def handle_job_get(args: argparse.Namespace) -> int:
             else "pending"
         )
         print(f"Note {note.note_id}  : [{status}] {note.body}")
+    return 0
+
+
+def handle_promote_scout(args: argparse.Namespace) -> int:
+    """Handle `orch promote-scout` (start a build job from a scout report)."""
+    from saberops.db import Database as _Database
+    from saberops.jobs.service import (
+        IdempotencyConflictError as _IdempotencyConflict,
+    )
+    from saberops.jobs.service import JobNotFoundError as _NotFound
+    from saberops.jobs.service import promote_scout as _promote
+
+    try:
+        result = _promote(
+            _Database(args.db),
+            scout_job_id=str(args.job_id),
+            goal=args.goal,
+            acceptance=args.acceptance,
+            base_ref=str(args.base_ref),
+            idempotency_key=args.idempotency_key,
+        )
+    except _NotFound:
+        print(f"Error: unknown job: {args.job_id}", file=sys.stderr)
+        return 1
+    except _IdempotencyConflict as exc:
+        print(f"[!] Idempotency conflict: {exc}", file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        print(f"[!] Cannot promote scout: {exc}", file=sys.stderr)
+        return 2
+    payload = {"job": _job_payload(result.job), "created": result.created}
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"Job        : {result.job.job_id}")
+    print(f"State      : {result.job.state.value}")
+    print(f"Promoted   : {args.job_id}")
+    print(f"Created    : {'yes' if result.created else 'no (idempotent replay)'}")
     return 0
 
 
@@ -7296,6 +7384,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         return handle_connect(args)
     elif args.command == "retry":
         return handle_retry(args)
+    elif args.command == "promote-scout":
+        return handle_promote_scout(args)
     elif args.command == "refresh":
         return _handle_run_operation(args, "refresh")
     elif args.command == "continue":

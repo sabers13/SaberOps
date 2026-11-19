@@ -77,6 +77,9 @@ class RunConfig:
     task: str
     target_repo: str
     routing_mode: RoutingMode = "auto"
+    #: F19 job kind frozen at creation: ``"build"`` (a candidate) or
+    #: ``"scout"`` (a read-only report, no gate/review/acceptance).
+    kind: str = "build"
     manual_tier: Tier | None = None
     max_auto_tier: Tier = Tier.T3
     training_allowed: bool = True
@@ -307,6 +310,7 @@ def resolve_run_config(
     target_repo: Path | str | None = None,
     repo_path: Path | str | None = None,
     routing_mode: str = "auto",
+    kind: str = "build",
     manual_tier: Tier | str | None = None,
     max_auto_tier: Tier | str | None = None,
     training_allowed: bool = True,
@@ -349,6 +353,9 @@ def resolve_run_config(
         raise ValueError("target repository is required")
     raw_mode = routing_mode.lower().strip()
     raw_review_mode = review_mode.lower().strip()
+    raw_kind = str(kind).strip().lower()
+    if raw_kind not in ("build", "scout"):
+        raise ValueError(f"kind must be 'build' or 'scout'; got {kind!r}")
     if raw_review_mode not in _REVIEW_MODES:
         raise ValueError("review_mode must be 'bounded' or 'max'")
     if review_limit < 1:
@@ -397,6 +404,7 @@ def resolve_run_config(
         task=task_clean,
         target_repo=str(Path(target).resolve()),
         routing_mode=raw_mode,  # type: ignore[arg-type]
+        kind=raw_kind,
         manual_tier=manual if raw_mode == "manual" else None,
         max_auto_tier=ceiling,
         training_allowed=training_allowed,
@@ -460,6 +468,11 @@ def reconstruct_run_config(data: dict[str, Any]) -> RunConfig:
         task=str(data.get("task", "")).strip(),
         target_repo=str(data.get("target_repo", "")),
         routing_mode=raw_mode,  # type: ignore[arg-type]
+        kind=(
+            "scout"
+            if str(data.get("kind", "build")).strip().lower() == "scout"
+            else "build"
+        ),
         manual_tier=manual_tier if raw_mode == "manual" else None,
         max_auto_tier=max_auto_tier,
         training_allowed=bool(data.get("training_allowed", True)),
