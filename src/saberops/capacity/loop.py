@@ -1192,6 +1192,17 @@ def scheduler_tick(
     except Exception:
         logging.getLogger(__name__).exception("plan state rendering failed")
 
+    # 1e. Plan-level notices (P5).  Complete, stalled and (away/critical-only)
+    # waiting-for-owner notices are derived from the same projection as
+    # STATE.md and keyed once, so repeated ticks never repeat a notice.  They
+    # run before the F17 pause return because a notice starts no work.
+    try:
+        from saberops.plan_state import deliver_plan_notices
+
+        deliver_plan_notices(db, now=moment)
+    except Exception:
+        logging.getLogger(__name__).exception("plan notice delivery failed")
+
     # F17: a closed gate starts nothing.  Running workers were already stopped
     # and parked above; terminal reconciliation, capacity settlement and
     # notices keep running so the store stays truthful.  The tick keeps
@@ -1210,7 +1221,6 @@ def scheduler_tick(
             plan_lanes_submitted=plan_lanes_submitted,
         )
     maybe_send_digest(db, work_gate, now=moment)
-
 
     # 2. Collect scheduling inputs
     queued_jobs, _ = store.list_jobs_tolerant(db, state=JobState.QUEUED, limit=100_000)
@@ -1595,8 +1605,12 @@ def scheduler_tick(
         from saberops import away as away_module
 
         try:
+            from saberops.plan_state import plan_return_summaries
+
             away_module.deliver_return_summary(
-                away_module.build_return_summary(away_journal),
+                away_module.build_return_summary(
+                    away_journal, plans=plan_return_summaries(db, now=moment)
+                ),
                 _notification_ledger(db),
             )
         except Exception:

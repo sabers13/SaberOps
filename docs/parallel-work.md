@@ -35,10 +35,13 @@ advisor for the first worker, not a planner. Step 015 adds the plan-data
 layer beside it (`saberops.project.ProjectRegistry`,
 `saberops.project_scope.plan_store`, chained `schedule_chained_waves` and
 `build_plan_run_report` in `saberops.ready_frontier`, via
-`orch project list|register|active` and `orch plan show|validate`): versioned,
-tamper-evident plans with an explicit active revision, sequenced into waves
-and reported — still data, not dispatch. This is a single-run team
-executor, **not** a cross-project, continuously refilled scheduler.
+`orch project list|register|active` and `orch plan-store show|validate`):
+versioned, tamper-evident plans with an explicit active revision, sequenced into
+waves and reported. The plan-file layer (`orch plan-file ...`) now submits one
+ordinary job per ready lane from the scheduler tick (Phase 1 lanes P1-P3);
+routing, capacity, worktrees and owner acceptance stay where they are. This is
+a single-run team executor, **not** a cross-project, continuously refilled
+scheduler.
 
 **TARGET — not yet implemented.** A deterministic, continuously refilled
 **cross-phase ready frontier across 3 active projects x 5 executing child tasks**

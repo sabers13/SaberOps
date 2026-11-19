@@ -63,10 +63,13 @@ validation and owner approval path.
   readiness authority), deterministic chained wave sequencing
   (`schedule_chained_waves`) and structured run summaries
   (`build_plan_run_report`) in `saberops.ready_frontier`, surfaced read-only
-  via `orch project list|register|active` and `orch plan show|validate`
-  (store verbs live on the `plan-store` command group so legacy
-  `orch plan <run_id>` is byte-for-byte preserved). Still plan **data**,
-  not dispatch: no lease, no worker launch, no slot admission.
+  via `orch project list|register|active` and
+  `orch plan-store show|validate` (the store verbs live on the `plan-store`
+  command group so the legacy `orch plan <run_id>` verb is byte-for-byte
+  preserved). The plan-file layer (`orch plan-file ...`) adds `PLAN.md`
+  parsing and submits one ordinary job per ready lane from the scheduler tick
+  (Phase 1 lanes P1-P3), so plan files are dispatchable; routing, quota,
+  worktrees and acceptance stay with the existing scheduler and owner.
 
 **Target — not yet live.** A deterministic, owner-approved plan with stable
 project/task IDs and a **continuously refilled cross-phase ready frontier**;

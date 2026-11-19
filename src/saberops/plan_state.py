@@ -30,6 +30,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -65,7 +66,10 @@ __all__ = [
     "PlanState",
     "PlanStateError",
     "adopt_state_file",
+    "deliver_plan_notices",
     "find_plan",
+    "plan_notice_messages",
+    "plan_return_summaries",
     "plan_state_path",
     "project_plan_state",
     "render_active_plan_states",
@@ -178,6 +182,9 @@ class PlanState:
     held: tuple[str, ...]
     landing: tuple[str, ...]
     next_action: str
+    #: Why F1's effective permission currently refuses automatic starts, when
+    #: it does.  ``None`` means a ready lane may start on the next tick.
+    advance_refusal: str | None = None
 
     def lane(self, lane_id: str) -> LaneState | None:
         for lane in self.lanes:
@@ -203,6 +210,7 @@ class PlanState:
             "held": list(self.held),
             "landing": list(self.landing),
             "next_action": self.next_action,
+            "advance_refusal": self.advance_refusal,
         }
 
 
@@ -447,7 +455,12 @@ def _lane_state(
     )
 
 
-def _next_action(lanes: tuple[LaneState, ...], plan: PlanRecord) -> str:
+def _next_action(
+    lanes: tuple[LaneState, ...],
+    plan: PlanRecord,
+    *,
+    advance_refusal: str | None = None,
+) -> str:
     """One deterministic owner-facing sentence, derived only from the rows."""
     if plan.status != "ACTIVE":
         return f"Plan {plan.plan_id} is {plan.status.lower()}; nothing is dispatched."
@@ -499,11 +512,18 @@ def _next_action(lanes: tuple[LaneState, ...], plan: PlanRecord) -> str:
     moving = [
         item
         for item in ordered
-        if item.state in {"running", "needs-attention", "queued", "ready"}
+        if item.state in {"running", "needs-attention", "queued"}
     ]
     if moving:
         names = ", ".join(item.lane_id for item in moving)
         return f"No owner action; lanes {names} are running or queued."
+
+    waiting = [item for item in ordered if item.state == "ready"]
+    if waiting:
+        names = ", ".join(item.lane_id for item in waiting)
+        if advance_refusal:
+            return f"Lanes {names} are ready but held: {advance_refusal}."
+        return f"Lanes {names} are ready and start on the next scheduler tick."
 
     return "Nothing to accept; every lane is accepted, done or removed."
 
@@ -542,6 +562,7 @@ def project_plan_state(
         lane.lane_id for lane in _in_landing_order(lanes) if lane.state in _CANDIDATE_STATES
     )
     generated = (now or datetime.now(UTC)).astimezone(UTC).isoformat()
+    advance_refusal = _advance_refusal(plan, db)
     base = PlanState(
         plan_id=plan.plan_id,
         project_id=plan.project_id,
@@ -558,9 +579,40 @@ def project_plan_state(
         ready=ready,
         held=held,
         landing=landing,
-        next_action=_next_action(tuple(lanes), plan),
+        next_action=_next_action(
+            tuple(lanes), plan, advance_refusal=advance_refusal
+        ),
+        advance_refusal=advance_refusal,
     )
     return replace(base, digest=_projection_digest(base))
+
+
+def _advance_refusal(plan: PlanRecord, db: Any) -> str | None:
+    """One visible reason a ready lane is not starting right now.
+
+    The same two gates the reconciler consults, in the same order: F17's work
+    gate (a closed gate starts nothing in any mode) and F1's typed owner-mode
+    decision.  Read-only, so the file and the reconciler cannot disagree.
+    """
+    if not plan.auto_advance:
+        return "auto-advance is off for this plan"
+    try:
+        from saberops.runtime_gate import evaluate_gate
+
+        gate = evaluate_gate(db=db)
+    except Exception:  # a gate that cannot be read is not permission
+        gate = None
+    if gate is not None and gate.closed:
+        return f"work is paused ({gate.label or gate.reason or 'paused'})"
+    try:
+        from saberops.owner_mode import ModeAction, decide_owner_action
+
+        decision = decide_owner_action(ModeAction.DISPATCH)
+    except Exception as exc:  # a corrupt document must never read as permission
+        return f"owner mode is unreadable ({type(exc).__name__})"
+    if decision.allowed:
+        return None
+    return decision.reason
 
 
 def _in_landing_order(lanes: list[LaneState]) -> list[LaneState]:
@@ -615,8 +667,9 @@ def render_plan_state_markdown(state: PlanState) -> str:
             f"`{state.base_ref}` @ {target}"
         ),
         (
-            f"Auto-advance: {'on' if state.auto_advance else 'off'} - "
-            f"Auto-refresh: {'on' if state.auto_refresh else 'off'}"
+            f"Auto-advance: {'on' if state.auto_advance else 'off'}"
+            + (f" - blocked: {state.advance_refusal}" if state.advance_refusal else "")
+            + f" - Auto-refresh: {'on' if state.auto_refresh else 'off'}"
         ),
         "",
         "| Lane | Wave | Status | Needs | Worker | Branch | Commit | Evidence |",
@@ -768,6 +821,196 @@ def render_active_plan_states(
                 "plan state render failed for plan %s", plan.plan_id
             )
     return tuple(written)
+
+
+# ---------------------------------------------------------------------------
+# Plan-level notices and the return-summary section (P5)
+# ---------------------------------------------------------------------------
+
+#: A lane in one of these states needs nothing more from anybody.
+_TERMINAL_LANE_STATES = frozenset(
+    {"accepted", "done", "cancelled", "superseded", "removed"}
+)
+
+#: A lane in one of these states can still move on its own.
+_MOVING_LANE_STATES = frozenset({"ready", "queued", "running"})
+
+#: A lane in one of these states is stalled and needs the owner's decision.
+_STALL_LANE_STATES = frozenset({"failed", "needs-attention"})
+
+
+def _active_plans_readonly(db: Any) -> tuple[PlanRecord, ...]:
+    """List active plans without creating tables on a read-only connection.
+
+    ``catch_up`` opens the owner database read-only.  ``list_active_plans``
+    first ensures the plan tables exist, which is a write on a store that has
+    never activated a plan.  No table means no plan, so an empty list is the
+    truthful answer instead of an error.
+    """
+    try:
+        return list_active_plans(db)
+    except sqlite3.Error:
+        return ()
+
+
+def plan_notice_messages(
+    state: PlanState, *, mode: Any = None
+) -> tuple[tuple[str, str, str], ...]:
+    """Plan-level notices derived only from one projection (P5).
+
+    Three families, each keyed once so repeated ticks never repeat a notice:
+
+    * ``plan:<id>:complete`` -- every lane is accepted, done or removed.
+    * ``plan:<id>:stalled:<lane>`` -- a lane failed or needs attention; the
+      body names the exact next owner action.
+    * ``plan:<id>:needs-decision:<lane>`` -- in ``away`` or ``critical-only``
+      the plan has no moving lane left and a candidate (or owner lane) waits
+      for the owner.  This is why an away plan never looks silently stalled:
+      v1 has no auto-accept, so the first candidate is the stopping point.
+
+    No notice is emitted when a lane starts; per-lane terminal notices already
+    come from the job notifier.
+    """
+    messages: list[tuple[str, str, str]] = []
+    plan_id = state.plan_id
+    if state.lanes and all(lane.state in _TERMINAL_LANE_STATES for lane in state.lanes):
+        messages.append(
+            (
+                f"plan:{plan_id}:complete",
+                f"SaberOps plan complete: {plan_id}",
+                state.next_action,
+            )
+        )
+        return tuple(messages)
+
+    stalled = False
+    for lane in _in_landing_order(list(state.lanes)):
+        if lane.state not in _STALL_LANE_STATES:
+            continue
+        stalled = True
+        detail = lane.failure_reason or lane.state
+        messages.append(
+            (
+                f"plan:{plan_id}:stalled:{lane.lane_id}",
+                f"SaberOps plan stalled: {plan_id}",
+                f"Lane {lane.lane_id} is {lane.state} ({detail}). {state.next_action}",
+            )
+        )
+
+    if stalled:
+        return tuple(messages)
+    if mode not in {"away", "critical-only"}:
+        return tuple(messages)
+    if any(lane.state in _MOVING_LANE_STATES for lane in state.lanes):
+        return tuple(messages)
+
+    ordered = _in_landing_order(list(state.lanes))
+    waiting = next((lane for lane in ordered if lane.state in _CANDIDATE_STATES), None)
+    if waiting is None:
+        waiting = next((lane for lane in ordered if lane.state == "owner"), None)
+    if waiting is not None:
+        messages.append(
+            (
+                f"plan:{plan_id}:needs-decision:{waiting.lane_id}",
+                f"SaberOps plan waits for you: {plan_id}",
+                f"Lane {waiting.lane_id} cannot move without the owner. "
+                f"{state.next_action}",
+            )
+        )
+    return tuple(messages)
+
+
+def deliver_plan_notices(
+    db: Any, *, now: datetime | None = None, mode: Any = None
+) -> tuple[str, ...]:
+    """Send every plan notice once; called from the scheduler tick.
+
+    Reads only durable records and never fails the tick: an unreadable plan or
+    a missing desktop notifier leaves unrelated work untouched.  Returns the
+    keys that were attempted, for tests and logs.
+    """
+    from saberops.notifications import notify_once
+
+    if mode is None:
+        try:
+            from saberops.owner_mode import load_effective_owner_mode
+
+            mode = load_effective_owner_mode(now=now)
+        except Exception:  # a corrupt mode document is "ask-me", never "away"
+            mode = "ask-me"
+    owner_db = getattr(db, "owner_db", db)
+    ledger = Path(owner_db.db_path).with_name(
+        Path(owner_db.db_path).name + ".notifications.sqlite3"
+    )
+    attempted: list[str] = []
+    for plan in _active_plans_readonly(db):
+        try:
+            state = project_plan_state(db, plan, now=now)
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "plan notice projection failed for plan %s", plan.plan_id
+            )
+            continue
+        for key, title, body in plan_notice_messages(state, mode=mode):
+            try:
+                notify_once(ledger, key, title, body)
+            except Exception:  # pragma: no cover - a notice never breaks the tick
+                logging.getLogger(__name__).exception(
+                    "plan notice failed for %s", plan.plan_id
+                )
+                continue
+            attempted.append(key)
+    return tuple(attempted)
+
+
+def plan_return_summaries(
+    db: Any, *, now: datetime | None = None
+) -> tuple[dict[str, Any], ...]:
+    """The plan section of M3's return summary, from the live records.
+
+    One entry per active plan with the lane groups the owner reads after being
+    away: accepted, running, parked (stalled) and waiting on the owner, plus
+    the same next action ``STATE.md`` shows.
+    """
+    summaries: list[dict[str, Any]] = []
+    for plan in _active_plans_readonly(db):
+        try:
+            state = project_plan_state(db, plan, now=now)
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "plan return summary failed for plan %s", plan.plan_id
+            )
+            continue
+        summaries.append(
+            {
+                "plan_id": state.plan_id,
+                "revision": state.revision,
+                "auto_advance": state.auto_advance,
+                "advance_refusal": state.advance_refusal,
+                "accepted": [
+                    lane.lane_id
+                    for lane in state.lanes
+                    if lane.state in {"accepted", "done"}
+                ],
+                "running": [
+                    lane.lane_id
+                    for lane in state.lanes
+                    if lane.state in _MOVING_LANE_STATES
+                ],
+                "parked": [
+                    lane.lane_id
+                    for lane in state.lanes
+                    if lane.state in _STALL_LANE_STATES
+                ],
+                "waiting_for_owner": [
+                    lane.lane_id
+                    for lane in state.lanes
+                    if lane.state in _CANDIDATE_STATES or lane.state == "owner"
+                ],
+                "next_action": state.next_action,
+            }
+        )
+    return tuple(summaries)
 
 
 def _ensure_excluded(repo: Path, entry: str) -> None:

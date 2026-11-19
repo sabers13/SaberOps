@@ -30,6 +30,13 @@ Two owner decisions shape this lane:
    the MCP planning lease.  The scheduler lease alone is not a planning
    session.  When F17 lands it will extend that pause to every other kind of
    work; this lane only guarantees plan lanes.
+3. **Auto-advance asks the typed owner decision (F1).**  The same
+   :func:`saberops.owner_mode.decide_owner_action` every other decision point
+   calls answers whether a lane may start.  A mode can only narrow the
+   authority preset; an unreadable mode or authority document refuses the
+   start.  This is a *start* capability only: acceptance stays owner-only
+   until F15, so an away plan parks at the first candidate with that reason
+   visible in ``STATE.md``.
 
 No model, provider or network call is made here.  The only side effects are
 owner-database rows, the immutable plan revision, and ordinary jobs.
@@ -129,6 +136,10 @@ LANE_SUBMIT_GATE: Callable[[Any], str | None] | None = None
 #: Reason recorded when the reconciler runs without a planning session.
 NO_PLANNING_SESSION = "no_planning_session"
 PLANNING_GATE_ERROR = "planning_gate_error"
+#: Reason recorded when the plan record itself disables automatic advance.
+AUTO_ADVANCE_OFF = "auto_advance_off"
+#: Prefix for a refusal from F1's effective-permission function.
+MODE_RESTRICTED = "mode_restricted"
 
 _PRIORITIES = {item.value for item in Priority}
 _EFFORTS = {item.value for item in Effort}
@@ -442,7 +453,32 @@ def planning_session_active() -> bool:
         return False
 
 
-def _submission_refusal(db: Any, *, owner_initiated: bool) -> str | None:
+def _dispatch_permission() -> str | None:
+    """Return a refusal reason when F1's effective permission forbids a start.
+
+    Plan auto-advance is a start capability, so it asks the same typed owner
+    decision every other decision point asks (F1/ADR-0020).  `ask-me` leaves
+    the authority preset's ``auto_start`` intact: starting an already-activated
+    lane is not an owner judgment, while acceptance stays owner-only.  A
+    narrower authority preset (`ask_before_actions`) refuses it here, and a
+    mode can only narrow the preset, never widen it.  An unreadable authority
+    or mode document fails closed.
+    """
+    try:
+        from saberops.owner_mode import ModeAction, decide_owner_action
+
+        decision = decide_owner_action(ModeAction.DISPATCH)
+    except Exception as exc:  # a corrupt document must never become permission
+        logging.getLogger(__name__).exception("owner-mode decision failed")
+        return f"{MODE_RESTRICTED}: owner mode is unreadable ({type(exc).__name__})"
+    if decision.allowed:
+        return None
+    return f"{MODE_RESTRICTED}: {decision.reason}"
+
+
+def _submission_refusal(
+    db: Any, *, plan: PlanRecord, owner_initiated: bool
+) -> str | None:
     gate = LANE_SUBMIT_GATE
     if gate is not None:
         try:
@@ -454,6 +490,11 @@ def _submission_refusal(db: Any, *, owner_initiated: bool) -> str | None:
             return str(reason)
     if owner_initiated:
         return None
+    if not plan.auto_advance:
+        return AUTO_ADVANCE_OFF
+    refusal = _dispatch_permission()
+    if refusal is not None:
+        return refusal
     if not planning_session_active():
         return NO_PLANNING_SESSION
     return None
@@ -1104,7 +1145,9 @@ def submit_lane_job(
     """
     if task.run == "owner":
         return LaneSubmitResult(lane_id=task.task_id, refused="owner_lane")
-    refusal = _submission_refusal(db, owner_initiated=owner_initiated)
+    refusal = _submission_refusal(
+        db, plan=plan, owner_initiated=owner_initiated
+    )
     if refusal is not None:
         return LaneSubmitResult(lane_id=task.task_id, refused=refusal)
 

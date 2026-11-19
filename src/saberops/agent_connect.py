@@ -385,7 +385,10 @@ def skill_document() -> str:
         "   report owner-only items (billing, sign-in, routes, check command) and wait.\n"
         "3. **Submit one job per independent task.** Call `submit_job` once per task\n"
         "   with `repo`, `goal`, testable `acceptance`, and a stable\n"
-        "   `idempotency_key`. Never send a provider, model or route.\n"
+        "   `idempotency_key`. When the owner works from a tracked `PLAN.md`, call\n"
+        "   `submit_plan` with the repo and path instead: each ready lane becomes one\n"
+        "   ordinary job, and dependent lanes start after their dependency is\n"
+        "   accepted. Never send a provider, model or route.\n"
         "4. **Wait.** Call `wait_job` after each submission. It returns on a final\n"
         "   outcome, a blocking question, or the timeout; call it again after a\n"
         "   timeout. Use `get_job`, `list_jobs` and `read_evidence` to explain what\n"
@@ -399,6 +402,9 @@ def skill_document() -> str:
         "   `catch_up` with its `job_id`. It is read-only, works from a session that\n"
         "   is not the planning owner, and returns the original request, candidate,\n"
         "   latest check and review, any open question and the next allowed action.\n"
+        "   For a plan, pass its plan id (or call `plan_status` with the repo) to\n"
+        "   get the lane table and the one next action, so a fresh CLI can take over\n"
+        "   without the planner that submitted it.\n"
         "7. **Turn off.** Call `saberops_off` when the owner asks to stop.\n\n"
         "## Full guide\n\n" + GUIDE
     )

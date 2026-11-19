@@ -646,6 +646,7 @@ class ReturnSummary:
     halts: tuple[dict[str, Any], ...]
     plan_impact: dict[str, Any] | None
     preflight: dict[str, Any] | None
+    plans: tuple[dict[str, Any], ...] = ()
 
     @property
     def has_items(self) -> bool:
@@ -657,6 +658,10 @@ class ReturnSummary:
             or self.audit_entries
             or self.stall_alarms
             or self.halts
+            or any(
+                plan.get("waiting_for_owner") or plan.get("parked")
+                for plan in self.plans
+            )
         )
 
     def one_line(self) -> str:
@@ -667,6 +672,11 @@ class ReturnSummary:
             f"{len(self.escalations)} escalated",
             f"{len(self.audit_entries)} audited",
         ]
+        waiting = sum(
+            len(plan.get("waiting_for_owner") or ()) for plan in self.plans
+        )
+        if waiting:
+            parts.append(f"{waiting} plan lane(s) waiting on you")
         if self.halts:
             parts.append("CIRCUIT BREAKER HALTED: 3 consecutive failures")
         return "; ".join(parts)
@@ -688,11 +698,21 @@ class ReturnSummary:
             "halts": list(self.halts),
             "plan_impact": self.plan_impact,
             "preflight": self.preflight,
+            "plans": list(self.plans),
         }
 
 
-def build_return_summary(journal: AwayJournal | None = None) -> ReturnSummary:
-    """Assemble the return summary from the durable journal only."""
+def build_return_summary(
+    journal: AwayJournal | None = None,
+    *,
+    plans: Sequence[dict[str, Any]] = (),
+) -> ReturnSummary:
+    """Assemble the return summary from the durable journal only.
+
+    ``plans`` is the read-only plan section of the same summary (the projection
+    behind ``STATE.md``): a plan is not a journal decision, but it is durable
+    engine state a fresh session must be able to read after the planner closed.
+    """
     resolved = journal if journal is not None else AwayJournal()
     records = resolved.records()
     standing: list[dict[str, Any]] = []
@@ -746,6 +766,7 @@ def build_return_summary(journal: AwayJournal | None = None) -> ReturnSummary:
         halts=tuple(halts),
         plan_impact=plan_impact,
         preflight=preflight,
+        plans=tuple(dict(plan) for plan in plans),
     )
 
 

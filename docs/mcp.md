@@ -118,8 +118,15 @@ returns as needs-attention; cancel or resubmit it.
 size-capped; the bytes are never sent over the wire) and submits one ordinary
 job per lane whose dependencies are already accepted. Independent lanes run in
 parallel; a `run: "owner"` lane is never dispatched and waits for the owner's
-`orch plan-file done`. Lanes submit only while a live planning session holds
-the planning lease, so closing the planning CLI pauses them.
+`orch plan-file done`. A ready lane starts only while a live planning session
+holds the planning lease **and** the typed owner-mode decision
+(`owner_mode.decide_owner_action(DISPATCH)`) allows a start; a mode can only
+narrow the authority preset, never widen it. Ask-me still allows a start (it is
+not an owner judgment); `ask_before_actions` refuses it with the reason shown in
+`STATE.md`. Closing the planning CLI pauses lane submission. V1 has no
+auto-accept, so `away` keeps starting unblocked lanes and then parks at the
+first candidate; the next owner action names that accept instead of looking
+stalled.
 
 ### Scout jobs (F19)
 
@@ -158,11 +165,21 @@ original request, the current candidate commit, the latest gate check and
 review **with the commit each assessed**, any open question, the preserved work
 location on failure, C5's `result` projection (including the exact
 `orch accept RUN_ID` when eligible), the durable away-mode `return_summary`
-(rebuilt from the away journal, the same object the notifier sends) and the one
-next action the engine allows.
+(rebuilt from the away journal, the same object the notifier sends, with a
+`plans` section: accepted, running, parked and waiting-on-owner lanes plus the
+next action) and the one next action the engine allows. Pass `plan_id` instead
+of `job_id` to receive the plan header, lane table and per-lane open questions,
+so a fresh CLI can take over a plan without the planner that submitted it.
 It changes nothing, sends no notice, takes no lease, and is safe from a
 read-only second client. Owners reject a candidate from the run page
 (`/runs/<run_id>`).
+
+The scheduler tick sends three plan-level notices, each once per key, from the
+same projection as `STATE.md`: `plan:<id>:complete` when every lane is accepted,
+done or removed; `plan:<id>:stalled:<lane>` when a lane failed or needs
+attention; and, in `away` or `critical-only`, `plan:<id>:needs-decision:<lane>`
+when no lane can move and a candidate (or owner lane) waits for the owner. A
+lane start sends no notice; per-job terminal notices already cover it.
 
 ## Steering a running job
 
@@ -277,12 +294,14 @@ The `saberops://snapshot` resource assembles the lease, the ledger digest and
 the bounded read sections (`list_jobs`, `capacity`, `list_questions`,
 `list_proposals`) under one versioned document.
 
-The append-only event ledger (`saberops.mcp.ledger`) records `job_submitted`,
-`job_cancelled`, `wave_submitted`, `question_answered` and `config_proposed`
-events as a SHA-256 hash chain. Appends are idempotent on the event key
-(replaying the same event returns the existing entry; the same key with a
-different payload is a typed conflict), `replay()` folds the log into state
-deterministically, and a tampered chain fails closed.
+The append-only event ledger (`saberops.mcp.ledger`) records the events the
+MCP server appends (`job_submitted`, `plan_submitted`, `plan_lane_submitted`,
+`scout_promoted`, `job_cancelled`, `job_note_recorded`, `question_answered`,
+`config_proposed`, `work_resumed`, `mode_change_proposed`) as a SHA-256 hash
+chain. Appends are idempotent on the event key (replaying the same event
+returns the existing entry; the same key with a different payload is a typed
+conflict), `replay()` folds the log into state deterministically, and a
+tampered chain fails closed.
 
 ## Resources
 
@@ -290,7 +309,7 @@ deterministically, and a tampered chain fails closed.
 | --- | --- |
 | `saberops://snapshot` | Versioned read snapshot (`v: 1`). |
 | `saberops://lease` | Current lease status. |
-| `saberops://ledger` | Ledger digest/counts and submitted waves. |
+| `saberops://ledger` | Ledger digest, last sequence and per-type event counts. |
 | `file://<abs path>` | One allowed evidence file (see below). |
 
 Evidence reads are restricted in two independent ways: the fully resolved path

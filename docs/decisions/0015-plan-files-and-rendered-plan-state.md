@@ -5,7 +5,10 @@
   submission, the owner-database plan mapping and the scheduler reconciler are
   implemented in lane P2. The rendered `STATE.md`, its projection, the
   git-ignored checkout link and the read-only `plan_status`/plan `catch_up`
-  paths are implemented in lane P3.
+  paths are implemented in lane P3. Lane P5 implemented the typed owner-mode
+  start decision for auto-advance, plan complete/stalled/needs-decision
+  notices, the plan section of the away return summary, and the planner/skill
+  and MCP documentation.
 - **Date:** 2026-11-19
 - **Decider:** Saber (owner), Phase 1 plan lane P1 after the owner approved
   every recommended choice for the plan-file design

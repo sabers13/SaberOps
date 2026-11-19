@@ -222,10 +222,19 @@ CLI (`orch mode set`) or the Questions page.
   starts automatically only after every dependency is accepted; independent
   lanes run in parallel. Do not queue a dependent lane by hand; its accepted
   dependency starts it.
+- A ready lane starts on the scheduler tick while a live planning session holds
+  the planning lease, and only when the owner mode and authority preset allow a
+  start. Ask-me still allows it: starting an activated lane is not an owner
+  judgment. Away keeps starting unblocked lanes; v1 has no auto-accept, so an
+  away plan stops at the first candidate and `STATE.md` says which accept it is
+  waiting for. Critical-only notifies a stalled lane instead of answering it.
 - `run: "owner"` lanes are never dispatched. They are completed only by the
   owner with `orch plan-file done <lane> --plan <id> --evidence "<what happened>"`.
+- `plan_status` returns the same record-derived table as `STATE.md`: lane
+  status, worker/model, branch, commit, evidence and the next owner action. It
+  is read-only, so a session that is not the planning owner can read it.
 - Lanes pause when the owner closes the planning CLI; they resume when a
-  planning session is open again.
+  planning session is open again. A plan stall or completion sends one notice.
 
 ## Following it
 - Call `wait_job` after each submission; it returns on a final outcome, blocking
@@ -254,6 +263,10 @@ CLI (`orch mode set`) or the Questions page.
 - When the owner says "catch me up" (or you have no history of a job), call
   `catch_up` with its `job_id`; use `list_jobs` first when they did not give one.
   It is read-only and works even when this session is not the planning owner.
+- For a plan, call `catch_up` with its `plan_id` (or `plan_status` with the
+  repository). It returns the plan header, the lane table, per-lane open
+  questions and the one next action, so a fresh CLI can take over a plan without
+  the planner that submitted it.
 - Tell the owner: the original request, the current candidate commit, the latest
   check and review with the commit each assessed, any open question, and the next
   action. When the result offers `orch accept RUN_ID`, show that exact command;

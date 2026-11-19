@@ -1082,16 +1082,21 @@ def _catch_up_next_action(
     }
 
 
-def _catch_up_return_summary() -> dict[str, Any]:
+def _catch_up_return_summary(context: ServerContext) -> dict[str, Any]:
     """The one durable "while you were away" summary, shared with the notifier.
 
-    Read-only: it is assembled from the append-only away journal, so a killed
-    scheduler and a fresh CLI session read exactly the same records.
+    Read-only: the journal part is append-only away state, and the ``plans``
+    section reuses the projection behind ``STATE.md``.  A killed scheduler and a
+    fresh CLI session therefore read exactly the same records, and closing the
+    planner never loses the plan's next action.
     """
     try:
         from saberops.away import build_return_summary
+        from saberops.plan_state import plan_return_summaries
 
-        return build_return_summary().as_dict()
+        db = context.database(read_only=True)
+        plans = plan_return_summaries(db) if db is not None else ()
+        return build_return_summary(plans=plans).as_dict()
     except Exception as exc:
         return {"error": f"{exc.__class__.__name__}: {exc}"}
 
@@ -1199,7 +1204,7 @@ def _catch_up(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str,
         "open_questions": questions,
         "self_answered": _catch_up_self_answered(context, job),
         "steering_notes": _catch_up_steering_notes(db, job),
-        "return_summary": _catch_up_return_summary(),
+        "return_summary": _catch_up_return_summary(context),
         "failure": failure,
         "report": result.get("report"),
         "next_action": _catch_up_next_action(job, view, result, projection, questions),
