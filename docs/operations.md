@@ -8,15 +8,15 @@ configuration lives in the `orch` CLI. Every command below supports
 goes to stdout and refusals to stderr with a nonzero exit. Nothing is
 persisted on a refusal.
 
-## Owner binding selection (reviewer / orchestrator)
+## Owner binding selection (check / plan)
 
-`orch reviewer show|select|clear` manages the owner's exact reviewer
-binding; `orch orchestrator show|select|clear` manages the orchestrator
-binding policy. The persisted choice is always a binding id, never
-free-floating provider/model text. Only a role-qualified binding that
-exists in the canonical registry may be selected: a `WORKER` or
-`ORCHESTRATOR` binding submitted as reviewer (and vice versa) is refused
-without mutation, as is an unknown id. Reviewer selection additionally
+`orch reviewer show|select|clear` manages the owner's exact **check** binding;
+`orch orchestrator show|select|clear` manages the **plan** binding policy. The
+persisted choice is always a binding id, never free-floating provider/model
+text. Only a role-qualified binding that exists in the canonical registry may
+be selected: a `BUILD` (formerly `WORKER`) or `PLAN` (formerly `ORCHESTRATOR`)
+binding submitted as a check binding (and vice versa) is refused without
+mutation, as is an unknown id. Reviewer selection additionally
 proves the exact binding through the real adapter; orchestrator `PINNED`
 proves policy-resolvability (role, enabled profile, quota) while live
 executability is confirmed at dispatch, which fails closed. Orchestrator
@@ -76,10 +76,14 @@ Retry, continue and try-worker launch through the durable supervisor like
 its checks and review finish. The new run id is printed with `orch wait` /
 `orch status` hints.
 
-## Worker routing policy
+## Build routing policy
 
-Worker selection uses one ordered chain per role: WORKER, SURGEON and
-INTEGRATOR. Each chain is a list of fallback groups. Resolution evaluates
+SaberOps has three roles (ADR-0005 §3): **plan** (the external CLI session the
+owner sits in), **build** and **check**. One ordered **build** chain selects the
+worker; each chain is a list of fallback groups. The build route also carries an
+optional **`strong_start`** setting, used when a manual high-tier run
+(`--tier T3`) or an escalation asks to start on a stronger model. It is a route
+setting, not a role. Resolution evaluates
 fallback groups in order: the first fallback group containing an admitted
 candidate wins, and candidates within that winning group are prioritized
 by their intra-group binding-window pacing score:
@@ -87,10 +91,10 @@ by their intra-group binding-window pacing score:
 Ties break deterministically by original chain order, then by lower estimated
 cost. The classifier still labels the run tier (a risk/telemetry label), but
 it no longer selects routes. Provider readiness, quota, capabilities, exact
-bindings and owner model enrollment still apply. Schema 3 routing files hold
-`roles` with `WORKER`, `SURGEON` and `INTEGRATOR` groups of `{"routes": [...]}`.
-ORCHESTRATOR and REVIEWER keep their existing ordered lists: see `orch orchestrator
-show` and `orch reviewer show` (`orch routing show` points there too).
+bindings and owner model enrollment still apply. Schema 3 routing files hold `roles.BUILD` plus a top-level `strong_start`, each a
+list of `{"routes": [...]}` groups. The check binding keeps its ordered list in
+`orch reviewer show`, and the plan role is the connected agent: see `orch
+orchestrator show` (`orch routing show` points there too).
 
 ## Pacing scheduler (`orch scheduler run`)
 
@@ -174,25 +178,29 @@ It reports remaining capacity estimates, active uncertainties, evidence sources
 (`OWNER`, `PROBE`, or `EXHAUSTION`), staleness flags, and any active exclusion
 reset times without creating or writing tables on read.
 
-Migration: schema 1 merges exactly as before, then migrates 2 → 3 with
-WORKER as the stable union of T2, T1 and T3 (T2 order first), SURGEON as
-the T3 order, and INTEGRATOR as the head of T2. A schema-1/2 user file
-loads as schema 3 in memory and is never rewritten by a load; review the
-migration once with `orch routing migrate` (dry run by default,
-`--write` persists with a timestamped backup). Role editors
-(`orch routing add|remove|move|reorder ROLE ...`, roles case-insensitive)
-refuse schema-1/2 files until migrated. `orch run --tier T1|T2` runs the
-WORKER chain without escalation and `--tier T3` starts on the SURGEON
-chain; `--max-tier T1|T2` disables escalation (default T3 allows it).
-Each explicit flag prints one deprecation line (ADR-0002 §11).
+Migration: schema 1 merges exactly as before, then migrates 2 → 3 with the
+build route as the stable union of T2, T1 and T3 (T2 order first) and the T3
+order as `strong_start`. A document that still names the retired roles also
+migrates on load: `WORKER` becomes `BUILD`, `SURGEON` becomes `strong_start`,
+and `INTEGRATOR` is dropped because landing is a deterministic engine stage,
+not a model role. A stored user file is never rewritten by a load; review the
+migration with `orch routing migrate` (dry run by default, `--write` persists
+with a timestamped backup), which prints the before/after mapping and what it
+migrated. Role editors (`orch routing add|remove|move|reorder ROLE ...`, roles
+case-insensitive) refuse schema-1/2 files until migrated and accept a retired
+role name as `build`. `orch run --tier T1|T2` runs the build route without
+escalation and `--tier T3` starts on its `strong_start` setting; `--max-tier
+T1|T2` disables escalation (default T3 allows it). Each explicit flag prints
+one deprecation line (ADR-0002 §11).
 
-Escalation is one step Worker → Surgeon, only on explicit typed
-`CAPABILITY_FAILURE` evidence (gate failure never escalates), only on the
-WORKER chain with `max_auto_tier T3`, auto routing and no model override.
-On escalation the run's tier label becomes T3. Per-role worker timeouts:
-WORKER/INTEGRATOR 1200s, SURGEON 1800s (explicit `--worker-timeout`
-wins). Frozen snapshots of runs from before R-002 keep their tier
-provenance and verify their stored digest exactly as before.
+Escalation moves the build route to its `strong_start` setting, only on
+explicit typed `CAPABILITY_FAILURE` evidence (gate failure never escalates),
+only with `max_auto_tier T3`, auto routing and no model override. On escalation
+the run's tier label becomes T3. A repair after a failed check stays on the
+ordinary build route. One build-role worker deadline: 1200s (explicit
+`--worker-timeout` wins). Frozen snapshots of runs from before this change keep
+their tier provenance, role keys and digest exactly as before; adopted snapshots
+re-emit byte-identically.
 
 ## Usage and account limits
 
@@ -297,14 +305,14 @@ NO_CAPACITY | PROBE_PENDING | PREEMPTED | CONCURRENCY. Requirements no
 route could ever satisfy, even with full capacity, store FAILED with
 `NO_ROUTE_FOR_REQUIREMENTS` at submit, so jobs never park forever.
 
-Requirements state what the work needs: `role` (ORCHESTRATOR, WORKER,
-INTEGRATOR, SURGEON, REVIEWER; only WORKER is dispatchable until R-002
-wires the role chains), optional `effort` (low | medium | high, a
-reasoning-budget hint that never selects a chain), required factual
-capabilities (plus `--read-only`), model-family allow/deny lists
-(validated and stored; enforced at admission), and a `size_hint`
-(S | M | L, shared with the capacity cost buckets). Callers never name
-a provider, model, tier or billing route.
+Requirements state what the work needs: `role` (`PLAN`, `BUILD` or `CHECK`;
+only `BUILD` is dispatchable, and retired names `WORKER`/`SURGEON`/
+`INTEGRATOR`/`REVIEWER` are accepted and migrated), optional `effort` (low |
+medium | high, a reasoning-budget hint that never selects a chain), required
+factual capabilities (plus `--read-only`), model-family allow/deny lists
+(validated and stored; enforced at admission), and a `size_hint` (S | M | L,
+shared with the capacity cost buckets). Callers never name a provider, model,
+tier or billing route.
 
 Idempotency: pass `--idempotency-key KEY` with a stable `caller_id`
 (`owner` for now). The same key with the same request returns the

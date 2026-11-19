@@ -135,7 +135,7 @@ def test_suggest_and_accept_default_route_in_one_command(
     assert main(["routing", "accept-default", "--json"]) == 0
     accept_out = json.loads(capsys.readouterr().out)
     assert accept_out["accepted"] == ["codex/gpt-6-luna"]
-    assert any("codex/gpt-6-luna" in grp["routes"] for grp in accept_out["worker_chain"])
+    assert any("codex/gpt-6-luna" in grp["routes"] for grp in accept_out["build_chain"])
 
 
 def test_opencode_readiness_names_missing_evidence_and_remedy(
@@ -212,7 +212,7 @@ def test_default_run_launcher_applies_supported_effort_and_refuses_unsupported(
         connection_id="codex-acct",
         provider="codex",
         model="gpt-5.3-codex",
-        binding_role=BindingRole.WORKER,
+        binding_role=BindingRole.BUILD,
         reasoning_effort_capabilities=frozenset(
             {
                 ReasoningEffort.LOW,
@@ -225,7 +225,7 @@ def test_default_run_launcher_applies_supported_effort_and_refuses_unsupported(
         connection_id="codex-acct",
         provider="codex",
         model="gpt-5.3-codex-mini",
-        binding_role=BindingRole.WORKER,
+        binding_role=BindingRole.BUILD,
         reasoning_effort_capabilities=frozenset({ReasoningEffort.LOW}),
     )
     owner = load_owner_bindings()
@@ -238,7 +238,7 @@ def test_default_run_launcher_applies_supported_effort_and_refuses_unsupported(
         repo=repo,
         goal="xhigh task",
         acceptance="true",
-        requirements=JobRequirements(role=JobRole.WORKER, effort=Effort.xhigh),
+        requirements=JobRequirements(role=JobRole.BUILD, effort=Effort.xhigh),
     ).job
     dec_ok = DispatchDecision(
         job=job_xhigh,

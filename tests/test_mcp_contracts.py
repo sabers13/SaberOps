@@ -110,7 +110,7 @@ def _ask(
     *,
     key: str = "q-1",
     decision_class: DecisionClass = DecisionClass.ROUTINE_QUESTION,
-    raised_by_role: AskRole = AskRole.WORKER,
+    raised_by_role: AskRole = AskRole.BUILD,
     raised_by: str = "worker-1",
 ) -> str:
     queue = OwnerQuestionQueue(store)
@@ -315,7 +315,7 @@ def test_list_questions_returns_views(tmp_path: Path) -> None:
     server = _server(tmp_path)
     payload = _payload(server, "list_questions", {"status": "OPEN"})
     assert payload["count"] == 1
-    assert payload["questions"][0]["answerable_by"] == "ORCHESTRATOR"
+    assert payload["questions"][0]["answerable_by"] == "PLAN"
 
 
 def test_answer_question_refuses_owner_authority(tmp_path: Path) -> None:
@@ -339,7 +339,7 @@ def test_answer_question_refuses_an_owner_only_decision_class(tmp_path: Path) ->
     response = _call(
         server,
         "answer_question",
-        {"question_id_or_key": "q-1", "answer_text": "yes", "authority": "ORCHESTRATOR"},
+        {"question_id_or_key": "q-1", "answer_text": "yes", "authority": "PLAN"},
     )
     assert response["error"]["code"] == -32010
 
@@ -347,12 +347,12 @@ def test_answer_question_refuses_an_owner_only_decision_class(tmp_path: Path) ->
 def test_answer_question_refuses_its_own_finding(tmp_path: Path) -> None:
     """Covers: prompt section 'implementer never answers its own finding'."""
     store = tmp_path / "questions.json"
-    _ask(store, raised_by_role=AskRole.ORCHESTRATOR, raised_by="orch-1")
+    _ask(store, raised_by_role=AskRole.PLAN, raised_by="orch-1")
     server = _server(tmp_path)
     response = _call(
         server,
         "answer_question",
-        {"question_id_or_key": "q-1", "answer_text": "yes", "authority": "ORCHESTRATOR"},
+        {"question_id_or_key": "q-1", "answer_text": "yes", "authority": "PLAN"},
     )
     assert response["result"]["isError"] is True
     assert "own finding" in response["result"]["structuredContent"]["error"]["message"]
@@ -369,14 +369,14 @@ def test_answer_question_records_an_orchestrator_answer(tmp_path: Path) -> None:
         {
             "question_id_or_key": "q-1",
             "answer_text": "route it to the same worker",
-            "authority": "ORCHESTRATOR",
+            "authority": "PLAN",
             "answered_by": "orch-1",
             "evidence": "lane-check.txt",
             "rejected_alternative": "a Surgeon handoff",
         },
     )
     assert payload["question"]["status"] == "ANSWERED"
-    assert payload["question"]["answer"]["authority"] == "ORCHESTRATOR"
+    assert payload["question"]["answer"]["authority"] == "PLAN"
 
 
 def test_answer_question_is_idempotent(tmp_path: Path) -> None:
@@ -387,7 +387,7 @@ def test_answer_question_is_idempotent(tmp_path: Path) -> None:
     arguments = {
         "question_id_or_key": "q-1",
         "answer_text": "same words",
-        "authority": "ORCHESTRATOR",
+        "authority": "PLAN",
         "answered_by": "orch-1",
         "evidence": "e",
         "rejected_alternative": "r",
@@ -477,19 +477,19 @@ def test_c5_schema_messages_and_guide(tmp_path: Path, monkeypatch: pytest.Monkey
     failed = _payload(
         server,
         "submit_job",
-        {"repo": str(repo), "goal": "unroutable", "requirements": {"role": "REVIEWER"}},
+        {"repo": str(repo), "goal": "unroutable", "requirements": {"role": "CHECK"}},
     )
-    assert "set requirements.role to WORKER" in failed["guidance"]
+    assert "set requirements.role to BUILD" in failed["guidance"]
     from types import SimpleNamespace
 
     from saberops.mcp.tools import _job_guidance
 
     unroutable = SimpleNamespace(
         failure_reason="NO_ROUTE_FOR_REQUIREMENTS",
-        requirements=SimpleNamespace(role=SimpleNamespace(value="WORKER")),
+        requirements=SimpleNamespace(role=SimpleNamespace(value="BUILD")),
     )
     guidance = _job_guidance(unroutable)
-    assert guidance is not None and "orch routing add worker <provider/model>" in guidance
+    assert guidance is not None and "orch routing add build <provider/model>" in guidance
     assert payload["result"]["run_id"] is None
     assert payload["state"] == "QUEUED"
     retrieved = _payload(server, "get_job", {"job_id": payload["job_id"]})

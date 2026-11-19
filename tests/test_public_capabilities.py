@@ -123,7 +123,7 @@ def _binding(
     model: str,
     profile_id: str,
     quota_pool_id: str,
-    role: BindingRole = BindingRole.ORCHESTRATOR,
+    role: BindingRole = BindingRole.PLAN,
     efforts: frozenset[ReasoningEffort] = frozenset(),
 ) -> ExecutionBinding:
     return ExecutionBinding(
@@ -247,16 +247,16 @@ def test_binding_roles_share_resource_but_stay_distinct() -> None:
         connection_id="opencode-account",
         provider="opencode",
         model="opencode/gemini-3.5-flash-lite",
-        binding_role=BindingRole.WORKER,
+        binding_role=BindingRole.BUILD,
     )
     orchestrator, o_profile, o_pool = materialize_discovered_binding(
         connection_id="opencode-account",
         provider="opencode",
         model="opencode/gemini-3.5-flash-lite",
-        binding_role=BindingRole.ORCHESTRATOR,
+        binding_role=BindingRole.PLAN,
     )
-    assert worker.binding_role is BindingRole.WORKER
-    assert orchestrator.binding_role is BindingRole.ORCHESTRATOR
+    assert worker.binding_role is BindingRole.BUILD
+    assert orchestrator.binding_role is BindingRole.PLAN
     assert worker.binding_id != orchestrator.binding_id
     assert w_profile.profile_id == o_profile.profile_id
     assert w_pool.pool_id == o_pool.pool_id
@@ -268,7 +268,7 @@ def test_exact_worker_binding_resolves_to_selected_identity() -> None:
         connection_id="opencode-account",
         provider="opencode",
         model="opencode/gemini-3.5-flash-lite",
-        binding_role=BindingRole.WORKER,
+        binding_role=BindingRole.BUILD,
     )
     adapter = _FakeAdapter(provider="opencode")
     registry = build_binding_registry(
@@ -279,7 +279,7 @@ def test_exact_worker_binding_resolves_to_selected_identity() -> None:
     )
     assert resolved.binding_id == worker_a.binding_id
     assert resolved.binding.model == "opencode/gemini-3.5-flash-lite"
-    assert resolved.binding.binding_role is BindingRole.WORKER
+    assert resolved.binding.binding_role is BindingRole.BUILD
 
 
 # ---------------------------------------------------------------------------
@@ -325,7 +325,7 @@ def test_worker_role_binding_is_refused_by_orchestrator_consumer() -> None:
         model="opencode/gemini-3.5-flash-lite",
         profile_id="p-worker",
         quota_pool_id="pool-worker",
-        role=BindingRole.WORKER,
+        role=BindingRole.BUILD,
     )
     consumer = OrchestratorModelConsumer(
         db=None,

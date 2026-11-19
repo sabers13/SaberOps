@@ -93,10 +93,10 @@ def select_reviewer_binding(
             requested_binding_id=wanted,
             reason=REVIEWER_BINDING_NOT_FOUND,
         )
-    # BindingRole: only a REVIEWER-role binding may authorize the
-    # reviewer slot.  A WORKER/ORCHESTRATOR binding with identical
+    # BindingRole: only a CHECK-role binding may authorize the
+    # reviewer slot.  A BUILD/PLAN binding with identical
     # provider/model text is a role violation, never reviewer authority.
-    if binding.binding_role is not BindingRole.REVIEWER:
+    if binding.binding_role is not BindingRole.CHECK:
         return ReviewerSelection(
             status=ReviewerSelectionStatus.UNRESOLVED,
             binding=binding,

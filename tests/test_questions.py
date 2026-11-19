@@ -79,7 +79,7 @@ def _request(
     *,
     kind: str = "gate-block",
     decision_class: DecisionClass = DecisionClass.TEST_CHANGE_AGAINST_ADR,
-    role: AskRole = AskRole.WORKER,
+    role: AskRole = AskRole.BUILD,
     by: str = "worker:run_abc",
     run_id: str | None = "run_abc",
     blocks: tuple[str, ...] = ("wave3/lane-a",),
@@ -128,7 +128,7 @@ def _orchestrator_request(key: str = "review/finding-f3") -> QuestionRequest:
         key,
         kind="review-finding",
         decision_class=DecisionClass.REVIEW_FINDING_CLASSIFICATION,
-        role=AskRole.REVIEWER,
+        role=AskRole.CHECK,
         by="reviewer:run_abc",
         blocks=(),
         options=("accept", "reject", "defer"),
@@ -147,9 +147,9 @@ def _orchestrator_answer(
     return queue.answer(
         ref,
         words=words,
-        authority=AnswerAuthority.ORCHESTRATOR,
+        authority=AnswerAuthority.PLAN,
         answered_by=by,
-        answered_by_role=AskRole.ORCHESTRATOR,
+        answered_by_role=AskRole.PLAN,
         chosen_option="accept",
         evidence="review finding F3 quotes the failing assertion",
         rejected_alternative="reject the finding and fix the code instead",
@@ -192,7 +192,7 @@ def test_a_question_cannot_exist_without_the_five_parts() -> None:
             subject="s",
             kind="kind",
             decision_class=DecisionClass.OTHER,
-            raised_by_role=AskRole.WORKER,
+            raised_by_role=AskRole.BUILD,
             raised_by="worker",
             escalation=None,  # type: ignore[arg-type]
         )
@@ -206,7 +206,7 @@ def test_a_question_cannot_exist_without_the_five_parts() -> None:
 def test_answer_authority_is_derived_from_the_decision_class() -> None:
     for decision_class in ORCHESTRATOR_ANSWERABLE_DECISION_CLASSES:
         assert is_orchestrator_answerable(decision_class) is True
-        assert resolve_answer_authority(decision_class) is AnswerAuthority.ORCHESTRATOR
+        assert resolve_answer_authority(decision_class) is AnswerAuthority.PLAN
     for decision_class in (
         DecisionClass.MOVE_MAIN,
         DecisionClass.PUSH,
@@ -376,7 +376,7 @@ def test_an_orchestrator_cannot_answer_its_own_finding(
         "orch/own-question",
         kind="routine",
         decision_class=DecisionClass.ROUTINE_QUESTION,
-        role=AskRole.ORCHESTRATOR,
+        role=AskRole.PLAN,
         by="orchestrator:session-9",
         blocks=(),
     )
@@ -396,9 +396,9 @@ def test_an_orchestrator_alone_answer_requires_evidence_and_alternative(
     for missing in ("evidence", "rejected_alternative"):
         kwargs: dict[str, Any] = {
             "words": "classify as accept",
-            "authority": AnswerAuthority.ORCHESTRATOR,
+            "authority": AnswerAuthority.PLAN,
             "answered_by": "orchestrator:session-1",
-            "answered_by_role": AskRole.ORCHESTRATOR,
+            "answered_by_role": AskRole.PLAN,
             "chosen_option": "accept",
             "evidence": "review finding F3",
             "rejected_alternative": "reject the finding",
@@ -417,9 +417,9 @@ def test_a_chosen_option_must_be_one_the_question_offered(
         queue.answer(
             "review/finding-f3",
             words="classify as maybe",
-            authority=AnswerAuthority.ORCHESTRATOR,
+            authority=AnswerAuthority.PLAN,
             answered_by="orchestrator:session-1",
-            answered_by_role=AskRole.ORCHESTRATOR,
+            answered_by_role=AskRole.PLAN,
             chosen_option="maybe",
             evidence="evidence",
             rejected_alternative="alternative",
@@ -471,9 +471,9 @@ def test_a_different_option_is_an_option_divergence(queue: OwnerQuestionQueue) -
     question = queue.answer(
         "review/finding-f3",
         words="classify as defer",
-        authority=AnswerAuthority.ORCHESTRATOR,
+        authority=AnswerAuthority.PLAN,
         answered_by="orchestrator:session-2",
-        answered_by_role=AskRole.ORCHESTRATOR,
+        answered_by_role=AskRole.PLAN,
         chosen_option="defer",
         evidence="new evidence",
         rejected_alternative="accept",
@@ -545,7 +545,7 @@ def test_only_the_owner_or_orchestrator_may_defer(queue: OwnerQuestionQueue) -> 
             "run_abc/gate-block",
             until="2026-11-01",
             deferred_by="worker:run_abc",
-            deferred_by_role=AskRole.WORKER,
+            deferred_by_role=AskRole.BUILD,
         )
 
 
@@ -606,7 +606,7 @@ def test_a_moot_close_after_an_answer_is_a_divergence(queue: OwnerQuestionQueue)
         "run_abc/gate-block",
         evidence="a later claim that it no longer matters",
         closed_by="orchestrator",
-        closed_by_role=AskRole.ORCHESTRATOR,
+        closed_by_role=AskRole.PLAN,
         now="2026-10-18T16:00:00+00:00",
     )
     assert question.status is QuestionStatus.ANSWERED

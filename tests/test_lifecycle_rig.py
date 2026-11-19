@@ -88,8 +88,12 @@ def acceptance_rig(rig: RigEnvironment) -> AcceptanceFixture:
 def test_rig_fresh_store_registers_two_providers_and_reviewer(rig: RigEnvironment) -> None:
     """Fresh-store setup registers two routable worker providers, reviewer, and gate."""
     snap = load_effective_routing()
+    # A fresh setup needs one build route and one reviewer: no second model
+    # role and no required strong-start setting (ADR-0005 §3).
+    assert tuple(role for role, _ in snap.role_chains) == ("BUILD",)
+    assert snap.strong_start == ()
     worker_routes = [
-        f"{c.provider}/{c.model}" for group in snap.groups_for("WORKER") for c in group
+        f"{c.provider}/{c.model}" for group in snap.groups_for("BUILD") for c in group
     ]
     assert WORKER_CANDIDATE_CODEX in worker_routes
     assert WORKER_CANDIDATE_OPENCODE in worker_routes
@@ -403,7 +407,7 @@ def test_unrelated_review_does_not_change_replacement_acceptance(
         DispatchEvidence(
             id=f"dispatch-{review_id}", run_id=acceptance_rig.run_id,
             association_id=review_id, review_id=review_id,
-            stage=DispatchStage.REVIEW, role=DispatchRole.REVIEW, tier=Tier.T1,
+            stage=DispatchStage.REVIEW, role=DispatchRole.CHECK, tier=Tier.T1,
             dispatch_reason=DispatchReason.INDEPENDENT_REVIEW,
             requested_provider="anthropic", requested_model="reviewer",
             candidate_sha=acceptance_rig.candidate_a_sha, started_at=now, completed_at=now,

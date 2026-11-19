@@ -4,14 +4,14 @@ The Routing page answers "which model does each job, and who takes over
 when it is busy".  This module is the single seam between that page and
 the two existing routing authorities:
 
-* the schema-3 routing document (``routing_config``) for the WORKER,
-  SURGEON and INTEGRATOR fallback chains, written only through
+* the schema-3 routing document (``routing_config``) for the build route's
+  fallback chain and its stronger-model start setting, written only through
   :func:`save_user_routing` after the canonical validators accept it;
-* the owner binding store for the REVIEWER fallback order, written only
+* the owner binding store for the CHECK fallback order, written only
   after the real reviewer resolver accepts the exact binding.
 
 A model becomes routable only through evidence: a discovery-verified,
-fresh, execution-supported catalog entry whose exact WORKER binding
+fresh, execution-supported catalog entry whose exact BUILD binding
 exists and resolves through the real adapter.  The approval record
 written next to the chain is the canonical :class:`DynamicCandidate`
 contract, so restarts and frozen run snapshots recover the same exact
@@ -82,7 +82,7 @@ class Job:
     """One job on the Routing page, in the order work flows through them."""
 
     slug: str
-    role: str  # engine role: ORCHESTRATOR, WORKER, REVIEWER, SURGEON, INTEGRATOR
+    role: str  # engine role: PLAN, BUILD or CHECK
     name: str
     verb: str
     help: str
@@ -90,23 +90,20 @@ class Job:
     @property
     def store(self) -> str:
         """Where the chain lives: the agent lease, the binding store or routing.json."""
-        if self.role == "ORCHESTRATOR":
+        if self.role == "PLAN":
             return "agent"
-        return "reviewer" if self.role == "REVIEWER" else "routing"
+        return "reviewer" if self.role == "CHECK" else "routing"
 
 
 JOBS: tuple[Job, ...] = (
-    Job("plan", "ORCHESTRATOR", "Plans the work", "plans",
+    Job("plan", "PLAN", "Plans the work", "plans",
         "Breaks a request into tasks. This is always the agent you connect to SaberOps."),
-    Job("write", "WORKER", "Writes the code", "writes",
-        "Makes each change in its own safe copy of the project."),
-    Job("check", "REVIEWER", "Checks the work", "checks",
+    Job("write", "BUILD", "Writes the code", "writes",
+        "Makes each change in its own safe copy of the project, including repairs "
+        "after a failed check."),
+    Job("check", "CHECK", "Checks the work", "checks",
         "Reads every change before you see it. Pick a model from a different "
         "company than the one that writes the code."),
-    Job("repair", "SURGEON", "Repairs failed work", "repairs",
-        "Takes over when a change fails its checks."),
-    Job("combine", "INTEGRATOR", "Combines finished work", "combines",
-        "Joins accepted changes so they fit together."),
 )
 
 
@@ -157,7 +154,7 @@ def _routable_entries(catalog: ModelCatalog) -> list[Any]:
 
 def _exact_binding(owner: OwnerBindings, role: BindingRole, connection_id: str, model: str) -> Any:
     binding = owner.registry.try_get(
-        f"discovered-binding:{role.value.lower()}:{connection_id}:{model}"
+        f"discovered-binding:{role.id_slug}:{connection_id}:{model}"
     )
     if binding is None or binding.binding_role is not role:
         return None
@@ -167,10 +164,10 @@ def _exact_binding(owner: OwnerBindings, role: BindingRole, connection_id: str, 
 def chain_options(
     owner: OwnerBindings, catalog: ModelCatalog, registry: AdapterRegistry
 ) -> list[RoutingOption]:
-    """Models that may enter a WORKER/SURGEON/INTEGRATOR chain, with evidence."""
+    """Models that may enter the build route, with evidence."""
     options: dict[str, RoutingOption] = {}
     for entry in _routable_entries(catalog):
-        binding = _exact_binding(owner, BindingRole.WORKER, entry.connection_id, entry.model_id)
+        binding = _exact_binding(owner, BindingRole.BUILD, entry.connection_id, entry.model_id)
         if binding is None or not _resolves(owner, binding, registry):
             continue
         try:
@@ -192,10 +189,10 @@ def chain_options(
 
 
 def reviewer_options(owner: OwnerBindings, registry: AdapterRegistry) -> list[RoutingOption]:
-    """REVIEWER bindings that resolve through the real adapter."""
+    """CHECK bindings that resolve through the real adapter."""
     options: list[RoutingOption] = []
     for binding in owner.registry.list_bindings():
-        if binding.binding_role is not BindingRole.REVIEWER:
+        if binding.binding_role is not BindingRole.CHECK:
             continue
         probe = replace(owner, reviewer_binding_id=binding.binding_id, reviewer_binding_ids=None)
         selection = select_reviewer_binding(probe, adapter_registry=registry)

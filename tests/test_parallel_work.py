@@ -392,7 +392,7 @@ def test_final_review_receives_the_full_combined_delta(
                 association_id=verdict.id,
                 review_id=verdict.id,
                 stage=DispatchStage.REVIEW,
-                role=DispatchRole.REVIEW,
+                role=DispatchRole.CHECK,
                 tier=Tier.T1,
                 dispatch_reason=DispatchReason.INDEPENDENT_REVIEW,
                 requested_provider="test-reviewer",

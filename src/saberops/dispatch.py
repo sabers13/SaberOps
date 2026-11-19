@@ -58,14 +58,18 @@ READINESS_SKIP_REASONS: frozenset[str] = frozenset(
 def routing_context_for_role(role: Any) -> str:
     """Return the canonical routing context for a dispatch role.
 
-    The role value itself (``"WORKER"`` …) is the new ``routing_context``
-    in skip/exhaustion evidence.
+    The three-role vocabulary (``PLAN`` / ``BUILD`` / ``CHECK``) is the new
+    ``routing_context`` in skip/exhaustion evidence; a retired role name
+    (``WORKER``/``SURGEON``/``INTEGRATOR``) resolves to ``BUILD``.
     """
-    from saberops.jobs.models import JobRole
+    from saberops.jobs.models import JobRole, coerce_job_role
 
     if isinstance(role, JobRole):
         return role.value
-    return str(role).strip().upper()
+    try:
+        return coerce_job_role(str(role)).value
+    except ValueError:
+        return str(role).strip().upper()
 
 
 def build_candidate_skip(

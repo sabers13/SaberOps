@@ -38,6 +38,7 @@ from saberops.gate_runner import (
     GateScratchPolicyError,
     load_project_gate_scratch_policy,
 )
+from saberops.jobs.models import JobRole, coerce_job_role
 from saberops.model_access import ReadinessService
 from saberops.models import (
     OrchEvent,
@@ -421,7 +422,8 @@ class OrchestratorService:
         return {
             "quota_states": quota_states,
             "role_chains": {
-                role: snap.chain_for_role(role) for role in ("WORKER", "SURGEON", "INTEGRATOR")
+                "BUILD": snap.chain_for_role(JobRole.BUILD),
+                "strong_start": snap.chain_for_role(JobRole.BUILD, strong_start=True),
             },
             "routing_snapshot": snap,
         }
@@ -430,7 +432,8 @@ class OrchestratorService:
         """Return the routing role of the newest ``tier_candidates_resolved`` event.
 
         A run with no such role (all runs before R-002) reports
-        ``"LEGACY:<tier>"``. Read-only; no DB schema change.
+        ``"LEGACY:<tier>"``. A retired role name stored before ADR-0005 §3
+        resolves to ``BUILD``. Read-only; no DB schema change.
         """
         run = self.db.get_run(run_id)
         if run is None:
@@ -443,8 +446,25 @@ class OrchestratorService:
                 if isinstance(role, str) and role.strip():
                     newest_role = role.strip().upper()
         if newest_role is not None:
-            return newest_role
+            return coerce_job_role(newest_role).value
         return f"LEGACY:{run.tier.value}"
+
+    def run_strong_start(self, run_id: str) -> bool:
+        """True when the newest routing chain used the build route's strong start.
+
+        Read-only over the same durable ``tier_candidates_resolved`` evidence;
+        a legacy ``SURGEON`` role counts as a strong start.
+        """
+        strong = False
+        for event in self.db.get_events_by_type(run_id, "tier_candidates_resolved"):
+            payload = event.payload
+            if not isinstance(payload, dict):
+                continue
+            if str(payload.get("role", "")).strip().upper() == "SURGEON":
+                strong = True
+            elif "strong_start" in payload:
+                strong = bool(payload.get("strong_start"))
+        return strong
 
     def get_quota(self, provider: str, pool: str) -> QuotaState | None:
         """Fetch quota state for a provider pool."""
@@ -559,7 +579,7 @@ class OrchestratorService:
         eligible = [
             binding.to_dict()
             for binding in owner.registry.list_bindings()
-            if binding.binding_role is BindingRole.REVIEWER
+            if binding.binding_role is BindingRole.CHECK
         ]
         return {
             "selected_binding_id": owner.reviewer_binding_id,
@@ -575,9 +595,9 @@ class OrchestratorService:
     def set_reviewer_binding(self, binding_id: str) -> dict[str, Any]:
         """Persist the owner's exact reviewer binding choice.
 
-        Only a ``REVIEWER``-role binding that exists in the canonical
+        Only a ``CHECK``-role binding that exists in the canonical
         registry and resolves through the real binding resolver with
-        the real adapter may be selected.  A ``WORKER``/``ORCHESTRATOR``
+        the real adapter may be selected.  A ``BUILD``/``PLAN``
         binding, an unknown id, or an unresolvable binding is refused;
         nothing is persisted on refusal.
         """
@@ -631,7 +651,7 @@ class OrchestratorService:
         eligible = [
             binding.to_dict()
             for binding in owner.registry.list_bindings()
-            if binding.binding_role is BindingRole.ORCHESTRATOR
+            if binding.binding_role is BindingRole.PLAN
         ]
         if owner.policy is None:
             return {
@@ -686,7 +706,7 @@ class OrchestratorService:
                     "UNKNOWN_BINDING",
                     f"No such canonical binding: {wanted or '(empty)'}",
                 )
-            if binding.binding_role is not BindingRole.ORCHESTRATOR:
+            if binding.binding_role is not BindingRole.PLAN:
                 raise OwnerSelectionError(
                     "WRONG_ROLE",
                     "Binding is not qualified for the Orchestrator slot: "
@@ -956,15 +976,22 @@ class OrchestratorService:
         try:
             snapshot = load_effective_routing()
             role = self.run_routing_role(run_id)
+            strong_start = self.run_strong_start(run_id)
             if role.startswith("LEGACY:"):
-                # A run from before R-002: the deprecated alias maps its
-                # tier label onto today's role chains (T3 → SURGEON).
+                # A run from before R-002: legacy tier labels all resolve to
+                # the build route; T3 asks for its stronger-model setting.
                 from saberops.models import Tier as _Tier
 
                 tier = _Tier(role.split(":", 1)[1])
-                candidates = resolve_candidate_chain(tier=tier, snapshot=snapshot)
+                candidates = resolve_candidate_chain(
+                    tier=tier, snapshot=snapshot, strong_start=tier == _Tier.T3
+                )
             else:
-                candidates = resolve_candidate_chain(role=role, snapshot=snapshot)
+                candidates = resolve_candidate_chain(
+                    role=role,
+                    snapshot=snapshot,
+                    strong_start=strong_start,
+                )
         except ValueError as exc:
             raise RunOperationError(
                 "ROUTING_UNAVAILABLE",

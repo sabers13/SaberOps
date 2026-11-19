@@ -96,7 +96,7 @@ def test_question_wakes_wait_and_delivery_survives_restart(
             subject="Choose a direction",
             kind="decision",
             decision_class=DecisionClass.OTHER,
-            raised_by_role=AskRole.WORKER,
+            raised_by_role=AskRole.BUILD,
             raised_by="worker",
             escalation=Escalation(
                 requirement="r",

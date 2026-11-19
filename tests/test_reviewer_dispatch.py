@@ -202,7 +202,7 @@ def _seed_configured_reviewer() -> str:
         connection_id=_R3E1_CONNECTION,
         provider=_R3E1_PROVIDER,
         model=_R3E1_REVIEWER_MODEL,
-        binding_role=BindingRole.REVIEWER,
+        binding_role=BindingRole.CHECK,
     )
     owner = upsert_owner_binding(
         OwnerBindings(), binding=reviewer, profile=profile, pool=pool
@@ -419,7 +419,7 @@ def _reviewer_pair() -> tuple[str, str, str]:
         connection_id=_R3E1_CONNECTION,
         provider=_R3E1_PROVIDER,
         model="r3e1-first-model",
-        binding_role=BindingRole.REVIEWER,
+        binding_role=BindingRole.CHECK,
     )
     owner = upsert_owner_binding(
         owner, binding=first, profile=first_profile, pool=first_pool
@@ -428,7 +428,7 @@ def _reviewer_pair() -> tuple[str, str, str]:
         connection_id=_R3E1_CONNECTION,
         provider=_R3E1_PROVIDER,
         model="r3e1-second-model",
-        binding_role=BindingRole.REVIEWER,
+        binding_role=BindingRole.CHECK,
     )
     owner = upsert_owner_binding(
         owner, binding=second, profile=second_profile, pool=second_pool
@@ -437,7 +437,7 @@ def _reviewer_pair() -> tuple[str, str, str]:
         connection_id=_R3E1_CONNECTION,
         provider=_R3E1_PROVIDER,
         model="r3e1-first-model",
-        binding_role=BindingRole.WORKER,
+        binding_role=BindingRole.BUILD,
     )
     owner = upsert_owner_binding(
         owner, binding=twin, profile=twin_profile, pool=twin_pool

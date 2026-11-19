@@ -37,6 +37,7 @@ from saberops.db import Database, get_default_db_path
 from saberops.dispatch import READINESS_AUTHORITY_UNAVAILABLE
 from saberops.gate_runner import GateScratchPolicyError
 from saberops.git import GitManager
+from saberops.jobs.models import JobRole
 from saberops.model_access import ReadinessService
 from saberops.models import (
     TERMINAL_RUN_STATUSES,
@@ -82,6 +83,8 @@ from saberops.questions import (
     QuestionError,
     QuestionRequest,
     QuestionStatus,
+    coerce_answer_authority,
+    coerce_ask_role,
     question_view,
 )
 from saberops.review_adaptive import ReviewPolicyError
@@ -226,14 +229,14 @@ def _warn_deprecated_routing_flags(args: argparse.Namespace) -> None:
     if hasattr(args, "tier"):
         print(
             "[!] --tier is deprecated (ADR-0002 §11): "
-            "--tier T1|T2 runs the WORKER chain without escalation, "
-            "--tier T3 starts on the SURGEON chain.",
+            "--tier T1|T2 runs the build route without escalation, "
+            "--tier T3 starts on the build route's strong_start setting.",
             file=sys.stderr,
         )
     if hasattr(args, "max_tier"):
         print(
             "[!] --max-tier is deprecated (ADR-0002 §11): "
-            "--max-tier T1|T2 disables escalation to SURGEON, "
+            "--max-tier T1|T2 disables escalation to the strong_start setting, "
             "--max-tier T3 (default) allows it.",
             file=sys.stderr,
         )
@@ -872,7 +875,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--worker-timeout",
         type=float,
         default=None,
-        help="Worker timeout in seconds (default: role default WORKER/INTEGRATOR=1200, SURGEON=1800).",
+        help="Worker timeout in seconds (default: build role 1800).",
     )
     run_parser.add_argument(
         "--gate-timeout",
@@ -1363,13 +1366,13 @@ def build_parser() -> argparse.ArgumentParser:
     routing_init = routing_sub.add_parser("init", help="Initialize user routing config.")
     routing_init.add_argument("--force", action="store_true", help="Overwrite existing file.")
     routing_migrate = routing_sub.add_parser(
-        "migrate", help="Migrate a schema-1/2 user routing file to schema 3."
+        "migrate", help="Migrate an old routing file (schema 1/2 or retired roles) to the build route."
     )
     routing_migrate.add_argument(
         "--write", action="store_true", help="Write the migrated schema-3 file (with backup)."
     )
     routing_add = routing_sub.add_parser("add", help="Add a candidate to a role chain.")
-    routing_add.add_argument("role", type=str, help="Role: worker | surgeon | integrator.")
+    routing_add.add_argument("role", type=str, help="Role: build or strong_start (retired worker/surgeon/integrator names migrate to build).")
     routing_add.add_argument("candidate_id", type=str, help="Candidate id (provider/model).")
     routing_add.add_argument(
         "--group", type=int, default=None, help="1-based group to append into."
@@ -1377,16 +1380,16 @@ def build_parser() -> argparse.ArgumentParser:
     routing_remove = routing_sub.add_parser(
         "remove", help="Remove a candidate from a role chain."
     )
-    routing_remove.add_argument("role", type=str, help="Role: worker | surgeon | integrator.")
+    routing_remove.add_argument("role", type=str, help="Role: build or strong_start (retired worker/surgeon/integrator names migrate to build).")
     routing_remove.add_argument("candidate_id", type=str, help="Candidate id (provider/model).")
     routing_move = routing_sub.add_parser("move", help="Move a fallback group one place.")
-    routing_move.add_argument("role", type=str, help="Role: worker | surgeon | integrator.")
+    routing_move.add_argument("role", type=str, help="Role: build or strong_start (retired worker/surgeon/integrator names migrate to build).")
     routing_move.add_argument("group", type=int, help="1-based group number.")
     routing_move.add_argument("direction", type=str, choices=["up", "down"])
     routing_reorder = routing_sub.add_parser(
         "reorder", help="Reorder a role's fallback groups (a permutation)."
     )
-    routing_reorder.add_argument("role", type=str, help="Role: worker | surgeon | integrator.")
+    routing_reorder.add_argument("role", type=str, help="Role: build or strong_start (retired worker/surgeon/integrator names migrate to build).")
     routing_reorder.add_argument("order", type=int, nargs="+", help="1-based group numbers.")
     routing_suggest = routing_sub.add_parser(
         "suggest",
@@ -1398,7 +1401,7 @@ def build_parser() -> argparse.ArgumentParser:
     routing_suggest.add_argument("--json", action="store_true", help="JSON output")
     routing_accept_default = routing_sub.add_parser(
         "accept-default",
-        help="Accept the suggested default build route(s) into the WORKER chain.",
+        help="Accept the suggested default build route(s) into the BUILD chain.",
     )
     routing_accept_default.add_argument(
         "--provider", type=str, default=None, help="Accept only the named provider's default."
@@ -1478,7 +1481,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--binding",
         type=str,
         default=None,
-        help="Exact ORCHESTRATOR-role binding id (PINNED mode).",
+        help="Exact PLAN-role binding id (PINNED mode).",
     )
     orch_mode.add_argument(
         "--auto",
@@ -1773,8 +1776,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--authority",
         type=str,
         default="owner",
-        choices=["owner", "orchestrator"],
-        help="Answer authority (default: owner).",
+        choices=["owner", "plan"],
+        help="Answer authority (default: owner; 'plan' is the planning session).",
     )
     questions_answer.add_argument("--by", dest="answered_by", type=str, default=None)
     questions_answer.add_argument(
@@ -1782,14 +1785,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     questions_answer.add_argument("--chosen-option", dest="chosen_option", type=str, default=None)
     questions_answer.add_argument(
-        "--evidence", type=str, default=None, help="Required for an Orchestrator-alone answer."
+        "--evidence", type=str, default=None, help="Required for a planner-alone answer."
     )
     questions_answer.add_argument(
         "--rejected-alternative",
         dest="rejected_alternative",
         type=str,
         default=None,
-        help="Required for an Orchestrator-alone answer.",
+        help="Required for a planner-alone answer.",
     )
     questions_answer.add_argument("--json", action="store_true", help="JSON output")
     _add_store_arg(questions_answer)
@@ -1804,7 +1807,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--role",
         type=str,
         default="OWNER",
-        choices=[AskRole.OWNER.value, AskRole.ORCHESTRATOR.value],
+        choices=[AskRole.OWNER.value, AskRole.PLAN.value],
     )
     questions_defer.add_argument("--note", type=str, default="")
     questions_defer.add_argument("--json", action="store_true", help="JSON output")
@@ -1824,7 +1827,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=AskRole.OWNER.value,
         choices=[
             AskRole.OWNER.value,
-            AskRole.ORCHESTRATOR.value,
+            AskRole.PLAN.value,
             AskRole.ENGINE.value,
         ],
     )
@@ -1898,8 +1901,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--role",
         type=str,
         default="WORKER",
-        choices=["ORCHESTRATOR", "WORKER", "INTEGRATOR", "SURGEON", "REVIEWER"],
-        help="Job role (only WORKER is dispatchable until R-002).",
+        choices=["PLAN", "BUILD", "CHECK"],
+        help="Job role (only BUILD is dispatchable; repair runs on the build route).",
     )
     job_submit.add_argument(
         "--effort", type=str, default=None, choices=["low", "medium", "high"]
@@ -3782,9 +3785,14 @@ def handle_models(
     print("Configured Multi-Provider Execution Roles & Routing Chains:\n")
     print(f"Routing Source: {snap.source} {snap.source_path or '(packaged default)'}")
     print(f"Content Hash: {snap.content_hash}\n")
-    for role in ("WORKER", "SURGEON", "INTEGRATOR"):
-        print(f"{role}:")
-        for number, group in enumerate(snap.groups_for(role), start=1):
+    print("BUILD:\n")
+    for number, group in enumerate(snap.groups_for(JobRole.BUILD), start=1):
+        for c in group:
+            avail = "✓ available" if registry.is_available(c.provider) else "✗ unavailable"
+            print(f"  {number}. → [{c.provider}] {c.model} ({avail})")
+    if snap.strong_start:
+        print("\nBUILD strong start (stronger-model setting):")
+        for number, group in enumerate(snap.strong_start, start=1):
             for c in group:
                 avail = "✓ available" if registry.is_available(c.provider) else "✗ unavailable"
                 print(f"  {number}. → [{c.provider}] {c.model} ({avail})")
@@ -3812,15 +3820,19 @@ def handle_routing_show(args: argparse.Namespace) -> int:
             "schema_version": snap.schema_version,
             "migrated_from": snap.migrated_from,
             "roles": {
-                role: [
+                "BUILD": [
                     [f"{c.provider}/{c.model}" for c in group]
-                    for group in snap.groups_for(role)
-                ]
-                for role in ("WORKER", "SURGEON", "INTEGRATOR")
+                    for group in snap.groups_for(JobRole.BUILD)
+                ],
+                "strong_start": [
+                    [f"{c.provider}/{c.model}" for c in group]
+                    for group in snap.strong_start
+                ],
             },
+            "migrated_roles": list(snap.migrated_roles),
             "managed_elsewhere": {
-                "ORCHESTRATOR": "orch orchestrator show",
-                "REVIEWER": "orch reviewer show",
+                "PLAN": "orch orchestrator show",
+                "CHECK": "orch reviewer show",
             },
         }
         print(json.dumps(payload, indent=2))
@@ -3833,12 +3845,20 @@ def handle_routing_show(args: argparse.Namespace) -> int:
             f"Note: migrated in memory from schema {snap.migrated_from}; "
             "run `orch routing migrate --write` to persist"
         )
-    for role in ("WORKER", "SURGEON", "INTEGRATOR"):
-        print(f"{role}:")
-        for number, group in enumerate(snap.groups_for(role), start=1):
-            print(f"  {number}.", [f"{c.provider}/{c.model}" for c in group])
-    print("ORCHESTRATOR: see 'orch orchestrator show'")
-    print("REVIEWER: see 'orch reviewer show'")
+    if snap.migrated_roles:
+        print(
+            "Note: retired roles migrated in memory: "
+            f"{', '.join(snap.migrated_roles)} -> BUILD/strong_start; "
+            "run `orch routing migrate --write` to persist"
+        )
+    print("BUILD:")
+    for number, group in enumerate(snap.groups_for(JobRole.BUILD), start=1):
+        print(f"  {number}.", [f"{c.provider}/{c.model}" for c in group])
+    print("strong_start (build route's stronger-model setting):")
+    for number, group in enumerate(snap.strong_start, start=1):
+        print(f"  {number}.", [f"{c.provider}/{c.model}" for c in group])
+    print("PLAN: see 'orch orchestrator show'")
+    print("CHECK: see 'orch reviewer show'")
     return 0
 
 
@@ -3875,15 +3895,23 @@ def handle_routing_init(args: argparse.Namespace) -> int:
 def _routing_role_or_refuse(role_raw: str) -> str | None:
     """Return the normalized routed role, or print a pointer and return None."""
     cleaned = str(role_raw).strip().upper()
-    if cleaned in ("ORCHESTRATOR", "REVIEWER"):
-        pointer = "orch orchestrator show" if cleaned == "ORCHESTRATOR" else "orch reviewer show"
+    if cleaned in ("ORCHESTRATOR", "REVIEWER", "PLAN", "CHECK"):
+        pointer = (
+            "orch orchestrator show" if cleaned in ("ORCHESTRATOR", "PLAN")
+            else "orch reviewer show"
+        )
         print(f"[!] Role {cleaned!r} is managed elsewhere; see '{pointer}'", file=sys.stderr)
         return None
-    if cleaned not in ("WORKER", "SURGEON", "INTEGRATOR"):
-        print(f"[!] Unknown routing role {role_raw!r}: expected worker, surgeon or integrator",
-              file=sys.stderr)
-        return None
-    return cleaned
+    if cleaned in ("BUILD", "WORKER", "SURGEON", "INTEGRATOR"):
+        # Retired role names migrate onto the build route.
+        return "BUILD"
+    if cleaned in ("STRONG_START", "STRONG-START"):
+        return "STRONG_START"
+    print(
+        f"[!] Unknown routing role {role_raw!r}: expected build or strong_start",
+        file=sys.stderr,
+    )
+    return None
 
 
 def _read_raw_user_routing() -> tuple[Path | None, dict[str, Any] | None, str | None]:
@@ -3921,10 +3949,13 @@ def handle_routing_migrate(args: argparse.Namespace) -> int:
         print("Packaged default is schema 3; no user routing file to migrate.")
         return 0
     raw_version = data.get("schema_version")
-    if raw_version == 3:
-        print(f"User routing config at {user_path} is already schema 3; nothing to do.")
+    roles_obj_raw = data.get("roles")
+    roles_obj: dict[str, Any] = roles_obj_raw if isinstance(roles_obj_raw, dict) else {}
+    retired = [role for role in ("WORKER", "SURGEON", "INTEGRATOR") if role in roles_obj]
+    if raw_version == 3 and not retired:
+        print(f"User routing config at {user_path} is current; nothing to do.")
         return 0
-    if raw_version not in (1, 2):
+    if raw_version not in (1, 2, 3):
         print(f"[!] Routing config at {user_path}: unsupported schema_version {raw_version!r}",
               file=sys.stderr)
         return 1
@@ -3933,16 +3964,32 @@ def handle_routing_migrate(args: argparse.Namespace) -> int:
     except RoutingConfigError as exc:
         print(f"[!] Routing config invalid: {exc}", file=sys.stderr)
         return 1
-    print(f"User routing config at {user_path} is schema {raw_version}; migrated preview:")
-    for tier in ("T1", "T2", "T3"):
-        section = data.get(tier)
-        if isinstance(section, dict):
-            for sub, chain in section.items():
-                print(f"  old {tier}.{sub}:", list(chain) if isinstance(chain, list) else chain)
+    print(f"User routing config at {user_path} needs migration; preview:")
+    if raw_version in (1, 2):
+        for tier in ("T1", "T2", "T3"):
+            section = data.get(tier)
+            if isinstance(section, dict):
+                for sub, chain in section.items():
+                    print(
+                        f"  old {tier}.{sub}:",
+                        list(chain) if isinstance(chain, list) else chain,
+                    )
+    for role in retired:
+        groups = roles_obj.get(role) or []
+        print(f"  old {role}:", [list(group.get("routes", ())) for group in groups])
+        if role == "SURGEON":
+            print("    -> BUILD strong_start (the build route's stronger-model setting)")
+        elif role == "INTEGRATOR":
+            print("    -> dropped (landing is a deterministic engine stage, not a role)")
+        else:
+            print("    -> BUILD")
     for role, groups in migrated["roles"].items():
         print(f"  new {role}:")
         for number, group in enumerate(groups, start=1):
             print(f"    {number}.", list(group["routes"]))
+    print("  new strong_start:")
+    for number, group in enumerate(migrated.get("strong_start", []), start=1):
+        print(f"    {number}.", list(group["routes"]))
     if not bool(getattr(args, "write", False)):
         print("Dry run: nothing written. Re-run with --write to persist (with backup).")
         return 0
@@ -4096,7 +4143,7 @@ def handle_routing_accept_default(args: argparse.Namespace) -> int:
         added: list[str] = []
         for item in suggestions:
             cid = item["candidate_id"]
-            payload = add_candidate_to_chain(payload, role=JobRole.WORKER, candidate_id=cid)
+            payload = add_candidate_to_chain(payload, role=JobRole.BUILD, candidate_id=cid)
             added.append(cid)
         canonical_routing_payload(payload)
         dest = save_user_routing(payload)
@@ -4106,13 +4153,13 @@ def handle_routing_accept_default(args: argparse.Namespace) -> int:
     if getattr(args, "json", False):
         print(
             json.dumps(
-                {"accepted": added, "path": str(dest), "worker_chain": payload["roles"]["WORKER"]},
+                {"accepted": added, "path": str(dest), "build_chain": payload["roles"]["BUILD"]},
                 indent=2,
                 sort_keys=True,
             )
         )
         return 0
-    print(f"Accepted default WORKER route(s) in {dest}: {', '.join(added)}")
+    print(f"Accepted default BUILD route(s) in {dest}: {', '.join(added)}")
     return 0
 
 
@@ -4692,7 +4739,7 @@ def handle_orchestrator_show(args: argparse.Namespace) -> int:
     resolved = status["resolved_binding"]
     if resolved is not None:
         print(f"Resolved           : {resolved['binding_id']} [{resolved['provider']}/{resolved['model']}]")
-    _render_bindings_human("Eligible ORCHESTRATOR bindings", status["eligible"])
+    _render_bindings_human("Eligible PLAN bindings", status["eligible"])
     return 0
 
 
@@ -5181,15 +5228,15 @@ def handle_questions_show(args: argparse.Namespace) -> int:
 
 def handle_questions_answer(args: argparse.Namespace) -> int:
     """Handle `orch questions answer REF --words ...` (verbatim owner words)."""
-    authority = AnswerAuthority(str(args.authority).strip().upper())
+    authority = coerce_answer_authority(str(args.authority).strip().upper())
     role_raw = getattr(args, "role", None)
     role = (
-        AskRole(str(role_raw))
+        coerce_ask_role(str(role_raw))
         if role_raw
         else (
             AskRole.OWNER
             if authority is AnswerAuthority.OWNER
-            else AskRole.ORCHESTRATOR
+            else AskRole.PLAN
         )
     )
     actor = str(args.answered_by) if args.answered_by else (
@@ -5346,8 +5393,8 @@ def handle_job_submit(args: argparse.Namespace) -> int:
     from saberops.db import Database as _Database
     from saberops.jobs.models import Effort as _Effort
     from saberops.jobs.models import JobRequirements as _Requirements
-    from saberops.jobs.models import JobRole as _JobRole
     from saberops.jobs.models import Priority as _Priority
+    from saberops.jobs.models import coerce_job_role
     from saberops.jobs.service import (
         IdempotencyConflictError as _IdempotencyConflict,
     )
@@ -5357,7 +5404,7 @@ def handle_job_submit(args: argparse.Namespace) -> int:
 
     try:
         requirements = _Requirements(
-            role=_JobRole(str(args.role)),
+            role=coerce_job_role(str(args.role)),
             effort=_Effort(str(args.effort).lower()) if args.effort else None,
             required_capabilities=tuple(args.capabilities or ()),
             read_only=bool(args.read_only),

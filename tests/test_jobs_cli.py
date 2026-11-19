@@ -86,7 +86,7 @@ def test_submit_get_list_json_shapes(
     job = payload["job"]
     assert job["state"] == "QUEUED"
     assert job["base_ref"] == "HEAD" and job["base_sha"]
-    assert job["requirements"]["role"] == "WORKER"
+    assert job["requirements"]["role"] == "BUILD"
     job_id = job["job_id"]
 
     code, out, _ = _cli("job", "get", job_id, "--db", _db_path(isolated), "--json",
@@ -150,13 +150,13 @@ def test_submit_infeasible_role_exit_3_with_job_printed(
     isolated: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     repo = _git_repo(isolated / "repo")
-    code, payload, _ = _submit(isolated, capsys, repo, "--role", "SURGEON")
+    code, payload, _ = _submit(isolated, capsys, repo, "--role", "CHECK")
     assert code == 3
     assert payload["job"]["state"] == "FAILED"
     assert payload["job"]["failure_reason"] == "NO_ROUTE_FOR_REQUIREMENTS"
     code, out, _ = _cli(
         "job", "submit", "--repo", str(repo), "--goal", "other",
-        "--role", "REVIEWER", "--db", _db_path(isolated), capsys=capsys,
+        "--role", "PLAN", "--db", _db_path(isolated), capsys=capsys,
     )
     assert code == 3
     assert "FAILED" in out
@@ -207,7 +207,7 @@ def test_list_state_filter_and_limit(
 ) -> None:
     repo = _git_repo(isolated / "repo")
     assert _submit(isolated, capsys, repo)[0] == 0
-    assert _submit(isolated, capsys, repo, "--role", "SURGEON")[0] == 3
+    assert _submit(isolated, capsys, repo, "--role", "CHECK")[0] == 3
     code, out, _ = _cli(
         "job", "list", "--state", "FAILED", "--db", _db_path(isolated),
         "--json", capsys=capsys,

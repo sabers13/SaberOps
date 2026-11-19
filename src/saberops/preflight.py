@@ -170,7 +170,7 @@ def collect_preflight(repo: Path, db_path: Path | None = None) -> list[Finding]:
     owner = load_owner_bindings()
     selection = select_reviewer_binding(owner, adapter_registry=registry)
     reviewers = [
-        b for b in owner.registry.list_bindings() if b.binding_role is BindingRole.REVIEWER
+        b for b in owner.registry.list_bindings() if b.binding_role is BindingRole.CHECK
     ]
     suggested_reviewer = next(
         (b for b in reviewers if not workers or b.provider != workers[0].provider), None

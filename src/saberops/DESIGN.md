@@ -52,11 +52,13 @@ tiers, binding ids, commit SHAs, paths, posture classes, mode codes) live behind
 | Projects | Can SaberOps work in this repository, and how much space does it use? | mode codes, preflight codes, plan registry JSON |
 | Setup | Is everything connected and ready? | connection ids, executables, catalog sources |
 
-**Routing contract.** Five jobs in work order: Plans the work (ORCHESTRATOR, always the
+**Routing contract.** Three roles in work order: Plans the work (PLAN, always the
 agent connected over MCP, read from the writer lease's `client` label, never chosen in
-the UI), Writes the code (WORKER), Checks the work (REVIEWER order in the binding store),
-Repairs failed work (SURGEON), Combines finished work (INTEGRATOR). One job is open at a
-time (`/routing?job=<slug>`); a phone shows the job list or one job. The picker offers
+the UI), Writes the code (BUILD, including its own repair retries and a stronger-model
+`strong_start` setting), Checks the work (CHECK order in the binding store). Landing,
+gates, the memory and disk guard and cleanup are deterministic engine stages, not roles
+(ADR-0005 §3). One job is open at a time (`/routing?job=<slug>`); a phone shows the job
+list or one job. The picker offers
 only models with fresh, discovery-verified, execution-supported evidence and an exact
 binding that resolves (`routing_ops.chain_options` / `reviewer_options`), eight at a
 time with account tabs and search. Changes are plain POSTs (`/routing/add`,
@@ -485,11 +487,11 @@ explicit. Opening usage can refresh metadata; it never starts model inference,
 changes routing or writes quota policy.
 
 Workspace and run chat headers have a searchable orchestrator picker. It lists
-only canonical, resolvable ORCHESTRATOR-role bindings and persists an explicit
+only canonical, resolvable PLAN-role bindings and persists an explicit
 choice through the existing orchestrator selection authority. Binding identity,
 provider/account connection and CLI/API billing remain distinct. The picker
 refreshes on opening and window focus so changes made in Routing are reflected.
-Worker tier routing remains in Routing. Both popovers support Escape, focus
+Build-route ordering and its `strong_start` setting remain in Routing. Both popovers support Escape, focus
 return, Tab navigation, outside-click dismissal and narrow-screen layouts.
 
 

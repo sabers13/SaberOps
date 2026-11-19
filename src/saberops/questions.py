@@ -95,6 +95,8 @@ __all__ = [
     "AnswerAuthority",
     "AnswerAuthorityError",
     "AskRole",
+    "coerce_ask_role",
+    "coerce_answer_authority",
     "DecisionClass",
     "DivergenceReason",
     "DivergenceReport",
@@ -190,26 +192,67 @@ class AskRole(StrEnum):
     """The role that raised a question or performed a queue verb."""
 
     OWNER = "OWNER"
-    ORCHESTRATOR = "ORCHESTRATOR"
-    WORKER = "WORKER"
-    SURGEON = "SURGEON"
-    REVIEWER = "REVIEWER"
-    INTEGRATOR = "INTEGRATOR"
+    PLAN = "PLAN"
+    BUILD = "BUILD"
+    CHECK = "CHECK"
     ENGINE = "ENGINE"
 
 
+#: Legacy persisted role names, mapped onto plan/build/check.  A durable
+#: question row written before ADR-0005 §3 keeps loading.
+_LEGACY_ASK_ROLES: dict[str, AskRole] = {
+    "ORCHESTRATOR": AskRole.PLAN,
+    "WORKER": AskRole.BUILD,
+    "SURGEON": AskRole.BUILD,
+    "INTEGRATOR": AskRole.BUILD,
+    "REVIEWER": AskRole.CHECK,
+}
+
+
+def coerce_ask_role(value: AskRole | str) -> AskRole:
+    """Return the plan/build/check ``AskRole`` for ``value`` (legacy accepted)."""
+    if isinstance(value, AskRole):
+        return value
+    cleaned = str(value).strip().upper()
+    try:
+        return AskRole(cleaned)
+    except ValueError:
+        legacy = _LEGACY_ASK_ROLES.get(cleaned)
+        if legacy is not None:
+            return legacy
+        known = ", ".join(role.value for role in AskRole)
+        raise ValueError(f"unknown role {value!r}: expected one of {known}") from None
+
+
 #: Roles that implement work or review it.  None of them may answer a
-#: question: answering is owner or Orchestrator authority only.
-IMPLEMENTER_ROLES: frozenset[AskRole] = frozenset(
-    {AskRole.WORKER, AskRole.SURGEON, AskRole.REVIEWER, AskRole.INTEGRATOR}
-)
+#: question: answering is owner or plan authority only.
+IMPLEMENTER_ROLES: frozenset[AskRole] = frozenset({AskRole.BUILD, AskRole.CHECK})
 
 
 class AnswerAuthority(StrEnum):
     """Who may answer a question."""
 
     OWNER = "OWNER"
-    ORCHESTRATOR = "ORCHESTRATOR"
+    PLAN = "PLAN"
+
+
+#: Legacy persisted answer authority: the planning session's authority.
+_LEGACY_AUTHORITIES: dict[str, AnswerAuthority] = {"ORCHESTRATOR": AnswerAuthority.PLAN}
+
+
+def coerce_answer_authority(value: AnswerAuthority | str) -> AnswerAuthority:
+    """Return the answer authority for ``value`` (legacy ORCHESTRATOR accepted)."""
+    if isinstance(value, AnswerAuthority):
+        return value
+    cleaned = str(value).strip().upper()
+    try:
+        return AnswerAuthority(cleaned)
+    except ValueError:
+        legacy = _LEGACY_AUTHORITIES.get(cleaned)
+        if legacy is not None:
+            return legacy
+        known = ", ".join(authority.value for authority in AnswerAuthority)
+        raise ValueError(f"unknown authority {value!r}: expected one of {known}") from None
 
 
 class QuestionStatus(StrEnum):
@@ -283,17 +326,16 @@ class DivergenceReason(StrEnum):
 def resolve_answer_authority(decision_class: DecisionClass) -> AnswerAuthority:
     """Return the authority allowed to answer ``decision_class``.
 
-    Only the explicit Orchestrator-answerable list resolves to
-    ``ORCHESTRATOR``; every other class -- including an unknown one -- fails
-    closed to ``OWNER``.
+    Only the explicit planner-answerable list resolves to ``PLAN``; every
+    other class -- including an unknown one -- fails closed to ``OWNER``.
     """
     if decision_class in ORCHESTRATOR_ANSWERABLE_DECISION_CLASSES:
-        return AnswerAuthority.ORCHESTRATOR
+        return AnswerAuthority.PLAN
     return AnswerAuthority.OWNER
 
 
 def is_orchestrator_answerable(decision_class: DecisionClass) -> bool:
-    """Return True only for an explicitly Orchestrator-answerable decision."""
+    """Return True only for an explicitly planner-answerable decision."""
     return decision_class in ORCHESTRATOR_ANSWERABLE_DECISION_CLASSES
 
 
@@ -372,11 +414,21 @@ def _enum[E: StrEnum](enum_type: type[E], value: object, field_name: str) -> E:
 
 
 def _ask_role(value: object, field_name: str) -> AskRole:
-    return _enum(AskRole, value, field_name)
+    if not isinstance(value, str):
+        raise QuestionStoreError(f"unknown {field_name}: {value!r}")
+    try:
+        return coerce_ask_role(value)
+    except ValueError as exc:
+        raise QuestionStoreError(str(exc)) from exc
 
 
 def _authority(value: object, field_name: str) -> AnswerAuthority:
-    return _enum(AnswerAuthority, value, field_name)
+    if not isinstance(value, str):
+        raise QuestionStoreError(f"unknown {field_name}: {value!r}")
+    try:
+        return coerce_answer_authority(value)
+    except ValueError as exc:
+        raise QuestionStoreError(str(exc)) from exc
 
 
 def _decision_class(value: object, field_name: str) -> DecisionClass:
@@ -548,7 +600,7 @@ class OwnerAnswer:
         expected_role = (
             AskRole.OWNER
             if self.authority is AnswerAuthority.OWNER
-            else AskRole.ORCHESTRATOR
+            else AskRole.PLAN
         )
         if self.answered_by_role is not expected_role:
             raise AnswerAuthorityError(
@@ -564,7 +616,7 @@ class OwnerAnswer:
             "rejected_alternative",
             _optional_text(self.rejected_alternative, "rejected_alternative"),
         )
-        if self.authority is AnswerAuthority.ORCHESTRATOR:
+        if self.authority is AnswerAuthority.PLAN:
             missing = [
                 name
                 for name, value in (
@@ -784,8 +836,8 @@ class OwnerQuestion:
             if self.answer.question_id != self.question_id:
                 raise QuestionStoreError("answer belongs to a different question")
             if (
-                self.answer.authority is AnswerAuthority.ORCHESTRATOR
-                and self.request.answerable_by is not AnswerAuthority.ORCHESTRATOR
+                self.answer.authority is AnswerAuthority.PLAN
+                and self.request.answerable_by is not AnswerAuthority.PLAN
             ):
                 raise AnswerAuthorityError(
                     "an Orchestrator answer on an owner-only decision class is refused"
@@ -1234,7 +1286,7 @@ class OwnerQuestionQueue:
     ) -> OwnerQuestion:
         """Defer a question until a date; it resurfaces on that date."""
         question = self._require(ref)
-        if deferred_by_role not in (AskRole.OWNER, AskRole.ORCHESTRATOR):
+        if deferred_by_role not in (AskRole.OWNER, AskRole.PLAN):
             raise AnswerAuthorityError(
                 "only the owner or the Orchestrator may defer a question"
             )
@@ -1278,7 +1330,7 @@ class OwnerQuestionQueue:
         cleaned up.
         """
         question = self._require(ref)
-        if closed_by_role not in (AskRole.OWNER, AskRole.ORCHESTRATOR, AskRole.ENGINE):
+        if closed_by_role not in (AskRole.OWNER, AskRole.PLAN, AskRole.ENGINE):
             raise AnswerAuthorityError(
                 "only the owner, the Orchestrator or the deterministic engine "
                 "may close a question as moot"
@@ -1444,7 +1496,7 @@ class OwnerQuestionQueue:
             )
             for question in self.load().questions
             if question.answer is not None
-            and question.answer.authority is AnswerAuthority.ORCHESTRATOR
+            and question.answer.authority is AnswerAuthority.PLAN
         ]
         return tuple(sorted(decisions, key=lambda item: (item.answered_at, item.question_id)))
 
@@ -1508,13 +1560,13 @@ class OwnerQuestionQueue:
     ) -> None:
         if authority is AnswerAuthority.OWNER:
             return
-        if question.answerable_by is not AnswerAuthority.ORCHESTRATOR:
+        if question.answerable_by is not AnswerAuthority.PLAN:
             raise AnswerAuthorityError(
                 f"decision class {question.request.decision_class.value} is owner-only; "
                 "only the owner may answer this question"
             )
         if (
-            question.request.raised_by_role is AskRole.ORCHESTRATOR
+            question.request.raised_by_role is AskRole.PLAN
             or answered_by == question.request.raised_by
         ):
             raise AnswerAuthorityError(

@@ -1,8 +1,8 @@
 """Contract: orchestrator dispatches through role chains (ADR-0002 §11).
 
 The classifier still labels the run tier, but it no longer selects routes:
-every dispatch resolves a role chain (WORKER first, SURGEON after exactly
-one capability escalation).
+every dispatch resolves the build route, and an escalation moves that route to
+its stronger-model ``strong_start`` setting (ADR-0005 §3: no second role).
 """
 
 from __future__ import annotations
@@ -161,15 +161,20 @@ class ScriptedWorker(WorkerAdapter):
 
 def _role_keyed_chain(
     worker: list[WorkerCandidate],
-    surgeon: list[WorkerCandidate],
+    strong: list[WorkerCandidate],
     calls: list[str],
 ) -> Any:
-    """Return a resolve_candidate_chain replacement keyed on the role."""
+    """Return a resolve_candidate_chain replacement keyed on the build setting."""
 
-    def _resolve(*, role: Any | None = None, **_: Any) -> list[WorkerCandidate]:
+    def _resolve(
+        *,
+        role: Any | None = None,
+        strong_start: bool = False,
+        **_: Any,
+    ) -> list[WorkerCandidate]:
         key = getattr(role, "value", role)
-        calls.append(str(key))
-        return list(surgeon) if str(key) == "SURGEON" else list(worker)
+        calls.append(f"{key}:{'strong' if strong_start else 'ordinary'}")
+        return list(strong) if strong_start else list(worker)
 
     return _resolve
 
@@ -279,20 +284,21 @@ def test_auto_run_labelled_t1_dispatches_worker_chain_head(
     assert result.status == RunStatus.COMPLETED
     impl_log = [e for e in log if not e.startswith("review:")]
     assert impl_log == ["m1"], impl_log
-    # The classifier labelled T1, but the route came from the WORKER chain.
+    # The classifier labelled T1, but the route came from the build route.
     assert db.get_run(result.run_id) is not None
     assert db.get_run(result.run_id).tier == Tier.T1  # type: ignore[union-attr]
-    assert calls and calls[0] == "WORKER"
+    assert calls and calls[0] == "BUILD:ordinary"
     resolved = _events_by_type(db.get_events(result.run_id), "tier_candidates_resolved")
     assert resolved and resolved[0].payload is not None
-    assert resolved[0].payload["role"] == "WORKER"
-    assert resolved[0].payload["routing_context"] == "WORKER"
+    assert resolved[0].payload["role"] == "BUILD"
+    assert resolved[0].payload["routing_context"] == "BUILD"
+    assert resolved[0].payload["strong_start"] is False
 
 
-def test_capability_failure_escalates_worker_to_surgeon_once(
+def test_capability_failure_escalates_build_to_strong_start_once(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
-    """Covers: ADR-0002 §11 escalation (one step Worker → Surgeon)."""
+    """Covers: ADR-0005 §3 escalation (one step to the build strong_start)."""
     repo = tmp_path / "repo"
     _init_repo(repo)
     log: list[str] = []
@@ -325,21 +331,23 @@ def test_capability_failure_escalates_worker_to_surgeon_once(
     escalated = _events_by_type(events, "tier_escalated")
     assert len(escalated) == 1
     assert escalated[0].payload is not None
-    assert escalated[0].payload["from_role"] == "WORKER"
-    assert escalated[0].payload["to_role"] == "SURGEON"
+    assert escalated[0].payload["from_role"] == "BUILD"
+    assert escalated[0].payload["to_role"] == "BUILD"
+    assert escalated[0].payload["strong_start"] is True
     assert escalated[0].payload["to"] == "T3"
     resolved = _events_by_type(events, "tier_candidates_resolved")
     assert resolved and resolved[-1].payload is not None
-    assert resolved[-1].payload["role"] == "SURGEON"
-    assert resolved[-1].payload["routing_context"] == "SURGEON"
+    assert resolved[-1].payload["role"] == "BUILD"
+    assert resolved[-1].payload["routing_context"] == "BUILD"
+    assert resolved[-1].payload["strong_start"] is True
     assert db.get_run(result.run_id) is not None
     assert db.get_run(result.run_id).tier == Tier.T3  # type: ignore[union-attr]
 
 
-def test_capability_failure_on_surgeon_never_escalates_further(
+def test_capability_failure_on_strong_start_never_escalates_further(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
-    """Covers: ADR-0002 §11 escalation (SURGEON chain never escalates)."""
+    """Covers: a manual high-tier run never escalates further."""
     repo = tmp_path / "repo"
     _init_repo(repo)
     log: list[str] = []
@@ -368,7 +376,7 @@ def test_capability_failure_on_surgeon_never_escalates_further(
 def test_capped_ceiling_withholds_escalation_and_evidence_event(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
-    """Covers: escalation ceiling (max_auto_tier=T2 disables Worker → Surgeon)."""
+    """Covers: escalation ceiling (max_auto_tier=T2 disables the strong start)."""
     repo = tmp_path / "repo"
     _init_repo(repo)
     log: list[str] = []
@@ -393,10 +401,10 @@ def test_capped_ceiling_withholds_escalation_and_evidence_event(
     assert _events_by_type(events, "stage_exhausted_without_escalation_evidence") == []
 
 
-def test_manual_t3_starts_on_surgeon_without_escalation(
+def test_manual_t3_starts_on_build_strong_start_without_escalation(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
-    """Covers: deprecated --tier T3 mapping (run starts on SURGEON chain)."""
+    """Covers: --tier T3 selects the build route's strong_start setting."""
     repo = tmp_path / "repo"
     _init_repo(repo)
     log: list[str] = []
@@ -423,18 +431,19 @@ def test_manual_t3_starts_on_surgeon_without_escalation(
     events = db.get_events(result.run_id)
     resolved = _events_by_type(events, "tier_candidates_resolved")
     assert resolved and resolved[0].payload is not None
-    assert resolved[0].payload["role"] == "SURGEON"
+    assert resolved[0].payload["role"] == "BUILD"
+    assert resolved[0].payload["strong_start"] is True
     assert _events_by_type(events, "tier_escalated") == []
 
 
 @pytest.mark.parametrize(
     ("mode", "tier", "expected"),
-    [("auto", None, 1200.0), ("manual", "T3", 1800.0)],
+    [("auto", None, 1200.0), ("manual", "T3", 1200.0)],
 )
 def test_per_role_worker_timeout_reaches_worker_request(
     tmp_path: Path, monkeypatch: MonkeyPatch, mode: str, tier: str | None, expected: float
 ) -> None:
-    """Covers: per-role worker timeouts (WORKER 1200 / SURGEON 1800)."""
+    """Covers: the one build-role worker deadline."""
     repo = tmp_path / "repo"
     _init_repo(repo)
     seen: list[float] = []
@@ -562,7 +571,7 @@ def test_schema2_frozen_snapshot_continuation_keeps_bytes_and_worker_chain(
     assert parent_result.attempts and parent_result.attempts[-1].commit_sha
     parent_id = parent_result.run_id
     # Freeze the parent's snapshot as a schema-2 document (as runs before
-    # R-002 persisted it): T2 first so the derived WORKER chain is ordered.
+    # R-002 persisted it): T2 first so the derived build chain is ordered.
     legacy_chains = {
         "T1.default": ["opencode/opencode/hy3-free"],
         "T2.default": ["codex/gpt-5.6-terra"],
@@ -599,7 +608,7 @@ def test_schema2_frozen_snapshot_continuation_keeps_bytes_and_worker_chain(
     assert child is not None and child.routing_snapshot_json is not None
     assert json.loads(child.routing_snapshot_json) == json.loads(parent_bytes)
     derived = payload_to_snapshot(json.loads(child.routing_snapshot_json), run_id=child_id)
-    assert [f"{c.provider}/{c.model}" for c in derived.chain_for_role(JobRole.WORKER)] == [
+    assert [f"{c.provider}/{c.model}" for c in derived.chain_for_role(JobRole.BUILD)] == [
         "codex/gpt-5.6-terra",
         "opencode/opencode/hy3-free",
         "codex/gpt-5.6-sol",
@@ -683,23 +692,27 @@ def test_escalation_is_per_package_and_worker_chain_returns_next_package(
     result = orch.run(config=config, is_peak=False)
     assert result.status == RunStatus.COMPLETED
     impl_log = [e for e in log if not e.startswith("review:")]
-    # Package 1: WORKER m1 capability failure, one escalation, SURGEON s1
-    # success. Package 2 restarts on WORKER m1 (no latch) and succeeds.
+    # Package 1: BUILD m1 capability failure, one escalation, strong-start s1
+    # success. Package 2 restarts on BUILD m1 (no latch) and succeeds.
     assert impl_log == ["m1", "s1", "m1"], impl_log
 
     events = db.get_events(result.run_id)
     escalated = _events_by_type(events, "tier_escalated")
     assert len(escalated) == 1
     assert escalated[0].payload is not None
-    assert escalated[0].payload["from_role"] == "WORKER"
-    assert escalated[0].payload["to_role"] == "SURGEON"
+    assert escalated[0].payload["from_role"] == "BUILD"
+    assert escalated[0].payload["to_role"] == "BUILD"
     resolved = _events_by_type(events, "tier_candidates_resolved")
-    # The second package resolves the WORKER chain again: escalation is per
+    # The second package resolves the ordinary build chain again: escalation is per
     # package, not latched for the run.
-    assert [r.payload["role"] for r in resolved if r.payload is not None] == [
-        "WORKER",
-        "SURGEON",
-        "WORKER",
+    assert [
+        (r.payload["role"], r.payload["strong_start"])
+        for r in resolved
+        if r.payload is not None
+    ] == [
+        ("BUILD", False),
+        ("BUILD", True),
+        ("BUILD", False),
     ]
 
 
@@ -740,7 +753,7 @@ def _owning_job(db: Database, repo: Path, base: str, job_id: str, run_id: str) -
             base_sha=base,
             goal="fix typo in readme",
             acceptance=None,
-            requirements=JobRequirements(role=JobRole.WORKER),
+            requirements=JobRequirements(role=JobRole.BUILD),
             priority=Priority.NORMAL,
             state=JobState.QUEUED,
             waiting_reason=WaitingReason.NEW,

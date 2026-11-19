@@ -339,7 +339,7 @@ class AutonomousSupervisor:
         """Return every WORKER-role binding in registry declaration order.
 
         Worker dispatch only consumes bindings whose
-        :class:`BindingRole` is :class:`BindingRole.WORKER`.  An
+        :class:`BindingRole` is :class:`BindingRole.BUILD`.  An
         ORCHESTRATOR-role binding is **not** eligible for worker
         execution; reusing one as worker dispatch authority would be a
         role violation.  The :class:`OrchBindingPolicy` (an
@@ -351,7 +351,7 @@ class AutonomousSupervisor:
         return tuple(
             binding
             for binding in configured
-            if getattr(binding, "binding_role", None) is BindingRole.WORKER
+            if getattr(binding, "binding_role", None) is BindingRole.BUILD
         )
 
     def _policy_bindings(self) -> tuple[Any, ...]:
@@ -385,7 +385,7 @@ class AutonomousSupervisor:
         Resolution order:
 
         1. If ``binding_id`` is non-empty, the exact binding with that
-           id is returned when its role is :class:`BindingRole.WORKER`
+           id is returned when its role is :class:`BindingRole.BUILD`
            and its ``provider``/``model`` agree with ``provider``/``model``.
            A missing binding id, a wrong role, or a mismatched
            provider/model causes ``None`` -- fail closed, never a

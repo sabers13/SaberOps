@@ -234,7 +234,7 @@ def _orchestrator_candidates(
     If ``risk`` is supplied, only bindings declared for that risk are
     returned.
     """
-    orch = list(registry.for_role(BindingRole.ORCHESTRATOR))
+    orch = list(registry.for_role(BindingRole.PLAN))
     if risk is None:
         return orch
     return [binding for binding in orch if binding.supports_risk(risk)]

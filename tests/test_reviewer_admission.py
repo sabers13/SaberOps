@@ -166,7 +166,7 @@ def _seed_two_connection_reviewers() -> tuple[str, str, str, str, str, str]:
         connection_id=_R3E12_CONN_A,
         provider=_R3E12_PROVIDER,
         model=_R3E12_REVIEWER_MODEL,
-        binding_role=BindingRole.REVIEWER,
+        binding_role=BindingRole.CHECK,
     )
     owner = upsert_owner_binding(
         owner, binding=binding_a, profile=profile_a, pool=pool_a
@@ -175,7 +175,7 @@ def _seed_two_connection_reviewers() -> tuple[str, str, str, str, str, str]:
         connection_id=_R3E12_CONN_B,
         provider=_R3E12_PROVIDER,
         model=_R3E12_REVIEWER_MODEL,
-        binding_role=BindingRole.REVIEWER,
+        binding_role=BindingRole.CHECK,
     )
     owner = upsert_owner_binding(
         owner, binding=binding_b, profile=profile_b, pool=pool_b

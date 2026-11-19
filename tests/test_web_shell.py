@@ -179,7 +179,7 @@ def test_r0b_action_state_refreshes_after_lifecycle_change(
             association_id="run_r0b_actions-rev1",
             review_id="run_r0b_actions-rev1",
             stage=DispatchStage.REVIEW,
-            role=DispatchRole.REVIEW,
+            role=DispatchRole.CHECK,
             tier=Tier.T1,
             dispatch_reason=DispatchReason.INDEPENDENT_REVIEW,
             requested_provider="opencode",

@@ -990,7 +990,7 @@ class ReviewEngine:
                     cand_adapter.prompt_transport_for(prompt_bytes) if cand_adapter else "unknown"
                 )
                 shared = _build_review_skip(
-                    role=DispatchRole.REVIEW,
+                    role=DispatchRole.CHECK,
                     candidate=candidate,
                     reason=skip_reason,
                     prompt_bytes=prompt_bytes,
@@ -1123,7 +1123,7 @@ class ReviewEngine:
                         association_id=review_association_id,
                         review_id=None,
                         stage=DispatchStage.REVIEW,
-                        role=DispatchRole.REVIEW,
+                        role=DispatchRole.CHECK,
                         tier=review_tier,
                         dispatch_reason=DispatchReason.INDEPENDENT_REVIEW,
                         requested_provider=reviewer.provider,

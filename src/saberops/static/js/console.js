@@ -294,7 +294,7 @@
     execution: ["Execution", "Timeouts and project execution policy"],
     providers: ["Providers", "Account and API access"],
     models: ["Models", "Discovered model catalog"],
-    routing: ["Routing", "Worker routing chains"],
+    routing: ["Routing", "Build route and check model"],
     repositories: ["Repositories", "Active target project for new runs"]
   };
 

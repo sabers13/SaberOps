@@ -21,7 +21,6 @@ from saberops.models import (
     AttemptTrace,
     CheckResult,
     DispatchEvidence,
-    DispatchRole,
     DispatchStage,
     EffectStatus,
     Handoff,
@@ -52,6 +51,7 @@ from saberops.models import (
     WorkerActivationState,
     WorkerCheckpoint,
     WorkPackage,
+    coerce_dispatch_role,
 )
 from saberops.owner_actions import (
     OWNER_PROCESS_DEAD_REASON,
@@ -4354,7 +4354,7 @@ class Database:
             attempt_id=_optional_text(row, "attempt_id"),
             review_id=_optional_text(row, "review_id"),
             stage=DispatchStage(str(row["stage"])),
-            role=DispatchRole(str(row["role"])),
+            role=coerce_dispatch_role(str(row["role"])),
             tier=Tier(str(row["tier"])),
             dispatch_reason=str(row["dispatch_reason"]),
             requested_provider=str(row["requested_provider"]),

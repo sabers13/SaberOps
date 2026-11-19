@@ -305,10 +305,10 @@ def test_admit_requirements_role_and_capabilities() -> None:
         postures={"codex": PostureRecord("codex", "A", ttl_days=30, verified_on="2026-10-01")}
     )
 
-    # Role mismatch
-    cand_worker = _make_candidate(role="WORKER")
-    req_surgeon = JobRequirements(role=JobRole.SURGEON)
-    d_role = admit(cand_worker, now=now, policy=policy, requirements=req_surgeon)
+    # Role mismatch: a check-required job cannot use a build candidate.
+    cand_worker = _make_candidate(role="BUILD")
+    req_check = JobRequirements(role=JobRole.CHECK)
+    d_role = admit(cand_worker, now=now, policy=policy, requirements=req_check)
     assert d_role.admitted is False
     assert d_role.reason == "ROLE_MISMATCH"
 
@@ -316,7 +316,7 @@ def test_admit_requirements_role_and_capabilities() -> None:
     # Codex lacks Capability.RESUME
     cand = _make_candidate()
     req_resume = JobRequirements(
-        role=JobRole.WORKER,
+        role=JobRole.BUILD,
         required_capabilities=("resume",),
     )
     d_cap = admit(cand, now=now, policy=policy, requirements=req_resume)
@@ -364,7 +364,7 @@ def test_admit_model_family_include_and_exclude() -> None:
     states = [s_codex, s_opencode]
 
     # model_family_include
-    req_include = JobRequirements(role=JobRole.WORKER, model_family_include=("deepseek",))
+    req_include = JobRequirements(role=JobRole.BUILD, model_family_include=("deepseek",))
     res_codex = admit(
         cand_codex, now=now, policy=policy, quota_states=states, requirements=req_include
     ).reason
@@ -374,7 +374,7 @@ def test_admit_model_family_include_and_exclude() -> None:
     ).admitted is True
 
     # model_family_exclude
-    req_exclude = JobRequirements(role=JobRole.WORKER, model_family_exclude=("gpt",))
+    req_exclude = JobRequirements(role=JobRole.BUILD, model_family_exclude=("gpt",))
     res_exclude = admit(
         cand_codex, now=now, policy=policy, quota_states=states, requirements=req_exclude
     ).reason

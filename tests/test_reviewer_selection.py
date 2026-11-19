@@ -90,15 +90,15 @@ def _seed_three_role_bindings() -> tuple[str, str, str]:
     owner = OwnerBindings()
     worker, profile, pool = materialize_discovered_binding(
         connection_id=_CONNECTION, provider=_PROVIDER, model=_MODEL,
-        binding_role=BindingRole.WORKER,
+        binding_role=BindingRole.BUILD,
     )
     reviewer, reviewer_profile, reviewer_pool = materialize_discovered_binding(
         connection_id=_CONNECTION, provider=_PROVIDER, model=_MODEL,
-        binding_role=BindingRole.REVIEWER,
+        binding_role=BindingRole.CHECK,
     )
     orch, orch_profile, orch_pool = materialize_discovered_binding(
         connection_id=_CONNECTION, provider=_PROVIDER, model=_MODEL,
-        binding_role=BindingRole.ORCHESTRATOR,
+        binding_role=BindingRole.PLAN,
     )
     assert reviewer_profile.profile_id == profile.profile_id
     assert reviewer_pool.pool_id == pool.pool_id
@@ -180,9 +180,9 @@ def test_discovery_materializes_three_role_bindings_sharing_resources(
     reviewer = owner.registry.try_get(reviewer_id)
     orch = owner.registry.try_get(orch_id)
     assert worker is not None and reviewer is not None and orch is not None
-    assert worker.binding_role is BindingRole.WORKER
-    assert reviewer.binding_role is BindingRole.REVIEWER
-    assert orch.binding_role is BindingRole.ORCHESTRATOR
+    assert worker.binding_role is BindingRole.BUILD
+    assert reviewer.binding_role is BindingRole.CHECK
+    assert orch.binding_role is BindingRole.PLAN
     # Same real account/model resource: shared profile and quota pool.
     assert reviewer.profile_id == worker.profile_id == orch.profile_id
     assert reviewer.quota_pool_id == worker.quota_pool_id == orch.quota_pool_id
@@ -367,7 +367,7 @@ def test_service_review_run_with_no_adapter_reviewer_fails_closed(
         connection_id="ghost-account",
         provider="ghost-provider",
         model="ghost-model",
-        binding_role=BindingRole.REVIEWER,
+        binding_role=BindingRole.CHECK,
     )
     owner = upsert_owner_binding(
         OwnerBindings(), binding=ghost, profile=ghost_profile, pool=ghost_pool

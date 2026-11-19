@@ -66,19 +66,19 @@ def _seed_three_role_bindings() -> tuple[str, str, str]:
         connection_id=_CONNECTION,
         provider=_PROVIDER,
         model=_MODEL,
-        binding_role=BindingRole.WORKER,
+        binding_role=BindingRole.BUILD,
     )
     reviewer, reviewer_profile, reviewer_pool = materialize_discovered_binding(
         connection_id=_CONNECTION,
         provider=_PROVIDER,
         model=_MODEL,
-        binding_role=BindingRole.REVIEWER,
+        binding_role=BindingRole.CHECK,
     )
     orch, orch_profile, orch_pool = materialize_discovered_binding(
         connection_id=_CONNECTION,
         provider=_PROVIDER,
         model=_MODEL,
-        binding_role=BindingRole.ORCHESTRATOR,
+        binding_role=BindingRole.PLAN,
     )
     owner = upsert_owner_binding(owner, binding=worker, profile=profile, pool=pool)
     owner = upsert_owner_binding(
@@ -218,7 +218,7 @@ def test_reviewer_select_unresolvable_refused_without_mutation(
         connection_id="ghost-conn",
         provider="ghost-provider",
         model="ghost-model",
-        binding_role=_BindingRole.REVIEWER,
+        binding_role=_BindingRole.CHECK,
     )
     _save(_upsert(_OwnerBindings(), binding=ghost, profile=profile, pool=pool))
     before = load_owner_bindings().to_dict()
@@ -324,7 +324,7 @@ def test_orchestrator_select_disabled_profile_refused_without_mutation(
         connection_id="off-conn",
         provider="opencode",
         model="off-model",
-        binding_role=_BindingRole.ORCHESTRATOR,
+        binding_role=_BindingRole.PLAN,
     )
     _save(
         _upsert(
@@ -924,23 +924,23 @@ def test_routing_show_text_and_json(
     code, out, _ = _cli("routing", "show", capsys=capsys)
     assert code == 0
     assert "Schema: 3" in out
-    assert "WORKER:" in out
-    assert "SURGEON:" in out
-    assert "INTEGRATOR:" in out
-    assert "orch orchestrator show" in out
-    assert "orch reviewer show" in out
+    assert "BUILD:" in out
+    assert "strong_start (build route's stronger-model setting):" in out
+    assert "PLAN: see 'orch orchestrator show'" in out
+    assert "CHECK: see 'orch reviewer show'" in out
     code, out, _ = _cli("routing", "show", "--json", capsys=capsys)
     assert code == 0
     payload = json.loads(out)
     assert payload["schema_version"] == 3
-    assert set(payload["roles"]) == {"WORKER", "SURGEON", "INTEGRATOR"}
-    assert payload["roles"]["INTEGRATOR"] == [
-        ["opencode/opencode/muse-spark-1.2-contributor-free"]
+    assert set(payload["roles"]) == {"BUILD", "strong_start"}
+    assert payload["roles"]["BUILD"][0] == ["opencode/opencode/muse-spark-1.2-contributor-free"]
+    assert payload["roles"]["strong_start"][0] == [
+        "opencode/opencode-go/deepseek-v4-pro"
     ]
-    assert payload["roles"]["WORKER"][0] == ["opencode/opencode/muse-spark-1.2-contributor-free"]
+    assert payload["migrated_roles"] == ["WORKER", "SURGEON", "INTEGRATOR"]
     assert payload["managed_elsewhere"] == {
-        "ORCHESTRATOR": "orch orchestrator show",
-        "REVIEWER": "orch reviewer show",
+        "PLAN": "orch orchestrator show",
+        "CHECK": "orch reviewer show",
     }
 
 
@@ -963,7 +963,7 @@ def test_routing_migrate_dry_run_writes_nothing(
     user_path.write_text(original)
     code, out, _ = _cli("routing", "migrate", capsys=capsys)
     assert code == 0
-    assert "WORKER" in out and "SURGEON" in out
+    assert "new BUILD:" in out and "new strong_start:" in out
     assert user_path.read_text() == original
     assert list(user_path.parent.glob("routing.json.bak-*")) == []
 
@@ -992,15 +992,16 @@ def test_routing_migrate_write_backs_up_and_persists_schema3(
     assert len(backups) == 1
     persisted = json.loads(user_path.read_text())
     assert persisted["schema_version"] == 3
-    assert [group["routes"][0] for group in persisted["roles"]["WORKER"]] == [
+    assert [group["routes"][0] for group in persisted["roles"]["BUILD"]] == [
         "codex/gpt-5.6-terra",
         "codex/gpt-5.6-luna",
         "codex/gpt-5.6-sol",
     ]
-    assert persisted["roles"]["SURGEON"] == [{"routes": ["codex/gpt-5.6-sol"]}]
+    assert persisted["strong_start"] == [{"routes": ["codex/gpt-5.6-sol"]}]
+    assert set(persisted["roles"]) == {"BUILD"}
     code, out, _ = _cli("routing", "migrate", capsys=capsys)
     assert code == 0
-    assert "already schema 3" in out
+    assert "is current; nothing to do" in out
 
 
 def test_routing_editors_and_legacy_refusal(
@@ -1038,10 +1039,13 @@ def test_routing_editors_and_legacy_refusal(
     assert "orch orchestrator show" in err
     code, _, err = _cli("routing", "add", "worker", "nope/unknown-model", capsys=capsys)
     assert code == 1
-    # Removing the last route of a chain leaves a valid empty chain.
+    # A retired role name edits the build route; removing the last route leaves
+    # a valid empty chain.
     code, _, _ = _cli("routing", "remove", "integrator", "codex/gpt-5.6-terra", capsys=capsys)
     assert code == 0
-    assert json.loads(user_path.read_text())["roles"]["INTEGRATOR"] == []
+    assert ["codex/gpt-5.6-terra"] not in [
+        group["routes"] for group in json.loads(user_path.read_text())["roles"]["BUILD"]
+    ]
     # Non-permutation reorder fails without writing.
     before = user_path.read_bytes()
     code, _, err = _cli("routing", "reorder", "worker", "1", "1", capsys=capsys)
@@ -1079,12 +1083,12 @@ def test_list_shows_role_and_status_shows_role_line(
     assert "TIER" not in out.splitlines()[0]
     new_line = next(line for line in out.splitlines() if "run_role_new" in line)
     old_line = next(line for line in out.splitlines() if "run_role_old" in line)
-    assert "WORKER" in new_line
+    assert "BUILD" in new_line
     assert "LEGACY:T1" in old_line
     code, out, _ = _cli("status", "run_role_new", "--db", str(db_path), capsys=capsys)
     assert code == 0
     assert "Tier             : T1" in out
-    assert "Role             : WORKER" in out
+    assert "Role             : BUILD" in out
 
 
 def test_deprecated_tier_flags_warn_and_supervisor_forwards_selectively(

@@ -156,41 +156,55 @@ class DispatchReason(StrEnum):
 
 
 class DispatchRole(StrEnum):
-    """Canonical role vocabulary for a model dispatch.
+    """Canonical role vocabulary for a model dispatch (ADR-0005 §3).
 
     Roles describe WHAT KIND of work the dispatched model is performing, not
     which tier/provider/model is selected.  The mapping is intentionally small:
 
-    * ``BULK``    — primary implementation work on a fresh slice.
-    * ``REPAIR``  — bounded corrective work on a committed candidate (retry,
-                    repair, final-repair).
-    * ``SURGEON`` — reserved for Surgical Escalation Capsule.  The value
-                    exists today so durable evidence already answers "what role
-                    was this dispatch performing?", but no automatic routing
-                    behaviour is wired to it in the core runtime.
-    * ``REVIEW``  — independent reviewer dispatch.
-    * ``PLANNER`` — reserved for explicit planning/planner dispatches.  The
-                    value exists today but is not auto-selected in the core runtime.
+    * ``BUILD`` — implementation, retry and repair work.  Repair is folded
+                  into build: the failing worker repairs its own candidate.
+    * ``CHECK`` — independent reviewer dispatch.
 
-    SURGEON and PLANNER must never gain automatic routing behavior in the core runtime;
-    they are placeholders for later slices.
+    Tier escalation (starting or continuing on a stronger model) is a route
+    setting on the build route, never a third model role.
     """
 
-    BULK = "BULK"
-    REPAIR = "REPAIR"
-    SURGEON = "SURGEON"
-    REVIEW = "REVIEW"
-    PLANNER = "PLANNER"
+    BUILD = "BUILD"
+    CHECK = "CHECK"
+
+
+#: Legacy persisted dispatch roles, mapped onto build/check.  Durable evidence
+#: written before ADR-0005 §3 keeps loading; new dispatches never emit them.
+_LEGACY_DISPATCH_ROLES: dict[str, DispatchRole] = {
+    "BULK": DispatchRole.BUILD,
+    "REPAIR": DispatchRole.BUILD,
+    "SURGEON": DispatchRole.BUILD,
+    "PLANNER": DispatchRole.BUILD,
+    "REVIEW": DispatchRole.CHECK,
+}
+
+
+def coerce_dispatch_role(value: DispatchRole | str) -> DispatchRole:
+    """Return the build/check ``DispatchRole`` for ``value`` (legacy accepted)."""
+    if isinstance(value, DispatchRole):
+        return value
+    cleaned = str(value).strip().upper()
+    try:
+        return DispatchRole(cleaned)
+    except ValueError:
+        legacy = _LEGACY_DISPATCH_ROLES.get(cleaned)
+        if legacy is not None:
+            return legacy
+        known = ", ".join(role.value for role in DispatchRole)
+        raise ValueError(f"dispatch role must be one of {known}; got {value!r}") from None
 
 
 # Canonical mapping of the legacy DispatchStage to the new DispatchRole.
-# A SURGEON/PLANNER dispatch must never claim one of the legacy stage labels,
-# and legacy stage labels must always project to a non-SURGEON/non-PLANNER role.
 STAGE_TO_ROLE: dict[DispatchStage, DispatchRole] = {
-    DispatchStage.IMPLEMENTATION: DispatchRole.BULK,
-    DispatchStage.RETRY: DispatchRole.REPAIR,
-    DispatchStage.REPAIR: DispatchRole.REPAIR,
-    DispatchStage.REVIEW: DispatchRole.REVIEW,
+    DispatchStage.IMPLEMENTATION: DispatchRole.BUILD,
+    DispatchStage.RETRY: DispatchRole.BUILD,
+    DispatchStage.REPAIR: DispatchRole.BUILD,
+    DispatchStage.REVIEW: DispatchRole.CHECK,
 }
 
 
@@ -198,7 +212,7 @@ def role_for_stage(stage: DispatchStage) -> DispatchRole:
     """Return the canonical role for a legacy dispatch stage.
 
     Centralised so evidence-emitting code never drifts from the documented
-    IMPLEMENTATION=BULK / RETRY=REPAIR / REPAIR=REPAIR / REVIEW=REVIEW mapping.
+    IMPLEMENTATION/RETRY/REPAIR=BUILD / REVIEW=CHECK mapping.
     """
     return STAGE_TO_ROLE[stage]
 
@@ -333,17 +347,57 @@ class OrchBindingMode(StrEnum):
 
 
 class BindingRole(StrEnum):
-    """Semantic role a binding is qualified to serve.
+    """Semantic slot a binding is qualified to serve (ADR-0005 §3).
 
+    The three slots are ``PLAN`` (the in-engine planning/guidance binding),
+    ``BUILD`` (worker dispatch) and ``CHECK`` (independent review).
     Distinct from :class:`DispatchRole`: ``BindingRole`` describes WHAT
     KIND of binding this is (the slot it fills in the autonomous
     runtime), while ``DispatchRole`` describes WHAT KIND OF WORK one
     particular dispatch is performing.
+
+    ``id_slug`` is the durable slug embedded in ``discovered-binding``
+    identifiers.  It keeps the pre-rename spelling so an existing owner
+    binding keeps resolving after the vocabulary change.
     """
 
-    ORCHESTRATOR = "ORCHESTRATOR"
-    WORKER = "WORKER"
-    REVIEWER = "REVIEWER"
+    PLAN = "PLAN"
+    BUILD = "BUILD"
+    CHECK = "CHECK"
+
+    @property
+    def id_slug(self) -> str:
+        """Durable identifier slug (unchanged across the role rename)."""
+        return _BINDING_ID_SLUGS[self]
+
+
+_BINDING_ID_SLUGS: dict[BindingRole, str] = {
+    BindingRole.PLAN: "orchestrator",
+    BindingRole.BUILD: "worker",
+    BindingRole.CHECK: "reviewer",
+}
+
+#: Legacy persisted binding-role values, mapped onto plan/build/check.
+LEGACY_BINDING_ROLE_ALIASES: dict[str, BindingRole] = {
+    "ORCHESTRATOR": BindingRole.PLAN,
+    "WORKER": BindingRole.BUILD,
+    "REVIEWER": BindingRole.CHECK,
+}
+
+
+def coerce_binding_role(value: BindingRole | str) -> BindingRole:
+    """Return the plan/build/check ``BindingRole`` for ``value`` (legacy accepted)."""
+    if isinstance(value, BindingRole):
+        return value
+    cleaned = str(value).strip().upper()
+    try:
+        return BindingRole(cleaned)
+    except ValueError:
+        legacy = LEGACY_BINDING_ROLE_ALIASES.get(cleaned)
+        if legacy is not None:
+            return legacy
+        known = ", ".join(role.value for role in BindingRole)
+        raise ValueError(f"binding role must be one of {known}; got {value!r}") from None
 
 
 class GateOutcome(StrEnum):

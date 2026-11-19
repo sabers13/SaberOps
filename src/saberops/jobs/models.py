@@ -5,8 +5,10 @@ Cross-lane contracts (identical text in the M2-3 and M2-4a prompts):
 * C1: ``size_hint`` literal values are exactly ``"S"``, ``"M"``,
   ``"L"``. This module derives ``SIZE_HINTS`` from the shared
   ``saberops.capacity.cost_model.SizeBucket`` enum.
-* C3: one role vocabulary lives here (``JobRole``); only
-  ``DISPATCHABLE_ROLES = {WORKER}`` is dispatchable until R-002.
+* C3: one role vocabulary lives here (``JobRole``): ``PLAN``, ``BUILD`` and
+  ``CHECK`` (ADR-0005 §3).  Only ``DISPATCHABLE_ROLES = {BUILD}`` is
+  dispatchable; ``PLAN`` is the external CLI session and ``CHECK`` is the
+  engine's independent reviewer.
 """
 
 from __future__ import annotations
@@ -19,16 +21,48 @@ from saberops.capacity.cost_model import SizeBucket
 
 
 class JobRole(StrEnum):
-    """One role vocabulary for jobs (C3). Values equal names."""
+    """The one role vocabulary (C3, ADR-0005 §3). Values equal names.
 
-    ORCHESTRATOR = "ORCHESTRATOR"
-    WORKER = "WORKER"
-    INTEGRATOR = "INTEGRATOR"
-    SURGEON = "SURGEON"
-    REVIEWER = "REVIEWER"
+    * ``PLAN``  — the external CLI session the owner sits in and submits from.
+    * ``BUILD`` — the one accountable worker per task, including its own
+                  repair retries and any stronger-model start/escalation.
+    * ``CHECK`` — the independent reviewer of the built candidate.
+    """
+
+    PLAN = "PLAN"
+    BUILD = "BUILD"
+    CHECK = "CHECK"
 
 
-DISPATCHABLE_ROLES: frozenset[JobRole] = frozenset({JobRole.WORKER})
+#: Legacy persisted role names, mapped onto the three-role vocabulary.  These
+#: are accepted when reading durable rows (jobs, routing snapshots, dispatch
+#: evidence) and when a caller uses an older name; new writes never emit them.
+LEGACY_ROLE_ALIASES: dict[str, JobRole] = {
+    "ORCHESTRATOR": JobRole.PLAN,
+    "PLANNER": JobRole.PLAN,
+    "WORKER": JobRole.BUILD,
+    "SURGEON": JobRole.BUILD,
+    "INTEGRATOR": JobRole.BUILD,
+    "REVIEWER": JobRole.CHECK,
+}
+
+
+def coerce_job_role(value: JobRole | str) -> JobRole:
+    """Return the three-role ``JobRole`` for ``value``, accepting legacy names."""
+    if isinstance(value, JobRole):
+        return value
+    cleaned = str(value).strip().upper()
+    try:
+        return JobRole(cleaned)
+    except ValueError:
+        legacy = LEGACY_ROLE_ALIASES.get(cleaned)
+        if legacy is not None:
+            return legacy
+        known = ", ".join(r.value for r in JobRole)
+        raise ValueError(f"role must be one of {known}; got {value!r}") from None
+
+
+DISPATCHABLE_ROLES: frozenset[JobRole] = frozenset({JobRole.BUILD})
 
 SIZE_HINTS: tuple[str, ...] = tuple(b.value for b in SizeBucket)
 
@@ -107,13 +141,7 @@ FAILURE_REASONS: frozenset[str] = frozenset(
 
 
 def _coerce_role(value: JobRole | str) -> JobRole:
-    if isinstance(value, JobRole):
-        return value
-    try:
-        return JobRole(str(value))
-    except ValueError as exc:
-        known = ", ".join(r.value for r in JobRole)
-        raise ValueError(f"role must be one of {known}; got {value!r}") from exc
+    return coerce_job_role(value)
 
 
 def _coerce_effort(value: Effort | str | None) -> Effort | None:
@@ -156,7 +184,7 @@ def _clean_family_list(values: tuple[str, ...] | list[str], *, field: str) -> tu
 class JobRequirements:
     """Caller-stated requirements (amended D6/section 11: no ``min_tier``)."""
 
-    role: JobRole = JobRole.WORKER
+    role: JobRole = JobRole.BUILD
     effort: Effort | None = None
     required_capabilities: tuple[str, ...] = ()
     read_only: bool = False
@@ -213,7 +241,7 @@ class JobRequirements:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> JobRequirements:
         return cls(
-            role=_coerce_role(str(data.get("role", JobRole.WORKER.value))),
+            role=_coerce_role(str(data.get("role", JobRole.BUILD.value))),
             effort=_coerce_effort(data.get("effort")),
             required_capabilities=tuple(data.get("required_capabilities", ())),
             read_only=bool(data.get("read_only", False)),
@@ -383,6 +411,8 @@ class Job:
 
 
 __all__ = [
+    "LEGACY_ROLE_ALIASES",
+    "coerce_job_role",
     "DISPATCHABLE_ROLES",
     "FAILURE_REASONS",
     "NO_ROUTE_FOR_REQUIREMENTS",

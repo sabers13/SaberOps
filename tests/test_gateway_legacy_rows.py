@@ -56,7 +56,7 @@ def _legacy_db(tmp_path: Path) -> Database:
         association_id="attempt-1",
         attempt_id="attempt-1",
         stage=DispatchStage.IMPLEMENTATION,
-        role=DispatchRole.BULK,
+        role=DispatchRole.BUILD,
         tier=Tier.T1,
         dispatch_reason=DispatchReason.INITIAL_IMPLEMENTATION,
         requested_provider="codex",

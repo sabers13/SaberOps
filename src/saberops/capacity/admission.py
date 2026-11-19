@@ -955,6 +955,7 @@ def order_candidates_for_role(
     global_running: int = 0,
     max_global_concurrent: int | None = None,
     reservations: Mapping[tuple[str, str], float] | None = None,
+    strong_start: bool = False,
 ) -> list[WorkerCandidate]:
     """Order candidates within fallback groups by D7 intra-group pacing score.
 
@@ -969,7 +970,7 @@ def order_candidates_for_role(
         return list(base_candidates)
 
     try:
-        groups = snapshot.groups_for(role)
+        groups = snapshot.groups_for(role, strong_start=strong_start)
     except Exception:
         return list(base_candidates)
 

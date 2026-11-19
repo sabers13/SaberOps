@@ -105,7 +105,7 @@ def _make_job(
     job_id: str,
     *,
     priority: Priority = Priority.NORMAL,
-    role: JobRole = JobRole.WORKER,
+    role: JobRole = JobRole.BUILD,
     created_at: datetime = _NOW,
 ) -> Job:
     return Job(
@@ -134,7 +134,7 @@ def _make_job(
 def _make_routes(
     groups: tuple[tuple[WorkerCandidate, ...], ...],
     *,
-    role: JobRole = JobRole.WORKER,
+    role: JobRole = JobRole.BUILD,
 ) -> RoutingSnapshot:
     return RoutingSnapshot(
         schema_version=3,
@@ -256,7 +256,7 @@ def test_unconfigured_capacity_degrades_gracefully(
     assert is_capacity_subsystem_configured(db=blank_db) is False
 
     # 1. Unverified posture fails closed on both queued and in-run seams (F1 fix)
-    req = JobRequirements(role=JobRole.WORKER)
+    req = JobRequirements(role=JobRole.BUILD)
     admit_queued = admit(
         cand,
         now=_NOW,
@@ -523,7 +523,7 @@ def test_order_candidates_for_role_intra_group_pacing(owner_db: Database) -> Non
     base = [cand_code, cand_open]
 
     ordered = order_candidates_for_role(
-        JobRole.WORKER,
+        JobRole.BUILD,
         snapshot=snapshot,
         base_candidates=base,
         now=now,

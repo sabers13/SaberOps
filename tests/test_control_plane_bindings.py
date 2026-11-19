@@ -111,7 +111,7 @@ def _materialize_both_roles(
         model=model_id,
         provider_transport=profile.transport,
         harness_capabilities=profile.capabilities,
-        binding_role=BindingRole.WORKER,
+        binding_role=BindingRole.BUILD,
     )
     orch, _orch_profile, _orch_pool = materialize_discovered_binding(
         connection_id=connection_id,
@@ -119,7 +119,7 @@ def _materialize_both_roles(
         model=model_id,
         provider_transport=profile.transport,
         harness_capabilities=profile.capabilities,
-        binding_role=BindingRole.ORCHESTRATOR,
+        binding_role=BindingRole.PLAN,
     )
     # Same real account / quota resource across roles: no pool duplication.
     assert worker.profile_id == orch.profile_id
@@ -243,7 +243,7 @@ def test_c16b2_owner_workflow_persists_across_restart(
     )
 
     def _group_of(payload: dict[str, Any], candidate_id: str) -> int:
-        for number, group in enumerate(payload["roles"]["WORKER"], start=1):
+        for number, group in enumerate(payload["roles"]["BUILD"], start=1):
             if candidate_id in group["routes"]:
                 return number
         raise AssertionError(f"{candidate_id} missing from WORKER chain")
@@ -257,7 +257,7 @@ def test_c16b2_owner_workflow_persists_across_restart(
     save_user_routing(moved)
     reordered = [
         cid
-        for group in load_effective_routing_payload()["roles"]["WORKER"]
+        for group in load_effective_routing_payload()["roles"]["BUILD"]
         for cid in group["routes"]
     ]
     assert isinstance(reordered, list)
@@ -305,8 +305,8 @@ def test_c16b2_owner_workflow_persists_across_restart(
     orch_binding = reloaded_owner.registry.try_get(orch_binding_id)
     assert worker_binding is not None
     assert orch_binding is not None
-    assert worker_binding.binding_role is BindingRole.WORKER
-    assert orch_binding.binding_role is BindingRole.ORCHESTRATOR
+    assert worker_binding.binding_role is BindingRole.BUILD
+    assert orch_binding.binding_role is BindingRole.PLAN
     assert worker_binding.provider == orch_binding.provider == _PROVIDER
     # Same connection-scoped quota pool for both models on this account.
     assert worker_binding.quota_pool_id == orch_binding.quota_pool_id
@@ -484,13 +484,13 @@ def test_c16b2_routing_move_route_reorders_canonical_chain(
     def _chain_ids() -> list[str]:
         return [
             cid
-            for group in load_effective_routing_payload()["roles"]["WORKER"]
+            for group in load_effective_routing_payload()["roles"]["BUILD"]
             for cid in group["routes"]
         ]
 
     def _group_of(candidate_id: str) -> int:
         payload = load_effective_routing_payload()
-        for number, group in enumerate(payload["roles"]["WORKER"], start=1):
+        for number, group in enumerate(payload["roles"]["BUILD"], start=1):
             if candidate_id in group["routes"]:
                 return number
         raise AssertionError(f"{candidate_id} missing from WORKER chain")

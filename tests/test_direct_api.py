@@ -342,7 +342,7 @@ def test_orchestrator_assign_selects_exact_api_binding_without_inference(
     identity = "discovered-binding:orchestrator:local-api:test-model"
     owner = _load_owner_bindings_safely()
     binding = owner.registry.try_get(identity)
-    assert binding is not None and binding.binding_role.value == "ORCHESTRATOR"
+    assert binding is not None and binding.binding_role.value == "PLAN"
     order = owner.role_binding_ids("orchestrator")
     save_owner_bindings(owner.with_role_order("orchestrator", (*order, identity)))
     assert identity in _load_owner_bindings_safely().role_binding_ids("orchestrator")

@@ -51,7 +51,7 @@ def _job(
     priority: Priority = Priority.NORMAL,
     deadline: datetime | None = None,
     created_at: datetime = _NOW,
-    role: JobRole = JobRole.WORKER,
+    role: JobRole = JobRole.BUILD,
     not_before: datetime | None = None,
     size_hint: str | None = None,
 ) -> Job:
@@ -186,14 +186,14 @@ def _make_snapshot(
     worker_groups: tuple[tuple[WorkerCandidate, ...], ...],
     pacing_metadata: tuple[int, ...] = (),
 ) -> RoutingSnapshot:
-    pacing_tuples = (("WORKER", pacing_metadata),) if pacing_metadata else ()
+    pacing_tuples = (("BUILD", pacing_metadata),) if pacing_metadata else ()
     return RoutingSnapshot(
         schema_version=3,
         source="test",
         source_path=None,
         content_hash="test-hash",
         role_chains=(
-            ("WORKER", worker_groups),
+            ("BUILD", worker_groups),
             ("SURGEON", ((_cand("codex", "gpt-5.6-sol"),),)),
             ("INTEGRATOR", ((_cand("codex", "gpt-5.6-sol"),),)),
         ),
@@ -546,7 +546,7 @@ def test_scheduler_non_dispatchable_role() -> None:
     snapshot = _make_snapshot(((c1,),))
     policy = _make_policy()
 
-    j = _job("surgeon_job", role=JobRole.SURGEON)
+    j = _job("planned_job", role=JobRole.PLAN)
     decisions = schedule(
         now=_NOW,
         queued=[j],

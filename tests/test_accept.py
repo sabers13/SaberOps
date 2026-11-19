@@ -207,7 +207,7 @@ def _add_review(
     db.create_dispatch_evidence(
         DispatchEvidence(
             id=f"dispatch-{review_id}", run_id=run_id, association_id=review_id,
-            review_id=review_id, stage=DispatchStage.REVIEW, role=DispatchRole.REVIEW,
+            review_id=review_id, stage=DispatchStage.REVIEW, role=DispatchRole.CHECK,
             tier=Tier.T1, dispatch_reason=DispatchReason.INDEPENDENT_REVIEW,
             requested_provider="opencode", requested_model="reviewer",
             candidate_sha=_final_candidate_sha(db_path, run_id),
@@ -944,7 +944,7 @@ def test_ported_custom_workflow_gate_and_review_are_independent(
         connection_id=_R3E1_CONNECTION,
         provider=_R3E1_PROVIDER,
         model=_R3E1_REVIEWER_MODEL,
-        binding_role=BindingRole.REVIEWER,
+        binding_role=BindingRole.CHECK,
     )
     save_owner_bindings(
         replace(

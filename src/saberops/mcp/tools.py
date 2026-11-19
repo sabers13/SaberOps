@@ -138,11 +138,11 @@ TOOL_NAMES: tuple[str, ...] = (
 
 _JOB_STATES = ["QUEUED", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"]
 _PRIORITIES = ["URGENT", "NORMAL", "BACKGROUND"]
-_JOB_ROLES = ["ORCHESTRATOR", "WORKER", "INTEGRATOR", "SURGEON", "REVIEWER"]
+_JOB_ROLES = ["PLAN", "BUILD", "CHECK"]
 _EFFORTS = ["low", "medium", "high"]
 _QUESTION_STATUSES = ["OPEN", "DEFERRED", "ANSWERED", "MOOT"]
-_ANSWER_AUTHORITIES = ["OWNER", "ORCHESTRATOR"]
-_ANSWER_ROLES = ["OWNER", "ORCHESTRATOR"]
+_ANSWER_AUTHORITIES = ["OWNER", "PLAN"]
+_ANSWER_ROLES = ["OWNER", "PLAN"]
 
 #: Field names that would let a caller choose a billing/model route
 #: (ADR-0001 invariant 3: callers state requirements only).
@@ -341,7 +341,7 @@ def _deny_requirement_fields(arguments: Mapping[str, Any]) -> None:
 
 
 def _submit_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
-    from saberops.jobs.models import Effort, JobRequirements, JobRole, Priority
+    from saberops.jobs.models import Effort, JobRequirements, Priority, coerce_job_role
     from saberops.jobs.service import IdempotencyConflictError, submit_job
 
     _deny_requirement_fields(arguments)
@@ -350,7 +350,7 @@ def _submit_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[st
     if isinstance(raw_requirements, Mapping):
         try:
             requirements = JobRequirements(
-                role=JobRole(str(raw_requirements.get("role", JobRole.WORKER.value))),
+                role=coerce_job_role(str(raw_requirements.get("role", "BUILD"))),
                 effort=(
                     Effort(str(raw_requirements["effort"]).lower())
                     if raw_requirements.get("effort")
@@ -417,12 +417,12 @@ def _submit_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[st
 
 def _job_guidance(job: Any) -> str | None:
     if job.failure_reason == "NO_ROUTE_FOR_REQUIREMENTS":
-        if job.requirements.role.value != "WORKER":
-            return "Only WORKER jobs dispatch; set requirements.role to WORKER."
+        if job.requirements.role.value != "BUILD":
+            return "Only BUILD jobs dispatch; set requirements.role to BUILD."
         return (
-            "No worker route satisfies the requirements. Configure one with "
-            "`orch routing add worker <provider/model>`; inspect with `orch routing show` "
-            "and adjust capability requirements if needed. Only WORKER jobs dispatch."
+            "No build route satisfies the requirements. Configure one with "
+            "`orch routing add build <provider/model>`; inspect with `orch routing show` "
+            "and adjust capability requirements if needed. Only BUILD jobs dispatch."
         )
     return None
 
@@ -601,13 +601,13 @@ def _catch_up_next_action(
     run_id = result.get("run_id")
     if questions:
         question = questions[0]
-        if question["answerable_by"] == "ORCHESTRATOR":
+        if question["answerable_by"] == "PLAN":
             return {
                 "action": "answer_question",
                 "owner_only": False,
                 "detail": (
                     f"Question {question['question_id']} blocks this job; answer it with "
-                    "the answer_question tool (authority ORCHESTRATOR)."
+                    "the answer_question tool (authority PLAN)."
                 ),
                 "command": None,
                 "question_id": question["question_id"],
@@ -944,13 +944,18 @@ def _answer_question(context: ServerContext, arguments: Mapping[str, Any]) -> di
         AnswerAuthority,
         AskRole,
         QuestionError,
+        coerce_answer_authority,
+        coerce_ask_role,
         is_orchestrator_answerable,
         question_view,
     )
 
     ref = _require_text(arguments, "question_id_or_key", what="question_id_or_key")
     words = _require_text(arguments, "answer_text", what="answer_text")
-    authority = AnswerAuthority(str(arguments.get("authority") or "").strip().upper())
+    try:
+        authority = coerce_answer_authority(str(arguments.get("authority") or ""))
+    except ValueError as exc:
+        raise InvalidParamsError(str(exc)) from exc
     if authority is AnswerAuthority.OWNER:
         raise ForbiddenOperationError(
             "owner authority is not exercisable over MCP; the owner answers "
@@ -964,14 +969,17 @@ def _answer_question(context: ServerContext, arguments: Mapping[str, Any]) -> di
     if not is_orchestrator_answerable(question.request.decision_class):
         raise ForbiddenOperationError(
             f"decision class {question.request.decision_class.value} is owner-only; "
-            "the Orchestrator may not answer it over MCP",
+            "the planning session may not answer it over MCP",
             data={
                 "ref": ref,
                 "decision_class": question.request.decision_class.value,
             },
         )
     answered_by = str(arguments.get("answered_by") or "orchestrator")
-    role = AskRole(str(arguments.get("answered_by_role") or AskRole.ORCHESTRATOR.value))
+    try:
+        role = coerce_ask_role(str(arguments.get("answered_by_role") or AskRole.PLAN.value))
+    except ValueError as exc:
+        raise InvalidParamsError(str(exc)) from exc
     try:
         updated = queue.answer(
             ref,

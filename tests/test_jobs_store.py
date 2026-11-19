@@ -42,7 +42,7 @@ def _job(job_id: str, *, state: JobState = JobState.QUEUED) -> Job:
         base_sha="abc123",
         goal="do the thing",
         acceptance=None,
-        requirements=JobRequirements(role=JobRole.WORKER),
+        requirements=JobRequirements(role=JobRole.BUILD),
         priority=Priority.NORMAL,
         state=state,
         waiting_reason=waiting,

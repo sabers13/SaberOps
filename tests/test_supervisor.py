@@ -264,15 +264,9 @@ def _base_config(**overrides: Any) -> RunConfig:
 
 def test_role_defaults_match_contract(isolated_xdg: Path) -> None:
     config = _base_config()
-    assert role_worker_timeout(JobRole.WORKER) == 1200.0
-    assert role_worker_timeout(JobRole.SURGEON) == 1800.0
-    assert role_worker_timeout(JobRole.INTEGRATOR) == 1200.0
-    assert ROLE_WORKER_TIMEOUTS[JobRole.WORKER] == 1200.0
-    assert ROLE_WORKER_TIMEOUTS[JobRole.SURGEON] == 1800.0
-    assert ROLE_WORKER_TIMEOUTS[JobRole.INTEGRATOR] == 1200.0
-    assert config.worker_timeout_for_role(JobRole.WORKER) == 1200.0
-    assert config.worker_timeout_for_role(JobRole.SURGEON) == 1800.0
-    assert config.worker_timeout_for_role(JobRole.INTEGRATOR) == 1200.0
+    assert role_worker_timeout(JobRole.BUILD) == 1200.0
+    assert ROLE_WORKER_TIMEOUTS[JobRole.BUILD] == 1200.0
+    assert config.worker_timeout_for_role(JobRole.BUILD) == 1200.0
 
 
 # ---------------------------------------------------------------------------
@@ -284,9 +278,9 @@ def test_explicit_worker_timeout_overrides_role_default(isolated_xdg: Path) -> N
     config = _base_config(worker_timeout=45.0)
     assert config.worker_timeout_explicit is True
     assert config.has_worker_deadline is True
-    assert config.worker_timeout_for_role(JobRole.WORKER) == 45.0
-    assert config.worker_timeout_for_role(JobRole.SURGEON) == 45.0
-    assert config.worker_timeout_for_role(JobRole.INTEGRATOR) == 45.0
+    assert config.worker_timeout_for_role(JobRole.BUILD) == 45.0
+    assert config.worker_timeout_for_role(JobRole.BUILD) == 45.0
+    assert config.worker_timeout_for_role(JobRole.BUILD) == 45.0
 
 
 # ---------------------------------------------------------------------------
@@ -300,15 +294,13 @@ def test_effective_timeout_survives_detached_reconstruction(isolated_xdg: Path) 
         payload = json.loads(json.dumps(original.as_dict()))
         rebuilt = reconstruct_run_config(payload)
         assert rebuilt.worker_timeout_explicit == original.worker_timeout_explicit
-        for role in (JobRole.WORKER, JobRole.SURGEON, JobRole.INTEGRATOR):
+        for role in (JobRole.BUILD,):
             assert rebuilt.worker_timeout_for_role(role) == original.worker_timeout_for_role(role)
     # The default ladder itself survives the round trip (no silent unbounded).
     rebuilt_default = reconstruct_run_config(
         json.loads(json.dumps(_base_config().as_dict()))
     )
-    assert rebuilt_default.worker_timeout_for_role(JobRole.WORKER) == 1200.0
-    assert rebuilt_default.worker_timeout_for_role(JobRole.SURGEON) == 1800.0
-    assert rebuilt_default.worker_timeout_for_role(JobRole.INTEGRATOR) == 1200.0
+    assert rebuilt_default.worker_timeout_for_role(JobRole.BUILD) == 1200.0
 
 
 def test_supervisor_forwards_timeout_only_when_explicit(
@@ -327,7 +319,7 @@ def test_supervisor_forwards_timeout_only_when_explicit(
     # Either way the reconstructed detached owner computes the same bound.
     for config in (default_config, explicit_config):
         rebuilt = reconstruct_run_config(json.loads(json.dumps(config.as_dict())))
-        for role in (JobRole.WORKER, JobRole.SURGEON, JobRole.INTEGRATOR):
+        for role in (JobRole.BUILD,):
             assert rebuilt.worker_timeout_for_role(role) == config.worker_timeout_for_role(role)
 
 
@@ -535,7 +527,7 @@ def test_successful_worker_unaffected(isolated_xdg: Path, tmp_path: Path) -> Non
     adapter = OpenCodeAdapter(runner=_quick_runner)
     # The default role bound is finite yet far above a healthy dispatch.
     config = _base_config()
-    bound = config.worker_timeout_for_role(JobRole.WORKER)
+    bound = config.worker_timeout_for_role(JobRole.BUILD)
     assert math.isfinite(bound) and bound == 1200.0
     result = adapter.run(
         WorkerRequest(

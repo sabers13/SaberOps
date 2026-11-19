@@ -53,6 +53,8 @@ from saberops.models import (
     DispatchRole,
     ReasoningEffort,
     RiskLevel,
+    coerce_binding_role,
+    coerce_dispatch_role,
 )
 
 
@@ -226,7 +228,7 @@ class ExecutionBinding:
     profile_id: str
     quota_pool_id: str
     transport: ProviderTransport = ProviderTransport.DIRECT_CLI
-    binding_role: BindingRole = BindingRole.WORKER
+    binding_role: BindingRole = BindingRole.BUILD
     harness_capabilities: frozenset[Capability] = frozenset()
     semantic_capabilities: tuple[str, ...] = ()
     supported_roles: frozenset[DispatchRole] = frozenset()
@@ -269,7 +271,7 @@ class ExecutionBinding:
     @property
     def is_orchestrator_capable(self) -> bool:
         """True iff the binding is qualified to fill the Orchestrator role."""
-        return self.binding_role is BindingRole.ORCHESTRATOR
+        return self.binding_role is BindingRole.PLAN
 
     def verification_state(
         self,
@@ -675,9 +677,9 @@ def binding_from_mapping(
         raise BindingRegistryError(
             f"binding '{binding_id}': unknown transport {transport_raw!r}"
         ) from exc
-    role_raw = str(payload.get("binding_role", BindingRole.WORKER.value)).strip()
+    role_raw = str(payload.get("binding_role", BindingRole.BUILD.value)).strip()
     try:
-        binding_role = BindingRole(role_raw)
+        binding_role = coerce_binding_role(role_raw)
     except ValueError as exc:
         raise BindingRegistryError(
             f"binding '{binding_id}': unknown binding_role {role_raw!r}"
@@ -686,9 +688,15 @@ def binding_from_mapping(
         Capability(str(item)) for item in payload.get("harness_capabilities", ())
     )
     semantic = tuple(str(item) for item in payload.get("semantic_capabilities", ()))
-    roles = frozenset(
-        DispatchRole(str(item)) for item in payload.get("supported_roles", ())
-    )
+    try:
+        roles = frozenset(
+            coerce_dispatch_role(str(item))
+            for item in payload.get("supported_roles", ())
+        )
+    except ValueError as exc:
+        raise BindingRegistryError(
+            f"binding '{binding_id}': unknown supported role: {exc}"
+        ) from exc
     efforts: set[ReasoningEffort] = set()
     for raw in payload.get("reasoning_effort_capabilities", ()):
         try:
@@ -1040,7 +1048,7 @@ def resolve_worker_candidate_binding(
     adapter: Any | None,
     reasoning_effort: ReasoningEffort | None = None,
 ) -> ResolvedExecutionBinding | None:
-    """Resolve one WORKER candidate's exact binding, or ``None`` when it has none.
+    """Resolve one BUILD candidate's exact binding, or ``None`` when it has none.
 
     This is the shared ordinary-dispatch counterpart to the autonomous
     supervisor's exact-binding seam.  It preserves the law for
@@ -1051,7 +1059,7 @@ def resolve_worker_candidate_binding(
       (static routing candidates, explicit ``--provider``/``--model``
       overrides, older configurations without owner bindings);
     * a non-empty ``binding_id`` is authoritative.  It must name an exact
-      registry binding whose role is :class:`BindingRole.WORKER` and whose
+      registry binding whose role is :class:`BindingRole.BUILD` and whose
       ``provider``/``model`` agree with the candidate, and it must resolve
       through :func:`resolve_execution_binding`.  Every failure raises
       :class:`BindingResolutionError` (fail closed, zero launch) and never
@@ -1069,7 +1077,7 @@ def resolve_worker_candidate_binding(
     binding = registry.try_get(wanted)
     if binding is None:
         raise BindingResolutionError("UNKNOWN_BINDING")
-    if getattr(binding, "binding_role", None) is not BindingRole.WORKER:
+    if getattr(binding, "binding_role", None) is not BindingRole.BUILD:
         raise BindingResolutionError("WRONG_ROLE")
     if (
         getattr(binding, "provider", None) != provider
@@ -1093,10 +1101,10 @@ def resolve_reviewer_candidate_binding(
     adapter: Any | None,
     reasoning_effort: ReasoningEffort | None = None,
 ) -> ResolvedExecutionBinding | None:
-    """Resolve one REVIEWER candidate's exact binding, or ``None`` when it has none.
+    """Resolve one CHECK candidate's exact binding, or ``None`` when it has none.
 
     The reviewer-side counterpart to
-    :func:`resolve_worker_candidate_binding`, whose WORKER-role contract
+    :func:`resolve_worker_candidate_binding`, whose BUILD-role contract
     is deliberately left untouched.  The law is identical with the role
     swapped:
 
@@ -1104,7 +1112,7 @@ def resolve_reviewer_candidate_binding(
       the caller keeps the historical provider/model adapter path
       (legacy reviewer ladder candidates carry no binding);
     * a non-empty ``binding_id`` is authoritative.  It must name an exact
-      registry binding whose role is :class:`BindingRole.REVIEWER` and whose
+      registry binding whose role is :class:`BindingRole.CHECK` and whose
       ``provider``/``model`` agree with the candidate, and it must resolve
       through :func:`resolve_execution_binding` with the real adapter.
       Every failure raises :class:`BindingResolutionError` (fail closed,
@@ -1123,7 +1131,7 @@ def resolve_reviewer_candidate_binding(
     binding = registry.try_get(wanted)
     if binding is None:
         raise BindingResolutionError("UNKNOWN_BINDING")
-    if getattr(binding, "binding_role", None) is not BindingRole.REVIEWER:
+    if getattr(binding, "binding_role", None) is not BindingRole.CHECK:
         raise BindingResolutionError("WRONG_ROLE")
     if (
         getattr(binding, "provider", None) != provider

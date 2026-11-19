@@ -1,10 +1,21 @@
 """Canonical routing configuration loader with strict validation and snapshots.
 
-Schema 3 (the only writable schema): role chains for WORKER, SURGEON and
-INTEGRATOR, each a list of fallback groups, each group an object with
-exactly the key ``routes`` holding a non-empty list of candidate ids.
-ORCHESTRATOR and REVIEWER keep their ordered lists where they live today
-(``orch orchestrator show`` / ``orch reviewer show``).
+Schema 3 (the only writable schema): one ``BUILD`` role chain plus an optional
+``strong_start`` chain. Each chain is a list of fallback groups, each group an
+object with exactly the key ``routes`` holding a non-empty list of candidate
+ids. A strong start is a setting on the build route (ADR-0005 §3), not a role:
+it is used for a manual high-tier run or an escalation that asks for a stronger
+model. PLAN (the external CLI session) and CHECK (the independent reviewer)
+keep their ordered lists where they live today (``orch orchestrator show`` /
+``orch reviewer show``).
+
+Documents written before ADR-0005 §3 name retired roles (``WORKER``,
+``SURGEON``, ``INTEGRATOR``). They load through a reported migration: the
+``WORKER`` chain becomes ``BUILD``, ``SURGEON`` becomes ``strong_start``, and
+``INTEGRATOR`` is dropped (landing is a deterministic engine stage, not a
+model role). Stored persisted snapshots keep their original digest so a
+pre-migration run stays adoptable; the legacy digest is recomputed with the
+legacy role scheme.
 """
 
 from __future__ import annotations
@@ -22,9 +33,19 @@ from saberops.models import WorkerCandidate
 SCHEMA_VERSION = 3
 
 #: The one role vocabulary (contract C3 from Wave 2). No second role enum.
-ROUTED_ROLES: tuple[JobRole, ...] = (JobRole.WORKER, JobRole.SURGEON, JobRole.INTEGRATOR)
+#: Only the build role carries routing chains; check bindings live in the
+#: reviewer store and the plan role is the external CLI session.
+ROUTED_ROLES: tuple[JobRole, ...] = (JobRole.BUILD,)
 
-_ROUTED_ROLE_VALUES: tuple[str, ...] = ("WORKER", "SURGEON", "INTEGRATOR")
+_ROUTED_ROLE_VALUES: tuple[str, ...] = ("BUILD",)
+
+#: Roles a pre-ADR-0005 document may name.  ``WORKER`` migrates to ``BUILD``,
+#: ``SURGEON`` to the build route's ``strong_start`` setting, and
+#: ``INTEGRATOR`` is dropped.
+_LEGACY_ROLE_VALUES: tuple[str, ...] = ("WORKER", "SURGEON", "INTEGRATOR")
+
+#: Canonical top-level key for the build route's stronger-model start setting.
+STRONG_START_KEY = "strong_start"
 
 # Closed registry of allowed canonical ids.
 #
@@ -142,15 +163,19 @@ def _parse_candidate_id(cid: str) -> WorkerCandidate:
 
 def _normalize_role(role: JobRole | str) -> str:
     if isinstance(role, JobRole):
-        return role.value
-    cleaned = str(role).strip().upper()
-    for value in _ROUTED_ROLE_VALUES:
-        if cleaned == value:
-            return value
-    # ORCHESTRATOR / REVIEWER get their pointer message from the caller;
-    # here just report the valid set.
+        cleaned = role.value
+    else:
+        cleaned = str(role).strip().upper()
+    if cleaned == "BUILD" or cleaned in _LEGACY_ROLE_VALUES:
+        # Retired roles migrate onto the one build route rather than erroring.
+        return "BUILD"
+    if cleaned in ("STRONG_START", "STRONG-START"):
+        return STRONG_START_KEY
+    # PLAN / CHECK get their pointer message from the caller; here just
+    # report the valid set.
     raise RoutingConfigError(
-        f"unknown routing role {str(role)!r}: expected one of {sorted(_ROUTED_ROLE_VALUES)}"
+        f"unknown routing role {str(role)!r}: expected one of "
+        f"{sorted((*_ROUTED_ROLE_VALUES, STRONG_START_KEY))}"
     )
 
 
@@ -275,7 +300,12 @@ def _merge_legacy_to_v2(validated: dict[str, list[str]]) -> dict[str, list[str]]
 
 
 def _migrate_v2_to_v3_roles(merged: dict[str, list[str]]) -> dict[str, list[list[str]]]:
-    """Migrate merged v2 chains to schema-3 role chains (ADR-0002 §11 item 2)."""
+    """Migrate merged v2 chains to schema-3 chains (ADR-0002 §11 item 2).
+
+    The worker union (T2 order first, then unseen T1/T3) becomes the build
+    route; the T3 order becomes the build route's ``strong_start`` setting.
+    There is no third model role to migrate into.
+    """
     t1 = list(merged.get("T1.default", []))
     t2 = list(merged.get("T2.default", []))
     t3 = list(merged.get("T3.default", []))
@@ -283,12 +313,10 @@ def _migrate_v2_to_v3_roles(merged: dict[str, list[str]]) -> dict[str, list[list
     for cid in (*t2, *t1, *t3):
         if cid not in worker:
             worker.append(cid)
-    roles: dict[str, list[list[str]]] = {
-        "WORKER": [[cid] for cid in worker],
-        "SURGEON": [[cid] for cid in t3],
-        "INTEGRATOR": [[t2[0]]] if t2 else [],
+    return {
+        "BUILD": [[cid] for cid in worker],
+        STRONG_START_KEY: [[cid] for cid in t3],
     }
-    return roles
 
 
 def _validate_role_groups(
@@ -347,16 +375,34 @@ def _validate_role_groups(
     return groups
 
 
+@dataclass(frozen=True)
+class ValidatedRouting:
+    """One validated schema-3 routing document (build route + strong start)."""
+
+    build: list[list[str]]
+    strong_start: list[list[str]]
+    build_pacing: list[int]
+    strong_start_pacing: list[int]
+    #: Retired role keys that were migrated away, in document order.
+    migrated_roles: tuple[str, ...] = ()
+
+    def role_groups(self) -> dict[str, list[list[str]]]:
+        return {"BUILD": self.build}
+
+    def pacing(self) -> dict[str, list[int]]:
+        return {"BUILD": self.build_pacing, STRONG_START_KEY: self.strong_start_pacing}
+
+
 def _validate_v3_structure(
     data: Any,
     source_label: str,
     *,
     approved: Mapping[str, DynamicCandidate] | None = None,
     out_pacing: dict[str, list[int]] | None = None,
-) -> dict[str, list[list[str]]]:
+) -> ValidatedRouting:
     if not isinstance(data, dict):
         raise RoutingConfigError(f"Routing config at {source_label}: top-level must be JSON object")
-    allowed_top = {"schema_version", "roles", _APPROVED_TOP_KEY}
+    allowed_top = {"schema_version", "roles", _APPROVED_TOP_KEY, STRONG_START_KEY}
     unknown = set(data.keys()) - allowed_top
     if unknown:
         raise RoutingConfigError(
@@ -370,44 +416,102 @@ def _validate_v3_structure(
         )
     roles_obj = data["roles"]
     for key in roles_obj:
-        if key in ("ORCHESTRATOR", "REVIEWER"):
-            pointer = "orch orchestrator show" if key == "ORCHESTRATOR" else "orch reviewer show"
+        if key in ("ORCHESTRATOR", "REVIEWER", "PLAN", "CHECK"):
+            pointer = (
+                "orch orchestrator show"
+                if key in ("ORCHESTRATOR", "PLAN")
+                else "orch reviewer show"
+            )
             raise RoutingConfigError(
                 f"Routing config at {source_label}: role {key!r} is managed elsewhere; see '{pointer}'"  # noqa: E501
             )
-    missing = [r for r in _ROUTED_ROLE_VALUES if r not in roles_obj]
-    if missing:
+    if "BUILD" not in roles_obj and "WORKER" not in roles_obj:
         raise RoutingConfigError(
-            f"Routing config at {source_label}: missing roles {missing}"
+            f"Routing config at {source_label}: missing roles ['BUILD']"
         )
-    extra = [k for k in roles_obj if k not in _ROUTED_ROLE_VALUES]
+    if "BUILD" in roles_obj and "WORKER" in roles_obj:
+        raise RoutingConfigError(
+            f"Routing config at {source_label}: both 'BUILD' and 'WORKER' are "
+            "present; the document is ambiguous"
+        )
+    extra = [
+        k for k in roles_obj if k not in ("BUILD", "WORKER", *_LEGACY_ROLE_VALUES)
+    ]
     if extra:
         raise RoutingConfigError(
             f"Routing config at {source_label}: unknown roles {sorted(extra)}"
         )
     if approved is None:
         approved = _parse_approved_candidates(data, source_label)
-    result: dict[str, list[list[str]]] = {}
-    for role in _ROUTED_ROLE_VALUES:
-        role_pacing: list[int] = [] if out_pacing is not None else []
-        pacing_arg = role_pacing if out_pacing is not None else None
-        result[role] = _validate_role_groups(
-            roles_obj[role],
-            role,
-            source_label,
-            approved=approved,
-            out_pacing=pacing_arg,
+
+    build_key = "BUILD" if "BUILD" in roles_obj else "WORKER"
+    build_pacing: list[int] = []
+    build = _validate_role_groups(
+        roles_obj[build_key],
+        "BUILD",
+        source_label,
+        approved=approved,
+        out_pacing=build_pacing,
+    )
+    if STRONG_START_KEY in data and "SURGEON" in roles_obj:
+        raise RoutingConfigError(
+            f"Routing config at {source_label}: both 'SURGEON' and "
+            f"'{STRONG_START_KEY}' are present; the document is ambiguous"
         )
-        if out_pacing is not None:
-            out_pacing[role] = role_pacing
-    return result
+    if STRONG_START_KEY in data:
+        strong_raw = data[STRONG_START_KEY]
+    elif "SURGEON" in roles_obj:
+        strong_raw = roles_obj["SURGEON"]
+    else:
+        strong_raw = []
+    strong_pacing: list[int] = []
+    strong_start = _validate_role_groups(
+        strong_raw,
+        "strong_start",
+        source_label,
+        approved=approved,
+        out_pacing=strong_pacing,
+    )
+    migrated = tuple(
+        key
+        for key in ("WORKER", "SURGEON", "INTEGRATOR")
+        if key in roles_obj and not (key == "WORKER" and build_key == "BUILD")
+    )
+    if out_pacing is not None:
+        out_pacing["BUILD"] = build_pacing
+        out_pacing[STRONG_START_KEY] = strong_pacing
+    return ValidatedRouting(
+        build=build,
+        strong_start=strong_start,
+        build_pacing=build_pacing,
+        strong_start_pacing=strong_pacing,
+        migrated_roles=migrated,
+    )
+
+
+def _groups_to_payload(
+    groups: list[list[str]], pacing: Sequence[int]
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "routes": list(group),
+            **(
+                {"prefer_wait_minutes": pacing[idx]}
+                if idx < len(pacing) and pacing[idx] > 0
+                else {}
+            ),
+        }
+        for idx, group in enumerate(groups)
+    ]
 
 
 def canonical_routing_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Return the canonical schema-3 document for any accepted input (1, 2, 3).
 
     Pure: the input is never mutated. Schema 1 merges exactly as before,
-    then migrates 2 → 3 per ADR-0002 §11 item 2.
+    then migrates 2 → 3 per ADR-0002 §11 item 2. A document that names a
+    retired role (``WORKER``/``SURGEON``/``INTEGRATOR``) is migrated to the
+    build route and its ``strong_start`` setting.
     """
     data: dict[str, Any] = json.loads(json.dumps(payload))
     if not isinstance(data, dict):
@@ -421,26 +525,13 @@ def canonical_routing_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         )
     if sv == 3:
         approved = _parse_approved_candidates(data, "packaged default")
-        pacing: dict[str, list[int]] = {}
-        validated = _validate_v3_structure(
-            data, "packaged default", approved=approved, out_pacing=pacing
-        )
+        validated = _validate_v3_structure(data, "packaged default", approved=approved)
         result: dict[str, Any] = {
             "schema_version": 3,
-            "roles": {
-                role: [
-                    {
-                        "routes": list(group),
-                        **(
-                            {"prefer_wait_minutes": pacing[role][idx]}
-                            if role in pacing and idx < len(pacing[role]) and pacing[role][idx] > 0
-                            else {}
-                        ),
-                    }
-                    for idx, group in enumerate(groups)
-                ]
-                for role, groups in validated.items()
-            },
+            "roles": {"BUILD": _groups_to_payload(validated.build, validated.build_pacing)},
+            STRONG_START_KEY: _groups_to_payload(
+                validated.strong_start, validated.strong_start_pacing
+            ),
         }
         if _APPROVED_TOP_KEY in data:
             result[_APPROVED_TOP_KEY] = data[_APPROVED_TOP_KEY]
@@ -451,47 +542,58 @@ def canonical_routing_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     result = {
         "schema_version": 3,
         "roles": {
-            role: [{"routes": list(group)} for group in groups] for role, groups in roles.items()
+            role: [{"routes": list(group)} for group in groups]
+            for role, groups in roles.items()
+            if role != STRONG_START_KEY
         },
+        STRONG_START_KEY: [
+            {"routes": list(group)} for group in roles.get(STRONG_START_KEY, [])
+        ],
     }
     if _APPROVED_TOP_KEY in data:
         result[_APPROVED_TOP_KEY] = data[_APPROVED_TOP_KEY]
     return result
 
 
+def _hash_groups(groups: list[list[str]], pacing: Sequence[int] | None) -> list[Any]:
+    """Canonical group rendering used by the content digest (no zero pacing)."""
+    rendered: list[Any] = []
+    for idx, group in enumerate(groups):
+        pwm = pacing[idx] if pacing is not None and idx < len(pacing) else 0
+        if pwm > 0:
+            rendered.append({"routes": list(group), "prefer_wait_minutes": pwm})
+        else:
+            rendered.append(list(group))
+    return rendered
+
+
 def _content_hash(
-    validated: Any,
+    validated: Mapping[str, Any],
     schema_version: int,
     approved: Mapping[str, DynamicCandidate] | None = None,
     pacing_metadata: Mapping[str, Sequence[int]] | None = None,
 ) -> str:
+    """Return the canonical digest for validated routing content.
+
+    ``validated`` holds the canonical document keys: role ``BUILD`` plus the
+    top-level ``strong_start`` chain. Legacy callers pass tier chains (schema
+    1/2) or a pre-ADR-0005 role mapping; those hash exactly as before so a
+    persisted snapshot written by an earlier build still verifies.
+    """
     if schema_version == 3:
-        has_pacing = bool(
-            pacing_metadata and any(any(p > 0 for p in pm) for pm in pacing_metadata.values())
-        )
-        if has_pacing and pacing_metadata:
-            roles_body: dict[str, Any] = {}
-            for role, groups in validated.items():
-                role_pacing = pacing_metadata.get(role, ())
-                group_list: list[Any] = []
-                for idx, group in enumerate(groups):
-                    pwm = role_pacing[idx] if idx < len(role_pacing) else 0
-                    if pwm > 0:
-                        group_list.append({"routes": list(group), "prefer_wait_minutes": pwm})
-                    else:
-                        group_list.append(list(group))
-                roles_body[role] = group_list
-            body: dict[str, Any] = {
-                "schema_version": 3,
-                "roles": roles_body,
-            }
-        else:
-            body = {
-                "schema_version": 3,
-                "roles": {
-                    role: [list(group) for group in groups] for role, groups in validated.items()
-                },
-            }
+        roles_body: dict[str, Any] = {}
+        for role, groups in validated.items():
+            if role == STRONG_START_KEY:
+                continue
+            roles_body[role] = _hash_groups(
+                groups, pacing_metadata.get(role) if pacing_metadata else None
+            )
+        body: dict[str, Any] = {"schema_version": 3, "roles": roles_body}
+        if STRONG_START_KEY in validated:
+            body[STRONG_START_KEY] = _hash_groups(
+                validated[STRONG_START_KEY],
+                pacing_metadata.get(STRONG_START_KEY) if pacing_metadata else None,
+            )
         if approved:
             body[_APPROVED_TOP_KEY] = {
                 cid: entry.to_dict() for cid, entry in sorted(approved.items())
@@ -531,35 +633,65 @@ class RoutingSnapshot:
     migrated_from: int | None = None
     #: Pacing metadata per role: tuple of (role, tuple of prefer_wait_minutes per group).
     pacing_metadata: tuple[tuple[str, tuple[int, ...]], ...] = ()
+    #: The build route's stronger-model start setting (ADR-0005 §3).
+    strong_start: tuple[tuple[WorkerCandidate, ...], ...] = ()
+    #: Retired routing roles the effective document named and the load migrated
+    #: (``WORKER``/``SURGEON``/``INTEGRATOR``), in document order.
+    migrated_roles: tuple[str, ...] = ()
+    #: Pre-ADR-0005 role chains when the snapshot was reconstructed from a
+    #: persisted schema-3 payload that still named them.  Re-emitted unchanged
+    #: (same keys, same digest) so an adopted run never rewrites its evidence.
+    legacy_role_chains: tuple[
+        tuple[str, tuple[tuple[WorkerCandidate, ...], ...]], ...
+    ] | None = None
 
     def _role_key(self, role: JobRole | str) -> str:
         if isinstance(role, JobRole):
             return role.value
         return str(role).strip().upper()
 
-    def groups_for(self, role: JobRole | str) -> tuple[tuple[WorkerCandidate, ...], ...]:
-        """Return the fallback groups for ``role`` in listed order."""
+    def groups_for(
+        self, role: JobRole | str, *, strong_start: bool = False
+    ) -> tuple[tuple[WorkerCandidate, ...], ...]:
+        """Return the fallback groups for ``role`` in listed order.
+
+        ``strong_start=True`` returns the build route's stronger-model setting
+        instead of its ordinary chain. Retired role names (``WORKER``,
+        ``SURGEON``, ``INTEGRATOR``) resolve to the build route.
+        """
         key = self._role_key(role)
+        if key in ("WORKER", "SURGEON", "INTEGRATOR"):
+            key = "BUILD"
+        if key == "BUILD" and strong_start:
+            return self.strong_start
         for stored_role, groups in self.role_chains:
             if stored_role == key:
                 return groups
         raise RoutingConfigError(f"unknown routing role {key!r}")
 
-    def prefer_wait_minutes_for(self, role: JobRole | str) -> tuple[int, ...]:
+    def prefer_wait_minutes_for(
+        self, role: JobRole | str, *, strong_start: bool = False
+    ) -> tuple[int, ...]:
         """Return the prefer_wait_minutes values for ``role`` fallback groups."""
         key = self._role_key(role)
+        if key in ("WORKER", "SURGEON", "INTEGRATOR"):
+            key = "BUILD"
+        if key == "BUILD" and strong_start:
+            key = STRONG_START_KEY
         for stored_role, minutes in self.pacing_metadata:
             if stored_role == key:
                 return minutes
         try:
-            return tuple(0 for _ in self.groups_for(role))
+            return tuple(0 for _ in self.groups_for(role, strong_start=strong_start))
         except RoutingConfigError:
             return ()
 
-    def chain_for_role(self, role: JobRole | str) -> list[WorkerCandidate]:
+    def chain_for_role(
+        self, role: JobRole | str, *, strong_start: bool = False
+    ) -> list[WorkerCandidate]:
         """Return the flattened candidate chain for ``role`` (group order)."""
         flattened: list[WorkerCandidate] = []
-        for group in self.groups_for(role):
+        for group in self.groups_for(role, strong_start=strong_start):
             flattened.extend(group)
         return flattened
 
@@ -583,27 +715,38 @@ def snapshot_references_exact_bindings(snapshot: RoutingSnapshot | None) -> bool
     )
 
 
+def _retired_role_keys(data: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return the retired role keys a raw routing document names, in order."""
+    roles = data.get("roles")
+    if not isinstance(roles, Mapping):
+        return ()
+    return tuple(role for role in _LEGACY_ROLE_VALUES if role in roles)
+
+
 def _snapshot_from_v3(
-    validated: dict[str, list[list[str]]],
+    validated: ValidatedRouting,
     *,
     source: str,
     source_path: Path | None,
     approved: Mapping[str, DynamicCandidate] | None = None,
     migrated_from: int | None = None,
-    pacing_metadata: Mapping[str, Sequence[int]] | None = None,
+    migrated_roles: tuple[str, ...] | None = None,
 ) -> RoutingSnapshot:
-    ch = _content_hash(validated, 3, approved, pacing_metadata=pacing_metadata)
+    pacing = validated.pacing()
+    ch = _content_hash(
+        {"BUILD": validated.build, STRONG_START_KEY: validated.strong_start},
+        3,
+        approved,
+        pacing_metadata=pacing,
+    )
 
     def to_group(cids: list[str]) -> tuple[WorkerCandidate, ...]:
         return tuple(_parse_candidate_id(cid) for cid in cids)
 
-    role_chains = tuple(
-        (role, tuple(to_group(group) for group in groups)) for role, groups in validated.items()
-    )
+    role_chains = (("BUILD", tuple(to_group(group) for group in validated.build)),)
     pacing_tuple = (
-        tuple((role, tuple(pacing_metadata.get(role, ()))) for role in validated)
-        if pacing_metadata
-        else ()
+        ("BUILD", tuple(validated.build_pacing)),
+        (STRONG_START_KEY, tuple(validated.strong_start_pacing)),
     )
     return RoutingSnapshot(
         schema_version=3,
@@ -615,6 +758,10 @@ def _snapshot_from_v3(
         approved_candidates=tuple(entry for _, entry in sorted((approved or {}).items())),
         migrated_from=migrated_from,
         pacing_metadata=pacing_tuple,
+        strong_start=tuple(to_group(group) for group in validated.strong_start),
+        migrated_roles=(
+            validated.migrated_roles if migrated_roles is None else migrated_roles
+        ),
     )
 
 
@@ -629,16 +776,16 @@ def load_packaged_default() -> RoutingSnapshot:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise RoutingConfigError(f"Packaged default routing.json invalid JSON: {exc}") from exc
+    retired = _retired_role_keys(data)
     canonical = canonical_routing_payload(data)
-    pacing: dict[str, list[int]] = {}
-    validated = _validate_v3_structure(
-        canonical, str(path), approved=_parse_approved_candidates(canonical, str(path)),
-        out_pacing=pacing,
-    )
     approved = _parse_approved_candidates(canonical, str(path))
+    validated = _validate_v3_structure(canonical, str(path), approved=approved)
     return _snapshot_from_v3(
-        validated, source="default", source_path=None, approved=approved,
-        pacing_metadata=pacing,
+        validated,
+        source="default",
+        source_path=None,
+        approved=approved,
+        migrated_roles=retired,
     )
 
 
@@ -666,15 +813,14 @@ def load_effective_routing() -> RoutingSnapshot:
             )
         raw_sv = data.get("schema_version")
         migrated_from = raw_sv if type(raw_sv) is int and raw_sv in (1, 2) else None
+        retired = _retired_role_keys(data)
         canonical = canonical_routing_payload(data)
         approved = _parse_approved_candidates(canonical, str(user_path))
-        pacing: dict[str, list[int]] = {}
-        validated = _validate_v3_structure(
-            canonical, str(user_path), approved=approved, out_pacing=pacing
-        )
+        validated = _validate_v3_structure(canonical, str(user_path), approved=approved)
         return _snapshot_from_v3(
             validated, source="user", source_path=user_path, approved=approved,
-            migrated_from=migrated_from, pacing_metadata=pacing,
+            migrated_from=migrated_from,
+            migrated_roles=retired if retired else None,
         )
     return load_packaged_default()
 
@@ -703,17 +849,32 @@ def snapshot_to_payload(snapshot: RoutingSnapshot, created_at: str) -> dict[str,
             }
         return payload
     roles: dict[str, list[dict[str, Any]]] = {}
-    for role, groups in snapshot.role_chains:
-        pacing = snapshot.prefer_wait_minutes_for(role)
-        group_list: list[dict[str, Any]] = []
-        for idx, group in enumerate(groups):
-            entry: dict[str, Any] = {
-                "routes": [{"provider": c.provider, "model": c.model} for c in group]
-            }
-            if idx < len(pacing) and pacing[idx] > 0:
-                entry["prefer_wait_minutes"] = pacing[idx]
-            group_list.append(entry)
-        roles[role] = group_list
+    if snapshot.legacy_role_chains is not None:
+        # A persisted pre-ADR-0005 snapshot re-emits its stored role keys and
+        # digest byte-identically: adoption must never rewrite run evidence.
+        for role, groups in snapshot.legacy_role_chains:
+            pacing = snapshot.prefer_wait_minutes_for(role)
+            group_list: list[dict[str, Any]] = []
+            for idx, group in enumerate(groups):
+                entry: dict[str, Any] = {
+                    "routes": [{"provider": c.provider, "model": c.model} for c in group]
+                }
+                if idx < len(pacing) and pacing[idx] > 0:
+                    entry["prefer_wait_minutes"] = pacing[idx]
+                group_list.append(entry)
+            roles[role] = group_list
+    else:
+        for role, groups in snapshot.role_chains:
+            pacing = snapshot.prefer_wait_minutes_for(role)
+            group_list = []
+            for idx, group in enumerate(groups):
+                entry = {
+                    "routes": [{"provider": c.provider, "model": c.model} for c in group]
+                }
+                if idx < len(pacing) and pacing[idx] > 0:
+                    entry["prefer_wait_minutes"] = pacing[idx]
+                group_list.append(entry)
+            roles[role] = group_list
     payload = {
         "schema_version": 3,
         "source": snapshot.source,
@@ -722,6 +883,16 @@ def snapshot_to_payload(snapshot: RoutingSnapshot, created_at: str) -> dict[str,
         "roles": roles,
         "created_at": created_at,
     }
+    if snapshot.legacy_role_chains is None:
+        strong_pacing = snapshot.prefer_wait_minutes_for(JobRole.BUILD, strong_start=True)
+        payload[STRONG_START_KEY] = [
+            {
+                "routes": [{"provider": c.provider, "model": c.model} for c in group],
+                **({"prefer_wait_minutes": strong_pacing[idx]}
+                   if idx < len(strong_pacing) and strong_pacing[idx] > 0 else {}),
+            }
+            for idx, group in enumerate(snapshot.strong_start)
+        ]
     if snapshot.approved_candidates:
         payload[_APPROVED_TOP_KEY] = {
             entry.candidate_id: entry.to_dict() for entry in snapshot.approved_candidates
@@ -759,6 +930,22 @@ def _parse_approved_candidates(
                 f"{candidate_id!r}: {exc}"
             ) from exc
     return approved
+
+
+def _document_keys(payload: Mapping[str, Any], source_label: str) -> dict[str, Any]:
+    """Return the routing-document keys of a persisted snapshot payload.
+
+    Persisted snapshots carry bookkeeping beside the document (``source``,
+    ``source_path``, ``content_hash``, ``created_at``).  Validation applies to
+    the document itself; the digest still covers exactly the document content.
+    """
+    allowed = {"schema_version", "roles", _APPROVED_TOP_KEY, STRONG_START_KEY}
+    unknown = set(payload) - allowed - {"source", "source_path", "content_hash", "created_at"}
+    if unknown:
+        raise RoutingConfigError(
+            f"Routing config at {source_label}: unknown top-level keys {sorted(unknown)}"
+        )
+    return {key: payload[key] for key in payload if key in allowed}
 
 
 def payload_to_snapshot(payload: Any, run_id: str | None = None) -> RoutingSnapshot:
@@ -832,9 +1019,18 @@ def payload_to_snapshot(payload: Any, run_id: str | None = None) -> RoutingSnaps
         # Derive the role chains with the migration (ADR-0002 §11 item 2).
         merged = _merge_legacy_to_v2(validated)
         migrated_roles = _migrate_v2_to_v3_roles(merged)
-        role_chains = tuple(
-            (role, tuple(tuple(_parse_candidate_id(cid) for cid in group) for group in groups))
-            for role, groups in migrated_roles.items()
+        role_chains = (
+            (
+                "BUILD",
+                tuple(
+                    tuple(_parse_candidate_id(cid) for cid in group)
+                    for group in migrated_roles["BUILD"]
+                ),
+            ),
+        )
+        strong_start = tuple(
+            tuple(_parse_candidate_id(cid) for cid in group)
+            for group in migrated_roles[STRONG_START_KEY]
         )
         return RoutingSnapshot(
             schema_version=sv,
@@ -846,6 +1042,7 @@ def payload_to_snapshot(payload: Any, run_id: str | None = None) -> RoutingSnaps
             role_chains=role_chains,
             legacy_chains=legacy_chains,
             approved_candidates=tuple(entry for _, entry in sorted(approved.items())),
+            strong_start=strong_start,
         )
     # Schema 3 persisted payload.
     roles_obj = payload.get("roles")
@@ -854,109 +1051,147 @@ def payload_to_snapshot(payload: Any, run_id: str | None = None) -> RoutingSnaps
             f"Routing config at {source_label}: missing or invalid 'roles' object"
         )
     for key in roles_obj:
-        if key in ("ORCHESTRATOR", "REVIEWER"):
-            pointer = "orch orchestrator show" if key == "ORCHESTRATOR" else "orch reviewer show"
+        if key in ("ORCHESTRATOR", "REVIEWER", "PLAN", "CHECK"):
+            pointer = (
+                "orch orchestrator show" if key in ("ORCHESTRATOR", "PLAN")
+                else "orch reviewer show"
+            )
             raise RoutingConfigError(
                 f"Routing config at {source_label}: role {key!r} is managed elsewhere; see '{pointer}'"  # noqa: E501
             )
-    validated_v3: dict[str, list[list[str]]] = {}
-    pacing_v3: dict[str, list[int]] = {}
-    for role in _ROUTED_ROLE_VALUES:
-        if role not in roles_obj:
-            raise RoutingConfigError(
-                f"Routing config at {source_label}: missing role {role!r}"
-            )
-        raw_groups = roles_obj[role]
-        if not isinstance(raw_groups, list):
-            raise RoutingConfigError(
-                f"Routing config at {source_label}: role {role} chain must be a list"
-            )
-        groups: list[list[str]] = []
-        pacing_list: list[int] = []
-        seen: set[str] = set()
-        for index, group in enumerate(raw_groups):
-            ctx_key = f"{role}[{index + 1}]"
-            if not isinstance(group, dict):
-                raise RoutingConfigError(
-                    f"Routing config at {source_label}: role {role} group {index + 1} must be an object with key 'routes' and optional 'prefer_wait_minutes'"  # noqa: E501
-                )
-            allowed_keys = {"routes", "prefer_wait_minutes"}
-            unknown = set(group.keys()) - allowed_keys
-            if unknown or "routes" not in group:
-                raise RoutingConfigError(
-                    f"Routing config at {source_label}: role {role} group {index + 1} must be an object with key 'routes' and optional 'prefer_wait_minutes'"  # noqa: E501
-                )
-            pwm = group.get("prefer_wait_minutes", 0)
-            if not isinstance(pwm, int) or isinstance(pwm, bool) or pwm < 0:
-                raise RoutingConfigError(
-                    f"Routing config at {source_label}: role {role} group {index + 1} 'prefer_wait_minutes' must be a non-negative integer"  # noqa: E501
-                )
-            pacing_list.append(pwm)
-            routes = group["routes"]
-            if not isinstance(routes, list) or not routes:
-                raise RoutingConfigError(
-                    f"Routing config at {source_label}: role {role} group {index + 1} 'routes' must be a non-empty list"  # noqa: E501
-                )
-            cids: list[str] = []
-            for entry in routes:
-                cid = _candidate_id_from_entry(entry, ctx_key, source_label)
-                if cid in seen:
-                    raise RoutingConfigError(
-                        f"Routing config at {source_label}: role {role} duplicate candidate {cid!r}"
-                    )
-                seen.add(cid)
-                _require_known_candidate_id(
-                    cid,
-                    approved=approved,
-                    source_label=source_label,
-                    scope_label=f"role {role}",
-                )
-                cids.append(cid)
-            groups.append(cids)
-        validated_v3[role] = groups
-        pacing_v3[role] = pacing_list
-    extra_roles = [k for k in roles_obj if k not in _ROUTED_ROLE_VALUES]
-    if extra_roles:
+    legacy_role_keys = [key for key in _LEGACY_ROLE_VALUES if key in roles_obj]
+    supplied_hash = payload.get("content_hash")
+    if supplied_hash is not None and (not isinstance(supplied_hash, str) or not supplied_hash):
         raise RoutingConfigError(
-            f"Routing config at {source_label}: unknown roles {sorted(extra_roles)}"
+            f"Routing config at {source_label}: content_hash must be "
+            f"a non-empty string digest, got {supplied_hash!r}"
         )
-    canonical_hash_v3 = _content_hash(validated_v3, 3, approved, pacing_metadata=pacing_v3)
-    if "content_hash" not in payload or payload.get("content_hash") is None:
-        ch3 = canonical_hash_v3
-    else:
-        stored3 = payload.get("content_hash")
-        if not isinstance(stored3, str) or not stored3:
+    if legacy_role_keys:
+        if STRONG_START_KEY in payload and "SURGEON" in roles_obj:
             raise RoutingConfigError(
-                f"Routing config at {source_label}: content_hash must be "
-                f"a non-empty string digest, got {stored3!r}"
+                f"Routing config at {source_label}: both 'SURGEON' and "
+                f"'{STRONG_START_KEY}' are present; the document is ambiguous"
             )
-        if stored3 != canonical_hash_v3:
+        legacy_groups: dict[str, list[list[str]]] = {}
+        legacy_pacing: dict[str, list[int]] = {}
+        parsed_legacy: dict[str, tuple[tuple[WorkerCandidate, ...], ...]] = {}
+        for role in _LEGACY_ROLE_VALUES:
+            raw_groups = roles_obj.get(role, [])
+            pacing_list: list[int] = []
+            groups = _validate_role_groups(
+                raw_groups,
+                role,
+                source_label,
+                approved=approved,
+                out_pacing=pacing_list,
+            )
+            legacy_groups[role] = groups
+            legacy_pacing[role] = pacing_list
+            parsed_legacy[role] = tuple(
+                tuple(_parse_candidate_id(cid) for cid in group) for group in groups
+            )
+        canonical_hash_v3 = _content_hash(
+            legacy_groups, 3, approved, pacing_metadata=legacy_pacing
+        )
+        if supplied_hash is not None and supplied_hash != canonical_hash_v3:
             raise RoutingConfigError(
                 f"Routing config at {source_label}: content_hash mismatch: "
                 f"persisted snapshot content does not match its stored digest "
                 f"(fail closed; refusing to route under a stale digest)"
             )
-        ch3 = stored3
-    role_chains_v3 = tuple(
-        (role, tuple(tuple(_parse_candidate_id(cid) for cid in group) for group in groups))
-        for role, groups in validated_v3.items()
+        build_groups = legacy_groups["WORKER"]
+        build_pacing = legacy_pacing["WORKER"]
+        if STRONG_START_KEY in payload:
+            # New shape with a stray legacy key: honor both.
+            mixed = _validate_v3_structure(
+                _document_keys(payload, source_label), source_label, approved=approved
+            )
+            build_groups = mixed.build
+            build_pacing = mixed.build_pacing
+            strong_groups = mixed.strong_start
+            strong_pacing = mixed.strong_start_pacing
+            legacy_shape = None
+        else:
+            strong_groups = legacy_groups["SURGEON"]
+            strong_pacing = legacy_pacing["SURGEON"]
+            legacy_shape = parsed_legacy
+        return RoutingSnapshot(
+            schema_version=3,
+            source=str(payload.get("source", "persisted")),
+            source_path=payload.get("source_path")
+            if isinstance(payload.get("source_path"), str)
+            else None,
+            content_hash=str(supplied_hash or canonical_hash_v3),
+            role_chains=(
+                (
+                    "BUILD",
+                    tuple(
+                        tuple(_parse_candidate_id(cid) for cid in group)
+                        for group in build_groups
+                    ),
+                ),
+            ),
+            legacy_chains=None,
+            approved_candidates=tuple(entry for _, entry in sorted(approved.items())),
+            pacing_metadata=(
+                ("BUILD", tuple(build_pacing)),
+                (STRONG_START_KEY, tuple(strong_pacing)),
+            ),
+            strong_start=tuple(
+                tuple(_parse_candidate_id(cid) for cid in group)
+                for group in strong_groups
+            ),
+            migrated_roles=tuple(
+                key
+                for key in _LEGACY_ROLE_VALUES
+                if key in roles_obj and not (key == "WORKER" and legacy_shape is None)
+            ),
+            legacy_role_chains=(
+                tuple(legacy_shape.items()) if legacy_shape is not None else None
+            ),
+        )
+    current = _validate_v3_structure(
+        _document_keys(payload, source_label), source_label, approved=approved
     )
-    pacing_tuple_v3 = tuple(
-        (role, tuple(pacing_v3.get(role, ()))) for role in validated_v3
+    canonical_hash_v3 = _content_hash(
+        {"BUILD": current.build, STRONG_START_KEY: current.strong_start},
+        3,
+        approved,
+        pacing_metadata=current.pacing(),
     )
+    if supplied_hash is not None and supplied_hash != canonical_hash_v3:
+        raise RoutingConfigError(
+            f"Routing config at {source_label}: content_hash mismatch: "
+            f"persisted snapshot content does not match its stored digest "
+            f"(fail closed; refusing to route under a stale digest)"
+        )
     return RoutingSnapshot(
         schema_version=3,
         source=str(payload.get("source", "persisted")),
         source_path=payload.get("source_path")
         if isinstance(payload.get("source_path"), str)
         else None,
-        content_hash=str(ch3),
-        role_chains=role_chains_v3,
+        content_hash=str(supplied_hash or canonical_hash_v3),
+        role_chains=(
+            (
+                "BUILD",
+                tuple(
+                    tuple(_parse_candidate_id(cid) for cid in group)
+                    for group in current.build
+                ),
+            ),
+        ),
         legacy_chains=None,
         approved_candidates=tuple(entry for _, entry in sorted(approved.items())),
-        pacing_metadata=pacing_tuple_v3,
+        pacing_metadata=(
+            ("BUILD", tuple(current.build_pacing)),
+            (STRONG_START_KEY, tuple(current.strong_start_pacing)),
+        ),
+        strong_start=tuple(
+            tuple(_parse_candidate_id(cid) for cid in group)
+            for group in current.strong_start
+        ),
     )
-
 
 def init_user_config(force: bool = False) -> Path:
     """Copy packaged default to user path, refusing to overwrite unless force=True."""
@@ -1219,13 +1454,23 @@ def load_effective_routing_payload() -> dict[str, Any]:
 
 def _require_role_payload(
     payload: Mapping[str, Any], role: JobRole | str
-) -> tuple[dict[str, Any], str]:
+) -> tuple[dict[str, Any], str, list[dict[str, Any]]]:
+    """Return (document, key, editable chain) for a routing edit.
+
+    ``strong_start`` is edited as the build route's stronger-model setting, not
+    as a role: its chain lives at the document's top level.
+    """
     data = canonical_routing_payload(payload)
     key = _normalize_role(role)
+    if key == STRONG_START_KEY:
+        chain = data.get(STRONG_START_KEY)
+        if not isinstance(chain, list):
+            raise RoutingConfigError("missing strong_start setting")
+        return data, key, chain
     roles = data.get("roles")
     if not isinstance(roles, dict) or key not in roles:
         raise RoutingConfigError(f"unknown routing role {key!r}")
-    return data, key
+    return data, key, roles[key]
 
 
 def _revalidate_v3(data: dict[str, Any]) -> dict[str, Any]:
@@ -1248,11 +1493,10 @@ def add_candidate_to_chain(
     candidate of that role is a no-op. The result is re-validated, so
     unknown candidate ids fail closed.
     """
-    data, key = _require_role_payload(payload, role)
+    data, key, chain = _require_role_payload(payload, role)
     cleaned = candidate_id.strip()
     if not cleaned:
         raise RoutingConfigError("candidate id must not be empty")
-    chain = data["roles"][key]
     for existing in chain:
         if cleaned in existing.get("routes", []):
             return _revalidate_v3(data)
@@ -1281,17 +1525,19 @@ def remove_candidate_from_chain(
     ordering decision, not a revocation of discovery evidence, and an
     approval that is no longer referenced is inert.
     """
-    data, key = _require_role_payload(payload, role)
+    data, key, chain = _require_role_payload(payload, role)
     cleaned = candidate_id.strip()
     if not cleaned:
         raise RoutingConfigError("candidate id must not be empty")
-    chain = data["roles"][key]
     rebuilt: list[dict[str, list[str]]] = []
     for existing in chain:
         routes = [cid for cid in existing.get("routes", []) if cid != cleaned]
         if routes:
             rebuilt.append({"routes": routes})
-    data["roles"][key] = rebuilt
+    if key == STRONG_START_KEY:
+        data[STRONG_START_KEY] = rebuilt
+    else:
+        data["roles"][key] = rebuilt
     return _revalidate_v3(data)
 
 
@@ -1309,17 +1555,18 @@ def move_group_in_chain(
     up or the last group down is a no-op. No route is added, removed or
     substituted -- this helper only reorders groups.
     """
-    data, key = _require_role_payload(payload, role)
+    data, key, chain = _require_role_payload(payload, role)
     cleaned_direction = direction.strip().lower()
     if cleaned_direction not in ("up", "down"):
         raise RoutingConfigError(f"invalid move direction {direction!r}: expected 'up' or 'down'")
-    chain = data["roles"][key]
     if type(group) is not int or group < 1 or group > len(chain):
         raise RoutingConfigError(f"unknown group {group!r} for role {key}")
     index = group - 1
     target = index - 1 if cleaned_direction == "up" else index + 1
     if 0 <= target < len(chain):
         chain[index], chain[target] = chain[target], chain[index]
+    if key == STRONG_START_KEY:
+        data[STRONG_START_KEY] = chain
     return _revalidate_v3(data)
 
 
@@ -1331,15 +1578,18 @@ def reorder_chain_groups(
     ``order`` is a permutation of the 1-based group numbers; anything
     else fails closed.
     """
-    data, key = _require_role_payload(payload, role)
-    chain = data["roles"][key]
+    data, key, chain = _require_role_payload(payload, role)
     if (
         not all(type(entry) is int for entry in order)
         or len(order) != len(chain)
         or set(order) != set(range(1, len(chain) + 1))
     ):
         raise RoutingConfigError("reordering must preserve every existing group exactly once")
-    data["roles"][key] = [chain[number - 1] for number in order]
+    reordered = [chain[number - 1] for number in order]
+    if key == STRONG_START_KEY:
+        data[STRONG_START_KEY] = reordered
+    else:
+        data["roles"][key] = reordered
     return _revalidate_v3(data)
 
 

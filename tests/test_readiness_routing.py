@@ -841,7 +841,7 @@ def test_r1b_verify_api_connection_not_falsely_not_ready(
 
 def _write_t1_chain(*candidate_ids: str) -> None:
     payload = load_effective_routing_payload()
-    payload["roles"]["WORKER"] = [{"routes": [cid]} for cid in candidate_ids]
+    payload["roles"]["BUILD"] = [{"routes": [cid]} for cid in candidate_ids]
     save_user_routing(payload)
 
 
@@ -897,7 +897,7 @@ def test_r1b_two_skips_named_with_typed_reasons(
     no_elig = [e for e in events if e.event_type == "no_eligible_candidate"]
     assert no_elig
     terminal_evidence = _payload(no_elig[-1])
-    assert terminal_evidence["routing_context"] == "WORKER"
+    assert terminal_evidence["routing_context"] == "BUILD"
     skipped = terminal_evidence["skipped_candidates"]
     assert isinstance(skipped, list)
     assert len(skipped) == 2
@@ -924,7 +924,7 @@ def test_r1b_two_skips_named_with_typed_reasons(
     termination = report["termination"]
     assert isinstance(termination, dict)
     assert termination["summary"] == result.summary
-    assert termination["routing_context"] == "WORKER"
+    assert termination["routing_context"] == "BUILD"
     termination_skipped = termination["skipped_candidates"]
     assert isinstance(termination_skipped, list)
     assert len(termination_skipped) == 2
@@ -940,13 +940,13 @@ def test_r1b_empty_chain_validates_and_roundtrips(
 ) -> None:
     """routing JSON with [] loads, validates and round-trips."""
     payload = load_effective_routing_payload()
-    payload["roles"]["WORKER"] = []
+    payload["roles"]["BUILD"] = []
     save_user_routing(payload)
 
     reloaded = load_effective_routing_payload()
-    assert reloaded["roles"]["WORKER"] == []
+    assert reloaded["roles"]["BUILD"] == []
     snapshot = load_effective_routing()
-    assert snapshot.chain_for_role("WORKER") == []
+    assert snapshot.chain_for_role("BUILD") == []
 
 
 def test_r1b_remove_final_candidate_persists_empty_chain(
@@ -960,11 +960,11 @@ def test_r1b_remove_final_candidate_persists_empty_chain(
     payload = load_effective_routing_payload()
     save_user_routing(
         remove_candidate_from_chain(
-            payload, role="WORKER", candidate_id="codex/gpt-5.6-terra"
+            payload, role="BUILD", candidate_id="codex/gpt-5.6-terra"
         )
     )
 
-    assert load_effective_routing_payload()["roles"]["WORKER"] == []
+    assert load_effective_routing_payload()["roles"]["BUILD"] == []
 
 
 def test_r1b_empty_chain_run_terminates_clearly(
@@ -972,7 +972,7 @@ def test_r1b_empty_chain_run_terminates_clearly(
 ) -> None:
     """A selected empty chain launches nothing and explains itself."""
     payload = load_effective_routing_payload()
-    payload["roles"]["WORKER"] = []
+    payload["roles"]["BUILD"] = []
     save_user_routing(payload)
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -999,14 +999,14 @@ def test_r1b_empty_chain_run_terminates_clearly(
 
     assert result.passed is False
     assert result.attempts == []
-    assert result.summary == "No routing candidates are configured for WORKER."
+    assert result.summary == "No routing candidates are configured for BUILD."
     events = db.get_events(result.run_id, limit=10000)
     no_elig = [e for e in events if e.event_type == "no_eligible_candidate"]
     assert no_elig
     empty_evidence = _payload(no_elig[-1])
     assert empty_evidence["candidates"] == []
     assert empty_evidence["skipped_candidates"] == []
-    assert empty_evidence["routing_context"] == "WORKER"
+    assert empty_evidence["routing_context"] == "BUILD"
 
 
 # ---------------------------------------------------------------------------
@@ -1060,7 +1060,7 @@ def _materialize_worker(backend: str) -> str:
         model=_STATIC_MODEL,
         provider_transport=profile.transport,
         harness_capabilities=profile.capabilities,
-        binding_role=BindingRole.WORKER,
+        binding_role=BindingRole.BUILD,
     )
     owner = upsert_owner_binding(owner, binding=worker, profile=profile_row, pool=pool)
     save_owner_bindings(owner)
@@ -1121,7 +1121,7 @@ def _add_routing_candidate(
 
     Same order, same refusals (as RoutingConfigError instead of HTTP 400):
     known connection, discovery-verified fresh catalog entry, exact
-    resolvable binding, WORKER role, submitted-binding match, valid
+    resolvable binding, BUILD role, submitted-binding match, valid
     candidate id, known context, then append + save.
     """
     from saberops.routing_config import (
@@ -1155,17 +1155,17 @@ def _add_routing_candidate(
     )
     if exact_binding is None:
         raise RoutingConfigError("No exact executable binding resolves.")
-    if exact_binding.binding_role is not BindingRole.WORKER:
+    if exact_binding.binding_role is not BindingRole.BUILD:
         raise RoutingConfigError(
-            f"Exact binding role is {exact_binding.binding_role.value!r}, not WORKER."
+            f"Exact binding role is {exact_binding.binding_role.value!r}, not BUILD."
         )
     if binding_id.strip() and binding_id.strip() != exact_binding.binding_id:
         raise RoutingConfigError("Submitted binding identity does not match.")
     candidate_id = format_candidate_id(entry.provider, entry.model_id)
     top, _, _sub = context.strip().partition(".")
-    role = {"T1": "WORKER", "T2": "WORKER", "T3": "WORKER"}.get(top.strip().upper())
-    if role is None:
+    if top.strip().upper() not in ("T1", "T2", "T3"):
         raise RoutingConfigError(f"Unknown routing context: {context!r}")
+    role = "BUILD"
     payload = load_effective_routing_payload()
     if candidate_id in ALLOWED_CANDIDATES:
         static_training_required = (
@@ -1208,7 +1208,7 @@ def test_r1b_static_add_preserves_exact_binding(
     )
     payload = load_effective_routing_payload()
     assert _STATIC_CID in [
-        cid for group in payload["roles"]["WORKER"] for cid in group["routes"]
+        cid for group in payload["roles"]["BUILD"] for cid in group["routes"]
     ]
     approval = payload["approved_candidates"][_STATIC_CID]
     assert approval["binding_id"] == worker_binding_id
@@ -1280,7 +1280,7 @@ def test_r1b_static_training_denied_semantics_preserved(
     # admissibility: UNKNOWN would have failed closed here.
     payload = load_effective_routing_payload()
     assert _STATIC_CID in [
-        cid for group in payload["roles"]["WORKER"] for cid in group["routes"]
+        cid for group in payload["roles"]["BUILD"] for cid in group["routes"]
     ]
 
 
@@ -1318,7 +1318,7 @@ def test_r1b_orchestrator_binding_cannot_satisfy_worker_routing(
         model=orch_model,
         provider_transport=profile.transport,
         harness_capabilities=profile.capabilities,
-        binding_role=BindingRole.ORCHESTRATOR,
+        binding_role=BindingRole.PLAN,
     )
     owner = upsert_owner_binding(owner, binding=orch, profile=profile_row, pool=pool)
     save_owner_bindings(owner)
@@ -1348,9 +1348,9 @@ def test_r1b_candidate_helpers_are_sanitized() -> None:
     )
     from saberops.jobs.models import JobRole
 
-    for role in (JobRole.WORKER, JobRole.SURGEON, JobRole.INTEGRATOR):
+    for role in (JobRole.BUILD, JobRole.BUILD, JobRole.BUILD):
         assert routing_context_for_role(role) == role.value
-    assert routing_context_for_role("worker") == "WORKER"
+    assert routing_context_for_role("worker") == "BUILD"
 
     skip = build_candidate_skip(
         provider="opencode",
@@ -1365,11 +1365,11 @@ def test_r1b_candidate_helpers_are_sanitized() -> None:
     assert skip["provider"] == "opencode"
     assert skip["binding_id"] == "b-1"
     assert skip["observed_at"] == "2026-09-24T00:00:00Z"
-    summary = format_no_eligible_summary([skip], routing_context="WORKER")
+    summary = format_no_eligible_summary([skip], routing_context="BUILD")
     assert "opencode/opencode-go/deepseek-v4-flash" in summary
     assert "readiness UNKNOWN (STALE_READINESS_EVIDENCE)" in summary
-    assert format_no_eligible_summary([], routing_context="WORKER") == (
-        "No routing candidates are configured for WORKER."
+    assert format_no_eligible_summary([], routing_context="BUILD") == (
+        "No routing candidates are configured for BUILD."
     )
     worker_candidate = WorkerCandidate(provider="p", model="m")
     assert worker_candidate.binding_id is None
@@ -1458,7 +1458,7 @@ def test_r1b1_mixed_attempted_plus_skipped_exhaustion_is_truthful(
 ) -> None:
     """Mixed exhaustion: one gate failure plus one readiness skip stays actionable."""
     payload = load_effective_routing_payload()
-    payload["roles"]["WORKER"] = [{"routes": [cid]} for cid in [_CAND_A, _CAND_B]]
+    payload["roles"]["BUILD"] = [{"routes": [cid]} for cid in [_CAND_A, _CAND_B]]
     save_user_routing(payload)
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -1513,7 +1513,7 @@ def test_r1b1_mixed_attempted_plus_skipped_exhaustion_is_truthful(
     no_elig = [e for e in events if e.event_type == "no_eligible_candidate"]
     assert no_elig
     terminal_evidence = _payload(no_elig[-1])
-    assert terminal_evidence["routing_context"] == "WORKER"
+    assert terminal_evidence["routing_context"] == "BUILD"
     skipped = terminal_evidence["skipped_candidates"]
     assert isinstance(skipped, list)
     assert len(skipped) == 1
@@ -1538,13 +1538,13 @@ def test_r1b1_mixed_attempted_plus_skipped_exhaustion_is_truthful(
     run_failed_payload = _payload(run_failed)
     assert run_failed_payload["summary"] == result.summary
     assert run_failed_payload["skipped_candidates"] == skipped
-    assert run_failed_payload["routing_context"] == "WORKER"
+    assert run_failed_payload["routing_context"] == "BUILD"
 
     report = build_run_report(db, result.run_id)
     termination = report["termination"]
     assert isinstance(termination, dict)
     assert termination["summary"] == result.summary
-    assert termination["routing_context"] == "WORKER"
+    assert termination["routing_context"] == "BUILD"
     assert termination["skipped_candidates"] == skipped
 
 
@@ -1557,8 +1557,8 @@ def test_r1b1_prior_tier_skips_never_render_under_later_context(
     (H3.1: gate failure alone no longer escalates).
     """
     payload = load_effective_routing_payload()
-    payload["roles"]["WORKER"] = [{"routes": [cid]} for cid in [_CAND_A, _CAND_B]]
-    payload["roles"]["SURGEON"] = [{"routes": [cid]} for cid in [_CAND_C]]
+    payload["roles"]["BUILD"] = [{"routes": [cid]} for cid in [_CAND_A, _CAND_B]]
+    payload["strong_start"] = [{"routes": [cid]} for cid in [_CAND_C]]
     save_user_routing(payload)
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -1591,26 +1591,26 @@ def test_r1b1_prior_tier_skips_never_render_under_later_context(
     # record may carry the T1-skipped terra model.
     for event in no_elig:
         evidence = _payload(event)
-        if evidence.get("routing_context") == "SURGEON":
+        if evidence.get("routing_context") == "BUILD":
             models = {
                 str(entry.get("model")) for entry in evidence["skipped_candidates"]
             }
             assert "gpt-5.6-terra" not in models
             assert "gpt-5.6-sol" in models
     terminal_evidence = _payload(no_elig[-1])
-    assert terminal_evidence["routing_context"] == "SURGEON"
+    assert terminal_evidence["routing_context"] == "BUILD"
     assert {e["model"] for e in terminal_evidence["skipped_candidates"]} == {
         "gpt-5.6-sol"
     }
     run_failed = _payload(
         [e for e in events if e.event_type == "run_failed"][-1]
     )
-    assert run_failed["routing_context"] == "SURGEON"
+    assert run_failed["routing_context"] == "BUILD"
     assert {e["model"] for e in run_failed["skipped_candidates"]} == {
         "gpt-5.6-sol"
     }
     report = build_run_report(db, result.run_id)
-    assert report["termination"]["routing_context"] == "SURGEON"
+    assert report["termination"]["routing_context"] == "BUILD"
     assert {
         e["model"] for e in report["termination"]["skipped_candidates"]
     } == {"gpt-5.6-sol"}
@@ -1674,10 +1674,10 @@ def test_r1b2_package_transition_resets_skip_evidence_and_routing_context(
     pkg1_success = "opencode/opencode-go/deepseek-v4-flash"
     pkg2_skip = "codex/gpt-5.6-sol"
     payload = load_effective_routing_payload()
-    payload["roles"]["WORKER"] = [
+    payload["roles"]["BUILD"] = [
         {"routes": [cid]} for cid in [pkg1_skip, pkg1_success, pkg2_skip]
     ]
-    payload["roles"]["SURGEON"] = [{"routes": [pkg2_skip]}]
+    payload["strong_start"] = [{"routes": [pkg2_skip]}]
     save_user_routing(payload)
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -1789,13 +1789,13 @@ def test_r1b2_package_transition_resets_skip_evidence_and_routing_context(
     assert len(resolved) >= 2
     pkg2_resolved = _payload(resolved[1])
     assert pkg2_resolved["tier"] == "T2"
-    assert pkg2_resolved["routing_context"] == "WORKER"
+    assert pkg2_resolved["routing_context"] == "BUILD"
 
     no_elig = [e for e in events if e.event_type == "no_eligible_candidate"]
     assert no_elig
     terminal = _payload(no_elig[-1])
     assert terminal["tier"] == "T2"
-    assert terminal["routing_context"] == "WORKER"
+    assert terminal["routing_context"] == "BUILD"
     assert terminal["routing_context"] == pkg2_resolved["routing_context"]
     terminal_models = [str(e.get("model")) for e in terminal["skipped_candidates"]]
     # Package 2's own walk skipped terra and sol, in that order; flash
@@ -1807,7 +1807,7 @@ def test_r1b2_package_transition_resets_skip_evidence_and_routing_context(
     run_failed = _payload(
         [e for e in events if e.event_type == "run_failed"][-1]
     )
-    assert run_failed["routing_context"] == "WORKER"
+    assert run_failed["routing_context"] == "BUILD"
     run_failed_models = [
         str(e.get("model")) for e in run_failed["skipped_candidates"]
     ]
@@ -1817,7 +1817,7 @@ def test_r1b2_package_transition_resets_skip_evidence_and_routing_context(
     report = build_run_report(db, result.run_id)
     termination = report["termination"]
     assert isinstance(termination, dict)
-    assert termination["routing_context"] == "WORKER"
+    assert termination["routing_context"] == "BUILD"
     termination_models = [
         str(e.get("model")) for e in termination["skipped_candidates"]
     ]
@@ -1828,7 +1828,7 @@ def test_r1b2_package_transition_resets_skip_evidence_and_routing_context(
     # walk. Package 2 launched flash once and failed its gate, so the
     # summary names exactly one failed attempt -- never a claim that
     # package 1's PASSED attempt failed its gate.
-    assert "No eligible candidate for WORKER" in result.summary
+    assert "No eligible candidate for BUILD" in result.summary
     assert "failed to pass gate" in result.summary
     assert "All 1 attempt(s)" in result.summary
     assert "All 2 attempt(s)" not in result.summary
@@ -1871,8 +1871,8 @@ def test_r1b3_mixed_current_chain_after_prior_success_is_truthful(
     # gate failure) and the package-2 skip; the old T1-only skip has no
     # per-package home anymore (see lane report). The T2 chain doubles as
     # the SURGEON chain, undispatched here (gate failure never escalates).
-    payload["roles"]["WORKER"] = [{"routes": [cid]} for cid in [pkg2_fail, pkg2_skip]]
-    payload["roles"]["SURGEON"] = [{"routes": [cid]} for cid in [pkg2_fail, pkg2_skip]]
+    payload["roles"]["BUILD"] = [{"routes": [cid]} for cid in [pkg2_fail, pkg2_skip]]
+    payload["strong_start"] = [{"routes": [cid]} for cid in [pkg2_fail, pkg2_skip]]
     save_user_routing(payload)
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -1956,14 +1956,14 @@ def test_r1b3_mixed_current_chain_after_prior_success_is_truthful(
     assert "All 1 attempt(s) failed to pass gate" in result.summary
     assert "All 2 attempt(s)" not in result.summary
     # Package-1 success is never described as failed/ineligible.
-    assert "No eligible candidate for WORKER" in result.summary
+    assert "No eligible candidate for BUILD" in result.summary
     assert pkg2_skip in result.summary
     assert pkg1_success not in result.summary.split("No eligible candidate")[-1]
 
     no_elig = [e for e in events if e.event_type == "no_eligible_candidate"]
     assert no_elig
     terminal = _payload(no_elig[-1])
-    assert terminal["routing_context"] == "WORKER"
+    assert terminal["routing_context"] == "BUILD"
     terminal_models = {str(e.get("model")) for e in terminal["skipped_candidates"]}
     assert terminal_models == {"gpt-5.6-sol"}
     assert len(terminal["skipped_candidates"]) == 1
@@ -1972,7 +1972,7 @@ def test_r1b3_mixed_current_chain_after_prior_success_is_truthful(
         [e for e in events if e.event_type == "run_failed"][-1]
     )
     assert run_failed["summary"] == result.summary
-    assert run_failed["routing_context"] == "WORKER"
+    assert run_failed["routing_context"] == "BUILD"
     assert {
         str(e.get("model")) for e in run_failed["skipped_candidates"]
     } == {"gpt-5.6-sol"}
@@ -1983,7 +1983,7 @@ def test_r1b3_mixed_current_chain_after_prior_success_is_truthful(
     termination = report["termination"]
     assert isinstance(termination, dict)
     assert termination["summary"] == result.summary
-    assert termination["routing_context"] == "WORKER"
+    assert termination["routing_context"] == "BUILD"
     assert {
         str(e["model"]) for e in termination["skipped_candidates"]
     } == {"gpt-5.6-sol"}
@@ -2137,8 +2137,8 @@ def _crashed_two_package_boundary(
     pkg1_success = "opencode/opencode-go/deepseek-v4-flash"
     pkg2_skip = "codex/gpt-5.6-sol"
     payload = load_effective_routing_payload()
-    payload["roles"]["WORKER"] = [{"routes": [cid]} for cid in [pkg1_skip, pkg1_success]]
-    payload["roles"]["SURGEON"] = [{"routes": [pkg2_skip]}]
+    payload["roles"]["BUILD"] = [{"routes": [cid]} for cid in [pkg1_skip, pkg1_success]]
+    payload["strong_start"] = [{"routes": [pkg2_skip]}]
     save_user_routing(payload)
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -2239,11 +2239,11 @@ def _crashed_partial_two_package_plan(
     import saberops.orchestrator as orchestrator_module
 
     payload = load_effective_routing_payload()
-    payload["roles"]["WORKER"] = [
+    payload["roles"]["BUILD"] = [
         {"routes": ["codex/gpt-5.6-terra"]},
         {"routes": ["opencode/opencode-go/deepseek-v4-flash"]},
     ]
-    payload["roles"]["SURGEON"] = [{"routes": ["codex/gpt-5.6-sol"]}]
+    payload["strong_start"] = [{"routes": ["codex/gpt-5.6-sol"]}]
     save_user_routing(payload)
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -2386,10 +2386,10 @@ def test_r1b4_package_recovery_excludes_prior_package_attempts(
     pkg1_success = "opencode/opencode-go/deepseek-v4-flash"
     pkg2_skip = "codex/gpt-5.6-sol"
     payload = load_effective_routing_payload()
-    payload["roles"]["WORKER"] = [
+    payload["roles"]["BUILD"] = [
         {"routes": [cid]} for cid in [pkg1_skip, pkg1_success, pkg2_skip]
     ]
-    payload["roles"]["SURGEON"] = [{"routes": [pkg2_skip]}]
+    payload["strong_start"] = [{"routes": [pkg2_skip]}]
     save_user_routing(payload)
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -2508,7 +2508,7 @@ def test_r1b4_package_recovery_excludes_prior_package_attempts(
 
     events = db2.get_events(run_id, limit=10000)
     # Current-chain attempt count is one: package 2 launched flash once.
-    assert "No eligible candidate for WORKER" in result.summary
+    assert "No eligible candidate for BUILD" in result.summary
     assert "failed to pass gate" in result.summary
     assert "All 1 attempt(s)" in result.summary
     assert "All 2 attempt(s)" not in result.summary
@@ -2520,7 +2520,7 @@ def test_r1b4_package_recovery_excludes_prior_package_attempts(
     assert run_failed["summary"] == result.summary
     assert run_failed["attempts_count"] == len(historical)
     assert run_failed["chain_attempts_count"] == 1
-    assert run_failed["routing_context"] == "WORKER"
+    assert run_failed["routing_context"] == "BUILD"
     # Package 2's own walk, in order: terra (resumed chain head) then sol;
     # package 1's terra skip must never leak into this evidence.
     run_failed_models = [
@@ -2534,7 +2534,7 @@ def test_r1b4_package_recovery_excludes_prior_package_attempts(
     termination = report["termination"]
     assert isinstance(termination, dict)
     assert termination["summary"] == result.summary
-    assert termination["routing_context"] == "WORKER"
+    assert termination["routing_context"] == "BUILD"
     termination_models = [
         str(e.get("model")) for e in termination["skipped_candidates"]
     ]
@@ -2557,8 +2557,8 @@ def test_r1b4_tier_boundary_reconstructs_from_durable_evidence(
     t1_fail = "opencode/opencode-go/deepseek-v4-flash"
     t2_skip = "codex/gpt-5.6-sol"
     payload = load_effective_routing_payload()
-    payload["roles"]["WORKER"] = [{"routes": [t1_fail]}]
-    payload["roles"]["SURGEON"] = [{"routes": [t2_skip]}]
+    payload["roles"]["BUILD"] = [{"routes": [t1_fail]}]
+    payload["strong_start"] = [{"routes": [t2_skip]}]
     save_user_routing(payload)
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -2587,7 +2587,7 @@ def test_r1b4_tier_boundary_reconstructs_from_durable_evidence(
 
     assert result.passed is False
     assert result.status == RunStatus.FAILED
-    assert "No eligible candidate for SURGEON" in result.summary
+    assert "No eligible candidate for BUILD" in result.summary
     assert "failed to pass gate" not in result.summary
     assert t2_skip in result.summary
     events = db.get_events(result.run_id, limit=10000)
@@ -2638,8 +2638,8 @@ def test_r1b4_ambiguous_chain_boundary_fails_closed(
     pkg1_success = "opencode/opencode-go/deepseek-v4-flash"
     pkg2_skip = "codex/gpt-5.6-sol"
     payload = load_effective_routing_payload()
-    payload["roles"]["WORKER"] = [{"routes": [cid]} for cid in [pkg1_skip, pkg1_success]]
-    payload["roles"]["SURGEON"] = [{"routes": [pkg2_skip]}]
+    payload["roles"]["BUILD"] = [{"routes": [cid]} for cid in [pkg1_skip, pkg1_success]]
+    payload["strong_start"] = [{"routes": [pkg2_skip]}]
     save_user_routing(payload)
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -2790,8 +2790,8 @@ def test_r1b42_markerless_middle_attempt_blocks_boundary_reconstruction(
     pkg1_success = "opencode/opencode-go/deepseek-v4-flash"
     pkg2_skip = "codex/gpt-5.6-sol"
     payload = load_effective_routing_payload()
-    payload["roles"]["WORKER"] = [{"routes": [cid]} for cid in [pkg1_skip, pkg1_success]]
-    payload["roles"]["SURGEON"] = [{"routes": [pkg2_skip]}]
+    payload["roles"]["BUILD"] = [{"routes": [cid]} for cid in [pkg1_skip, pkg1_success]]
+    payload["strong_start"] = [{"routes": [pkg2_skip]}]
     save_user_routing(payload)
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -3199,7 +3199,7 @@ def test_r1b5_recovery_does_not_create_second_plan(
     assert len([e for e in post_events if e.event_type == "plan_step_added"]) == 2
     # Recovery still continued package 2 from durable state and terminalized.
     assert result.status == RunStatus.FAILED
-    assert "No eligible candidate for WORKER" in result.summary
+    assert "No eligible candidate for BUILD" in result.summary
 
 
 def test_r1b5_recovery_adopts_durable_plan(
@@ -3298,11 +3298,11 @@ def test_r1b5_recovery_adopts_durable_plan(
     assert post_attempts[0].status == AttemptStatus.SUCCESS
     assert post_attempts[-1].status == AttemptStatus.FAILED
     assert result.status == RunStatus.FAILED
-    assert "No eligible candidate for WORKER" in result.summary
+    assert "No eligible candidate for BUILD" in result.summary
     run_failed = _payload(
         [e for e in post_events if e.event_type == "run_failed"][-1]
     )
-    assert run_failed["routing_context"] == "WORKER"
+    assert run_failed["routing_context"] == "BUILD"
 
 
 def test_r1b5_fresh_run_plans_once(
@@ -3317,8 +3317,8 @@ def test_r1b5_fresh_run_plans_once(
     pkg1_success = "opencode/opencode-go/deepseek-v4-flash"
     pkg2_skip = "codex/gpt-5.6-sol"
     payload = load_effective_routing_payload()
-    payload["roles"]["WORKER"] = [{"routes": [cid]} for cid in [pkg1_skip, pkg1_success]]
-    payload["roles"]["SURGEON"] = [{"routes": [pkg2_skip]}]
+    payload["roles"]["BUILD"] = [{"routes": [cid]} for cid in [pkg1_skip, pkg1_success]]
+    payload["strong_start"] = [{"routes": [pkg2_skip]}]
     save_user_routing(payload)
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -3378,7 +3378,7 @@ def test_r1b5_fresh_run_plans_once(
     # Normal planning persisted exactly one plan with the expected steps and
     # packages, and the run proceeded through its normal lifecycle.
     assert result.status == RunStatus.FAILED
-    assert "No eligible candidate for WORKER" in result.summary
+    assert "No eligible candidate for BUILD" in result.summary
     assert len(db.list_run_plans(result.run_id)) == 1
     events = db.get_events(result.run_id, limit=10000)
     assert len([e for e in events if e.event_type == "plan_created"]) == 1
@@ -3745,7 +3745,7 @@ def test_r1b4_same_chain_continuation_keeps_prior_attempts(
     cand_a = "opencode/opencode-go/deepseek-v4-flash"
     cand_b = "opencode/opencode-go/mimo-v2.5"
     payload = load_effective_routing_payload()
-    payload["roles"]["WORKER"] = [{"routes": [cid]} for cid in [cand_a, cand_b]]
+    payload["roles"]["BUILD"] = [{"routes": [cid]} for cid in [cand_a, cand_b]]
     save_user_routing(payload)
     repo = tmp_path / "repo"
     _init_repo(repo)

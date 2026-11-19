@@ -184,7 +184,7 @@ def test_c16b1_running_projection(tmp_path: Path) -> None:
     _run(db)
     _attempt(db, "run_c16b1", "att_1", 1)
     _dispatch(
-        db, "run_c16b1", "assoc_1", DispatchStage.IMPLEMENTATION, DispatchRole.BULK,
+        db, "run_c16b1", "assoc_1", DispatchStage.IMPLEMENTATION, DispatchRole.BUILD,
         attempt_id="att_1",
     )
     db.record_event("run_c16b1", "run_started", payload={})
@@ -230,7 +230,7 @@ def test_team_report_rejects_foreign_and_recursive_links(tmp_path: Path) -> None
         "execution_mode": "parallel", "parallel_parent_run_id": parent.id,
         "parallel_task_index": 1, "parallel_plan": [{"title": "A"}, {"title": "B"}],
     })
-    _dispatch(db, foreign.id, "foreign-dispatch", DispatchStage.IMPLEMENTATION, DispatchRole.BULK)
+    _dispatch(db, foreign.id, "foreign-dispatch", DispatchStage.IMPLEMENTATION, DispatchRole.BUILD)
     for index, child in enumerate((foreign, recursive)):
         db.record_event(parent.id, "team_worker_created", payload={
             "task_index": index, "child_run_id": child.id,
@@ -277,7 +277,7 @@ def test_c16b1_completed_successful_run(tmp_path: Path) -> None:
     _run(db, status=RunStatus.COMPLETED, completed_at=_COMPLETED, final_attempt_id="att_1")
     _attempt(db, "run_c16b1", "att_1", 1, status=AttemptStatus.SUCCESS, commit_sha="cand-sha")
     _dispatch(
-        db, "run_c16b1", "assoc_1", DispatchStage.IMPLEMENTATION, DispatchRole.BULK,
+        db, "run_c16b1", "assoc_1", DispatchStage.IMPLEMENTATION, DispatchRole.BUILD,
         attempt_id="att_1",
         actual_provider="test",
         actual_model="actual-model",
@@ -326,7 +326,7 @@ def test_c16b1_failed_run(tmp_path: Path) -> None:
     db = Database(tmp_path / "state.db")
     _run(db, status=RunStatus.FAILED, completed_at=_COMPLETED)
     _attempt(db, "run_c16b1", "att_1", 1, status=AttemptStatus.FAILED)
-    _dispatch(db, "run_c16b1", "assoc_1", DispatchStage.IMPLEMENTATION, DispatchRole.BULK,
+    _dispatch(db, "run_c16b1", "assoc_1", DispatchStage.IMPLEMENTATION, DispatchRole.BUILD,
               attempt_id="att_1", outcome=DispatchOutcome.GATE_FAILURE,
               usage=[ProviderUsage(usage_source="unavailable")])
     db.create_check(
@@ -351,13 +351,13 @@ def test_c16b1_retry_vs_repair_separation(tmp_path: Path) -> None:
     db = Database(tmp_path / "state.db")
     _run(db)
     _attempt(db, "run_c16b1", "att_1", 1)
-    _dispatch(db, "run_c16b1", "a1", DispatchStage.IMPLEMENTATION, DispatchRole.BULK,
+    _dispatch(db, "run_c16b1", "a1", DispatchStage.IMPLEMENTATION, DispatchRole.BUILD,
               attempt_id="att_1")
-    _dispatch(db, "run_c16b1", "a2", DispatchStage.RETRY, DispatchRole.REPAIR,
+    _dispatch(db, "run_c16b1", "a2", DispatchStage.RETRY, DispatchRole.BUILD,
               attempt_id="att_1")
-    _dispatch(db, "run_c16b1", "a3", DispatchStage.RETRY, DispatchRole.REPAIR,
+    _dispatch(db, "run_c16b1", "a3", DispatchStage.RETRY, DispatchRole.BUILD,
               attempt_id="att_1")
-    _dispatch(db, "run_c16b1", "a4", DispatchStage.REPAIR, DispatchRole.REPAIR,
+    _dispatch(db, "run_c16b1", "a4", DispatchStage.REPAIR, DispatchRole.BUILD,
               attempt_id="att_1")
 
     report = build_run_report(db, "run_c16b1")
@@ -372,15 +372,15 @@ def test_c16b1_worker_vs_reviewer_dispatch_counts(tmp_path: Path) -> None:
     db = Database(tmp_path / "state.db")
     _run(db)
     _attempt(db, "run_c16b1", "att_1", 1)
-    _dispatch(db, "run_c16b1", "a1", DispatchStage.IMPLEMENTATION, DispatchRole.BULK,
+    _dispatch(db, "run_c16b1", "a1", DispatchStage.IMPLEMENTATION, DispatchRole.BUILD,
               attempt_id="att_1")
-    _dispatch(db, "run_c16b1", "a2", DispatchStage.RETRY, DispatchRole.REPAIR,
+    _dispatch(db, "run_c16b1", "a2", DispatchStage.RETRY, DispatchRole.BUILD,
               attempt_id="att_1")
-    _dispatch(db, "run_c16b1", "a3", DispatchStage.REPAIR, DispatchRole.REPAIR,
+    _dispatch(db, "run_c16b1", "a3", DispatchStage.REPAIR, DispatchRole.BUILD,
               attempt_id="att_1")
-    _dispatch(db, "run_c16b1", "r1", DispatchStage.REVIEW, DispatchRole.REVIEW,
+    _dispatch(db, "run_c16b1", "r1", DispatchStage.REVIEW, DispatchRole.CHECK,
               review_id="rev_1")
-    _dispatch(db, "run_c16b1", "r2", DispatchStage.REVIEW, DispatchRole.REVIEW,
+    _dispatch(db, "run_c16b1", "r2", DispatchStage.REVIEW, DispatchRole.CHECK,
               review_id="rev_2")
 
     report = build_run_report(db, "run_c16b1")
@@ -395,7 +395,7 @@ def test_c16b1_requested_never_becomes_actual(tmp_path: Path) -> None:
     db = Database(tmp_path / "state.db")
     _run(db)
     _attempt(db, "run_c16b1", "att_1", 1)
-    _dispatch(db, "run_c16b1", "a1", DispatchStage.IMPLEMENTATION, DispatchRole.BULK,
+    _dispatch(db, "run_c16b1", "a1", DispatchStage.IMPLEMENTATION, DispatchRole.BUILD,
               attempt_id="att_1")
 
     report = build_run_report(db, "run_c16b1")
@@ -409,11 +409,11 @@ def test_c16b1_mixed_actual_identities_flagged(tmp_path: Path) -> None:
     db = Database(tmp_path / "state.db")
     _run(db)
     _attempt(db, "run_c16b1", "att_1", 1)
-    _dispatch(db, "run_c16b1", "a1", DispatchStage.IMPLEMENTATION, DispatchRole.BULK,
+    _dispatch(db, "run_c16b1", "a1", DispatchStage.IMPLEMENTATION, DispatchRole.BUILD,
               attempt_id="att_1", actual_provider="prov-a", actual_model="model-a",
               outcome=DispatchOutcome.CAPABILITY_FAILURE,
               usage=[ProviderUsage(usage_source="unavailable")])
-    _dispatch(db, "run_c16b1", "a2", DispatchStage.RETRY, DispatchRole.REPAIR,
+    _dispatch(db, "run_c16b1", "a2", DispatchStage.RETRY, DispatchRole.BUILD,
               attempt_id="att_1", actual_provider="prov-b", actual_model="model-b",
               outcome=DispatchOutcome.CAPABILITY_FAILURE,
               usage=[ProviderUsage(usage_source="unavailable")])
@@ -443,7 +443,7 @@ def test_c16b1_usage_events_are_not_dispatch_counts(tmp_path: Path) -> None:
     )
     evidence = new_dispatch_evidence(
         run_id="run_c16b1", association_id="assoc_1",
-        stage=DispatchStage.IMPLEMENTATION, role=DispatchRole.BULK, tier=Tier.T1,
+        stage=DispatchStage.IMPLEMENTATION, role=DispatchRole.BUILD, tier=Tier.T1,
         dispatch_reason=DispatchReason.INITIAL_IMPLEMENTATION,
         requested_provider="test", requested_model="requested",
         task="docs task", attempt_id="att_1",
@@ -476,7 +476,7 @@ def test_c16b1_all_unknown_usage_stays_unknown(tmp_path: Path) -> None:
     db = Database(tmp_path / "state.db")
     _run(db)
     _attempt(db, "run_c16b1", "att_1", 1)
-    _dispatch(db, "run_c16b1", "a1", DispatchStage.IMPLEMENTATION, DispatchRole.BULK,
+    _dispatch(db, "run_c16b1", "a1", DispatchStage.IMPLEMENTATION, DispatchRole.BUILD,
               attempt_id="att_1", outcome=DispatchOutcome.CAPABILITY_FAILURE,
               usage=[ProviderUsage(usage_source="unavailable")])
 
@@ -514,9 +514,9 @@ def test_c16b1_independent_review(tmp_path: Path) -> None:
     db.create_review(
         ReviewResult(id="rev_2", run_id="run_c16b1", provider="test", model="reviewer",
                      verdict=ReviewVerdict.PASS, summary="fixed", created_at=_COMPLETED))
-    _dispatch(db, "run_c16b1", "r1", DispatchStage.REVIEW, DispatchRole.REVIEW,
+    _dispatch(db, "run_c16b1", "r1", DispatchStage.REVIEW, DispatchRole.CHECK,
               review_id="rev_1")
-    _dispatch(db, "run_c16b1", "r2", DispatchStage.REVIEW, DispatchRole.REVIEW,
+    _dispatch(db, "run_c16b1", "r2", DispatchStage.REVIEW, DispatchRole.CHECK,
               review_id="rev_2")
 
     report = build_run_report(db, "run_c16b1")
@@ -572,7 +572,7 @@ def test_c16b1_provider_runtime_failure_warns(tmp_path: Path) -> None:
     db = Database(tmp_path / "state.db")
     _run(db)
     _attempt(db, "run_c16b1", "att_1", 1, status=AttemptStatus.FAILED)
-    _dispatch(db, "run_c16b1", "a1", DispatchStage.IMPLEMENTATION, DispatchRole.BULK,
+    _dispatch(db, "run_c16b1", "a1", DispatchStage.IMPLEMENTATION, DispatchRole.BUILD,
               attempt_id="att_1", outcome=DispatchOutcome.PROVIDER_OR_RUNTIME_FAILURE,
               usage=[ProviderUsage(usage_source="unavailable")])
     db.create_review(
@@ -602,7 +602,7 @@ def test_c16b1_json_stability_and_determinism(tmp_path: Path) -> None:
     db = Database(tmp_path / "state.db")
     _run(db, status=RunStatus.COMPLETED, completed_at=_COMPLETED, final_attempt_id="att_1")
     _attempt(db, "run_c16b1", "att_1", 1, status=AttemptStatus.SUCCESS, commit_sha="cand")
-    _dispatch(db, "run_c16b1", "a1", DispatchStage.IMPLEMENTATION, DispatchRole.BULK,
+    _dispatch(db, "run_c16b1", "a1", DispatchStage.IMPLEMENTATION, DispatchRole.BUILD,
               attempt_id="att_1", actual_provider="test", actual_model="m",
               outcome=DispatchOutcome.CAPABILITY_FAILURE,
               usage=[ProviderUsage(input_tokens=1, output_tokens=1, total_tokens=2,
@@ -687,3 +687,101 @@ def test_c16b1_run_page_shows_monitoring_section(tmp_path: Path) -> None:
     assert response.status_code == 200
     assert 'aria-label="Live monitoring"' in response.text
     assert "stage" in response.text.lower()
+
+
+# --- plan / build / check roles (ADR-0005 §3) ------------------------------
+
+
+def test_roles_show_who_planned_built_and_checked(tmp_path: Path) -> None:
+    """Every run record names the plan, build and check roles."""
+    db = Database(tmp_path / "state.db")
+    _run(db)
+    db.record_event(
+        "run_c16b1",
+        "run_created",
+        payload={
+            "planned_by": {
+                "identity": "claude-code",
+                "client": "claude-code",
+                "session_id": "session-1",
+                "source": "planning lease",
+            }
+        },
+    )
+    _attempt(db, "run_c16b1", "att_1", 1)
+    _dispatch(
+        db,
+        "run_c16b1",
+        "a1",
+        DispatchStage.IMPLEMENTATION,
+        DispatchRole.BUILD,
+        attempt_id="att_1",
+        actual_provider="codex",
+        actual_model="gpt-5.6-terra",
+    )
+    db.create_review(
+        ReviewResult(
+            id="rev_1",
+            run_id="run_c16b1",
+            provider="anthropic",
+            model="claude-sonnet-4-6",
+            verdict=ReviewVerdict.PASS,
+            summary="ok",
+            created_at=_COMPLETED,
+        )
+    )
+
+    report = build_run_report(db, "run_c16b1")
+    roles = report["roles"]
+    assert roles["plan"]["identity"] == "claude-code"
+    assert roles["plan"]["session_id"] == "session-1"
+    assert roles["build"]["provider"] == "codex"
+    assert roles["build"]["model"] == "gpt-5.6-terra"
+    assert roles["build"]["identity_status"] == "reported"
+    assert roles["check"]["provider"] == "anthropic"
+    assert roles["check"]["model"] == "claude-sonnet-4-6"
+    assert roles["check"]["verdict"] == "PASS"
+    text = render_report_text(report)
+    assert "roles" in text
+    assert "plan   claude-code" in text
+    assert "build  codex/gpt-5.6-terra" in text
+    assert "check  anthropic/claude-sonnet-4-6" in text
+
+
+def test_roles_stay_unknown_without_evidence(tmp_path: Path) -> None:
+    """An unreported role stays UNKNOWN; the record never invents an identity."""
+    db = Database(tmp_path / "state.db")
+    _run(db)
+
+    roles = build_run_report(db, "run_c16b1")["roles"]
+    assert roles["plan"]["identity"] == UNKNOWN
+    assert roles["build"]["provider"] == UNKNOWN
+    assert roles["build"]["identity_status"] == UNKNOWN
+    assert roles["check"]["verdict"] == UNKNOWN
+
+
+def test_legacy_dispatch_and_review_evidence_roles_load(tmp_path: Path) -> None:
+    """Durable evidence written before ADR-0005 §3 keeps loading."""
+    db = Database(tmp_path / "state.db")
+    _run(db)
+    _attempt(db, "run_c16b1", "att_1", 1)
+    _dispatch(
+        db,
+        "run_c16b1",
+        "a1",
+        DispatchStage.IMPLEMENTATION,
+        DispatchRole.BUILD,
+        attempt_id="att_1",
+        actual_provider="codex",
+        actual_model="gpt-5.6-terra",
+    )
+    # Rewrite the stored role to its pre-ADR-0005 spelling, as an old row has.
+    with db._get_connection() as conn:
+        conn.execute(
+            "UPDATE dispatch_evidence SET role = 'BULK' WHERE id = ?",
+            (db.get_dispatch_evidence_for_run("run_c16b1")[0].id,),
+        )
+    dispatches = db.get_dispatch_evidence_for_run("run_c16b1")
+    assert [d.role for d in dispatches] == [DispatchRole.BUILD]
+    report = build_run_report(db, "run_c16b1")
+    assert report["roles"]["build"]["provider"] == "codex"

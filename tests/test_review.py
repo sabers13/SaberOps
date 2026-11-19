@@ -233,7 +233,7 @@ def test_ported_owner_reviewer_chain_respects_fallback_budget(
             connection_id=_R3E1_CONNECTION,
             provider=_R3E1_PROVIDER,
             model=model,
-            binding_role=BindingRole.REVIEWER,
+            binding_role=BindingRole.CHECK,
         )
         owner = upsert_owner_binding(owner, binding=binding, profile=profile, pool=pool)
         ids.append(binding.binding_id)
@@ -281,7 +281,7 @@ def test_ported_reviewer_selection_uses_injected_registry(
         connection_id=_R3E1_CONNECTION,
         provider=_R3E1_PROVIDER,
         model=_R3E1_REVIEWER_MODEL,
-        binding_role=BindingRole.REVIEWER,
+        binding_role=BindingRole.CHECK,
     )
     save_owner_bindings(
         upsert_owner_binding(OwnerBindings(), binding=reviewer, profile=profile, pool=pool)

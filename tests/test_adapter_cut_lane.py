@@ -40,20 +40,19 @@ def test_automatic_tier_chains_never_yield_antigravity(tier: Tier) -> None:
 
 def test_configured_snapshot_still_never_yields_antigravity() -> None:
     snapshot = load_packaged_default()
-    worker_groups = snapshot.groups_for("WORKER")
+    build_groups = snapshot.groups_for("BUILD")
     injected = RoutingSnapshot(
         schema_version=snapshot.schema_version,
         source=snapshot.source,
         source_path=snapshot.source_path,
         content_hash=snapshot.content_hash,
         role_chains=(
-            ("WORKER", ((CANDIDATE_ANTIGRAVITY_FLASH,),) + worker_groups),
-            ("SURGEON", snapshot.groups_for("SURGEON")),
-            ("INTEGRATOR", snapshot.groups_for("INTEGRATOR")),
+            ("BUILD", ((CANDIDATE_ANTIGRAVITY_FLASH,),) + build_groups),
         ),
         approved_candidates=snapshot.approved_candidates,
+        strong_start=snapshot.strong_start,
     )
-    resolved = resolve_candidate_chain(role="WORKER", snapshot=injected)
+    resolved = resolve_candidate_chain(role="BUILD", snapshot=injected)
     assert all(candidate.provider != "antigravity" for candidate in resolved)
 
 
@@ -134,13 +133,13 @@ def test_closed_registry_and_packaged_default_exclude_antigravity() -> None:
 
     assert "antigravity/gemini-3.7-flash" not in ALLOWED_CANDIDATES
     snapshot = load_packaged_default()
-    for role in (JobRole.WORKER, JobRole.SURGEON, JobRole.INTEGRATOR):
+    for role in (JobRole.BUILD, JobRole.BUILD, JobRole.BUILD):
         assert all(
             candidate.provider != "antigravity"
             for candidate in snapshot.chain_for_role(role)
         )
     # Automatic routing still has candidates after the cut.
-    assert snapshot.chain_for_role(JobRole.WORKER)
+    assert snapshot.chain_for_role(JobRole.BUILD)
 
 
 def test_configured_antigravity_candidate_id_fails_closed() -> None:

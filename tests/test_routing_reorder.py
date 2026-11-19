@@ -31,7 +31,7 @@ def isolated_xdg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _worker_ids(payload: dict[str, Any]) -> list[str]:
-    return [group["routes"][0] for group in payload["roles"]["WORKER"]]
+    return [group["routes"][0] for group in payload["roles"]["BUILD"]]
 
 
 def _reorder(payload: dict[str, Any], order: Any) -> dict[str, Any]:
@@ -40,12 +40,12 @@ def _reorder(payload: dict[str, Any], order: Any) -> dict[str, Any]:
 
 def test_drag_order_persists_and_preserves_other_chains(isolated_xdg: None) -> None:
     before = load_effective_routing_payload()
-    count = len(before["roles"]["WORKER"])
+    count = len(before["roles"]["BUILD"])
     order = list(reversed(range(1, count + 1)))
     updated = _reorder(before, order)
     save_user_routing(updated)
     expected = copy.deepcopy(before)
-    expected["roles"]["WORKER"] = list(reversed(expected["roles"]["WORKER"]))
+    expected["roles"]["BUILD"] = list(reversed(expected["roles"]["BUILD"]))
     assert load_effective_routing_payload() == expected
 
 
@@ -55,7 +55,7 @@ def test_drag_order_persists_and_preserves_other_chains(isolated_xdg: None) -> N
 )
 def test_invalid_drag_never_writes(isolated_xdg: None, kind: str) -> None:
     before = load_effective_routing_payload()
-    count = len(before["roles"]["WORKER"])
+    count = len(before["roles"]["BUILD"])
     save_user_routing(before)
     proposed: Any = list(reversed(range(1, count + 1)))
     if kind == "missing":
@@ -84,7 +84,7 @@ def test_malformed_order_payload_never_writes(isolated_xdg: None) -> None:
 
 def test_empty_chain_can_remain_empty(isolated_xdg: None) -> None:
     before = load_effective_routing_payload()
-    before["roles"]["WORKER"] = []
+    before["roles"]["BUILD"] = []
     save_user_routing(before)
     updated = _reorder(before, [])
     save_user_routing(updated)

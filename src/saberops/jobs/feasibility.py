@@ -4,11 +4,11 @@ Called once, by ``submit_job``, before the insert. Never called at
 dispatch (that is M2-4b's ``admit()``), never contacts a provider,
 never reads quota or posture.
 
-Which chain: the candidate set is the WORKER role chain
-(``snapshot.chain_for_role(JobRole.WORKER)``); approved dynamic
-candidates in that chain count. This is followup-4's decision: a
-requirement only a SURGEON-chain route satisfies is not feasible at
-submit.
+Which chain: the candidate set is the build route
+(``snapshot.chain_for_role(JobRole.BUILD)``); approved dynamic
+candidates in that chain count. A requirement only the build route's
+``strong_start`` setting satisfies is not feasible at submit: a strong start
+is an escalation setting, not an ordinary route.
 
 ``model_family_include`` / ``model_family_exclude`` are validated and
 stored only (non-empty lowercase strings, disjoint). They are not part
@@ -47,7 +47,7 @@ def feasible(
     """Return (True, None) when a route could ever satisfy ``requirements``."""
     if requirements.role not in DISPATCHABLE_ROLES:
         return False, NO_ROUTE_FOR_REQUIREMENTS
-    candidates = role_candidates(routing, JobRole.WORKER)
+    candidates = role_candidates(routing, JobRole.BUILD)
     if not candidates:
         return False, NO_ROUTE_FOR_REQUIREMENTS
     need = set(requirements.required_capabilities)

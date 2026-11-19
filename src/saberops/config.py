@@ -18,7 +18,7 @@ from saberops.control_plane.capabilities import (
     Capability,
     normalize_required_capabilities,
 )
-from saberops.jobs.models import JobRole
+from saberops.jobs.models import JobRole, coerce_job_role
 from saberops.models import GateScratchMode, ReviewPolicyMode, Tier
 from saberops.tooling.contracts import validate_logical_ref
 
@@ -29,13 +29,10 @@ _TIER_ORDER: tuple[Tier, ...] = (Tier.T1, Tier.T2, Tier.T3)
 # Bounded default worker execution. These per-role defaults are the
 # hard absolute deadline applied to every worker dispatch unless the owner
 # explicitly supplies ``--worker-timeout`` (which remains authoritative).
-# WORKER/INTEGRATOR keep the old T2 default (1200s); SURGEON keeps the old
-# T3 default (1800s) so Surgeon output keeps today's top-tier review risk
-# budget (ADR-0002 §11).
+# Every build dispatch (initial, retry or repair, including a strong-model
+# start) shares one default; a strong start is a route setting, not a role.
 ROLE_WORKER_TIMEOUTS: dict[JobRole, float] = {
-    JobRole.WORKER: 1200.0,
-    JobRole.SURGEON: 1800.0,
-    JobRole.INTEGRATOR: 1200.0,
+    JobRole.BUILD: 1200.0,
 }
 
 # Soft inactivity expectation (seconds of quiet provider output before the
@@ -62,11 +59,9 @@ def role_worker_timeout(role: JobRole | str) -> float:
     inactivity expectation (``WORKER_INACTIVITY_TIMEOUT``) remains a
     monitoring/reporting signal only and never terminates a worker.
     """
-    key = role if isinstance(role, JobRole) else JobRole(str(role).strip().upper())
-    if key not in (JobRole.WORKER, JobRole.SURGEON, JobRole.INTEGRATOR):
-        raise ValueError(
-            f"no worker timeout for role {str(role)!r}: expected a routed role"
-        )
+    key = coerce_job_role(role)
+    if key not in ROLE_WORKER_TIMEOUTS:
+        raise ValueError(f"no worker timeout for role {str(role)!r}: expected the build role")
     return ROLE_WORKER_TIMEOUTS[key]
 
 
@@ -174,17 +169,25 @@ class RunConfig:
 
     @property
     def initial_role(self) -> JobRole:
-        """Return the routing role the run starts on (ADR-0002 §11).
+        """Return the routing role the run starts on (ADR-0005 §3).
 
-        SURGEON iff the run is manual with ``manual_tier == T3`` (the old
-        T3 chain is exactly the SURGEON chain), else WORKER. Manual runs
-        never escalate; auto runs start on WORKER and may escalate once
-        to SURGEON. No new persisted config field: this derives from the
-        frozen ``manual_tier``/``max_auto_tier`` back-compat fields.
+        Always ``BUILD``: there is no second model role.  A manual run at the
+        high tier asks for a stronger-model start through the build route's
+        ``strong_start`` setting; see :attr:`initial_strong_start`.
         """
-        if self.routing_mode == "manual" and self.manual_tier == Tier.T3:
-            return JobRole.SURGEON
-        return JobRole.WORKER
+        return JobRole.BUILD
+
+    @property
+    def initial_strong_start(self) -> bool:
+        """True when a manual high-tier run starts on the stronger-model setting.
+
+        A strong start is a route setting on the build route, not a role: a
+        manual run at ``T3`` resolves the routing document's ``strong_start``
+        chain (falling back to the ordinary build chain when it is empty).
+        Automatic runs start on the ordinary build chain and keep the right to
+        escalate to the strong chain under the existing evidence rule.
+        """
+        return self.routing_mode == "manual" and self.manual_tier == Tier.T3
 
     @property
     def has_worker_deadline(self) -> bool:

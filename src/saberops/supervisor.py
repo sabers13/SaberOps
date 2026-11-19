@@ -223,6 +223,7 @@ class RunSupervisor:
             provider_override=config.provider_override,
             training_allowed=config.training_allowed,
             snapshot=snapshot,
+            strong_start=config.initial_strong_start,
         )
         # When the frozen routing snapshot can produce an
         # exact-binding candidate, freeze the effective owner BindingRegistry
@@ -314,6 +315,8 @@ class RunSupervisor:
                 "child_run_id": run_id, "candidate_sha": source[1].commit_sha,
                 "attempt_id": source[1].id,
             })
+        from saberops.mcp.lease import planner_identity
+
         self.db.record_event(
             run_id,
             "run_created",
@@ -328,6 +331,7 @@ class RunSupervisor:
                 "routing_snapshot": routing_payload,
                 "project_id": provenance.project_id,
                 "objective_id": provenance.objective_id,
+                "planned_by": planner_identity(),
             },
         )
         self.db.record_event(run_id, "routing_snapshot", payload=routing_payload)

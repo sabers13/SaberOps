@@ -34,7 +34,7 @@ evidence**: during the day and while you sleep.
 - [What's in the engine](#whats-in-the-engine)
 - [Interfaces](#interfaces)
 - [Worker adapters](#worker-adapters)
-- [Authority modes](#authority-modes)
+- [Authority settings](#authority-settings)
 - [Installation](#installation)
 - [Quick start](#quick-start)
 - [Security and execution boundaries](#security-and-execution-boundaries)
@@ -62,8 +62,8 @@ SaberOps keeps semantic work (models) separate from execution authority
 
 | Models propose | SaberOps decides |
 | --- | --- |
-| The Orchestrator proposes plans, waves and tasks | Validates the plan, scores waves, admits lanes with disjoint write scopes |
-| Workers propose implementation commits | Chooses the route from role chains, plan capacity and billing posture |
+| You plan in your own CLI session | Validates, builds, checks and accepts deterministically |
+| Builders propose implementation commits | Chooses the route from the build chain, plan capacity and billing posture |
 | Reviewers give an independent read-only verdict | Owns worktrees, gates, provenance, durable state and acceptance |
 | Nobody accepts their own work | Fails closed whenever required evidence is missing |
 
@@ -77,10 +77,10 @@ flowchart LR
     J --> SC[Pacing scheduler<br/>posture + capacity admission]
     SC --> W[Isolated worktree<br/>official vendor CLI]
     W --> G{Gate<br/>base-trusted}
-    G -- fail --> R[Surgeon / retry<br/>role chain]
+    G -- fail --> R[Build route repair<br/>same worker role]
     R --> W
     G -- pass --> RV[Independent review<br/>read-only]
-    RV --> A[Acceptance<br/>per authority mode]
+    RV --> A[Acceptance<br/>per authority setting]
     W -. plan exhausted .-> P[Preempt: commit WIP<br/>+ resume capsule]
     P --> J
 ```
@@ -114,11 +114,10 @@ flowchart LR
 | **Jobs and scheduler** | Durable job queue (URGENT > NORMAL > BACKGROUND, deadline, FIFO), idempotency keys, single-instance scheduler lease, atomic dispatch | [operations](docs/operations.md#jobs) |
 | **Plan registry and billing posture** | Accounts → pools → windows; per-route posture class (A/B/C/D/X) with policy URL, owner verification date and TTL. Unverified or expired routes are never admitted unattended | [operations](docs/operations.md#plans-and-billing-posture) |
 | **Capacity ledger** | Usage observations, vendor exhaustion errors and learned per-job cost (EWMA by S/M/L size) feed admission and pacing | [operations](docs/operations.md#capacity-ledger-inspection-orch-capacity-show) |
-| **Role-chain routing** | Ordered fallback groups per role: WORKER, SURGEON, INTEGRATOR; owner-selected Orchestrator and Reviewer bindings; exact provider/backend/model identity end to end | [operations](docs/operations.md#worker-routing-policy) |
+| **Role routing** | Three roles: **plan** (the CLI session you sit in), **build** (one worker per task, including repairs and a stronger-model `strong_start` setting on the build route) and **check** (an independent reviewer). Gates, landing, the memory and disk guard and cleanup are deterministic engine stages, not roles | [operations](docs/operations.md#build-routing-policy) |
 | **Gates G1 / G2 / G3** | Base-trusted gate profiles, gate slots sized to free RAM, gate history, coverage-mapped affected gate and a single-pass full gate | [gate](docs/gate.md), [operations](docs/operations.md#engine-run-gates-g1--g2--g3-and-the-history-ledger) |
 | **Owner questions** | The engine never guesses an owner decision: keyed questions with a five-part escalation, answered verbatim from the CLI or web UI | [questions](docs/questions.md) |
 | **Unattended plans** | Frozen decision sheet, never-delegable list, three autonomous decision classes, circuit breaker, stall alarm and morning report. Unattended runs can never push | [unattended](docs/unattended-plans.md) |
-| **Project entry modes** | Six modes (`new_project`, `develop_existing`, `continue_saberops`, `task`, `resume_run`, `inspect`) qualified from repository facts with a blocker preflight | [project modes](docs/project-modes.md) |
 | **Storage lifecycle** | Owner-aware inventory, retention and guarded GC of worktrees, branches, checkpoint refs and evidence; dry-run first, never `--force` | [storage](docs/storage-lifecycle.md) |
 | **Central configuration** | Declarative workflow settings with an append-only, owner-approved decision ledger | [config](docs/config.md) |
 | **Certification** | `orch certify` evaluates Q4 dogfooding criteria and nine resilience scenarios | [certification](docs/end-certification.md) |
@@ -158,12 +157,13 @@ drift without sending prompts or reading credentials.
 
 ---
 
-## Authority modes
+## Authority settings
 
-How much SaberOps may do without asking is an explicit, persisted owner setting.
-Unknown values fail closed and never degrade into a more permissive mode.
+How much SaberOps may do without asking is an explicit, persisted owner setting,
+not an orchestration mode. Unknown values fail closed and never degrade into a
+more permissive setting.
 
-| Mode | May accept verified candidates without asking | Publishes candidate branch |
+| Setting | May accept verified candidates without asking | Publishes candidate branch |
 | --- | :---: | :---: |
 | `ask_before_actions` | No | No |
 | `supervised` (default) | No | No |
@@ -173,7 +173,7 @@ Unknown values fail closed and never degrade into a more permissive mode.
 
 Acceptance never bypasses verification. Unattended acceptance is limited to a
 local commit; no autonomous decision can move a remote. Inspect or change the
-mode with `orch authority show|list|set`.
+setting with `orch authority show|list|set`.
 
 ---
 
@@ -203,7 +203,8 @@ orch connect all   # register SaberOps in Claude Code, Codex, Antigravity, OpenC
 
 In the web UI: **Setup** signs you in and finds your models, **Accounts**
 confirms how each subscription is billed (**Confirm all**, once), and
-**Routing** chooses which model writes, checks, repairs and combines. Then open
+**Routing** chooses which model writes and which independent model checks. Repairs
+run on the build route, and landing is automatic. Then open
 a new session in your agent and say **"turn on saberops"**; say **"turn off
 saberops"** to go back to a normal agent. Messages from SaberOps start with
 `Orchestrator:`. `orch mcp off` hides SaberOps from every agent.

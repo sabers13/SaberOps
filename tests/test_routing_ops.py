@@ -62,7 +62,7 @@ def _seed(models: tuple[str, ...] = _MODELS) -> ModelCatalog:
     owner = load_owner_bindings()
     entries = []
     for model in models:
-        for role in (BindingRole.WORKER, BindingRole.REVIEWER):
+        for role in (BindingRole.BUILD, BindingRole.CHECK):
             binding, profile_row, pool = materialize_discovered_binding(
                 connection_id=_CONNECTION,
                 provider=_PROVIDER,
@@ -126,7 +126,7 @@ def test_add_move_remove_writes_canonical_routing(isolated_xdg: None) -> None:
             registry=registry,
         )
     payload = load_effective_routing_payload()
-    chain = [group["routes"] for group in payload["roles"]["WORKER"]]
+    chain = [group["routes"] for group in payload["roles"]["BUILD"]]
     assert chain == [[f"{_PROVIDER}/{m}"] for m in _MODELS]
     # A discovered model outside the static catalog carries its exact binding approval.
     approval = payload["approved_candidates"][f"{_PROVIDER}/opencode/brand-new-model"]
@@ -137,12 +137,12 @@ def test_add_move_remove_writes_canonical_routing(isolated_xdg: None) -> None:
     assert approval["training_required"] == "UNKNOWN"
 
     routing_ops.move_in_job("write", 3, "up", owner=load_owner_bindings())
-    chain = [g["routes"][0] for g in load_effective_routing_payload()["roles"]["WORKER"]]
+    chain = [g["routes"][0] for g in load_effective_routing_payload()["roles"]["BUILD"]]
     assert chain[1] == f"{_PROVIDER}/opencode/brand-new-model"
 
     for model in _MODELS:
         routing_ops.remove_from_job("write", f"{_PROVIDER}/{model}", owner=load_owner_bindings())
-    assert load_effective_routing_payload()["roles"]["WORKER"] == []
+    assert load_effective_routing_payload()["roles"]["BUILD"] == []
 
 
 def test_unknown_model_is_refused_and_nothing_written(isolated_xdg: None) -> None:

@@ -31,19 +31,10 @@ from saberops.config import (
     resolve_run_config,
 )
 from saberops.context_projection import (
-    CHANGED_PATHS_MAX,
     EVIDENCE_BLOCK_MAX_CHARS,
-    STDERR_BLOCK_MAX_CHARS,
-    STDOUT_BLOCK_MAX_CHARS,
     ContextProjection,
     RenderResult,
     build_retry_projection,
-)
-from saberops.context_projection import (
-    objective_digest as objective_digest_inline,
-)
-from saberops.context_projection import (
-    objective_slug as objective_slug_inline,
 )
 from saberops.control_plane import (
     NO_ELIGIBLE_CANDIDATE,
@@ -530,26 +521,6 @@ def _record_quota_exhaustion_evidence(
             pass
 
 
-def _is_genuine_capability_escalation(outcome: DispatchOutcome | None) -> bool:
-    """Return True only for genuine capability-bearing tier escalation evidence.
-
-    Invariant: SURGEON context semantics may activate ONLY on a real
-    validation failure on actual candidate changes (``GATE_FAILURE`` with
-    real diff).  Provider / quota / infrastructure / timeout / termination /
-    mutation / no_changes / already_satisfied / unknown / unknown_no_changes
-    / eligibility_skip / worker_failure_or_refusal / explicit
-    capability-failure escalations never select SURGEON context semantics,
-    regardless of how cleanly the worker ran.
-
-    Gate failure alone no longer authorizes tier escalation, so the
-    ``GATE_FAILURE`` branch is currently unreachable and SURGEON stays
-    dormant.  An explicit worker ``CAPABILITY_FAILURE`` is NOT mapped to
-    SURGEON: it carries no failed-candidate diff for a corrective
-    descendant.
-    """
-    return outcome is DispatchOutcome.GATE_FAILURE
-
-
 # Durable event types that install a genuinely fresh routing candidate
 # chain.  Each is emitted exactly where the in-memory
 # ``chain_attempt_start`` marker advances during uninterrupted execution
@@ -837,20 +808,15 @@ def _adopt_durable_plan_for_recovery(
 def _role_for_orchestrator_dispatch(
     stage: DispatchStage | None,
     *,
-    surgeon_active: bool,
     package: Any = None,
 ) -> DispatchRole:
     """Return the canonical role for one Orchestrator-level dispatch.
 
-    Override: when ``surgeon_active`` is True (genuine capability-bearing
-    tier escalation), the next dispatch is labelled SURGEON.  Otherwise the
-    canonical :func:`role_for_stage` mapping is preserved unchanged for the
-    legacy IMPLEMENTATION / RETRY / REPAIR / REVIEW stages.
+    Build covers implementation, retry and repair; check covers review.  A
+    stronger-model escalation is a route setting, never a separate role.
     """
-    if surgeon_active:
-        return DispatchRole.SURGEON
     if stage is None:
-        return DispatchRole.BULK
+        return DispatchRole.BUILD
     return role_for_stage(stage)
 
 
@@ -1885,8 +1851,8 @@ class Orchestrator:
         freezing in :meth:`_run_core`, before any worker is ever dispatched.
         This is infrastructure failure evidence -- never a worker, provider or
         model capability failure -- so it spends no tier escalation, no
-        SURGEON and no worker retry budget.  Bounded, non-secret evidence is
-        recorded via the existing event log, and the run is terminalized
+        stronger-model escalation and no worker retry budget.  Bounded,
+        non-secret evidence is recorded via the existing event log, and the run is terminalized
         through the existing ``fail_run_if_nonterminal`` lifecycle helper
         (idempotent: a run already terminal is left alone, no duplicate
         terminalization event is created).
@@ -2219,6 +2185,9 @@ class Orchestrator:
 
         current_tier = config.initial_tier
         current_role = config.initial_role
+        # A manual high-tier run asks for the build route's stronger-model
+        # setting; an escalation later raises this for the next chain.
+        strong_start_active = config.initial_strong_start
         routing_snapshot = None
         routing_payload: dict[str, Any] | None = None
         frozen_control_plane: FrozenControlPlane
@@ -2812,15 +2781,6 @@ class Orchestrator:
             tier_has_escalation_evidence = False
             escalation_outcome: DispatchOutcome | None = None
             escalation_stage: DispatchStage | None = None
-            # True only when the just-completed tier escalation is a
-            # GENUINE capability-bearing escalation (a real validation
-            # failure on actual candidate changes).  Gate misconfiguration handling removed gate
-            # failure from escalation authority, so no reachable escalation
-            # sets this today; SURGEON stays dormant.  Reset alongside
-            # tier_has_escalation_evidence wherever a fresh attempt-budget
-            # cycle begins.  Used to select SURGEON context semantics for
-            # the next dispatch only.
-            surgeon_active: bool = False
             try:
                 from saberops.capacity.snapshot import effective_quota_states
 
@@ -2834,6 +2794,7 @@ class Orchestrator:
                 model_override=config.model_override,
                 provider_override=config.provider_override,
                 snapshot=routing_snapshot,
+                strong_start=strong_start_active,
             )
             # Quota policy evaluates quota at the same pre-dispatch boundary as every
             # other hard control-plane filter, so excluded candidates still
@@ -2846,6 +2807,7 @@ class Orchestrator:
                 policy=control_plane_policy,
                 quota_states=quota_states,
                 db=self.db,
+                strong_start=strong_start_active,
             )
             # Structured per-candidate skip evidence for this run: every
             # automatic candidate that cannot dispatch appends one
@@ -2886,6 +2848,7 @@ class Orchestrator:
                     "role": current_role.value
                     if isinstance(current_role, JobRole)
                     else str(current_role),
+                    "strong_start": strong_start_active,
                     "routing_context": selected_routing_context,
                     "candidates": [
                         {"provider": c.provider, "model": c.model} for c in base_candidates
@@ -3220,15 +3183,14 @@ class Orchestrator:
                     and candidate_idx >= len(candidates)
                     and supervisor is None
                 ):
-                    # Escalation is one step Worker → Surgeon (ADR-0002 §11):
-                    # allowed only on the WORKER chain, under today's
-                    # evidence rule (CAPABILITY_FAILURE only) and today's
-                    # autonomous-supervisor rule. A run on the SURGEON
-                    # chain never escalates further.
+                    # Escalation moves the build route to its stronger-model
+                    # setting (ADR-0005 §3); there is no second model role.
+                    # Allowed under today's evidence rule and the
+                    # autonomous-supervisor rule.
                     ceiling_allows_escalation = (
                         config.routing_mode == "auto"
                         and config.model_override is None
-                        and current_role == JobRole.WORKER
+                        and current_role == JobRole.BUILD
                         and config.max_auto_tier == Tier.T3
                     )
                     # Exhausting the attempt budget or candidate ladder is
@@ -3316,7 +3278,10 @@ class Orchestrator:
                         break
                     prior_tier = current_tier
                     prior_role = current_role
-                    current_role = JobRole.SURGEON
+                    # Escalation stays on the build route and moves it to the
+                    # stronger-model setting: no second model role exists.
+                    current_role = JobRole.BUILD
+                    strong_start_active = True
                     current_tier = Tier.T3
                     self.db.update_run_tier(run_id, current_tier)
                     assert escalation_outcome is not None
@@ -3327,17 +3292,6 @@ class Orchestrator:
                         escalation_outcome,
                         stage=escalation_stage,
                     )
-                    # A genuine capability-bearing tier escalation may
-                    # activate SURGEON context semantics for the next
-                    # dispatch.  Explicit CAPABILITY_FAILURE escalations and
-                    # provider / quota / infrastructure / timeout / mutation
-                    # / no_changes / already_satisfied outcomes never set
-                    # this flag -- those continue to use the canonical
-                    # role_for_stage() mapping (an explicit worker
-                    # CAPABILITY_FAILURE carries no failed-candidate diff
-                    # for a corrective descendant).  See
-                    # ``_is_genuine_capability_escalation``.
-                    surgeon_active = _is_genuine_capability_escalation(escalation_outcome)
                     self.db.record_event(
                         run_id,
                         "tier_escalated",
@@ -3350,6 +3304,7 @@ class Orchestrator:
                             "to_role": current_role.value
                             if isinstance(current_role, JobRole)
                             else str(current_role),
+                            "strong_start": strong_start_active,
                             "stage": tier_decision.stage.value,
                             "package_id": tier_decision.package_id,
                             "escalation_reason": escalation_outcome.value,
@@ -3370,6 +3325,7 @@ class Orchestrator:
                         is_peak=is_peak,
                         provider_override=config.provider_override,
                         snapshot=routing_snapshot,
+                        strong_start=strong_start_active,
                     )
                     candidates = order_candidates_for_role(
                         role=current_role,
@@ -3378,6 +3334,7 @@ class Orchestrator:
                         policy=control_plane_policy,
                         quota_states=quota_states,
                         db=self.db,
+                        strong_start=strong_start_active,
                     )
                     selected_routing_context = routing_context_for_role(current_role)
                     self.db.record_event(
@@ -3388,6 +3345,7 @@ class Orchestrator:
                             "role": current_role.value
                             if isinstance(current_role, JobRole)
                             else str(current_role),
+                            "strong_start": strong_start_active,
                             "routing_context": selected_routing_context,
                             "candidates": [
                                 {"provider": c.provider, "model": c.model} for c in base_candidates
@@ -3413,12 +3371,8 @@ class Orchestrator:
                     tier_has_escalation_evidence = False
                     escalation_outcome = None
                     escalation_stage = None
-                    # The next dispatch after a genuine escalation is a
-                    # SURGEON context.  After resetting the attempt-budget
-                    # cycle we must also re-evaluate whether the next
-                    # dispatch is a SURGEON (set above when the escalation
-                    # was genuine) or whether it should fall back to the
-                    # canonical role_for_stage() mapping.
+                    # The next dispatch stays on the build route, now using
+                    # its stronger-model setting.
                     continue
                 auto_pinned_candidate = None
                 auto_decision_effort: str | None = None
@@ -3891,7 +3845,6 @@ class Orchestrator:
                 is_explicit = config.model_override is not None
                 next_attempt_num = attempt_number + 1
                 from saberops.context_projection import (
-                    SurgicalCapsule,
                     build_continuation_projection,
                     build_initial_projection,
                     build_package_initial_projection,
@@ -3958,7 +3911,7 @@ class Orchestrator:
                         changed_paths=continuation_changed_paths,
                         diff_summary=diff_summary,
                         package=current_package,
-                        role=DispatchRole.REPAIR.value,
+                        role=DispatchRole.BUILD.value,
                     )
                 elif continued_source and next_attempt_num == 1:
                     parent, prior_attempt = continued_source
@@ -3993,7 +3946,7 @@ class Orchestrator:
                             prior_check=prior_checks[-1] if prior_checks else None,
                             failure_excerpt=dispatch_projection.failure_excerpt,
                             review_excerpt=review_evidence,
-                            role=DispatchRole.REPAIR.value,
+                            role=DispatchRole.BUILD.value,
                         )
                 elif current_package is not None:
                     # PACKAGE branch: ONE package projection, NEVER composed
@@ -4061,7 +4014,7 @@ class Orchestrator:
                         # ``_do_repair``; this dispatch is the gate-failure
                         # retry on the same package.
                         pkg_retry_role = _role_for_orchestrator_dispatch(
-                            DispatchStage.REPAIR, surgeon_active=surgeon_active
+                            DispatchStage.REPAIR
                         )
                         dispatch_projection = build_package_retry_projection(
                             original_task=task,
@@ -4080,9 +4033,7 @@ class Orchestrator:
                             for step in self.db.get_plan_steps(run_id)
                             if step.status == PlanStepStatus.COMPLETED
                         ]
-                        pkg_role = _role_for_orchestrator_dispatch(
-                            local_stage, surgeon_active=surgeon_active
-                        )
+                        pkg_role = _role_for_orchestrator_dispatch(local_stage)
                         # Bounded initial-orchestrator-guidance
                         # is consumed exactly once per run.  It is
                         # passed here as an advisory ``extra_sections``
@@ -4110,106 +4061,17 @@ class Orchestrator:
                     prior_attempt = attempts[-1]
                     prior_checks = self.db.get_checks_for_attempt(prior_attempt.id)
                     prior_chk = prior_checks[-1] if prior_checks else None
-                    if surgeon_active:
-                        # A SURGEON dispatch after a genuine capability
-                        # escalation receives a Surgical Escalation Capsule
-                        # rather than the original epic task.
-                        changed_paths: tuple[str, ...] = ()
-                        if prior_chk is not None:
-                            try:
-                                for ev in self.db.get_complete_events_for_run(run_id):
-                                    if (
-                                        ev.event_type == "gate_completed"
-                                        and ev.attempt_id == prior_attempt.id
-                                        and ev.payload is not None
-                                    ):
-                                        cp = ev.payload.get("changed_paths") or []
-                                        changed_paths = tuple(cp)
-                                        break
-                            except Exception:
-                                changed_paths = ()
-                        bounded_stderr = (
-                            prune_evidence(
-                                prior_chk.stderr.strip() if prior_chk else None,
-                                limit=STDERR_BLOCK_MAX_CHARS,
-                            ).text
-                            if prior_chk is not None
-                            else None
-                        )
-                        bounded_stdout = (
-                            prune_evidence(
-                                prior_chk.stdout.strip() if prior_chk else None,
-                                limit=STDOUT_BLOCK_MAX_CHARS,
-                            ).text
-                            if prior_chk is not None
-                            else None
-                        )
-                        diff_ref = (
-                            f"{(prior_attempt.base_sha or 'UNKNOWN')}.."
-                            f"{(prior_attempt.commit_sha or 'UNKNOWN')}"
-                            if prior_attempt.commit_sha
-                            else None
-                        )
-                        surgical_capsule = SurgicalCapsule(
-                            parent_slug=objective_slug_inline(task),
-                            inherited_candidate_sha=(
-                                lineage_base_sha or prior_attempt.base_sha or "UNKNOWN"
-                            ),
-                            dispatch_reason=(
-                                f"SURGICAL escalation after attempt "
-                                f"#{prior_attempt.attempt_number} on "
-                                f"({prior_attempt.provider}/"
-                                f"{prior_attempt.model})"
-                            ),
-                            bounded_defect=(
-                                f"Resolve the residual validation failure "
-                                f"from attempt "
-                                f"#{prior_attempt.attempt_number}; the "
-                                f"bounded objective digest is: "
-                                f"{objective_digest_inline(task)}"
-                            ),
-                            failing_check_command=(
-                                getattr(prior_chk, "gate_command", None)
-                                if prior_chk is not None
-                                else None
-                            ),
-                            failing_exit_code=(
-                                getattr(prior_chk, "exit_code", None)
-                                if prior_chk is not None
-                                else None
-                            ),
-                            bounded_stdout_excerpt=bounded_stdout,
-                            bounded_stderr_excerpt=bounded_stderr,
-                            blocking_review_finding=(
-                                prior_attempt.worker_error if prior_attempt.worker_error else None
-                            ),
-                            changed_paths=changed_paths[:CHANGED_PATHS_MAX],
-                            diff_ref=diff_ref,
-                            invariants_to_preserve=(
-                                "Acceptance criteria of the inherited "
-                                "candidate must remain satisfied.",
-                                "Original task context (bounded digest): "
-                                + objective_digest_inline(task),
-                            ),
-                            source_original_task_bytes=len(task.encode("utf-8")),
-                        )
-                        dispatch_projection = surgical_capsule.to_projection(
-                            role=DispatchRole.SURGEON.value
-                        )
-                    else:
-                        dispatch_projection = build_retry_projection(
-                            original_task=task,
-                            attempt_idx=next_attempt_num,
-                            prior_attempt=prior_attempt,
-                            prior_check=prior_chk,
-                            inherited_base_sha=lineage_base_sha,
-                            role=DispatchRole.REPAIR.value,
-                        )
+                    dispatch_projection = build_retry_projection(
+                        original_task=task,
+                        attempt_idx=next_attempt_num,
+                        prior_attempt=prior_attempt,
+                        prior_check=prior_chk,
+                        inherited_base_sha=lineage_base_sha,
+                        role=DispatchRole.BUILD.value,
+                    )
                 else:
                     # Unslciced initial dispatch.
-                    initial_role = _role_for_orchestrator_dispatch(
-                        local_stage, surgeon_active=surgeon_active
-                    )
+                    initial_role = _role_for_orchestrator_dispatch(local_stage)
                     # Bounded initial-orchestrator-guidance
                     # is consumed exactly once per run.  It is
                     # passed here as an advisory ``extra_sections``
@@ -4419,10 +4281,10 @@ class Orchestrator:
                         max_bytes_pre = None
                     payload_pre = build_skip_payload(
                         role=(
-                            (DispatchRole.REPAIR if local_stage == DispatchStage.REPAIR
-                             else DispatchRole.BULK)
+                            (DispatchRole.BUILD if local_stage == DispatchStage.REPAIR
+                             else DispatchRole.BUILD)
                             if package_dispatch_ordinal == 0
-                            else DispatchRole.REPAIR
+                            else DispatchRole.BUILD
                         ),
                         candidate=candidate,
                         reason=reason_pre,
@@ -4624,7 +4486,7 @@ class Orchestrator:
                 package_dispatch_ordinal += 1
                 stage_attempts += 1
                 effective_role = _role_for_orchestrator_dispatch(
-                    DispatchStage(stage_label), surgeon_active=surgeon_active
+                    DispatchStage(stage_label)
                 )
 
                 rep_launch_key: str | None = None
@@ -5637,6 +5499,7 @@ class Orchestrator:
                                 )
                                 current_tier = tier_decision.effective_tier
                                 current_role = config.initial_role
+                                strong_start_active = config.initial_strong_start
                                 self.db.update_run_tier(run_id, current_tier)
                                 self.db.record_event(
                                     run_id,
@@ -5667,6 +5530,7 @@ class Orchestrator:
                                     model_override=config.model_override,
                                     provider_override=config.provider_override,
                                     snapshot=routing_snapshot,
+                                    strong_start=strong_start_active,
                                 )
                                 candidates = order_candidates_for_role(
                                     role=current_role,
@@ -5675,6 +5539,7 @@ class Orchestrator:
                                     policy=control_plane_policy,
                                     quota_states=quota_states,
                                     db=self.db,
+                                    strong_start=strong_start_active,
                                 )
                                 selected_routing_context = routing_context_for_role(current_role)
                                 self.db.record_event(
@@ -5685,6 +5550,7 @@ class Orchestrator:
                                         "role": current_role.value
                                         if isinstance(current_role, JobRole)
                                         else str(current_role),
+                                        "strong_start": strong_start_active,
                                         "routing_context": selected_routing_context,
                                         "package_id": tier_decision.package_id,
                                         "candidates": [
@@ -5717,7 +5583,6 @@ class Orchestrator:
                                 tier_has_escalation_evidence = False
                                 escalation_outcome = None
                                 escalation_stage = None
-                                surgeon_active = False
                                 continue
 
                         lineage_base_sha = commit_sha
@@ -6004,7 +5869,7 @@ class Orchestrator:
                                     except Exception:
                                         quota_states_rep = self.db.list_quota()
                                     base_repair_candidates = resolve_candidate_chain(
-                                        role=JobRole.WORKER,
+                                        role=JobRole.BUILD,
                                         training_allowed=config.training_allowed,
                                         is_peak=is_peak,
                                         model_override=config.model_override,
@@ -6018,7 +5883,7 @@ class Orchestrator:
                                             if c.provider not in blocked_repair_providers
                                         ]
                                     repair_candidates = order_candidates_for_role(
-                                        role=JobRole.WORKER,
+                                        role=JobRole.BUILD,
                                         snapshot=routing_snapshot,
                                         base_candidates=base_repair_candidates,
                                         policy=control_plane_policy,
@@ -6196,7 +6061,7 @@ class Orchestrator:
                                         except Exception:
                                             max_bytes_rep = None
                                         payload_rep = build_skip_payload(
-                                            role=DispatchRole.REPAIR,
+                                            role=DispatchRole.BUILD,
                                             candidate=repair_candidate,
                                             reason=reason_rep or "provider_unavailable",
                                             prompt_bytes=prompt_bytes_rep,
@@ -6245,7 +6110,7 @@ class Orchestrator:
                                             payload={
                                                 "replacement_attempt_number": attempt_number,
                                                 "base_sha": cur_from_sha,
-                                                "role": DispatchRole.REPAIR.value,
+                                                "role": DispatchRole.BUILD.value,
                                             },
                                         )
 
@@ -6273,7 +6138,7 @@ class Orchestrator:
                                             "findings_count": findings_cnt,
                                             "tier": cur_tier.value,
                                             "tier_reason": repair_decision.source,
-                                            "role": DispatchRole.REPAIR.value,
+                                            "role": DispatchRole.BUILD.value,
                                         },
                                     )
                                     rep_attempt = Attempt(
@@ -6325,7 +6190,7 @@ class Orchestrator:
                                             "worktree": str(local_wt_path),
                                             "branch": local_branch,
                                             "inherited_base_sha": cur_from_sha,
-                                            "role": DispatchRole.REPAIR.value,
+                                            "role": DispatchRole.BUILD.value,
                                         },
                                     )
                                     self.db.record_event(
@@ -6344,7 +6209,7 @@ class Orchestrator:
                                                 else "unknown"
                                             ),
                                             "stage": "repair",
-                                            "role": DispatchRole.REPAIR.value,
+                                            "role": DispatchRole.BUILD.value,
                                             "tier": cur_tier.value,
                                             "tier_reason": repair_decision.source,
                                             "package_id": repair_decision.package_id,
@@ -6356,7 +6221,7 @@ class Orchestrator:
                                     # bounded effective timeout as primary
                                     # dispatches (explicit owner value, else
                                     # the WORKER role default).
-                                    rep_timeout_sec = config.worker_timeout_for_role(JobRole.WORKER)
+                                    rep_timeout_sec = config.worker_timeout_for_role(JobRole.BUILD)
                                     rep_deadline = (
                                         datetime.now(UTC) + timedelta(seconds=rep_timeout_sec)
                                     ).isoformat()
@@ -6508,7 +6373,7 @@ class Orchestrator:
                                         association_id=local_attempt_id,
                                         attempt_id=local_attempt_id,
                                         stage=DispatchStage.REPAIR,
-                                        role=DispatchRole.REPAIR,
+                                        role=DispatchRole.BUILD,
                                         tier=cur_tier,
                                         dispatch_reason=repair_dispatch_reason,
                                         requested_provider=cand_provider,
@@ -6616,7 +6481,7 @@ class Orchestrator:
                                                     else None
                                                 ),
                                                 "reason": "gateway_removed",
-                                                "role": DispatchRole.REPAIR.value,
+                                                "role": DispatchRole.BUILD.value,
                                             },
                                         )
                                         w_res: WorkerResult | None = WorkerResult(
@@ -6718,7 +6583,7 @@ class Orchestrator:
                                                 "stdout": "",
                                                 "stderr": str(exc),
                                                 "error": str(exc),
-                                                "role": DispatchRole.REPAIR.value,
+                                                "role": DispatchRole.BUILD.value,
                                             },
                                         )
                                         now_exc2 = current_iso_timestamp()
@@ -6743,7 +6608,7 @@ class Orchestrator:
                                             payload={
                                                 "error": str(exc),
                                                 "status": AttemptStatus.FAILED.value,
-                                                "role": DispatchRole.REPAIR.value,
+                                                "role": DispatchRole.BUILD.value,
                                             },
                                         )
                                         attempts.append(rep_attempt)
@@ -6789,7 +6654,7 @@ class Orchestrator:
                                             "prompt_bytes": repair_prompt_bytes,
                                             "transport": repair_transport,
                                             "stage": "repair",
-                                            "role": DispatchRole.REPAIR.value,
+                                            "role": DispatchRole.BUILD.value,
                                             "tier": cur_tier.value,
                                             "attempt": attempt_number,
                                         },
@@ -6825,7 +6690,7 @@ class Orchestrator:
                                                 operation=SideEffectOperation.CHECKPOINT_CREATION,
                                                 payload={
                                                     "reason": w_res.interruption_reason.value,
-                                                    "role": DispatchRole.REPAIR.value,
+                                                    "role": DispatchRole.BUILD.value,
                                                 },
                                             )
                                             cp_sha = GitManager.create_checkpoint_commit(
@@ -6869,7 +6734,7 @@ class Orchestrator:
                                                         "source_attempt_id": local_attempt_id,
                                                         "reason": w_res.interruption_reason.value,
                                                         "changed_paths": list(changed_paths_rep),
-                                                        "role": DispatchRole.REPAIR.value,
+                                                        "role": DispatchRole.BUILD.value,
                                                     },
                                                 )
                                                 cur_from_sha = cp_sha
@@ -6885,7 +6750,7 @@ class Orchestrator:
                                                 attempt_id=local_attempt_id,
                                                 payload={
                                                     "reason": w_res.interruption_reason.value,
-                                                    "role": DispatchRole.REPAIR.value,
+                                                    "role": DispatchRole.BUILD.value,
                                                 },
                                             )
 
@@ -6924,7 +6789,7 @@ class Orchestrator:
                                                     if cp_obj_rep
                                                     else None
                                                 ),
-                                                "role": DispatchRole.REPAIR.value,
+                                                "role": DispatchRole.BUILD.value,
                                             },
                                         )
                                         self.db.record_event(
@@ -6936,7 +6801,7 @@ class Orchestrator:
                                                     DispatchOutcome.PROVIDER_OR_RUNTIME_FAILURE.value
                                                 ),
                                                 "escalation_evidence": False,
-                                                "role": DispatchRole.REPAIR.value,
+                                                "role": DispatchRole.BUILD.value,
                                                 "reason": w_res.interruption_reason.value,
                                             },
                                         )
@@ -7046,7 +6911,7 @@ class Orchestrator:
                                                 "transcript_path": str(
                                                     get_transcript_path(self.db, run_id)
                                                 ),
-                                                "role": DispatchRole.REPAIR.value,
+                                                "role": DispatchRole.BUILD.value,
                                             },
                                         )
                                         attempts.append(rep_attempt)
@@ -7079,7 +6944,7 @@ class Orchestrator:
                                         attempt_id=local_attempt_id,
                                         payload={
                                             "reason": "no_changes",
-                                            "role": DispatchRole.REPAIR.value,
+                                            "role": DispatchRole.BUILD.value,
                                         },
                                     )
                                     attempts.append(rep_attempt)
@@ -7105,7 +6970,7 @@ class Orchestrator:
                                     payload={
                                         "gate_command": gate_command,
                                         "candidate_sha": to_sha_local,
-                                        "role": DispatchRole.REPAIR.value,
+                                        "role": DispatchRole.BUILD.value,
                                     },
                                 )
                                 gate_args_local = (
@@ -7129,7 +6994,7 @@ class Orchestrator:
                                     "stdout": _bounded_output(gate_res_local.stdout),
                                     "stderr": _bounded_output(gate_res_local.stderr),
                                     "changed_paths": list(changed_paths_local_t),
-                                    "role": DispatchRole.REPAIR.value,
+                                    "role": DispatchRole.BUILD.value,
                                 }
                                 completed_local_payload.update(
                                     _gate_disposition_payload(rep_disposition)
@@ -7202,7 +7067,7 @@ class Orchestrator:
                                     )
                                     gate_failed_payload: dict[str, Any] = {
                                         "candidate_sha": to_sha_local,
-                                        "role": DispatchRole.REPAIR.value,
+                                        "role": DispatchRole.BUILD.value,
                                     }
                                     gate_failed_payload.update(
                                         _gate_disposition_payload(rep_disposition)
@@ -7258,7 +7123,7 @@ class Orchestrator:
                                         "from_sha": from_sha_local,
                                         "to_sha": to_sha_local,
                                         "findings_count": findings_cnt,
-                                        "role": DispatchRole.REPAIR.value,
+                                        "role": DispatchRole.BUILD.value,
                                     },
                                 )
                                 # Repair candidate reached the reviewable
@@ -7975,7 +7840,7 @@ class Orchestrator:
                                     attempt_id=desc_attempt_id,
                                     payload={
                                         "gate_command": config.gate_command,
-                                        "role": DispatchRole.REVIEW.value,
+                                        "role": DispatchRole.CHECK.value,
                                     },
                                 )
                                 gate_cmd_parts = (
@@ -8032,7 +7897,7 @@ class Orchestrator:
                                         completed_at=now_f,
                                     )
                                     gate_failed_payload_d: dict[str, Any] = {
-                                        "role": DispatchRole.REVIEW.value,
+                                        "role": DispatchRole.CHECK.value,
                                     }
                                     gate_failed_payload_d.update(
                                         _gate_disposition_payload(desc_disposition)
@@ -8072,7 +7937,7 @@ class Orchestrator:
                                     attempt_id=desc_attempt_id,
                                     payload={
                                         **_gate_disposition_payload(desc_disposition),
-                                        "role": DispatchRole.REVIEW.value,
+                                        "role": DispatchRole.CHECK.value,
                                     },
                                 )
                                 self.db.record_event(
@@ -8081,7 +7946,7 @@ class Orchestrator:
                                     attempt_id=desc_attempt_id,
                                     payload={
                                         "exit_code": 0,
-                                        "role": DispatchRole.REVIEW.value,
+                                        "role": DispatchRole.CHECK.value,
                                         "gate_outcome": (
                                             GateOutcome.PASS.value
                                             if config.gate_enabled

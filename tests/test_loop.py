@@ -72,7 +72,7 @@ def _make_routes(worker_groups: tuple[tuple[WorkerCandidate, ...], ...]) -> Rout
         source_path=None,
         content_hash="test-hash",
         role_chains=(
-            ("WORKER", worker_groups),
+            ("BUILD", worker_groups),
             ("SURGEON", ((WorkerCandidate("codex", "gpt-5.6-sol"),),)),
             ("INTEGRATOR", ((WorkerCandidate("codex", "gpt-5.6-sol"),),)),
         ),

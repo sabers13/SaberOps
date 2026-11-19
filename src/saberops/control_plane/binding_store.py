@@ -269,7 +269,7 @@ def materialize_discovered_binding(
     provider_transport: ProviderTransport = ProviderTransport.DIRECT_CLI,
     harness_capabilities: frozenset[Capability] = frozenset(),
     backend: BindingKind = BindingKind.DIRECT_CLI,
-    binding_role: BindingRole = BindingRole.WORKER,
+    binding_role: BindingRole = BindingRole.BUILD,
     reasoning_effort_capabilities: frozenset[ReasoningEffort] = frozenset(),
 ) -> tuple[ExecutionBinding, ExecutionProfile, QuotaPool]:
     """Build the exact binding identity for one discovered account model.
@@ -282,7 +282,7 @@ def materialize_discovered_binding(
     only provider-neutral identity.  Quota scarcity stays UNKNOWN to quota policy
     until a real ``QuotaPoolPolicy`` exists for the pool id.
 
-    ``binding_role`` defaults to :class:`BindingRole.WORKER`: discovery is
+    ``binding_role`` defaults to :class:`BindingRole.BUILD`: discovery is
     a worker-routing pathway.  Callers needing a role-compatible binding
     for the ORCHESTRATOR slot must request it explicitly (reusing an
     ORCHESTRATOR binding as proof of worker execution would be a role
@@ -333,7 +333,8 @@ def materialize_discovered_binding(
         raise BindingStoreError(
             "a discovered binding requires connection, provider and model"
         )
-    role_slug = binding_role.value.lower()
+    # Binding ids are durable identity: the slug keeps its pre-rename spelling.
+    role_slug = binding_role.id_slug
     profile = ExecutionProfile(
         profile_id=f"discovered-profile:{cleaned_connection}",
         provider=cleaned_provider,

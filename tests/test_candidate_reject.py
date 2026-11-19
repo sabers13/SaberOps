@@ -130,7 +130,7 @@ def _review_dispatch(db: Database, run_id: str, assoc: str, sha: str | None) -> 
             run_id=run_id,
             association_id=assoc,
             stage=DispatchStage.REVIEW,
-            role=DispatchRole.REVIEW,
+            role=DispatchRole.CHECK,
             tier=Tier.T1,
             dispatch_reason=DispatchReason.INDEPENDENT_REVIEW,
             requested_provider="opencode",

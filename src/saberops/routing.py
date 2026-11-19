@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from saberops.models import Tier, WorkerCandidate
+from saberops.models import WorkerCandidate
 
 # Canonical worker candidates
 #
@@ -131,23 +131,20 @@ def parse_candidate_override(
 
 
 def _normalize_role(role: Any) -> str:
-    from saberops.jobs.models import JobRole
+    from saberops.jobs.models import coerce_job_role
 
-    if isinstance(role, JobRole):
-        return role.value
-    return str(role).strip().upper()
+    # Retired role names (WORKER/SURGEON/INTEGRATOR) resolve to the build route.
+    return coerce_job_role(role).value
 
 
 def _role_for_tier_alias(tier: Any | None) -> str:
-    if tier is None:
-        return "WORKER"
-    if isinstance(tier, Tier):
-        return "SURGEON" if tier == Tier.T3 else "WORKER"
-    try:
-        normalized = Tier(str(tier).strip().upper())
-    except ValueError:
-        return "WORKER"
-    return "SURGEON" if normalized == Tier.T3 else "WORKER"
+    """Legacy tier alias (ADR-0002 §11): every tier starts on the build route.
+
+    The old T3 chain is now the build route's ``strong_start`` setting; a
+    legacy caller that passes ``tier`` still selects ``BUILD`` and the caller
+    asks for the strong start explicitly through ``strong_start=True``.
+    """
+    return "BUILD"
 
 
 def resolve_candidate_chain(
@@ -159,6 +156,7 @@ def resolve_candidate_chain(
     model_override: str | None = None,
     provider_override: str | None = None,
     snapshot: Any | None = None,
+    strong_start: bool = False,
 ) -> list[WorkerCandidate]:
     """Resolve ordered list of worker candidates for one role chain.
 
@@ -176,10 +174,13 @@ def resolve_candidate_chain(
     behavior.
 
     Args:
-        role: Routing role (WORKER, SURGEON, INTEGRATOR).
-        tier: Deprecated alias (ADR-0002 §11): ``None`` selects WORKER,
-            ``T3`` selects SURGEON, anything else selects WORKER.
+        role: Routing role.  ``BUILD`` is the only routed role; retired names
+            (``WORKER``/``SURGEON``/``INTEGRATOR``) resolve to it.
+        tier: Deprecated alias (ADR-0002 §11): every tier selects ``BUILD``.
             Passing both ``role`` and ``tier`` raises ``ValueError``.
+        strong_start: Select the build route's stronger-model setting.  Used
+            for a manual high-tier run or an escalation; falls back to the
+            ordinary build chain when no strong start is configured.
         training_allowed: Ignored legacy compatibility argument.
         is_peak: Ignored legacy compatibility argument.
         model_override: Explicit model specified by user.
@@ -214,8 +215,12 @@ def resolve_candidate_chain(
         from saberops.routing_config import load_packaged_default
 
         snapshot = load_packaged_default()
+    # A strong start is a setting on the build route, not a separate role.
+    # An empty setting falls back to the ordinary build chain.
+    use_strong_start = strong_start and bool(getattr(snapshot, "strong_start", ()))
     chain = [
-        _with_frozen_evidence(c, snapshot) for c in snapshot.chain_for_role(selected_role)
+        _with_frozen_evidence(c, snapshot)
+        for c in snapshot.chain_for_role(selected_role, strong_start=use_strong_start)
     ]
 
     # Attended-only providers never dispatch automatically, even when a

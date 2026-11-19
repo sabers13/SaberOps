@@ -60,10 +60,10 @@ now redirects on success to the page that owns it (`/setup`, `/routing`,
 
 ## Routing (`/routing`) and Projects (`/projects`)
 
-- **Per-role assignment.** Owner bindings are grouped by semantic role
-  (Worker / Reviewer / Orchestrator) with their exact `binding_id`; the
-  effective Worker/Integrator/Surgeon fallback chains come from the routing
-  snapshot. The Orchestrator choice is explicit and is never engine-dispatched.
+- **Per-role assignment.** Owner bindings are grouped by the three roles (plan /
+  build / check) with their exact `binding_id`; the build route's fallback chain
+  and its `strong_start` setting come from the routing snapshot. The plan role is
+  the connected agent and is never engine-dispatched.
 - **Concurrency.** The owner ceiling is at most 3 active projects × 5 executing
   child slots per project. Changes are recorded as an immutable owner-approved
   decision in the configuration ledger (`saberops.config`); lowering a limit

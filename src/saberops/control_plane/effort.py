@@ -366,9 +366,9 @@ class OrchestratorExecutionConfig:
         """Return the owner-bounded effort policy for ``role``."""
         from saberops.models import DispatchRole
 
-        if role == "ORCHESTRATOR":
+        if role.strip().upper() in ("PLAN", "ORCHESTRATOR"):
             return self.orch_effort
-        if role == DispatchRole.REVIEW.value:
+        if role == DispatchRole.CHECK.value:
             return self.reviewer_effort_bounds
         return self.worker_effort_bounds
 

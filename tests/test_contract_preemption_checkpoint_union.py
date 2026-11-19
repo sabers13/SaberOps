@@ -102,7 +102,7 @@ def _job(
         base_sha=base_sha,
         goal="do the thing",
         acceptance=None,
-        requirements=JobRequirements(role=JobRole.WORKER),
+        requirements=JobRequirements(role=JobRole.BUILD),
         priority=Priority.NORMAL,
         state=state,
         waiting_reason=waiting,

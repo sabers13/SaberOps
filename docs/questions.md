@@ -26,8 +26,9 @@ A question is keyed and immutable in its ask payload:
   never silently merged; a superseding decision is a new keyed question that
   names the earlier one in `supersedes` — the reference must resolve to a known
   question, and linking to it never closes it.
-* Any role may raise one: `OWNER`, `ORCHESTRATOR`, `WORKER`, `SURGEON`,
-  `REVIEWER`, `INTEGRATOR`, `ENGINE`.
+* Any role may raise one: `OWNER`, `PLAN`, `BUILD`, `CHECK`, `ENGINE`.
+  Retired names (`ORCHESTRATOR`, `WORKER`, `SURGEON`, `REVIEWER`, `INTEGRATOR`)
+  are accepted from stored rows and map onto the three roles.
 
 ### Statuses and transitions
 
@@ -85,16 +86,16 @@ by the caller:
 | Class | Authority |
 |---|---|
 | `MOVE_MAIN`, `PUSH`, `QUARANTINE`, `BILLING_OR_POSTURE`, `TEST_CHANGE_AGAINST_ADR`, `DELETE_OUTSIDE_ENGINE_FOLDERS`, `APPROVE_CONFIG_PROPOSAL`, `OTHER` | `OWNER` only |
-| `REVIEW_FINDING_CLASSIFICATION`, `FIX_UP_CONTENT`, `G3_FAILURE_ROUTING`, `ROUTINE_QUESTION` | `ORCHESTRATOR` allowed |
+| `REVIEW_FINDING_CLASSIFICATION`, `FIX_UP_CONTENT`, `G3_FAILURE_ROUTING`, `ROUTINE_QUESTION` | `PLAN` allowed |
 
 Rules enforced in code:
 
-* An **implementer role** (`WORKER`, `SURGEON`, `REVIEWER`, `INTEGRATOR`) can
-  never answer a question; `OWNER` authority requires the `OWNER` role and
-  `ORCHESTRATOR` authority requires the `ORCHESTRATOR` role.
-* An **Orchestrator never answers its own finding**: a question raised by the
-  `ORCHESTRATOR` role, or by the same actor that would answer it, is refused.
-* An Orchestrator-alone answer must carry `evidence` **and** the
+* An **implementer role** (`BUILD`, `CHECK`) can never answer a question;
+  `OWNER` authority requires the `OWNER` role and `PLAN` authority requires the
+  `PLAN` role (legacy `ORCHESTRATOR` rows and arguments map to it).
+* A **planning session never answers its own finding**: a question raised by the
+  `PLAN` role, or by the same actor that would answer it, is refused.
+* A planner-alone answer must carry `evidence` **and** the
   `rejected_alternative` (RD-1: logged with evidence and the rejected
   alternative), which is what makes the audit list usable.
 * An unknown decision class fails closed to `OWNER`.
@@ -134,16 +135,16 @@ unreadable, malformed or wrongly-versioned document fails closed with
 
 ```bash
 orch questions ask --key run_abc/gate-block --subject "May the lane touch the protected test?" \
-  --kind gate-block --decision-class TEST_CHANGE_AGAINST_ADR --role WORKER --by worker:run_abc \
+  --kind gate-block --decision-class TEST_CHANGE_AGAINST_ADR --role BUILD --by worker:run_abc \
   --run-id run_abc --blocks wave3/lane-a \
   --requirement "..." --expansion "..." --smallest "..." --consequences "..." --recommendation "..."
 
 orch questions list [--status OPEN|DEFERRED|ANSWERED|MOOT] [--as-of 2026-11-01] [--run-id RUN] [--json]
 orch questions show REF [--as-of DATE] [--json]
-orch questions answer REF --words "..." [--authority owner|orchestrator] [--by ACTOR] [--role ROLE] \
+orch questions answer REF --words "..." [--authority owner|plan] [--by ACTOR] [--role ROLE] \
   [--chosen-option OPTION] [--evidence E] [--rejected-alternative A] [--json]
-orch questions defer REF --until YYYY-MM-DD [--by ACTOR] [--role OWNER|ORCHESTRATOR] [--note TEXT]
-orch questions moot REF --evidence "..." [--by ACTOR] [--role OWNER|ORCHESTRATOR|ENGINE]
+orch questions defer REF --until YYYY-MM-DD [--by ACTOR] [--role OWNER|PLAN] [--note TEXT]
+orch questions moot REF --evidence "..." [--by ACTOR] [--role OWNER|PLAN|ENGINE]
 orch questions diverge REF --reason REASON --words "..." --by ACTOR --role ROLE [--note TEXT]
 orch questions divergences [REF] [--json]
 orch questions standing-rules [--threshold 3] [--json]

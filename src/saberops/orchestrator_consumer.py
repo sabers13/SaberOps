@@ -44,7 +44,7 @@ The model-access layer invariants preserved:
 
 * **WORKER / ORCHESTRATOR separation:** the consumer only
   resolves bindings whose :class:`BindingRole` is
-  :class:`~saberops.control_plane.bindings.BindingRole.ORCHESTRATOR`.
+  :class:`~saberops.control_plane.bindings.BindingRole.PLAN`.
   A WORKER-role binding selected on the Web /orchestrator page is a UI
   bug; the consumer refuses such a binding closed, never silently
   swaps it for a sibling.
@@ -955,7 +955,7 @@ class OrchestratorModelConsumer:
         # a WORKER-role binding; the persisted owner policy must
         # already be ORCHESTRATOR-only by construction, but the
         # consumer re-checks at the execution seam.
-        if binding.binding_role is not BindingRole.ORCHESTRATOR:
+        if binding.binding_role is not BindingRole.PLAN:
             event_id = self._record_refusal_event(
                 run_id=evidence_run_id,
                 reason=REASON_NOT_ORCHESTRATOR_ROLE,
@@ -970,7 +970,7 @@ class OrchestratorModelConsumer:
                 message=(
                     f"binding {binding.binding_id!r} has role "
                     f"{binding.binding_role.value!r}; Orchestrator consumer "
-                    "only honors BindingRole.ORCHESTRATOR"
+                    "only honors BindingRole.PLAN"
                 ),
                 detail={
                     "evidence_event_id": event_id,

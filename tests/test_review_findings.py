@@ -191,7 +191,7 @@ def test_review_run_persists_findings_and_run_page_shows_them(
     monkeypatch.setattr("saberops.orchestrator.resolve_candidate_chain", _chain)
     reviewer, profile, pool = materialize_discovered_binding(
         connection_id="findings-conn", provider=PROVIDER, model="reviewer-model",
-        binding_role=BindingRole.REVIEWER,
+        binding_role=BindingRole.CHECK,
     )
     owner = upsert_owner_binding(OwnerBindings(), binding=reviewer, profile=profile, pool=pool)
     save_owner_bindings(replace(owner, reviewer_binding_id=reviewer.binding_id))

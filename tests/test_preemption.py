@@ -92,7 +92,7 @@ def _job(
         base_sha=base_sha,
         goal="do the thing",
         acceptance=None,
-        requirements=JobRequirements(role=JobRole.WORKER),
+        requirements=JobRequirements(role=JobRole.BUILD),
         priority=Priority.NORMAL,
         state=state,
         waiting_reason=waiting,
@@ -1563,7 +1563,7 @@ def test_failure_vocabulary_and_terminal_recognition() -> None:
     failed = Job(
         job_id="j", idempotency_key=None, caller_id="owner", repo="/r",
         base_ref="HEAD", base_sha="b", goal="g", acceptance=None,
-        requirements=JobRequirements(role=JobRole.WORKER),
+        requirements=JobRequirements(role=JobRole.BUILD),
         state=JobState.FAILED, failure_reason=PREEMPTION_LIMIT,
         created_at=_NOW.isoformat(), updated_at=_NOW.isoformat(),
         request_digest="d",

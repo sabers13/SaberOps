@@ -1,7 +1,7 @@
 # ADR-0005: MCP-first engine stays; board and setup page are Phase 2
 
-- **Status:** Accepted. The UI, role and cut decisions stand. Role retirement is
-  pending implementation in Phase 1 lane E1. The Telegram, replay, roadmap and
+- **Status:** Accepted. The UI, role and cut decisions stand, and the role
+  retirement has landed in Phase 1 lane E1. The Telegram, replay, roadmap and
   in-engine orchestrator-memory deletions have landed; the wave executor, its
   slot policy and `execute_wave` were removed in lane D3.
 - **Date:** 2026-11-19
@@ -76,11 +76,32 @@ Three roles the owner can see and choose:
 | **build** | One accountable worker per task, including its own repair retries |
 | **check** | An independent reviewer, ideally a different vendor family |
 
-**SURGEON and INTEGRATOR retire.** Landing, gates, the memory and disk guard and
-cleanup are **deterministic engine stages**, not model roles. Starting a task on
-a stronger model, or escalating along the worker route chain, is a route
-setting, not a role. Independent review, provenance and permission boundaries
-stay. (Pending implementation in lane E1.)
+**SURGEON and INTEGRATOR are retired.** Landing, gates, the memory and disk guard
+and cleanup are **deterministic engine stages**, not model roles. Starting a task
+on a stronger model, or escalating along the build chain, is the build route's
+`strong_start` setting, not a role. Independent review, provenance and
+permission boundaries stay.
+
+Implemented in lane E1:
+
+- One role vocabulary (`PLAN`, `BUILD`, `CHECK`) replaces the overlapping job,
+  dispatch, binding, question and routing role enums. Persisted legacy values
+  (`ORCHESTRATOR`, `WORKER`, `SURGEON`, `INTEGRATOR`, `REVIEWER`) load through
+  explicit mappings; new writes never emit them.
+- Routing schema 3 holds `roles.BUILD` and a top-level `strong_start`. A stored
+  document naming `WORKER`/`SURGEON`/`INTEGRATOR` migrates on load — `WORKER`
+  becomes `BUILD`, `SURGEON` becomes `strong_start`, `INTEGRATOR` is dropped —
+  and `orch routing migrate` reports the before/after mapping. A persisted run
+  snapshot keeps its original role keys and digest so adoption stays
+  byte-stable.
+- A fresh setup needs one build route and one check binding. A repair after a
+  failed check runs on the build route. A manual high-tier run starts on the
+  build route's `strong_start` setting.
+- Every run and job record shows who planned, who built and who checked; an
+  unreported identity stays `UNKNOWN`.
+- A docs-only review skip under the existing risk-adaptive policy is unchanged;
+  a separate owner switch for it was not added. Follow-up: consider one only if
+  it does not duplicate the risk-adaptive classifier.
 
 ## 4. What was cut, and why
 

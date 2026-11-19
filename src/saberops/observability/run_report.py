@@ -46,7 +46,9 @@ from saberops.db import Database
 from saberops.models import (
     TERMINAL_RUN_STATUSES,
     Attempt,
+    DispatchRole,
     DispatchStage,
+    ReviewVerdict,
     Run,
 )
 from saberops.observability._core import canonical_snapshot_json
@@ -725,6 +727,88 @@ def _warnings(
     return sorted(set(warnings))
 
 
+def _roles_section(
+    db: Database,
+    run: Run,
+    dispatches: list[Any],
+    reviews: list[Any],
+) -> dict[str, Any]:
+    """Show who planned, who built and who checked this run (ADR-0005 §3).
+
+    Read-only projection over durable evidence.  An unreported identity stays
+    ``UNKNOWN``: the plan role is the external CLI session recorded in the
+    live planning lease at creation time, the build role is the worker
+    dispatch evidence, and the check role is the review row.
+    """
+    plan: dict[str, Any] = {
+        "role": "plan",
+        "identity": UNKNOWN,
+        "source": "no creation evidence",
+    }
+    try:
+        events = db.get_events(run.id, limit=10000)
+    except Exception:
+        events = []
+    for event in events:
+        if event.event_type != "run_created":
+            continue
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        planned_by = payload.get("planned_by")
+        if isinstance(planned_by, dict):
+            plan = {
+                "role": "plan",
+                "identity": planned_by.get("identity") or UNKNOWN,
+                "client": planned_by.get("client") or UNKNOWN,
+                "session_id": planned_by.get("session_id") or UNKNOWN,
+                "source": planned_by.get("source") or "creation evidence",
+            }
+        break
+    build: dict[str, Any] = {
+        "role": "build",
+        "provider": UNKNOWN,
+        "model": UNKNOWN,
+        "identity_status": UNKNOWN,
+        "dispatch_id": UNKNOWN,
+    }
+    build_dispatches = [
+        row for row in dispatches if row.role is DispatchRole.BUILD
+    ]
+    if build_dispatches:
+        latest = build_dispatches[-1]
+        provider = latest.actual_provider or latest.requested_provider
+        model = latest.actual_model or latest.requested_model
+        build = {
+            "role": "build",
+            "provider": provider or UNKNOWN,
+            "model": model or UNKNOWN,
+            "identity_status": (
+                "reported" if latest.actual_provider and latest.actual_model
+                else "requested_only"
+            ),
+            "stage": latest.stage.value,
+            "dispatch_id": latest.id,
+        }
+    check: dict[str, Any] = {
+        "role": "check",
+        "provider": UNKNOWN,
+        "model": UNKNOWN,
+        "verdict": UNKNOWN,
+        "review_id": UNKNOWN,
+    }
+    if reviews:
+        latest_review = reviews[-1]
+        check = {
+            "role": "check",
+            "provider": latest_review.provider or UNKNOWN,
+            "model": latest_review.model or UNKNOWN,
+            "verdict": latest_review.verdict.value
+            if isinstance(latest_review.verdict, ReviewVerdict)
+            else str(latest_review.verdict),
+            "review_id": latest_review.id,
+        }
+    return {"plan": plan, "build": build, "check": check}
+
+
 def _team_section(db: Database, run: Run, report: dict[str, Any]) -> dict[str, Any] | None:
     """Include linked worker evidence without reassigning it to the parent.
 
@@ -905,10 +989,33 @@ def build_run_report(db: Database, run_id: str) -> dict[str, Any]:
         "warnings": warnings,
         "evidence_gaps": sorted(set(gaps)),
     }
+    report["roles"] = _roles_section(db, run, dispatches, reviews)
     team = _team_section(db, run, report)
     if team is not None:
         report["team"] = team
     return report
+
+
+def build_roles_view(
+    db: Database, run_id: str, *, plan_identity: str | None = None
+) -> dict[str, Any] | None:
+    """Return the plan/build/check role view for one run (read-only).
+
+    The job record reuses this so a job and its run never disagree about who
+    planned, built and checked.  ``plan_identity`` (the job's caller) is shown
+    when the run's creation evidence did not record a live planning session.
+    """
+    run = db.get_run(run_id)
+    if run is None:
+        return None
+    dispatches = _sorted_dispatches(db, run_id)
+    reviews = db.get_reviews_for_run(run_id)
+    roles = _roles_section(db, run, dispatches, reviews)
+    identity = (plan_identity or "").strip()
+    if identity and roles["plan"]["identity"] == UNKNOWN:
+        roles["plan"]["identity"] = identity
+        roles["plan"]["source"] = "job caller"
+    return roles
 
 
 def canonical_report_json(report: dict[str, Any]) -> bytes:
@@ -947,6 +1054,7 @@ def render_report_text(report: dict[str, Any]) -> str:
     lifecycle = report["lifecycle"]
     execution = report["execution"]
     worker = report["worker"]
+    roles = report["roles"]
     termination = report.get("termination", {})
     review = report["review"]
     gate = report["gate"]
@@ -1012,6 +1120,16 @@ def render_report_text(report: dict[str, Any]) -> str:
         f"  actual     {_fmt_scalar(worker['actual_provider'])}/"
         f"{_fmt_scalar(worker['actual_model'])} "
         f"({worker['actual_identity_status']})",
+        "",
+        "roles",
+        f"  plan   {_fmt_scalar(roles['plan']['identity'])} "
+        f"({_fmt_scalar(roles['plan'].get('source'))})",
+        f"  build  {_fmt_scalar(roles['build']['provider'])}/"
+        f"{_fmt_scalar(roles['build']['model'])} "
+        f"({_fmt_scalar(roles['build']['identity_status'])})",
+        f"  check  {_fmt_scalar(roles['check']['provider'])}/"
+        f"{_fmt_scalar(roles['check']['model'])} "
+        f"({_fmt_scalar(roles['check']['verdict'])})",
         "",
         "review",
         f"  required     {_fmt_scalar(review['review_required'])}",

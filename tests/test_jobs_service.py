@@ -24,6 +24,7 @@ from saberops.jobs.models import (
     JobState,
     Priority,
     WaitingReason,
+    coerce_job_role,
 )
 from saberops.jobs.service import (
     CapacityView,
@@ -33,6 +34,7 @@ from saberops.jobs.service import (
     capacity,
     get_job,
     job_dispatch_spec,
+    job_status_view,
     list_jobs,
     reconcile_jobs,
     submit_job,
@@ -71,7 +73,7 @@ def _opencode_only_snapshot() -> RoutingSnapshot:
         source="test",
         source_path=None,
         content_hash="test",
-        role_chains=(("WORKER", (tuple(only),)), ("SURGEON", ()), ("INTEGRATOR", ())),
+        role_chains=(("BUILD", (tuple(only),)),),
     )
 
 
@@ -191,19 +193,38 @@ def test_no_key_always_new_job(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "role", ["ORCHESTRATOR", "INTEGRATOR", "SURGEON", "REVIEWER"]
+    ("role", "expected"),
+    [
+        ("ORCHESTRATOR", JobRole.PLAN),
+        ("INTEGRATOR", JobRole.BUILD),
+        ("SURGEON", JobRole.BUILD),
+        ("REVIEWER", JobRole.CHECK),
+        ("PLAN", JobRole.PLAN),
+        ("CHECK", JobRole.CHECK),
+    ],
 )
-def test_non_worker_roles_store_failed(tmp_path: Path, role: str) -> None:
+def test_non_build_roles_store_failed(
+    tmp_path: Path, role: str, expected: JobRole
+) -> None:
+    """Only BUILD is dispatchable; retired names migrate to the build route."""
     db = Database(tmp_path / "jobs.db")
     repo = _git_repo(tmp_path / "repo")
+    requirements = JobRequirements(role=coerce_job_role(role))
+    assert requirements.role is expected
     result = submit_job(
         db, repo=repo, goal="x",
-        requirements=JobRequirements(role=JobRole(role)),
+        requirements=requirements,
         routing=_snapshot(), now=_NOW,
     )
     assert result.created is True
-    assert result.job.state == JobState.FAILED
-    assert result.job.failure_reason == NO_ROUTE_FOR_REQUIREMENTS
+    if expected is JobRole.BUILD:
+        # A retired role name now routes on the build chain.
+        assert result.job.state != JobState.FAILED or (
+            result.job.failure_reason != NO_ROUTE_FOR_REQUIREMENTS
+        )
+    else:
+        assert result.job.state == JobState.FAILED
+        assert result.job.failure_reason == NO_ROUTE_FOR_REQUIREMENTS
 
 
 def test_unsupported_capability_stores_failed(tmp_path: Path) -> None:
@@ -264,7 +285,7 @@ def test_list_jobs_ordering_and_state_filter(tmp_path: Path) -> None:
     snap = _snapshot()
     low = submit_job(
         db, repo=repo, goal="background",
-        requirements=JobRequirements(role=JobRole.WORKER),
+        requirements=JobRequirements(role=JobRole.BUILD),
         priority=Priority.BACKGROUND, routing=snap, now=_NOW,
     ).job
     urgent = submit_job(
@@ -277,7 +298,7 @@ def test_list_jobs_ordering_and_state_filter(tmp_path: Path) -> None:
     ).job
     failed = submit_job(
         db, repo=repo, goal="bad role",
-        requirements=JobRequirements(role=JobRole.SURGEON),
+        requirements=JobRequirements(role=JobRole.CHECK),
         routing=snap, now=_NOW + timedelta(seconds=3),
     ).job
     assert [j.job_id for j in list_jobs(db, limit=100)] == [
@@ -505,18 +526,17 @@ def test_job_dispatch_spec_no_acceptance_no_frozen_policy(tmp_path: Path) -> Non
     assert not hasattr(spec.request, "control_plane_digest")
 
 
-def test_surgeon_only_capability_is_not_feasible_at_submit() -> None:
-    """Covers: feasibility reads the WORKER chain, not the union."""
+def test_strong_start_only_capability_is_not_feasible_at_submit() -> None:
+    """Covers: feasibility reads the build chain, not the strong-start setting."""
     snapshot = RoutingSnapshot(
         schema_version=3,
         source="test",
         source_path=None,
         content_hash="test",
         role_chains=(
-            ("WORKER", ((WorkerCandidate(provider="opencode", model="opencode/hy3-free"),),)),
-            ("SURGEON", ((WorkerCandidate(provider="codex", model="gpt-5.6-terra"),),)),
-            ("INTEGRATOR", ()),
+            ("BUILD", ((WorkerCandidate(provider="opencode", model="opencode/hy3-free"),),)),
         ),
+        strong_start=((WorkerCandidate(provider="codex", model="gpt-5.6-terra"),),),
     )
     req = JobRequirements(read_only=True)
     ok, reason = feasible(req, snapshot)
@@ -615,3 +635,23 @@ def test_reconcile_preempted_run_completes_requeue(tmp_path: Path) -> None:
     assert job.resume_from is not None
     assert job.resume_from.checkpoint_sha == base
     assert reconcile_jobs(db, run_status=status, now=_NOW) == []
+
+
+def test_job_record_shows_who_planned_built_and_checked(tmp_path: Path) -> None:
+    """Every job record names the plan, build and check roles (ADR-0005 §3)."""
+    db = Database(tmp_path / "jobs.db")
+    repo = _git_repo(tmp_path / "repo")
+    job = submit_job(
+        db,
+        repo=repo,
+        goal="roles",
+        caller_id="claude-code",
+        routing=_snapshot(),
+        now=_NOW,
+    ).job
+    view = job_status_view(db, job)
+    assert view["roles"]["plan"]["identity"] == "claude-code"
+    assert view["roles"]["plan"]["role"] == "plan"
+    # Nothing has been built or checked yet: the record stays honest.
+    assert view["roles"]["build"]["provider"] == "UNKNOWN"
+    assert view["roles"]["check"]["verdict"] == "UNKNOWN"

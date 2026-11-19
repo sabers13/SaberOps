@@ -1,8 +1,7 @@
 {
   "roles": {
-    "INTEGRATOR": [],
-    "SURGEON": [],
-    "WORKER": []
+    "BUILD": []
   },
-  "schema_version": 3
+  "schema_version": 3,
+  "strong_start": []
 }

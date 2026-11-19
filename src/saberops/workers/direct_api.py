@@ -121,7 +121,7 @@ class DirectAPIAdapter(WorkerAdapter):
         ):
             raise BindingResolutionError("UNSUPPORTED_BACKEND")
         expected = (
-            f"discovered-binding:{binding.binding_role.value.lower()}:"
+            f"discovered-binding:{binding.binding_role.id_slug}:"
             f"{connection.connection_id}:{binding.model}"
         )
         if binding.binding_id != expected:

@@ -70,25 +70,22 @@ def _approval(model: str, requirement: str) -> DynamicCandidate:
 
 
 def _snapshot(*approvals: DynamicCandidate) -> RoutingSnapshot:
-    """Frozen snapshot with every approval present in WORKER and SURGEON chains."""
+    """Frozen snapshot with every approval on the build route (and strong start)."""
     from saberops.routing_config import _content_hash
 
     dyn = [WorkerCandidate(provider=a.provider, model=a.model) for a in approvals]
     static_pool = [STATIC_CLEAN, STATIC_TRAINING]
     members = [*static_pool, *dyn]
     cids = [_cid(c) for c in members]
-    validated = {"WORKER": [cids], "SURGEON": [cids], "INTEGRATOR": []}
+    validated = {"BUILD": [cids], "strong_start": [cids]}
     approved = {a.candidate_id: a for a in approvals}
     return RoutingSnapshot(
         schema_version=3,
         source="test",
         source_path=None,
         content_hash=_content_hash(validated, 3, approved),
-        role_chains=(
-            ("WORKER", (tuple(members),)),
-            ("SURGEON", (tuple(members),)),
-            ("INTEGRATOR", ()),
-        ),
+        role_chains=(("BUILD", (tuple(members),)),),
+        strong_start=(tuple(members),),
         approved_candidates=tuple(approvals),
     )
 
@@ -494,9 +491,8 @@ def _static_snapshot(*approvals: DynamicCandidate) -> RoutingSnapshot:
         return [_cid(c) for c in members]
 
     validated = {
-        "WORKER": [_cids(t1_members)],
-        "SURGEON": [_cids(t1_members)],
-        "INTEGRATOR": [],
+        "BUILD": [_cids(t1_members)],
+        "strong_start": [_cids(t1_members)],
     }
     approved = {a.candidate_id: a for a in approvals}
     candidate = RoutingSnapshot(
@@ -504,11 +500,8 @@ def _static_snapshot(*approvals: DynamicCandidate) -> RoutingSnapshot:
         source="test",
         source_path=None,
         content_hash=_content_hash(validated, 3, approved),
-        role_chains=(
-            ("WORKER", (tuple(t1_members),)),
-            ("SURGEON", (tuple(t1_members),)),
-            ("INTEGRATOR", ()),
-        ),
+        role_chains=(("BUILD", (tuple(t1_members),)),),
+        strong_start=(tuple(t1_members),),
         approved_candidates=tuple(approvals),
     )
     # Canonical invariant: the fixture must be a valid persisted snapshot.
@@ -518,7 +511,7 @@ def _static_snapshot(*approvals: DynamicCandidate) -> RoutingSnapshot:
     revived = payload_to_snapshot(json.loads(json.dumps(payload)), run_id="r2b1-canonical")
     # Each identity exactly once per chain in the revived canonical shape.
     for chain in (
-        revived.chain_for_role("WORKER"),
+        revived.chain_for_role("BUILD"),
         revived.chain_for_role("SURGEON"),
     ):
         ids = [_cid(c) for c in chain]
@@ -559,7 +552,7 @@ def test_r2b1_static_fixtures_are_canonical_valid() -> None:
             assert by_approval[approval.candidate_id].binding_id == approval.binding_id
         # Explicit round-trip invariant through the canonical parser.
         revived = _assert_canonical_roundtrip(snapshot)
-        t1_ids = [_cid(c) for c in revived.chain_for_role("WORKER")]
+        t1_ids = [_cid(c) for c in revived.chain_for_role("BUILD")]
         assert len(t1_ids) == len(set(t1_ids))
         assert t1_ids.count(_MUSE_CID) == 1
         assert t1_ids.count(_CLEAN_CID) == 1

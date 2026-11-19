@@ -79,10 +79,11 @@ It changes nothing, sends no notice, takes no lease, and is safe from a
 read-only second client. Owners reject a candidate from the run page
 (`/runs/<run_id>`).
 
-`answer_question` accepts only `authority: "ORCHESTRATOR"`. Owner authority is
-not exercisable over MCP: `authority: "OWNER"` is refused with `-32010`, and a
-question whose decision class is owner-only is refused the same way. An
-Orchestrator can never answer its own finding, and answers are idempotent --
+`answer_question` accepts only `authority: "PLAN"` (legacy `ORCHESTRATOR` is
+accepted and mapped). Owner authority is not exercisable over MCP:
+`authority: "OWNER"` is refused with `-32010`, and a question whose decision
+class is owner-only is refused the same way. A planning session can never answer
+its own finding, and answers are idempotent --
 repeating an identical answer records a confirmation and changes nothing
 (ADR-0004 invariants 6 and 13).
 

@@ -410,12 +410,12 @@ def prune_evidence(raw: str | None, limit: int = EVIDENCE_BLOCK_MAX_CHARS) -> Pr
 
 @dataclass(frozen=True)
 class SurgicalCapsule:
-    """First-class surgical escalation capsule.
+    """Bounded capsule for a stronger-model repair.
 
-    A surgical capsule carries ONLY the bounded residual defect; the raw full
-    original task, full repository diff, and complete review history are
-    intentionally absent.  The dispatcher is responsible for selecting SURGEON
-    role only when genuine capability-bearing tier escalation is required.
+    A capsule carries ONLY the bounded residual defect; the raw full original
+    task, full repository diff and complete review history are intentionally
+    absent.  The SURGEON model role is retired (ADR-0005 §3): this is a retained
+    context projection for a bounded repair on the build route, not a role.
     """
 
     parent_slug: str
@@ -436,7 +436,7 @@ class SurgicalCapsule:
         "Apply the bounded fix only; verify with focused tests and return the candidate."
     )
 
-    def to_projection(self, role: str = "SURGEON") -> ContextProjection:
+    def to_projection(self, role: str = "BUILD") -> ContextProjection:
         """Return the :class:`ContextProjection` for this capsule."""
         change_section: list[tuple[str, str]] = []
         if self.bounded_stdout_excerpt:
@@ -784,7 +784,7 @@ def build_package_initial_projection(
             )
     return ContextProjection(
         mode=DispatchContextMode.PACKAGE,
-        role=(role or DispatchRole.BULK.value),
+        role=(role or DispatchRole.BUILD.value),
         parent_slug=slug,
         inherited_candidate_sha=inherited_base_sha,
         dispatch_reason="package implementation",
@@ -842,7 +842,7 @@ def build_package_retry_projection(
         )
     return ContextProjection(
         mode=DispatchContextMode.PACKAGE,
-        role=(role or DispatchRole.REPAIR.value),
+        role=(role or DispatchRole.BUILD.value),
         parent_slug=slug,
         inherited_candidate_sha=inherited_base_sha,
         dispatch_reason="package retry",

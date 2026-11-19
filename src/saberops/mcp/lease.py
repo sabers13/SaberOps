@@ -34,6 +34,7 @@ __all__ = [
     "OrchestratorLease",
     "default_lease_path",
     "pid_is_alive",
+    "planner_identity",
 ]
 
 #: Schema version of the durable lease record.
@@ -44,6 +45,30 @@ LEASE_ENV = "SABEROPS_MCP_LEASE"
 
 #: File name inside the owner state directory.
 LEASE_FILENAME = "mcp-orchestrator.lock"
+
+
+def planner_identity() -> dict[str, Any]:
+    """Return the live planning-session identity for run records (display only).
+
+    The plan role is the external CLI session the owner sits in; the durable
+    lease is its one recorded identity.  A store with no live planner reports
+    ``UNKNOWN`` rather than guessing, so a run record never invents who
+    planned it.
+    """
+    try:
+        record = OrchestratorLease().read()
+    except Exception:
+        record = None
+    if record is None or not pid_is_alive(record.pid):
+        return {"identity": "UNKNOWN", "source": "no live planning lease"}
+    identity = record.client or record.holder
+    return {
+        "identity": identity,
+        "holder": record.holder,
+        "session_id": record.session_id or "UNKNOWN",
+        "client": record.client or "UNKNOWN",
+        "source": "planning lease",
+    }
 
 
 def default_lease_path() -> Path:

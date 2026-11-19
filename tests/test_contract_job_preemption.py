@@ -87,7 +87,7 @@ def _job(job_id: str, repo: str, base: str, *, preemptions: int = 0) -> Job:
         base_sha=base,
         goal="do the thing",
         acceptance=None,
-        requirements=JobRequirements(role=JobRole.WORKER),
+        requirements=JobRequirements(role=JobRole.BUILD),
         priority=Priority.NORMAL,
         state=JobState.QUEUED,
         waiting_reason=WaitingReason.NEW,

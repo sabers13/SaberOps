@@ -107,7 +107,7 @@
         {% endfor %}
       </ol>
       {% else %}
-      <div class="empty" role="note" style="margin-bottom: var(--gap)"><strong>No model {{ job.verb }} yet.</strong>{% if job.slug == "repair" %}Failed work waits for you until you pick one.{% elif job.slug == "check" %}Changes wait for your own review until you pick one.{% else %}Work that needs this job waits until you pick one.{% endif %}</div>
+      <div class="empty" role="note" style="margin-bottom: var(--gap)"><strong>No model {{ job.verb }} yet.</strong>{% if job.slug == "check" %}Changes wait for your own review until you pick one.{% else %}Work that needs this job waits until you pick one.{% endif %}</div>
       {% endif %}
 
       <h3 id="picker-h">{{ "Add a backup" if job.chain else "Choose a model" }}</h3>

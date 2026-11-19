@@ -1136,7 +1136,7 @@ def _materialize_discovered_binding(
         model=model_id,
         provider_transport=profile.transport,
         harness_capabilities=profile.capabilities,
-        binding_role=BindingRole.WORKER,
+        binding_role=BindingRole.BUILD,
         backend=BindingKind.DIRECT_API if api else BindingKind.DIRECT_CLI,
     )
     reviewer_binding, _reviewer_profile, _reviewer_pool = materialize_discovered_binding(
@@ -1145,7 +1145,7 @@ def _materialize_discovered_binding(
         model=model_id,
         provider_transport=profile.transport,
         harness_capabilities=profile.capabilities,
-        binding_role=BindingRole.REVIEWER,
+        binding_role=BindingRole.CHECK,
         backend=BindingKind.DIRECT_API if api else BindingKind.DIRECT_CLI,
     )
     orch_binding, _orch_profile, _orch_pool = materialize_discovered_binding(
@@ -1154,7 +1154,7 @@ def _materialize_discovered_binding(
         model=model_id,
         provider_transport=profile.transport,
         harness_capabilities=profile.capabilities,
-        binding_role=BindingRole.ORCHESTRATOR,
+        binding_role=BindingRole.PLAN,
         backend=BindingKind.DIRECT_API if api else BindingKind.DIRECT_CLI,
     )
     owner = owner if owner is not None else _load_owner_bindings_safely()

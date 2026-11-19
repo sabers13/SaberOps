@@ -26,7 +26,7 @@ _OWNER_ONLY_ASK = (
     "--decision-class",
     "TEST_CHANGE_AGAINST_ADR",
     "--role",
-    "WORKER",
+    "BUILD",
     "--by",
     "worker:run_abc",
     "--run-id",
@@ -203,7 +203,7 @@ def test_an_orchestrator_cannot_answer_an_owner_only_question(
         "answer",
         "run_abc/gate-block",
         "--authority",
-        "orchestrator",
+        "plan",
         "--by",
         "orchestrator:session-1",
         "--words",
@@ -222,7 +222,7 @@ def test_an_orchestrator_cannot_answer_an_owner_only_question(
 def test_an_implementer_role_can_never_answer(capsys: pytest.CaptureFixture[str]) -> None:
     assert _ask(capsys=capsys)[0] == 0
     code, _, err = _answer(
-        "run_abc/gate-block", "we allow it", "--role", "WORKER", capsys=capsys
+        "run_abc/gate-block", "we allow it", "--role", "BUILD", capsys=capsys
     )
     assert code == 1
     assert "implementers never answer" in err
@@ -244,7 +244,7 @@ def test_an_orchestrator_alone_answer_requires_evidence_and_alternative(
             "--decision-class",
             "REVIEW_FINDING_CLASSIFICATION",
             "--role",
-            "REVIEWER",
+            "CHECK",
             "--by",
             "reviewer:run_abc",
             "--requirement",
@@ -266,7 +266,7 @@ def test_an_orchestrator_alone_answer_requires_evidence_and_alternative(
         "answer",
         "review/finding-f3",
         "--authority",
-        "orchestrator",
+        "plan",
         "--by",
         "orchestrator:session-1",
         "--words",
@@ -281,7 +281,7 @@ def test_an_orchestrator_alone_answer_requires_evidence_and_alternative(
         "answer",
         "review/finding-f3",
         "--authority",
-        "orchestrator",
+        "plan",
         "--by",
         "orchestrator:session-1",
         "--words",
@@ -294,7 +294,7 @@ def test_an_orchestrator_alone_answer_requires_evidence_and_alternative(
         capsys=capsys,
     )
     assert (code, err) == (0, "")
-    assert json.loads(out)["answer"]["authority"] == "ORCHESTRATOR"
+    assert json.loads(out)["answer"]["authority"] == "PLAN"
 
     code, out, err = _cli("questions", "audit", "--json", capsys=capsys)
     assert (code, err) == (0, "")
@@ -412,11 +412,11 @@ def test_the_cli_cannot_defer_as_an_implementer(
                 "--until",
                 "2026-11-01",
                 "--role",
-                "WORKER",
+                "CHECK",
             ]
         )
     assert excinfo.value.code == 2
-    assert "WORKER" in capsys.readouterr().err
+    assert "CHECK" in capsys.readouterr().err
     code, out, _ = _cli("questions", "show", "run_abc/gate-block", "--json", capsys=capsys)
     assert code == 0
     assert json.loads(out)["status"] == "OPEN"

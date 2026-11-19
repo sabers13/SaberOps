@@ -187,7 +187,7 @@ def _seed_failed_check_job(db: Database, store: dict[str, Any]) -> None:
             association_id=review_id,
             review_id=review_id,
             stage=DispatchStage.REVIEW,
-            role=DispatchRole.REVIEW,
+            role=DispatchRole.CHECK,
             tier=Tier.T1,
             dispatch_reason=DispatchReason.INDEPENDENT_REVIEW,
             requested_provider="anthropic",
@@ -289,7 +289,7 @@ def _seed_waiting_job(db: Database, store: dict[str, Any]) -> str:
             subject="May this job touch the billing posture?",
             kind="escalation",
             decision_class=DecisionClass.BILLING_OR_POSTURE,
-            raised_by_role=AskRole.WORKER,
+            raised_by_role=AskRole.BUILD,
             raised_by="worker-1",
             escalation=Escalation(
                 requirement="The rename needs a billing attestation.",

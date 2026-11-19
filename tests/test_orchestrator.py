@@ -60,6 +60,8 @@ from saberops.git import GitManager
 from saberops.models import (
     AttemptStatus,
     DispatchOutcome,
+    DispatchRole,
+    DispatchStage,
     GateOutcome,
     RunStatus,
     Tier,
@@ -270,13 +272,17 @@ def _success_with_file(provider: str, model: str, rel_path: str, content: str) -
 
 
 def _role_keyed_chain(
-    worker: list[WorkerCandidate], surgeon: list[WorkerCandidate]
+    worker: list[WorkerCandidate], strong: list[WorkerCandidate]
 ) -> Any:
-    """Return a resolve_candidate_chain replacement keyed on the role."""
+    """Return a resolve_candidate_chain replacement keyed on the build setting."""
 
-    def _resolve(*, role: Any | None = None, **_: Any) -> list[WorkerCandidate]:
-        key = getattr(role, "value", role)
-        return list(surgeon) if str(key) == "SURGEON" else list(worker)
+    def _resolve(
+        *,
+        role: Any | None = None,
+        strong_start: bool = False,
+        **_: Any,
+    ) -> list[WorkerCandidate]:
+        return list(strong) if strong_start else list(worker)
 
     return _resolve
 
@@ -601,8 +607,9 @@ def test_h3_1_d_explicit_capability_failure_escalates(
     tier_escalated = _events_by_type(events, "tier_escalated")
     assert tier_escalated, "explicit capability evidence must escalate"
     assert tier_escalated[0].payload is not None
-    assert tier_escalated[0].payload["from_role"] == "WORKER"
-    assert tier_escalated[0].payload["to_role"] == "SURGEON"
+    assert tier_escalated[0].payload["from_role"] == "BUILD"
+    assert tier_escalated[0].payload["to_role"] == "BUILD"
+    assert tier_escalated[0].payload["strong_start"] is True
     assert tier_escalated[0].payload["to"] == Tier.T3.value
     # A stronger-tier worker actually launched and completed the run.
     assert "t2a" in impl_log, impl_log
@@ -711,3 +718,13 @@ def test_h3_1_e_same_tier_repair_inherits_failed_candidate(
     assert classified and classified[-1].payload is not None
     assert classified[-1].payload["outcome"] == DispatchOutcome.GATE_FAILURE.value
     assert classified[-1].payload["escalation_evidence"] is False
+    # The repair after the failed check ran on the build route: every dispatch
+    # is BUILD and the repair dispatch is recorded as such (ADR-0005 §3).
+    dispatches = db.get_dispatch_evidence_for_run(result.run_id)
+    assert dispatches
+    assert all(d.role is DispatchRole.BUILD for d in dispatches)
+    repair = [
+        d for d in dispatches
+        if d.stage in (DispatchStage.REPAIR, DispatchStage.RETRY)
+    ]
+    assert repair and all(d.role is DispatchRole.BUILD for d in repair)

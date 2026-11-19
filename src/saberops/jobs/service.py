@@ -997,6 +997,32 @@ def job_status_view(db: Any, job: Job) -> dict[str, Any]:
     """Project durable execution evidence onto a job without changing its state."""
     view = job.to_dict()
     view.update(activity=None, reason=None, work_location=None, last_failed_attempt=None)
+    from saberops.observability.run_report import build_roles_view
+
+    roles = (
+        build_roles_view(db, job.current_run_id, plan_identity=job.caller_id)
+        if job.current_run_id
+        else None
+    )
+    view["roles"] = roles or {
+        "plan": {
+            "role": "plan",
+            "identity": job.caller_id or "UNKNOWN",
+            "source": "job caller",
+        },
+        "build": {
+            "role": "build",
+            "provider": "UNKNOWN",
+            "model": "UNKNOWN",
+            "identity_status": "UNKNOWN",
+        },
+        "check": {
+            "role": "check",
+            "provider": "UNKNOWN",
+            "model": "UNKNOWN",
+            "verdict": "UNKNOWN",
+        },
+    }
     if not job.current_run_id:
         return view
     run = db.get_run(job.current_run_id)
