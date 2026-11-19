@@ -3,7 +3,7 @@
 The following tools are exposed::
 
     preflight submit_job get_job catch_up tail_job wait_job list_jobs cancel_job
-    capacity read_evidence list_questions answer_question
+    note_job capacity read_evidence list_questions answer_question
     propose_config_change list_proposals
 
 Everything else is either not modelled or on the **never-exposed** list, which
@@ -99,6 +99,7 @@ MUTATING_TOOLS: frozenset[str] = frozenset(
         "submit_job",
         "refresh_candidate",
         "cancel_job",
+        "note_job",
         "answer_question",
         "propose_config_change",
     }
@@ -130,6 +131,7 @@ TOOL_NAMES: tuple[str, ...] = (
     "wait_job",
     "list_jobs",
     "cancel_job",
+    "note_job",
     "capacity",
     "read_evidence",
     "list_questions",
@@ -629,6 +631,13 @@ def _catch_up_questions(context: ServerContext, job: Any) -> list[dict[str, Any]
     return matched
 
 
+def _catch_up_steering_notes(db: Any, job: Any) -> list[dict[str, Any]]:
+    """Owner steering notes with their delivery state (read-only)."""
+    from saberops.jobs.service import steering_notes
+
+    return [note.to_dict() for note in steering_notes(db, job.job_id)]
+
+
 def _catch_up_next_action(
     job: Any,
     view: Mapping[str, Any],
@@ -831,6 +840,7 @@ def _catch_up(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str,
         "check": check,
         "review": review,
         "open_questions": questions,
+        "steering_notes": _catch_up_steering_notes(db, job),
         "failure": failure,
         "next_action": _catch_up_next_action(job, view, result, projection, questions),
         "usage": result["usage"],
@@ -924,6 +934,36 @@ def _cancel_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[st
         },
     )
     return payload
+
+
+def _note_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    """Record one durable steering note; delivery happens at the next attempt."""
+    from saberops.jobs.service import JobNotFoundError, note_job
+
+    job_id = _require_text(arguments, "job_id", what="job_id")
+    text = _require_text(arguments, "text", what="text")
+    db = context.database(read_only=False)
+    try:
+        note = note_job(db, job_id, text)
+    except JobNotFoundError as exc:
+        raise NotFoundError(f"unknown job: {job_id}", data={"job_id": job_id}) from exc
+    except ValueError as exc:
+        raise InvalidParamsError(f"invalid steering note: {exc}") from exc
+    context.ledger.append(
+        "job_note_recorded",
+        {"job_id": job_id, "note_id": note.note_id},
+        key=f"job:{job_id}",
+    )
+    return {
+        "v": SNAPSHOT_SCHEMA_VERSION,
+        "job_id": job_id,
+        "note_id": note.note_id,
+        "note": note.to_dict(),
+        "delivery": (
+            "pending: the note reaches the worker in the prompt of the job's "
+            "next attempt, never mid-tool"
+        ),
+    }
 
 
 def _preflight(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
@@ -1280,6 +1320,20 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
             required=("job_id",),
         ),
         _cancel_job,
+        mutating=True,
+    )
+    register(
+        "note_job",
+        "Record one owner steering note on a job; it is delivered once at the "
+        "next worker attempt (never typed into a running worker) and shown by catch_up.",
+        _schema(
+            {
+                "job_id": {"type": "string", "minLength": 1},
+                "text": {"type": "string", "minLength": 1, "maxLength": 4000},
+            },
+            required=("job_id", "text"),
+        ),
+        _note_job,
         mutating=True,
     )
     register(

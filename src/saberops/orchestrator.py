@@ -183,6 +183,11 @@ from saberops.routing_decision import (
     is_escalation_evidence,
 )
 from saberops.slicing import resolve_work_packages
+from saberops.steering import (
+    append_steering_section,
+    record_steering_delivery,
+    steering_section_for_run,
+)
 from saberops.storage_gc import retire_run_worktrees
 from saberops.storage_maintenance import database_audit_sink
 from saberops.telemetry import persist_worker_usage
@@ -4125,7 +4130,16 @@ class Orchestrator:
                             current_package.scope_json if current_package is not None else None,
                         ),
                     )
-                task_for_worker_pre = rendered.prompt
+                # ADR-0013: a pending owner steering note travels in the next
+                # attempt's prompt -- the next safe point.  Delivery is marked
+                # only once the attempt row exists (below), so a note never
+                # reaches a worker process that is already running.
+                steering_section, steering_pending = steering_section_for_run(
+                    self.db, run_id
+                )
+                task_for_worker_pre = append_steering_section(
+                    rendered.prompt, steering_section
+                )
                 prompt_bytes_pre = len(task_for_worker_pre.encode("utf-8"))
                 adapter_pre = (auto_resolved.adapter if auto_resolved is not None
                                else self.registry.get(candidate.provider))
@@ -4543,6 +4557,12 @@ class Orchestrator:
                     base_sha=start_point,
                 )
                 self.db.create_attempt(attempt)
+                record_steering_delivery(
+                    self.db,
+                    steering_pending,
+                    run_id=run_id,
+                    attempt_id=attempt.id,
+                )
                 worker_activation = WorkerActivation(
                     id=f"act_{uuid.uuid4().hex[:10]}",
                     run_id=run_id,
@@ -5845,7 +5865,15 @@ class Orchestrator:
                                 repair_resolved: ResolvedExecutionBinding | None = None
 
                                 while True:
-                                    prompt_task = cur_rendered_task.prompt
+                                    # ADR-0013: deliver pending owner notes in
+                                    # this repair attempt's prompt; the mark is
+                                    # written once the attempt row exists.
+                                    rep_steering_section, rep_steering_pending = (
+                                        steering_section_for_run(self.db, run_id)
+                                    )
+                                    prompt_task = append_steering_section(
+                                        cur_rendered_task.prompt, rep_steering_section
+                                    )
                                     repair_decision = choose_tier(
                                         config,
                                         stage=DispatchStage.REPAIR,
@@ -6154,6 +6182,12 @@ class Orchestrator:
                                         base_sha=cur_from_sha,
                                     )
                                     self.db.create_attempt(rep_attempt)
+                                    record_steering_delivery(
+                                        self.db,
+                                        rep_steering_pending,
+                                        run_id=run_id,
+                                        attempt_id=rep_attempt.id,
+                                    )
 
                                     rep_activation = WorkerActivation(
                                         id=f"act_{uuid.uuid4().hex[:10]}",

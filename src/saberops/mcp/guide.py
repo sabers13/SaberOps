@@ -156,6 +156,11 @@ steps, not model roles. There are no selectable modes.
 - Report back to the owner in plain words: what finished, what failed and why,
   and what needs their decision. Link them to the run on the SaberOps page.
 - `cancel_job` only for work you submitted by mistake or that the owner stopped.
+- When the owner corrects a running job, call `note_job` with their correction.
+  It is stored durably and reaches the worker once, in the prompt of the next
+  attempt; it is never typed into a running worker, so a job that finishes
+  before another attempt keeps the note pending. `catch_up` lists every note
+  with whether it was delivered and to which attempt.
 
 ## Catching up in a new session
 - When the owner says "catch me up" (or you have no history of a job), call

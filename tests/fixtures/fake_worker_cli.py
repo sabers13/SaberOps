@@ -64,13 +64,18 @@ def _read_control_json(path_str: str | None) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _resolve_worker_mode(cli_mode: str | None) -> tuple[str, float, int, str, str | None]:
+def _worker_control_path() -> str | None:
     control_path = os.environ.get("ORCH_FAKE_WORKER_CONTROL_FILE")
-    if not control_path:
-        state_home = os.environ.get("XDG_STATE_HOME")
-        if state_home:
-            control_path = str(Path(state_home) / "saberops" / "fake-worker-mode.json")
-    cfg = _read_control_json(control_path)
+    if control_path:
+        return control_path
+    state_home = os.environ.get("XDG_STATE_HOME")
+    if state_home:
+        return str(Path(state_home) / "saberops" / "fake-worker-mode.json")
+    return None
+
+
+def _resolve_worker_mode(cli_mode: str | None) -> tuple[str, float, int, str, str | None]:
+    cfg = _read_control_json(_worker_control_path())
 
     mode = (
         cli_mode
@@ -110,6 +115,91 @@ def _resolve_reviewer_verdict(cli_verdict: str | None) -> str:
     if raw in {"REJECT", "BLOCK"}:
         return "BLOCK"
     return "PASS"
+
+
+def _codex_prompt_arg(args: list[str]) -> str:
+    """Return the positional prompt Codex was given (``""`` when it is stdin)."""
+    flag_values = {"--model", "--cd", "--sandbox", "--image", "-c", "--config"}
+    try:
+        index = args.index("exec") + 1
+    except ValueError:
+        return ""
+    if index < len(args) and args[index] == "resume":
+        index += 1
+        if index < len(args) and not args[index].startswith("-"):
+            index += 1
+    while index < len(args):
+        token = args[index]
+        if token == "-":
+            return ""
+        if token in flag_values:
+            index += 2
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        return token
+    return ""
+
+
+def _opencode_prompt_arg(args: list[str]) -> str:
+    """Return the positional prompt OpenCode was given (``""`` when it is stdin)."""
+    flag_values = {"--model", "--format", "--session", "--dir", "--agent"}
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token == "run":
+            index += 1
+            continue
+        if token in flag_values:
+            index += 2
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        return token
+    return ""
+
+
+def _prompt_log_append(harness: str, prompt: str) -> None:
+    """Append one received prompt to the test log named by the rig, if any."""
+    cfg = _read_control_json(_worker_control_path())
+    path_str = os.environ.get("ORCH_FAKE_WORKER_PROMPT_LOG") or str(
+        cfg.get("prompt_log") or ""
+    )
+    if not path_str:
+        return
+    path = Path(path_str)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as sink:
+            sink.write(
+                json.dumps(
+                    {"harness": harness, "pid": os.getpid(), "prompt": prompt},
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+    except OSError:
+        pass
+
+
+def _wait_for_control_file() -> None:
+    """Block a worker run until the rig's marker file exists (bounded)."""
+    cfg = _read_control_json(_worker_control_path())
+    path_str = os.environ.get("ORCH_FAKE_WORKER_WAIT_FILE") or str(
+        cfg.get("wait_file") or ""
+    )
+    if not path_str:
+        return
+    timeout = float(
+        os.environ.get("ORCH_FAKE_WORKER_WAIT_TIMEOUT")
+        or cfg.get("wait_timeout_seconds", 30)
+    )
+    path = Path(path_str)
+    deadline = time.monotonic() + timeout
+    while not path.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
 
 
 def _commit_change(workdir: Path, harness: str, target_file: str, content: str | None) -> None:
@@ -233,14 +323,19 @@ def _handle_codex(
         print(json.dumps({"models": [{"id": "gpt-5.6-terra"}, {"id": "gpt-5.6-sol"}]}))
         return 0
 
+    cd_val = _get_arg_value(args, "--cd")
+    workdir = Path(cd_val) if cd_val else Path.cwd()
+    prompt_text = ""
+    if "-" in args and not sys.stdin.isatty():
+        prompt_text = sys.stdin.read()
+    else:
+        prompt_text = _codex_prompt_arg(args)
+    _prompt_log_append("codex", prompt_text)
+    _wait_for_control_file()
     switched = _run_failure_switch("codex", mode, hang_seconds, exit_code)
     if switched is not None:
         return switched
 
-    cd_val = _get_arg_value(args, "--cd")
-    workdir = Path(cd_val) if cd_val else Path.cwd()
-    if "-" in args and not sys.stdin.isatty():
-        _ = sys.stdin.read()
     sandbox = _get_arg_value(args, "--sandbox")
     if sandbox != "read-only":
         _commit_change(workdir, "codex", target_file, content)
@@ -466,11 +561,14 @@ def _handle_opencode(
         return 0
 
     switched = _run_failure_switch("opencode", mode, hang_seconds, exit_code)
+
+    stdin_text = ""
+    if not sys.stdin.isatty():
+        stdin_text = sys.stdin.read()
+    _prompt_log_append("opencode", _opencode_prompt_arg(args) or stdin_text)
+    _wait_for_control_file()
     if switched is not None:
         return switched
-
-    if not sys.stdin.isatty():
-        _ = sys.stdin.read()
     _commit_change(Path.cwd(), "opencode", target_file, content)
     print(json.dumps({"type": "step_start", "part": {"type": "step-start"}}))
     print(

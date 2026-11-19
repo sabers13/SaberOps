@@ -25,8 +25,16 @@ from saberops.jobs.models import (
     JobState,
     Priority,
     ResumeFrom,
+    SteeringNote,
     WaitingReason,
 )
+
+#: Bounded note body; an owner note is a correction, not a second task.
+MAX_STEERING_NOTE_CHARS = 4000
+
+#: At most this many pending notes travel in one attempt prompt; any further
+#: notes wait for the following attempt boundary instead of splitting a note.
+MAX_NOTES_PER_DELIVERY = 5
 
 
 class JobNotFoundError(LookupError):
@@ -116,6 +124,25 @@ def ensure_tables(db: Any) -> None:
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_job_events_job ON job_events(job_id, seq)"
+        )
+        # ADR-0013: durable steering notes, delivered at the next attempt
+        # boundary (never typed into a running worker).
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS job_steering_notes (
+                note_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id TEXT NOT NULL REFERENCES jobs(job_id),
+                body TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                delivered_at TEXT,
+                delivered_run_id TEXT,
+                delivered_attempt_id TEXT
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_job_steering_notes_job "
+            "ON job_steering_notes(job_id, note_id)"
         )
         conn.commit()
 
@@ -409,6 +436,136 @@ def list_events(db: Any, job_id: str) -> list[dict[str, Any]]:
             (job_id,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+def _row_to_steering_note(row: sqlite3.Row) -> SteeringNote:
+    return SteeringNote(
+        note_id=int(row["note_id"]),
+        job_id=str(row["job_id"]),
+        body=str(row["body"]),
+        created_at=str(row["created_at"]),
+        delivered_at=str(row["delivered_at"]) if row["delivered_at"] is not None else None,
+        delivered_run_id=(
+            str(row["delivered_run_id"]) if row["delivered_run_id"] is not None else None
+        ),
+        delivered_attempt_id=(
+            str(row["delivered_attempt_id"])
+            if row["delivered_attempt_id"] is not None
+            else None
+        ),
+    )
+
+
+def insert_steering_note(
+    db: Any, job_id: str, body: str, *, now: datetime | None = None
+) -> SteeringNote:
+    """Record one durable note plus its job event in a single transaction."""
+    ensure_tables(db)
+    at = _utcnow_iso(now)
+    with _owner_conn(db) as conn:
+        cursor = conn.execute(
+            "INSERT INTO job_steering_notes (job_id, body, created_at) VALUES (?, ?, ?)",
+            (job_id, body, at),
+        )
+        note_id = int(cursor.lastrowid or 0)
+        _append_event(
+            conn,
+            job_id=job_id,
+            at=at,
+            kind="steering_note",
+            from_state=None,
+            to_state=None,
+            payload={"note_id": note_id, "length": len(body)},
+        )
+        row = conn.execute(
+            "SELECT * FROM job_steering_notes WHERE note_id = ?", (note_id,)
+        ).fetchone()
+        conn.commit()
+    if row is None:  # pragma: no cover - the row was just written
+        raise RuntimeError(f"steering note {note_id} disappeared after insert")
+    return _row_to_steering_note(row)
+
+
+def list_steering_notes(db: Any, job_id: str) -> list[SteeringNote]:
+    """Every note for a job, oldest first; empty when the store predates notes."""
+    with _owner_conn(db) as conn:
+        present = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            ("job_steering_notes",),
+        ).fetchone()
+        if present is None:
+            return []
+        rows = conn.execute(
+            "SELECT * FROM job_steering_notes WHERE job_id = ? ORDER BY note_id ASC",
+            (job_id,),
+        ).fetchall()
+        return [_row_to_steering_note(r) for r in rows]
+
+
+def pending_steering_notes_for_run(
+    db: Any, run_id: str, *, limit: int = MAX_NOTES_PER_DELIVERY
+) -> list[SteeringNote]:
+    """Undelivered notes for the job currently dispatched as ``run_id``.
+
+    Read-only and allocation-free: the dispatch path calls this before every
+    attempt, so it never creates the notes table or writes when no note exists.
+    """
+    with _owner_conn(db) as conn:
+        present = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            ("job_steering_notes",),
+        ).fetchone()
+        if present is None:
+            return []
+        rows = conn.execute(
+            "SELECT n.* FROM job_steering_notes AS n"
+            " JOIN jobs AS j ON j.job_id = n.job_id"
+            " WHERE n.delivered_at IS NULL AND j.current_run_id = ?"
+            " ORDER BY n.note_id ASC LIMIT ?",
+            (run_id, max(1, int(limit))),
+        ).fetchall()
+        return [_row_to_steering_note(r) for r in rows]
+
+
+def mark_steering_notes_delivered(
+    db: Any,
+    note_ids: tuple[int, ...] | list[int],
+    *,
+    run_id: str,
+    attempt_id: str,
+    now: datetime | None = None,
+) -> list[SteeringNote]:
+    """Record that these notes travelled in one attempt's prompt.
+
+    The ``delivered_at IS NULL`` guard keeps a note single-use even if two
+    launchers raced; only rows won by this attempt are returned.
+    """
+    ids = tuple(int(note_id) for note_id in note_ids)
+    if not ids:
+        return []
+    ensure_tables(db)
+    at = _utcnow_iso(now)
+    placeholders = ", ".join("?" for _ in ids)
+    with _owner_conn(db) as conn:
+        conn.execute(
+            "UPDATE job_steering_notes SET delivered_at = ?, delivered_run_id = ?,"
+            " delivered_attempt_id = ?"
+            f" WHERE delivered_at IS NULL AND note_id IN ({placeholders})",
+            (at, run_id, attempt_id, *ids),
+        )
+        rows = conn.execute(
+            "SELECT * FROM job_steering_notes"
+            " WHERE delivered_run_id = ? AND delivered_attempt_id = ?"
+            " ORDER BY note_id ASC",
+            (run_id, attempt_id),
+        ).fetchall()
+        conn.commit()
+    wanted = set(ids)
+    return [
+        note
+        for note in (_row_to_steering_note(r) for r in rows)
+        if note.note_id in wanted
+    ]
 
 
 def _cas(

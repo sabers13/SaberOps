@@ -25,12 +25,14 @@ from saberops.jobs.models import (
     PREEMPTION_LIMIT,
     RUN_FAILED,
     RUN_MISSING,
+    TERMINAL_JOB_STATES,
     Effort,
     Job,
     JobRequirements,
     JobState,
     Priority,
     ResumeFrom,
+    SteeringNote,
     WaitingReason,
 )
 from saberops.jobs.store import (
@@ -63,12 +65,14 @@ __all__ = [
     "job_usage_view",
     "list_jobs",
     "mark_dispatched",
+    "note_job",
     "reconcile_jobs",
     "reconcile_preemptions",
     "requeue",
     "requeue_preemption",
     "settle_preemption_debts",
     "set_waiting",
+    "steering_notes",
     "submit_job",
 ]
 
@@ -372,6 +376,39 @@ def submit_job(
 
 def get_job(db: Any, job_id: str) -> Job | None:
     return store.get_job(db, job_id)
+
+
+def note_job(
+    db: Any, job_id: str, body: str, *, now: datetime | None = None
+) -> SteeringNote:
+    """Attach one durable owner note to a job (ADR-0013).
+
+    The note is never injected into a running worker.  It stays pending until
+    the job's next worker attempt starts, whose prompt is the next safe point,
+    and delivery is recorded once on that attempt.  Notes for terminal jobs
+    are refused because no boundary remains to deliver them.
+    """
+    job = store.get_job(db, job_id)
+    if job is None:
+        raise JobNotFoundError(f"unknown job: {job_id}")
+    text = (body or "").strip()
+    if not text:
+        raise ValueError("a steering note needs non-empty text")
+    if len(text) > store.MAX_STEERING_NOTE_CHARS:
+        raise ValueError(
+            "a steering note is limited to "
+            f"{store.MAX_STEERING_NOTE_CHARS} characters; got {len(text)}"
+        )
+    if job.state in TERMINAL_JOB_STATES:
+        raise ValueError(
+            f"job {job_id} is {job.state.value}; no worker attempt remains to deliver a note"
+        )
+    return store.insert_steering_note(db, job_id, text, now=now)
+
+
+def steering_notes(db: Any, job_id: str) -> tuple[SteeringNote, ...]:
+    """Every note recorded for a job, oldest first (read-only)."""
+    return tuple(store.list_steering_notes(db, job_id))
 
 
 def list_jobs(
@@ -1112,6 +1149,7 @@ def job_status_view(db: Any, job: Job) -> dict[str, Any]:
     view.update(activity=None, reason=None, work_location=None, last_failed_attempt=None)
     from saberops.observability.run_report import build_roles_view
 
+    view["steering_notes"] = [note.to_dict() for note in steering_notes(db, job.job_id)]
     roles = (
         build_roles_view(db, job.current_run_id, plan_identity=job.caller_id)
         if job.current_run_id

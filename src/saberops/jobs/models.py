@@ -280,6 +280,41 @@ class ResumeFrom:
 
 
 @dataclass(frozen=True)
+class SteeringNote:
+    """One durable owner note attached to a job (ADR-0013).
+
+    A note is never typed into a live worker.  It is recorded here and
+    included in the prompt of the next worker attempt, which is the only safe
+    boundary at which new owner input can reach the worker.  Delivery is
+    recorded once, on the attempt that carried the note.
+    """
+
+    note_id: int
+    job_id: str
+    body: str
+    created_at: str
+    delivered_at: str | None = None
+    delivered_run_id: str | None = None
+    delivered_attempt_id: str | None = None
+
+    @property
+    def delivered(self) -> bool:
+        return self.delivered_at is not None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "note_id": self.note_id,
+            "job_id": self.job_id,
+            "text": self.body,
+            "created_at": self.created_at,
+            "delivered": self.delivered,
+            "delivered_at": self.delivered_at,
+            "delivered_run_id": self.delivered_run_id,
+            "delivered_attempt_id": self.delivered_attempt_id,
+        }
+
+
+@dataclass(frozen=True)
 class Job:
     """One durable job. ``base_sha`` travels beside ``base_ref`` (section H):
 

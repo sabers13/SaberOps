@@ -52,6 +52,7 @@ served, and an unknown requested revision falls back to `2025-06-18`.
 | `catch_up` | no | `job_id` | read-only handoff over saved job, run, check, review and question records |
 | `list_jobs` | no | `state`, `limit` | `saberops.jobs.service.list_jobs` |
 | `cancel_job` | yes | `job_id`, `reason` | `saberops.jobs.service.cancel_job` |
+| `note_job` | yes | `job_id`, `text` | `saberops.jobs.service.note_job` |
 | `capacity` | no | — | `saberops.jobs.service.capacity` |
 | `read_evidence` | no | `path` | guarded evidence reader |
 | `list_questions` | no | `status`, `run_id` | `saberops.questions.OwnerQuestionQueue.questions` |
@@ -78,6 +79,15 @@ location on failure, C5's `result` projection (including the exact
 It changes nothing, sends no notice, takes no lease, and is safe from a
 read-only second client. Owners reject a candidate from the run page
 (`/runs/<run_id>`).
+
+## Steering a running job
+
+`note_job` (or `orch job note`) records one durable owner correction on a job
+(ADR-0013). It is **not** typed into a running worker: the note is delivered
+once, inside the prompt of the job's next worker attempt — a retry, repair or
+continuation — and the attempt, run and time are recorded on the note. A job
+that finishes before another attempt keeps the note pending. `catch_up` and
+`orch job notes` list every note with its delivery state.
 
 `answer_question` accepts only `authority: "PLAN"` (legacy `ORCHESTRATOR` is
 accepted and mapped). Owner authority is not exercisable over MCP:
@@ -134,7 +144,7 @@ exclusive `flock` during each read-modify-write.
 * The first client to acquire becomes the writer; the lease is acquired during
   `initialize` and released at EOF.
 * A second live client (a different, live `pid` holds the record) is read-only:
-  calls to `submit_job`, `cancel_job`, `answer_question` and
+  calls to `submit_job`, `cancel_job`, `note_job`, `answer_question` and
   `propose_config_change` are refused with JSON-RPC error `-32020`. Its read
   tools (`get_job`, `catch_up`, `list_jobs`, `capacity`, `read_evidence`,
   `list_questions`, `list_proposals`) keep working.

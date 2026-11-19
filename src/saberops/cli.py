@@ -1962,6 +1962,23 @@ def build_parser() -> argparse.ArgumentParser:
     job_cancel.add_argument("job_id", type=str, help="Job identifier.")
     job_cancel.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
     job_cancel.add_argument("--json", action="store_true", help="JSON output")
+    job_note = job_sub.add_parser(
+        "note",
+        help="Send one durable steering note; delivered at the next worker attempt.",
+    )
+    job_note.add_argument("job_id", type=str, help="Job identifier.")
+    job_note.add_argument(
+        "--text",
+        type=str,
+        required=True,
+        help="Correction for the worker; delivered at the next attempt boundary.",
+    )
+    job_note.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
+    job_note.add_argument("--json", action="store_true", help="JSON output")
+    job_notes = job_sub.add_parser("notes", help="List steering notes recorded for a job.")
+    job_notes.add_argument("job_id", type=str, help="Job identifier.")
+    job_notes.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
+    job_notes.add_argument("--json", action="store_true", help="JSON output")
 
     # orch scheduler run [--once] [--interval-seconds INT]
     scheduler_parser = subparsers.add_parser(
@@ -2264,7 +2281,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Expose the Orchestrator contract tools over MCP (stdio transport).",
         description=(
             "Serve the SaberOps Orchestrator contract tools (submit_job, get_job, "
-            "catch_up, list_jobs, cancel_job, capacity, read_evidence, "
+            "catch_up, list_jobs, cancel_job, note_job, capacity, read_evidence, "
             "list_questions, answer_question, propose_config_change, list_proposals) "
             "over the Model Context Protocol. Owner-only operations are never exposed."
         ),
@@ -5453,22 +5470,38 @@ def handle_job_get(args: argparse.Namespace) -> int:
     """Handle `orch job get`."""
     from saberops.db import Database as _Database
     from saberops.jobs.service import get_job as _get
+    from saberops.jobs.service import steering_notes as _notes
 
+    db = _Database(args.db)
     try:
-        job = _get(_Database(args.db), str(args.job_id))
+        job = _get(db, str(args.job_id))
     except ValueError as exc:
         print(f"[!] Invalid job get: {exc}", file=sys.stderr)
         return 2
     if job is None:
         print(f"Error: unknown job: {args.job_id}", file=sys.stderr)
         return 1
+    notes = _notes(db, job.job_id)
     if getattr(args, "json", False):
-        print(json.dumps(_job_payload(job), indent=2, sort_keys=True))
+        print(
+            json.dumps(
+                {**_job_payload(job), "steering_notes": [n.to_dict() for n in notes]},
+                indent=2,
+                sort_keys=True,
+            )
+        )
         return 0
     print(f"Job        : {job.job_id}")
     print(f"State      : {job.state.value}")
     print(f"Goal       : {job.goal}")
     print(f"Repo       : {job.repo} @ {job.base_ref} ({job.base_sha})")
+    for note in notes:
+        status = (
+            f"delivered to attempt {note.delivered_attempt_id}"
+            if note.delivered
+            else "pending"
+        )
+        print(f"Note {note.note_id}  : [{status}] {note.body}")
     return 0
 
 
@@ -5519,6 +5552,60 @@ def handle_job_cancel(args: argparse.Namespace) -> int:
     print(f"Job        : {result.job.job_id}")
     print(f"State      : {result.job.state.value}")
     print(f"Cancelled  : {'yes' if result.cancelled else 'no'}")
+    return 0
+
+
+def handle_job_note(args: argparse.Namespace) -> int:
+    """Handle `orch job note` (durable; delivered at the next attempt)."""
+    from saberops.db import Database as _Database
+    from saberops.jobs.service import JobNotFoundError as _NotFound
+    from saberops.jobs.service import note_job as _note
+
+    try:
+        note = _note(_Database(args.db), str(args.job_id), str(args.text))
+    except _NotFound:
+        print(f"Error: unknown job: {args.job_id}", file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        print(f"[!] Invalid steering note: {exc}", file=sys.stderr)
+        return 2
+    if getattr(args, "json", False):
+        print(json.dumps(note.to_dict(), indent=2, sort_keys=True))
+        return 0
+    print(f"Note       : {note.note_id}")
+    print(f"Job        : {note.job_id}")
+    print("Delivery   : pending the job's next worker attempt")
+    return 0
+
+
+def handle_job_notes(args: argparse.Namespace) -> int:
+    """Handle `orch job notes` (read-only list, oldest first)."""
+    from saberops.db import Database as _Database
+    from saberops.jobs.service import JobNotFoundError as _NotFound
+    from saberops.jobs.service import get_job as _get
+    from saberops.jobs.service import steering_notes as _notes
+
+    db = _Database(args.db)
+    try:
+        if _get(db, str(args.job_id)) is None:
+            raise _NotFound(f"unknown job: {args.job_id}")
+        notes = _notes(db, str(args.job_id))
+    except _NotFound:
+        print(f"Error: unknown job: {args.job_id}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps([note.to_dict() for note in notes], indent=2, sort_keys=True))
+        return 0
+    if not notes:
+        print("No steering notes recorded.")
+        return 0
+    for note in notes:
+        status = (
+            f"delivered to attempt {note.delivered_attempt_id}"
+            if note.delivered
+            else "pending"
+        )
+        print(f"{note.note_id}: [{status}] {note.body}")
     return 0
 
 
@@ -6415,6 +6502,10 @@ def _dispatch(args: argparse.Namespace) -> int:
             return handle_job_list(args)
         elif args.job_command == "cancel":
             return handle_job_cancel(args)
+        elif args.job_command == "note":
+            return handle_job_note(args)
+        elif args.job_command == "notes":
+            return handle_job_notes(args)
     elif args.command == "scheduler":
         if args.scheduler_command == "run":
             return handle_scheduler_run(args)

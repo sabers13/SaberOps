@@ -140,11 +140,20 @@ class RigEnvironment:
         content: str | None = None,
         live_lines: int | None = None,
         live_interval: float | None = None,
+        prompt_log: Path | None = None,
+        wait_file: Path | None = None,
+        wait_timeout_seconds: float | None = None,
     ) -> None:
         """Configure fake worker behaviour via control file and ``ORCH_FAKE_*`` env vars."""
         control_path = self.state_home / "saberops" / "fake-worker-mode.json"
         control_path.parent.mkdir(parents=True, exist_ok=True)
         payload: dict[str, object] = {"mode": mode}
+        if prompt_log is not None:
+            payload["prompt_log"] = str(prompt_log)
+        if wait_file is not None:
+            payload["wait_file"] = str(wait_file)
+        if wait_timeout_seconds is not None:
+            payload["wait_timeout_seconds"] = wait_timeout_seconds
         if hang_seconds is not None:
             payload["hang_seconds"] = hang_seconds
         if exit_code is not None:
