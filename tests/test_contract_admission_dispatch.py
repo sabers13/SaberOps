@@ -233,10 +233,14 @@ def test_two_dispatch_points_share_canonical_admit_score(owner_db: Database) -> 
     assert direct_admit.pool_id == "chatgpt-plus"
 
 
-def test_unconfigured_capacity_degrades_gracefully(tmp_path: Path) -> None:
+def test_unconfigured_capacity_degrades_gracefully(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Covers: ADR-0002 D2/D7 posture fail-closed on blank DB;
     unconfigured capacity grace for verified A/C only.
     """
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "empty_cfg"))
+    monkeypatch.delenv("SABEROPS_PROFILE", raising=False)
     from saberops.control_plane.posture import (
         POSTURE_ATTENDED_ONLY,
         POSTURE_FORBIDDEN,
