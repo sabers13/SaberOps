@@ -130,7 +130,7 @@ flowchart LR
 | Surface | Use it for |
 | --- | --- |
 | **`orch` CLI** | Everything. Every owner-facing command supports `--json` for agents and scripts. |
-| **MCP server** (`orch mcp serve`, stdio; `orch connect` registers it in agent CLIs) | The primary integration surface for other agents: off until the user says "turn on saberops", then 12 tools to submit and inspect jobs and waves, read evidence, list/answer questions and propose configuration changes. `submit_job` rejects provider, model and billing fields. See [MCP](docs/mcp.md). |
+| **MCP server** (`orch mcp serve`, stdio; `orch connect` registers it in agent CLIs) | The primary integration surface for other agents: off until the user says "turn on saberops", then tools to submit and inspect jobs, read evidence, list/answer questions and propose configuration changes. `submit_job` rejects provider, model and billing fields. See [MCP](docs/mcp.md). |
 | **Web UI** (`orch ui`) | Localhost first-run onboarding (readiness, vendor logins, model discovery, billing-posture attestation), routing and concurrency, project registration, plan/wave scoring, question queue, run monitoring with live events, and storage cleanup with typed confirmation. See [first-run web UI](docs/first-run-web-ui.md). |
 
 ---
@@ -280,7 +280,7 @@ orch gc --dry-run          # preview storage cleanup
 **5. Connect another agent over MCP:**
 
 ```bash
-orch mcp tools --json      # list the 12 tools and their schemas
+orch mcp tools --json      # list the available tools and their schemas
 orch mcp serve             # JSON-RPC 2.0 over stdio
 ```
 
@@ -358,8 +358,9 @@ scripts/               gate wrappers and tooling
   (default 15 running jobs); the 3 projects × 5 tasks policy is enforced by the
   wave executor and slot policy, not yet by the job scheduler itself.
 - **Waves at runtime.** The wave executor does not yet replace the older
-  parallel-team path for every run; MCP `submit_wave` performs structural
-  admission only.
+  parallel-team path for every run. For parallel MCP work, submit one job per
+  independent task with a distinct `idempotency_key`. Until E6 lands, resubmit
+  a stale-base sibling from the current base with a fresh `idempotency_key`.
 - **No governed publication.** Accepted work is not pushed automatically;
   `full_autonomy_publish` stops at the accepted state.
 - **Adapter coverage.** Not every adapter/account combination has been

@@ -35,7 +35,7 @@ served, and an unknown requested revision falls back to `2025-06-18`.
 | `initialize` | request | Returns `protocolVersion`, `capabilities` (`tools`, `resources`), `serverInfo`, `snapshotSchemaVersion: 1`, `readOnly` and the lease status. |
 | `notifications/initialized` | notification | Completes the handshake; no response is sent. |
 | `ping` | request | Health check; allowed before or after the handshake. |
-| `tools/list` | request | The twelve exposed tools with their JSON input schemas. |
+| `tools/list` | request | The currently exposed tools with their JSON input schemas. |
 | `tools/call` | request | Invoke one tool by name with an arguments object. |
 | `resources/list` | request | Synthetic resources plus discovered evidence files. |
 | `resources/read` | request | Read one resource by URI. |
@@ -43,7 +43,7 @@ served, and an unknown requested revision falls back to `2025-06-18`.
 `tools/*` and `resources/*` are refused with JSON-RPC `-32600` until
 `initialize` + `notifications/initialized` have completed.
 
-## The twelve tools
+## The job and administration tools
 
 | Tool | Mutating | Key arguments | Calls |
 | --- | --- | --- | --- |
@@ -52,8 +52,6 @@ served, and an unknown requested revision falls back to `2025-06-18`.
 | `list_jobs` | no | `state`, `limit` | `saberops.jobs.service.list_jobs` |
 | `cancel_job` | yes | `job_id`, `reason` | `saberops.jobs.service.cancel_job` |
 | `capacity` | no | — | `saberops.jobs.service.capacity` |
-| `submit_wave` | yes | `wave` | `saberops.wave_models` + `saberops.wave_admission` structural checks |
-| `wave_status` | no | `wave` or `wave_id` | `saberops.wave_models` + `saberops.wave_executor` projection |
 | `read_evidence` | no | `path` | guarded evidence reader |
 | `list_questions` | no | `status`, `run_id` | `saberops.questions.OwnerQuestionQueue.questions` |
 | `answer_question` | yes | `question_id_or_key`, `answer_text`, `authority` | `saberops.questions.OwnerQuestionQueue.answer` |
@@ -65,14 +63,10 @@ served, and an unknown requested revision falls back to `2025-06-18`.
 inside `requirements` (ADR-0001 invariant 3), and the tool schema sets
 `additionalProperties: false`, so an unknown field is never silently ignored.
 
-`submit_wave` validates the wave description and refuses overlapping lane
-scopes before recording anything (ADR-0004 invariant 2). Live route-posture and
-Git-ancestry admission need the repository and the current posture snapshot,
-which a pure wave description does not carry, so that part of admission stays
-with the engine; the tool records the validated submission in the event ledger.
-Nothing is spawned and no ref moves. `wave_status` projects the wave state,
-lane states, slot occupancy and barrier conditions (`merge_order`, `g3_budget`,
-`fix_round_budget`) from `saberops.wave_executor` / `saberops.wave_models`.
+For parallel work, submit one `submit_job` per independent task, with a
+distinct `idempotency_key` and non-overlapping scope. Until E6 lands, if an
+accepted sibling makes another job stale, resubmit the stale-base sibling from
+the current base with a fresh `idempotency_key`.
 
 `answer_question` accepts only `authority: "ORCHESTRATOR"`. Owner authority is
 not exercisable over MCP: `authority: "OWNER"` is refused with `-32010`, and a
@@ -128,9 +122,9 @@ exclusive `flock` during each read-modify-write.
 * The first client to acquire becomes the writer; the lease is acquired during
   `initialize` and released at EOF.
 * A second live client (a different, live `pid` holds the record) is read-only:
-  calls to `submit_job`, `cancel_job`, `submit_wave`, `answer_question` and
+  calls to `submit_job`, `cancel_job`, `answer_question` and
   `propose_config_change` are refused with JSON-RPC error `-32020`. Its read
-  tools (`get_job`, `list_jobs`, `capacity`, `wave_status`, `read_evidence`,
+  tools (`get_job`, `list_jobs`, `capacity`, `read_evidence`,
   `list_questions`, `list_proposals`) keep working.
 * **Stale self-healing:** a record whose `pid` is dead is stale and is stolen by
   the next client (`os.kill(pid, 0)` is the liveness probe), so a crashed client
@@ -226,7 +220,7 @@ can always tell SaberOps apart from the agent's own words.
 
 ## The built-in guide
 
-How to plan and submit work (when to use a job or a wave, writing acceptance
+How to plan and submit work (submitting independent jobs, writing acceptance
 criteria, what stays with the owner) is delivered three ways so any client sees
 it: the `initialize` instructions, the `saberops-guide` prompt and the
 `saberops://guide` resource; `saberops_on` also returns it.
