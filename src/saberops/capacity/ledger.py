@@ -679,11 +679,12 @@ def _default_window_kinds() -> dict[tuple[str, str], str]:
     ``window_kinds`` or isolate ``XDG_*``. Missing windows are UNKNOWN.
     """
     try:
+        from saberops.control_plane.plans import effective_pool_plans
         from saberops.control_plane.policy import load_control_plane_policy
 
         policy = load_control_plane_policy()
         kinds: dict[tuple[str, str], str] = {}
-        for pool_id, plan in policy.plans.pool_plans.items():
+        for pool_id, plan in effective_pool_plans(policy).items():
             for window in plan.windows:
                 kinds[(pool_id, window.id)] = str(window.kind or "UNKNOWN").upper()
         return kinds
@@ -828,18 +829,23 @@ def estimate(
 def snapshot(db: Database, now: datetime) -> list[LedgerEstimate]:
     """Estimate every key with an observation, reservation or exclusion."""
     moment = _utcnow(now)
-    keys: set[tuple[str, str]] = set()
+    obs_latest: dict[tuple[str, str], datetime | None] = {}
+    res_keys: set[tuple[str, str]] = set()
+    exc_keys: set[tuple[str, str]] = set()
     try:
         with _read_connection(db) as conn:
             for row in conn.execute(
-                "SELECT DISTINCT pool_id, window_id FROM capacity_observations"
+                "SELECT pool_id, window_id, MAX(observed_at) AS max_obs"
+                " FROM capacity_observations GROUP BY pool_id, window_id"
             ).fetchall():
-                keys.add((str(row["pool_id"]), str(row["window_id"])))
+                obs_latest[(str(row["pool_id"]), str(row["window_id"]))] = parse_iso(
+                    str(row["max_obs"])
+                )
             for row in conn.execute(
                 "SELECT DISTINCT pool_id, window_id FROM capacity_reservations"
                 " WHERE state IN ('RESERVED', 'SETTLED')"
             ).fetchall():
-                keys.add((str(row["pool_id"]), str(row["window_id"])))
+                res_keys.add((str(row["pool_id"]), str(row["window_id"])))
     except sqlite3.OperationalError:
         return []
     try:
@@ -852,9 +858,23 @@ def snapshot(db: Database, now: datetime) -> list[LedgerEstimate]:
                     if isinstance(window_raw, str) and window_raw
                     else "ALL"
                 )
-                keys.add((pool_raw, window_key))
+                exc_keys.add((pool_raw, window_key))
     except Exception:
         pass
+    specific_pools: dict[str, datetime | None] = {}
+    for (pid, wid), ts in obs_latest.items():
+        if wid != "ALL":
+            prev = specific_pools.get(pid)
+            if prev is None or (ts is not None and ts > prev):
+                specific_pools[pid] = ts
+    keys: set[tuple[str, str]] = set(res_keys) | set(exc_keys)
+    for key, ts in obs_latest.items():
+        pid, wid = key
+        if wid == "ALL" and pid in specific_pools and key not in keys:
+            spec_ts = specific_pools[pid]
+            if ts is None or spec_ts is None or ts <= spec_ts:
+                continue
+        keys.add(key)
     out = [estimate(db, pool, window, now=moment) for pool, window in sorted(keys)]
     return out
 

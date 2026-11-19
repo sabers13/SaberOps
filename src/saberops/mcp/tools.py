@@ -29,7 +29,7 @@ this client is not the writer.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -473,15 +473,16 @@ def _cancel_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[st
 
 
 def _capacity(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
-    from saberops.jobs.service import capacity
+    from saberops.jobs.service import CapacityView, capacity, serialize_capacity_view
 
     db = context.database(read_only=True)
     if db is None:
+        empty_view = CapacityView(generated_at=_now_iso(), ledger_wired=False, pools=())
         return {
             "v": SNAPSHOT_SCHEMA_VERSION,
-            "capacity": {"generated_at": _now_iso(), "ledger_wired": False, "pools": []},
+            "capacity": serialize_capacity_view(empty_view),
         }
-    return {"v": SNAPSHOT_SCHEMA_VERSION, "capacity": asdict(capacity(db))}
+    return {"v": SNAPSHOT_SCHEMA_VERSION, "capacity": serialize_capacity_view(capacity(db))}
 
 
 def _lane_overlap_reasons(wave: Any) -> list[str]:

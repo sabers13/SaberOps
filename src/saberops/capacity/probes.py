@@ -244,10 +244,14 @@ def pools_for_probe(
     for pool_id, policy in pool_policies.items():
         members = getattr(policy, "members", ()) or ()
         for member in members:
-            sel = member.get("route") if isinstance(member, dict) else member
-            if not isinstance(sel, str):
+            raw_sel = (
+                member.get("route")
+                if isinstance(member, dict)
+                else getattr(member, "route", member)
+            )
+            if not isinstance(raw_sel, str):
                 continue
-            text = sel.strip().lower()
+            text = raw_sel.strip().lower()
             prov = provider.lower()
             if harness == "opencode-go":
                 # Go usage covers Go routes, not every OpenCode upstream.
@@ -367,7 +371,17 @@ def handle_probe_result(
             min_reset_iso = min_reset.isoformat() if min_reset else None
             for pool_id in pools:
                 try:
-                    db.set_quota(provider, pool_id, min_remaining, min_reset_iso, source="PROBE")
+                    db.set_quota(
+                        provider, pool_id, min_remaining, min_reset_iso,
+                        source="PROBE", now=moment,
+                    )
+                except TypeError:
+                    try:
+                        db.set_quota(
+                            provider, pool_id, min_remaining, min_reset_iso, source="PROBE"
+                        )
+                    except Exception:
+                        pass
                 except Exception:
                     pass
         except Exception:

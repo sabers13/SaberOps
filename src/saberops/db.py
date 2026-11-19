@@ -4111,6 +4111,7 @@ class Database:
         reset_at: str | None = None,
         *,
         source: str = "OWNER",
+        now: datetime | None = None,
     ) -> QuotaState:
         """Upsert quota state for a provider pool.
 
@@ -4129,6 +4130,7 @@ class Database:
                 remaining_percent=remaining_percent,
                 reset_at=reset_at,
                 source=source,
+                now=now,
             )
         from saberops.capacity.ledger import record_owner_quota
 
@@ -4139,6 +4141,7 @@ class Database:
             remaining_percent,
             reset_at,
             source=source,
+            now=now,
         )
 
     def enable_quota(self, provider: str, pool: str) -> QuotaState:

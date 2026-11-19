@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -111,6 +112,42 @@ def _legacy_exclusion_from_row(row: Any, now: datetime) -> dict[str, object] | N
     }
 
 
+def _read_latest_observations(db: Database) -> dict[tuple[str, str], dict[str, Any]]:
+    """Read the newest capacity_observations row per ``(pool_id, window_id)`` read-only."""
+    owner = getattr(db, "owner_db", db)
+    out: dict[tuple[str, str], dict[str, Any]] = {}
+    try:
+        with owner._get_connection() as conn:
+            present = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table'"
+                " AND name = 'capacity_observations'"
+            ).fetchone()
+            if present is None:
+                return out
+            rows = conn.execute(
+                "SELECT pool_id, window_id, remaining_pct, reset_at, observed_at,"
+                " source, legacy_provider, legacy_pool"
+                " FROM capacity_observations"
+                " ORDER BY observed_at DESC, id DESC"
+            ).fetchall()
+            for row in rows:
+                key = (str(row["pool_id"]), str(row["window_id"]))
+                if key not in out:
+                    out[key] = dict(row)
+    except (sqlite3.OperationalError, sqlite3.DatabaseError, AttributeError):
+        return {}
+    return out
+
+
+_HARNESS_TO_PROVIDER: dict[str, str] = {
+    "codex": "codex",
+    "claude": "anthropic",
+    "anthropic": "anthropic",
+    "opencode": "opencode",
+    "opencode-go": "opencode",
+}
+
+
 def effective_quota_states(
     db: Database,
     *,
@@ -123,7 +160,9 @@ def effective_quota_states(
 
     1. runs due probes (bounded to <= 45s total; only harnesses with a
        PROBE_DUE exclusion);
-    2. reads ``db.list_quota()`` and sets ``freshness`` per row; a
+    2. builds per-window ``QuotaState`` views from ``capacity_observations``
+       (preserving real ``window_id`` and ``source`` without collapsing windows),
+       falling back to ``db.list_quota()`` for uncovered legacy rows; a
        BLOCKED/DEMOTED row whose tz-aware ``reset_at`` is in the past
        comes back as NORMAL with STALE;
     3. resolves the no-probe path in the seam: a PROBE_DUE exclusion no
@@ -137,10 +176,11 @@ def effective_quota_states(
     ``pool_policies`` defaults to the control-plane policy (best effort);
     tests pass it explicitly.
     """
-    from saberops.models import RoutingState
+    from saberops.models import QuotaState, RoutingState
 
     moment = _utcnow(now)
-    ensure_tables(db)
+    if not getattr(db, "_read_only", False):
+        ensure_tables(db)
     if run_probes:
         try:
             from saberops.capacity import probes as _probes
@@ -159,16 +199,92 @@ def effective_quota_states(
         )
     except Exception:
         policies = {}
-    rows = db.list_quota()
+
+    latest_obs = _read_latest_observations(db)
+    by_pool: dict[str, dict[str, dict[str, Any]]] = {}
+    for (pool_id, win_id), obs_row in latest_obs.items():
+        by_pool.setdefault(pool_id, {})[win_id] = obs_row
+
     out: list[Any] = []
+    covered_keys: set[tuple[str, str]] = set()
+    pools_with_specific: dict[str, datetime | None] = {}
+
+    for pool_id in sorted(by_pool):
+        win_map = by_pool[pool_id]
+        specific = [(w, r) for w, r in sorted(win_map.items()) if w != "ALL"]
+        newest_specific: datetime | None = None
+        if specific:
+            parsed_times = [
+                ts
+                for _, r in specific
+                if (ts := parse_iso(str(r.get("observed_at") or ""))) is not None
+            ]
+            newest_specific = max(parsed_times) if parsed_times else None
+            pools_with_specific[pool_id] = newest_specific
+        selected: list[tuple[str, dict[str, Any]]] = list(specific)
+        all_row = win_map.get("ALL")
+        if all_row is not None:
+            if not specific:
+                selected.append(("ALL", all_row))
+            else:
+                all_ts = parse_iso(str(all_row.get("observed_at") or ""))
+                if all_ts is not None and newest_specific is not None and all_ts > newest_specific:
+                    selected.append(("ALL", all_row))
+        for win_id, obs_row in selected:
+            obs_source = str(obs_row["source"]) if obs_row.get("source") else None
+            raw_prov = str(obs_row.get("legacy_provider") or "").strip().lower()
+            provider = _HARNESS_TO_PROVIDER.get(raw_prov, raw_prov) or pool_id
+            legacy_pool = str(obs_row.get("legacy_pool") or "").strip().lower()
+            pool_label = legacy_pool if (win_id == "ALL" and legacy_pool) else win_id
+            obs_at = str(obs_row.get("observed_at") or "")
+            rem = float(obs_row["remaining_pct"])
+            reset_raw = obs_row.get("reset_at")
+            reset_at = str(reset_raw) if reset_raw else None
+            out.append(
+                QuotaState(
+                    provider=provider,
+                    pool=pool_label,
+                    remaining_percent=rem,
+                    reset_at=reset_at,
+                    routing_state=RoutingState.NORMAL,
+                    updated_at=obs_at,
+                    pool_id=pool_id,
+                    normalized_remaining_pct=rem,
+                    freshness=freshness(obs_at, win_id, obs_source, moment),
+                    source=obs_source,
+                    window_id=win_id,
+                )
+            )
+            covered_keys.add((pool_id, win_id))
+
+    rows = db.list_quota()
     for row in rows:
-        # Freshness per row: window = pool label; source unknown for raw
-        # quota_state rows -> owner rule (max(table, 24h)).
+        r_pool_id, r_win_id = _legacy_pool_and_window(row)
+        r_state = getattr(row, "routing_state", None)
+        if r_state == RoutingState.NORMAL:
+            if (r_pool_id, r_win_id) in covered_keys:
+                continue
+            if r_win_id == "ALL" and r_pool_id in pools_with_specific:
+                row_ts = parse_iso(getattr(row, "updated_at", None))
+                spec_ts = pools_with_specific[r_pool_id]
+                if row_ts is None or spec_ts is None or row_ts <= spec_ts:
+                    continue
+        if not getattr(row, "pool_id", None):
+            try:
+                row.pool_id = r_pool_id
+            except Exception:
+                pass
+        if not getattr(row, "window_id", None):
+            try:
+                row.window_id = r_win_id
+            except Exception:
+                pass
+        row_source = getattr(row, "source", None)
         try:
             row.freshness = freshness(
                 getattr(row, "updated_at", None),
-                getattr(row, "pool", None),
-                None,
+                r_win_id,
+                row_source,
                 moment,
             )
         except Exception:
@@ -226,8 +342,8 @@ def effective_quota_states(
                 available = True
             if not available:
                 # Fail closed: pools without a known policy keep excluding.
-                pool_id = exc.get("pool_id")
-                policy = policies.get(pool_id) if isinstance(pool_id, str) else None
+                exc_pool_id = exc.get("pool_id")
+                policy = policies.get(exc_pool_id) if isinstance(exc_pool_id, str) else None
                 clearable = policy is not None and not bool(
                     getattr(policy, "overage_possible", False)
                 )

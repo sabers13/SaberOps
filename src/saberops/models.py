@@ -1024,6 +1024,9 @@ class QuotaState:
     exclusion_until: str | None = None
     exclusion_confidence: str | None = None
     exclusion_model_scope: str | None = None
+    # C8 additive read metadata: real source and window id when known.
+    source: str | None = None
+    window_id: str | None = None
 
 
 class ReviewVerdict(StrEnum):

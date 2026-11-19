@@ -57,6 +57,7 @@ __all__ = [
     "SubmitResult",
     "cancel_job",
     "capacity",
+    "serialize_capacity_view",
     "get_job",
     "job_dispatch_spec",
     "list_jobs",
@@ -445,6 +446,78 @@ def capacity(db: Any, now: datetime | None = None) -> CapacityView:
         )
     )
     return CapacityView(generated_at=moment.isoformat(), ledger_wired=True, pools=pools)
+
+
+def serialize_capacity_view(
+    view: CapacityView,
+    *,
+    policy: Any | None = None,
+) -> dict[str, Any]:
+    """Serialize a CapacityView with source, age, and explicit ``'unknown'`` entries."""
+    from saberops.capacity.exclusions import parse_iso
+    from saberops.capacity.freshness import age_seconds, format_age
+    from saberops.control_plane.plans import effective_pool_plans
+    from saberops.control_plane.policy import load_control_plane_policy
+
+    moment = parse_iso(view.generated_at) or datetime.now(UTC)
+    entries: list[dict[str, Any]] = []
+    seen_windows: set[tuple[str, str]] = set()
+    pools_with_all: set[str] = set()
+    for p in view.pools:
+        seen_windows.add((p.pool_id, p.window_id))
+        if p.window_id == "ALL":
+            pools_with_all.add(p.pool_id)
+        entries.append(
+            {
+                "pool_id": p.pool_id,
+                "window_id": p.window_id,
+                "remaining_est": p.remaining_est,
+                "remaining": (
+                    f"{p.remaining_est:.1f}%"
+                    if p.remaining_est is not None
+                    else "unknown"
+                ),
+                "uncertainty": p.uncertainty,
+                "observed_at": p.observed_at,
+                "source": p.source or "unknown",
+                "age": format_age(p.observed_at, moment),
+                "age_seconds": age_seconds(p.observed_at, moment),
+                "stale": p.stale,
+                "excluded_until": p.excluded_until,
+            }
+        )
+    try:
+        eff_policy = policy if policy is not None else load_control_plane_policy()
+        pool_plans = effective_pool_plans(eff_policy)
+    except Exception:
+        pool_plans = {}
+    for pool_id, plan in sorted(pool_plans.items()):
+        if pool_id in pools_with_all:
+            continue
+        for win in plan.windows:
+            if (pool_id, win.id) in seen_windows:
+                continue
+            entries.append(
+                {
+                    "pool_id": pool_id,
+                    "window_id": win.id,
+                    "remaining_est": None,
+                    "remaining": "unknown",
+                    "uncertainty": 0.0,
+                    "observed_at": None,
+                    "source": "unknown",
+                    "age": "unknown",
+                    "age_seconds": None,
+                    "stale": True,
+                    "excluded_until": None,
+                }
+            )
+    entries.sort(key=lambda item: (str(item["pool_id"]), str(item["window_id"])))
+    return {
+        "generated_at": view.generated_at,
+        "ledger_wired": view.ledger_wired,
+        "pools": entries,
+    }
 
 
 def mark_dispatched(

@@ -29,13 +29,38 @@ def _parse_observed(value: str | None) -> datetime | None:
 
 def _is_owner_source(source: str | None) -> bool:
     if not source:
-        return True
+        return False
     low = source.strip().lower()
     if not low:
-        return True
-    if "probe" in low or "exhaustion" in low or "plan-exhaustion" in low:
         return False
-    return True
+    return low in {"owner", "manual"} or low.startswith("owner:")
+
+
+def age_seconds(observed_at: str | None, now: datetime | None = None) -> int | None:
+    """Return non-negative observation age in seconds, or None when unavailable."""
+    observed = _parse_observed(observed_at)
+    if observed is None:
+        return None
+    moment = now.astimezone(UTC) if now is not None and now.tzinfo else (
+        now.replace(tzinfo=UTC) if now is not None else datetime.now(UTC)
+    )
+    return max(0, int((moment - observed).total_seconds()))
+
+
+def format_age(observed_at: str | None, now: datetime | None = None) -> str:
+    """Format observation age for human and JSON displays, or ``'unknown'``."""
+    secs = age_seconds(observed_at, now)
+    if secs is None:
+        return "unknown"
+    if secs < 60:
+        return f"{secs}s"
+    if secs < 3600:
+        return f"{secs // 60}m"
+    if secs < 86400:
+        hours, rem_min = divmod(secs // 60, 60)
+        return f"{hours}h{rem_min}m" if rem_min else f"{hours}h"
+    days, rem_hours = divmod(secs // 3600, 24)
+    return f"{days}d{rem_hours}h" if rem_hours else f"{days}d"
 
 
 def max_age_minutes(window_id: str | None, source: str | None) -> int:
@@ -71,6 +96,8 @@ __all__ = [
     "WINDOW_MAX_AGE_MIN",
     "DEFAULT_MAX_AGE_MIN",
     "OWNER_MAX_AGE_MIN",
+    "age_seconds",
+    "format_age",
     "max_age_minutes",
     "freshness",
 ]

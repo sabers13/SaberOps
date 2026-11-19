@@ -5473,10 +5473,9 @@ def handle_scheduler_run(args: argparse.Namespace) -> int:
 
 def handle_capacity_show(args: argparse.Namespace) -> int:
     """Handle `orch capacity show [--json]` (read-only)."""
-    from dataclasses import asdict
-
     from saberops.db import Database as _Database
     from saberops.jobs.service import capacity as _capacity
+    from saberops.jobs.service import serialize_capacity_view as _serialize_capacity
 
     db_path = getattr(args, "db", None)
     # Open read-only to honour D5 lifecycle rule: create nothing, write nothing on read
@@ -5484,25 +5483,33 @@ def handle_capacity_show(args: argparse.Namespace) -> int:
 
     try:
         cap_view = _capacity(db)
+        payload = _serialize_capacity(cap_view)
         if getattr(args, "json", False):
-            print(json.dumps(asdict(cap_view), indent=2))
+            print(json.dumps(payload, indent=2))
             return 0
-        print(f"Generated at : {cap_view.generated_at}")
-        print(f"Ledger wired : {cap_view.ledger_wired}")
+        print(f"Generated at : {payload['generated_at']}")
+        print(f"Ledger wired : {payload['ledger_wired']}")
         if not cap_view.pools:
             print("No capacity pools recorded.")
+        pools_data = payload["pools"]
+        if not pools_data:
             return 0
-        header = f"{'Pool':<18} {'Window':<8} {'Remaining':<12} {'Uncertainty':<12} {'Source':<10} {'Stale':<6} {'Excluded Until'}"
+        header = (
+            f"{'Pool':<20} {'Window':<11} {'Remaining':<10} {'Uncertainty':<12}"
+            f" {'Source':<11} {'Age':<9} {'Stale':<6} {'Excluded Until'}"
+        )
         print(header)
         print("-" * len(header))
-        for p in cap_view.pools:
-            rem = f"{p.remaining_est:.1f}%" if p.remaining_est is not None else "None"
-            unc = f"±{p.uncertainty:.1f}%" if p.uncertainty is not None else "0.0%"
-            src = p.source or "-"
-            stl = "yes" if p.stale else "no"
-            exc = p.excluded_until or "-"
+        for p in pools_data:
+            rem = str(p["remaining"])
+            unc = f"±{float(p['uncertainty']):.1f}%" if p.get("uncertainty") is not None else "0.0%"
+            src = str(p["source"])
+            age = str(p["age"])
+            stl = "yes" if p["stale"] else "no"
+            exc = str(p["excluded_until"] or "-")
             print(
-                f"{p.pool_id:<18} {p.window_id:<8} {rem:<12} {unc:<12} {src:<10} {stl:<6} {exc}"
+                f"{p['pool_id']:<20} {p['window_id']:<11} {rem:<10} {unc:<12}"
+                f" {src:<11} {age:<9} {stl:<6} {exc}"
             )
         return 0
     except Exception as exc:
@@ -5764,25 +5771,67 @@ def handle_quota_set(args: argparse.Namespace) -> int:
 
 def handle_quota_list(args: argparse.Namespace) -> int:
     """Handle `orch quota list` command."""
-    service = OrchestratorService(db=Database(args.db))
-    states = service.list_quota()
+    from datetime import UTC, datetime
+
+    from saberops.capacity.freshness import format_age
+    from saberops.capacity.snapshot import effective_quota_states
+    from saberops.control_plane.plans import effective_pool_plans
+    from saberops.control_plane.policy import load_control_plane_policy
+
+    moment = datetime.now(UTC)
+    db = Database(args.db)
+    states = effective_quota_states(db, now=moment, run_probes=False)
     if not states:
         print(
             "No quota state recorded. Providers without quota evidence are refused "
             "(QUOTA_EVIDENCE_REQUIRED) until a safe probe succeeds or you run "
             "`orch quota set <provider> <remaining_percent>`."
         )
-        return 0
 
-    header = f"{'PROVIDER':<12} {'POOL':<12} {'REMAINING':<11} {'RESET':<26} {'ROUTING STATE'}"
+    header = (
+        f"{'PROVIDER':<12} {'POOL':<20} {'WINDOW':<11} {'REMAINING':<10}"
+        f" {'SOURCE':<10} {'AGE':<9} {'FRESHNESS':<10} {'RESET':<26} {'ROUTING STATE'}"
+    )
     print(header)
     print("─" * len(header))
+
+    seen_windows: set[tuple[str, str]] = set()
+    pools_with_all: set[str] = set()
     for state in states:
+        pool_key = str(getattr(state, "pool_id", None) or state.pool or "")
+        win_key = str(getattr(state, "window_id", None) or state.pool or "ALL")
+        seen_windows.add((pool_key, win_key))
+        if win_key == "ALL":
+            pools_with_all.add(pool_key)
         reset_str = state.reset_at or "N/A"
+        src = str(getattr(state, "source", None) or "unknown")
+        age = format_age(getattr(state, "updated_at", None), moment)
+        fresh = str(getattr(state, "freshness", None) or "unknown")
+        rem_str = f"{state.remaining_percent:g}%"
         print(
-            f"{state.provider:<12} {state.pool:<12} {state.remaining_percent:<11g} "
-            f"{reset_str:<26} {state.routing_state.value}"
+            f"{state.provider:<12} {pool_key:<20} {win_key:<11} {rem_str:<10}"
+            f" {src:<10} {age:<9} {fresh:<10} {reset_str:<26} {state.routing_state.value}"
         )
+
+    try:
+        pool_plans = effective_pool_plans(load_control_plane_policy())
+    except Exception:
+        pool_plans = {}
+    for pool_id, plan in sorted(pool_plans.items()):
+        if pool_id in pools_with_all:
+            continue
+        prov = (
+            plan.members[0].route.split("/")[0]
+            if plan.members and plan.members[0].route
+            else pool_id
+        )
+        for win in plan.windows:
+            if (pool_id, win.id) in seen_windows:
+                continue
+            print(
+                f"{prov:<12} {pool_id:<20} {win.id:<11} {'unknown':<10}"
+                f" {'unknown':<10} {'unknown':<9} {'unknown':<10} {'N/A':<26} QUOTA_EVIDENCE_REQUIRED"
+            )
     return 0
 
 

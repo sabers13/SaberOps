@@ -22,6 +22,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from saberops.capacity.cost_model import CostState, SizeBucket, cost_estimate
 from saberops.capacity.exclusions import model_scope_matches, parse_iso
 from saberops.capacity.ledger import PoolDraw
+from saberops.capacity.snapshot import _legacy_pool_and_window
 from saberops.control_plane import (
     GOVERNED_INSTRUCTIONS_UNSUPPORTED,
     PROVIDER_DISABLED,
@@ -39,6 +40,7 @@ from saberops.control_plane.capabilities import (
 )
 from saberops.control_plane.plans import (
     Window,
+    effective_pool_plans,
     effective_quota_pools,
 )
 from saberops.control_plane.policy import (
@@ -634,6 +636,7 @@ def admit(
 
     # 8. Quota pools & windows
     pool_policies = effective_quota_pools(effective_policy, activate_overage=activate_overage)
+    pool_plans = effective_pool_plans(effective_policy)
     # ADR-0002 D1/D7 QuotaPool binding contract: a bound route draws its
     # ``binding_pool_id`` plus every pool whose ``members`` match the candidate
     # (declared shared scarcity), and NEVER the synthesized provider-wide
@@ -719,7 +722,7 @@ def admit(
                 pool_id=pool_id,
             )
 
-        plan = effective_policy.plans.pool_plans.get(pool_id)
+        plan = pool_plans.get(pool_id)
         if plan is not None and plan.max_concurrent is not None and running_counts is not None:
             current_count = running_counts.get(pool_id, 0)
             if current_count >= plan.max_concurrent:
@@ -759,7 +762,12 @@ def admit(
                     and s.provider.lower() == pool_id
                 )
                 if s_pool == pool_id or matches_provider_pool:
-                    s_win = getattr(s, "window_id", None) or getattr(s, "window", None) or "5h"
+                    s_win_raw = getattr(s, "window_id", None) or getattr(s, "window", None)
+                    if isinstance(s_win_raw, str) and s_win_raw.strip():
+                        clean_w = s_win_raw.strip()
+                        s_win = "ALL" if clean_w.upper() == "ALL" else clean_w.lower()
+                    else:
+                        _, s_win = _legacy_pool_and_window(s)
                     if s_win == win.id or s_win == "ALL":
                         matched_state = s
                         if s_win == win.id:
@@ -876,11 +884,7 @@ def admit(
     all_draws: list[PoolDraw] = []
     for pid in drawn_pools:
         mult_val = 1.0
-        pp_plan = (
-            effective_policy.plans.pool_plans.get(pid)
-            if effective_policy and effective_policy.plans
-            else None
-        )
+        pp_plan = pool_plans.get(pid)
         if pp_plan and pp_plan.members:
             for member in pp_plan.members:
                 if _member_matches(member.route, candidate):

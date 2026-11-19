@@ -97,6 +97,7 @@ def test_pinned_run_auto_probes_safe_reader_and_proceeds_on_fresh_store(
         {
             "codex": lambda now: [
                 ("5h", 85.0, now + timedelta(hours=3), "EXACT"),
+                ("weekly", 90.0, now + timedelta(days=3), "EXACT"),
             ]
         },
         raising=False,

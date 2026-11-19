@@ -622,6 +622,17 @@ def load_effective_plan_set() -> tuple[PlanSet, dict[str, Any]]:
     return plans, sources
 
 
+def effective_pool_plans(
+    policy: ControlPlanePolicy | None = None,
+) -> dict[str, PoolPlan]:
+    """Resolve per-pool plan definitions (packaged defaults overlaid by owner)."""
+    plans = validate_plan_sections(load_packaged_plans_raw(), "packaged plans", packaged=True)
+    pool_plans = dict(plans.pool_plans)
+    if policy is not None and policy.plans.pool_plans:
+        pool_plans.update(policy.plans.pool_plans)
+    return pool_plans
+
+
 def effective_quota_pools(
     policy: ControlPlanePolicy,
     *,

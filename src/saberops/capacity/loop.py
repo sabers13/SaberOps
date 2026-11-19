@@ -44,6 +44,7 @@ from saberops.capacity.store import (
 from saberops.capacity.store import (
     owner_connection,
 )
+from saberops.control_plane.plans import effective_pool_plans
 from saberops.control_plane.policy import (
     ControlPlanePolicy,
     effective_global_slot_limit,
@@ -717,11 +718,7 @@ def scheduler_tick(
     probed_count = 0
     waited_count = 0
 
-    pool_policies = (
-        effective_pol.plans.pool_plans
-        if effective_pol and effective_pol.plans
-        else {}
-    )
+    pool_policies = effective_pool_plans(effective_pol)
 
     # 4. Execute decisions
     for dec in decisions:
