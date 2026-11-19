@@ -607,3 +607,56 @@ def test_setup_preset_preserves_existing_gate(
     set_project_workflow(repo, preset="max")
     assert load_project_settings(repo).gate_command == "make verify"
     assert load_project_settings(repo).review_mode == "max"
+
+
+def test_project_notes_are_project_local_and_replaceable(isolated_xdg: Path) -> None:
+    """Notes live in each project's state dir, outside the reviewed repository."""
+    from saberops.job_evidence import project_notes_path
+    from saberops.project_settings import load_project_notes, set_project_notes
+
+    repo_a = _make_repo(isolated_xdg, "notes-a")
+    repo_b = _make_repo(isolated_xdg, "notes-b")
+    set_project_notes(repo_a, "note for project A")
+    set_project_notes(repo_b, "note for project B")
+
+    assert load_project_notes(repo_a) == "note for project A"
+    assert load_project_notes(repo_b) == "note for project B"
+    path_a = project_notes_path(_state_dir(repo_a))
+    assert path_a.is_file()
+    assert not (repo_a / "project-notes.md").exists()
+
+    set_project_notes(repo_a, "  note for project A v2  ")
+    assert load_project_notes(repo_a) == "note for project A v2"
+    assert load_project_notes(repo_b) == "note for project B"
+
+    set_project_notes(repo_a, None)
+    assert load_project_notes(repo_a) is None
+    assert not path_a.exists()
+    assert load_project_notes(repo_b) == "note for project B"
+
+
+def test_project_notes_cli_round_trip(
+    isolated_xdg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`orch project notes set|show|clear` edits the file handed to workers."""
+    from saberops.cli import main as cli_main
+    from saberops.project_settings import load_project_notes
+
+    repo = _make_repo(isolated_xdg, "notes-cli")
+    assert cli_main(["project", "notes", "set", "--repo", str(repo), "cli note"]) == 0
+    assert load_project_notes(repo) == "cli note"
+
+    assert cli_main(["project", "notes", "show", "--repo", str(repo)]) == 0
+    shown = capsys.readouterr().out
+    assert "cli note" in shown
+
+    note_file = isolated_xdg / "note.txt"
+    note_file.write_text("note from file\n", encoding="utf-8")
+    assert (
+        cli_main(["project", "notes", "set", "--repo", str(repo), "--file", str(note_file)])
+        == 0
+    )
+    assert load_project_notes(repo) == "note from file"
+
+    assert cli_main(["project", "notes", "clear", "--repo", str(repo)]) == 0
+    assert load_project_notes(repo) is None

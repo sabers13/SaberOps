@@ -355,6 +355,31 @@ key always creates a new job.
   QUEUED cancels at once; RUNNING first cancels the live run through
   the supervisor and only then marks the job CANCELLED.
 
+## Per-job worker evidence and project notes
+
+Each run keeps a plain folder beside its store:
+`<state dir>/jobs/<run_id>/` holds `request.md`, each attempt's exact
+`attempt-N.prompt.md`, the project note that attempt received
+(`attempt-N.note.md`), its `attempt-N.result.md`, and an `attempt-N.json`
+manifest. The manifest carries the note's SHA-256 digest, the dispatch
+evidence id, and the dispatch report's requested and provider-reported model
+fields. A provider that supplied no identity reads **`unreported`**; the
+requested model is never copied into the reported field.
+
+Each project also has one short note handed to every worker attempt in a
+`[PROJECT NOTES]` section:
+
+```bash
+orch project notes set --repo ~/projects/foo --file notes.md
+orch project notes show --repo ~/projects/foo
+orch project notes clear --repo ~/projects/foo
+```
+
+The note lives in the project state directory, outside the repository, so it
+never enters a reviewed diff. Editing it changes the next attempt only; earlier
+attempts keep their own snapshot and digest. See
+[ADR-0021](decisions/0021-worker-evidence-and-project-notes.md).
+
 ## Phase 1 benchmark (`scripts/benchmark.py`)
 
 Ten fixed small tasks measure the full job, scheduler, worker, gate, review and

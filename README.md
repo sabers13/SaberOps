@@ -343,7 +343,11 @@ scripts/               gate wrappers and tooling
 
 - [v0.5.0 release notes](docs/releases/0.5.0.md) · [v0.4.0](docs/releases/0.4.0.md)
 - [ADR-0005: MCP-first engine, Phase 2 board](docs/decisions/0005-mcp-first-engine-and-phase-2-board.md) ·
-  [ADR-0001: engine direction](docs/decisions/0001-saberops-engine-mcp-first.md) (superseded in part)
+  [ADR-0001: engine direction](docs/decisions/0001-saberops-engine-mcp-first.md) (superseded in part) ·
+  [ADR-0002: routing, admission and quota](docs/decisions/0002-routing-admission-and-quota.md) ·
+  [ADR-0003: gate, capacity and storage](docs/decisions/0003-gate-capacity-and-storage.md) ·
+  [ADR-0004: MCP contract and authority](docs/decisions/0004-mcp-authority-and-evidence.md) ·
+  [ADR-0021: per-job evidence and project notes](docs/decisions/0021-worker-evidence-and-project-notes.md)
 - Operating: [operations](docs/operations.md) · [config](docs/config.md) ·
   [storage lifecycle](docs/storage-lifecycle.md) · [security](docs/security.md) ·
   [vendor CLI live check](docs/vendor-cli-live-check.md)

@@ -2300,6 +2300,43 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_repo_arg(project_clear_branch)
 
+    project_notes = project_sub.add_parser(
+        "notes",
+        help="Show, set or clear the per-project note handed to every worker attempt.",
+    )
+    project_notes_sub = project_notes.add_subparsers(
+        dest="project_notes_command", required=True
+    )
+    project_notes_show = project_notes_sub.add_parser(
+        "show",
+        help="Show the note that the next worker attempt will receive.",
+    )
+    _add_repo_arg(project_notes_show)
+    _add_json_arg(project_notes_show)
+    project_notes_set = project_notes_sub.add_parser(
+        "set",
+        help="Replace the note from a file or inline text.",
+    )
+    _add_repo_arg(project_notes_set)
+    project_notes_set.add_argument(
+        "text",
+        nargs="?",
+        default=None,
+        help="Inline note text (omit when using --file).",
+    )
+    project_notes_set.add_argument(
+        "--file",
+        dest="notes_file",
+        type=str,
+        default=None,
+        help="Read the note from this file ('-' reads stdin).",
+    )
+    project_notes_clear = project_notes_sub.add_parser(
+        "clear",
+        help="Remove the project note.",
+    )
+    _add_repo_arg(project_notes_clear)
+
     project_set_workflow = project_sub.add_parser(
         "set-workflow",
         help="Persist a workflow preset (quick|balanced|thorough|max) or custom settings.",
@@ -4880,6 +4917,80 @@ def handle_project_clear_target_branch(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_project_notes_show(args: argparse.Namespace) -> int:
+    """Handle ``orch project notes show``."""
+    from saberops.job_evidence import project_notes_path
+    from saberops.project_settings import (
+        ProjectSettingsError,
+        load_project_notes,
+        project_state_dir,
+    )
+
+    try:
+        repo = _resolve_repo_for_project_settings(args)
+    except SystemExit:
+        return 2
+    try:
+        text = load_project_notes(repo)
+        path = project_notes_path(project_state_dir(repo))
+    except (OSError, ProjectSettingsError) as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps({"path": str(path), "note": text}, indent=2, sort_keys=True))
+        return 0
+    print(f"Notes file: {path}")
+    print("")
+    print(text if text is not None else "(no project note)")
+    return 0
+
+
+def handle_project_notes_set(args: argparse.Namespace) -> int:
+    """Handle ``orch project notes set`` from inline text or a file."""
+    from saberops.project_settings import ProjectSettingsError, set_project_notes
+
+    try:
+        repo = _resolve_repo_for_project_settings(args)
+    except SystemExit:
+        return 2
+    inline = getattr(args, "text", None)
+    source = getattr(args, "notes_file", None)
+    if source is not None and inline is not None:
+        print("[!] pass either inline text or --file, not both", file=sys.stderr)
+        return 2
+    if source is None and inline is None:
+        print("[!] provide inline text or --file", file=sys.stderr)
+        return 2
+    try:
+        if source is not None:
+            text = sys.stdin.read() if source == "-" else Path(source).read_text(encoding="utf-8")
+        else:
+            text = str(inline)
+        path = set_project_notes(repo, text)
+    except (OSError, ProjectSettingsError) as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    print(f"Project notes saved at {path}")
+    return 0
+
+
+def handle_project_notes_clear(args: argparse.Namespace) -> int:
+    """Handle ``orch project notes clear``."""
+    from saberops.project_settings import ProjectSettingsError, set_project_notes
+
+    try:
+        repo = _resolve_repo_for_project_settings(args)
+    except SystemExit:
+        return 2
+    try:
+        path = set_project_notes(repo, None)
+    except (OSError, ProjectSettingsError) as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    print(f"Project notes cleared at {path}")
+    return 0
+
+
 def handle_authority_show(args: argparse.Namespace) -> int:
     """Handle `orch authority show`."""
     try:
@@ -6907,6 +7018,13 @@ def _dispatch(args: argparse.Namespace) -> int:
             return handle_project_set_target_branch(args)
         elif args.project_command == "clear-target-branch":
             return handle_project_clear_target_branch(args)
+        elif args.project_command == "notes":
+            if args.project_notes_command == "show":
+                return handle_project_notes_show(args)
+            elif args.project_notes_command == "set":
+                return handle_project_notes_set(args)
+            elif args.project_notes_command == "clear":
+                return handle_project_notes_clear(args)
         elif args.project_command == "set-workflow":
             return handle_project_set_workflow(args)
         elif args.project_command == "list":

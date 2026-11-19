@@ -985,6 +985,7 @@ def render_projection(
     validation_policy_marker: str,
     tool_contract: FrozenToolContract | None = None,
     project_scope_text: str | None = None,
+    project_notes_text: str | None = None,
     run_verification_text: str | None = None,
 ) -> RenderResult:
     """Render a deterministic worker prompt for ``projection``.
@@ -993,7 +994,8 @@ def render_projection(
     invariant contract prefix is byte-identical for identical
     (role, mode, parent_slug, package_id, dispatch_reason) tuples.
     An optional bounded ``[PROJECT SCOPE]`` section is appended exactly
-    once, before the validation policy.
+    once, before the validation policy.  An optional ``[PROJECT NOTES]``
+    section carries the exact per-project note the owner maintains.
     """
     if projection.mode in MODES_WITHOUT_FULL_TASK:
         # Defense in depth: refuse to model-expose the full task in
@@ -1018,6 +1020,10 @@ def render_projection(
     stripped = body.rstrip()
     if project_scope_text is not None and "[PROJECT SCOPE]" not in stripped:
         stripped = stripped + "\n\n" + project_scope_text.rstrip()
+    if project_notes_text is not None:
+        notes = project_notes_text.strip()
+        if notes and "[PROJECT NOTES]" not in stripped:
+            stripped = stripped + "\n\n[PROJECT NOTES]\n" + notes
     if run_verification_text is not None:
         stripped += "\n\n" + run_verification_text.rstrip()
     if validation_policy_marker in stripped:

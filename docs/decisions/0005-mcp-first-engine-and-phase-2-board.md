@@ -149,3 +149,8 @@ owner acceptance, and "LLMs advise; deterministic software decides". See
   skip of the duplicate post-integration gate.
 - [ADR-0011](0011-bounded-automatic-actions.md) — what the engine may do
   without an owner request.
+- [ADR-0002](0002-routing-admission-and-quota.md),
+  [ADR-0003](0003-gate-capacity-and-storage.md) and
+  [ADR-0004](0004-mcp-authority-and-evidence.md) — reconstructed citation
+  indexes for decisions the repository shipped but whose original records were
+  never committed.

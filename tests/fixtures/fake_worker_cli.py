@@ -64,6 +64,60 @@ def _read_control_json(path_str: str | None) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _reported_identity(harness: str) -> tuple[str, str] | None:
+    """Return the provider/model identity the fake CLI should report, if any."""
+    return _identity_from(_read_control_json(_worker_control_path()), harness)
+
+
+def _identity_from(cfg: dict[str, Any], harness: str) -> tuple[str, str] | None:
+    raw_model = cfg.get("report_model")
+    if not (isinstance(raw_model, str) and raw_model.strip()):
+        return None
+    raw_provider = cfg.get("report_provider")
+    provider = (
+        raw_provider.strip()
+        if isinstance(raw_provider, str) and raw_provider.strip()
+        else f"{harness}-fake"
+    )
+    return provider, raw_model.strip()
+
+
+def _control_turn(index: int) -> dict[str, Any]:
+    """Return per-turn control overrides for the long-lived ``serve`` mode.
+
+    ``turns`` is a list applied in order to each prompt the server receives,
+    so one test run can drive several attempts with distinct behaviour even
+    though it shares one server process.
+    """
+    cfg = _read_control_json(_worker_control_path())
+    turns = cfg.get("turns")
+    if isinstance(turns, list) and index < len(turns) and isinstance(turns[index], dict):
+        return dict(turns[index])
+    return {}
+
+
+def _next_turn_index() -> int:
+    """Return this prompt's ordinal, persisted beside the control file.
+
+    The OpenCode server may be restarted between attempts, so the ordinal
+    must survive the process; a small counter file does that.
+    """
+    control = _worker_control_path()
+    if control is None:
+        return 0
+    path = Path(control).with_name("fake-worker-turns")
+    try:
+        index = int(path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        index = 0
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(index + 1), encoding="utf-8")
+    except OSError:
+        pass
+    return index
+
+
 def _worker_control_path() -> str | None:
     control_path = os.environ.get("ORCH_FAKE_WORKER_CONTROL_FILE")
     if control_path:
@@ -484,17 +538,19 @@ def _serve_opencode(
                 return
             if path == f"/session/{session_id}/prompt_async":
                 message_id = str(body.get("messageID") or f"msg_{uuid.uuid4().hex}")
-                if mode == "hang":
+                turn_cfg = _control_turn(_next_turn_index())
+                turn_mode = str(turn_cfg.get("mode", mode)).strip().lower()
+                if turn_mode == "hang":
                     with lock:
                         state["status"] = "busy"
                     self._send_json(204, None)
                     time.sleep(hang_seconds)
                     return
-                if mode == "crash":
+                if turn_mode == "crash":
                     self._send_json(500, {"error": f"Fake opencode crash (code {exit_code})"})
                     return
-                if mode in {"quota_exhausted", "partial_quota"}:
-                    if mode == "partial_quota":
+                if turn_mode in {"quota_exhausted", "partial_quota"}:
+                    if turn_mode == "partial_quota":
                         # Interrupted mid-turn: uncommitted work, then the limit.
                         try:
                             _write_partial_change(workdir, "opencode", target_file, content)
@@ -529,16 +585,22 @@ def _serve_opencode(
                     return
 
                 _commit_change(workdir, "opencode", target_file, content)
+                reported = _identity_from(turn_cfg, "opencode") or _reported_identity(
+                    "opencode"
+                )
+                info: dict[str, Any] = {
+                    "id": f"msg_resp_{len(messages) + 1}",
+                    "role": "assistant",
+                    "parentID": message_id,
+                    "time": {"completed": 1},
+                    "finish": "stop",
+                }
+                if reported is not None:
+                    info["providerID"], info["modelID"] = reported
                 with lock:
                     messages.append(
                         {
-                            "info": {
-                                "id": f"msg_resp_{len(messages) + 1}",
-                                "role": "assistant",
-                                "parentID": message_id,
-                                "time": {"completed": 1},
-                                "finish": "stop",
-                            },
+                            "info": info,
                             "parts": [
                                 {"type": "text", "text": "Fake opencode completed."},
                             ],
@@ -632,7 +694,12 @@ def _handle_opencode(
     if switched is not None:
         return switched
     _commit_change(Path.cwd(), "opencode", target_file, content)
-    print(json.dumps({"type": "step_start", "part": {"type": "step-start"}}))
+    start_part: dict[str, Any] = {"type": "step-start"}
+    identity = _reported_identity("opencode")
+    if identity is not None:
+        provider, model = identity
+        start_part.update({"providerID": provider, "modelID": model})
+    print(json.dumps({"type": "step_start", "part": start_part}))
     print(
         json.dumps({"type": "text", "part": {"type": "text", "text": "Fake opencode completed."}})
     )

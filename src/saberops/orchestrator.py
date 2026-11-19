@@ -81,6 +81,13 @@ from saberops.git import (
     GitManager,
     assert_repository_at_revision,
 )
+from saberops.job_evidence import (
+    job_folder,
+    read_project_notes,
+    record_attempt_prompt,
+    record_attempt_result,
+    record_request,
+)
 from saberops.jobs.models import JobRole
 from saberops.models import (
     Attempt,
@@ -2597,6 +2604,36 @@ class Orchestrator:
 
         run_id = effective_run_id
         assert routing_snapshot is not None and routing_payload is not None
+        # Keep the plain per-job evidence folder beside the project store:
+        # what was asked, then each attempt's exact prompt and result.  This
+        # is evidence, never authority: a write failure is recorded and the
+        # run continues (the database remains the source of truth).
+        try:
+            requested_run = self.db.get_run(run_id)
+            if requested_run is not None:
+                record_request(
+                    job_folder(self.db.db_path.parent, run_id),
+                    run_id=run_id,
+                    task=requested_run.task,
+                    target_repo=requested_run.target_repo,
+                    base_commit=requested_run.base_commit,
+                    created_at=requested_run.created_at,
+                )
+        except OSError as exc:
+            self.db.record_event(
+                run_id,
+                "job_folder_write_failed",
+                payload={"stage": "request", "error": str(exc)[:500]},
+            )
+        # Project notes belong to the repository, not to whichever database
+        # happens to hold this run (a pinned/global store is a supported
+        # layout).  Resolve the project state directory once per run.
+        try:
+            from saberops.project_settings import project_state_dir
+
+            project_notes_state_dir = project_state_dir(repo)
+        except Exception:
+            project_notes_state_dir = self.db.db_path.parent
         # The single run-scoped BindingRegistry ordinary
         # exact-binding dispatch, retry, continuation and repair resolve
         # against.  Reconstructed from the Run's own durable frozen material;
@@ -4238,6 +4275,19 @@ class Orchestrator:
                     )
 
                 assert dispatch_projection is not None
+                # The per-project note is owner-maintained and handed to
+                # every worker attempt.  Reading it here (not at run start)
+                # means an edit between two attempts reaches the next
+                # attempt, while each attempt keeps its own snapshot.
+                try:
+                    project_notes_text = read_project_notes(project_notes_state_dir)
+                except OSError as exc:
+                    project_notes_text = None
+                    self.db.record_event(
+                        run_id,
+                        "project_notes_unreadable",
+                        payload={"error": str(exc)[:500]},
+                    )
                 # Render ONE projection -- this is the actual prompt that
                 # the worker will receive.
                 with measure_phase(
@@ -4267,6 +4317,7 @@ class Orchestrator:
                             run_id,
                             current_package.scope_json if current_package is not None else None,
                         ),
+                        project_notes_text=project_notes_text,
                     )
                 # ADR-0013: a pending owner steering note travels in the next
                 # attempt's prompt -- the next safe point.  Delivery is marked
@@ -5013,6 +5064,28 @@ class Orchestrator:
                     dispatch_evidence.tool_description_bytes = metrics["tool_description_bytes"]
                     dispatch_evidence.tools_exposed_count = metrics["tools_exposed_count"]
                 self.db.create_dispatch_evidence(dispatch_evidence)
+                # Plain evidence folder: the exact prompt this attempt will
+                # receive plus an immutable snapshot of the project note that
+                # travelled in it.  The manifest links the attempt to the
+                # dispatch report's requested identity now and to the
+                # provider-reported identity once the worker returns.
+                try:
+                    record_attempt_prompt(
+                        job_folder(self.db.db_path.parent, run_id),
+                        run_id=run_id,
+                        attempt_number=attempt_number,
+                        prompt=worker_req.task,
+                        dispatch_evidence_id=dispatch_evidence.id,
+                        requested_provider=candidate.provider,
+                        requested_model=candidate.model,
+                        project_note=project_notes_text,
+                    )
+                except OSError as exc:
+                    self.db.record_event(
+                        run_id,
+                        "job_folder_write_failed",
+                        payload={"stage": "prompt", "error": str(exc)[:500]},
+                    )
                 if active_continuation_attempt is not None:
                     self.db.link_dispatch_replacement(
                         run_id=run_id,
@@ -5101,6 +5174,24 @@ class Orchestrator:
 
                 update_dispatch_from_result(dispatch_evidence, worker_res)
                 self.db.update_dispatch_evidence(dispatch_evidence)
+                try:
+                    record_attempt_result(
+                        job_folder(self.db.db_path.parent, run_id),
+                        attempt_number=attempt_number,
+                        status=worker_res.status.value,
+                        actual_provider=worker_res.actual_provider,
+                        actual_model=worker_res.actual_model,
+                        commit_sha=worker_res.commit_sha,
+                        summary=worker_res.summary,
+                        stdout=worker_res.stdout,
+                        stderr=worker_res.stderr,
+                    )
+                except OSError as exc:
+                    self.db.record_event(
+                        run_id,
+                        "job_folder_write_failed",
+                        payload={"stage": "result", "error": str(exc)[:500]},
+                    )
 
                 actual_prompt_bytes = (
                     worker_res.prompt_bytes
@@ -6634,6 +6725,28 @@ class Orchestrator:
                                             "tools_exposed_count"
                                         ]
                                     self.db.create_dispatch_evidence(repair_dispatch_evidence)
+                                    try:
+                                        record_attempt_prompt(
+                                            job_folder(self.db.db_path.parent, run_id),
+                                            run_id=run_id,
+                                            attempt_number=attempt_number,
+                                            prompt=w_req.task,
+                                            dispatch_evidence_id=repair_dispatch_evidence.id,
+                                            requested_provider=cand_provider,
+                                            requested_model=cand_model,
+                                            project_note=read_project_notes(
+                                                project_notes_state_dir
+                                            ),
+                                        )
+                                    except OSError as exc:
+                                        self.db.record_event(
+                                            run_id,
+                                            "job_folder_write_failed",
+                                            payload={
+                                                "stage": "repair_prompt",
+                                                "error": str(exc)[:500],
+                                            },
+                                        )
                                     if rep_continuation_attempt is not None:
                                         self.db.link_dispatch_replacement(
                                             run_id=run_id,
@@ -6817,6 +6930,27 @@ class Orchestrator:
                                     )
                                     update_dispatch_from_result(repair_dispatch_evidence, w_res)
                                     self.db.update_dispatch_evidence(repair_dispatch_evidence)
+                                    try:
+                                        record_attempt_result(
+                                            job_folder(self.db.db_path.parent, run_id),
+                                            attempt_number=attempt_number,
+                                            status=w_res.status.value,
+                                            actual_provider=w_res.actual_provider,
+                                            actual_model=w_res.actual_model,
+                                            commit_sha=w_res.commit_sha,
+                                            summary=w_res.summary,
+                                            stdout=w_res.stdout,
+                                            stderr=w_res.stderr,
+                                        )
+                                    except OSError as exc:
+                                        self.db.record_event(
+                                            run_id,
+                                            "job_folder_write_failed",
+                                            payload={
+                                                "stage": "repair_result",
+                                                "error": str(exc)[:500],
+                                            },
+                                        )
                                     persist_worker_usage(
                                         self.db,
                                         run_id=run_id,
@@ -7053,6 +7187,9 @@ class Orchestrator:
                                                     if package_local is not None
                                                     else None
                                                 ),
+                                            ),
+                                            project_notes_text=read_project_notes(
+                                                project_notes_state_dir
                                             ),
                                         )
                                         continue

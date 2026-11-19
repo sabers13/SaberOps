@@ -73,6 +73,11 @@ def project_settings_path(state_dir: Path | str) -> Path:
     return Path(state_dir) / _SETTINGS_FILENAME
 
 
+def project_state_dir(repo_path: Path | str) -> Path:
+    """Return the verified per-project state directory for ``repo_path``."""
+    return _resolve_state_dir(repo_path)
+
+
 @dataclass(frozen=True)
 class ProjectSettings:
     """Persisted owner decisions that had no prior canonical store.
@@ -382,6 +387,26 @@ def clear_project_accept_target_branch(repo_path: Path | str) -> Path:
     path = project_settings_path(state_dir)
     _atomic_write_json(path, merged.as_dict())
     return path
+
+
+def set_project_notes(repo_path: Path | str, text: str | None) -> Path:
+    """Replace the per-project notes file handed to every worker attempt.
+
+    ``None`` (or whitespace only) clears the note.  The file is stored in the
+    project state directory, outside the repository, so notes are never
+    committed into the reviewed diff.
+    """
+    from saberops.job_evidence import write_project_notes
+
+    state_dir = _resolve_state_dir(repo_path)
+    return write_project_notes(state_dir, text)
+
+
+def load_project_notes(repo_path: Path | str) -> str | None:
+    """Return the per-project note currently handed to worker attempts."""
+    from saberops.job_evidence import read_project_notes
+
+    return read_project_notes(_resolve_state_dir(repo_path))
 
 
 def detect_authoritative_gate(repo_path: Path | str) -> str | None:

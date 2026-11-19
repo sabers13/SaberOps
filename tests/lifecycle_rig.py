@@ -146,6 +146,9 @@ class RigEnvironment:
         wait_file: Path | None = None,
         wait_timeout_seconds: float | None = None,
         per_harness: dict[str, str] | None = None,
+        turns: list[dict[str, object]] | None = None,
+        report_model: str | None = None,
+        report_provider: str | None = None,
     ) -> None:
         """Configure fake worker behaviour via control file and ``ORCH_FAKE_*`` env vars.
 
@@ -164,6 +167,12 @@ class RigEnvironment:
             payload["wait_timeout_seconds"] = wait_timeout_seconds
         if per_harness is not None:
             payload["per_harness"] = dict(per_harness)
+        if turns is not None:
+            payload["turns"] = [dict(turn) for turn in turns]
+        if report_model is not None:
+            payload["report_model"] = report_model
+        if report_provider is not None:
+            payload["report_provider"] = report_provider
         if hang_seconds is not None:
             payload["hang_seconds"] = hang_seconds
         if exit_code is not None:
