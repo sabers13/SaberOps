@@ -247,6 +247,25 @@ def test_cli_install_and_remove_is_one_command(
     assert not path.exists()
 
 
+def test_skill_carries_the_worker_choice_guidance() -> None:
+    document = skill_document()
+    loop = " ".join(document.split("## Full guide", 1)[0].split())
+    for phrase in (
+        "## Which worker for which job",
+        "read-only exploration and drafting",
+        "never accepted on its own",
+        "saberops-worker",
+        "claude-worker",
+        "codex-worker",
+        "opencode-go-worker",
+        "scout job",
+        "Claude cannot be an OpenCode subagent",
+        "Connect other coding agents",
+        "Antigravity is an orchestrator only",
+    ):
+        assert phrase in loop, phrase
+
+
 def test_skill_matches_the_live_mcp_tool_list() -> None:
     document = skill_document()
     switch_tools = {"saberops_on", "saberops_off"}

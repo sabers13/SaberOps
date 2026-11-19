@@ -480,6 +480,32 @@ CLI to launch native workers only from that definition, to call
 `native_controls` while waiting, and to stop the child itself when SaberOps
 posts a stop. Design: ADR-0030.
 
+### Which worker for which job
+
+| The work is | Use | What SaberOps still does |
+| --- | --- | --- |
+| Reading code, tracing a failure, summarising or drafting for the owner to review | A native subagent of the host CLI, untracked | Nothing: there is no job, gate, review or acceptance, so its output is never accepted as finished work |
+| A change on the host CLI's own vendor | The generated `saberops-worker`, with native workers enabled | Prepares the worktree, runs the project gate and a different-family review, and leaves acceptance to the owner |
+| A change on another vendor's subscription | A proxy (`claude-worker`, `codex-worker`, `opencode-go-worker`) | Runs the job on that vendor's own CLI, with the full record, gate, review and acceptance |
+| An investigation whose deliverable is a report | A scout job (`kind: SCOUT`) | Records the report; there is no gate, review or acceptance until `promote_scout` starts a build job |
+
+No CLI hosts another vendor's CLI as a native subagent, so a native child always
+runs on the host's own vendor and subscription. In particular Claude cannot be
+an OpenCode subagent on the Claude subscription: Anthropic does not allow a
+third-party app to offer Claude.ai sign-in, so the permitted path is the
+unmodified Claude Code binary signed in with the owner's own account. From
+OpenCode, reach Claude through the `claude-worker` proxy instead.
+
+OpenCode's "Connect other coding agents" runs the other direction: it points
+Claude Code or Codex at an OpenCode Console workspace's models and policies (or
+keeps their own provider with `--keep-provider`). It does not make OpenCode host
+Claude Code or Codex as subagents, and it is not a SaberOps proxy.
+
+Antigravity may orchestrate with its own native agents; that is a normal
+orchestrator session. It is never an automated SaberOps worker, so there is no
+`agy-worker`: automating `agy` is outside its consumer terms. Antigravity work
+stays attended.
+
 The Setup page offers the same as one **Connect** button per agent. Supported:
 Claude Code, Codex, Antigravity, OpenCode and Cursor; any other MCP client can
 use the snippet under "Client configuration" below.

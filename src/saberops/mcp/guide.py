@@ -194,6 +194,45 @@ CLI (`orch mode set`) or the Questions page.
   risk-adapted review policy; that policy keeps review for anything touching
   authority or production behaviour, and never changes acceptance.
 
+## Which worker for which job
+Choose by what the work needs, not by what is closest to hand.
+
+- **Your own subagent, untracked** — use a native subagent in this CLI for
+  read-only exploration and drafting: finding code, reading a stack trace,
+  summarising a design, drafting a patch for the owner to review. It is cheap
+  and appears in this CLI's own subagent list, but it leaves no SaberOps record,
+  gate or independent review, so its output is never accepted as finished work.
+  Anything the owner should accept goes through SaberOps.
+- **`saberops-worker`** — when native workers are enabled and the task belongs
+  on this CLI's own vendor, hand the claimed job to the generated
+  `saberops-worker` definition. SaberOps prepares the worktree and still runs
+  the project gate, an independent different-family review and the owner's
+  acceptance.
+- **A proxy (`claude-worker`, `codex-worker`, `opencode-go-worker`)** — when
+  the work belongs on another vendor's subscription. The proxy only submits one
+  job with that family token; it never edits, reviews or accepts.
+- **A scout job (`kind: SCOUT`)** — when the deliverable is an investigation or
+  a report rather than a change. A scout is read-only and has no gate,
+  independent review or acceptance; promote its report with `promote_scout`
+  when the owner wants the work built.
+
+No CLI hosts another vendor's CLI as a native subagent, so a native child always
+runs on this CLI's own vendor and subscription. In particular Claude cannot be
+an OpenCode subagent on the Claude subscription: Anthropic does not allow a
+third-party app to offer Claude.ai sign-in, so the permitted path is the
+unmodified Claude Code binary signed in with the owner's own account. Reach
+Claude from OpenCode through the `claude-worker` proxy instead.
+
+OpenCode's "Connect other coding agents" runs the other direction: it points
+Claude Code or Codex at an OpenCode Console workspace's models and policies (or
+keeps their own provider with `--keep-provider`). It does not make OpenCode host
+Claude Code or Codex as subagents, and it is not a SaberOps proxy.
+
+Antigravity may orchestrate with its own native agents; that is a normal
+orchestrator session. It is never an automated SaberOps worker, so there is no
+`agy-worker`: automating `agy` is outside its consumer terms. Antigravity work
+stays attended.
+
 ## Submitting work
 1. Call `capacity` to see whether work can start now.
 2. One task: `submit_job` with
@@ -311,7 +350,10 @@ CLI (`orch mode set`) or the Questions page.
 ## Native workers (hybrid)
 When the owner has enabled native workers (`ORCH_NATIVE_WORKERS=1`), part of the
 work may run on your own subagents while other jobs run as ordinary SaberOps
-workers. The tools below exist only while that flag is on.
+workers. The tools below exist only while that flag is on. This is the
+generated `saberops-worker`, not a free-form subagent you invent: an ad-hoc
+subagent stays read-only exploration and drafting, and its work is never
+accepted on its own.
 
 - Launch a native worker only from the generated `saberops-worker` definition
   that `orch connect --skill` installed. Never do SaberOps work in your main

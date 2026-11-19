@@ -120,6 +120,30 @@ def test_guide_names_the_owner_only_boundaries() -> None:
         assert owner_only in GUIDE.replace("\n  ", " "), owner_only
 
 
+def test_guide_says_which_worker_to_use_and_keeps_acceptance_in_saberops() -> None:
+    text = " ".join(GUIDE.split())
+    for phrase in (
+        "## Which worker for which job",
+        "read-only exploration and drafting",
+        "no SaberOps record, gate or independent review",
+        "saberops-worker",
+        "claude-worker",
+        "codex-worker",
+        "opencode-go-worker",
+        "scout job",
+        "Connect other coding agents",
+        "Claude cannot be an OpenCode subagent",
+        "Anthropic does not allow",
+        "Antigravity",
+        "never an automated SaberOps worker",
+        "stays attended",
+    ):
+        assert phrase in text, phrase
+    # A native child's work is never accepted without a SaberOps record.
+    assert "never accepted as finished work" in text
+    assert "Anything the owner should accept goes through SaberOps" in text
+
+
 def _cli_server(tmp_path: Path) -> McpServer:
     """The way `orch mcp serve` builds it: the session starts off."""
     server = _server(tmp_path)
