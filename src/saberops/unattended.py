@@ -44,8 +44,8 @@ The frozen ADR-0004 D14 rules encoded here:
    report collects standing-decision actions, accepted candidates, parked
    branches, escalations and audit entries.
 
-This module deliberately does **not** own the durable plan, the wave executor,
-the scheduler, the notification transport, the owner-question queue, the audit
+This module deliberately does **not** own the durable plan, the scheduler,
+the notification transport, the owner-question queue, the audit
 store or the candidate git operation. It returns deterministic decisions and
 records; the runtime applies them under its own fence, and only the owner moves
 ``main`` or pushes.

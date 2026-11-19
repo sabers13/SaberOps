@@ -121,9 +121,7 @@ owner config/UI change.
 **Scope limitation (honest):** this is aggregate admission only. It does **not**
 enforce the owner's project-aware policy of *3 concurrently active projects ×
 5 executing tasks per project*, because M2-4b has no durable registered project
-identity or wave-child task identity yet. That two-dimensional enforcement
-belongs to the wave executor (parent/child tasks), project registry, owner
-settings service, and the editable UI. Until then the status is:
+identity or wave-child task identity yet. The status is:
 `GLOBAL AGGREGATE IMPLEMENTED / PROJECT-AWARE DIMENSIONS DEFERRED`. This
 ceiling is independent of, and does not replace, provider-pool maxima, quota
 red lines, billing posture, gate-slot or host limits.

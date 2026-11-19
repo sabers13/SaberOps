@@ -18,7 +18,7 @@ from saberops.control_plane.quota_policy import QuotaPoolMode, QuotaPoolPolicy
 #: RUNNING top-level scheduled jobs (D7 global slot). Derived from the owner
 #: decision of "3 active projects x 5 executing tasks"; it is an interim
 #: aggregate bridge only and does NOT enforce the project-aware 3x5 policy
-#: (that belongs to the wave executor / project registry / UI steps).
+#: (that belongs to project registry / UI steps).
 DEFAULT_MAX_GLOBAL_CONCURRENT: int = 15
 
 

@@ -115,8 +115,6 @@ flowchart LR
 | **Plan registry and billing posture** | Accounts → pools → windows; per-route posture class (A/B/C/D/X) with policy URL, owner verification date and TTL. Unverified or expired routes are never admitted unattended | [operations](docs/operations.md#plans-and-billing-posture) |
 | **Capacity ledger** | Usage observations, vendor exhaustion errors and learned per-job cost (EWMA by S/M/L size) feed admission and pacing | [operations](docs/operations.md#capacity-ledger-inspection-orch-capacity-show) |
 | **Role-chain routing** | Ordered fallback groups per role: WORKER, SURGEON, INTEGRATOR; owner-selected Orchestrator and Reviewer bindings; exact provider/backend/model identity end to end | [operations](docs/operations.md#worker-routing-policy) |
-| **Quota preemption** | Plan exhaustion classifies to `QUOTA_EXHAUSTED` with a reset time; WIP is anchored to create-only checkpoint refs and resumed from the capsule | [waves](docs/waves.md#quota-preemption--auto-resume-wx-2--m2-5) |
-| **Waves and lanes** | Plans run as waves of lanes with disjoint write scopes, sequential pinned-SHA merges and one gate per wave; at most 3 active projects × 5 child tasks (owner-adjustable ceilings) | [waves](docs/waves.md), [wave optimization](docs/wave-plan-optimization.md) |
 | **Gates G1 / G2 / G3** | Base-trusted gate profiles, gate slots sized to free RAM, gate history, coverage-mapped affected gate and a single-pass full gate | [gate](docs/gate.md), [operations](docs/operations.md#engine-run-gates-g1--g2--g3-and-the-history-ledger) |
 | **Owner questions** | The engine never guesses an owner decision: keyed questions with a five-part escalation, answered verbatim from the CLI or web UI | [questions](docs/questions.md) |
 | **Unattended plans** | Frozen decision sheet, never-delegable list, three autonomous decision classes, circuit breaker, stall alarm and morning report. Unattended runs can never push | [unattended](docs/unattended-plans.md) |
@@ -326,15 +324,11 @@ scripts/               gate wrappers and tooling
 
 - **Preview.** Interfaces, storage schemas and workflows may still change; a
   downgrade is not a supported migration path.
-- **Project-aware concurrency.** The scheduler enforces a global ceiling
-  (default 15 running jobs); the 3 projects × 5 tasks policy is enforced by the
-  wave executor and slot policy, not yet by the job scheduler itself.
-- **Waves at runtime.** The wave executor does not yet replace the older
-  parallel-team path for every run. For parallel MCP work, submit one job per
-  independent task with a distinct `idempotency_key`. If an accepted sibling
-  makes another job stale, request `refresh_candidate` with its run ID (or run
-  `orch refresh <run-id>`); the refreshed candidate gets fresh checks and review
-  and the owner accepts it separately.
+- **Parallel MCP work.** Submit one job per independent task with a distinct
+  `idempotency_key`. If an accepted sibling makes another job stale, request
+  `refresh_candidate` with its run ID (or run `orch refresh <run-id>`); the
+  refreshed candidate gets fresh checks and review and the owner accepts it
+  separately.
 - **No governed publication.** Accepted work is not pushed automatically;
   `full_autonomy_publish` stops at the accepted state.
 - **Adapter coverage.** Not every adapter/account combination has been
@@ -352,7 +346,7 @@ scripts/               gate wrappers and tooling
 - Operating: [operations](docs/operations.md) · [config](docs/config.md) ·
   [storage lifecycle](docs/storage-lifecycle.md) · [security](docs/security.md) ·
   [vendor CLI live check](docs/vendor-cli-live-check.md)
-- Execution: [waves](docs/waves.md) · [wave optimization](docs/wave-plan-optimization.md) ·
+- Execution: [wave optimization](docs/wave-plan-optimization.md) ·
   [parallel work](docs/parallel-work.md) · [gate](docs/gate.md) ·
   [unattended plans](docs/unattended-plans.md) · [certification](docs/end-certification.md)
 - Orchestrator: [parallel-first policy](docs/orchestrator-parallel-first.md) ·

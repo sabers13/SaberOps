@@ -7,7 +7,7 @@ use pinned SHAs).
 What this module is
 -------------------
 Pure, immutable descriptions of one **wave** and its **lanes**, plus the two
-deterministic state machines the wave executor drives:
+deterministic state machines described here:
 
 * :class:`WaveState` -- ``PLANNED -> RUNNING -> INTEGRATING -> GATED ->
   AWAITING_ACCEPT -> ACCEPTED`` with ``BLOCKED`` / ``CANCELLED`` escapes.
@@ -17,8 +17,8 @@ deterministic state machines the wave executor drives:
   expires (WX-2 quota preemption, M2-5 bridge).
 
 The models perform no I/O, spawn no process, read no clock and call no model.
-The state machines are exposed as total functions over the enums so both the
-executor and its tests reason about exactly one transition table.
+The state machines are exposed as total functions over the enums so callers and
+tests reason about exactly one transition table.
 
 Serialization
 -------------

@@ -27,14 +27,9 @@ reimplement them:
   dependency-state transitions against the run database and validate the frozen
   project write envelope. This module never reads or advances that state; it
   consumes already-validated task facts supplied by a trusted caller.
-* ``saberops.project_slot_policy.evaluate_slot_admission`` (Step 010 / WX-1) is
-  the *live* 3x5 execution-slot admission contract against observed occupancy,
-  with a mandatory transactional/lease caller. This module performs **no slot
-  admission**: it has no notion of reserved or executing slots, no lease, no
-  compare-and-swap and no occupancy read. The :class:`FrontierLimits` it accepts
-  are a declared planning bound echoed from the owner policy so the *ready set*
-  can be reported without silently under-reporting it (the projection never
-  lowers the owner's 3x5 default). Step 010 may then admit fewer, never more.
+* This module performs **no slot admission**: it has no lease,
+  compare-and-swap or occupancy read. Its :class:`FrontierLimits` are
+  planning bounds, not authorization to launch work.
 * ``saberops.parallel_work.execute_team`` is the current single-run 2-4 worker
   team executor. This module computes no wave and launches nothing.
 

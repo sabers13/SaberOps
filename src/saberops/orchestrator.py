@@ -213,18 +213,6 @@ from saberops.wave_admission import (
     WaveAdmissionDecision,
 )
 from saberops.wave_admission import admit_wave as _admit_wave
-from saberops.wave_executor import (
-    DatabaseQuotaPreemption,
-    DatabaseWaveEventSink,
-    GateExecutorPort,
-    LongWorkerObserver,
-    ProjectRegistry,
-    QuotaPreemptionPort,
-    SupervisorLongWorkerObserver,
-    WaveEventSink,
-    WaveExecutor,
-    WaveGitPort,
-)
 from saberops.wave_models import Wave
 from saberops.workers.base import WorkerAdapter
 from saberops.workers.registry import AdapterRegistry
@@ -8966,87 +8954,6 @@ class Orchestrator:
             posture_validator,
             repo=repo,
             ancestry_checker=ancestry_checker,
-        )
-
-    def execute_wave(
-        self,
-        wave: Wave,
-        *,
-        repo: Path | str,
-        worktree_base: Path | str | None = None,
-        git: WaveGitPort | None = None,
-        event_sink: WaveEventSink | None = None,
-        gate_executor: GateExecutorPort | None = None,
-        evidence_dir: Path | str | None = None,
-        project_registry: ProjectRegistry | None = None,
-        project_id: str | None = None,
-        integration_branch: str | None = None,
-        integration_worktree: Path | str | None = None,
-        slot_pool: GateSlotPool | None = None,
-        run_id: str | None = None,
-        long_worker_observer: LongWorkerObserver | None = None,
-        quota_preemption: QuotaPreemptionPort | None = None,
-    ) -> WaveExecutor:
-        """Build the deterministic wave executor for one admitted wave.
-
-        Covers: ADR-0004 D2/D4 and Amendment 3 (the engine, and only the
-        engine, allocates worktrees, merges pinned SHAs and runs the one G3),
-        plus the WX-2 recovery seams: the ``observe_long_worker`` transition is
-        wired to this orchestrator's ``RunSupervisor`` by default and quota
-        preemption to the M2-5 protocol over this orchestrator's database.
-
-        The executor shares this orchestrator's worktree base and engine gate
-        executor, so a wave's single G3 runs through the same GS-2 heavy-slot
-        machinery as every other engine gate. Construction allocates nothing;
-        :meth:`WaveExecutor.start` is the first mutating call.
-        """
-        from saberops.wave_executor import SubprocessWaveGit
-
-        resolved_repo = Path(repo).expanduser().resolve()
-        base = (
-            Path(worktree_base)
-            if worktree_base is not None
-            else self.worktree_base or GitManager.get_default_worktree_base(resolved_repo)
-        )
-        resolved_base = Path(base).expanduser().resolve()
-        resolved_gate = gate_executor or EngineGateExecutor(
-            slot_pool=slot_pool or GateSlotPool(_common_dir_for(resolved_repo))
-        )
-        resolved_sink = event_sink or DatabaseWaveEventSink(self.db, wave.wave_id)
-        resolved_evidence = (
-            Path(evidence_dir)
-            if evidence_dir is not None
-            else resolved_base / wave.wave_id / "evidence"
-        )
-        resolved_integration_wt = (
-            Path(integration_worktree)
-            if integration_worktree is not None
-            else resolved_base / wave.wave_id / "integration"
-        )
-        observer = long_worker_observer
-        if observer is None:
-            from saberops.supervisor import RunSupervisor
-
-            observer = SupervisorLongWorkerObserver(
-                RunSupervisor(
-                    db=self.db, registry=self.registry, worktree_base=resolved_base
-                )
-            )
-        return WaveExecutor(
-            wave,
-            git=git or SubprocessWaveGit(),
-            event_sink=resolved_sink,
-            repo=str(resolved_repo),
-            worktree_base=str(resolved_base),
-            gate_executor=resolved_gate,
-            evidence_dir=str(resolved_evidence),
-            project_registry=project_registry,
-            project_id=project_id,
-            integration_branch=integration_branch,
-            integration_worktree=str(resolved_integration_wt),
-            run_id=run_id,
-            long_worker_observer=observer,
-            quota_preemption=quota_preemption or DatabaseQuotaPreemption(self.db),
         )
 
     def cleanup_run(self, run_id: str) -> dict[str, list[str]]:

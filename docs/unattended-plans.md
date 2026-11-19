@@ -13,7 +13,7 @@ the questions an overnight run must answer without the owner awake:
 
 It encodes ADR-0004 **D14** (overnight readiness) and the roadmap's **RD-1**
 acceptance criteria. It is an **advice-and-record projection only**: the runtime
-still owns the plan, the wave executor, the scheduler, the notification
+still owns the plan, the scheduler, the notification
 transport, the owner-question queue, the audit store and the candidate's git
 operation. Nothing in this module reads or writes the filesystem, network,
 clock, environment, database or a model provider, and nothing here can move
@@ -50,7 +50,7 @@ In scope:
 Deliberately out of scope (owned elsewhere):
 
 * the durable plan store, plan registration and resume briefing (PL-1);
-* wave execution, admission, merges and gate scheduling (WX-1/GS-2);
+* task admission, merges and gate scheduling;
 * the durable question queue and its owner answers (Q-1);
 * the actual Telegram/log transport (TG-1) and the audit store;
 * the git operation that performs a local commit, and any push (owner-only);

@@ -540,8 +540,7 @@ class ProjectRegistry:
 
     The registry persists ``{project_id: RegisteredProject}`` as JSON with
     atomic writes and enforces the owner-approved cap of
-    ``DEFAULT_ACTIVE_PROJECT_LIMIT`` concurrently active projects,
-    consistent with ``saberops.project_slot_policy``. Reads tolerate a
+    ``DEFAULT_ACTIVE_PROJECT_LIMIT`` concurrently active projects. Reads tolerate a
     missing file (empty registry) but fail closed on corrupt content.
     """
 
