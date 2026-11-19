@@ -131,11 +131,19 @@ CLI (`orch mode set`) or the Questions page.
   mode you have not read.
 - `propose_mode_change` raises an owner question. It never changes the mode, so
   do not tell the user the mode changed.
-- In `ask-me`, recovery actions (retry, repair, escalation) and acceptance wait
-  for the owner. In `critical-only`, the owner is reachable and routine
-  questions may be answered by the planning session. In `away`, the authority
-  preset decides what may proceed. Closing the planning session is separate
-  work and pauses dispatch in every mode.
+- In `ask-me`, every question waits for the owner. In `critical-only`, a live
+  planning session may answer a **routine** question (`critical: false`) with
+  `answer_question`, following the question's stored recommendation and
+  supplying evidence and a rejected alternative; every self-answer is logged and
+  appears in `catch_up`.
+  Never answer a `critical: true` question: it notifies the owner and waits.
+  `away` follows the same question rule while a planner is connected. Closing
+  the planning session pauses work in every mode and is separate work; do not
+  start a background planner or claim a question was answered without the tool.
+  Critical means an owner-only or acceptance class, a never-delegable kind, or
+  anything you escalated; you can add criticality, never remove it.
+- Call `list_questions` before answering. `question_view.critical` and
+  `critical_reasons` say why a question is the owner's.
 
 ## Talking to the user
 - Start every message that relays SaberOps (a submission, a status, a result, a

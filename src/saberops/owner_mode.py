@@ -30,7 +30,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 from saberops.authority import (
     ADVISORY_POLICY_FIELDS,
@@ -45,6 +45,9 @@ from saberops.authority import (
 )
 from saberops.paths import get_owner_mode_path
 
+if TYPE_CHECKING:
+    from saberops.questions import OwnerQuestion
+
 __all__ = [
     "ENFORCED_ACTIONS",
     "ModeAction",
@@ -55,8 +58,11 @@ __all__ = [
     "OwnerModeError",
     "OwnerModeSettings",
     "PACKAGE_DEFAULT_OWNER_MODE",
+    "QuestionAnswerDecision",
+    "QuestionDisposition",
     "clear_owner_mode",
     "decide_owner_action",
+    "decide_question_answer",
     "effective_authority_policy",
     "effective_owner_mode",
     "list_owner_modes",
@@ -510,6 +516,105 @@ def list_owner_modes() -> list[dict[str, str]]:
         {"mode": mode.value, "label": OWNER_MODE_LABELS[mode]}
         for mode in OWNER_MODE_ORDER
     ]
+
+
+class QuestionDisposition(StrEnum):
+    """What the effective mode permits for one question."""
+
+    #: Critical or attended: the owner answers; the question notifies and waits.
+    ASK_OWNER = "ask_owner"
+    #: A live planning session may answer with evidence and an alternative.
+    PLANNER_MAY_ANSWER = "planner_may_answer"
+    #: Routine, but no live planner: the question waits; no background planner.
+    WAIT_FOR_PLANNER = "wait_for_planner"
+
+
+@dataclass(frozen=True)
+class QuestionAnswerDecision:
+    """The typed answer to "may the planning session answer this question?"."""
+
+    critical: bool
+    disposition: QuestionDisposition
+    mode: OwnerMode
+    declared_mode: OwnerMode
+    planner_present: bool
+    until: str | None
+    expired: bool
+    reason: str
+
+    @property
+    def allowed(self) -> bool:
+        """True only when the live planning session may record the answer."""
+        return self.disposition is QuestionDisposition.PLANNER_MAY_ANSWER
+
+    def as_dict(self) -> dict[str, Any]:
+        """Serialize the decision for CLI/MCP output and audit records."""
+        return {
+            "allowed": self.allowed,
+            "critical": self.critical,
+            "disposition": self.disposition.value,
+            "mode": self.mode.value,
+            "declared_mode": self.declared_mode.value,
+            "planner_present": self.planner_present,
+            "until": self.until,
+            "expired": self.expired,
+            "reason": self.reason,
+        }
+
+
+def decide_question_answer(
+    question: OwnerQuestion,
+    *,
+    planner_present: bool,
+    mode_settings: OwnerModeSettings | None = None,
+    now: datetime | None = None,
+) -> QuestionAnswerDecision:
+    """Decide whether a planning session may self-answer one question.
+
+    Criticality is derived from the question, never supplied by the caller; a
+    critical question therefore reaches the owner in every mode.  A routine
+    question is answered only in ``critical-only`` or ``away`` while a live
+    planning session is present.  With no session, the question waits and the
+    engine starts no background planner (the work pause itself belongs to the
+    close-the-CLI lane).
+    """
+    from saberops.questions import is_critical_question
+
+    settings = mode_settings or load_owner_mode_settings()
+    mode, expired = effective_owner_mode(settings, now=now)
+    expiry_note = f"away ended at {settings.until}; ask-me applies. " if expired else ""
+    critical = is_critical_question(question)
+    if critical:
+        disposition = QuestionDisposition.ASK_OWNER
+        reason = expiry_note + (
+            "the question is critical: it notifies the owner and waits, and no "
+            "planning session may answer it."
+        )
+    elif mode is OwnerMode.ASK_ME:
+        disposition = QuestionDisposition.ASK_OWNER
+        reason = expiry_note + "ask-me leaves every question to the owner."
+    elif not planner_present:
+        disposition = QuestionDisposition.WAIT_FOR_PLANNER
+        reason = (
+            "no live planning session: no background planner runs, so the routine "
+            "question waits and work pauses until a planner returns."
+        )
+    else:
+        disposition = QuestionDisposition.PLANNER_MAY_ANSWER
+        reason = (
+            f"{mode.value} lets the live planning session answer this routine "
+            "question with evidence and a rejected alternative; the answer is logged."
+        )
+    return QuestionAnswerDecision(
+        critical=critical,
+        disposition=disposition,
+        mode=mode,
+        declared_mode=settings.mode,
+        planner_present=planner_present,
+        until=settings.until,
+        expired=expired,
+        reason=reason,
+    )
 
 
 def mode_view(

@@ -163,6 +163,17 @@ its own finding, and answers are idempotent --
 repeating an identical answer records a confirmation and changes nothing
 (ADR-0004 invariants 6 and 13).
 
+`list_questions` returns a derived `critical` tag and its reasons for every
+question. Critical is the union of an owner-only or acceptance class, a
+never-delegable kind, and an explicit orchestrator escalation; it can only be
+added. In `ask-me`, every question waits for the owner. In `critical-only` or
+`away`, a live planning session may answer a routine (`critical: false`)
+question with PLAN authority, evidence and a rejected alternative; the answer
+is logged and appears in `catch_up`. A critical question is refused to the
+planning session in every mode, notifies the owner and waits. With no live
+planning session no self-answer is possible and no background planner starts
+(ADR-0027).
+
 `propose_config_change` validates the change and returns an approval-ready
 proposal. It **applies nothing**: only the owner approving through
 `orch config approve <id>` or the local web surface writes the config ledger

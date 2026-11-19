@@ -34,6 +34,7 @@ from saberops.mcp.tools import (
     TOOL_NAMES,
     ServerContext,
 )
+from saberops.owner_mode import OwnerMode, set_owner_mode
 from saberops.questions import (
     AskRole,
     DecisionClass,
@@ -41,6 +42,18 @@ from saberops.questions import (
     OwnerQuestionQueue,
     QuestionRequest,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolated_owner_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never read or write the owner's real mode/state files from this module."""
+    state = tmp_path / "owner-state"
+    config = tmp_path / "owner-config"
+    state.mkdir(parents=True, exist_ok=True)
+    config.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("XDG_STATE_HOME", str(state))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config))
+    monkeypatch.delenv("SABEROPS_PROFILE", raising=False)
 
 
 def _git_repo(path: Path) -> Path:
@@ -364,6 +377,7 @@ def test_answer_question_records_an_orchestrator_answer(tmp_path: Path) -> None:
     """Covers: prompt section 'answer_question' (answerable class succeeds)."""
     store = tmp_path / "questions.json"
     _ask(store, decision_class=DecisionClass.FIX_UP_CONTENT)
+    set_owner_mode(OwnerMode.CRITICAL_ONLY)
     server = _server(tmp_path)
     payload = _payload(
         server,
@@ -385,6 +399,7 @@ def test_answer_question_is_idempotent(tmp_path: Path) -> None:
     """Covers: ADR-0004 invariant 13 (a repeated identical answer is a no-op)."""
     store = tmp_path / "questions.json"
     _ask(store, decision_class=DecisionClass.FIX_UP_CONTENT)
+    set_owner_mode(OwnerMode.CRITICAL_ONLY)
     server = _server(tmp_path)
     arguments = {
         "question_id_or_key": "q-1",

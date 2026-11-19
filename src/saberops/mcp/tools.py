@@ -888,6 +888,8 @@ def _catch_up_questions(context: ServerContext, job: Any) -> list[dict[str, Any]
                 "subject": view["subject"],
                 "decision_class": view["decision_class"],
                 "answerable_by": view["answerable_by"],
+                "critical": view["critical"],
+                "critical_reasons": view["critical_reasons"],
                 "run_id": view["run_id"],
                 "blocks": view["blocks"],
                 "options": view["options"],
@@ -895,6 +897,18 @@ def _catch_up_questions(context: ServerContext, job: Any) -> list[dict[str, Any]
             }
         )
     return matched
+
+
+def _catch_up_self_answered(context: ServerContext, job: Any) -> list[dict[str, Any]]:
+    """Routine decisions the planning session took for this job (read-only)."""
+    from saberops.questions import question_return_summary
+
+    summary = question_return_summary(
+        context.question_queue(),
+        run_ids=tuple(job.run_ids),
+        blocks=(job.job_id,),
+    )
+    return [item.to_mapping() for item in summary.self_answered]
 
 
 def _catch_up_steering_notes(db: Any, job: Any) -> list[dict[str, Any]]:
@@ -918,7 +932,7 @@ def _catch_up_next_action(
     run_id = result.get("run_id")
     if questions:
         question = questions[0]
-        if question["answerable_by"] == "PLAN":
+        if question["answerable_by"] == "PLAN" and not question.get("critical", False):
             return {
                 "action": "answer_question",
                 "owner_only": False,
@@ -933,8 +947,13 @@ def _catch_up_next_action(
             "action": "answer_question",
             "owner_only": True,
             "detail": (
-                f"Question {question['question_id']} blocks this job and only the owner "
-                "can answer it."
+                f"Question {question['question_id']} is critical and only the owner "
+                "can answer it; it notifies and waits."
+                if question.get("critical", False)
+                else (
+                    f"Question {question['question_id']} blocks this job and only the "
+                    "owner can answer it."
+                )
             ),
             "command": f'orch questions answer {question["question_id"]} --words "<answer>"',
             "question_id": question["question_id"],
@@ -1122,6 +1141,7 @@ def _catch_up(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str,
         "review": review,
         "switch": switch,
         "open_questions": questions,
+        "self_answered": _catch_up_self_answered(context, job),
         "steering_notes": _catch_up_steering_notes(db, job),
         "failure": failure,
         "report": result.get("report"),
@@ -1312,11 +1332,13 @@ def _list_questions(context: ServerContext, arguments: Mapping[str, Any]) -> dic
     return {
         "v": SNAPSHOT_SCHEMA_VERSION,
         "count": len(questions),
+        "critical_count": sum(1 for question in questions if question.critical),
         "questions": [question_view(question) for question in questions],
     }
 
 
 def _answer_question(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    from saberops.owner_mode import OwnerModeError, decide_question_answer
     from saberops.questions import (
         AnswerAuthority,
         AskRole,
@@ -1357,6 +1379,29 @@ def _answer_question(context: ServerContext, arguments: Mapping[str, Any]) -> di
         role = coerce_ask_role(str(arguments.get("answered_by_role") or AskRole.PLAN.value))
     except ValueError as exc:
         raise InvalidParamsError(str(exc)) from exc
+    if (
+        question.request.raised_by_role is AskRole.PLAN
+        or answered_by == question.request.raised_by
+    ):
+        raise ToolError(
+            "an Orchestrator may never answer its own finding",
+            data={"ref": ref},
+        )
+    try:
+        decision = decide_question_answer(question, planner_present=True)
+    except (OwnerModeError, ValueError) as exc:
+        raise ToolError(f"owner mode unavailable: {exc}") from exc
+    if not decision.allowed:
+        raise ForbiddenOperationError(
+            f"the planning session may not answer question {question.question_id}: "
+            f"{decision.reason}",
+            data={
+                "ref": ref,
+                "critical": decision.critical,
+                "disposition": decision.disposition.value,
+                "mode": decision.mode.value,
+            },
+        )
     try:
         updated = queue.answer(
             ref,
@@ -1378,9 +1423,15 @@ def _answer_question(context: ServerContext, arguments: Mapping[str, Any]) -> di
             "status": updated.status.value,
             "words": words,
             "chosen_option": arguments.get("chosen_option"),
+            "critical": decision.critical,
+            "mode": decision.mode.value,
         },
     )
-    return {"v": SNAPSHOT_SCHEMA_VERSION, "question": question_view(updated)}
+    return {
+        "v": SNAPSHOT_SCHEMA_VERSION,
+        "question": question_view(updated),
+        "answer_policy": decision.as_dict(),
+    }
 
 
 def _propose_config_change(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:

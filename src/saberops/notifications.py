@@ -94,7 +94,7 @@ def deliver_pending(db: Any) -> None:
     would erase the evidence those guards base their owner-visible hold on.
     """
     from saberops.jobs.store import list_jobs_tolerant
-    from saberops.questions import OwnerQuestionQueue
+    from saberops.questions import OwnerQuestionQueue, is_critical_question
     from saberops.scout import latest_report
 
     ledger = db.owner_db.db_path.with_name(db.owner_db.db_path.name + ".notifications.sqlite3")
@@ -115,10 +115,11 @@ def deliver_pending(db: Any) -> None:
                 ledger, f"job:{job.job_id}:{job.state.value}", f"SaberOps job {label}", body
             )
     for question in OwnerQuestionQueue().questions():
+        critical = is_critical_question(question)
         notify_once(
             ledger,
             f"question:{question.question_id}",
-            "SaberOps question asked",
+            "SaberOps critical question" if critical else "SaberOps question asked",
             question.request.subject,
         )
         if question.request.blocks or question.request.run_id:

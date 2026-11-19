@@ -2383,6 +2383,16 @@ def _question_rows() -> dict[str, Any]:
     return {"error": None, "pending": pending, "all": all_rows}
 
 
+def _self_answered_question_rows(limit: int = 20) -> dict[str, Any]:
+    """Routine questions the planning session answered, newest last."""
+    try:
+        decisions = _question_queue().orchestrator_alone_decisions()
+    except Exception as exc:
+        return {"error": f"{exc.__class__.__name__}: {exc}", "rows": [], "count": 0}
+    rows = [decision.to_mapping() for decision in decisions[-limit:]]
+    return {"error": None, "rows": rows, "count": len(decisions)}
+
+
 def _standing_decision_rows() -> dict[str, Any]:
     """Standing decisions with their expiration windows, read from durable state."""
     path = _unattended_store_path()
@@ -2661,6 +2671,7 @@ def _onboarding_context(
         "wave": _wave_view(wave_project),
         "runs": runs,
         "questions": _question_rows(),
+        "self_answered_questions": _self_answered_question_rows(),
         "standing_decisions": _standing_decision_rows(),
         "never_delegable": _never_delegable_rows(),
         "authority": _authority_view(),

@@ -1894,6 +1894,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--supersedes", type=str, default=None, help="Question id/key this one supersedes."
     )
     questions_ask.add_argument(
+        "--escalate",
+        action="store_true",
+        help=(
+            "Mark this otherwise-routine question critical; the orchestrator can "
+            "add criticality but never remove it."
+        ),
+    )
+    questions_ask.add_argument(
         "--requirement", type=str, required=True, help="Escalation 1/5: forcing requirement."
     )
     questions_ask.add_argument(
@@ -5877,6 +5885,10 @@ def _print_question(question: OwnerQuestion, *, as_json: bool) -> int:
     print(f"Question : {view['question_id']} ({view['key']}) [{view['status']}]")
     print(f"Subject  : {view['subject']}")
     print(f"Class    : {view['decision_class']} — answerable by {view['answerable_by']}")
+    print(
+        "Critical : "
+        + ("yes — " + "; ".join(view["critical_reasons"]) if view["critical"] else "no")
+    )
     print(f"Raised   : {view['raised_by_role']} {view['raised_by']} at {view['raised_at']}")
     if view["scope"] or view["run_id"]:
         print(f"Scope    : {view['scope'] or '-'} run {view['run_id'] or '-'}")
@@ -5918,6 +5930,7 @@ def handle_questions_ask(args: argparse.Namespace) -> int:
             options=tuple(str(item) for item in args.options),
             default_option=args.default_option,
             supersedes=args.supersedes,
+            escalated=bool(args.escalate),
         )
         question = _questions_queue(args).ask(request)
     except QuestionError as exc:
@@ -5955,9 +5968,10 @@ def handle_questions_list(args: argparse.Namespace) -> int:
         return 0
     for view in views:
         marker = "DUE" if view["due"] else view["status"]
+        critical = "CRITICAL" if view["critical"] else "-"
         print(
-            f"{view['question_id']}  {marker:<9} {view['decision_class']:<32} "
-            f"{view['key']}  {view['subject']}"
+            f"{view['question_id']}  {marker:<9} {critical:<8} "
+            f"{view['decision_class']:<32} {view['key']}  {view['subject']}"
         )
     return 0
 

@@ -78,9 +78,13 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from saberops.unattended import NEVER_DELEGABLE_KINDS
+
 __all__ = [
     "ASK_EVENT_VERB",
     "CFG_1_TARGET",
+    "CRITICAL_DECISION_CLASSES",
+    "CRITICAL_QUESTION_KINDS",
     "ESCALATION_PARTS",
     "IMPLEMENTER_ROLES",
     "ORCHESTRATOR_ANSWERABLE_DECISION_CLASSES",
@@ -111,16 +115,20 @@ __all__ = [
     "QuestionEvent",
     "QuestionLedger",
     "QuestionRequest",
+    "QuestionReturnSummary",
     "QuestionStateError",
     "QuestionStatus",
     "QuestionStoreError",
     "StandingRuleProposal",
     "build_questions_router",
+    "critical_reasons",
     "get_questions_store_path",
+    "is_critical_question",
     "is_due",
     "is_orchestrator_answerable",
     "question_id_for_key",
     "question_request",
+    "question_return_summary",
     "question_view",
     "request_from_payload",
     "resolve_answer_authority",
@@ -279,6 +287,8 @@ class DecisionClass(StrEnum):
     TEST_CHANGE_AGAINST_ADR = "TEST_CHANGE_AGAINST_ADR"
     DELETE_OUTSIDE_ENGINE_FOLDERS = "DELETE_OUTSIDE_ENGINE_FOLDERS"
     APPROVE_CONFIG_PROPOSAL = "APPROVE_CONFIG_PROPOSAL"
+    #: Accepting a candidate is always critical; no self-answer path exists.
+    ACCEPTANCE = "ACCEPTANCE"
     # Orchestrator-answerable (ADR-0004 D6, accepted answer Q2).
     REVIEW_FINDING_CLASSIFICATION = "REVIEW_FINDING_CLASSIFICATION"
     FIX_UP_CONTENT = "FIX_UP_CONTENT"
@@ -310,6 +320,20 @@ ORCHESTRATOR_ANSWERABLE_DECISION_CLASSES: frozenset[DecisionClass] = frozenset(
         DecisionClass.G3_FAILURE_ROUTING,
         DecisionClass.ROUTINE_QUESTION,
     }
+)
+
+#: Question kinds that are never delegable (the ADR-0004 D14 list).  A question
+#: raised with one of these kinds is critical even when its decision class is
+#: otherwise routine: the orchestrator can add criticality, never remove it.
+CRITICAL_QUESTION_KINDS: frozenset[str] = frozenset(
+    kind.value for kind in NEVER_DELEGABLE_KINDS
+)
+
+#: Decision classes that always reach the owner, regardless of mode or of
+#: anything the planning session says.  The owner-only split is unchanged; the
+#: acceptance class is added here because acceptance has no delegable form.
+CRITICAL_DECISION_CLASSES: frozenset[DecisionClass] = (
+    OWNER_ONLY_DECISION_CLASSES | frozenset({DecisionClass.ACCEPTANCE})
 )
 
 
@@ -375,6 +399,15 @@ def _optional_text(value: object, field_name: str) -> str | None:
     if not isinstance(value, str):
         raise QuestionStoreError(f"{field_name} must be text when present")
     return value.strip() or None
+
+
+def _boolean(value: object, field_name: str, *, default: bool = False) -> bool:
+    """Return a strict boolean; a truthy string is refused, not coerced."""
+    if value is None:
+        return default
+    if not isinstance(value, bool):
+        raise QuestionStoreError(f"{field_name} must be a boolean")
+    return value
 
 
 def _text_tuple(value: object, field_name: str) -> tuple[str, ...]:
@@ -521,6 +554,9 @@ class QuestionRequest:
     options: tuple[str, ...] = ()
     default_option: str | None = None
     supersedes: str | None = None
+    #: Orchestrator judgment that this otherwise-routine question is critical.
+    #: It can only add criticality; an owner-only class stays critical either way.
+    escalated: bool = False
 
     def __post_init__(self) -> None:
         key = _require_text(self.key, "key")
@@ -544,6 +580,9 @@ class QuestionRequest:
                 raise QuestionStoreError("default_option must be one of the options")
         object.__setattr__(self, "default_option", default)
         object.__setattr__(self, "supersedes", _optional_text(self.supersedes, "supersedes"))
+        object.__setattr__(
+            self, "escalated", _boolean(self.escalated, "escalated", default=False)
+        )
 
     @property
     def question_id(self) -> str:
@@ -554,6 +593,11 @@ class QuestionRequest:
     def answerable_by(self) -> AnswerAuthority:
         """Who is allowed to answer: derived, never caller-chosen."""
         return resolve_answer_authority(self.decision_class)
+
+    @property
+    def critical(self) -> bool:
+        """True when this question can only reach the owner (derived)."""
+        return is_critical_question(self)
 
     def to_mapping(self) -> dict[str, Any]:
         """Render the ask payload (verbatim text) for comparison or storage."""
@@ -570,6 +614,7 @@ class QuestionRequest:
             "options": list(self.options),
             "default_option": self.default_option,
             "supersedes": self.supersedes,
+            "escalated": self.escalated,
             "escalation": self.escalation.to_mapping(),
         }
 
@@ -864,6 +909,16 @@ class OwnerQuestion:
         return self.request.answerable_by
 
     @property
+    def critical(self) -> bool:
+        """True when this question can only reach the owner (derived)."""
+        return is_critical_question(self)
+
+    @property
+    def critical_reasons(self) -> tuple[str, ...]:
+        """Every reason this question is critical, for a page or a CLI."""
+        return critical_reasons(self)
+
+    @property
     def is_closed(self) -> bool:
         """True for the two evidence-bearing terminal outcomes."""
         return self.status in (QuestionStatus.ANSWERED, QuestionStatus.MOOT)
@@ -916,6 +971,7 @@ class OwnerQuestion:
             options=_text_tuple(data.get("options"), "question.options"),
             default_option=data.get("default_option"),
             supersedes=data.get("supersedes"),
+            escalated=_boolean(data.get("escalated"), "question.escalated", default=False),
         )
         answer_raw = data.get("answer")
         answer = None if answer_raw is None else OwnerAnswer.from_mapping(answer_raw)
@@ -1025,6 +1081,7 @@ class OrchestratorAloneDecision:
     kind: str
     decision_class: DecisionClass
     scope: str | None
+    subject: str
     requirement: str
     recommendation: str
     words: str
@@ -1032,6 +1089,8 @@ class OrchestratorAloneDecision:
     rejected_alternative: str
     answered_by: str
     answered_at: str
+    run_id: str | None = None
+    blocks: tuple[str, ...] = ()
 
     def to_mapping(self) -> dict[str, Any]:
         """Render the audit entry."""
@@ -1041,6 +1100,7 @@ class OrchestratorAloneDecision:
             "kind": self.kind,
             "decision_class": self.decision_class.value,
             "scope": self.scope,
+            "subject": self.subject,
             "requirement": self.requirement,
             "recommendation": self.recommendation,
             "words": self.words,
@@ -1048,6 +1108,25 @@ class OrchestratorAloneDecision:
             "rejected_alternative": self.rejected_alternative,
             "answered_by": self.answered_by,
             "answered_at": self.answered_at,
+            "run_id": self.run_id,
+            "blocks": list(self.blocks),
+        }
+
+
+@dataclass(frozen=True)
+class QuestionReturnSummary:
+    """The question section of a return summary, derived only from records."""
+
+    self_answered: tuple[OrchestratorAloneDecision, ...]
+    critical_open: tuple[OwnerQuestion, ...]
+    routine_open: tuple[OwnerQuestion, ...]
+
+    def to_mapping(self, as_of: date | None = None) -> dict[str, Any]:
+        """Render the summary for a return notice or ``catch_up``."""
+        return {
+            "self_answered": [item.to_mapping() for item in self.self_answered],
+            "critical_open": [question_view(item, as_of) for item in self.critical_open],
+            "routine_open": [question_view(item, as_of) for item in self.routine_open],
         }
 
 
@@ -1081,6 +1160,30 @@ def question_request(question: OwnerQuestion) -> QuestionRequest:
     return question.request
 
 
+def critical_reasons(question: OwnerQuestion | QuestionRequest) -> tuple[str, ...]:
+    """Explain every reason a question is critical, in stable order.
+
+    The union is additive by construction: an owner-only or acceptance class,
+    a never-delegable kind, or the orchestrator's own escalation.  Nothing in
+    the input can remove a reason.
+    """
+    request = question.request if isinstance(question, OwnerQuestion) else question
+    reasons: list[str] = []
+    if request.decision_class in CRITICAL_DECISION_CLASSES:
+        reasons.append(f"decision class {request.decision_class.value} is owner-only")
+    kind = request.kind.strip().lower()
+    if kind in CRITICAL_QUESTION_KINDS:
+        reasons.append(f"question kind {kind} is never delegable")
+    if request.escalated:
+        reasons.append("the orchestrator escalated it")
+    return tuple(reasons)
+
+
+def is_critical_question(question: OwnerQuestion | QuestionRequest) -> bool:
+    """Return True when only the owner may answer this question."""
+    return bool(critical_reasons(question))
+
+
 def is_due(question: OwnerQuestion, as_of: date) -> bool:
     """Return True when a deferred question has reached its resurface date."""
     if question.status is not QuestionStatus.DEFERRED or question.defer_until is None:
@@ -1098,6 +1201,9 @@ def question_view(question: OwnerQuestion, as_of: date | None = None) -> dict[st
         "subject": question.request.subject,
         "decision_class": question.request.decision_class.value,
         "answerable_by": question.answerable_by.value,
+        "critical": is_critical_question(question),
+        "critical_reasons": list(critical_reasons(question)),
+        "escalated": question.request.escalated,
         "raised_by_role": question.request.raised_by_role.value,
         "raised_by": question.request.raised_by,
         "raised_at": question.raised_at,
@@ -1486,6 +1592,7 @@ class OwnerQuestionQueue:
                 kind=question.kind,
                 decision_class=question.request.decision_class,
                 scope=question.request.scope,
+                subject=question.request.subject,
                 requirement=question.request.escalation.requirement,
                 recommendation=question.request.escalation.recommendation,
                 words=question.answer.words,
@@ -1493,6 +1600,8 @@ class OwnerQuestionQueue:
                 rejected_alternative=question.answer.rejected_alternative or "",
                 answered_by=question.answer.answered_by,
                 answered_at=question.answer.answered_at,
+                run_id=question.request.run_id,
+                blocks=question.request.blocks,
             )
             for question in self.load().questions
             if question.answer is not None
@@ -1623,6 +1732,52 @@ class OwnerQuestionQueue:
         )
 
 
+def question_return_summary(
+    queue: OwnerQuestionQueue,
+    *,
+    run_ids: tuple[str, ...] = (),
+    blocks: tuple[str, ...] = (),
+    as_of: date | None = None,
+) -> QuestionReturnSummary:
+    """Build the question section of a return summary from durable records.
+
+    ``run_ids`` and ``blocks`` narrow the summary to one job (its runs and its
+    job id); with neither, every question is included.  Reads only: nothing is
+    written, no notice is sent and no lease is taken.
+    """
+    wanted_runs = set(run_ids)
+    wanted_blocks = set(blocks)
+
+    def matches(run_id: str | None, question_blocks: tuple[str, ...]) -> bool:
+        if not wanted_runs and not wanted_blocks:
+            return True
+        if run_id is not None and run_id in wanted_runs:
+            return True
+        return bool(wanted_blocks.intersection(question_blocks))
+
+    open_questions = queue.questions(status=QuestionStatus.OPEN)
+    critical_open: list[OwnerQuestion] = []
+    routine_open: list[OwnerQuestion] = []
+    for question in open_questions:
+        request = question.request
+        if not matches(request.run_id, request.blocks):
+            continue
+        if is_critical_question(question):
+            critical_open.append(question)
+        else:
+            routine_open.append(question)
+    self_answered = tuple(
+        decision
+        for decision in queue.orchestrator_alone_decisions()
+        if matches(decision.run_id, decision.blocks)
+    )
+    return QuestionReturnSummary(
+        self_answered=self_answered,
+        critical_open=tuple(critical_open),
+        routine_open=tuple(routine_open),
+    )
+
+
 def _payload(raw: object, label: str) -> dict[str, Any]:
     if not isinstance(raw, Mapping):
         raise QuestionError(f"{label} must be a JSON object")
@@ -1656,6 +1811,7 @@ def request_from_payload(payload: Mapping[str, Any]) -> QuestionRequest:
         options=_text_tuple(payload.get("options"), "options"),
         default_option=payload.get("default_option"),
         supersedes=payload.get("supersedes"),
+        escalated=_boolean(payload.get("escalated"), "escalated", default=False),
     )
 
 

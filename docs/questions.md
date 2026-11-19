@@ -84,8 +84,27 @@ by the caller:
 
 | Class | Authority |
 |---|---|
-| `MOVE_MAIN`, `PUSH`, `QUARANTINE`, `BILLING_OR_POSTURE`, `TEST_CHANGE_AGAINST_ADR`, `DELETE_OUTSIDE_ENGINE_FOLDERS`, `APPROVE_CONFIG_PROPOSAL`, `OTHER` | `OWNER` only |
+| `MOVE_MAIN`, `PUSH`, `QUARANTINE`, `BILLING_OR_POSTURE`, `TEST_CHANGE_AGAINST_ADR`, `DELETE_OUTSIDE_ENGINE_FOLDERS`, `APPROVE_CONFIG_PROPOSAL`, `ACCEPTANCE`, `OTHER` | `OWNER` only |
 | `REVIEW_FINDING_CLASSIFICATION`, `FIX_UP_CONTENT`, `G3_FAILURE_ROUTING`, `ROUTINE_QUESTION` | `PLAN` allowed |
+
+Every question also carries a derived **critical** tag. It is the union of an
+owner-only or acceptance class, a never-delegable question kind (the ADR-0004
+D14 list: test gate, data/training policy, roadmap scope, budget cap,
+credentials, destructive operations, publishing), and an explicit orchestrator
+escalation (`escalated: true`). The tag can only be added, never removed, and
+`critical_reasons()` explains it. `question_view` exposes `critical`,
+`critical_reasons` and `escalated`.
+
+The owner mode decides who may self-answer (ADR-0027):
+
+* `ask-me` leaves every question to the owner.
+* `critical-only` and `away`, with a live planning session, let that session
+  answer a routine (`critical: false`) question with PLAN authority, evidence
+  and a rejected alternative. The answer is logged and shown in `catch_up`.
+* A critical question is refused to the planning session in every mode; it
+  notifies the owner and waits.
+* With no live planning session, a routine question waits. The engine starts no
+  background planner; the question stays durable until a planner returns.
 
 Rules enforced in code:
 
@@ -114,7 +133,10 @@ current status attached.
 * `orchestrator_alone_decisions()` is the audit list of every decision the
   Orchestrator took without the owner: the question, its decision class, the
   forcing requirement, the Orchestrator's recommendation, the answer words, the
-  evidence and the rejected alternative.
+  evidence, the rejected alternative and the run/job scope. `catch_up` returns
+  the job's self-answered decisions, and `question_return_summary()` is the
+  reusable projection (self-answered, open critical and open routine) for the
+  return summary.
 * `standing_rule_proposals(threshold=3)` groups **owner** answers by question
   kind and answer (the chosen option, or the words when there is no option) and
   proposes one standing rule per group that reached the threshold. A proposal
