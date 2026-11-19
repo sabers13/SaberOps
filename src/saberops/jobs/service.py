@@ -39,7 +39,7 @@ from saberops.jobs.store import (
     JobNotFoundError,
     JobTransitionError,
 )
-from saberops.models import RunStatus
+from saberops.models import AttemptStatus, HealthState, ManagerState, RunStatus
 from saberops.routing_config import RoutingSnapshot, load_effective_routing
 from saberops.run_creation import RunRequest
 
@@ -911,8 +911,8 @@ def reconcile_jobs(
 
     Called by whoever owns the loop (M2-4b scheduler start and tick).
     ``COMPLETED`` -> SUCCEEDED; ``FAILED`` -> FAILED ``RUN_FAILED``;
-    ``None`` (run not found) -> FAILED ``RUN_MISSING``; ``PENDING``,
-    ``RUNNING`` and ``ORPHANED`` stay (run recovery belongs to the
+    ``None`` (run not found) -> FAILED ``RUN_MISSING``; ``ORPHANED`` ->
+    FAILED ``RUN_FAILED``; ``PENDING`` and ``RUNNING`` stay (recovery belongs to the
     supervisor) with no event.  ``PREEMPTED`` (ADR-0002 D8, M2-5) completes
     an interrupted preemption idempotently: the run is conclusively
     terminal, so the job is requeued to QUEUED/PREEMPTED with its verified
@@ -931,7 +931,7 @@ def reconcile_jobs(
             to_state, failure = JobState.FAILED, RUN_MISSING
         elif status == RunStatus.COMPLETED:
             to_state, failure = JobState.SUCCEEDED, None
-        elif status == RunStatus.FAILED:
+        elif status in (RunStatus.FAILED, RunStatus.ORPHANED):
             to_state, failure = JobState.FAILED, RUN_FAILED
         elif status == RunStatus.PREEMPTED:
             # Crash between run terminalization and job requeue (D8): finish
@@ -958,7 +958,7 @@ def reconcile_jobs(
                 )
             )
             continue
-        else:  # PENDING, RUNNING, ORPHANED: supervisor's recovery, not ours
+        else:  # PENDING, RUNNING: supervisor's recovery, not ours
             continue
         try:
             updated = store.reconcile_transition(
@@ -984,6 +984,57 @@ def reconcile_jobs(
         except Exception:
             pass
     return changes
+
+
+def job_status_view(db: Any, job: Job) -> dict[str, Any]:
+    """Project durable execution evidence onto a job without changing its state."""
+    view = job.to_dict()
+    view.update(activity=None, reason=None, work_location=None, last_failed_attempt=None)
+    if not job.current_run_id:
+        return view
+    run = db.get_run(job.current_run_id)
+    attempts = db.get_attempts_for_run(job.current_run_id)
+    failed = [a for a in attempts if a.status in (AttemptStatus.FAILED, AttemptStatus.TIMEOUT)]
+    last = failed[-1] if failed else (attempts[-1] if attempts else None)
+    if last is not None:
+        view["work_location"] = last.worktree_path
+    if failed:
+        attempt = failed[-1]
+        view["last_failed_attempt"] = {
+            "attempt_id": attempt.id,
+            "reason": (
+                attempt.worker_error or attempt.interruption_reason or "worker attempt failed"
+            ),
+            "work_location": attempt.worktree_path,
+        }
+    if run is not None:
+        view["reason"] = run.result_summary
+    if job.state != JobState.RUNNING:
+        if not view["reason"]:
+            view["reason"] = job.failure_reason or (
+                view["last_failed_attempt"]["reason"] if failed else None
+            )
+        return view
+    from saberops.ownership import Liveness
+    from saberops.supervisor import RunSupervisor
+
+    _, liveness = RunSupervisor(db=db).owner_evidence(job.current_run_id)
+    supervision = db.get_supervision(job.current_run_id)
+    if liveness is Liveness.DEAD:
+        view["activity"] = "needs_attention"
+        view["reason"] = "execution owner is dead; worker safety is being checked"
+    elif supervision is not None and (
+        supervision.health_state == HealthState.STALLED
+        or supervision.manager_state == ManagerState.ATTENTION_REQUIRED
+    ):
+        view["activity"] = "needs_attention"
+        view["reason"] = supervision.health_reason or "worker needs attention"
+    elif failed and attempts[-1].id != failed[-1].id:
+        view["activity"] = "retrying"
+        view["reason"] = view["last_failed_attempt"]["reason"]
+    else:
+        view["activity"] = "running"
+    return view
 
 
 def job_dispatch_spec(job: Job) -> JobDispatchSpec:

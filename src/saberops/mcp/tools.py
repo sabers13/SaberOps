@@ -457,7 +457,7 @@ def _job_result(db: Any, job: Any) -> dict[str, Any]:
 
 
 def _get_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
-    from saberops.jobs.service import get_job
+    from saberops.jobs.service import get_job, job_status_view
 
     job_id = _require_text(arguments, "job_id", what="job_id")
     db = context.database(read_only=True)
@@ -466,7 +466,7 @@ def _get_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, 
         raise NotFoundError(f"unknown job: {job_id}", data={"job_id": job_id})
     return {
         "v": SNAPSHOT_SCHEMA_VERSION,
-        "job": job.to_dict(),
+        "job": job_status_view(db, job),
         "result": _job_result(db, job),
         "guidance": _job_guidance(job),
     }
@@ -499,7 +499,7 @@ def _wait_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str,
 
 
 def _list_jobs(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
-    from saberops.jobs.service import list_jobs
+    from saberops.jobs.service import job_status_view, list_jobs
 
     limit = int(arguments.get("limit", 50))
     state = arguments.get("state")
@@ -508,7 +508,7 @@ def _list_jobs(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str
     return {
         "v": SNAPSHOT_SCHEMA_VERSION,
         "count": len(jobs),
-        "jobs": [job.to_dict() for job in jobs],
+        "jobs": [job_status_view(db, job) for job in jobs],
     }
 
 

@@ -394,19 +394,21 @@ def test_reconcile_status_mapping(tmp_path: Path) -> None:
 
     changes = reconcile_jobs(db, run_status=status, now=_NOW)
     by_job = {c.job_id: c for c in changes}
-    assert set(by_job) == {completed, failed, missing}
+    assert set(by_job) == {completed, failed, missing, orphaned}
     assert by_job[completed].to_state == JobState.SUCCEEDED
     assert by_job[completed].failure_reason is None
     assert by_job[failed].to_state == JobState.FAILED
     assert by_job[failed].failure_reason == RUN_FAILED
     assert by_job[missing].to_state == JobState.FAILED
     assert by_job[missing].failure_reason == RUN_MISSING
-    for untouched in (pending, running, orphaned):
+    assert by_job[orphaned].to_state == JobState.FAILED
+    assert by_job[orphaned].failure_reason == RUN_FAILED
+    for untouched in (pending, running):
         current = get_job(db, untouched)
         assert current is not None
         assert current.state == JobState.RUNNING
     # No event for untouched RUNNING jobs: still exactly 2 events each.
-    for untouched in (pending, running, orphaned):
+    for untouched in (pending, running):
         assert len(store.list_events(db, untouched)) == 2
     # Idempotent second call changes nothing.
     assert reconcile_jobs(db, run_status=status, now=_NOW) == []

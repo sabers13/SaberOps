@@ -796,7 +796,9 @@ class RunSupervisor:
                 pass
         return False
 
-    def reconcile(self, run_id: str, dry_run: bool = False) -> dict[str, object]:
+    def reconcile(
+        self, run_id: str, dry_run: bool = False, *, orphan_recoverable: bool = False
+    ) -> dict[str, object]:
         """Reconcile persisted run state with durable ownership evidence.
 
         Reconciliation never launches anything.  A live detached owner is kept,
@@ -808,6 +810,9 @@ class RunSupervisor:
         commits fenced to it, so a newer generation that claims the run while
         this reconcile is deciding is never orphaned, never has its attempts
         failed, and never gets released.
+
+        Scheduler-owned jobs may request orphaning instead of offering cold
+        recovery; the same owner and worker liveness fences still apply.
         """
         run = self.db.get_run(run_id)
         if run is None:
@@ -963,7 +968,7 @@ class RunSupervisor:
         if preempt_result is not None:
             return preempt_result
 
-        if self._is_recovery_eligible(run, inspected_owner=owner):
+        if not orphan_recoverable and self._is_recovery_eligible(run, inspected_owner=owner):
             result["action"] = "recover"
             result["reason"] = "recovery_eligible"
             result["status"] = run.status.value

@@ -747,6 +747,23 @@ def scheduler_tick(
             unresolved_running_jobs=tuple(unresolved_running_jobs),
         )
 
+    # Reconcile execution owners before projecting terminal runs into jobs.
+    # The supervisor fences the owner generation and refuses to orphan while a
+    # worker may still be alive. Worktrees and attempts are retained.
+    if run_status is None:
+        from saberops.supervisor import RunSupervisor
+
+        supervisor = RunSupervisor(db=db)
+        for running_job in running_snapshot:
+            run_id = running_job.current_run_id
+            if run_id and tick_status(run_id) in (RunStatus.PENDING, RunStatus.RUNNING):
+                try:
+                    supervisor.reconcile(run_id, orphan_recoverable=True)
+                except ValueError:
+                    # Unresolvable provenance remains an owner-visible hold.
+                    continue
+                status_cache.pop(run_id, None)
+
     # 1. Startup and periodic reconciliation
     changes = reconcile_jobs(db, run_status=tick_status, now=moment)
     try:
