@@ -3,7 +3,7 @@
 - **Status:** Accepted. The UI, role and cut decisions stand. Role retirement is
   pending implementation in Phase 1 lane E1. The Telegram, replay, roadmap and
   in-engine orchestrator-memory deletions have landed; the wave executor, its
-  slot policy and `execute_wave` are pending in lane D3.
+  slot policy and `execute_wave` were removed in lane D3.
 - **Date:** 2026-11-19
 - **Decider:** Saber (owner)
 - **Supersedes in part:** [ADR-0001](0001-saberops-engine-mcp-first.md) (UI scope, role vocabulary, cut list). ADR-0001's billing, isolation, gate and independent-review invariants still stand.
@@ -94,8 +94,8 @@ stay. (Pending implementation in lane E1.)
 
 These are **removed**, not hidden: they remain in git history. Removing them,
 and the tests only they used, is the largest maintenance and gate-time saving in
-Phase 1. Lanes D1 and D2 have landed; lane D3 completes the wave-executor
-deletion. **Antigravity stays attended-only as a worker**; driving SaberOps from
+Phase 1. Lanes D1, D2 and D3 have landed, so the wave-executor deletion is
+complete. **Antigravity stays attended-only as a worker**; driving SaberOps from
 an Antigravity session is supported, automating Antigravity is not.
 
 ## 5. What still stands from ADR-0001
