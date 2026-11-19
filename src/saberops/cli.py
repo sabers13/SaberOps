@@ -3483,6 +3483,7 @@ def handle_list(args: argparse.Namespace) -> int:
             f"{r.id:<16} {r.status.value:<12} {service.run_routing_role(r.id):<10} "
             f"{r.created_at[:19]:<24} {task_snippet}"
         )
+    print(f"Database: {service.db.db_path}")
     return 0
 
 
@@ -5814,7 +5815,12 @@ def handle_ui(args: argparse.Namespace) -> int:
         # unavailable evidence. Never reset it or block the dashboard from opening.
         print("Provider discovery could not read or save owner state; see Access.")
     app = create_app(db_path=args.db, repo_path=args.repo, seed_cwd_if_empty=False)
-    startup_db = Database(args.db) if args.db else Database(get_default_db_path())
+    if args.db:
+        startup_db = Database(args.db)
+    elif args.repo:
+        startup_db = Database(project_db_path_for_repo(args.repo))
+    else:
+        startup_db = Database(get_default_db_path())
     url = f"http://{args.host}:{args.port}"
     from saberops.observability.run_report import saberops_version
 

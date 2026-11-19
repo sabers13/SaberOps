@@ -17,6 +17,7 @@
       {% elif bad %}<strong>{{ bad }} {{ "run" if bad == 1 else "runs" }} did not finish.</strong> Open one to see what happened.
       {% else %}Nothing is running. Open a finished run to read its changes and decide.{% endif %}
     </p>
+    <p class="muted">Store: <code>{{ db_path }}</code></p>
   </div>
 </header>
 

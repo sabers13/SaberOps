@@ -520,6 +520,7 @@ def _dashboard_context(
     """Build the minimal status-page context: the run list."""
     return {
         "runs": _run_rows(service.list_runs(limit=50)),
+        "db_path": str(service.db.db_path),
         "saberops_version": saberops_version(),
         "error": error,
         "notice": notice,
@@ -2654,13 +2655,18 @@ def create_app(
     compatibility but the page always shows the pinned store's runs.
     Passing an explicit ``db_path`` pins the whole app to that single store.
     """
-    del repo_path, seed_cwd_if_empty  # launch compatibility only; see docstring.
+    del seed_cwd_if_empty
+    resolved_db_path: str | Path | None = db_path
+    if resolved_db_path is None and repo_path is not None:
+        from saberops.runtime import project_db_path_for_repo
+
+        resolved_db_path = project_db_path_for_repo(repo_path, state_root=state_root)
     resolved_registry = registry if registry is not None else AdapterRegistry.default()
 
     runtimes = ProjectRuntimeManager(
         registry=resolved_registry,
         worktree_base=worktree_base,
-        pinned_db_path=db_path,
+        pinned_db_path=resolved_db_path,
         state_root=state_root,
     )
 
