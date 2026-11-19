@@ -5,9 +5,7 @@ a small toy Git repository, executable shims on ``PATH`` for our deterministic
 fake worker/reviewer CLI, two separately routable worker providers (``codex``
 and ``opencode``), and an independent ``anthropic`` (``claude``) reviewer.
 
-Setup runs through the same public functions/commands an owner uses, with
-narrow, explicitly tagged workarounds for the Wave 0 defects (findings §3
-items 1-3) so they can be removed cleanly as A3-A5 land.
+Setup runs through the same public functions/commands an owner uses.
 """
 
 from __future__ import annotations
@@ -31,7 +29,6 @@ from saberops.access_ops import (
     verify_access_model,
 )
 from saberops.cli import main as cli_main
-from saberops.control_plane.policy import ProviderPolicyState, set_provider_policy
 from saberops.db import Database, current_iso_timestamp
 from saberops.models import (
     TERMINAL_RUN_STATUSES,
@@ -77,10 +74,14 @@ def _git(repo: Path, *args: str) -> str:
     return proc.stdout.strip()
 
 
-def _install_shim(bin_dir: Path, name: str) -> Path:
+def _install_shim(bin_dir: Path, name: str, state_dir: Path) -> Path:
     shim = bin_dir / name
+    worker_ctl = state_dir / "fake-worker-mode.json"
+    reviewer_ctl = state_dir / "fake-reviewer-mode.json"
     shim.write_text(
         "#!/bin/sh\n"
+        f'export ORCH_FAKE_WORKER_CONTROL_FILE="{worker_ctl}"\n'
+        f'export ORCH_FAKE_REVIEWER_CONTROL_FILE="{reviewer_ctl}"\n'
         f'exec "{sys.executable}" "{FAKE_CLI_SCRIPT}" --fake-harness {name} "$@"\n',
         encoding="utf-8",
     )
@@ -138,7 +139,20 @@ class RigEnvironment:
         target_file: str | None = None,
         content: str | None = None,
     ) -> None:
-        """Configure fake worker behaviour via ``ORCH_FAKE_*`` env vars."""
+        """Configure fake worker behaviour via control file and ``ORCH_FAKE_*`` env vars."""
+        control_path = self.state_home / "saberops" / "fake-worker-mode.json"
+        control_path.parent.mkdir(parents=True, exist_ok=True)
+        payload: dict[str, object] = {"mode": mode}
+        if hang_seconds is not None:
+            payload["hang_seconds"] = hang_seconds
+        if exit_code is not None:
+            payload["exit_code"] = exit_code
+        if target_file is not None:
+            payload["target_file"] = target_file
+        if content is not None:
+            payload["content"] = content
+        control_path.write_text(json.dumps(payload), encoding="utf-8")
+
         self.monkeypatch.setenv("ORCH_FAKE_WORKER_MODE", mode)
         if hang_seconds is not None:
             self.monkeypatch.setenv("ORCH_FAKE_WORKER_HANG_SECONDS", str(hang_seconds))
@@ -187,7 +201,9 @@ class RigEnvironment:
             time.sleep(0.05)
         run = db.get_run(run_id)
         status_str = run.status.value if run is not None else "missing"
-        raise TimeoutError(f"Run {run_id} did not terminate within {timeout}s (status={status_str})")
+        raise TimeoutError(
+            f"Run {run_id} did not terminate within {timeout}s (status={status_str})"
+        )
 
 
 def build_lifecycle_rig(
@@ -198,9 +214,7 @@ def build_lifecycle_rig(
 ) -> RigEnvironment:
     """Create a fresh empty store + toy repo wired with fake workers and reviewer.
 
-    Every setup step uses the public functions/commands an owner uses, except
-    where Wave 0 defects (findings §3 items 1-3) block fresh setup; those are
-    marked with ``# WORKAROUND(defect #N)``.
+    Every setup step uses the public functions/commands an owner uses.
     """
     home_dir = tmp_path / "home"
     state_home = tmp_path / "state"
@@ -238,8 +252,10 @@ def build_lifecycle_rig(
     ):
         monkeypatch.delenv(var, raising=False)
 
+    saberops_state_dir = state_home / "saberops"
+    saberops_state_dir.mkdir(parents=True, exist_ok=True)
     for cli_name in ("codex", "opencode", "claude"):
-        _install_shim(bin_dir, cli_name)
+        _install_shim(bin_dir, cli_name, saberops_state_dir)
 
     repo, base_sha = create_toy_repo(tmp_path)
     resolved_gate = (
@@ -295,21 +311,30 @@ def build_lifecycle_rig(
         "A",
         today,
     )
-    # WORKAROUND(defect #1): verify_posture writes control_plane.json with an
-    # empty ``providers`` mapping, leaving every provider in ALLOWED_WITH_WARNING
-    # (refused unattended), and ``anthropic`` is absent from policy._default().
-    # No CLI command marks a provider ALLOWED yet (A4).
-    for provider in ("codex", "opencode", "anthropic"):
-        set_provider_policy(provider, ProviderPolicyState.ALLOWED)
 
-    # 5. Supply fresh quota evidence for overage_possible pools.
-    # WORKAROUND(defect #2): Fresh stores hold no quota reading and nothing
-    # gathers quota evidence automatically (A5), so overage_possible pools
-    # refuse admission with QUOTA_EVIDENCE_REQUIRED / NO_CAPACITY.
+    # 5. Supply fresh quota evidence via the public CLI (`orch quota set`) for
+    # overage_possible pools (auto-probing is disabled under pytest / claude).
     future_reset = (datetime.now(UTC) + timedelta(hours=4)).isoformat()
-    service.set_quota("codex", "chatgpt-plus", 80.0, reset_at=future_reset)
-    service.set_quota("opencode", "opencode-go", 80.0, reset_at=future_reset)
-    service.set_quota("anthropic", "claude-pro", 80.0, reset_at=future_reset)
+    for provider, pool in (
+        ("codex", "chatgpt-plus"),
+        ("opencode", "opencode-go"),
+        ("anthropic", "claude-pro"),
+    ):
+        assert (
+            cli_main(
+                [
+                    "quota",
+                    "set",
+                    provider,
+                    pool,
+                    "--remaining",
+                    "80",
+                    "--reset-at",
+                    future_reset,
+                ]
+            )
+            == 0
+        )
 
     # 6. Configure project review policy and check command via public CLI.
     set_project_review_policy(repo, ReviewPolicyMode.ALWAYS_REQUIRED)

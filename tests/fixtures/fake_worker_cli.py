@@ -12,10 +12,13 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
+import threading
 import time
 import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -240,6 +243,170 @@ def _handle_codex(
     return 0
 
 
+def _serve_opencode(
+    *,
+    mode: str,
+    hang_seconds: float,
+    exit_code: int,
+    target_file: str,
+    content: str | None,
+) -> int:
+    """Minimal HTTP server emulating ``opencode serve`` for ``OpenCodeServerSession``."""
+    session_id = "ses_fakeopencode01"
+    workdir = Path.cwd()
+    messages: list[dict[str, Any]] = []
+    lock = threading.Lock()
+    state = {"status": "idle"}
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: Any) -> None:
+            pass
+
+        def _send_json(self, code: int, payload: object) -> None:
+            raw = b"" if code == 204 else json.dumps(payload).encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            if raw:
+                self.wfile.write(raw)
+
+        def do_GET(self) -> None:
+            path = self.path.split("?", 1)[0]
+            if path == "/global/health":
+                self._send_json(200, {"healthy": True, "version": "2.0.29-fake"})
+                return
+            if path == "/session/status":
+                with lock:
+                    current = state["status"]
+                self._send_json(200, {session_id: {"type": current}})
+                return
+            if path == f"/session/{session_id}":
+                self._send_json(200, {"id": session_id, "directory": str(workdir)})
+                return
+            if path == f"/session/{session_id}/message":
+                with lock:
+                    snapshot = list(messages)
+                self._send_json(200, snapshot)
+                return
+            if path == "/event":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                event = json.dumps(
+                    {
+                        "type": "session.status",
+                        "properties": {"sessionID": session_id, "status": {"type": "idle"}},
+                    }
+                )
+                try:
+                    self.wfile.write(f"data: {event}\n\n".encode())
+                    self.wfile.flush()
+                except OSError:
+                    pass
+                return
+            self._send_json(404, {"error": f"not found: {path}"})
+
+        def do_POST(self) -> None:
+            path = self.path.split("?", 1)[0]
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            raw_body = self.rfile.read(length) if length > 0 else b"{}"
+            try:
+                body = json.loads(raw_body.decode("utf-8")) if raw_body else {}
+            except ValueError:
+                body = {}
+
+            if path == "/session":
+                self._send_json(200, {"id": session_id})
+                return
+            if path == f"/session/{session_id}/abort":
+                with lock:
+                    state["status"] = "idle"
+                self._send_json(200, {})
+                return
+            if path == f"/session/{session_id}/prompt_async":
+                message_id = str(body.get("messageID") or f"msg_{uuid.uuid4().hex}")
+                if mode == "hang":
+                    with lock:
+                        state["status"] = "busy"
+                    self._send_json(204, None)
+                    time.sleep(hang_seconds)
+                    return
+                if mode == "crash":
+                    self._send_json(500, {"error": f"Fake opencode crash (code {exit_code})"})
+                    return
+                if mode == "quota_exhausted":
+                    with lock:
+                        messages.append(
+                            {
+                                "info": {
+                                    "id": f"msg_err_{len(messages) + 1}",
+                                    "role": "assistant",
+                                    "parentID": message_id,
+                                    "time": {"completed": 1},
+                                    "finish": "error",
+                                    "error": {
+                                        "name": "APIError",
+                                        "data": {
+                                            "message": "429 quota exceeded / rate limit reached"
+                                        },
+                                    },
+                                },
+                                "parts": [
+                                    {
+                                        "type": "text",
+                                        "text": "429 quota exceeded / rate limit reached",
+                                    }
+                                ],
+                            }
+                        )
+                        state["status"] = "idle"
+                    self._send_json(204, None)
+                    return
+
+                _commit_change(workdir, "opencode", target_file, content)
+                with lock:
+                    messages.append(
+                        {
+                            "info": {
+                                "id": f"msg_resp_{len(messages) + 1}",
+                                "role": "assistant",
+                                "parentID": message_id,
+                                "time": {"completed": 1},
+                                "finish": "stop",
+                            },
+                            "parts": [
+                                {"type": "text", "text": "Fake opencode completed."},
+                            ],
+                        }
+                    )
+                    state["status"] = "idle"
+                self._send_json(204, None)
+                return
+
+            self._send_json(404, {"error": f"not found: {path}"})
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    port = server.server_address[1]
+    stop_event = threading.Event()
+
+    def _shutdown(*_args: object) -> None:
+        stop_event.set()
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
+
+    print(f"opencode server listening on http://127.0.0.1:{port}", flush=True)
+    try:
+        server.serve_forever(poll_interval=0.05)
+    finally:
+        server.server_close()
+    return 0
+
+
 def _handle_opencode(
     args: list[str],
     *,
@@ -253,6 +420,15 @@ def _handle_opencode(
         print("opencode-go/deepseek-v4-flash")
         print("opencode-go/mimo-v2.5")
         return 0
+
+    if args and args[0] == "serve":
+        return _serve_opencode(
+            mode=mode,
+            hang_seconds=hang_seconds,
+            exit_code=exit_code,
+            target_file=target_file,
+            content=content,
+        )
 
     agent = _get_arg_value(args, "--agent")
     if agent == "saberops-access-check":
@@ -283,7 +459,9 @@ def _handle_opencode(
         _ = sys.stdin.read()
     _commit_change(Path.cwd(), "opencode", target_file, content)
     print(json.dumps({"type": "step_start", "part": {"type": "step-start"}}))
-    print(json.dumps({"type": "text", "part": {"type": "text", "text": "Fake opencode completed."}}))
+    print(
+        json.dumps({"type": "text", "part": {"type": "text", "text": "Fake opencode completed."}})
+    )
     print(
         json.dumps(
             {
@@ -387,7 +565,9 @@ def _handle_claude(
     model = _get_arg_value(args, "--model") or "claude-sonnet-4-6"
     body = _review_text(review_verdict)
     print(json.dumps({"type": "system", "subtype": "init", "model": model}))
-    print(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": body}]}}))
+    print(
+        json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": body}]}})
+    )
     print(
         json.dumps(
             {

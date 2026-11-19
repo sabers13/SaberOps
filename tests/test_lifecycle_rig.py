@@ -25,7 +25,12 @@ from saberops.accept import AcceptEngine
 from saberops.candidate_lifecycle import project_candidate_state
 from saberops.capacity.loop import run_scheduler_loop
 from saberops.config import RunConfig
-from saberops.control_plane import load_owner_bindings, reviewer_candidate_for_dispatch
+from saberops.control_plane import (
+    freeze_control_plane_policy,
+    load_control_plane_policy,
+    load_owner_bindings,
+    reviewer_candidate_for_dispatch,
+)
 from saberops.db import current_iso_timestamp
 from saberops.jobs.service import get_job, submit_job
 from saberops.model_access.readiness_service import ReadinessService
@@ -78,7 +83,9 @@ def acceptance_rig(rig: RigEnvironment) -> AcceptanceFixture:
 def test_rig_fresh_store_registers_two_providers_and_reviewer(rig: RigEnvironment) -> None:
     """Fresh-store setup registers two routable worker providers, reviewer, and gate."""
     snap = load_effective_routing()
-    worker_routes = [f"{c.provider}/{c.model}" for group in snap.groups_for("WORKER") for c in group]
+    worker_routes = [
+        f"{c.provider}/{c.model}" for group in snap.groups_for("WORKER") for c in group
+    ]
     assert WORKER_CANDIDATE_CODEX in worker_routes
     assert WORKER_CANDIDATE_OPENCODE in worker_routes
 
@@ -160,7 +167,7 @@ def _run_supervised_and_accept(
 
 
 def test_lifecycle_rig_worker_gate_review_accept_end_to_end(rig: RigEnvironment) -> None:
-    """Real detached RunSupervisor -> fake codex commits -> gate -> fake claude reviews -> accept."""
+    """Detached RunSupervisor -> fake codex -> gate -> fake claude -> accept."""
     run, final_sha = _run_supervised_and_accept(
         rig,
         task="Create feature artifact via codex",
@@ -198,14 +205,15 @@ def test_fake_reviewer_approves_and_rejects_on_instruction(rig: RigEnvironment) 
     provenance = mint_run_provenance(rig.repo, task)
     run_id = provenance.run_id
 
-    _git(rig.repo, "checkout", "-b", f"orch/{run_id}/a1", rig.base_sha)
-    (rig.repo / "reviewed.txt").write_text("reviewed change\n", encoding="utf-8")
-    _git(rig.repo, "add", "reviewed.txt")
-    _git(rig.repo, "commit", "-m", "candidate for review")
-    cand_sha = _git(rig.repo, "rev-parse", "HEAD")
-    _git(rig.repo, "checkout", "main")
+    worktree_dir = rig.root / "wt_review"
+    _git(rig.repo, "worktree", "add", "-b", f"orch/{run_id}/a1", str(worktree_dir), rig.base_sha)
+    (worktree_dir / "reviewed.txt").write_text("reviewed change\n", encoding="utf-8")
+    _git(worktree_dir, "add", "reviewed.txt")
+    _git(worktree_dir, "commit", "-m", "candidate for review")
+    cand_sha = _git(worktree_dir, "rev-parse", "HEAD")
 
     now = current_iso_timestamp()
+    frozen_cp = freeze_control_plane_policy(load_control_plane_policy())
     db.create_run(
         Run(
             id=run_id,
@@ -217,6 +225,8 @@ def test_fake_reviewer_approves_and_rejects_on_instruction(rig: RigEnvironment) 
             gate_command=rig.gate_command,
             status=RunStatus.RUNNING,
             created_at=now,
+            control_plane_snapshot_json=frozen_cp.as_json(),
+            control_plane_snapshot_digest=frozen_cp.digest,
             project_id=provenance.project_id,
             project_identity_json=provenance.identity.to_json(),
             objective_id=provenance.objective_id,
@@ -230,7 +240,7 @@ def test_fake_reviewer_approves_and_rejects_on_instruction(rig: RigEnvironment) 
             attempt_number=1,
             provider="codex",
             model="gpt-5.6-terra",
-            worktree_path=str(rig.repo),
+            worktree_path=str(worktree_dir),
             branch_name=f"orch/{run_id}/a1",
             status=AttemptStatus.SUCCESS,
             commit_sha=cand_sha,
@@ -287,7 +297,7 @@ def test_fake_worker_switch_hang(
     assert res.status == AttemptStatus.TIMEOUT
     assert res.outcome == DispatchOutcome.TIMEOUT
     assert res.stdout == ""
-    assert res.stderr == ""
+    assert res.stderr == "" or "timed out" in res.stderr.lower()
 
 
 @pytest.mark.parametrize(
@@ -370,7 +380,7 @@ def test_acceptance_fixture_refuses_unreviewed_replacement_b(
 def test_acceptance_fixture_qualifies_b_after_own_review(
     acceptance_rig: AcceptanceFixture,
 ) -> None:
-    """Once replacement B has its own candidate-linked PASS review, B becomes REVIEWED & eligible."""
+    """Once replacement B has its own candidate-linked PASS review, B becomes REVIEWED."""
     db = acceptance_rig.rig.db()
     acceptance_rig.record_passing_review_for_b()
 
