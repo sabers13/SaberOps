@@ -448,7 +448,13 @@ def test_return_summary_matches_records_and_catch_up(
         questions_store=owner_env["questions"],
     )
     payload = _catch_up(context, {"job_id": "job_a"})
-    assert payload["return_summary"] == expected
+    # The advisor block is attached to the return summary too (F26), so the
+    # shared object is compared without it and the same projection is checked
+    # on its own.
+    summary = dict(payload["return_summary"])
+    advisor = summary.pop("advisor", None)
+    assert summary == expected
+    assert advisor == payload["advisor"]
     assert payload["return_summary"]["parked_branches"] == expected["parked_branches"]
 
 

@@ -40,7 +40,13 @@ from saberops.model_access.readiness_service import ReadinessService
 from saberops.models import Run, RunStatus, Tier
 from saberops.owner_mode import set_owner_mode
 from saberops.paths import owner_state_dir
-from saberops.plan_runner import get_plan, project_plan, reconcile_plan_lanes, submit_plan_file
+from saberops.plan_runner import (
+    NO_PLANNING_SESSION,
+    get_plan,
+    project_plan,
+    reconcile_plan_lanes,
+    submit_plan_file,
+)
 from saberops.plan_state import (
     deliver_plan_notices,
     plan_return_summaries,
@@ -395,8 +401,14 @@ def test_completed_plan_notifies_once(
 
 def test_plan_can_disable_auto_advance(rig: RigEnvironment) -> None:
     db = rig.db()
+    # Activate the plan with no session attached (F24): an unattended
+    # activation records the plan and starts nothing, which gives auto-advance
+    # something to prove below.  F24 gives the rig an attended terminal by
+    # default, and a live session legitimately starts the ready root lane.
+    rig.end_attendance()
     submission = _activate(rig, [_spec(id="A", title="Root lane")], owner_initiated=False)
     assert submission.submitted == ()
+    assert submission.paused == NO_PLANNING_SESSION
     assert _plan_jobs(db) == []
     with sqlite3.connect(db.owner_db.db_path) as conn:
         conn.execute("UPDATE plans SET auto_advance = 0 WHERE plan_id = ?", (PLAN_ID,))

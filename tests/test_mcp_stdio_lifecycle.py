@@ -213,9 +213,12 @@ def test_active_job_blocks_expiry_and_targeted_release(tmp_path: Path, monkeypat
     owner.configure_database(db_path)
     assert owner.acquire()
     with sqlite3.connect(db_path) as conn:
-        conn.execute("CREATE TABLE jobs (job_id TEXT PRIMARY KEY, state TEXT NOT NULL)")
+        conn.execute(
+            "CREATE TABLE jobs (job_id TEXT PRIMARY KEY, state TEXT NOT NULL,"
+            " waiting_reason TEXT)"
+        )
         conn.execute("CREATE TABLE mcp_job_owners (job_id TEXT, session_id TEXT)")
-        conn.execute("INSERT INTO jobs VALUES ('job', 'RUNNING')")
+        conn.execute("INSERT INTO jobs (job_id, state) VALUES ('job', 'RUNNING')")
         conn.execute("INSERT INTO mcp_job_owners VALUES ('job', ?)", (owner.session_id,))
     record = json.loads(lease_path.read_text())
     record["last_activity"] = time.time() - 3600
