@@ -103,7 +103,10 @@ def test_exact_content_per_cli(slug: str, target: str) -> None:
     model = HOST_MODEL[slug]
     assert f'caller_id="proxy:{target}"' in document
     assert f'requirements={{"model_family_include": ["{family}"]}}' in document
-    assert target in document and "agy-worker" not in document
+    assert target in document
+    # An `agy` proxy is never generated; the guide only names the gap in prose.
+    assert "name: agy-worker" not in document
+    assert 'name = "agy-worker"' not in document
     assert "no eligible candidate" in document
     # Every definition forbids editing, accepting and merging in plain words.
     assert "Never edit files" in document and "never push and never merge" in document
