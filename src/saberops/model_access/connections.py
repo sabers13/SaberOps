@@ -852,6 +852,11 @@ ACCOUNT_BACKENDS: tuple[AccountBackend, ...] = (
         backend="opencode",
         executable="opencode",
         auth_mode=AuthMode.ACCOUNT_SESSION,
+        # ``--standalone`` keeps the status read on a private server instead
+        # of the owner's shared background service.  Verified in OpenCode
+        # 2.3.2; prints integration ids and credential ids only, never a
+        # secret, and sends no prompt.
+        auth_status_argv=("auth", "list", "--format", "json", "--standalone"),
         model_list_argv=("models",),
     ),
     AccountBackend(

@@ -105,6 +105,12 @@ def test_fresh_ui_launch_detects_and_verifies_without_model_calls(
             0,
         ),
         ("claude", ["auth", "status", "--json"], {"loggedIn": False}, 1),
+        (
+            "opencode",
+            ["auth", "list", "--format", "json", "--standalone"],
+            [{"id": "opencode-go", "name": "OpenCode Go", "connections": []}],
+            0,
+        ),
     ):
         _executable(
             home / ".local/bin" / name,
@@ -113,11 +119,10 @@ def test_fresh_ui_launch_detects_and_verifies_without_model_calls(
             f"print({json.dumps(payload)!r})\n"
             f"raise SystemExit({code})\n",
         )
-    # Any invocation of these CLIs would write a marker. Installation checks
+    # Any invocation of this CLI would write a marker. Installation checks
     # must never invoke an unverified prompt or a guessed auth command.
     marker = tmp_path / "unexpected-command"
-    for path in (home / ".opencode/bin/opencode", home / ".local/bin/agy"):
-        _executable(path, f"open({str(marker)!r}, 'w').write('invoked')\n")
+    _executable(home / ".local/bin/agy", f"open({str(marker)!r}, 'w').write('invoked')\n")
     apps: list[FastAPI] = []
 
     def serve(app: FastAPI, **kwargs: Any) -> None:
@@ -142,8 +147,12 @@ def test_fresh_ui_launch_detects_and_verifies_without_model_calls(
     evidence = {row.connection_id: row for row in store.load().evidence}
     assert evidence["codex-chatgpt-account"].state == ProviderReadiness.READY
     assert evidence["claude-code-subscription"].reason == "NOT_AUTHENTICATED"
-    for connection_id in ("opencode-account", "antigravity-google-account"):
-        assert evidence[connection_id].state == ProviderReadiness.UNKNOWN
+    # The verified `auth list` probe answered with no connection:
+    # explicit NOT_AUTHENTICATED, not a guess.
+    assert evidence["opencode-account"].reason == "NOT_AUTHENTICATED"
+    assert (
+        evidence["antigravity-google-account"].state == ProviderReadiness.UNKNOWN
+    )
     assert "never-persist" not in (owner_state / ReadinessStore.FILENAME).read_text(
         encoding="utf-8"
     )
@@ -157,7 +166,8 @@ def test_native_status_failure_stays_unknown_and_is_bounded(
     registry = build_access_registry(default_account_connections())
 
     def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        assert argv == ["codex", "doctor", "--json"]
+        # The probe runs the binary installed-detection resolved.
+        assert argv == ["/fake/codex", "doctor", "--json"]
         assert kwargs["timeout"] == 8
         if failure == "timeout":
             raise subprocess.TimeoutExpired(argv, 8, output="sensitive-output")

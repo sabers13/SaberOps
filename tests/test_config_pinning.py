@@ -170,16 +170,26 @@ def test_opencode_provider_id_parsing(model: str, expected: str | None) -> None:
 def test_opencode_serve_config_starts_empty_and_pins_provider() -> None:
     permissions = {"*": "allow", "external_directory": "deny", "doom_loop": "deny"}
     config = opencode_serve_config(MODEL, permissions)
-    # Frozen permission/agent keys are preserved ...
-    assert config["permission"] == permissions
+    # Frozen permission/agent keys use the v2.3 surface ...
+    assert config["permissions"] == [
+        {"action": "*", "resource": "*", "effect": "allow"},
+        {"action": "external_directory", "resource": "*", "effect": "deny"},
+        {"action": "doom_loop", "resource": "*", "effect": "deny"},
+    ]
     assert config["model"] == MODEL
     assert config["default_agent"] == "saberops"
-    assert config["agent"]["saberops"]["model"] == MODEL
-    assert config["agent"]["saberops"]["permission"] == permissions
+    assert config["agents"]["saberops"]["model"] == {
+        "providerID": "opencode-go",
+        "model": MODEL.partition("/")[2],
+    }
+    assert config["agents"]["saberops"]["permissions"] == config["permissions"]
     # ... and billing is pinned to exactly the selected provider.  The
     # builder takes no shell input, so ambient OPENCODE_CONFIG_CONTENT
     # cannot enter by construction.
     assert config["enabled_providers"] == ["opencode-go"]
+    # No legacy v2.0 keys survive: the server normalizes them, but pinning
+    # must be explicit on the supported surface.
+    assert "permission" not in config and "agent" not in config
 
 
 def test_opencode_serve_config_refuses_model_without_prefix() -> None:

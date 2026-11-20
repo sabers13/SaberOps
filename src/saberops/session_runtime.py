@@ -28,6 +28,8 @@ from saberops.git import GitManager
 from saberops.models import (
     AttemptStatus,
     DispatchOutcome,
+    ProviderUsage,
+    ReasoningEffort,
     WorkerInterruptionReason,
     WorkerRequest,
     WorkerResult,
@@ -35,7 +37,6 @@ from saberops.models import (
 from saberops.process import ProcessResult, launch_worker_process
 from saberops.session_control import ControlConflict, SessionControls
 from saberops.session_journal import SessionJournal
-from saberops.telemetry import parse_opencode_jsonl
 from saberops.workers.env import hermetic_env
 from saberops.workers.opencode_isolation import (
     OpenCodeIsolationUnavailable,
@@ -47,30 +48,90 @@ class SessionRuntimeError(RuntimeError):
     pass
 
 
+#: The OpenCode server surface this runtime speaks.  The installed v2.3.2
+#: server exposes every route under ``/api/*`` and has no ``/global/health``
+#: (the web handler answers SPA HTML there), so readiness is a real JSON
+#: endpoint: ``GET /api/info`` returns the server identity and version.
+#: Older ``/session`` + ``/global/health`` servers are refused with a clear
+#: message; no committed fixture requires them.
+API_INFO = "/api/info"
+API_SESSION = "/api/session"
+API_ACTIVE = "/api/session/active"
+API_EVENT = "/api/event"
+
+#: Lowest OpenCode server version that serves the required ``/api/*`` shape.
+MINIMUM_SERVER_VERSION = (2, 3)
+
+#: Routes the session runtime itself calls, used by the vendor live check to
+#: pin the server API shape against the committed OpenAPI fixture.
+REQUIRED_SERVER_ROUTES: tuple[str, ...] = (
+    API_INFO,
+    API_SESSION,
+    "/api/session/{sessionID}",
+    "/api/session/{sessionID}/message",
+    "/api/session/{sessionID}/prompt",
+    "/api/session/{sessionID}/interrupt",
+    API_ACTIVE,
+    API_EVENT,
+)
+
+_VERSION_RE = re.compile(r"(\d+)\.(\d+)(?:\.(\d+))?")
+
+
+def server_version(version: object) -> tuple[int, ...] | None:
+    """Parse an OpenCode server version string (``2.3.2`` or ``v2.3.2``)."""
+    if not isinstance(version, str):
+        return None
+    match = _VERSION_RE.search(version)
+    if match is None:
+        return None
+    return tuple(int(part) for part in match.groups() if part is not None)
+
+
+def require_supported_server(version: object) -> tuple[int, ...]:
+    """Refuse an OpenCode server that does not serve the supported API shape.
+
+    Raises :class:`SessionRuntimeError` with a fixed, secret-free message;
+    never guesses that an unknown surface behaves like v2.3.
+    """
+    parsed = server_version(version)
+    minimum = MINIMUM_SERVER_VERSION
+    if parsed is None or parsed[:2] < minimum:
+        raise SessionRuntimeError(
+            f"OpenCode server {version!r} is not supported: SaberOps requires "
+            f"the v{minimum[0]}.{minimum[1]}+ /api/* server surface "
+            "(GET /api/info, POST /api/session/{id}/prompt, "
+            "POST /api/session/{id}/interrupt; no /global/health)"
+        )
+    return parsed
+
+
 def opencode_serve_config(model: str, permissions: dict[str, str]) -> dict[str, Any]:
     """Return the pinned inline server config for one OpenCode assignment.
 
     The config always starts from ``{}`` -- never from ``request.env`` or
     the parent shell -- so ambient ``OPENCODE_CONFIG_CONTENT`` cannot change
-    provider selection.  ``enabled_providers`` allowlists exactly the
-    selected model's provider (inline config outranks project and global
-    config files), and the frozen permission/agent keys are preserved.
-    Raises :class:`SessionRuntimeError` when ``model`` has no
+    provider selection.  The v2.3 keys are used directly: ``agents`` (not the
+    legacy ``agent``), ``permissions`` (a :class:`Permission.Ruleset`, not the
+    legacy name->effect map) and ``enabled_providers`` allowlisting exactly
+    the selected model's provider (inline config outranks project and global
+    config files).  Raises :class:`SessionRuntimeError` when ``model`` has no
     ``<provider>/<model>`` prefix, since billing cannot be pinned then.
     """
     provider, separator, identifier = model.partition("/")
     if not separator or not provider or not identifier:
         raise SessionRuntimeError("OpenCode requires a provider/model identity")
+    rules = permission_rules(permissions)
     return {
-        "permission": permissions,
+        "permissions": rules,
         "model": model,
         "default_agent": "saberops",
-        "agent": {
+        "agents": {
             "saberops": {
                 "description": "Frozen SaberOps assignment",
                 "mode": "primary",
-                "model": model,
-                "permission": permissions,
+                "model": {"providerID": provider, "model": identifier},
+                "permissions": rules,
             }
         },
         "enabled_providers": [provider],
@@ -113,6 +174,7 @@ class AgentSessionRuntime:
         self.turn_lock = threading.Lock()
         self.terminal_status: str | None = None
         self.native_parts: dict[str, list[dict[str, str]]] = {}
+        self.server_version: str | None = None
 
     def api(self, method: str, path: str, body: object = None, *, timeout: float = 5) -> Any:
         if not self.endpoint:
@@ -131,8 +193,21 @@ class AgentSessionRuntime:
         )
         # Never follow redirects or ambient HTTP proxies to another authority.
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
-        with opener.open(req, timeout=timeout) as response:
-            raw = response.read()
+        try:
+            with opener.open(req, timeout=timeout) as response:
+                raw = response.read()
+        except urllib.error.HTTPError as exc:
+            # Surface the server's own error tag/message (never a secret):
+            # a bare "HTTP Error 400" hides which request was refused.
+            detail = ""
+            try:
+                detail = exc.read().decode("utf-8", "replace")[:500]
+            except OSError:
+                pass
+            raise SessionRuntimeError(
+                f"Provider API {method} {path.split('?')[0]} failed: "
+                f"HTTP {exc.code}{': ' + detail if detail else ''}"
+            ) from None
         return json.loads(raw) if raw else None
 
     def ensure_started(self, request: WorkerRequest, binary: str) -> None:
@@ -227,34 +302,52 @@ class AgentSessionRuntime:
             self.close()
             raise SessionRuntimeError("Provider server could not start")
         deadline = started + min(20, request.timeout_seconds)
+        info: dict[str, Any] | None = None
         while True:
             try:
-                health = self.api("GET", "/global/health", timeout=1)
-                if not health.get("healthy"):
-                    raise SessionRuntimeError("Provider server health check failed")
+                payload = self.api("GET", API_INFO, timeout=1)
+                if not isinstance(payload, dict):
+                    raise SessionRuntimeError("Provider server info endpoint is malformed")
+                version = payload.get("version")
+                require_supported_server(version)
+                info = payload
+                self.server_version = str(version)
                 break
+            except SessionRuntimeError:
+                # An answered-but-unsupported server is a contract failure:
+                # retrying cannot change the shipped API surface.
+                self.close()
+                raise
             except (OSError, ValueError):
                 if time.monotonic() >= deadline:
-                    raise SessionRuntimeError("Provider server did not become ready") from None
+                    self.close()
+                    raise SessionRuntimeError(
+                        "Provider server did not become ready: GET /api/info did "
+                        "not return JSON (an older server without the v2.3+ "
+                        "/api/* surface is not supported)"
+                    ) from None
                 time.sleep(0.05)
+        assert info is not None
         if request.native_resume_id:
-            session = self.api("GET", "/session/" + request.native_resume_id)
-            # Never reuse another assignment's directory or permission scope.
-            if Path(session["directory"]).resolve() != request.worktree_path.resolve():
+            session = self.api("GET", API_SESSION + "/" + request.native_resume_id)
+            info_payload = session["data"] if isinstance(session, dict) else session
+            directory = (info_payload.get("location") or {}).get("directory")
+            if directory is None or Path(directory).resolve() != request.worktree_path.resolve():
                 raise SessionRuntimeError("Saved session belongs to a different worktree")
             self.native_id = request.native_resume_id
         else:
             session = self.api(
                 "POST",
-                "/session",
+                API_SESSION,
                 {
                     "title": "SaberOps assignment",
                     "agent": "saberops",
-                    "model": native_model(request.model),
-                    "permission": permission_rules(permissions),
+                    "model": native_model(request.model, request.reasoning_effort),
+                    "permissions": permission_rules(permissions),
+                    "location": {"directory": str(request.worktree_path)},
                 },
             )
-            self.native_id = session["id"]
+            self.native_id = session["data"]["id"]
         if not isinstance(self.native_id, str) or not re.fullmatch(
             r"ses_[A-Za-z0-9]+", self.native_id
         ):
@@ -265,12 +358,52 @@ class AgentSessionRuntime:
                 "native_id": self.native_id,
                 "native_access": "shared-server",
                 "native_attach_ready": True,
-                "runtime_version": health.get("version"),
+                "runtime_version": self.server_version,
                 "native_cli_reason": "Native OpenCode interface; input uses controlled takeover.",
             }
         )
         self.events_thread = threading.Thread(target=self._events, daemon=True)
         self.events_thread.start()
+
+    def _messages(self, prefix: str) -> list[dict[str, Any]]:
+        """Return every projected message for the session, oldest first.
+
+        The v2.3 list endpoint is cursor-paginated (``data`` + ``cursor.next``);
+        callers must not assume a bare list.
+        """
+        rows: list[dict[str, Any]] = []
+        cursor: str | None = None
+        while True:
+            # ``order`` and ``cursor`` are mutually exclusive on v2.3; the
+            # first page fixes the order and cursors continue it.  ``next``
+            # is an anchor, present even on a complete page, so an empty page
+            # is the end of the list.
+            query: dict[str, str] = {"limit": "200"}
+            if cursor is None:
+                query["order"] = "asc"
+            else:
+                query["cursor"] = cursor
+            payload = self.api("GET", prefix + "/message?" + urllib.parse.urlencode(query))
+            page = payload.get("data") if isinstance(payload, dict) else payload
+            if not isinstance(page, list):
+                raise SessionRuntimeError("Provider message list is malformed")
+            if not page:
+                return rows
+            rows.extend(page)
+            next_cursor = (payload.get("cursor") or {}).get("next") if isinstance(
+                payload, dict
+            ) else None
+            if not next_cursor:
+                return rows
+            if next_cursor == cursor or len(rows) > 10000:
+                raise SessionRuntimeError("Provider message pagination did not advance")
+            cursor = str(next_cursor)
+
+    def _active(self) -> bool:
+        """Return whether this OpenCode process currently executes our session."""
+        payload = self.api("GET", API_ACTIVE)
+        data = payload.get("data") if isinstance(payload, dict) else payload
+        return isinstance(data, dict) and self.native_id in data
 
     def _events(self) -> None:
         assert self.request is not None
@@ -280,7 +413,8 @@ class AgentSessionRuntime:
         }
         url = (
             self.endpoint
-            + "/event?"
+            + API_EVENT
+            + "?"
             + urllib.parse.urlencode({"directory": str(self.request.worktree_path)})
         )
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
@@ -293,9 +427,9 @@ class AgentSessionRuntime:
                         if not raw.startswith(b"data:"):
                             continue
                         event = json.loads(raw[5:])
-                        properties = event.get("properties", {})
-                        info = properties.get("info") or properties.get("part") or properties
-                        if info.get("sessionID") not in (None, self.native_id):
+                        if not isinstance(event, dict):
+                            continue
+                        if event_session_id(event) not in (None, self.native_id):
                             continue
                         self.capture_event(event)
             except (OSError, ValueError):
@@ -303,26 +437,43 @@ class AgentSessionRuntime:
                     self.stop.wait(0.2)
 
     def capture_event(self, event: dict[str, Any]) -> None:
-        """Late deltas cannot overwrite a message already confirmed complete by the API."""
+        """Late deltas cannot overwrite a message already confirmed complete by the API.
+
+        v2.3 event frames are ``{"id", "created", "type", "location", "data"}``
+        envelopes; the message being edited is named by ``assistantMessageID``
+        or ``messageID`` inside ``data``.
+        """
         with self.event_lock:
-            properties = event.get("properties", {})
-            info = properties.get("info") or properties.get("part") or properties
-            message_id = info.get("messageID") or properties.get("messageID")
-            if event.get("type") == "message.updated":
-                message_id = info.get("id")
+            message_id = event_message_id(event)
+            event_type = event.get("type")
             if (
                 self.closing.is_set()
-                or message_id in self.sealed_messages
-                or (self.idle_confirmed and event.get("type") in ("session.status", "session.idle"))
+                or (message_id is not None and message_id in self.sealed_messages)
+                or (
+                    self.idle_confirmed
+                    and event_type
+                    in (
+                        "session.execution.started",
+                        "session.execution.succeeded",
+                        "session.execution.failed",
+                        "session.execution.interrupted",
+                        "session.status",
+                        "session.idle",
+                    )
+                )
             ):
                 return
             if self.request and self.request.on_stdout:
                 self.request.on_stdout(json.dumps(event) + "\n")
 
-    def confirm_snapshot(self, messages: list[dict[str, Any]]) -> None:
+    def confirm_snapshot(
+        self, messages: list[dict[str, Any]], *, outcome: str = "succeeded"
+    ) -> None:
         """Persist API-confirmed state independently of a delayed provider event stream."""
         with self.event_lock:
-            self.sealed_messages.update(row["info"]["id"] for row in messages)
+            self.sealed_messages.update(
+                str(row["id"]) for row in messages if isinstance(row.get("id"), str)
+            )
             self.idle_confirmed = True
             self.final_cursor = self.journal.append(
                 self.sid,
@@ -331,24 +482,42 @@ class AgentSessionRuntime:
                     "source": "provider-api",
                     "session_id": self.native_id,
                     "messages": messages,
+                    "outcome": outcome,
                     "status": {"type": "idle"},
+                    "directory": str(self.request.worktree_path) if self.request else "",
                 },
             )
 
     @staticmethod
     def snapshot_events(payload: dict[str, Any]) -> list[dict[str, Any]]:
-        events: list[dict[str, Any]] = []
-        for row in payload["messages"]:
-            events.append({"type": "message.updated", "properties": {"info": row["info"]}})
-            for part in row.get("parts", []):
-                events.append({"type": "message.part.updated", "properties": {"part": part}})
-        events.append(
+        """Render one provider snapshot as a v2.3 event frame.
+
+        The native client re-fetches message content from the API, so the
+        snapshot only has to publish the terminal execution state truthfully:
+        an ``execution.succeeded|failed|interrupted`` frame with our session
+        id.  Replaying old deltas would risk putting a finished session back
+        into a busy state.
+        """
+        outcome = payload.get("outcome", "succeeded")
+        event_type = {
+            "succeeded": "session.execution.succeeded",
+            "failed": "session.execution.failed",
+            "interrupted": "session.execution.interrupted",
+        }.get(outcome, "session.execution.succeeded")
+        data: dict[str, Any] = {"sessionID": payload.get("session_id")}
+        if event_type == "session.execution.failed" and payload.get("error"):
+            data["error"] = payload["error"]
+        if event_type == "session.execution.interrupted":
+            data["reason"] = "interrupted"
+        return [
             {
-                "type": "session.status",
-                "properties": {"sessionID": payload["session_id"], "status": payload["status"]},
+                "id": "evt_saberops_" + uuid.uuid4().hex,
+                "created": int(time.time() * 1000),
+                "type": event_type,
+                "location": {"directory": payload.get("directory", "")},
+                "data": data,
             }
-        )
-        return events
+        ]
 
     def run_opencode(self, request: WorkerRequest, binary: str) -> WorkerResult:
         started = time.monotonic()
@@ -403,15 +572,16 @@ class AgentSessionRuntime:
             }
             session = self.api(
                 "POST",
-                "/session",
+                API_SESSION,
                 {
                     "title": "SaberOps formal review",
                     "agent": "saberops",
-                    "model": native_model(request.model),
-                    "permission": permission_rules(permissions),
+                    "model": native_model(request.model, request.reasoning_effort),
+                    "permissions": permission_rules(permissions),
+                    "location": {"directory": str(request.worktree_path)},
                 },
             )
-            self.native_id = session["id"]
+            self.native_id = session["data"]["id"]
             descriptor = self.folder / (self.sid + ".native")
             if descriptor.exists():
                 data = json.loads(descriptor.read_text())
@@ -423,34 +593,27 @@ class AgentSessionRuntime:
                     json.dump(data, file)
                 temporary.replace(descriptor)
             self.publish({"native_id": self.native_id})
-        prefix = "/session/" + self.native_id
-        before = {row["info"]["id"] for row in self.api("GET", prefix + "/message")}
+        prefix = API_SESSION + "/" + self.native_id
+        before = {str(row["id"]) for row in self._messages(prefix) if "id" in row}
         if request.on_stdout:
             request.on_stdout(json.dumps({"sessionID": self.native_id}) + "\n")
         provider, separator, model = request.model.partition("/")
-        if not separator:
+        if not separator or not provider or not model:
             raise SessionRuntimeError("OpenCode requires a provider/model identity")
         message_id = request.native_message_id
         if not message_id or not re.fullmatch(r"msg_[A-Za-z0-9_-]{1,120}", message_id):
             message_id = "msg_" + uuid.uuid4().hex
         parts = self.native_parts.pop(message_id, None) or [{"type": "text", "text": request.task}]
+        text = "\n".join(str(part.get("text", "")) for part in parts)
         self.has_turn = True
         with self.event_lock:
             self.idle_confirmed = False
+        # v2.3 admits one proxied prompt into the manual queue; model and agent
+        # are frozen on the session, so the prompt carries text only.
         self.api(
             "POST",
-            prefix + "/prompt_async",
-            {
-                "messageID": message_id,
-                "model": {"providerID": provider, "modelID": model},
-                "agent": "saberops",
-                "parts": parts,
-                **(
-                    {"variant": request.reasoning_effort.value.lower()}
-                    if request.reasoning_effort is not None
-                    else {}
-                ),
-            },
+            prefix + "/prompt",
+            {"id": message_id, "text": text},
         )
         self.terminal_status = None
         interrupted = timed_out = False
@@ -460,77 +623,62 @@ class AgentSessionRuntime:
             timed_out = time.monotonic() - started >= request.timeout_seconds
             interrupted = bool(request.control_interrupt and request.control_interrupt())
             if timed_out or interrupted:
-                self.api("POST", prefix + "/abort")
+                self.api("POST", prefix + "/interrupt")
                 # Abort is a request; do not acknowledge takeover until provider reports idle.
                 deadline = time.monotonic() + 10
-                while (
-                    self.api("GET", "/session/status").get(self.native_id, {}).get("type", "idle")
-                    != "idle"
-                ):
+                while self._active():
                     if time.monotonic() >= deadline:
                         raise SessionRuntimeError("Provider did not confirm cancellation")
                     time.sleep(0.05)
                 break
             if self.thread is None or not self.thread.is_alive():
                 raise SessionRuntimeError("Provider server disappeared during a turn")
-            rows = self.api("GET", prefix + "/message")
+            rows = self._messages(prefix)
             foreign = [
                 row
                 for row in rows
-                if row["info"].get("role") == "user"
-                and row["info"]["id"] not in before
-                and row["info"]["id"] != message_id
+                if row.get("type") == "user"
+                and row.get("id") not in before
+                and row.get("id") != message_id
             ]
             if foreign:
                 self.journal.append(self.sid, "native.foreign_input", foreign)
                 self.controls.hold(self.sid, "Unexpected native input detected; automation paused.")
                 continue
             for row in rows:
-                info = row["info"]
-                if (
-                    info["id"] not in before
-                    and info.get("role") == "assistant"
-                    and info.get("parentID") == message_id
+                if row.get("id") in before or row.get("type") != "assistant":
+                    continue
+                raw_time = row.get("time")
+                time_info: dict[str, Any] = raw_time if isinstance(raw_time, dict) else {}
+                if row.get("error") or (
+                    time_info.get("completed") and row.get("finish") != "tool-calls"
                 ):
-                    if info.get("error") or (
-                        info.get("time", {}).get("completed") and info.get("finish") != "tool-calls"
-                    ):
-                        completed = row
+                    completed = row
             own_messages = [
                 row
                 for row in rows
-                if row["info"].get("role") == "assistant"
-                and row["info"].get("parentID") == message_id
+                if row.get("type") == "assistant" and row.get("id") not in before
             ]
-            status = self.api("GET", "/session/status").get(self.native_id, {}).get("type", "idle")
-            if completed and status == "idle":
+            if completed and not self._active():
                 break
             time.sleep(0.1)
         self.last_message = completed or {}
         if not own_messages and (interrupted or timed_out):
             own_messages = [
                 row
-                for row in self.api("GET", prefix + "/message")
-                if row["info"].get("role") == "assistant"
-                and row["info"].get("parentID") == message_id
+                for row in self._messages(prefix)
+                if row.get("type") == "assistant" and row.get("id") not in before
             ]
-        self.confirm_snapshot(own_messages)
-        text = "\n".join(
-            p["text"]
-            for p in self.last_message.get("parts", [])
-            if p.get("type") == "text" and isinstance(p.get("text"), str)
-        )
-        raw_usage = "\n".join(
-            json.dumps({"type": "step_finish", "part": p})
-            for row in own_messages
-            for p in row.get("parts", [])
-            if p.get("type") == "step-finish"
-        )
-        _, usage = parse_opencode_jsonl(raw_usage)
-        error = self.last_message.get("info", {}).get("error")
+        text = assistant_text(self.last_message)
+        usage = session_usage(self.last_message)
+        error = self.last_message.get("error")
         success = bool(completed and not error and not interrupted and not timed_out)
+        outcome = "interrupted" if interrupted else "succeeded" if success else "failed"
+        self.confirm_snapshot(own_messages, outcome=outcome)
         self.terminal_status = "SUCCESS" if success else "INTERRUPTED" if interrupted else "FAILED"
         changes = GitManager.get_changed_paths(request.worktree_path)
+        model_ref = self.last_message.get("model")
+        model_ref = model_ref if isinstance(model_ref, dict) else {}
         return WorkerResult(
             provider="opencode",
             model=request.model,
@@ -550,8 +698,8 @@ class AgentSessionRuntime:
             changed_paths=changes,
             has_changes=bool(changes),
             usage=usage,
-            actual_model=self.last_message.get("info", {}).get("modelID"),
-            actual_provider=self.last_message.get("info", {}).get("providerID"),
+            actual_model=model_ref.get("id"),
+            actual_provider=model_ref.get("providerID"),
             prompt_bytes=len(request.task.encode()),
             prompt_transport_used="session-protocol",
             duration_seconds=time.monotonic() - started,
@@ -592,41 +740,45 @@ class AgentSessionRuntime:
                 if not self.authenticated():
                     self.respond(401, {"error": "Native client authentication required"})
                     return
-                path = urllib.parse.urlsplit(self.path).path
-                if path.startswith("/session/") and path != "/session/status":
-                    if path.split("/")[2] != runtime.native_id:
+                target = urllib.parse.urlsplit(self.path)
+                path = target.path
+                if path.startswith(API_SESSION + "/"):
+                    session_id = path[len(API_SESSION) + 1 :].split("/")[0]
+                    if session_id != "active" and session_id != runtime.native_id:
                         self.respond(403, {"error": "This terminal is scoped to one session"})
                         return
                 allowed = (
-                    "/event",
-                    "/global/health",
-                    "/global/event",
-                    "/project",
-                    "/path",
-                    "/vcs",
-                    "/config",
-                    "/provider",
-                    "/session",
-                    "/agent",
-                    "/command",
-                    "/permission",
-                    "/question",
-                    "/file",
-                    "/find",
-                    "/lsp",
-                    "/formatter",
-                    "/mcp",
-                    "/doc",
+                    "/api/event",
+                    "/api/info",
+                    "/api/config",
+                    "/api/provider",
+                    "/api/agent",
+                    "/api/model",
+                    "/api/command",
+                    "/api/project",
+                    "/api/location",
+                    "/api/vcs",
+                    "/api/fs/find",
+                    "/api/fs/list",
+                    "/api/permission/request",
+                    "/api/permission/saved",
+                    "/api/mcp",
+                    "/api/skill",
+                    "/api/plugin",
+                    "/api/integration",
+                    "/api/form",
+                    "/api/reference",
                 )
-                if not any(path == p or path.startswith(p + "/") for p in allowed):
-                    self.respond(403, {"error": "Endpoint unavailable in managed terminal"})
-                    return
+                if path != API_SESSION and not path.startswith(API_SESSION + "/"):
+                    if not any(path == p or path.startswith(p + "/") for p in allowed):
+                        self.respond(403, {"error": "Endpoint unavailable in managed terminal"})
+                        return
                 try:
-                    if path in ("/event", "/global/event"):
+                    if path == API_EVENT:
                         self.send_response(200)
                         self.send_header("Content-Type", "text/event-stream")
                         self.end_headers()
-                        # Native clients bootstrap history with GET /message.
+                        # Native clients bootstrap history with the message API.
                         # Old deltas can put a completed session back into busy state.
                         cursor = runtime.journal.latest_sequence(runtime.sid)
                         stream_id = uuid.uuid4().hex
@@ -647,24 +799,9 @@ class AgentSessionRuntime:
                                     )
                                     for frame in frames:
                                         self.wfile.write(
-                                            (
-                                                "data: "
-                                                + json.dumps(
-                                                    {
-                                                        "directory": str(
-                                                            runtime.request.worktree_path
-                                                        )
-                                                        if runtime.request
-                                                        else "",
-                                                        "payload": frame,
-                                                    }
-                                                    if path == "/global/event"
-                                                    else frame
-                                                )
-                                                + "\n\n"
-                                            ).encode()
+                                            ("data: " + json.dumps(frame) + "\n\n").encode()
                                         )
-                                self.wfile.write(b": keepalive\n\n")
+                                self.wfile.write(b": heartbeat\n\n")
                                 self.wfile.flush()
                                 with runtime.stream_condition:
                                     runtime.stream_cursors[stream_id] = cursor
@@ -675,11 +812,19 @@ class AgentSessionRuntime:
                                 runtime.stream_cursors.pop(stream_id, None)
                                 runtime.stream_condition.notify_all()
                         return
-                    data = runtime.api("GET", path)
-                    if path == "/session":
-                        data = [row for row in data if row.get("id") == runtime.native_id]
-                    elif path == "/session/status":
-                        data = {k: v for k, v in data.items() if k == runtime.native_id}
+                    data = runtime.api("GET", path + _pinned_query(target.query))
+                    if path == API_SESSION:
+                        rows = data.get("data") if isinstance(data, dict) else data
+                        if isinstance(rows, list):
+                            scoped = [row for row in rows if row.get("id") == runtime.native_id]
+                            data = (
+                                {**data, "data": scoped} if isinstance(data, dict) else scoped
+                            )
+                    elif path == API_ACTIVE:
+                        active = data.get("data") if isinstance(data, dict) else data
+                        if isinstance(active, dict):
+                            data = {"data": {k: v for k, v in active.items()
+                                             if k == runtime.native_id}}
                     self.respond(200, data)
                 except (OSError, ValueError):
                     self.respond(503, {"error": "Provider session unavailable"})
@@ -689,39 +834,32 @@ class AgentSessionRuntime:
                     self.respond(401, {"error": "Native client authentication required"})
                     return
                 path = urllib.parse.urlsplit(self.path).path
+                prefix = API_SESSION + "/" + str(runtime.native_id)
                 try:
-                    if path == "/session/" + str(runtime.native_id) + "/abort":
+                    if path == prefix + "/interrupt":
                         state = runtime.controls.get(runtime.sid)
-                        if state and state["mode"] in ("ACTIVE", "REQUESTED"):
+                        active = bool(state and state["mode"] in ("ACTIVE", "REQUESTED"))
+                        if active:
                             runtime.controls.hold(
                                 runtime.sid, "Native terminal requested interruption."
                             )
                         else:
                             runtime.controls.interrupt(runtime.sid)
-                        self.respond(200, True)
+                        self.respond(200, {"interrupted": active})
                         return
-                    if path not in (
-                        "/session/" + str(runtime.native_id) + "/message",
-                        "/session/" + str(runtime.native_id) + "/prompt_async",
-                    ):
+                    if path != prefix + "/prompt":
                         raise ControlConflict("This operation is outside the frozen assignment")
                     length = int(self.headers.get("Content-Length", "0"))
                     if length <= 0 or length > 128000:
                         raise ControlConflict("Native message is too large or missing")
                     body = json.loads(self.rfile.read(length))
-                    parts = body.get("parts", [])
-                    if not parts or any(p.get("type") != "text" for p in parts):
+                    if body.get("files") or body.get("agents") or body.get("skills"):
                         raise ControlConflict("Managed native messages currently support text only")
-                    text = "\n".join(str(p.get("text", "")) for p in parts)
-                    request_id = body.get("messageID") or uuid.uuid4().hex
-                    native_parts = [
-                        {
-                            "type": "text",
-                            "text": str(p.get("text", "")),
-                            **({"id": p["id"]} if isinstance(p.get("id"), str) else {}),
-                        }
-                        for p in parts
-                    ]
+                    text = body.get("text")
+                    if not isinstance(text, str) or not text.strip():
+                        raise ControlConflict("Managed native messages currently support text only")
+                    request_id = body.get("id") or "msg_" + uuid.uuid4().hex
+                    native_parts = [{"type": "text", "text": text}]
                     had_parts = str(request_id) in runtime.native_parts
                     runtime.native_parts.setdefault(str(request_id), native_parts)
                     try:
@@ -735,27 +873,19 @@ class AgentSessionRuntime:
                         "native.message.queued",
                         {"request_id": request_id, "parts": native_parts},
                     )
-                    if path.endswith("/prompt_async"):
-                        self.respond(204, None)
-                        return
-                    # Blocking native clients see the same response as the app.
-                    while not runtime.stop.wait(0.1):
-                        data = runtime.controls.get(runtime.sid, messages=True) or {}
-                        row = next(
-                            (
-                                m
-                                for m in data.get("messages", [])
-                                if m["id"] == runtime.sid + ":" + str(request_id)
-                            ),
-                            None,
-                        )
-                        if row and row["state"] in ("DONE", "FAILED"):
-                            self.respond(
-                                200 if row["state"] == "DONE" else 409,
-                                runtime.last_message or {"error": row["response"]},
-                            )
-                            return
-                    raise ControlConflict("Session closed before the reply")
+                    self.respond(
+                        200,
+                        {
+                            "data": {
+                                "id": str(request_id),
+                                "sessionID": runtime.native_id,
+                                "time": {"created": int(time.time() * 1000)},
+                                "type": "user",
+                                "payload": {"text": text},
+                                "delivery": "steer",
+                            }
+                        },
+                    )
                 except (ControlConflict, ValueError, TypeError, AttributeError) as exc:
                     self.respond(409, {"error": str(exc)})
 
@@ -828,14 +958,109 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def permission_rules(permissions: dict[str, str]) -> list[dict[str, str]]:
+    """Project the frozen permission map onto the v2.3 ``Permission.Ruleset``.
+
+    The owner policy maps a permission name (``"*"``, ``"external_directory"``)
+    to an effect; every rule applies to every resource.
+    """
     return [
-        {"permission": name, "pattern": "*", "action": action}
-        for name, action in permissions.items()
+        {"action": action, "resource": "*", "effect": effect}
+        for action, effect in permissions.items()
     ]
 
 
-def native_model(model: str) -> dict[str, str]:
+def native_model(
+    model: str, reasoning_effort: ReasoningEffort | None = None
+) -> dict[str, str]:
+    """Return the v2.3 ``Model.Ref`` for a ``provider/model`` identity."""
     provider, separator, identifier = model.partition("/")
     if not separator or not identifier:
         raise SessionRuntimeError("OpenCode requires a provider/model identity")
-    return {"providerID": provider, "id": identifier}
+    ref = {"providerID": provider, "id": identifier}
+    if reasoning_effort is not None:
+        ref["variant"] = reasoning_effort.value.lower()
+    return ref
+
+
+def event_session_id(event: dict[str, Any]) -> str | None:
+    """Return the v2.3 event's owning session id, when it names one."""
+    data = event.get("data")
+    if isinstance(data, dict):
+        for key in ("sessionID", "sessionId"):
+            value = data.get(key)
+            if isinstance(value, str):
+                return value
+        info = data.get("session")
+        if isinstance(info, dict):
+            value = info.get("id")
+            if isinstance(value, str):
+                return value
+    return None
+
+
+def event_message_id(event: dict[str, Any]) -> str | None:
+    """Return the message an event edits (``assistantMessageID``/``messageID``)."""
+    data = event.get("data")
+    if not isinstance(data, dict):
+        return None
+    for key in ("assistantMessageID", "messageID", "messageId"):
+        value = data.get(key)
+        if isinstance(value, str):
+            return value
+    message = data.get("message")
+    if isinstance(message, dict):
+        value = message.get("id")
+        if isinstance(value, str):
+            return value
+    return None
+
+
+def assistant_text(message: dict[str, Any]) -> str:
+    """Join the assistant message's text content (v2.3 ``content`` array)."""
+    content = message.get("content")
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(
+        str(part["text"])
+        for part in content
+        if isinstance(part, dict)
+        and part.get("type") == "text"
+        and isinstance(part.get("text"), str)
+    )
+
+
+def session_usage(message: dict[str, Any]) -> list[ProviderUsage]:
+    """Return exact usage from the v2.3 assistant message token counters."""
+    tokens = message.get("tokens")
+    if not isinstance(tokens, dict):
+        return [ProviderUsage(usage_source="opencode_session_message_without_usage")]
+    cache = tokens.get("cache")
+    cache_dict = cache if isinstance(cache, dict) else {}
+    cache_read = _integer(cache_dict.get("read"))
+    return [
+        ProviderUsage(
+            input_tokens=_integer(tokens.get("input")),
+            output_tokens=_integer(tokens.get("output")),
+            cached_tokens=cache_read,
+            cache_read_tokens=cache_read,
+            cache_write_tokens=_integer(cache_dict.get("write")),
+            reasoning_tokens=_integer(tokens.get("reasoning")),
+            usage_source="opencode_session_message_tokens",
+            raw_payload=json.dumps({"tokens": tokens}),
+        )
+    ]
+
+
+def _integer(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _pinned_query(query: str) -> str:
+    """Keep client query parameters but never let a client choose the location."""
+    kept = [
+        (key, value)
+        for key, value in urllib.parse.parse_qsl(query, keep_blank_values=True)
+        if key not in ("directory", "location[directory]", "location")
+    ]
+    encoded = urllib.parse.urlencode(kept)
+    return "?" + encoded if encoded else ""

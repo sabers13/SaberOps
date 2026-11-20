@@ -400,7 +400,9 @@ def test_committed_fixtures_are_refreshed_to_the_installed_versions() -> None:
         "opencode": "opencode v2.3.2",
     }
     for fixture in manifest.fixtures:
-        assert fixture.captured_on == "2026-11-19"
+        # The v2.3 server-route fixture was added 2026-11-20 (ADR-0039).
+        expected = "2026-11-20" if fixture.kind == "server_openapi" else "2026-11-19"
+        assert fixture.captured_on == expected
         assert (vcf.FIXTURES_ROOT / fixture.file).is_file()
     assert detect_drift(manifest, recorded) == []
     assert UNKNOWN_VERSION not in recorded.values()

@@ -27,8 +27,11 @@ behaviours are:
 from __future__ import annotations
 
 import argparse
+import base64
 import json
+import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -65,8 +68,16 @@ FIXTURES_ROOT = REPO_ROOT / "tests" / "fixtures" / "vendor_cli"
 MANIFEST_PATH = FIXTURES_ROOT / "manifest.json"
 
 #: Fixture content kinds.  ``config_help`` feeds the adapter flag-pinning check;
-#: the other three feed the pure parser functions named in ``consumer``.
-KINDS: tuple[str, ...] = ("usage_panel", "usage_json", "exhaustion", "config_help")
+#: the other kinds feed the pure parser functions named in ``consumer``.
+#: ``server_openapi`` pins the shipped local-server route surface
+#: (``GET /openapi.json``) for CLIs whose adapter speaks a server API.
+KINDS: tuple[str, ...] = (
+    "usage_panel",
+    "usage_json",
+    "exhaustion",
+    "config_help",
+    "server_openapi",
+)
 
 #: Provenance of a committed fixture.  ``real-capture`` is a byte capture taken
 #: by this project (e.g. the installed CLI's own ``--help``); ``owner-supplied-log``
@@ -650,6 +661,204 @@ def check_version_support(
 
 
 # ---------------------------------------------------------------------------
+# Server API shape check (opencode local server)
+# ---------------------------------------------------------------------------
+
+#: How long the token-free ``opencode serve`` probe may take, in seconds.
+SERVER_PROBE_TIMEOUT = 30.0
+
+
+def server_api_drift(
+    fixture_document: Mapping[str, Any],
+    live_document: Mapping[str, Any],
+    *,
+    required_paths: Sequence[str],
+    forbidden_paths: Sequence[str] = (),
+) -> tuple[str, ...]:
+    """Return human-readable API-shape drift records (empty when aligned).
+
+    Compares the route keys the adapter pins against the live server's
+    ``/openapi.json`` and against the committed fixture.  Pure: both documents
+    are passed in, so the check is unit-tested without launching a server.
+    """
+    fixture_paths = fixture_document.get("paths")
+    live_paths = live_document.get("paths")
+    fixture_paths = fixture_paths if isinstance(fixture_paths, Mapping) else {}
+    live_paths = live_paths if isinstance(live_paths, Mapping) else {}
+    problems: list[str] = []
+    for path in required_paths:
+        if path not in live_paths:
+            problems.append(f"required route missing from installed server: {path}")
+        if path not in fixture_paths:
+            problems.append(f"required route missing from committed fixture: {path}")
+    for path in forbidden_paths:
+        if path in live_paths:
+            problems.append(f"forbidden route present on installed server: {path}")
+    if not fixture_paths:
+        problems.append("committed fixture has no paths")
+    return tuple(problems)
+
+
+def opencode_server_openapi(
+    executable: str, *, timeout: float = SERVER_PROBE_TIMEOUT
+) -> dict[str, Any]:
+    """Start ``opencode serve`` privately and return its ``/openapi.json``.
+
+    Token-free: no prompt is sent and no credential file is read.  The child
+    gets a disposable private XDG root (so project/global config cannot leak
+    in), a random basic-auth password, and is always terminated afterwards.
+    """
+    import select
+    import tempfile
+    import time
+    import urllib.request
+
+    root = Path(tempfile.mkdtemp(prefix="saberops-openapi-probe-"))
+    password = secrets.token_urlsafe(32)
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": str(root / "home"),
+        "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
+        "XDG_CONFIG_HOME": str(root / "config"),
+        "XDG_DATA_HOME": str(root / "data"),
+        "XDG_CACHE_HOME": str(root / "cache"),
+        "XDG_STATE_HOME": str(root / "state"),
+        "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
+        "OPENCODE_SERVER_PASSWORD": password,
+        "OPENCODE_SERVER_USERNAME": "opencode",
+    }
+    for name in ("HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"):
+        Path(env[name]).mkdir(parents=True, exist_ok=True)
+    process: subprocess.Popen[str] | None = None
+    try:
+        process = subprocess.Popen(
+            [executable, "serve", "--hostname", "127.0.0.1", "--port", "0"],
+            cwd=str(root),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        assert process.stdout is not None
+        endpoint = ""
+        buffer = ""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and not endpoint:
+            ready, _, _ = select.select([process.stdout], [], [], 0.2)
+            if not ready:
+                if process.poll() is not None:
+                    raise RuntimeError("opencode serve exited before printing its URL")
+                continue
+            line = process.stdout.readline()
+            if not line:
+                time.sleep(0.05)
+                continue
+            buffer += line
+            match = re.search(r"http://127\.0\.0\.1:\d+", buffer)
+            if match:
+                endpoint = match.group(0)
+        if not endpoint:
+            raise RuntimeError("opencode serve did not report a local endpoint")
+        token = base64.b64encode(("opencode:" + password).encode()).decode()
+        request = urllib.request.Request(
+            endpoint + "/openapi.json", headers={"Authorization": "Basic " + token}
+        )
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(request, timeout=timeout) as response:
+            document = json.loads(response.read())
+        if not isinstance(document, dict):
+            raise RuntimeError("openapi.json is not a JSON object")
+        return document
+    finally:
+        if process is not None:
+            process.terminate()
+            try:
+                process.wait(5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(5)
+        shutil.rmtree(root, ignore_errors=True)
+
+
+@dataclass(frozen=True)
+class ServerCheck:
+    """Outcome of pinning one CLI's local server route surface."""
+
+    vendor: str
+    cli: str
+    installed_version: str
+    state: str
+    problems: tuple[str, ...] = ()
+    paths: int = 0
+
+
+def check_server_api(
+    manifest: Manifest,
+    installed: Mapping[str, str],
+    *,
+    which: Callable[[str], str | None] = shutil.which,
+    fetch_openapi: Callable[[str], Mapping[str, Any]] = opencode_server_openapi,
+    fixtures_root: Path = FIXTURES_ROOT,
+) -> list[ServerCheck]:
+    """Probe every CLI with a ``server_openapi`` fixture and compare routes."""
+    checks: list[ServerCheck] = []
+    for fixture in manifest.fixtures:
+        if fixture.kind != "server_openapi":
+            continue
+        executable = which(fixture.cli)
+        version = installed.get(fixture.cli, MISSING)
+        if not executable:
+            checks.append(
+                ServerCheck(
+                    vendor=fixture.vendor,
+                    cli=fixture.cli,
+                    installed_version=version,
+                    state="missing",
+                    problems=("CLI not installed",),
+                )
+            )
+            continue
+        expect = fixture.expect if isinstance(fixture.expect, Mapping) else {}
+        required = tuple(
+            str(item) for item in expect.get("required_paths", []) if isinstance(item, str)
+        )
+        forbidden = tuple(
+            str(item) for item in expect.get("forbidden_paths", []) if isinstance(item, str)
+        )
+        try:
+            committed = json.loads((fixtures_root / fixture.file).read_text(encoding="utf-8"))
+            live = fetch_openapi(executable)
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+            checks.append(
+                ServerCheck(
+                    vendor=fixture.vendor,
+                    cli=fixture.cli,
+                    installed_version=version,
+                    state="unverified",
+                    problems=(f"server probe failed: {type(exc).__name__}: {exc}",),
+                )
+            )
+            continue
+        problems = server_api_drift(
+            committed, live, required_paths=required, forbidden_paths=forbidden
+        )
+        raw_paths = live.get("paths")
+        live_paths = raw_paths if isinstance(raw_paths, Mapping) else {}
+        checks.append(
+            ServerCheck(
+                vendor=fixture.vendor,
+                cli=fixture.cli,
+                installed_version=version,
+                state="drift" if problems else "ok",
+                problems=problems,
+                paths=len(live_paths),
+            )
+        )
+    return checks
+
+
+# ---------------------------------------------------------------------------
 # Owner-run capture (token-free)
 # ---------------------------------------------------------------------------
 
@@ -838,6 +1047,8 @@ def run_check(
     which: Callable[[str], str | None] = shutil.which,
     run: RunFn | None = None,
     stream: Any = None,
+    probe_server_api: bool = True,
+    fetch_openapi: Callable[[str], Mapping[str, Any]] = opencode_server_openapi,
 ) -> int:
     """Validate the manifest, print drift records, then guard each drift.
 
@@ -854,6 +1065,12 @@ def run_check(
     ``UNSUPPORTED``/``UNVERIFIED`` state is printed.  The exit code still
     reports drift only; the guard never turns an unverified probe into a
     failure.
+
+    ``probe_server_api`` additionally compares each ``server_openapi``
+    fixture's pinned routes with the installed server (token-free).  A missing
+    or forbidden route is reported as ``SERVER-API DRIFT`` and makes the exit
+    code non-zero, because a help-text match cannot prove the shipped server
+    API still exists.
     """
     out = stream if stream is not None else sys.stdout
     path = Path(manifest_path)
@@ -898,7 +1115,32 @@ def run_check(
             f"{cli}={installed[cli]}" for cli in sorted(installed)
         )
         print(f"no drift: {len(manifest.fixtures)} fixture(s) match ({checked})", file=out)
-    return 1 if drifts else 0
+    api_drift = False
+    if probe_server_api:
+        for server_check in check_server_api(
+            manifest,
+            installed,
+            which=which,
+            fetch_openapi=fetch_openapi,
+            fixtures_root=path.parent,
+        ):
+            if server_check.state == "ok":
+                print(
+                    f"SERVER-API OK {server_check.vendor} ({server_check.cli}): "
+                    f"{server_check.paths} live path(s) include every pinned route",
+                    file=out,
+                )
+                continue
+            api_drift = True
+            print(
+                f"SERVER-API {server_check.state.upper()} "
+                f"{server_check.vendor} ({server_check.cli}): "
+                f"installed {server_check.installed_version}",
+                file=out,
+            )
+            for problem in server_check.problems:
+                print(f"  - {problem}", file=out)
+    return 1 if drifts or api_drift else 0
 
 
 def _print_capture(records: Sequence[CaptureRecord], stream: Any = None) -> None:
@@ -917,12 +1159,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
     check_parser = subparsers.add_parser("check", help="report installed-version drift")
     check_parser.add_argument("--manifest", default=str(MANIFEST_PATH))
+    check_parser.add_argument(
+        "--no-server-api",
+        action="store_true",
+        help="skip the token-free local-server route pin",
+    )
     capture_parser = subparsers.add_parser("capture", help="capture token-free vendor output")
     capture_parser.add_argument("--vendor", choices=(*VENDOR_CLI, "all"), required=True)
     capture_parser.add_argument("--out", required=True, help="output directory outside the repo")
     args = parser.parse_args(argv)
     if args.command == "check":
-        return run_check(args.manifest)
+        return run_check(args.manifest, probe_server_api=not args.no_server_api)
     records = capture(args.vendor, args.out)
     _print_capture(records)
     return 0

@@ -75,6 +75,10 @@ def sign_in_remedy(provider: str, reason: str, connection: str) -> str:
     login = {"codex": "codex login", "anthropic": "claude auth login"}.get(provider)
     if reason == "NOT_AUTHENTICATED" and login:
         return f"{login} && {check}"
+    if provider == "opencode" and reason == "INSUFFICIENT_EVIDENCE":
+        # The v2.3 ``auth list`` probe is the supported zero-inference check;
+        # when it could not run, only a real turn can prove sign-in.
+        return f"OpenCode sign-in is confirmed only by a first successful run; {check}"
     return check
 
 

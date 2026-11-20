@@ -503,7 +503,12 @@ def test_r1a_web_probe_writes_no_readiness_evidence(
     connection = registry.try_get("opencode-account")
     assert connection is not None
     service = ReadinessService(
-        registry, _readiness_store(), which=shutil.which, run=subprocess.run
+        registry,
+        _readiness_store(),
+        which=shutil.which,
+        # Deterministic, token-free status read: never launch the ambient
+        # vendor CLI from pytest.
+        run=lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, "[]", ""),
     )
     service.refresh(connection)
 
@@ -701,8 +706,8 @@ def test_r1b_verify_success_persists_readiness(
     assert evidence.state is ProviderReadiness.READY
     # The declared non-inference status command ran exactly once; every
     # other subprocess call is unrelated git plumbing, never a model call.
-    assert calls.count(["codex", "doctor", "--json"]) == 1
-    assert all(call[0] in ("codex", "git") for call in calls)
+    assert calls.count(["/fake/codex", "doctor", "--json"]) == 1
+    assert all(call[0] in ("/fake/codex", "git") for call in calls)
     # State/reason/timestamp survive reload through the canonical store.
     reloaded = ReadinessStore(isolated_state["readiness"]).load()
     persisted = reloaded.try_get("codex-chatgpt-account")
@@ -769,7 +774,7 @@ def test_r1b_verify_unauthenticated_is_not_ready(
     )
     service.refresh(connection)
 
-    assert calls.count(["codex", "doctor", "--json"]) == 1
+    assert calls.count(["/fake/codex", "doctor", "--json"]) == 1
     evidence = ReadinessStore(isolated_state["readiness"]).load().try_get(
         "codex-chatgpt-account"
     )

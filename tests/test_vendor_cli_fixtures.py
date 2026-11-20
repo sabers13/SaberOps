@@ -466,3 +466,88 @@ def test_usage_providers_and_help_commands_are_declared() -> None:
     """Covers: HV-1 capture mapping matches the readers' provider names."""
     assert vcf.USAGE_PROVIDER == {"codex": "codex", "claude": "anthropic", "opencode": "opencode"}
     assert set(vcf.HELP_COMMANDS) == set(vcf.VENDOR_CLI)
+
+
+# ---------------------------------------------------------------------------
+# Server API shape pin
+# ---------------------------------------------------------------------------
+
+
+def test_server_api_drift_reports_missing_required_and_forbidden_routes() -> None:
+    """Covers: the route pin that makes server-surface drift visible."""
+    problems = vcf.server_api_drift(
+        {"paths": {"/api/info": {}}},
+        {"paths": {"/api/info": {}, "/global/health": {}}},
+        required_paths=["/api/info", "/api/session"],
+        forbidden_paths=["/global/health"],
+    )
+    assert any("/api/session" in problem for problem in problems)
+    assert any("/global/health" in problem for problem in problems)
+    assert not vcf.server_api_drift(
+        {"paths": {"/api/info": {}}}, {"paths": {"/api/info": {}}}, required_paths=["/api/info"]
+    )
+
+
+def _write_server_manifest(tmp_path: Path) -> Path:
+    (tmp_path / "fixtures" / "opencode").mkdir(parents=True)
+    (tmp_path / "fixtures" / "opencode" / "openapi.json").write_text(
+        json.dumps({"paths": {"/api/info": {"get": "server.info"}, "/api/session": {}}})
+    )
+    path = tmp_path / "manifest.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "fixtures": [
+                    {
+                        "vendor": "opencode",
+                        "cli": "opencode",
+                        "cli_version": "opencode 1.0",
+                        "captured_on": "2026-11-20",
+                        "kind": "server_openapi",
+                        "source": "real-capture",
+                        "redacted": True,
+                        "file": "fixtures/opencode/openapi.json",
+                        "consumer": "saberops.vendor_cli_fixtures:server_api_drift",
+                        "expect": {"required_paths": ["/api/info", "/api/session"]},
+                    }
+                ],
+                "fake_only": [],
+            }
+        )
+    )
+    return path
+
+
+def test_check_pins_the_server_api_shape_and_fails_on_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: `check` fails when the installed server drops a pinned route."""
+    monkeypatch.setenv("HV1_ARGV_LOG", str(tmp_path / "argv.log"))
+    stub = _stub_binary(tmp_path, "opencode")
+    which = lambda _name: str(stub)  # noqa: E731
+    manifest = _write_server_manifest(tmp_path)
+
+    def matching(_executable: str) -> dict[str, Any]:
+        return {"paths": {"/api/info": {}, "/api/session": {}}}
+
+    out = io.StringIO()
+    assert (
+        run_check(manifest, which=which, stream=out, fetch_openapi=matching) == 0
+    )
+    assert "SERVER-API OK opencode" in out.getvalue()
+
+    def drifted(_executable: str) -> dict[str, Any]:
+        return {"paths": {"/api/info": {}, "/global/health": {}}}
+
+    out = io.StringIO()
+    assert run_check(manifest, which=which, stream=out, fetch_openapi=drifted) == 1
+    text = out.getvalue()
+    assert "SERVER-API DRIFT opencode" in text
+    assert "/api/session" in text
+
+    out = io.StringIO()
+    assert (
+        run_check(manifest, which=which, stream=out, probe_server_api=False) == 0
+    )
+    assert "SERVER-API" not in out.getvalue()

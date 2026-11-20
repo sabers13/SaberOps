@@ -322,21 +322,19 @@ def http(
 
 def test_native_prompt_holds_automation_joins_queue_and_records_reply(bridge: Any) -> None:
     runtime, controls = bridge
-    path = "/session/ses_native123456/prompt_async"
-    body = {
-        "messageID": "msg_human1234",
-        "agent": "unrestricted",
-        "model": {"providerID": "other", "modelID": "other"},
-        "parts": [{"type": "text", "text": "Inspect current work"}],
-    }
+    path = "/api/session/ses_native123456/prompt"
+    body = {"id": "msg_human1234", "text": "Inspect current work"}
     assert http(runtime, "POST", path, body, auth=False)[0] == 401
     assert controls.mode("sid") == "ACTIVE"
-    assert http(runtime, "POST", path, body)[0] == 204
+    status, payload = http(runtime, "POST", path, body)
+    assert status == 200
+    assert payload["data"]["payload"]["text"] == "Inspect current work"
+    assert payload["data"]["sessionID"] == "ses_native123456"
     assert controls.mode("sid") == "REQUESTED"
     assert not controls.complete_if_active("sid")
     # Queued prompt is never delivered by the native client or before quiescence.
     controls.finish("sid", "MANUAL")
-    assert http(runtime, "POST", path, body)[0] == 204
+    assert http(runtime, "POST", path, body)[0] == 200
     message = controls.next_message("sid")
     assert message and message["text"] == "Inspect current work"
     with pytest.raises(ControlConflict):
@@ -348,27 +346,31 @@ def test_native_prompt_holds_automation_joins_queue_and_records_reply(bridge: An
         ("Inspect current work", "Done")
     ]
     controls.resume("sid")
-    assert http(runtime, "POST", path, {"parts": [{"type": "text", "text": "Late"}]})[0] == 409
+    assert http(runtime, "POST", path, {"id": "msg_late0001", "text": "Late"})[0] == 409
 
 
 def test_native_client_cannot_change_frozen_settings_or_access_another_session(bridge: Any) -> None:
     runtime, controls = bridge
-    assert http(runtime, "GET", "/session/ses_other1234/message")[0] == 403
-    assert http(runtime, "PATCH", "/config", {"permission": "allow"})[0] == 403
+    assert http(runtime, "GET", "/api/session/ses_other1234/message")[0] == 403
+    assert http(runtime, "GET", "/api/credential")[0] == 403
+    assert http(runtime, "PATCH", "/api/config", {"permission": "allow"})[0] == 403
     assert (
-        http(runtime, "POST", "/session/ses_native123456/shell", {"command": "touch bad"})[0] == 409
+        http(runtime, "POST", "/api/session/ses_native123456/shell", {"command": "touch bad"})[0]
+        == 409
     )
-    assert http(runtime, "POST", "/instance/dispose", {})[0] == 409
+    assert http(runtime, "POST", "/api/session", {})[0] == 409
     assert controls.mode("sid") == "ACTIVE"
 
 
-def test_native_abort_requests_takeover_and_does_not_resume_automation(bridge: Any) -> None:
+def test_native_interrupt_requests_takeover_and_does_not_resume_automation(bridge: Any) -> None:
     runtime, controls = bridge
-    path = "/session/ses_native123456/abort"
-    assert http(runtime, "POST", path, {})[0] == 200
+    path = "/api/session/ses_native123456/interrupt"
+    status, payload = http(runtime, "POST", path, {})
+    assert status == 200 and payload == {"interrupted": True}
     assert controls.mode("sid") == "REQUESTED" and controls.should_interrupt("sid")
     controls.finish("sid", "MANUAL")
-    assert http(runtime, "POST", path, {})[0] == 200
+    status, payload = http(runtime, "POST", path, {})
+    assert status == 200 and payload == {"interrupted": False}
     assert controls.mode("sid") == "MANUAL" and controls.should_interrupt("sid")
     controls.resume("sid")
     assert http(runtime, "POST", path, {})[0] == 409
@@ -398,32 +400,37 @@ def test_protocol_turn_sends_frozen_model_and_readonly_agent_and_validates_termi
 
     def api(method: str, path: str, body: object = None, **kwargs: Any) -> Any:
         nonlocal polls
-        if method == "POST" and path == "/session":
+        if method == "POST" and path == "/api/session":
             created.append(body)
-            return {"id": "ses_fresh1234"}
+            return {"data": {"id": "ses_fresh1234"}}
         if method == "POST":
             posted.append(body)
             return None
-        if path.endswith("/message"):
+        if path == "/api/session/active":
+            return {"data": {}}
+        if path.startswith("/api/session/") and "/message" in path:
             polls += 1
-            return (
+            rows = (
                 []
                 if polls == 1
                 else [
                     {
-                        "info": {
-                            "id": "msg_reply",
-                            "role": "assistant",
-                            "parentID": posted[0]["messageID"],
-                            "time": {"completed": 1},
-                            "finish": "stop",
-                            "providerID": "provider",
-                            "modelID": "model",
+                        "id": "msg_reply",
+                        "type": "assistant",
+                        "time": {"created": 2, "completed": 3},
+                        "finish": "stop",
+                        "model": {"id": "model", "providerID": "provider"},
+                        "content": [{"type": "text", "text": "Done"}],
+                        "tokens": {
+                            "input": 7,
+                            "output": 2,
+                            "reasoning": 0,
+                            "cache": {"read": 1, "write": 0},
                         },
-                        "parts": [{"type": "text", "text": "Done"}],
                     }
                 ]
             )
+            return {"data": rows, "cursor": {"previous": None, "next": None}}
         return {}
 
     monkeypatch.setattr(runtime, "api", api)
@@ -432,15 +439,21 @@ def test_protocol_turn_sends_frozen_model_and_readonly_agent_and_validates_termi
 
     result = runtime._turn(runtime.request, time.monotonic())
     assert result.status == AttemptStatus.SUCCESS and result.stdout == "Done"
-    assert posted[0]["model"] == {"providerID": "provider", "modelID": "model"}
-    assert posted[0]["agent"] == "saberops"
-    assert posted[0]["variant"] == "high"
+    assert result.actual_model == "model" and result.actual_provider == "provider"
+    assert result.usage and result.usage[0].input_tokens == 7
+    assert posted[0]["id"].startswith("msg_") and posted[0]["text"] == "task"
     assert bool(created) == prior_interrupted_turn
     if prior_interrupted_turn:
         assert created[0]["agent"] == "saberops"
+        assert created[0]["model"] == {
+            "providerID": "provider",
+            "id": "model",
+            "variant": "high",
+        }
+        assert created[0]["location"] == {"directory": str(tmp_path)}
         assert json.loads(descriptor.read_text())["session"] == "ses_fresh1234"
     assert permission_rules({"edit": "deny"}) == [
-        {"permission": "edit", "pattern": "*", "action": "deny"}
+        {"action": "edit", "resource": "*", "effect": "deny"}
     ]
 
 
@@ -628,21 +641,26 @@ def test_unmanaged_provider_input_holds_execution_before_any_result_is_accepted(
 
     def api(method: str, path: str, body: object = None, **kwargs: Any) -> Any:
         nonlocal polls, aborted
-        if path.endswith("/abort"):
+        if path.endswith("/interrupt"):
             aborted = True
-            return True
-        if path.endswith("/message"):
+            return {"interrupted": True}
+        if path == "/api/session/active":
+            return {"data": {}}
+        if "/message" in path:
             polls += 1
-            return (
+            rows = (
                 []
                 if polls == 1
                 else [
                     {
-                        "info": {"id": "msg_unmanaged", "role": "user"},
-                        "parts": [{"type": "text", "text": "external task"}],
+                        "id": "msg_unmanaged",
+                        "type": "user",
+                        "time": {"created": 1},
+                        "text": "external task",
                     }
                 ]
             )
+            return {"data": rows, "cursor": {"previous": None, "next": None}}
         return {}
 
     monkeypatch.setattr(runtime, "api", api)
@@ -664,21 +682,34 @@ def test_confirmed_snapshot_seals_late_deltas_and_busy_status(tmp_path: Path) ->
     runtime.native_id = "ses_one"
     runtime.request = WorkerRequest("task", tmp_path, "provider/model", on_stdout=output.append)
     runtime.capture_event(
-        {"type": "message.part.delta", "properties": {"messageID": "msg_final", "delta": "partial"}}
+        {
+            "type": "session.text.delta",
+            "data": {"sessionID": "ses_one", "assistantMessageID": "msg_final", "delta": "part"},
+        }
     )
     runtime.confirm_snapshot(
-        [{"info": {"id": "msg_final"}, "parts": [{"type": "text", "text": "Complete response"}]}]
+        [
+            {
+                "id": "msg_final",
+                "type": "assistant",
+                "content": [{"type": "text", "text": "Complete response"}],
+            }
+        ]
     )
     runtime.capture_event(
-        {"type": "message.part.delta", "properties": {"messageID": "msg_final", "delta": "late"}}
+        {
+            "type": "session.text.delta",
+            "data": {"sessionID": "ses_one", "assistantMessageID": "msg_final", "delta": "late"},
+        }
     )
-    runtime.capture_event({"type": "session.status", "properties": {"status": {"type": "busy"}}})
+    runtime.capture_event({"type": "session.execution.succeeded", "data": {"sessionID": "ses_one"}})
     assert len(output) == 1
     events = journal.view("sid")["events"]
     assert events[-1]["kind"] == "provider.snapshot"
     frames = runtime.snapshot_events(events[-1]["payload"])
-    assert frames[-2]["properties"]["part"]["text"] == "Complete response"
-    assert frames[-1]["properties"]["status"]["type"] == "idle"
+    assert len(frames) == 1
+    assert frames[0]["type"] == "session.execution.succeeded"
+    assert frames[0]["data"]["sessionID"] == "ses_one"
 
 
 def test_unconfirmed_abort_cannot_publish_a_finished_snapshot(
@@ -693,9 +724,11 @@ def test_unconfirmed_abort_cannot_publish_a_finished_snapshot(
     runtime.request = request
 
     def api(method: str, path: str, body: object = None, **kwargs: Any) -> Any:
-        if path == "/session/status":
-            return {"ses_one": {"type": "busy"}}
-        return [] if path.endswith("/message") else None
+        if path == "/api/session/active":
+            return {"data": {"ses_one": {"type": "running"}}}
+        if "/message" in path:
+            return {"data": [], "cursor": {"previous": None, "next": None}}
+        return None
 
     clock = iter([0, 0, 11])
     monkeypatch.setattr(runtime, "api", api)
@@ -737,13 +770,16 @@ def test_durable_outcome_overrides_stale_active_metadata_without_mutating_it(
     assert path.read_bytes() == before
 
 
-@pytest.mark.parametrize("path", ["/event", "/global/event"])
-def test_live_stream_gets_final_snapshot_without_replaying_old_busy(bridge: Any, path: str) -> None:
+def test_live_stream_gets_final_snapshot_without_replaying_old_busy(bridge: Any) -> None:
     runtime, _ = bridge
+    path = "/api/event"
     runtime.journal.append(
         "sid",
         "provider.structured",
-        {"type": "session.status", "properties": {"status": {"type": "busy"}}},
+        {
+            "type": "session.execution.started",
+            "data": {"sessionID": runtime.native_id},
+        },
     )
     frames: list[dict[str, Any]] = []
     failures: list[BaseException] = []
@@ -761,10 +797,9 @@ def test_live_stream_gets_final_snapshot_without_replaying_old_busy(bridge: Any,
                 for line in response:
                     if not line.startswith(b"data:"):
                         continue
-                    payload = json.loads(line[5:])
-                    frame = payload["payload"] if path == "/global/event" else payload
+                    frame = json.loads(line[5:])
                     frames.append(frame)
-                    if frame["type"] == "session.status":
+                    if frame["type"] == "session.execution.succeeded":
                         return
         except BaseException as exc:
             failures.append(exc)
@@ -778,25 +813,21 @@ def test_live_stream_gets_final_snapshot_without_replaying_old_busy(bridge: Any,
     runtime.confirm_snapshot(
         [
             {
-                "info": {"id": "msg_done", "sessionID": runtime.native_id},
-                "parts": [
-                    {
-                        "id": "prt_done",
-                        "messageID": "msg_done",
-                        "sessionID": runtime.native_id,
-                        "type": "text",
-                        "text": "All done",
-                    }
-                ],
+                "id": "msg_done",
+                "type": "assistant",
+                "content": [{"type": "text", "text": "All done"}],
             }
-        ]
+        ],
+        outcome="succeeded",
     )
     assert runtime.close()
     reader.join(5)
     assert not reader.is_alive() and not failures
-    assert frames[-1]["properties"]["status"]["type"] == "idle"
-    assert frames[-2]["properties"]["part"]["text"] == "All done"
-    assert len(frames) == 3
+    assert frames[-1]["type"] == "session.execution.succeeded"
+    assert frames[-1]["data"]["sessionID"] == runtime.native_id
+    # The pre-existing busy-state journal event is not replayed: only the
+    # terminal snapshot reaches a late native client.
+    assert len(frames) == 1
 
 
 def test_frozen_gate_contract_reaches_repairs_with_correct_prompt_metrics() -> None:

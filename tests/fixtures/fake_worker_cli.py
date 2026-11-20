@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -492,12 +493,18 @@ def _serve_opencode(
     target_file: str,
     content: str | None,
 ) -> int:
-    """Minimal HTTP server emulating ``opencode serve`` for ``OpenCodeServerSession``."""
+    """Minimal v2.3.2 HTTP server emulating ``opencode serve``.
+
+    The session runtime calls only the ``/api/*`` surface: ``/api/info`` for
+    readiness/version, ``/api/session*`` for the turn, and ``/api/event``.
+    ``/global/health`` is deliberately absent (the real v2.3.2 server answers
+    SPA HTML there), so an old readiness poll cannot pass against this fake.
+    """
     session_id = "ses_fakeopencode01"
     workdir = Path.cwd()
     messages: list[dict[str, Any]] = []
     lock = threading.Lock()
-    state = {"status": "idle"}
+    state = {"active": False}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format: str, *args: Any) -> None:
@@ -513,32 +520,87 @@ def _serve_opencode(
                 self.wfile.write(raw)
 
         def do_GET(self) -> None:
-            path = self.path.split("?", 1)[0]
-            if path == "/global/health":
-                self._send_json(200, {"healthy": True, "version": "2.0.29-fake"})
+            parsed = urllib.parse.urlsplit(self.path)
+            path = parsed.path
+            query = urllib.parse.parse_qs(parsed.query)
+            if path == "/api/info":
+                self._send_json(
+                    200,
+                    {
+                        "version": "2.3.2-fake",
+                        "pid": 1,
+                        "urls": [],
+                        "paths": {"tmp": "/tmp"},
+                    },
+                )
                 return
-            if path == "/session/status":
+            if path == "/api/session/active":
                 with lock:
-                    current = state["status"]
-                self._send_json(200, {session_id: {"type": current}})
+                    active = state["active"]
+                data = {session_id: {"type": "running"}} if active else {}
+                self._send_json(200, {"data": data})
                 return
-            if path == f"/session/{session_id}":
-                self._send_json(200, {"id": session_id, "directory": str(workdir)})
+            if path == "/api/session":
+                session = {
+                    "id": session_id,
+                    "projectID": "proj_fake",
+                    "cost": 0,
+                    "tokens": {"input": 0, "output": 0, "reasoning": 0,
+                               "cache": {"read": 0, "write": 0}},
+                    "time": {"created": 1, "updated": 1},
+                    "location": {"directory": str(workdir)},
+                }
+                self._send_json(
+                    200,
+                    {"data": [session], "cursor": {"previous": None, "next": None}},
+                )
                 return
-            if path == f"/session/{session_id}/message":
+            if path == f"/api/session/{session_id}":
+                self._send_json(
+                    200,
+                    {
+                        "data": {
+                            "id": session_id,
+                            "projectID": "proj_fake",
+                            "cost": 0,
+                            "tokens": {"input": 0, "output": 0, "reasoning": 0,
+                                       "cache": {"read": 0, "write": 0}},
+                            "time": {"created": 1, "updated": 1},
+                            "location": {"directory": str(workdir)},
+                        }
+                    },
+                )
+                return
+            if path == f"/api/session/{session_id}/message":
+                if query.get("cursor"):
+                    # Past the end: v2.3 answers an empty page.
+                    self._send_json(
+                        200, {"data": [], "cursor": {"previous": None, "next": None}}
+                    )
+                    return
                 with lock:
                     snapshot = list(messages)
-                self._send_json(200, snapshot)
+                # v2.3 returns an anchor even on a complete page.
+                self._send_json(
+                    200,
+                    {
+                        "data": snapshot,
+                        "cursor": {"previous": None,
+                                   "next": "next-anchor" if snapshot else None},
+                    },
+                )
                 return
-            if path == "/event":
+            if path == "/api/event":
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-cache")
                 self.end_headers()
                 event = json.dumps(
                     {
-                        "type": "session.status",
-                        "properties": {"sessionID": session_id, "status": {"type": "idle"}},
+                        "id": "evt_fake_connected",
+                        "created": 1,
+                        "type": "server.connected",
+                        "data": {},
                     }
                 )
                 try:
@@ -558,22 +620,51 @@ def _serve_opencode(
             except ValueError:
                 body = {}
 
-            if path == "/session":
-                self._send_json(200, {"id": session_id})
+            if path == "/api/session":
+                session = {
+                    "id": session_id,
+                    "projectID": "proj_fake",
+                    "agent": body.get("agent"),
+                    "model": body.get("model"),
+                    "cost": 0,
+                    "tokens": {"input": 0, "output": 0, "reasoning": 0,
+                               "cache": {"read": 0, "write": 0}},
+                    "time": {"created": 1, "updated": 1},
+                    "title": body.get("title", ""),
+                    "permissions": body.get("permissions", []),
+                    "location": body.get("location", {"directory": str(workdir)}),
+                }
+                self._send_json(200, {"data": session})
                 return
-            if path == f"/session/{session_id}/abort":
+            if path == f"/api/session/{session_id}/interrupt":
                 with lock:
-                    state["status"] = "idle"
-                self._send_json(200, {})
+                    was_active = state["active"]
+                    state["active"] = False
+                self._send_json(200, {"interrupted": was_active})
                 return
-            if path == f"/session/{session_id}/prompt_async":
-                message_id = str(body.get("messageID") or f"msg_{uuid.uuid4().hex}")
+            if path == f"/api/session/{session_id}/prompt":
+                message_id = str(body.get("id") or f"msg_{uuid.uuid4().hex}")
+                text = str(body.get("text", ""))
+                with lock:
+                    messages.append(
+                        {
+                            "id": message_id,
+                            "type": "user",
+                            "time": {"created": 2},
+                            "text": text,
+                        }
+                    )
                 turn_cfg = _control_turn(_next_turn_index())
                 turn_mode = str(turn_cfg.get("mode", mode)).strip().lower()
                 if turn_mode == "hang":
                     with lock:
-                        state["status"] = "busy"
-                    self._send_json(204, None)
+                        state["active"] = True
+                    self._send_json(
+                        200,
+                        {"data": {"id": message_id, "sessionID": session_id,
+                                  "time": {"created": 2}, "type": "user",
+                                  "payload": {"text": text}, "delivery": "steer"}},
+                    )
                     time.sleep(hang_seconds)
                     return
                 if turn_mode == "crash":
@@ -589,20 +680,19 @@ def _serve_opencode(
                     with lock:
                         messages.append(
                             {
-                                "info": {
-                                    "id": f"msg_err_{len(messages) + 1}",
-                                    "role": "assistant",
-                                    "parentID": message_id,
-                                    "time": {"completed": 1},
-                                    "finish": "error",
-                                    "error": {
-                                        "name": "APIError",
-                                        "data": {
-                                            "message": "429 quota exceeded / rate limit reached"
-                                        },
-                                    },
+                                "id": f"msg_err_{len(messages) + 1}",
+                                "type": "assistant",
+                                "agent": "saberops",
+                                "model": {"id": "deepseek-v4-flash",
+                                          "providerID": "opencode-go"},
+                                "time": {"created": 3, "completed": 4},
+                                "finish": "error",
+                                "error": {
+                                    "type": "provider.rate-limit",
+                                    "message": "429 quota exceeded / rate limit reached",
+                                    "status": 429,
                                 },
-                                "parts": [
+                                "content": [
                                     {
                                         "type": "text",
                                         "text": "429 quota exceeded / rate limit reached",
@@ -610,39 +700,49 @@ def _serve_opencode(
                                 ],
                             }
                         )
-                        state["status"] = "idle"
-                    self._send_json(204, None)
+                        state["active"] = False
+                    self._send_json(
+                        200,
+                        {"data": {"id": message_id, "sessionID": session_id,
+                                  "time": {"created": 2}, "type": "user",
+                                  "payload": {"text": text}, "delivery": "steer"}},
+                    )
                     return
 
                 _commit_change(workdir, "opencode", target_file, content)
                 reported = _identity_from(turn_cfg, "opencode") or _reported_identity(
                     "opencode"
                 )
-                info: dict[str, Any] = {
+                message: dict[str, Any] = {
                     "id": f"msg_resp_{len(messages) + 1}",
-                    "role": "assistant",
-                    "parentID": message_id,
-                    "time": {"completed": 1},
+                    "type": "assistant",
+                    "agent": "saberops",
+                    "time": {"created": 3, "completed": 4},
                     "finish": "stop",
+                    # Exact provider counters; the runtime reads them
+                    # from the assistant message (v2.3 has no
+                    # step-finish part on the HTTP surface).
+                    "tokens": {
+                        "input": 12,
+                        "output": 8,
+                        "reasoning": 0,
+                        "cache": {"read": 4, "write": 2},
+                    },
+                    "content": [{"type": "text", "text": "Fake opencode completed."}],
                 }
                 if reported is not None:
-                    info["providerID"], info["modelID"] = reported
+                    # Identity evidence is controllable: the fake omits the
+                    # model ref entirely to model a provider that reports none.
+                    message["model"] = {"providerID": reported[0], "id": reported[1]}
                 with lock:
-                    messages.append(
-                        {
-                            "info": info,
-                            "parts": [
-                                {"type": "text", "text": "Fake opencode completed."},
-                                # The real server exposes step usage as a
-                                # ``step-finish`` message part; without it the
-                                # session runtime has no provider counters to
-                                # persist and the job would read ``unknown``.
-                                _opencode_step_finish_part(),
-                            ],
-                        }
-                    )
-                    state["status"] = "idle"
-                self._send_json(204, None)
+                    messages.append(message)
+                    state["active"] = False
+                self._send_json(
+                    200,
+                    {"data": {"id": message_id, "sessionID": session_id,
+                              "time": {"created": 2}, "type": "user",
+                              "payload": {"text": text}, "delivery": "steer"}},
+                )
                 return
 
             self._send_json(404, {"error": f"not found: {path}"})

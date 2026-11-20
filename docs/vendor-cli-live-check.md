@@ -21,6 +21,21 @@ recorded version differs from the installed one.  Owner-supplied logs whose
 exact version was not recorded (`cli_version = "unknown"`) are skipped: drift
 cannot be assessed for them.
 
+It also pins the **shipped local-server route surface** for every
+`server_openapi` fixture.  For OpenCode it starts `serve` in a disposable
+private XDG root with a random basic-auth password (no prompt, no credential
+file read), fetches `GET /openapi.json`, and compares it with
+`tests/fixtures/vendor_cli/opencode/opencode-v2.3.2/openapi.json`:
+
+* `SERVER-API OK opencode` — every route the runtime calls is present.
+* `SERVER-API DRIFT opencode` — a pinned route is missing (or a forbidden
+  route such as the retired `/global/health` reappeared); the exit code is
+  non-zero.
+* `SERVER-API UNVERIFIED opencode` — the probe could not run; also non-zero,
+  because a help-text match cannot prove the API still exists.
+
+Pass `--no-server-api` to skip the probe.
+
 The manifest is validated first (`validate_manifest`).  An unknown kind or
 source, a missing or unredacted fixture file, a duplicate path or a bad date
 prints an `INVALID manifest` block and exits `2` **without** running the drift
@@ -68,6 +83,7 @@ classifier in `consumer`.  Until then the gap stays visible in the manifest's
 | 2026-10-16 | codex `codex-cli 0.162.1`; claude `2.1.301 (Claude Code)`; opencode `opencode v2.0.29` | no drift (`check` exit 0; 3 `config_help` fixtures match) | y — `config_help` captured and owner-kept (D-0015); usage panels/JSON and exhaustion **not** refreshed: owner-declined 2026-10-16 (D-0016), recorded under `fake_only` |
 | 2026-10-17 | opencode `opencode v2.0.29` | not run (fixture edit only) | y — `opencode/opencode-v2.0.29/config_help.txt` re-captured token-free with `opencode serve --help` appended (Step 024/HV-2, authorized by the step prompt); the first three sections reproduced byte-for-byte |
 | 2026-10-17 | opencode `opencode v2.0.29` (sha256 `7e23471f…`, probe evidence in `LANE/probe-isolation/`) | `check` exit 0 on the committed manifest | fixup 1 (D-0040): five-site config/plugin isolation repair — `workers/opencode_isolation.py` (owned root + `OPENCODE_DISABLE_PROJECT_CONFIG=1` + inline `integration.use` denies), applied to the direct worker, the session server, first-use verification, the Go usage reader and the web model listing; refusals before launch use existing typed forms |
+| 2026-11-20 | opencode `opencode v2.3.2` | `SERVER-API OK opencode (142 live paths)`; claude `2.1.328` drift reported by the installed `2.1.329` (outside this lane) | y — added `opencode/opencode-v2.3.2/openapi.json` (token-free `/openapi.json` route capture) after the v2.3 server moved every route under `/api/*` and dropped `/global/health`; ADR-0039 records the supported surface |
 
 ## 5. Findings
 

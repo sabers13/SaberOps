@@ -118,6 +118,35 @@
         }
       },
       "provenance": "Owner-approved one-prompt smoke on the dogfood host, 2026-11-19, under the SaberOps adapter's own hermetic environment and private OpenCode config/home root: `opencode run --standalone --format json -m opencode-go/deepseek-v4.1-flash --archived \"Reply with the single word OK.\"`. Session/part ids redacted; no credential value was read or emitted. The 2.3.2 JSONL stream carries step_finish.part.tokens but no provider/model identity fields, so the adapter's reported-model evidence stays `unreported` for this CLI version."
+    },
+    {
+      "vendor": "opencode",
+      "cli": "opencode",
+      "cli_version": "opencode v2.3.2",
+      "captured_on": "2026-11-20",
+      "kind": "server_openapi",
+      "source": "real-capture",
+      "redacted": true,
+      "file": "opencode/opencode-v2.3.2/openapi.json",
+      "consumer": "saberops.vendor_cli_fixtures:server_api_drift",
+      "provider": "opencode",
+      "expect": {
+        "required_paths": [
+          "/api/info",
+          "/api/session",
+          "/api/session/{sessionID}",
+          "/api/session/{sessionID}/message",
+          "/api/session/{sessionID}/prompt",
+          "/api/session/{sessionID}/interrupt",
+          "/api/session/active",
+          "/api/event"
+        ],
+        "forbidden_paths": [
+          "/global/health"
+        ],
+        "drift": []
+      },
+      "provenance": "Token-free capture of the installed opencode v2.3.2 `serve` process in a private XDG root under /var/tmp: `GET /openapi.json` only, no prompt and no credential read. Paths and operation ids are kept verbatim; response schemas are omitted so the fixture stays redaction-clean. The runtime requires these /api/* routes; the absent /global/health is the drift that broke the worker in run_70ead49549d5_71a86a5c40."
     }
   ],
   "fake_only": [

@@ -29,6 +29,7 @@ from saberops.vendor_cli_fixtures import (
     Fixture,
     assert_redacted,
     load_manifest,
+    server_api_drift,
 )
 from saberops.workers.exhaustion import (
     ExhaustionClassification,
@@ -55,6 +56,7 @@ EXPECTED_CONSUMERS: dict[str, Any] = {
     "saberops.workers.exhaustion.classify_cline": classify_cline,
     "saberops.workers.exhaustion.classify_antigravity": classify_antigravity,
     "saberops.workers.exhaustion.parse_antigravity_usage": parse_antigravity_usage,
+    "saberops.vendor_cli_fixtures:server_api_drift": server_api_drift,
 }
 
 MANIFEST = load_manifest(MANIFEST_PATH)
@@ -109,6 +111,22 @@ def _invoke(fixture: Fixture, text: str) -> Any:
         if missing:
             result["known_missing"] = missing
         return result
+    if fixture.kind == "server_openapi":
+        document = json.loads(text)
+        required = list(fixture.expect["required_paths"])
+        forbidden = list(fixture.expect.get("forbidden_paths", []))
+        return {
+            "required_paths": required,
+            "forbidden_paths": forbidden,
+            "drift": list(
+                server_api_drift(
+                    document,
+                    document,
+                    required_paths=required,
+                    forbidden_paths=forbidden,
+                )
+            ),
+        }
     if consumer == "saberops.native_usage_panel.parse_panel":
         return target(fixture.provider, text)
     if consumer == "saberops.cli_usage.parse_limits":

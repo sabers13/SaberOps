@@ -95,12 +95,43 @@ def _codex_authentication(payload: object) -> bool | None:
     return None
 
 
+def _opencode_authentication(payload: object) -> bool | None:
+    """Project ``opencode auth list --format json`` to an authentication verdict.
+
+    Verified shape (OpenCode 2.3.2, ``--standalone`` so no shared background
+    service is touched): a JSON array of integrations, each with a
+    ``connections`` array::
+
+        [{"id": "opencode-go", "name": "OpenCode Go",
+          "connections": [{"type": "credential", "id": "cred_...",
+                           "label": "OpenCode Go", "method": "key"}]}]
+
+    Only the presence of at least one connection is read; labels, ids and
+    credential values are ignored and never persisted.  A successful empty
+    list proves no configured account (NOT_READY); an unrecognized shape stays
+    ``None`` (UNKNOWN).
+    """
+    if not isinstance(payload, list):
+        return None
+    connections = 0
+    for entry in payload:
+        if not isinstance(entry, Mapping):
+            return None
+        rows = entry.get("connections", [])
+        if not isinstance(rows, list):
+            return None
+        connections += sum(1 for row in rows if isinstance(row, Mapping))
+    return connections > 0
+
+
 def _status_authentication(backend: str, payload: object) -> bool | None:
     """Parse only the verified authentication verdict for supported CLIs."""
     if backend == "claude-code":
         return _claude_authentication(payload)
     if backend == "codex":
         return _codex_authentication(payload)
+    if backend == "opencode":
+        return _opencode_authentication(payload)
     return None
 
 
@@ -188,8 +219,12 @@ class ReadinessService:
         else:
             authenticated: bool | None = None
             try:
+                # Probe the binary that installed-detection resolved, so a
+                # test-injected ``which`` never falls through to an ambient
+                # vendor CLI on PATH.
+                executable = self.which(descriptor.executable) or descriptor.executable
                 result = self.run(
-                    [descriptor.executable, *descriptor.auth_status_argv],
+                    [executable, *descriptor.auth_status_argv],
                     capture_output=True,
                     text=True,
                     check=False,
@@ -209,6 +244,24 @@ class ReadinessService:
             state = TriState.UNKNOWN if authenticated is None else (
                 TriState.TRUE if authenticated else TriState.FALSE
             )
+            if authenticated is None:
+                # An unreadable status probe cannot supersede actual execution
+                # evidence; only an explicit verdict can.
+                previous = self.store.load().try_get(connection.connection_id)
+                if (
+                    connection.enabled
+                    and connection.is_configured
+                    and previous is not None
+                    and previous.source
+                    in (
+                        ReadinessEvidenceSource.SUCCESSFUL_EXECUTION,
+                        ReadinessEvidenceSource.MODEL_ACCESS_TEST,
+                    )
+                    and previous.state == ProviderReadiness.READY
+                    and previous.provider == connection.provider
+                    and previous.backend == connection.backend
+                ):
+                    return previous
             evidence = derive_dispatch_readiness(
                 connection,
                 discovery=DiscoveryState(

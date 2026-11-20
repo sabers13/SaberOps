@@ -6,6 +6,8 @@ not in the removed /access page."""
 
 from __future__ import annotations
 
+import json
+import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -62,11 +64,64 @@ def test_ported_installed_cli_is_not_proven_readiness(
         AccessRegistry((connection,)),
         ReadinessStore(isolated / "readiness.json"),
         which=lambda _exe: "/usr/bin/opencode",
+        # The v2.3 ``auth list`` status probe fails here; a failed probe is
+        # never proof of readiness.
+        run=lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "unavailable"),
     )
     evidence = service.refresh(connection)
-    # The opencode backend exposes no auth probe: a present binary is
-    # availability, never proven readiness.
     assert evidence.state is ProviderReadiness.UNKNOWN
+
+
+def test_opencode_auth_list_probe_proves_sign_in(isolated: Path) -> None:
+    """A credential listing is zero-inference evidence, never a model call."""
+    connection = _account_connection()
+    payload = json.dumps(
+        [
+            {
+                "id": "opencode-go",
+                "name": "OpenCode Go",
+                "connections": [
+                    {
+                        "type": "credential",
+                        "id": "cred_abc",
+                        "label": "OpenCode Go",
+                        "method": "key",
+                    }
+                ],
+            }
+        ]
+    )
+    calls: list[list[str]] = []
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, payload, "")
+
+    service = ReadinessService(
+        AccessRegistry((connection,)),
+        ReadinessStore(isolated / "readiness.json"),
+        which=lambda _exe: "/usr/bin/opencode",
+        run=run,
+    )
+    evidence = service.refresh(connection)
+    assert evidence.state is ProviderReadiness.READY
+    assert evidence.reason == "READY"
+    assert calls and calls[0][1:] == ["auth", "list", "--format", "json", "--standalone"]
+
+
+def test_opencode_auth_list_probe_without_connections_is_not_authenticated(
+    isolated: Path,
+) -> None:
+    connection = _account_connection()
+    service = ReadinessService(
+        AccessRegistry((connection,)),
+        ReadinessStore(isolated / "readiness.json"),
+        which=lambda _exe: "/usr/bin/opencode",
+        run=lambda argv, **k: subprocess.CompletedProcess(argv, 0, "[]", ""),
+    )
+    evidence = service.refresh(connection)
+    assert evidence.state is ProviderReadiness.NOT_READY
+    assert evidence.reason == "NOT_AUTHENTICATED"
 
 
 def test_ported_stale_ready_evidence_marked_stale(isolated: Path) -> None:
