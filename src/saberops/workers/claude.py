@@ -192,6 +192,15 @@ class ClaudeCodeAdapter(WorkerAdapter):
                                       "Claude Code process termination could not be confirmed")
         elif process.passed and completed:
             status, outcome, error = AttemptStatus.SUCCESS, None, None
+        elif process.passed and process.output_incomplete:
+            # The child exited cleanly, but not every byte it wrote reached
+            # the capture, so native terminal evidence may have been lost.
+            # Never read that as success: report the real cause instead of
+            # claiming the provider did not complete.
+            status, outcome, error = (AttemptStatus.FAILED,
+                                      DispatchOutcome.PROVIDER_OR_RUNTIME_FAILURE,
+                                      "Claude Code output capture was incomplete; "
+                                      "the terminal result frame was not observed")
         else:
             status, outcome, error = (AttemptStatus.FAILED,
                                       DispatchOutcome.PROVIDER_OR_RUNTIME_FAILURE,

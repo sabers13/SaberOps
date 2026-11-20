@@ -51,6 +51,13 @@ class ProcessResult:
     memory_peak_bytes: int = 0
     memory_wait_seconds: float = 0.0
     memory_freeze_count: int = 0
+    # True when a stream drain thread could not be confirmed finished before
+    # this result was returned, so ``stdout``/``stderr`` may be missing
+    # trailing bytes for a reason other than the child's own behaviour.
+    # Callers that require terminal provider evidence must fail closed rather
+    # than read a partial stream as a complete one.  Declared last so the
+    # positional field order of the established fields does not move.
+    output_incomplete: bool = False
 
     @property
     def passed(self) -> bool:
@@ -1106,6 +1113,29 @@ def _drain_stream(
             errors.append(f"[Stream drain error ({stream_name}): {exc}]")
 
 
+def _drain_stream_marked(
+    done: threading.Event,
+    stream: IO[str],
+    chunks: list[str],
+    callback: Callable[[str], None] | None,
+    errors: list[str] | None,
+    stream_name: str,
+    tracker: _ActivityTracker | None,
+    monitor_touch: Callable[[], None] | None,
+) -> None:
+    """Drain one stream and publish completion so the owner can wait for it.
+
+    Capture completeness must not depend on how long the caller's callback
+    takes per line: the drain thread appends the raw line to *chunks* before
+    invoking the callback, so waiting for this event is what makes the
+    captured output equal to the child's real output.
+    """
+    try:
+        _drain_stream(stream, chunks, callback, errors, stream_name, tracker, monitor_touch)
+    finally:
+        done.set()
+
+
 def _write_stdin(stream: IO[str], text: str) -> None:
     """Write input_text to child's stdin and close to signal EOF."""
     try:
@@ -1213,6 +1243,16 @@ def _check_leader_exit_liveness(pgid: int) -> LeaderExitStatus:
 
 _WAIT_SLICE_SECONDS: float = 0.2
 _DEFAULT_TERMINATION_GRACE_SECONDS: float = 5.0
+# Budget for a drain thread to finish delivering bytes it has already read.
+# Once the worker tree is provably extinct every write end of the child's
+# pipes is closed, so a drain thread that is still alive is only working
+# through its own read-ahead buffer: abandoning it truncates the captured
+# stream mid-frame while the bytes are still available.  The bound only
+# guards against a callback that itself never returns.
+_DRAIN_COMPLETION_SECONDS: float = 60.0
+# Cleanup budget when extinction was NOT proven and a drain thread may still
+# be blocked in readline on a pipe a surviving descendant holds open.
+_DRAIN_CLEANUP_SECONDS: float = 5.0
 
 # Stream wrappers deliberately kept referenced when a surviving orphan
 # descendant holds a pipe end and a drain thread remains blocked in readline.
@@ -1497,6 +1537,9 @@ def run_process(
     stderr_chunks: list[str] = []
     drain_errors: list[str] = []
     threads: list[threading.Thread] = []
+    drain_completions: list[threading.Event] = []
+    output_incomplete = False
+    extinction_confirmed = False
     tracker = _ActivityTracker()
     termination_incomplete = False
     termination_note: str | None = None
@@ -1530,9 +1573,11 @@ def run_process(
         _mon_stdout_touch = _monitor.touch_stdout if _monitor is not None else None
         _mon_stderr_touch = _monitor.touch_stderr if _monitor is not None else None
         if proc.stdout is not None:
+            stdout_done = threading.Event()
             t_out = threading.Thread(
-                target=_drain_stream,
+                target=_drain_stream_marked,
                 args=(
+                    stdout_done,
                     proc.stdout,
                     stdout_chunks,
                     on_stdout,
@@ -1545,10 +1590,13 @@ def run_process(
             )
             t_out.start()
             threads.append(t_out)
+            drain_completions.append(stdout_done)
         if proc.stderr is not None:
+            stderr_done = threading.Event()
             t_err = threading.Thread(
-                target=_drain_stream,
+                target=_drain_stream_marked,
                 args=(
+                    stderr_done,
                     proc.stderr,
                     stderr_chunks,
                     on_stderr,
@@ -1561,6 +1609,7 @@ def run_process(
             )
             t_err.start()
             threads.append(t_err)
+            drain_completions.append(stderr_done)
 
         writer_thread: threading.Thread | None = None
         if input_text is not None and proc.stdin is not None:
@@ -1588,6 +1637,7 @@ def run_process(
                     ok, reason = _terminate_group_and_reap(proc, termination_grace_seconds)
                     control_interrupted = ok
                     termination_incomplete = not ok
+                    extinction_confirmed = ok
                     termination_note = (
                         "\n[Provider invocation interrupted for manual control]" if ok else
                         f"\n[Execution error: extinction unconfirmed during takeover: {reason}]"
@@ -1637,6 +1687,7 @@ def run_process(
                         ok, reason = _terminate_group_and_reap(
                             proc, termination_grace_seconds
                         )
+                        extinction_confirmed = ok
                         if ok:
                             if _monitor is not None:
                                 try:
@@ -1674,6 +1725,7 @@ def run_process(
                         ok, reason = _terminate_group_and_reap(
                             proc, termination_grace_seconds
                         )
+                        extinction_confirmed = ok
                         if ok:
                             if _monitor is not None:
                                 try:
@@ -1691,7 +1743,12 @@ def run_process(
                                 f"extinction could not be confirmed after leader "
                                 f"exit ({reason})]"
                             )
-                    # else LeaderExitStatus.EXTINCT → normal completion
+                    else:
+                        # LeaderExitStatus.EXTINCT → normal completion.  Every
+                        # write end of the child's pipes is closed, so a drain
+                        # thread still working is only delivering bytes it
+                        # already read (see the drain completion wait below).
+                        extinction_confirmed = True
                     break
                 except subprocess.TimeoutExpired:
                     pass
@@ -1714,6 +1771,7 @@ def run_process(
                         except Exception:
                             pass
                     ok, reason = _terminate_group_and_reap(proc, termination_grace_seconds)
+                    extinction_confirmed = ok
                     if _monitor is not None and ok:
                         try:
                             _monitor.mark_terminal()
@@ -1764,6 +1822,7 @@ def run_process(
                             ok, reason = _terminate_group_and_reap(
                                 proc, termination_grace_seconds
                             )
+                            extinction_confirmed = ok
                             if _monitor is not None and ok:
                                 _monitor.mark_terminal()
                                 _emit_monitor_transition(
@@ -1807,15 +1866,36 @@ def run_process(
                         proc.stdin.close()
                 except Exception:
                     pass
-            for t in threads:
-                t.join(timeout=5.0)
+            # The captured stdout/stderr must equal the child's real output
+            # even when the caller's per-line callback is slower than the
+            # producer (the durable session journal performs two writes per
+            # line in production).  Such a drain thread is not blocked on the
+            # pipe: it is working through bytes it already read, so abandoning
+            # it truncates the stream mid-line and can hide the terminal
+            # provider frame.  Wait for those reads to finish under an
+            # explicit budget, and record honestly when the budget expires.
+            if drain_completions:
+                drain_budget = (
+                    _DRAIN_COMPLETION_SECONDS
+                    if extinction_confirmed
+                    # Extinction unproven: a drain may still be blocked in
+                    # readline on a pipe a surviving descendant holds open, so
+                    # keep the short cleanup wait and let the fd close unblock.
+                    else _DRAIN_CLEANUP_SECONDS
+                )
+                drain_deadline = time.monotonic() + drain_budget
+                for done in drain_completions:
+                    done.wait(max(0.0, drain_deadline - time.monotonic()))
+                output_incomplete = not all(
+                    done.is_set() for done in drain_completions
+                )
             # Close owned pipe handles without blocking: a surviving orphan
             # descendant may hold the write end, and BufferedReader.close()
             # would block on the buffer lock held by a drain thread blocked
             # in readline.  Close the raw descriptor instead, and keep the
             # stream wrappers referenced so GC can never attempt a blocking
             # close behind run_process's back.  Drain threads are daemons
-            # and were bounded-joined above.
+            # and were waited for above.
             if any(t.is_alive() for t in threads):
                 _ORPHANED_PIPE_STREAMS.append((proc.stdout, proc.stderr))
             for stream in (proc.stdout, proc.stderr):
@@ -1884,4 +1964,5 @@ def run_process(
         termination_incomplete=termination_incomplete,
         launch_failed=launch_failed,
         control_interrupted=control_interrupted,
+        output_incomplete=output_incomplete,
     )

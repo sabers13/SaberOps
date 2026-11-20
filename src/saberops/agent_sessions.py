@@ -221,7 +221,7 @@ def observe_invocation(
                             publish({"native_id": native})
             except (OSError, sqlite3.Error) as exc:
                 evidence_error = str(exc)
-            append(("\n[stderr] " if channel == "stderr" else "") + text)
+            append(("[stderr] " if channel == "stderr" else "") + _terminated_line(text))
             if previous is not None:
                 previous(text)
 
@@ -547,6 +547,18 @@ def legacy_session(
         "source": "Recorded result · live transcript was not captured",
         "native_cli_reason": "No verified native session attachment was recorded for this call.",
     }
+
+
+def _terminated_line(text: str) -> str:
+    """Terminate one delivered output line for the durable session log.
+
+    The drain callback receives each provider line without its trailing
+    newline, so appending the raw text concatenated every frame of a
+    stream-json transcript into a single unreadable line.  Callers that pass
+    text that already ends with a newline keep it instead of gaining a blank
+    line.
+    """
+    return text if text.endswith("\n") else text + "\n"
 
 
 def _native_id(text: str, provider: str) -> str | None:
