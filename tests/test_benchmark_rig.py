@@ -22,6 +22,21 @@ from benchmark_rig import (
     run_fake_benchmark,
     run_recovery_drill,
 )
+from benchmark_wave3 import (
+    assert_drill_groups,
+    drills_report,
+    run_advisor_drill,
+    run_autonomy_drills,
+    run_landing_queue_drill,
+    run_plan_drills,
+    run_presence_drills,
+    run_question_mode_drills,
+    run_scheduling_drills,
+    run_scout_proxy_drills,
+    run_vendor_drills,
+    run_walkthrough_drill,
+    usage_rows,
+)
 from lifecycle_rig import RigEnvironment, build_lifecycle_rig
 
 from saberops.benchmark import (
@@ -159,6 +174,140 @@ def test_combined_recovery_drill(
     assert drill.notices == 1
     assert drill.final_state == "FAILED"
     assert "terminal events 1" in drill.detail
+
+
+# --------------------------------------------------------------------------
+# Wave 3 drills (lane B2b)
+# --------------------------------------------------------------------------
+
+
+def test_wave3_question_mode_drills(
+    rig: RigEnvironment,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F10/F11: critical-only answers routine questions; away parks one branch."""
+    drills = run_question_mode_drills(rig)
+    report = drills_report("fake wave 3", drills)
+    with capsys.disabled():
+        print(report.table())
+    assert_drill_groups(drills, ["F10", "F11"])
+    assert "Failure and feature drills" in report.table()
+
+
+def test_wave3_plan_drills(
+    rig: RigEnvironment,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F8/F9/F12: dependency order, a mid-run edit and the landing queue."""
+    drills = list(run_plan_drills(rig))
+    drills.append(run_landing_queue_drill(rig))
+    report = drills_report("fake wave 3", drills)
+    with capsys.disabled():
+        print(report.table())
+    assert_drill_groups(drills, ["F8", "F9", "F12"])
+
+
+def test_wave3_scheduling_drills(
+    rig: RigEnvironment,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F4/F13/F14/F2: quota failover, steering, one nudge and per-subscription usage."""
+    drills = run_scheduling_drills(rig)
+    report = drills_report("fake wave 3", drills, usage=usage_rows(rig))
+    table = report.table()
+    with capsys.disabled():
+        print(table)
+    assert_drill_groups(drills, ["F13", "F14", "F2", "F4"])
+    assert "Usage per subscription (F2)" in table
+    assert "codex" in table and "opencode" in table
+
+
+def test_wave3_vendor_and_cleanup_drills(
+    rig: RigEnvironment,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F5/F18/F6: the update guard, self-healing and landed worktree cleanup."""
+    drills = run_vendor_drills(rig, tmp_path)
+    report = drills_report("fake wave 3", drills)
+    with capsys.disabled():
+        print(report.table())
+    assert_drill_groups(drills, ["F5", "F18", "F6"])
+
+
+def test_wave3_autonomy_drills(
+    rig: RigEnvironment,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F1/F15/F16: owner modes, auto-accept and an imported native attempt."""
+    drills = run_autonomy_drills(rig)
+    report = drills_report("fake wave 3", drills)
+    with capsys.disabled():
+        print(report.table())
+    assert_drill_groups(drills, ["F1", "F15", "F16"])
+
+
+@pytest.mark.no_attendance
+def test_wave3_presence_drills(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F17/F24: a closed session or terminal pauses work until confirmed."""
+    rig = build_lifecycle_rig(tmp_path, monkeypatch, attended=False)
+    monkeypatch.delenv("SABEROPS_RUNTIME_GATE", raising=False)
+    monkeypatch.setenv("SABEROPS_PLANNING_HEARTBEAT_TIMEOUT", "60")
+    try:
+        drills = run_presence_drills(rig)
+        report = drills_report("fake wave 3", drills)
+        with capsys.disabled():
+            print(report.table())
+        assert_drill_groups(drills, ["F17/F24", "F17/F24"])
+    finally:
+        try:
+            from saberops.mcp.lease import OrchestratorLease
+
+            OrchestratorLease().release()
+        except Exception:  # noqa: BLE001 - cleanup never fails the drill
+            pass
+
+
+def test_wave3_scout_and_proxy_drills(
+    rig: RigEnvironment,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F19/F27/F20/F21: a cheap scout report and proxy routing by family token."""
+    drills = run_scout_proxy_drills(rig)
+    report = drills_report("fake wave 3", drills)
+    with capsys.disabled():
+        print(report.table())
+    assert_drill_groups(drills, ["F19/F27", "F20/F21"])
+
+
+def test_wave3_walkthrough_drill(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F25: only the walkthrough's own prompts are needed for a green preflight."""
+    drill = run_walkthrough_drill(tmp_path, monkeypatch)
+    report = drills_report("fake wave 3", [drill])
+    with capsys.disabled():
+        print(report.table())
+    assert_drill_groups([drill], ["F25"])
+
+
+def test_wave3_advisor_drill(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F26: each advisor checkpoint fires once and its advice reaches the worker."""
+    drill = run_advisor_drill(tmp_path, monkeypatch)
+    report = drills_report("fake wave 3", [drill])
+    with capsys.disabled():
+        print(report.table())
+    assert_drill_groups([drill], ["F26"])
 
 
 # --------------------------------------------------------------------------

@@ -31,6 +31,7 @@ from saberops.benchmark import (
     BenchmarkTask,
     DrillResult,
     TaskResult,
+    aggregate_subscription_usage,
 )
 from saberops.capacity.loop import run_scheduler_loop, scheduler_alive
 from saberops.cli import main as cli_main
@@ -293,6 +294,7 @@ def run_fake_benchmark(
         results=tuple(results),
         started_at=started,
         finished_at=time.time(),
+        usage=aggregate_subscription_usage(db, jobs.values()),
     )
 
 

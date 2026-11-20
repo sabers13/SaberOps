@@ -32,6 +32,32 @@ a fresh MCP session's `catch_up` must report the failed job, its reason and the
 preserved work location within C2's 60-second limit. Terminal events and desktop
 notices are counted across a second scheduler tick and must each occur once.
 
+Fake mode also carries one drill per Wave 3 feature, added in lane B2b and driven
+through the feature's own durable records rather than a test-only shortcut:
+owner modes (ask-me parks an accept a permissive preset would allow), routine and
+critical questions in critical-only, away parking one branch while an independent
+branch finishes and the return summary names it, a plan file running independent
+lanes in parallel and a dependent lane only after acceptance with `state.md`
+matching the records at each step, a mid-run plan revision, the three-sibling
+landing queue, quota exhaustion continuing on a second fake subscription from the
+preserved checkpoint, a steering note delivered exactly once, one automatic nudge,
+per-subscription usage in the results table, the CLI update guard, vendor
+self-healing, landed worktree cleanup, auto-accept with undo (ask-me and a stale
+candidate never accept), an imported native attempt eligible only after its gate
+and a fresh review of its SHA, pause and presence (a closed session or terminal
+pauses dispatch and parks running work, and nothing resumes without one
+confirmation), a cheap read-only scout report, proxy routing by family token, the
+walkthrough to a green preflight, and the three advisor checkpoints. Every drill
+group is named by its feature id in the table.
+
+**Results table.** Both modes print the same table: per task the final state, the
+accepted commit, submit-to-start, time to the accepted commit, completion-notice
+delay, owner actions and the subscription used; below it the failure and feature
+drills with their feature group; and a usage section that aggregates input,
+output and total tokens per subscription from the durable records `get_job` and
+`catch_up` read. A counter a provider did not report is printed as `unknown`,
+never inferred.
+
 **Real mode** drives real Codex, Claude and OpenCode Go CLIs and is run by hand
 with the owner present. It is not part of the test suite. It refuses to start
 without an explicit acknowledgement flag and an isolated, empty store, and it
@@ -43,7 +69,9 @@ Codex `gpt-6-luna`. It refuses to submit until the isolated store's preflight is
 green, and prints the owner command that fixes each missing item.
 
 Fake-mode tests are marked `slow`: the full gate runs them, and the per-change
-gate may skip that marker (lane E2 owns the selection change).
+gate may skip that marker (lane E2 owns the selection change). The Wave 3 drills
+follow the same rule, so a per-change gate stays fast while the full gate proves
+every mode and comfort feature.
 
 ## 3. Consequences
 

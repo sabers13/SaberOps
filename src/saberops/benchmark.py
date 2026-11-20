@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -184,7 +185,7 @@ class TaskResult:
 
 @dataclass(frozen=True)
 class DrillResult:
-    """Outcome of one injected-failure drill."""
+    """Outcome of one injected-failure or feature drill."""
 
     name: str
     passed: bool
@@ -193,17 +194,107 @@ class DrillResult:
     reason: str
     notices: int
     detail: str = ""
+    #: Feature id(s) the drill covers, e.g. ``"F13/F14"``.
+    group: str = ""
+    #: Slow drills are skipped by the per-change gate and run by the full gate.
+    slow: bool = True
+
+
+@dataclass(frozen=True)
+class SubscriptionUsage:
+    """Usage one subscription reported across a set of jobs (F2)."""
+
+    subscription: str
+    jobs: int
+    calls: int
+    input_tokens: int | None
+    output_tokens: int | None
+    total_tokens: int | None
+    unknown_calls: int = 0
+
+    @property
+    def reported(self) -> bool:
+        return self.calls > 0 and self.unknown_calls < self.calls
+
+
+def aggregate_subscription_usage(
+    db: Any, job_ids: Iterable[str]
+) -> tuple[SubscriptionUsage, ...]:
+    """Per-subscription usage from the same durable records owner surfaces read.
+
+    ``job_usage_view`` is the projection ``get_job`` and ``catch_up`` use, so
+    the benchmark table cannot disagree with what the owner is shown.  A
+    counter a provider did not report stays ``None`` (printed as ``unknown``).
+    """
+    from saberops.jobs.service import get_job, job_usage_view
+
+    totals: dict[str, dict[str, Any]] = {}
+    for job_id in job_ids:
+        job = get_job(db, job_id)
+        if job is None:
+            continue
+        view = job_usage_view(db, job)
+        for entry in view["subscriptions"]:
+            usage = entry["usage"]
+            bucket = totals.setdefault(
+                entry["subscription"],
+                {
+                    "jobs": 0,
+                    "calls": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "total_tokens": 0,
+                    "unknown_calls": 0,
+                    "input_known": False,
+                    "output_known": False,
+                    "total_known": False,
+                },
+            )
+            bucket["jobs"] += 1
+            bucket["calls"] += int(usage["provider_usage_event_count"])
+            bucket["unknown_calls"] += int(usage["calls_with_unknown_usage"])
+            for field, flag in (
+                ("input_tokens", "input_known"),
+                ("output_tokens", "output_known"),
+                ("total_tokens", "total_known"),
+            ):
+                value = usage[field]
+                if isinstance(value, int):
+                    bucket[field] += value
+                    bucket[flag] = True
+    rows: list[SubscriptionUsage] = []
+    for subscription in sorted(totals):
+        bucket = totals[subscription]
+        rows.append(
+            SubscriptionUsage(
+                subscription=subscription,
+                jobs=int(bucket["jobs"]),
+                calls=int(bucket["calls"]),
+                input_tokens=(
+                    int(bucket["input_tokens"]) if bucket["input_known"] else None
+                ),
+                output_tokens=(
+                    int(bucket["output_tokens"]) if bucket["output_known"] else None
+                ),
+                total_tokens=(
+                    int(bucket["total_tokens"]) if bucket["total_known"] else None
+                ),
+                unknown_calls=int(bucket["unknown_calls"]),
+            )
+        )
+    return tuple(rows)
 
 
 @dataclass(frozen=True)
 class BenchmarkReport:
-    """The ten-task table plus any failure drills that ran with it."""
+    """The ten-task table plus any failure or feature drills that ran with it."""
 
     mode: str
     results: tuple[TaskResult, ...]
     drills: tuple[DrillResult, ...] = ()
     started_at: float = 0.0
     finished_at: float = 0.0
+    usage: tuple[SubscriptionUsage, ...] = ()
 
     @property
     def passed(self) -> bool:
@@ -235,17 +326,39 @@ class BenchmarkReport:
                 f"{result.owner_actions:>5} {result.subscription:<38}"
             )
         if self.drills:
-            lines.extend(["", "Failure drills", ""])
+            lines.extend(["", "Failure and feature drills", ""])
             drill_header = (
-                f"{'drill':<20} {'result':<7} {'seconds':>8} {'final':<10} "
-                f"{'notices':>8}  reason"
+                f"{'drill':<28} {'group':<14} {'result':<7} {'seconds':>8} "
+                f"{'final':<10} {'notices':>8}  reason"
             )
             lines.extend([drill_header, "-" * len(drill_header)])
             for drill in self.drills:
+                marker = "" if drill.slow else "*"
                 lines.append(
-                    f"{drill.name:<20} {'pass' if drill.passed else 'FAIL':<7} "
+                    f"{drill.name + marker:<28} {drill.group:<14} "
+                    f"{'pass' if drill.passed else 'FAIL':<7} "
                     f"{drill.seconds:>8.1f} {drill.final_state:<10} "
                     f"{drill.notices:>8}  {drill.reason}"
+                )
+            if any(drill.slow for drill in self.drills):
+                lines.append(
+                    "* slow: skipped by the per-change gate, run by the full gate"
+                )
+        if self.usage:
+            lines.extend(["", "Usage per subscription (F2)", ""])
+            usage_header = (
+                f"{'subscription':<20} {'jobs':>5} {'calls':>6} {'input':>9} "
+                f"{'output':>9} {'total':>9}"
+            )
+            lines.extend([usage_header, "-" * len(usage_header)])
+            for row in self.usage:
+                lines.append(
+                    f"{row.subscription:<20} {row.jobs:>5} {row.calls:>6} "
+                    f"{_tokens(row.input_tokens):>9} "
+                    f"{_tokens(row.output_tokens):>9} "
+                    f"{_tokens(row.total_tokens):>9}"
+                    + (f"  ({row.unknown_calls} calls unreported)"
+                       if row.unknown_calls else "")
                 )
         lines.extend(
             ["", f"total {self.elapsed:.1f}s; "
@@ -256,6 +369,10 @@ class BenchmarkReport:
 
 def _seconds(value: float | None) -> str:
     return "-" if value is None else f"{value:.1f}s"
+
+
+def _tokens(value: int | None) -> str:
+    return "unknown" if value is None else str(value)
 
 
 def _iso_epoch(value: str | None) -> float | None:
@@ -583,4 +700,5 @@ def run_real_benchmark(
         results=tuple(results),
         started_at=started,
         finished_at=time.time(),
+        usage=aggregate_subscription_usage(db, jobs.values()),
     )
