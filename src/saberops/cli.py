@@ -39,6 +39,7 @@ from saberops.config import RunConfig, reconstruct_run_config
 from saberops.db import Database, get_default_db_path
 from saberops.dispatch import READINESS_AUTHORITY_UNAVAILABLE
 from saberops.gate_runner import GateScratchPolicyError
+from saberops.gate_status import gate_summary_label
 from saberops.git import GitManager
 from saberops.jobs.models import JobRole
 from saberops.model_access import ReadinessService
@@ -3204,7 +3205,7 @@ def handle_run(args: argparse.Namespace) -> int:
             print("─" * 60)
             print(f"Run ID      : {result.run_id}")
             print(f"Status      : {result.status.value}")
-            print(f"Gate Passed : {'YES' if result.passed else 'NO'}")
+            print(f"Gate Passed : {gate_summary_label(db, run_id_clean)}")
             print(f"Summary     : {result.summary}")
             if result.branch_name:
                 print(f"Branch      : {result.branch_name}")
@@ -3388,7 +3389,7 @@ def _follow_run(db: Database, run_id: str) -> int:
     if final is None:
         return 1
     print(f"Status      : {final.status.value}")
-    print(f"Gate Passed : {'YES' if final.status == RunStatus.COMPLETED else 'NO'}")
+    print(f"Gate Passed : {gate_summary_label(db, run_id)}")
     print(f"Summary     : {final.result_summary or ''}")
     attempts = db.get_attempts_for_run(run_id)
     if attempts:
