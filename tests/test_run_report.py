@@ -785,3 +785,17 @@ def test_legacy_dispatch_and_review_evidence_roles_load(tmp_path: Path) -> None:
     assert [d.role for d in dispatches] == [DispatchRole.BUILD]
     report = build_run_report(db, "run_c16b1")
     assert report["roles"]["build"]["provider"] == "codex"
+
+
+def test_full_gate_receipt_projects_failed_and_invalid_timestamps(tmp_path: Path) -> None:
+    db = Database(tmp_path / "report.db")
+    run = _run(db)
+    db.record_event(run.id, "full_gate_receipt", payload={
+        "candidate_sha": "candidate", "gate_command": "check",
+        "passed": False, "started_at": "invalid", "finished_at": _COMPLETED,
+    })
+    report = build_run_report(db, run.id)
+    receipt = report["gate"]["receipts"][0]
+    assert receipt["verdict"] == "FAIL"
+    assert receipt["duration_seconds"] == UNKNOWN
+    assert "[FAIL] full_gate_receipt" in render_report_text(report)

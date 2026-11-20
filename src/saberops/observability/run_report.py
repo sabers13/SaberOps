@@ -467,10 +467,9 @@ def _gate_section(
 ) -> dict[str, Any]:
     """Project gate evidence from check rows and gate-receipt events.
 
-    Per-attempt check rows carry pass/fail but no duration; durations
-    are observable only through durable ``gate_receipt`` events.  The
-    two sources are reported side by side and never joined by
-    heuristics.
+    Check rows have no duration. Full-gate receipts record timestamps and
+    outcome; acceptance gate-runner receipts record a separate execution.
+    These sources are reported side by side without joining them heuristically.
     """
     checks = db.get_checks_for_run(run_id)
     check_rows = [
@@ -493,29 +492,42 @@ def _gate_section(
         events = []
     receipts: list[dict[str, Any]] = []
     for event in events:
-        if event.event_type != "gate_receipt":
+        if event.event_type not in {"gate_receipt", "full_gate_receipt"}:
             continue
         payload = event.payload if isinstance(event.payload, dict) else {}
-        duration = payload.get("duration_seconds")
-        receipts.append(
-            {
-                "event_id": event.id,
-                "candidate_sha": payload.get("candidate_sha") or UNKNOWN,
-                "gate_command": payload.get("gate_command") or UNKNOWN,
-                "exit_code": payload.get("exit_code", UNKNOWN),
-                "verdict": "PASS"
-                if payload.get("exit_code") == 0
+        duration: Any
+        if event.event_type == "full_gate_receipt":
+            duration = _wall_seconds(payload.get("started_at"), payload.get("finished_at"))
+            passed = payload.get("passed")
+            verdict = "PASS" if passed is True else "FAIL" if passed is False else UNKNOWN
+            exit_code = UNKNOWN
+        else:
+            duration = payload.get("duration_seconds")
+            exit_code = payload.get("exit_code", UNKNOWN)
+            verdict = (
+                "PASS" if exit_code == 0
                 and not payload.get("timed_out", False)
                 and not payload.get("launch_failed", False)
                 and not payload.get("termination_incomplete", False)
                 and not payload.get("evidence_persistence_failed", False)
-                else "FAIL",
+                else "FAIL"
+            )
+        receipts.append(
+            {
+                "event_id": event.id,
+                "event_type": event.event_type,
+                "candidate_sha": payload.get("candidate_sha") or UNKNOWN,
+                "gate_command": payload.get("gate_command") or UNKNOWN,
+                "exit_code": exit_code,
+                "verdict": verdict,
                 "duration_seconds": duration if isinstance(duration, (int, float)) else UNKNOWN,
                 "created_at": event.created_at,
             }
         )
-    if any(not check.skipped for check in checks) and not receipts:
-        gaps.append("gate durations UNKNOWN: no durable gate_receipt event persisted")
+    if any(not check.skipped for check in checks) and not any(
+        receipt["duration_seconds"] != UNKNOWN for receipt in receipts
+    ):
+        gaps.append("gate durations UNKNOWN: no usable duration in durable gate receipts")
     if not checks and run.status in TERMINAL_RUN_STATUSES:
         gaps.append("no gate check rows persisted for a terminal run")
     passed = sum(1 for row in check_rows if row["passed"])
@@ -1151,6 +1163,12 @@ def render_report_text(report: dict[str, Any]) -> str:
         lines.append(
             f"    [{check['verdict']}] exit={check['exit_code']} "
             f"attempt={check['attempt_id']} duration={_fmt_scalar(check['duration_seconds'])}"
+        )
+    for receipt in gate["receipts"]:
+        lines.append(
+            f"    [{receipt['verdict']}] {receipt['event_type']} "
+            f"candidate={receipt['candidate_sha']} command={receipt['gate_command']} "
+            f"duration={_fmt_scalar(receipt['duration_seconds'])}"
         )
     lines += [
         "",

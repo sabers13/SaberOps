@@ -633,3 +633,22 @@ def test_opencode_standalone_resume_dispatches_on_the_rig(rig: RigEnvironment) -
     output_file = rig.repo / "fake_worker_output.txt"
     assert output_file.is_file()
     assert "opencode:" in output_file.read_text(encoding="utf-8")
+
+
+def test_report_shows_full_gate_receipt_from_fake_run(rig: RigEnvironment) -> None:
+    from saberops.observability.run_report import build_run_report, render_report_text
+
+    run, _ = _run_supervised_and_accept(rig, task="Exercise report gate evidence")
+    db = rig.db()
+    events = db.get_events_by_type(run.id, "full_gate_receipt")
+    assert events
+    assert events[0].payload is not None
+    report = build_run_report(db, run.id)
+    receipts = report["gate"]["receipts"]
+    full = next(row for row in receipts if row["event_id"] == events[0].id)
+    assert full["verdict"] == "PASS"
+    assert isinstance(full["duration_seconds"], (int, float))
+    assert full["candidate_sha"] == events[0].payload["candidate_sha"]
+    text = render_report_text(report)
+    assert "[PASS] full_gate_receipt" in text
+    assert "no durable gate_receipt event persisted" not in text
