@@ -127,6 +127,21 @@ def test_fake_benchmark_ten_tasks_reach_final_state(
         assert result.notice_at is not None
     assert report.elapsed < 120
 
+    # OpenCode Go reports the real 2.3.2 counter set: exact input/output/cache
+    # counters per call, no invented total, and no identity guess.
+    usage_by_subscription = {row.subscription: row for row in report.usage}
+    opencode = usage_by_subscription["opencode"]
+    assert opencode.jobs == 5
+    assert opencode.calls > 0
+    assert opencode.unknown_calls == 0
+    assert opencode.input_tokens == 12 * opencode.calls
+    assert opencode.output_tokens == 8 * opencode.calls
+    assert opencode.cache_read_tokens == 4 * opencode.calls
+    assert opencode.cache_write_tokens == 2 * opencode.calls
+    assert opencode.total_tokens is None
+    # The table states the missing provider total instead of inventing one.
+    assert "not reported" in report.table()
+
 
 # --------------------------------------------------------------------------
 # Failure drills

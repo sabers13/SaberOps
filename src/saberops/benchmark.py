@@ -42,6 +42,24 @@ DEFAULT_CODEX_MODEL = "gpt-6-luna"
 REAL_MODE_FLAG = "--yes-real-cli"
 
 
+def fake_mode_environment() -> dict[str, str]:
+    """Return the isolated environment fake mode runs under.
+
+    Fake mode runs the deterministic fake worker and reviewer, so it must
+    behave like the test suite: no detached scheduler of its own, scratch under
+    ``/var/tmp`` (``/tmp`` is RAM-backed on the owner's PC), and no vendor CLI
+    probe.  Without the last pin the F5 update guard reads the fake CLIs'
+    ``0.0.0-fake`` version, parks every provider and no benchmark job can
+    dispatch.  Fake mode never starts a real vendor CLI, so this can never
+    hide a real update.
+    """
+    return {
+        "TMPDIR": "/var/tmp",
+        "SABEROPS_DISABLE_AUTO_SCHEDULER": "1",
+        "SABEROPS_VENDOR_CHECKS": "0",
+    }
+
+
 @dataclass(frozen=True)
 class BenchmarkTask:
     """One fixed small task in the benchmark catalogue."""
@@ -211,6 +229,8 @@ class SubscriptionUsage:
     output_tokens: int | None
     total_tokens: int | None
     unknown_calls: int = 0
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
 
     @property
     def reported(self) -> bool:
@@ -224,7 +244,8 @@ def aggregate_subscription_usage(
 
     ``job_usage_view`` is the projection ``get_job`` and ``catch_up`` use, so
     the benchmark table cannot disagree with what the owner is shown.  A
-    counter a provider did not report stays ``None`` (printed as ``unknown``).
+    counter a provider did not report stays ``None``; the table prints the
+    token columns as ``unknown`` and a missing ``total`` as ``not reported``.
     """
     from saberops.jobs.service import get_job, job_usage_view
 
@@ -244,10 +265,14 @@ def aggregate_subscription_usage(
                     "input_tokens": 0,
                     "output_tokens": 0,
                     "total_tokens": 0,
+                    "cache_read_tokens": 0,
+                    "cache_write_tokens": 0,
                     "unknown_calls": 0,
                     "input_known": False,
                     "output_known": False,
                     "total_known": False,
+                    "cache_read_known": False,
+                    "cache_write_known": False,
                 },
             )
             bucket["jobs"] += 1
@@ -257,6 +282,8 @@ def aggregate_subscription_usage(
                 ("input_tokens", "input_known"),
                 ("output_tokens", "output_known"),
                 ("total_tokens", "total_known"),
+                ("cache_read_tokens", "cache_read_known"),
+                ("cache_write_tokens", "cache_write_known"),
             ):
                 value = usage[field]
                 if isinstance(value, int):
@@ -280,6 +307,16 @@ def aggregate_subscription_usage(
                     int(bucket["total_tokens"]) if bucket["total_known"] else None
                 ),
                 unknown_calls=int(bucket["unknown_calls"]),
+                cache_read_tokens=(
+                    int(bucket["cache_read_tokens"])
+                    if bucket["cache_read_known"]
+                    else None
+                ),
+                cache_write_tokens=(
+                    int(bucket["cache_write_tokens"])
+                    if bucket["cache_write_known"]
+                    else None
+                ),
             )
         )
     return tuple(rows)
@@ -348,7 +385,8 @@ class BenchmarkReport:
             lines.extend(["", "Usage per subscription (F2)", ""])
             usage_header = (
                 f"{'subscription':<20} {'jobs':>5} {'calls':>6} {'input':>9} "
-                f"{'output':>9} {'total':>9}"
+                f"{'output':>9} {'cache read':>11} {'cache write':>12} "
+                f"{'total':>12}"
             )
             lines.extend([usage_header, "-" * len(usage_header)])
             for row in self.usage:
@@ -356,7 +394,9 @@ class BenchmarkReport:
                     f"{row.subscription:<20} {row.jobs:>5} {row.calls:>6} "
                     f"{_tokens(row.input_tokens):>9} "
                     f"{_tokens(row.output_tokens):>9} "
-                    f"{_tokens(row.total_tokens):>9}"
+                    f"{_tokens(row.cache_read_tokens):>11} "
+                    f"{_tokens(row.cache_write_tokens):>12} "
+                    f"{_total_tokens(row.total_tokens):>12}"
                     + (f"  ({row.unknown_calls} calls unreported)"
                        if row.unknown_calls else "")
                 )
@@ -373,6 +413,11 @@ def _seconds(value: float | None) -> str:
 
 def _tokens(value: int | None) -> str:
     return "unknown" if value is None else str(value)
+
+
+def _total_tokens(value: int | None) -> str:
+    """A missing provider total is stated, never invented from other fields."""
+    return "not reported" if value is None else str(value)
 
 
 def _iso_epoch(value: str | None) -> float | None:

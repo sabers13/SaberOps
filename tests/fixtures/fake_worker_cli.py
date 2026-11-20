@@ -25,6 +25,29 @@ from typing import Any
 _CHALLENGE_RE = re.compile(r"SABEROPS_ACCESS_[0-9a-f]+")
 
 
+def _opencode_step_finish_part() -> dict[str, Any]:
+    """Return a real OpenCode 2.3.2 ``step-finish`` part with small counters.
+
+    Shape copied from the checked-in real capture
+    ``tests/fixtures/vendor_cli/opencode/opencode-v2.3.2/run_json.jsonl``:
+    exact ``input``/``output``/``reasoning``/``cache`` counters, no
+    ``tokens.total`` (2.3.2 does not emit one) and no model identity.  The
+    numbers stay small and deterministic so the fake benchmark table is
+    readable; every value is still an exact provider counter, never a guess.
+    """
+    return {
+        "type": "step-finish",
+        "reason": "stop",
+        "cost": 0,
+        "tokens": {
+            "input": 12,
+            "output": 8,
+            "reasoning": 0,
+            "cache": {"read": 4, "write": 2},
+        },
+    }
+
+
 def _pop_flag_value(argv: list[str], flag: str) -> str | None:
     """Remove ``--flag value`` or ``--flag=value`` from *argv* and return value."""
     for idx, token in enumerate(argv):
@@ -610,6 +633,11 @@ def _serve_opencode(
                             "info": info,
                             "parts": [
                                 {"type": "text", "text": "Fake opencode completed."},
+                                # The real server exposes step usage as a
+                                # ``step-finish`` message part; without it the
+                                # session runtime has no provider counters to
+                                # persist and the job would read ``unknown``.
+                                _opencode_step_finish_part(),
                             ],
                         }
                     )
@@ -710,18 +738,7 @@ def _handle_opencode(
     print(
         json.dumps({"type": "text", "part": {"type": "text", "text": "Fake opencode completed."}})
     )
-    print(
-        json.dumps(
-            {
-                "type": "step_finish",
-                "part": {
-                    "type": "step-finish",
-                    "reason": "stop",
-                    "tokens": {"input": 12, "output": 8, "total": 20},
-                },
-            }
-        )
-    )
+    print(json.dumps({"type": "step_finish", "part": _opencode_step_finish_part()}))
     return 0
 
 

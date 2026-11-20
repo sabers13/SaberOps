@@ -28,6 +28,7 @@ from saberops.benchmark import (  # noqa: E402
     REAL_MODE_FLAG,
     TASKS,
     RealModeRefused,
+    fake_mode_environment,
     isolated_environment,
     real_subscription,
     validate_real_mode,
@@ -92,8 +93,7 @@ def _run_fake() -> int:
     from lifecycle_rig import build_lifecycle_rig
 
     scratch = Path(tempfile.mkdtemp(prefix="saberops-benchmark-", dir="/var/tmp"))
-    os.environ.setdefault("TMPDIR", "/var/tmp")
-    os.environ["SABEROPS_DISABLE_AUTO_SCHEDULER"] = "1"
+    os.environ.update(fake_mode_environment())
     monkeypatch = MonkeyPatch()
     try:
         rig = build_lifecycle_rig(scratch, monkeypatch)
