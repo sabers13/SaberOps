@@ -1518,13 +1518,19 @@ class RunSupervisor:
 
         prefix = resolve_owner_argv_prefix()
         db_path = str(self.db.db_path)
-        return [
+        args = [
             *prefix,
             "recover",
             run_id,
             "--db",
             db_path,
         ]
+        # Owner-wide quota lives in the global store, not the project store.
+        # A recovery child that received only ``--db`` would evaluate review
+        # admission with no owner evidence and fail closed incorrectly.
+        if self.db.owner_db is not self.db:
+            args.extend(["--owner-db", str(self.db.owner_db.db_path)])
+        return args
 
     def _spawn_recovery_owner(
         self,
@@ -1679,6 +1685,13 @@ class RunSupervisor:
                 run_id,
             ]
         )
+        # The detached owner adopts the explicit project ``--db``.  It must
+        # also receive the owner store, otherwise its review admission reads
+        # quota from the project database alone: preflight sees the owner's
+        # fresh discovered-pool evidence while the reviewer is refused with
+        # ``QUOTA_EVIDENCE_REQUIRED`` and a null pool id.
+        if self.db.owner_db is not self.db:
+            args.extend(["--owner-db", str(self.db.owner_db.db_path)])
         if config.provider_override:
             args.extend(["--provider", config.provider_override])
         if config.model_override:

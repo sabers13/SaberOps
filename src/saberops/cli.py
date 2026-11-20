@@ -883,6 +883,7 @@ def build_parser() -> argparse.ArgumentParser:
             "~/.local/state/saberops/orchestrator.db)."
         ),
     )
+    run_parser.add_argument("--owner-db", default=None, help=argparse.SUPPRESS)
     run_parser.add_argument(
         "--worker-timeout",
         type=float,
@@ -1312,6 +1313,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     recover_parser.add_argument("run_id", type=str)
     recover_parser.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
+    recover_parser.add_argument("--owner-db", default=None, help=argparse.SUPPRESS)
 
     cancel_parser = subparsers.add_parser(
         "cancel", help="Explicitly cancel a run and terminate its execution owner."
@@ -3080,7 +3082,13 @@ def db_for_run(args: argparse.Namespace, run_id: str) -> Database:
     """
     explicit = _explicit_db(args)
     if explicit is not None:
-        return Database(explicit)
+        # A detached execution owner is handed an explicit project ``--db`` so
+        # it can never be retargeted.  Quota is owner-wide, so the supervisor
+        # also forwards the exact owner store; without it the child would
+        # silently evaluate review admission against its project store alone
+        # and refuse a reviewer whose owner evidence is fresh and sufficient.
+        owner_path = getattr(args, "owner_db", None)
+        return Database(explicit, owner_db=Database(owner_path) if owner_path else None)
     resolved = db_path_for_run(run_id)
     if resolved is None:
         return Database(get_default_db_path())
