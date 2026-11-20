@@ -94,7 +94,7 @@ def test_initialize_advertises_saberops_and_the_d7_capabilities(tmp_path: Path) 
     result = _call(server, "initialize", {"protocolVersion": "2025-06-18"})["result"]
     assert isinstance(result, dict)
     assert result["serverInfo"]["name"] == SERVER_NAME == "saberops"
-    assert result["serverInfo"]["version"] == SERVER_VERSION == "0.5.0"
+    assert result["serverInfo"]["version"] == SERVER_VERSION == "0.6.0"
     assert result["protocolVersion"] == "2025-06-18"
     assert set(result["capabilities"]) == {"tools", "resources", "prompts"}
     assert result["snapshotSchemaVersion"] == SNAPSHOT_SCHEMA_VERSION == 1
