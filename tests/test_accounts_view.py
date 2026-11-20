@@ -82,6 +82,45 @@ def test_check_never_launches_a_cli_under_test(isolated_xdg: None, tmp_path: Pat
     assert check_usage(db, "nope", now=_NOW) == "failed"
 
 
+def test_opencode_failure_keeps_a_plain_reason_on_the_card(
+    isolated_xdg: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import saberops.capacity.probes as probes
+
+    reason = (
+        "The saved OpenCode Go API key has expired. Create a new key in OpenCode"
+        " Console and connect it again in OpenCode; SaberOps cannot renew it."
+    )
+
+    def failing(
+        db: object, *, reasons: dict[str, str] | None = None, **kwargs: object
+    ) -> dict[str, str]:
+        if reasons is not None:
+            reasons["opencode-go"] = reason
+        return {"opencode-go": "failed"}
+
+    monkeypatch.setattr(probes, "run_due_probes", failing)
+    db_path = tmp_path / "web.db"
+    assert check_usage(Database(db_path), "opencode", now=_NOW) == "failed"
+    view = accounts_view(Database(db_path), now=_NOW)
+    card = next(card for card in view["cards"] if card["slug"] == "opencode")
+    assert card["error"] == reason
+
+    page = TestClient(create_app(db_path=db_path)).get("/accounts")
+    assert "Create a new key in OpenCode Console" in page.text
+
+    def passing(
+        db: object, *, reasons: dict[str, str] | None = None, **kwargs: object
+    ) -> dict[str, str]:
+        return {"opencode-go": "ran"}
+
+    monkeypatch.setattr(probes, "run_due_probes", passing)
+    assert check_usage(Database(db_path), "opencode", now=_NOW) == "ran"
+    cleared = accounts_view(Database(db_path), now=_NOW)
+    card = next(card for card in cleared["cards"] if card["slug"] == "opencode")
+    assert card["error"] is None
+
+
 def test_accounts_page_and_routes(isolated_xdg: None, tmp_path: Path) -> None:
     client = TestClient(create_app(db_path=tmp_path / "web.db"))
     page = client.get("/accounts")

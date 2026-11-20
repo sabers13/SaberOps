@@ -407,6 +407,15 @@ def handle_probe_result(
         pass
 
 
+def _plain_probe_reason(exc: BaseException) -> str:
+    """Return a fixed, secret-free explanation for one failed probe."""
+    from saberops.opencode_go_usage import GoUsageUnavailable
+
+    if isinstance(exc, GoUsageUnavailable):
+        return str(exc)
+    return "The usage check failed. Try again."
+
+
 def run_due_probes(
     db: Any,
     *,
@@ -416,6 +425,7 @@ def run_due_probes(
     deadline: float | None = None,
     force_harnesses: Iterable[str] = (),
     auto_only: bool = False,
+    reasons: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Run probes only for harnesses with a PROBE_DUE exclusion; never raises.
 
@@ -423,10 +433,12 @@ def run_due_probes(
     and maps to it (``source == harness`` or its pool is in
     ``pools_for_probe``); otherwise no executable is looked up and the outcome
     is ``not-due``. ``force_harnesses`` runs named harnesses regardless (for
-    future callers; unused now). Under pytest without an injected probe for
-    the harness, no real executable is ever resolved or launched
-    (``disabled-under-test``): tests must never depend on owner logins.
-    Returns {harness: outcome}; a failing probe never clears and never raises.
+    future callers; unused now). ``reasons`` receives one plain-language
+    failure explanation per failed harness (safe fixed messages only). Under
+    pytest without an injected probe for the harness, no real executable is
+    ever resolved or launched (``disabled-under-test``): tests must never
+    depend on owner logins. Returns {harness: outcome}; a failing probe never
+    clears and never raises.
     """
     from saberops.capacity.store import (
         ensure_tables,
@@ -522,13 +534,18 @@ def run_due_probes(
             except Exception:
                 pass
             outcomes[harness] = "ran"
-        except Exception:
+        except Exception as exc:
             try:
                 record_probe_run(
                     db, harness=harness, ok=False, error_code="PROBE_FAILED", now=moment
                 )
             except Exception:
                 pass
+            if reasons is not None:
+                try:
+                    reasons[harness] = _plain_probe_reason(exc)
+                except Exception:
+                    reasons[harness] = "The usage check failed. Try again."
             outcomes[harness] = "failed"
     return outcomes
 

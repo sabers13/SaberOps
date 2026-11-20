@@ -1686,7 +1686,7 @@ def _onboarding_notice(request: Request) -> str | None:
         return {
             "ran": "Usage checked just now.",
             "no-executable": "Usage not checked: this account's command-line tool is not installed.",
-            "failed": "Usage could not be read. The account may need you to sign in again.",
+            "failed": "Usage could not be read. The reason and next step are shown on this account.",
         }.get(outcome, "Usage was not checked this time.")
     if params.get("project_registered") == "1":
         return "Project registered (inactive until you activate it)."

@@ -206,11 +206,58 @@ def _antigravity_label(label: str) -> str:
     return f"{group.title()} models, {when.lower()}" if group else when
 
 
+def _load_cache() -> dict[str, Any]:
+    try:
+        data = json.loads(_cache_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_cache(data: dict[str, Any]) -> bool:
+    path = _cache_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+        tmp.replace(path)
+        return True
+    except OSError:
+        return False
+
+
+def _remember_usage_error(slug: str, message: str | None, moment: datetime) -> None:
+    """Keep the last failure, or clear it, beside the display-only reading."""
+    data = _load_cache()
+    stored = data.get(slug)
+    entry = dict(stored) if isinstance(stored, dict) else {}
+    if message:
+        entry["error"] = message
+        entry["error_at"] = moment.isoformat()
+    else:
+        entry.pop("error", None)
+        entry.pop("error_at", None)
+    if entry:
+        data[slug] = entry
+    else:
+        data.pop(slug, None)
+    _save_cache(data)
+
+
+def _cached_usage_error(slug: str) -> str | None:
+    stored = _load_cache().get(slug)
+    if not isinstance(stored, dict):
+        return None
+    message = stored.get("error")
+    return message if isinstance(message, str) and message else None
+
+
 def check_usage(db: Any, slug: str, *, now: datetime | None = None) -> str:
     """Owner-initiated, zero-inference usage reading for one account.
 
     Returns a plain outcome: "ran", "no-executable", "failed" or
-    "disabled-under-test". Never raises.
+    "disabled-under-test". Never raises. A failure keeps its plain-language
+    reason in the display-only cache so the page can say what to do next.
     """
     account = next((a for a in ACCOUNTS if a.slug == slug), None)
     if account is None:
@@ -219,8 +266,15 @@ def check_usage(db: Any, slug: str, *, now: datetime | None = None) -> str:
     if account.probed_by_engine:
         from saberops.capacity.probes import run_due_probes
 
-        outcomes = run_due_probes(db, now=moment, force_harnesses=(account.harness,))
-        return outcomes.get(account.harness, "failed")
+        reasons: dict[str, str] = {}
+        outcomes = run_due_probes(
+            db, now=moment, force_harnesses=(account.harness,), reasons=reasons
+        )
+        outcome = outcomes.get(account.harness, "failed")
+        _remember_usage_error(
+            slug, reasons.get(account.harness) if outcome == "failed" else None, moment
+        )
+        return outcome
     if os.environ.get("PYTEST_CURRENT_TEST") is not None:
         return "disabled-under-test"
     executable = shutil.which(account.executable)
@@ -231,7 +285,12 @@ def check_usage(db: Any, slug: str, *, now: datetime | None = None) -> str:
         from saberops.cli_usage import read_limits
 
         rows = read_limits(executable, account.provider)
-    except Exception:
+    except Exception as exc:
+        _remember_usage_error(
+            slug,
+            str(exc) if str(exc).strip() else "The usage check failed. Try again.",
+            moment,
+        )
         return "failed"
     windows = [
         {
@@ -243,20 +302,14 @@ def check_usage(db: Any, slug: str, *, now: datetime | None = None) -> str:
         for row in rows
         if isinstance(row.get("remaining"), (int, float))
     ]
-    path = _cache_path()
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            data = {}
-    except (OSError, ValueError):
-        data = {}
-    data[slug] = {"observed_at": moment.isoformat(), "windows": windows}
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
-        tmp.replace(path)
-    except OSError:
+    data = _load_cache()
+    stored = data.get(slug)
+    entry = dict(stored) if isinstance(stored, dict) else {}
+    entry.pop("error", None)
+    entry.pop("error_at", None)
+    entry.update({"observed_at": moment.isoformat(), "windows": windows})
+    data[slug] = entry
+    if not _save_cache(data):
         return "failed"
     return "ran"
 
@@ -331,6 +384,7 @@ def accounts_view(db: Any, *, now: datetime | None = None) -> dict[str, Any]:
                 "billing": mine,
                 "billing_ok": any(row["ok"] for row in mine),
                 "display_only": not account.probed_by_engine,
+                "error": _cached_usage_error(account.slug),
             }
         )
     others = [row for row in billing if row["selector"] not in used]

@@ -50,6 +50,7 @@ saberops = [
     "static/vendor/chat/*",
     "defaults/*.json",
     "defaults/*.mjs",
+    "defaults/opencode_go_usage/*",
 ]
 
 [tool.ruff]

@@ -49,7 +49,7 @@ class _FakeProbe:
 
 def test_probe_no_prompt_in_argv_or_stdin() -> None:
     # Contract: Codex probe uses app-server + account/rateLimits/read;
-    # Claude probe only submits /usage; Go probe uses the plugin path and
+    # Claude probe only submits /usage; Go probe uses the shipped plugin and the
     # `models` enumeration (no inference session).
     import inspect
 
@@ -65,7 +65,8 @@ def test_probe_no_prompt_in_argv_or_stdin() -> None:
     assert "/usage" in panel_src
     go_src = inspect.getsource(go.read_go_limits)
     assert "plugin" in go_src
-    assert '"models"' in go_src or "'models'" in go_src or "models" in go_src
+    assert "serve" in go_src and "api" in go_src  # local read-only API, no inference
+    assert '"run"' not in go_src and '"prompt"' not in go_src
 
 
 def test_child_env_is_hermetic(
@@ -161,6 +162,32 @@ def test_probe_failure_no_clear_no_raise(tmp_path: Path) -> None:
     assert outcomes["codex"] == "failed"
     active = list_active_exclusions(db, now=now)
     assert len(active) == 1
+
+
+def test_probe_failure_reason_is_plain_and_secret_free(tmp_path: Path) -> None:
+    """Covers: the owner sees why a usage read failed, not a bare `failed`."""
+    from saberops.opencode_go_usage import GoUsageUnavailable
+
+    db = _db(tmp_path)
+    now = datetime(2026, 10, 11, 12, 0, tzinfo=UTC)
+
+    class _GoFail:
+        harness = "opencode-go"
+
+        def read(self, now: datetime) -> list[Any]:
+            raise GoUsageUnavailable(
+                "The saved OpenCode Go API key has expired. Create a new key in"
+                " OpenCode Console."
+            )
+
+    reasons: dict[str, str] = {}
+    outcomes = run_due_probes(
+        db, now=now, probes={"opencode-go": _GoFail()},
+        force_harnesses=("opencode-go",), reasons=reasons,
+    )
+    assert outcomes["opencode-go"] == "failed"
+    assert reasons["opencode-go"].startswith("The saved OpenCode Go API key has expired.")
+    assert "sk-" not in reasons["opencode-go"]
 
 
 def test_zero_creates_exclusion_positive_clears(tmp_path: Path) -> None:

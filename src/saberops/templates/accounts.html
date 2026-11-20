@@ -84,7 +84,7 @@
 {% for card in a.cards %}
 <section class="panel account" aria-labelledby="acc-{{ card.slug }}">
   <div class="panel-head">
-    <div><h2 id="acc-{{ card.slug }}">{{ card.name }}</h2><p>{% if not card.installed %}Not installed on this computer{% elif card.windows %}Usage checked {{ card.checked }}{% else %}Usage not checked yet{% endif %}</p></div>
+    <div><h2 id="acc-{{ card.slug }}">{{ card.name }}</h2><p>{% if not card.installed %}Not installed on this computer{% elif card.windows %}Usage checked {{ card.checked }}{% elif card.error %}Last check failed{% else %}Usage not checked yet{% endif %}</p></div>
     {% if not card.installed %}{{ ui.status("MISSING") }}{% elif card.billing_ok %}<span class="status" data-tone="ok">Billing confirmed</span>{% elif card.billing %}<span class="status" data-tone="warn">Needs confirmation</span>{% endif %}
   </div>
   <div class="panel-body account-body">
@@ -104,6 +104,7 @@
       {% else %}
       <p class="muted">{% if card.installed %}No reading yet. Checking asks the {{ card.name }} tool for its own usage numbers; it sends no prompt and uses none of your limit.{% else %}Install and sign in to its command-line tool to see its usage here.{% endif %}</p>
       {% endif %}
+      {% if card.error %}<p class="banner" data-tone="warn" role="alert">{{ card.error }}</p>{% endif %}
       {% if card.installed %}
       <form method="post" action="/accounts/check">
         <input type="hidden" name="csrf" value="{{ csrf_token }}"><input type="hidden" name="account" value="{{ card.slug }}">
