@@ -6,7 +6,7 @@ Deterministic, side-effect-free projection from developer-gate evidence
 selector defect) to a normalized :class:`ProjectedDecision` that retains
 the raw observed identity verbatim.
 
-Design law (ADR-0003 D1/D2/D5, fail-closed):
+Design law (fail-closed):
 
 * Unknown, missing, or contradictory evidence is ``BLOCKED`` -- never
   green, never silently reinterpreted as another word.
@@ -84,7 +84,7 @@ PRODUCER_FAIL_ONLY_REASONS: Final[frozenset[str]] = frozenset(
     {SELECTOR_DEFECT_REASON, "pytest failed without rerunnable node IDs"}
 )
 
-#: The only producer whose gates are authoritative evidence (ADR-0004 D3).
+#: The only producer whose gates are authoritative evidence.
 #: A model's own iteration run (G0) may execute the same commands but is never
 #: accepted as gate evidence.
 PRODUCER_ENGINE: Final[str] = "engine"

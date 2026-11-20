@@ -143,12 +143,12 @@ def validate_candidate_sha(sha: object) -> str:
     return sha
 
 
-# Engine-owned WIP checkpoint refs (ADR-0002 D8, M2-5):
+# Engine-owned WIP checkpoint refs:
 # ``refs/saberops/checkpoints/<job_id>/<n>``.  Anchoring the preemption
 # checkpoint under this exact namespace keeps the WIP commit reachable
 # after worktree retirement plus ``git gc``.  The ref is engine-owned and
 # never a branch: nothing ever checks it out, merges it, or pushes it, and
-# it is never deleted before the approved retention window (ADR-0003 D6).
+# it is never deleted before the approved retention window.
 CHECKPOINT_REF_PREFIX: Final = "refs/saberops/checkpoints/"
 
 # Job identities admitted into a checkpoint ref name.  The ref is built by

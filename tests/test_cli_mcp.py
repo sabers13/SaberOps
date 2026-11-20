@@ -58,7 +58,7 @@ def test_cli_mcp_tools_json_lists_exactly_the_d7_tools(
 def test_cli_mcp_tools_never_lists_a_forbidden_operation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Covers: ADR-0004 D7 ('Never exposed' stays invisible)."""
+    """Covers: 'Never exposed' stays invisible."""
     options = _isolate(monkeypatch, tmp_path)
     assert main(_argv(options, "tools", "--json")) == 0
     text = capsys.readouterr().out
@@ -225,7 +225,7 @@ def test_cli_mcp_serve_is_read_only_for_a_second_client(
 def test_cli_mcp_never_opens_a_credential_surface(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: ADR-0004 D7 (no MCP subcommand reaches credentials)."""
+    """Covers: no MCP subcommand reaches credentials."""
     options = _isolate(monkeypatch, tmp_path)
     captured = io.StringIO()
     monkeypatch.setattr(sys, "stdin", io.StringIO())

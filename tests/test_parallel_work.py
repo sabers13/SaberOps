@@ -38,7 +38,7 @@ from saberops.supervisor import RunSupervisor
 from saberops.workers.codex import CodexAdapter
 from saberops.workers.registry import AdapterRegistry
 
-# ADR-0003 §2: contention flakes pass when run serially.
+# Contention flakes pass when run serially.
 pytestmark = pytest.mark.serial
 
 def git(repo: Path, *args: str) -> str:
@@ -51,7 +51,7 @@ def _seed_verified_codex_posture(config_home: Path) -> None:
     """Seed an isolated owner config with a verified posture for the synthetic
     ``codex/test-model`` candidate used by this module's fixtures.
 
-    Covers: ADR-0002 D2 / WORKFLOW §7 authorized setup-only fixture migration.
+    Covers: WORKFLOW §7 authorized setup-only fixture migration.
     This adds ONLY the synthetic provider/posture record needed to preserve
     the module's historical parallel-work assertions now that unverified
     routes fail closed (M2-4b D7); no assertion or expected behaviour is

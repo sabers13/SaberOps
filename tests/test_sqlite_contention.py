@@ -4,7 +4,7 @@ These tests exercise the real cross-process behaviour of
 :mod:`saberops.sqlite_policy` with actual child processes and real SQLite locks,
 not mocked ``OperationalError`` values.
 
-Covers: ADR-0003 D7 (WAL, 30 s busy timeout, bounded ``BEGIN IMMEDIATE`` total
+Covers: WAL, 30 s busy timeout, bounded ``BEGIN IMMEDIATE`` total
 <= 30 s, typed infrastructure on lock exhaustion, reads never take a write
 lock).
 """
@@ -79,7 +79,7 @@ def _db(tmp_path: Path) -> Path:
 
 
 def test_write_connection_sets_wal_and_d7_busy_timeout(tmp_path: Path) -> None:
-    """Covers: ADR-0003 D7 -- WAL and a 30 s busy timeout on write connections."""
+    """Covers: WAL and a 30 s busy timeout on write connections."""
     with write_connection(tmp_path / "a.db") as conn:
         assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
         assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == BUSY_TIMEOUT_MS
@@ -88,7 +88,7 @@ def test_write_connection_sets_wal_and_d7_busy_timeout(tmp_path: Path) -> None:
 
 
 def test_read_connection_is_read_only(tmp_path: Path) -> None:
-    """Covers: ADR-0003 D7 -- reads never take a write lock or mutate the file."""
+    """Covers: reads never take a write lock or mutate the file."""
     path = _db(tmp_path)
     with read_connection(path) as conn:
         with pytest.raises(sqlite3.OperationalError):
@@ -96,7 +96,7 @@ def test_read_connection_is_read_only(tmp_path: Path) -> None:
 
 
 def test_immediate_transaction_commits_and_rolls_back(tmp_path: Path) -> None:
-    """Covers: ADR-0003 D7 -- explicit commit / rollback with no partial write."""
+    """Covers: explicit commit / rollback with no partial write."""
     path = _db(tmp_path)
     with write_connection(path) as conn:
         with immediate_transaction(conn):
@@ -114,7 +114,7 @@ def test_immediate_transaction_commits_and_rolls_back(tmp_path: Path) -> None:
 
 
 def test_lock_exhaustion_is_a_typed_infra_error(tmp_path: Path) -> None:
-    """Covers: ADR-0003 D7 -- a held lock past the budget is typed INFRA."""
+    """Covers: a held lock past the budget is typed INFRA."""
     path = _db(tmp_path)
     child = subprocess.Popen(
         [sys.executable, "-c", _CHILD_HOLD, str(path), "3.0"],
@@ -139,7 +139,7 @@ def test_lock_exhaustion_is_a_typed_infra_error(tmp_path: Path) -> None:
 
 
 def test_release_before_deadline_succeeds_exactly_once(tmp_path: Path) -> None:
-    """Covers: ADR-0003 D7 -- a lock released inside the budget is taken once."""
+    """Covers: a lock released inside the budget is taken once."""
     path = _db(tmp_path)
     child = subprocess.Popen(
         [sys.executable, "-c", _CHILD_HOLD, str(path), "0.3"],
@@ -159,7 +159,7 @@ def test_release_before_deadline_succeeds_exactly_once(tmp_path: Path) -> None:
 
 
 def test_two_writer_processes_never_lose_a_transaction(tmp_path: Path) -> None:
-    """Covers: ADR-0003 D7 -- exclusive read-check-write across processes."""
+    """Covers: exclusive read-check-write across processes."""
     path = _db(tmp_path)
     procs = [
         subprocess.Popen([sys.executable, "-c", _CHILD_INCR, str(path), "15"]) for _ in range(2)
@@ -171,7 +171,7 @@ def test_two_writer_processes_never_lose_a_transaction(tmp_path: Path) -> None:
 
 
 def test_read_only_connection_never_blocks_a_writer(tmp_path: Path) -> None:
-    """Covers: ADR-0003 D7 -- no write lock is taken on a read path."""
+    """Covers: no write lock is taken on a read path."""
     path = _db(tmp_path)
     with read_connection(path) as reader:
         assert reader.execute("SELECT n FROM counter WHERE id = 1").fetchone()[0] == 0
@@ -181,7 +181,7 @@ def test_read_only_connection_never_blocks_a_writer(tmp_path: Path) -> None:
 
 
 def test_free_page_ratio_and_vacuum(tmp_path: Path) -> None:
-    """Covers: ADR-0003 D6 -- owner-DB VACUUM uses the free-page ratio."""
+    """Covers: owner-DB VACUUM uses the free-page ratio."""
     path = tmp_path / "vacuum.db"
     with write_connection(path) as conn:
         conn.execute("CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY, blob BLOB)")
@@ -201,7 +201,7 @@ def test_free_page_ratio_and_vacuum(tmp_path: Path) -> None:
 
 
 def test_is_busy_error_classification() -> None:
-    """Covers: ADR-0003 D7 -- only real lock contention maps to BUSY."""
+    """Covers: only real lock contention maps to BUSY."""
     assert is_busy_error(sqlite3.OperationalError("database is locked"))
     assert is_busy_error(sqlite3.OperationalError("database table is locked"))
     assert not is_busy_error(sqlite3.OperationalError("no such table: nope"))
@@ -248,7 +248,7 @@ def _seed_run_db(tmp_path: Path) -> Path:
 
 
 def test_real_database_write_is_a_typed_infra_error_under_contention(tmp_path: Path) -> None:
-    """Covers: ADR-0003 D7 -- an actual Database write raises typed INFRA, not a crash."""
+    """Covers: an actual Database write raises typed INFRA, not a crash."""
     from saberops.db import Database
     from saberops.models import RunStatus
 
@@ -276,7 +276,7 @@ def test_real_database_write_is_a_typed_infra_error_under_contention(tmp_path: P
 
 
 def test_real_database_write_succeeds_once_after_release(tmp_path: Path) -> None:
-    """Covers: ADR-0003 D7 -- a lock released inside the budget commits exactly once."""
+    """Covers: a lock released inside the budget commits exactly once."""
     from saberops.db import Database
     from saberops.models import RunStatus
 
@@ -299,7 +299,7 @@ def test_real_database_write_succeeds_once_after_release(tmp_path: Path) -> None
 
 
 def test_capacity_store_write_is_a_typed_infra_error_under_contention(tmp_path: Path) -> None:
-    """Covers: ADR-0003 D7 -- capacity.store writes share the bounded write path."""
+    """Covers: capacity.store writes share the bounded write path."""
     from saberops.capacity.store import ensure_tables, owner_write_connection
     from saberops.db import Database
 
@@ -324,7 +324,7 @@ def test_capacity_store_write_is_a_typed_infra_error_under_contention(tmp_path: 
 
 
 def test_read_paths_are_not_blocked_by_a_writer(tmp_path: Path) -> None:
-    """Covers: ADR-0003 D7 -- reads take no write lock and stay available."""
+    """Covers: reads take no write lock and stay available."""
     from saberops.capacity.store import owner_connection
     from saberops.db import Database
 

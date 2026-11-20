@@ -155,7 +155,7 @@ def _ask(
 
 @pytest.mark.parametrize("operation", sorted(FORBIDDEN_OPERATIONS))
 def test_every_never_exposed_operation_is_refused(tmp_path: Path, operation: str) -> None:
-    """Covers: ADR-0004 D7 'Never exposed' + REHEARSAL §3 never-verbs."""
+    """Covers: 'Never exposed' + REHEARSAL §3 never-verbs."""
     server = _server(tmp_path)
     response = _call(server, operation, {})
     assert "error" in response, response
@@ -164,7 +164,7 @@ def test_every_never_exposed_operation_is_refused(tmp_path: Path, operation: str
 
 
 def test_never_exposed_operations_are_absent_from_tools_list(tmp_path: Path) -> None:
-    """Covers: ADR-0004 D7 (no tool can reach the owner-only authority)."""
+    """Covers: no tool can reach the owner-only authority."""
     server = _server(tmp_path)
     response = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
     assert response is not None
@@ -173,7 +173,7 @@ def test_never_exposed_operations_are_absent_from_tools_list(tmp_path: Path) -> 
 
 
 def test_owner_only_authorities_cannot_be_reached_by_alias(tmp_path: Path) -> None:
-    """Covers: ADR-0004 D7 (synonyms cannot smuggle authority)."""
+    """Covers: synonyms cannot smuggle authority."""
     server = _server(tmp_path)
     for alias in ("approve_proposal", "git_push", "move_main", "gate_full", "read_token"):
         response = _call(server, alias, {})
@@ -255,7 +255,7 @@ def test_submit_job_refuses_a_nested_denylisted_field(tmp_path: Path) -> None:
 def test_submit_job_is_idempotent_with_a_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: ADR-0004 invariant 13 (idempotent tools)."""
+    """Covers: idempotent tools."""
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     repo = _git_repo(tmp_path / "repo")
     server = _server(tmp_path)
@@ -337,7 +337,7 @@ def test_list_questions_returns_views(tmp_path: Path) -> None:
 
 
 def test_answer_question_refuses_owner_authority(tmp_path: Path) -> None:
-    """Covers: ADR-0004 invariant 6 (owner-only decisions refuse over MCP)."""
+    """Covers: owner-only decisions refuse over MCP."""
     store = tmp_path / "questions.json"
     _ask(store)
     server = _server(tmp_path)
@@ -350,7 +350,7 @@ def test_answer_question_refuses_owner_authority(tmp_path: Path) -> None:
 
 
 def test_answer_question_refuses_an_owner_only_decision_class(tmp_path: Path) -> None:
-    """Covers: ADR-0004 D6/D7 (owner-only classes are not Orchestrator-answerable)."""
+    """Covers: owner-only classes are not Orchestrator-answerable."""
     store = tmp_path / "questions.json"
     _ask(store, decision_class=DecisionClass.MOVE_MAIN)
     server = _server(tmp_path)
@@ -399,7 +399,7 @@ def test_answer_question_records_an_orchestrator_answer(tmp_path: Path) -> None:
 
 
 def test_answer_question_is_idempotent(tmp_path: Path) -> None:
-    """Covers: ADR-0004 invariant 13 (a repeated identical answer is a no-op)."""
+    """Covers: a repeated identical answer is a no-op."""
     store = tmp_path / "questions.json"
     _ask(store, decision_class=DecisionClass.FIX_UP_CONTENT)
     set_owner_mode(OwnerMode.CRITICAL_ONLY)
@@ -425,7 +425,7 @@ def test_answer_question_is_idempotent(tmp_path: Path) -> None:
 
 
 def test_propose_config_change_validates_and_applies_nothing(tmp_path: Path) -> None:
-    """Covers: ADR-0004 D8.2 (a proposal changes nothing)."""
+    """Covers: a proposal changes nothing."""
     server = _server(tmp_path)
     payload = _payload(
         server,
@@ -442,7 +442,7 @@ def test_propose_config_change_validates_and_applies_nothing(tmp_path: Path) -> 
 
 
 def test_propose_config_change_refuses_an_unknown_setting(tmp_path: Path) -> None:
-    """Covers: ADR-0004 D8.1 (one validating service layer, fail-closed)."""
+    """Covers: one validating service layer, fail-closed."""
     server = _server(tmp_path)
     response = _call(
         server,
@@ -473,7 +473,7 @@ def test_list_proposals_lists_approved_decisions(tmp_path: Path) -> None:
 
 
 def test_no_tool_can_approve_a_config_proposal(tmp_path: Path) -> None:
-    """Covers: ADR-0004 invariant 7 (no MCP tool can apply a config change)."""
+    """Covers: no MCP tool can apply a config change."""
     server = _server(tmp_path)
     for name in ("approve_config_proposal", "config_approve", "record_config_decision"):
         response = _call(server, name, {})

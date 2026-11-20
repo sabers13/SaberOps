@@ -447,7 +447,7 @@ def test_model_catalog_store_override_pins_explicit_path(
 def test_storage_audit_events_round_trip(tmp_path: Path) -> None:
     """GS-1 storage audit persistence is additive and idempotent.
 
-    Covers: ADR-0003 D7 (bounded write transaction) and Amendment 1 §4
+    Covers: (bounded write transaction) and Amendment 1 §4
     (durable audit with task/run/artifact identity, bytes and reason).
     """
     from saberops.db import DB_SCHEMA_VERSION, Database

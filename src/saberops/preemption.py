@@ -1,4 +1,4 @@
-"""Durable quota preemption and resume (ADR-0002 D8, M2-5 Step 001).
+"""Durable quota preemption and resume (Step 001).
 
 A durable JOB-owned run that suffers
 :attr:`WorkerInterruptionReason.QUOTA_EXHAUSTED
@@ -83,7 +83,7 @@ from saberops.models import (
 from saberops.ownership import ExecutionOwner
 from saberops.process import run_process
 
-#: Default bound from ADR-0002 D8: how many times one job may be preempted
+#: Default bound: how many times one job may be preempted
 #: before it goes terminally FAILED with ``PREEMPTION_LIMIT``.
 DEFAULT_MAX_PREEMPTIONS: int = 5
 

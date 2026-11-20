@@ -1,4 +1,4 @@
-"""SaberOps MCP interface (ADR-0004 D7, Step 014 / M3).
+"""SaberOps MCP interface (Step 014 / M3).
 
 Public surface:
 

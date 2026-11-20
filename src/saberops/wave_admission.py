@@ -1,6 +1,6 @@
-"""Deterministic, fail-closed wave admission (ADR-0004 §3 D2, §4 invariant 2).
+"""Deterministic, fail-closed wave admission.
 
-Covers: ADR-0004 D2 "Admission of a wave is deterministic and fail-closed: lane
+Covers: "Admission of a wave is deterministic and fail-closed: lane
 file sets disjoint (path-prefix overlap check), base is an ancestor of the
 target branch, every route has valid posture."
 

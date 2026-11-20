@@ -4,8 +4,7 @@
 - **Date:** 2026-11-19
 - **Decider:** Saber (owner), Phase 1 plan lane F25
 - **Related:** [ADR-0005](0005-mcp-first-engine-and-phase-2-board.md) (MCP-first
-  engine), [ADR-0004](0004-mcp-authority-and-evidence.md) (MCP authority),
-  [ADR-0011](0011-bounded-automatic-actions.md) (no silent work)
+  engine), [ADR-0011](0011-bounded-automatic-actions.md) (no silent work)
 
 ## 1. Context
 

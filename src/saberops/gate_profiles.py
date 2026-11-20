@@ -1,4 +1,4 @@
-"""Gate profiles as project data (ADR-0003 D2, ADR-0004 D3).
+"""Gate profiles as project data.
 
 Three profiles bound each lifecycle point::
 
@@ -48,7 +48,7 @@ class GateProfileError(ValueError):
 
 
 class GateProfileName(StrEnum):
-    """The three ADR-0003 D2 profiles."""
+    """The three profiles."""
 
     FAST = "fast"
     ACCEPTANCE = "acceptance"

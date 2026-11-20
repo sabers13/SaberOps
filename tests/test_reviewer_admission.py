@@ -68,7 +68,7 @@ def _seed_verified_opencode_posture(config_home: Path) -> None:
     """Seed an isolated owner config with a verified class-A posture for the
     synthetic ``opencode`` reviewer provider these fixtures dispatch.
 
-    Covers: ADR-0002 D2 / WORKFLOW §7 authorized setup-only fixture migration.
+    Covers: WORKFLOW §7 authorized setup-only fixture migration.
     The R3-E1.2 fixtures dispatch synthetic ``opencode`` reviewer candidates
     with no matching posture record, so the accepted M2-4b F1 admission seam
     rightfully returns ``REVIEW_UNAVAILABLE`` (POSTURE_UNVERIFIED).  This seeds
@@ -432,7 +432,7 @@ def _seed_shared_membership_quota_policies(
 ) -> tuple[str, str]:
     """Declare BOTH pools over the identical reviewer route (declared shared scarcity).
 
-    Covers: ADR-0002 D1 route draws every member pool; binding does not discard
+    Covers: route draws every member pool; binding does not discard
     shared scarcity.
     """
     shared = (f"{_R3E12_PROVIDER}/{_R3E12_REVIEWER_MODEL}",)
@@ -445,7 +445,7 @@ def _seed_shared_membership_quota_policies(
 def test_shared_membership_blocked_member_pool_refuses_bound_reviewer(
     isolated_xdg: None, tmp_path: Path
 ) -> None:
-    """Covers: ADR-0002 D1 route draws every member pool; binding does not discard shared scarcity.
+    """Covers: route draws every member pool; binding does not discard shared scarcity.
 
     When both pools declare the same reviewer route as a member, pool A is a
     declared shared-scarcity constraint on that route rather than an isolated
@@ -484,7 +484,7 @@ def test_shared_membership_blocked_member_pool_refuses_bound_reviewer(
 def test_admit_binding_pool_scope_matches_quota_decision(
     isolated_xdg: None, tmp_path: Path
 ) -> None:
-    """Covers: ADR-0002 D1/D7 ``admit()`` binding scope and provider-default non-fallback.
+    """Covers: ``admit`` binding scope and provider-default non-fallback.
 
     Direct seam check with the real binding-derived candidate and real quota
     states (no dispatch):

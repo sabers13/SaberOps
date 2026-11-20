@@ -1,4 +1,4 @@
-"""Deterministic write-scope and test-retirement checks (ADR-0004 D3)."""
+"""Deterministic write-scope and test-retirement checks."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ from saberops.gate_scope import (
 
 
 def test_write_scope_accepts_subpaths() -> None:
-    """Covers: ADR-0004 D3 (changed files subset of Touches)."""
+    """Covers: changed files subset of Touches."""
     result = check_write_scope(
         ["src/saberops/gate_runner.py", "tests/test_gate_scope.py", "docs/gate.md"],
         ["src/saberops/", "tests/test_gate_scope.py", "docs/gate.md"],
@@ -37,7 +37,7 @@ def test_write_scope_accepts_subpaths() -> None:
 
 
 def test_write_scope_rejects_out_of_scope() -> None:
-    """Covers: ADR-0004 D3 (out-of-scope paths fail closed)."""
+    """Covers: out-of-scope paths fail closed."""
     result = check_write_scope(
         ["src/saberops/web.py"],
         ["src/saberops/gate_runner.py"],
@@ -48,7 +48,7 @@ def test_write_scope_rejects_out_of_scope() -> None:
 
 
 def test_write_scope_rejects_must_not_touch() -> None:
-    """Covers: ADR-0004 D3 (Intersect must-not-touch = empty)."""
+    """Covers: Intersect must-not-touch = empty."""
     result = check_write_scope(
         ["pyproject.toml", "src/saberops/gate_runner.py"],
         ["src/saberops/", "pyproject.toml"],

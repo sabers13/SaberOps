@@ -108,7 +108,7 @@ def _sole_hold(projection: FrontierProjection, task_id: str) -> FrontierReason:
 
 
 def test_blocked_early_phase_keeps_later_phase_independent_task_ready() -> None:
-    """Covers: ADR-0004 Amendment 5 - a blocked dependency holds only its dependents.
+    """Covers: a blocked dependency holds only its dependents.
 
     Four named phases are present; the Phase 1 task is blocked while a Phase 4
     task with no dependency on it remains eligible.
@@ -129,7 +129,7 @@ def test_blocked_early_phase_keeps_later_phase_independent_task_ready() -> None:
 
 
 def test_later_phase_implementation_starts_while_earlier_integration_waits() -> None:
-    """Covers: ADR-0004 Amendment 5 - later-phase work does not wait on an integration edge.
+    """Covers: later-phase work does not wait on an integration edge.
 
     The Phase 1 task is complete but unintegrated (its dependent carries it as a
     deferred integration prerequisite, not a START dependency).
@@ -167,7 +167,7 @@ def test_dependency_pending_is_distinct_from_dependency_blocked() -> None:
 
 
 def test_completion_releases_dependent_and_failure_holds_it() -> None:
-    """Covers: ADR-0004 Amendment 5 - completion and failure updates move the frontier."""
+    """Covers: completion and failure updates move the frontier."""
     edge = (_ref("p1", "dep"),)
     child = _task("child", phase="01-engine-core", start=edge)
 
@@ -384,7 +384,7 @@ def test_blank_scope_entries_are_ignored_and_documented() -> None:
 
 
 def test_duplicate_coordination_wrappers_are_not_extra_child_tasks() -> None:
-    """Covers: ADR-0004 Amendment 5 - wrapper records do not double-count as lanes."""
+    """Covers: wrapper records do not double-count as lanes."""
     wrapper = _task(
         "plan-1", phase="01-engine-core", kind=TaskKind.PLAN_WRAPPER.value
     )
@@ -397,7 +397,7 @@ def test_duplicate_coordination_wrappers_are_not_extra_child_tasks() -> None:
 
 
 def test_orchestrator_turn_and_wave_wrapper_never_eligible() -> None:
-    """Covers: ADR-0004 Amendment 5 - Orchestrator turns are not executable lanes."""
+    """Covers: Orchestrator turns are not executable lanes."""
     snapshot = _snapshot(
         _project(
             "p1",
@@ -433,7 +433,7 @@ def test_owner_and_resource_waits_are_reasoned_holds() -> None:
 
 
 def test_owner_wait_dependency_holds_only_its_dependents() -> None:
-    """Covers: ADR-0004 Amendment 5 - an owner-blocked task freezes only dependents."""
+    """Covers: an owner-blocked task freezes only dependents."""
     snapshot = _snapshot(
         _project(
             "p1",
@@ -453,7 +453,7 @@ def test_owner_wait_dependency_holds_only_its_dependents() -> None:
 
 
 def test_three_projects_by_five_tasks_reports_full_fifteen() -> None:
-    """Covers: ADR-0004 Amendment 5 - no silent lowering of the owner 3x5 bound."""
+    """Covers: no silent lowering of the owner 3x5 bound."""
     projects = tuple(
         _project(f"p{n}", *(_task(f"t{i}", phase="01") for i in range(5)))
         for n in range(DEFAULT_ACTIVE_PROJECT_LIMIT)
@@ -468,7 +468,7 @@ def test_three_projects_by_five_tasks_reports_full_fifteen() -> None:
 
 
 def test_sixth_ready_task_in_one_project_is_capacity_held() -> None:
-    """Covers: ADR-0004 Amendment 5 - per-project maximum holds the overflow."""
+    """Covers: per-project maximum holds the overflow."""
     snapshot = _snapshot(_project("p1", *(_task(f"t{i}", phase="01") for i in range(6))))
     projection = _projection(snapshot)
     assert projection.eligible_count == 5
@@ -476,7 +476,7 @@ def test_sixth_ready_task_in_one_project_is_capacity_held() -> None:
 
 
 def test_fourth_active_project_is_capacity_held() -> None:
-    """Covers: ADR-0004 Amendment 5 - three active projects, not a global cap of 15."""
+    """Covers: three active projects, not a global cap of 15."""
     projects = tuple(_project(f"p{n}", _task("only", phase="01")) for n in range(4))
     projection = _projection(_snapshot(*projects))
     assert projection.eligible_count == 3
@@ -549,7 +549,7 @@ def test_repeated_calls_are_stable_across_input_order() -> None:
 
 
 def test_unknown_status_fails_closed() -> None:
-    """Covers: ADR-0004 Amendment 5 - unknown status fails closed."""
+    """Covers: unknown status fails closed."""
     snapshot = _snapshot(_project("p1", _task("a", phase="01", status="vibing")))
     projection = _projection(snapshot)
     assert projection.status is ProjectionStatus.DENIED
@@ -589,7 +589,7 @@ def test_unsafe_write_scope_fails_closed(unsafe: str) -> None:
 
 
 def test_conflicting_duplicate_task_identity_fails_closed() -> None:
-    """Covers: ADR-0004 Amendment 5 - conflicting duplicate identity fails closed."""
+    """Covers: conflicting duplicate identity fails closed."""
     snapshot = _snapshot(
         _project(
             "p1",
@@ -670,7 +670,7 @@ def test_integration_prerequisite_cycle_fails_closed() -> None:
 
 
 def test_incomplete_snapshot_fails_closed() -> None:
-    """Covers: ADR-0004 Amendment 5 - a partial snapshot cannot claim a ready set."""
+    """Covers: a partial snapshot cannot claim a ready set."""
     snapshot = _snapshot(_project("p1", _task("a", phase="01")), complete=False)
     projection = _projection(snapshot)
     assert projection.status is ProjectionStatus.DENIED

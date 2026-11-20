@@ -1,7 +1,7 @@
 """Cross-module crash-recovery contract: jobs + capacity + preemption + supervisor.
 
-ADR-0002 D8 R1 (post-requeue capacity settlement) and R2 (interrupted
-preemption preparation).  Hermetic by construction: every test uses an
+Post-requeue capacity settlement and interrupted preemption
+preparation.  Hermetic by construction: every test uses an
 isolated file-backed :class:`Database`, a real temporary local Git repository
 (local ``git`` only, no remotes/network), synthetic durable quota evidence and
 a frozen clock.  No provider, model, credential, billing, or owner-config
@@ -258,7 +258,7 @@ def _assert_released(db: Database, run_id: str) -> None:
 def test_restart_settles_after_committed_requeue_before_release(
     tmp_path: Path
 ) -> None:
-    """Covers: ADR-0002 D8 R1 -- crash after requeue commit, before release.
+    """Covers: crash after requeue commit, before release.
 
     The old run is conclusively terminal and the job already left RUNNING, so
     no job/run scan can find the debt: only durable owner-storage debt can.
@@ -286,7 +286,7 @@ def test_restart_settles_after_committed_requeue_before_release(
 def test_settlement_survives_relabel_terminal_job_and_newer_run(
     tmp_path: Path
 ) -> None:
-    """Covers: ADR-0002 D8 R1 -- discovery ignores waiting label and job state."""
+    """Covers: discovery ignores waiting label and job state."""
     repo = tmp_path / "repo"
     base = _repo(repo)
     db = _db(tmp_path)
@@ -339,7 +339,7 @@ def test_settlement_survives_relabel_terminal_job_and_newer_run(
 def test_settlement_is_fail_closed_on_unproven_or_live_runs(
     tmp_path: Path
 ) -> None:
-    """Covers: ADR-0002 D8 R1 -- never free capacity without terminal proof."""
+    """Covers: never free capacity without terminal proof."""
     repo = tmp_path / "repo"
     base = _repo(repo)
     db = _db(tmp_path)
@@ -371,7 +371,7 @@ def test_settlement_is_fail_closed_on_unproven_or_live_runs(
 
 
 def test_settlement_requires_a_durable_d8_receipt(tmp_path: Path) -> None:
-    """Covers: ADR-0002 D8 R1 -- an ordinary terminal run is never D8-settled."""
+    """Covers: an ordinary terminal run is never D8-settled."""
     repo = tmp_path / "repo"
     base = _repo(repo)
     db = _db(tmp_path)
@@ -392,7 +392,7 @@ def test_settlement_requires_a_durable_d8_receipt(tmp_path: Path) -> None:
 def test_settlement_lease_guard_blocks_a_stale_scheduler(
     tmp_path: Path
 ) -> None:
-    """Covers: ADR-0002 D8 R1 -- settlement is fenced by the scheduler lease."""
+    """Covers: settlement is fenced by the scheduler lease."""
     repo = tmp_path / "repo"
     base = _repo(repo)
     db = _db(tmp_path)
@@ -410,7 +410,7 @@ def test_settlement_lease_guard_blocks_a_stale_scheduler(
 def test_scheduler_tick_settles_old_debt_on_restart(
     tmp_path: Path
 ) -> None:
-    """Covers: ADR-0002 D8 R1 -- the real restart tick settles stranded debt."""
+    """Covers: the real restart tick settles stranded debt."""
     repo = tmp_path / "repo"
     base = _repo(repo)
     db = _db(tmp_path)
@@ -436,7 +436,7 @@ def test_scheduler_tick_settles_old_debt_on_restart(
 def test_limit_restart_settles_once_and_never_counts_sixth(
     tmp_path: Path
 ) -> None:
-    """Covers: ADR-0002 D8 -- the preemption bound is not escapable by restart."""
+    """Covers: the preemption bound is not escapable by restart."""
     repo = tmp_path / "repo"
     base = _repo(repo)
     db = _db(tmp_path)
@@ -516,7 +516,7 @@ def authenticate_bound_transaction(db: Database, run_id: str, job_id: str, repo:
 def test_supervisor_recovers_interrupted_preparation_before_orphaning(
     tmp_path: Path
 ) -> None:
-    """Covers: ADR-0002 D8 R2 -- dead-owner restart finishes the transaction."""
+    """Covers: dead-owner restart finishes the transaction."""
     from saberops.supervisor import RunSupervisor
 
     repo = tmp_path / "repo"
@@ -547,7 +547,7 @@ def test_supervisor_recovers_interrupted_preparation_before_orphaning(
 def test_reconcile_preemptions_discovers_and_delegates_pending_transaction(
     tmp_path: Path
 ) -> None:
-    """Covers: ADR-0002 D8 R2 -- the scheduler-facing discovery pass delegates."""
+    """Covers: the scheduler-facing discovery pass delegates."""
     repo = tmp_path / "repo"
     base = _repo(repo)
     db = _db(tmp_path)
@@ -567,7 +567,7 @@ def test_reconcile_preemptions_discovers_and_delegates_pending_transaction(
 def test_supervisor_refuses_live_attempt_without_orphaning(
     tmp_path: Path
 ) -> None:
-    """Covers: ADR-0002 D8 R2 -- a live attempt is not a recoverable crash."""
+    """Covers: a live attempt is not a recoverable crash."""
     from saberops.supervisor import RunSupervisor
 
     repo = tmp_path / "repo"
@@ -586,7 +586,7 @@ def test_supervisor_refuses_live_attempt_without_orphaning(
 def test_supervisor_does_not_infer_d8_from_quota_history_alone(
     tmp_path: Path
 ) -> None:
-    """Covers: ADR-0002 D8 R2 -- no receipt means no invented preemption."""
+    """Covers: no receipt means no invented preemption."""
     from saberops.supervisor import RunSupervisor
 
     repo = tmp_path / "repo"
@@ -609,7 +609,7 @@ def test_supervisor_does_not_infer_d8_from_quota_history_alone(
 def test_supervisor_blocks_legacy_intent_with_valid_artifacts(
     tmp_path: Path
 ) -> None:
-    """Covers: ADR-0002 D8 R2 -- an unbound legacy intent is NOT D8 authority.
+    """Covers: an unbound legacy intent is NOT D8 authority.
 
     The intent's SHA, direct anchor ref, capsule and quota-attempt evidence all
     genuinely exist, but there is no authentic bound ``preemption_preparing``
@@ -666,7 +666,7 @@ def test_supervisor_blocks_legacy_intent_with_valid_artifacts(
 
 
 def test_settlement_retains_charge_for_a_legacy_parked_run(tmp_path: Path) -> None:
-    """Covers: ADR-0002 D8 R1 -- no release on an unauthenticated receipt."""
+    """Covers: no release on an unauthenticated receipt."""
     from saberops.handoff import create_handoffs
 
     repo = tmp_path / "repo"
@@ -716,7 +716,7 @@ def test_settlement_retains_charge_for_a_legacy_parked_run(tmp_path: Path) -> No
 
 
 def test_supervisor_blocks_stale_owner_generation_decision(tmp_path: Path) -> None:
-    """Covers: ADR-0002 D8 R2 -- a decision bound to another generation is not authority."""
+    """Covers: a decision bound to another generation is not authority."""
     from saberops.supervisor import RunSupervisor
 
     repo = tmp_path / "repo"
@@ -740,7 +740,7 @@ def test_supervisor_blocks_stale_owner_generation_decision(tmp_path: Path) -> No
 def test_recovery_refuses_unfenced_terminalization(
     tmp_path: Path
 ) -> None:
-    """Covers: ADR-0002 D8 R2 -- crash recovery never takes the unfenced path."""
+    """Covers: crash recovery never takes the unfenced path."""
     repo = tmp_path / "repo"
     base = _repo(repo)
     db = _db(tmp_path)
@@ -759,7 +759,7 @@ def test_recovery_refuses_unfenced_terminalization(
 
 
 def test_limit_tail_is_fenced_against_a_newer_generation(tmp_path: Path) -> None:
-    """Covers: ADR-0002 D8 -- the limit tail never rewrites another generation."""
+    """Covers: the limit tail never rewrites another generation."""
     repo = tmp_path / "repo"
     base = _repo(repo)
     db = _db(tmp_path)
@@ -799,7 +799,7 @@ def test_limit_tail_is_fenced_against_a_newer_generation(tmp_path: Path) -> None
 def test_requeue_exact_rejects_aba_on_the_job_row(
     tmp_path: Path, second_reason: str
 ) -> None:
-    """Covers: ADR-0002 D8 R2 -- stale recovery cannot requeue a newer run."""
+    """Covers: stale recovery cannot requeue a newer run."""
     from saberops.jobs.store import JobConflictError
 
     repo = tmp_path / "repo"
@@ -915,7 +915,7 @@ def _split_park(
 def test_split_db_settlement_releases_stranded_old_run_exactly_once(
     tmp_path: Path,
 ) -> None:
-    """Covers: ADR-0002 D8 R1 -- split-DB stranded debt settles exactly once.
+    """Covers: split-DB stranded debt settles exactly once.
 
     Real two-file layout: the job, its requeue event and the RESERVED rows live
     in the owner DB; the run, attempt, execution-owner row, decision, intent,
@@ -952,7 +952,7 @@ def test_split_db_settlement_releases_stranded_old_run_exactly_once(
 
 
 def test_split_db_settlement_retains_unbound_legacy_charge(tmp_path: Path) -> None:
-    """Covers: ADR-0002 D8 R1 -- split-DB legacy receipt is not authenticated."""
+    """Covers: split-DB legacy receipt is not authenticated."""
     from saberops.handoff import create_handoffs
 
     repo = tmp_path / "repo"
@@ -1006,7 +1006,7 @@ def test_split_db_settlement_retains_unbound_legacy_charge(tmp_path: Path) -> No
 
 
 def test_split_db_scheduler_tick_settles_stranded_debt(tmp_path: Path) -> None:
-    """Covers: ADR-0002 D8 R1 -- the real tick settles split-DB debt.
+    """Covers: the real tick settles split-DB debt.
 
     The scheduler is handed the owner DB (its production shape) and its
     default status lookup has no evidence for a project-local run; the

@@ -1,4 +1,4 @@
-"""Scheduler loop, single-instance lease, and atomic dispatch (ADR-0002 D7).
+"""Scheduler loop, single-instance lease, and atomic dispatch.
 
 Implements:
 - Owner DB single-instance scheduler lease with transactional claim, renewal,
@@ -234,11 +234,11 @@ class TickResult:
     probed: int = 0
     waited: int = 0
     decisions: tuple[SchedulerDecision, ...] = ()
-    # ADR-0002 D8 crash recovery (R1 + R2) evidence for this tick.
+    # Crash recovery evidence for this tick.
     preemption_settled: int = 0
     preemption_pending: tuple[str, ...] = ()
     preemption_blocked: tuple[str, ...] = ()
-    # ADR-0002 D7 legacy-RUNNING hold diagnostics (owner-visible job ids).
+    # Legacy-RUNNING hold diagnostics (owner-visible job ids).
     # ``legacy_running_jobs``: RUNNING jobs with no ``current_run_id`` or no
     # live RESERVED reservation row, held by
     # ``reason="legacy_running_without_reservation"``.
@@ -253,8 +253,8 @@ class TickResult:
     #: their reserved capacity was released and each was requeued once, or
     #: failed with ``DISPATCH_WINDOW_LOST`` if it already lost a dispatch.
     dispatch_window_repaired: tuple[str, ...] = ()
-    #: Typed GS-1 storage/SQLite infrastructure reason for this tick (ADR-0003
-    #: D7 / Amendment 1).  ``None`` when storage maintenance was not invoked or
+    #: Typed GS-1 storage/SQLite infrastructure reason for this tick.
+    #: ``None`` when storage maintenance was not invoked or
     #: reported healthy.  A non-``None`` value is an INFRA park, never a code
     #: failure and never a pass.
     storage_infra_reason: str | None = None
@@ -788,7 +788,7 @@ def _default_run_launcher(
         objective_id=provenance.objective_id,
     )
     db.create_run(run)
-    # ADR-0002 D8 (M2-5) durable resume wiring -- and ONLY resume wiring:
+    # Durable resume wiring -- and ONLY resume wiring:
     # when the dispatched job carries a verified preemption capsule, stage
     # the checkpoint plus capsule into the new run through its ordinary
     # worker-checkpoint channel.  The new run is still anchored at the
@@ -857,7 +857,7 @@ def scheduler_tick(
 ) -> TickResult:
     """Execute one complete scheduler tick.
 
-    0. ADR-0002 D7 fail-closed RUNNING accounting: refuse the whole tick when
+    0. Fail-closed RUNNING accounting: refuse the whole tick when
        any RUNNING job has no trustworthy capacity reservation, or when the
        owner status lookup cannot see a RUNNING job's run (a project-local
        run in a distinct store).  Zero schedule/dispatch/CAS/provider calls.
@@ -875,7 +875,7 @@ def scheduler_tick(
        - Invoke run_launcher
        - On error or lost lease: compensate by requeueing and releasing reservation.
 
-    ``launch_guard`` (GS-1 / ADR-0003 D4) is consulted BEFORE any dispatch,
+    ``launch_guard`` (GS-1 /) is consulted BEFORE any dispatch,
     reservation or claim transition.  When it returns a typed reason the whole
     tick parks with zero side effects -- no job leaves QUEUED, no ledger row is
     booked and no launcher runs.  The fixed floor is the current guard; adaptive
@@ -934,7 +934,7 @@ def scheduler_tick(
             status_cache[run_id] = status_fn(run_id)
         return status_cache[run_id]
 
-    # 0. Fail-closed RUNNING accounting (ADR-0002 D7 legacy reservations).
+    # 0. Fail-closed RUNNING accounting (legacy reservations).
     #
     # Per-pool occupancy and outstanding debt are derived from RESERVED
     # ``capacity_reservations`` rows.  A legacy/upgraded job persisted in
@@ -1142,13 +1142,13 @@ def scheduler_tick(
         elif ch.to_state in (JobState.FAILED, JobState.CANCELLED):
             release(db, ch.run_id, now=moment)
         elif ch.to_state == JobState.QUEUED:
-            # ADR-0002 D8 (M2-5): a completed preemption requeue.  The old
+            # A completed preemption requeue. The old
             # run is conclusively terminal (PREEMPTED), so its reservation
             # is released exactly once here; release is idempotent, so this
             # is also safe when the coordinator already released it.
             release(db, ch.run_id, now=moment)
 
-    # 1b. ADR-0002 D8 crash recovery (R1 + R2).  This is the restart entry
+    # 1b. crash recovery. This is the restart entry
     # point for two gaps that the RUNNING-only job reconciliation above cannot
     # see:
     #   R1 -- a job already requeued (QUEUED / terminal / re-dispatched) still
@@ -1278,7 +1278,7 @@ def scheduler_tick(
     # Fail closed (R3-M1): per-pool occupancy is authoritative owner-DB state.
     # If the reservation scan for any RUNNING job cannot be read, the pool
     # occupancy is UNKNOWN, never zero — a partially counted map must never
-    # reach admission (ADR-0002 D7 requires a free pool slot as well as a free
+    # reach admission (requires a free pool slot as well as a free
     # global slot). Abort the tick with zero dispatches; do not silently skip a
     # failed job. Only targeted DB read errors are absorbed here; unrelated
     # programming errors are not hidden.
@@ -1719,7 +1719,7 @@ def _invoke_storage_maintenance(
 
     A storage/SQLite infrastructure failure becomes a typed reason code so the
     tick reports an INFRA park instead of crashing the scheduler or relaunching
-    work (ADR-0003 D7).  Maintenance runs inside its own bounded budget and must
+    work. Maintenance runs inside its own bounded budget and must
     not monopolise the tick.
     """
     from saberops.sqlite_policy import StorageInfraError
@@ -1757,7 +1757,7 @@ def run_scheduler_loop(
 ) -> TickResult | None:
     """Run the scheduler loop or a single tick (--once).
 
-    Ordering is safety-critical (ADR-0003 D4):
+    Ordering is safety-critical:
 
     * Startup maintenance runs BEFORE any tick in both ``--once`` and continuous
       modes.  When it reports a typed infra reason (disk low/unknown, storage

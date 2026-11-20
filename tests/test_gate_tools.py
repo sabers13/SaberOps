@@ -1116,7 +1116,7 @@ def test_workers_follow_grant_without_configured_caps(
 def test_full_gate_reruns_only_failing_ids_serially(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: ADR-0003 D5 (deterministic serial rerun only for failures)."""
+    """Covers: deterministic serial rerun only for failures."""
     repo = tmp_path / "repo"
     repo.mkdir()
     _init_main_repo(repo)
@@ -1284,7 +1284,7 @@ def test_no_history_env_suppresses_engine_managed_write(
 def test_outcome_json_carries_kind_producer_profile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: ADR-0004 D3 (outcome.json kind/producer/profile/checks_ok)."""
+    """Covers: outcome.json kind/producer/profile/checks_ok."""
     repo = tmp_path / "repo"
     repo.mkdir()
     _init_main_repo(repo)

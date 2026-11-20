@@ -1,6 +1,6 @@
 # END Production Certification (Step 028)
 
-How to certify SaberOps for self-dogfooding under ADR-0004 §8 Q4.
+How to certify SaberOps for self-dogfooding.
 
 ## Q4 qualification criteria and evidence standard
 

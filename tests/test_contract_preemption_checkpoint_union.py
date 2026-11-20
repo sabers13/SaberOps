@@ -1,7 +1,7 @@
 """R3+R4 union contract: verified-ownership resolution (R4) meets create-only
 checkpoint-ref anchoring (R3) through the real preemption protocol.
 
-Covers: ADR-0002 D8 (Step001 R3+R4 compatibility join).
+Covers: Step001 R3+R4 compatibility join.
 
 Bridge scope only: each side's unit/adversarial behavior is proved in
 ``tests/test_checkpoint_ref_safety.py`` (R3, 12 cases) and
@@ -182,7 +182,7 @@ def _seed_quota_attempt(
 def test_union_newer_wip_snapshot_anchors_direct_ref_with_capsule_and_reuse(
     tmp_path: Path,
 ) -> None:
-    """Covers: ADR-0002 D8 R4-resolved newer WIP is published by the R3 CAS."""
+    """Covers: newer WIP is published by the R3 CAS."""
     repo = tmp_path / "repo"
     base = _repo(repo)
     db = _db(tmp_path)
@@ -262,7 +262,7 @@ def test_union_newer_wip_snapshot_anchors_direct_ref_with_capsule_and_reuse(
 def test_union_symref_at_allocated_index_fails_protocol_closed(
     tmp_path: Path,
 ) -> None:
-    """Covers: ADR-0002 D8 symref at the checkpoint name fails preemption closed."""
+    """Covers: symref at the checkpoint name fails preemption closed."""
     repo = tmp_path / "repo"
     base = _repo(repo)
     _git(["branch", "valuable"], repo)
@@ -306,7 +306,7 @@ def test_union_symref_at_allocated_index_fails_protocol_closed(
 def test_union_dangling_symref_at_allocated_index_fails_protocol_closed(
     tmp_path: Path,
 ) -> None:
-    """Covers: ADR-0002 D8 a dangling symref is not converted into an anchor."""
+    """Covers: a dangling symref is not converted into an anchor."""
     repo = tmp_path / "repo"
     base = _repo(repo)
 
@@ -346,7 +346,7 @@ def test_union_dangling_symref_at_allocated_index_fails_protocol_closed(
 def test_union_deregistered_hint_with_recorded_anchor_declines_without_fallback(
     tmp_path: Path,
 ) -> None:
-    """Covers: ADR-0002 D8 unverifiable hint + recorded S declines, no stale reuse."""
+    """Covers: unverifiable hint + recorded S declines, no stale reuse."""
     repo = tmp_path / "repo"
     base = _repo(repo)
     db = _db(tmp_path)

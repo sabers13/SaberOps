@@ -1,6 +1,6 @@
-"""Secret redaction for every MCP read surface (ADR-0004 D7).
+"""Secret redaction for every MCP read surface.
 
-ADR-0004 D7: "Read tools never return credentials or secret references'
+The contract is: "Read tools never return credentials or secret references'
 values."  A thin adapter cannot rely on the underlying service to be
 secret-free (a job goal, a repo path, a question answer or an evidence file is
 free text supplied by a human), so every value that leaves the MCP server is

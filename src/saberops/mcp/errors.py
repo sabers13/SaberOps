@@ -1,4 +1,4 @@
-"""Typed refusals for the SaberOps MCP interface (ADR-0004 D7, Step 014 / M3).
+"""Typed refusals for the SaberOps MCP interface (Step 014 / M3).
 
 Every refusal is a value, not a traceback: the stdio server maps an
 :class:`McpError` onto a JSON-RPC 2.0 error object with a stable code, so a
@@ -7,7 +7,7 @@ client can distinguish "the server does not offer that operation"
 (:class:`InvalidParamsError`) or "you are the read-only client"
 (:class:`LeaseReadOnlyError`).
 
-Authority is deterministic: the MCP layer refuses operations that ADR-0004
+Authority is deterministic: the MCP layer refuses operations that
 D7 marks **never exposed** (approving proposals, moving ``main``, pushing,
 quarantine approval, posture attestation, gate execution, tracked-source
 edits, deletions outside ``.orch``) before any handler runs.
@@ -118,7 +118,7 @@ class ToolError(McpError):
 
 
 class ForbiddenOperationError(ToolError):
-    """The requested operation is on the never-exposed list (ADR-0004 D7).
+    """The requested operation is on the never-exposed list.
 
     This is not "unknown tool": the operation is a known, permanently
     prohibited authority.  It is refused before any handler runs.

@@ -180,7 +180,7 @@ def test_testserver_host_rejected_outside_synthetic_scope(tmp_path: Path) -> Non
 
 
 def test_health_stays_open_by_design(tmp_path: Path) -> None:
-    """Covers: ADR-0004 D8 (health reports non-secret install identity)."""
+    """Covers: health reports non-secret install identity."""
     client = _loopback_client(tmp_path)
     response = client.get("/health", headers={"Host": "evil.test"})
     assert response.status_code == 200

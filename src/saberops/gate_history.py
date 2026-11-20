@@ -1,4 +1,4 @@
-"""Engine gate-history ledger (ADR-0004 D3).
+"""Engine gate-history ledger.
 
 One append-only JSONL ledger records every gate the engine produces, in the
 existing G-005 ``full.jsonl`` format **extended with ``kind`` and
@@ -48,7 +48,7 @@ class GateKind(StrEnum):
 class GateProducer(StrEnum):
     """Who produced a gate run.
 
-    ``ENGINE`` is the authoritative producer (ADR-0004 D3).  ``DEVELOPER`` is
+    ``ENGINE`` is the authoritative producer. ``DEVELOPER`` is
     the repository's own gate scripts run by a human/worker shell.  ``MODEL``
     and ``G0`` are iteration runs: they are never evidence.
     """
@@ -167,7 +167,7 @@ def read_entries(path: Path | str) -> list[dict[str, Any]]:
 
 
 def require_engine_evidence(entry: Mapping[str, Any]) -> None:
-    """Raise unless ``entry`` is authoritative engine evidence (ADR-0004 D3).
+    """Raise unless ``entry`` is authoritative engine evidence.
 
     G0 (model) runs and human developer runs are legitimate operations but
     they are never accepted as gate evidence; this seam states that rule in

@@ -147,7 +147,7 @@ provider/model.
 ## Pacing scheduler (`orch scheduler run`)
 
 `orch scheduler run [--once] [--interval-seconds INT] [--max-concurrent N]`
-runs the deterministic pacing scheduler loop (ADR-0002 D7). Queued jobs are
+runs the deterministic pacing scheduler loop. Queued jobs are
 scheduled in strict priority order: `URGENT` > `NORMAL` > `BACKGROUND`, with
 earliest deadline first, then FIFO by creation time. `BACKGROUND` jobs require
 binding-window pace >= 4.0 %/h.
@@ -244,7 +244,7 @@ case-insensitive) refuse schema-1/2 files until migrated and accept a retired
 role name as `build`. `orch run --tier T1|T2` runs the build route without
 escalation and `--tier T3` starts on its `strong_start` setting; `--max-tier
 T1|T2` disables escalation (default T3 allows it). Each explicit flag prints
-one deprecation line (ADR-0002 §11).
+one deprecation line.
 
 Escalation moves the build route to its `strong_start` setting, only on
 explicit typed `CAPABILITY_FAILURE` evidence (gate failure never escalates),
@@ -521,7 +521,7 @@ gate may skip that marker.
 
 `scripts/main-gate.sh` runs the full gate on `main` — by hand, before a wave, or
 from the optional systemd timer — so it can run at any time and is not tied to
-the night (ADR-0003 Q6). It also rebuilds the coverage map and keeps flaky
+the night. It also rebuilds the coverage map and keeps flaky
 statistics. It is deterministic, runs no model, and is idempotent. Run it by
 hand with `bash scripts/main-gate.sh` from the checkout. The timer is just one
 optional way to run it: it fires daily at 03:30 (`Persistent=true`,
@@ -582,7 +582,7 @@ Run once by hand: `bash scripts/main-gate.sh` from the checkout.
 
 ## Engine-run gates (G1 / G2 / G3) and the history ledger
 
-The engine is the only producer of authoritative gate evidence (ADR-0004 D3).
+The engine is the only producer of authoritative gate evidence.
 `Orchestrator.run_engine_gate(...)` (module seam `saberops.orchestrator.
 run_engine_gate`) runs one profile against one repository and records typed
 evidence:
@@ -605,7 +605,7 @@ evidence:
   must-not-touch, and no test may be removed or rewritten unless authorized by
   the lane's retirement table. Both fail closed as engine-raised findings
   (`WRITE_SCOPE_VIOLATION`, `TEST_RETIREMENT_VIOLATION`) with no command run.
-- **Disk admission** enforces the shared free-space floor (ADR-0003 D4) and,
+- **Disk admission** enforces the shared free-space floor and,
   when the Step 008 storage ledger is available, the gate's declared estimate
   through `host-disk` admission.
 - **Evidence** is written to the run's evidence directory as `engine-outcome.json`

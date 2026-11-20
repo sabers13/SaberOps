@@ -3,7 +3,7 @@
 Owner-aware inventory, retention and guarded garbage collection for the local
 artifacts SaberOps creates on one host: attempt worktrees, engine local
 branches, checkpoint refs, gate scratch, worktree venvs, run evidence and the
-owner database. It implements ADR-0003 D4/D6/D7 and Amendment 1, and consumes
+owner database. It implements the storage lifecycle and consumes
 the SB-1 reservation ledger (Amendment 2) without activating adaptive
 admission.
 
@@ -168,11 +168,11 @@ Adaptive admission (per-filesystem reservations from `storage_budget.py`) is
 **not activated** by this service. It is labelled `inactive` in telemetry and
 the shadow comparison remains shadow-only. Replacing the floor requires every
 gate and engine launch path to participate, owner-approved calibration and the
-G1/review/G3/activation proof of ADR-0003 Amendment 2.
+complete G1/review/G3/activation proof.
 
-## D7 SQLite robustness
+## SQLite robustness
 
-`saberops.sqlite_policy` is the single implementation of the D7 write policy:
+`saberops.sqlite_policy` is the single implementation of the bounded write policy:
 WAL, a 30 s `busy_timeout`, and `BEGIN IMMEDIATE` with bounded retry/backoff
 under one shared 30 s deadline covering acquire, statements and commit. Reads
 open genuinely read-only (`mode=ro`) and never take a write lock. A lock that

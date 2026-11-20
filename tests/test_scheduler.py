@@ -1,4 +1,4 @@
-"""Comprehensive tests for pure deterministic pacing scheduler (ADR-0002 D7).
+"""Comprehensive tests for pure deterministic pacing scheduler.
 
 All tests carry docstring `Covers: ...` and execute purely in-memory.
 """
@@ -593,7 +593,7 @@ def test_scheduler_monotonicity_lower_capacity_never_admits_more() -> None:
 
 
 def test_schedule_simulates_reservations_across_batch() -> None:
-    """Covers: ADR-0002 D5/D7/F2 batch simulated reservations prevent over-admitting."""
+    """Covers: batch simulated reservations prevent over-admitting."""
     c1 = _cand("codex", "gpt-5.6-sol")
     snapshot = _make_snapshot(((c1,),))
     pool = _make_pool_plan("chatgpt-plus", [("codex", 1.0)], red_line_pct=15.0)
@@ -624,7 +624,7 @@ def test_schedule_simulates_reservations_across_batch() -> None:
 
 
 def test_schedule_respects_running_counts() -> None:
-    """Covers: ADR-0002 D7/F3 running counts per pool enforce max_concurrent."""
+    """Covers: running counts per pool enforce max_concurrent."""
     c1 = _cand("codex", "gpt-5.6-sol")
     snapshot = _make_snapshot(((c1,),))
     pool = _make_pool_plan("chatgpt-plus", [("codex", 1.0)], max_concurrent=1)
@@ -650,7 +650,7 @@ def test_schedule_respects_running_counts() -> None:
 
 
 def test_wait_eta_picks_min_from_exact_or_parsed_decisions() -> None:
-    """Covers: ADR-0002 D7 / F9: wait ETA picks minimum reset ETA over posture-valid decisions."""
+    """Covers: wait ETA picks minimum reset ETA over posture-valid decisions."""
     c1 = _cand("codex", "gpt-5.6-sol")
     c2 = _cand("opencode", "claude-sonnet")
     snapshot = _make_snapshot(((c1,), (c2,)))
@@ -703,7 +703,7 @@ def _global_quota(pool: str, provider: str) -> QuotaState:
 
 
 def test_schedule_global_ceiling_blocks_when_full() -> None:
-    """Covers: ADR-0002 D7 / F3 global aggregate ceiling: at 15 RUNNING the
+    """Covers: global aggregate ceiling: at 15 RUNNING the
     next queued job WAITs with CONCURRENCY, counting jobs even without pool
     reservation rows.
     """
@@ -729,7 +729,7 @@ def test_schedule_global_ceiling_blocks_when_full() -> None:
 
 
 def test_schedule_global_ceiling_admits_at_most_one_from_last_slot() -> None:
-    """Covers: ADR-0002 D7 / F3 at 14 RUNNING with ceiling 15, exactly one of
+    """Covers: at 14 RUNNING with ceiling 15, exactly one of
     two queued jobs begins and the second waits (simulated same-tick start).
     """
     c1 = _cand("codex", "gpt-5.6-sol")
@@ -760,7 +760,7 @@ def test_schedule_global_ceiling_admits_at_most_one_from_last_slot() -> None:
 
 
 def test_schedule_global_ceiling_spans_distinct_pools() -> None:
-    """Covers: ADR-0002 D7 / F3 two queued jobs bound for distinct pools with
+    """Covers: two queued jobs bound for distinct pools with
     spare per-pool capacity still share one global ceiling.
     """
     c_g1 = _cand("codex", "gpt-5.6-sol")
@@ -795,7 +795,7 @@ def test_schedule_global_ceiling_spans_distinct_pools() -> None:
 
 
 def test_schedule_global_ceiling_absent_is_unbounded() -> None:
-    """Covers: ADR-0002 D7 / F3 pure scheduler leaves the global gate off when
+    """Covers: pure scheduler leaves the global gate off when
     no ceiling is supplied (backward-compatible per-pool-only behaviour).
     """
     c1 = _cand("codex", "gpt-5.6-sol")

@@ -1,4 +1,4 @@
-"""MCP JSON-RPC 2.0 server over the contract tools (ADR-0004 D7, M3).
+"""MCP JSON-RPC 2.0 server over the contract tools.
 
 Implements the standard lifecycle (``initialize`` ->
 ``notifications/initialized`` -> reads), ``tools/list`` / ``tools/call``,
@@ -64,7 +64,7 @@ __all__ = [
     "McpServer",
 ]
 
-#: Server identity advertised in ``initialize`` (ADR-0004 D7 / Step 014).
+#: Server identity advertised in ``initialize`` (Step 014).
 SERVER_NAME = "saberops"
 SERVER_VERSION = "0.5.0"
 

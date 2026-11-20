@@ -1,6 +1,6 @@
 # Owner question queue and the five-part escalation protocol (Q-1, Step 012)
 
-The engine never guesses an owner decision (ADR-0004 §3 D6, WORKFLOW §7 as
+The engine never guesses an owner decision (WORKFLOW §7 as
 data). It raises a **keyed question** instead. This document describes the
 queue that carries those questions from any role — including a worker mid-run —
 to the owner's answer, and the escalation protocol that accompanies them.
@@ -88,8 +88,8 @@ by the caller:
 | `REVIEW_FINDING_CLASSIFICATION`, `FIX_UP_CONTENT`, `G3_FAILURE_ROUTING`, `ROUTINE_QUESTION` | `PLAN` allowed |
 
 Every question also carries a derived **critical** tag. It is the union of an
-owner-only or acceptance class, a never-delegable question kind (the ADR-0004
-D14 list: test gate, data/training policy, roadmap scope, budget cap,
+owner-only or acceptance class, a never-delegable question kind (the
+list of such kinds: test gate, data/training policy, roadmap scope, budget cap,
 credentials, destructive operations, publishing), and an explicit orchestrator
 escalation (`escalated: true`). The tag can only be added, never removed, and
 `critical_reasons()` explains it. `question_view` exposes `critical`,
@@ -187,7 +187,7 @@ mounting application keeps its own local-only origin guard.
 The web application (`saberops.web`) does not mount this router yet: the web
 console cut belongs to a separate step, and Step 012's authorised scope is the
 service layer plus the CLI. UI-1 (Step 019) wires the answer surface into the
-local UI. The MCP tools of ADR-0004 D7 (`list_questions`, `answer_question`)
+local UI. The MCP tools (`list_questions`, `answer_question`)
 map onto the same verbs when M3 lands, and inherit the same refusals.
 
 ## Boundaries

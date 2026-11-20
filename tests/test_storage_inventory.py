@@ -1,6 +1,6 @@
 """GS-1 real owned-artifact inventory contracts.
 
-Covers: ADR-0003 Amendment 1 §1/§2 (ownership from real persisted provenance,
+Covers: ownership from real persisted provenance,
 unknown => KEEP, no prune from missing registration) and §5 (conservative
 reclaimable-byte accounting for hard-linked/shared data).
 """
@@ -102,7 +102,7 @@ def _measure_hardlink_free(tmp_path: Path) -> None:
 
 
 def test_owned_terminal_worktree_carries_provenance(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 1 §1 -- ownership comes from real records."""
+    """Covers: ownership comes from real records."""
     repo = _repo(tmp_path)
     db = Database(tmp_path / "orch.db")
     base = GitManager.get_head_commit(repo)
@@ -151,7 +151,7 @@ def test_owned_terminal_worktree_carries_provenance(tmp_path: Path) -> None:
 
 
 def test_gate_passed_candidate_is_a_protected_consumer(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 1 §2 -- pending review keeps the worktree."""
+    """Covers: pending review keeps the worktree."""
     repo = _repo(tmp_path)
     db = Database(tmp_path / "orch.db")
     wt = GitManager.get_default_worktree_base(repo) / "run2" / "a1"
@@ -186,7 +186,7 @@ def test_gate_passed_candidate_is_a_protected_consumer(tmp_path: Path) -> None:
 
 
 def test_running_run_is_owned_live(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 1 §2 -- an active run is never eligible."""
+    """Covers: an active run is never eligible."""
     repo = _repo(tmp_path)
     db = Database(tmp_path / "orch.db")
     wt = GitManager.get_default_worktree_base(repo) / "run3" / "a1"
@@ -207,7 +207,7 @@ def test_running_run_is_owned_live(tmp_path: Path) -> None:
 
 
 def test_unregistered_worktree_and_branch_fail_closed(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 1 §1 -- unregistered objects are UNKNOWN/KEEP."""
+    """Covers: unregistered objects are UNKNOWN/KEEP."""
     repo = _repo(tmp_path)
     db = Database(tmp_path / "orch.db")
     wt = GitManager.get_default_worktree_base(repo) / "ghost" / "a1"
@@ -224,7 +224,7 @@ def test_unregistered_worktree_and_branch_fail_closed(tmp_path: Path) -> None:
 
 
 def test_foreign_branches_are_not_inventoried(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 1 §3 -- only engine-owned refs are in scope."""
+    """Covers: only engine-owned refs are in scope."""
     repo = _repo(tmp_path)
     _git(repo, "branch", "feature/manual")
     db = Database(tmp_path / "orch.db")
@@ -235,7 +235,7 @@ def test_foreign_branches_are_not_inventoried(tmp_path: Path) -> None:
 
 
 def test_hardlinked_bytes_are_not_definitely_reclaimable(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 1 §5 -- shared hard-linked bytes are not summed."""
+    """Covers: shared hard-linked bytes are not summed."""
     directory = tmp_path / "tree"
     directory.mkdir()
     original = tmp_path / "original.bin"
@@ -249,14 +249,14 @@ def test_hardlinked_bytes_are_not_definitely_reclaimable(tmp_path: Path) -> None
 
 
 def test_measure_missing_path_is_unknown_not_zero(tmp_path: Path) -> None:
-    """Covers: ADR-0003 D6 -- a missing/unmeasurable path is UNKNOWN, never 0."""
+    """Covers: a missing/unmeasurable path is UNKNOWN, never 0."""
     measure = measure_path_bytes(tmp_path / "nope")
     assert measure.apparent_bytes is None
     assert measure.reclaimable_bytes is None
 
 
 def test_missing_database_is_a_true_no_op(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 1 §6 -- dry-run creates nothing, adopts nothing."""
+    """Covers: dry-run creates nothing, adopts nothing."""
     repo = _repo(tmp_path)
     db_path = tmp_path / "absent.db"
     inventory = build_inventory(None, repo_root=repo)
@@ -269,7 +269,7 @@ def test_missing_database_is_a_true_no_op(tmp_path: Path) -> None:
 
 
 def test_not_a_git_repository_reports_and_stops(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 1 §1 -- no repo identity means no inventory."""
+    """Covers: no repo identity means no inventory."""
     plain = tmp_path / "plain"
     plain.mkdir()
     inventory = build_inventory(None, repo_root=plain)
@@ -278,7 +278,7 @@ def test_not_a_git_repository_reports_and_stops(tmp_path: Path) -> None:
 
 
 def test_checkpoint_refs_are_enumerated_read_only(tmp_path: Path) -> None:
-    """Covers: ADR-0003 D6 -- checkpoint refs are inventoried with their job id."""
+    """Covers: checkpoint refs are inventoried with their job id."""
     repo = _repo(tmp_path)
     base = GitManager.get_head_commit(repo)
     GitManager.anchor_checkpoint_ref(repo, "job1", 0, base)
@@ -305,7 +305,7 @@ def _scratch(root: Path, name: str, owner: dict[str, object]) -> Path:
 
 
 def test_gate_scratch_is_inventoried_with_owner_liveness(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 1 §1 -- scratch is discovered from real records."""
+    """Covers: scratch is discovered from real records."""
     import json as _json
 
     repo = _repo(tmp_path)
@@ -336,7 +336,7 @@ def test_gate_scratch_is_inventoried_with_owner_liveness(tmp_path: Path) -> None
 
 
 def test_evidence_is_inventoried_from_verified_provenance(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 1 §1/§4 -- evidence linked to a real run record."""
+    """Covers: evidence linked to a real run record."""
     repo = _repo(tmp_path)
     db = Database(tmp_path / "orch.db")
     base = GitManager.get_head_commit(repo)
@@ -367,7 +367,7 @@ def test_evidence_is_inventoried_from_verified_provenance(tmp_path: Path) -> Non
 
 
 def test_checkpoint_ref_links_to_terminal_job(tmp_path: Path) -> None:
-    """Covers: ADR-0003 D6 -- checkpoint refs get real job terminal provenance."""
+    """Covers: checkpoint refs get real job terminal provenance."""
     from saberops.jobs.models import Job, JobRequirements, JobState
     from saberops.jobs.store import insert_job
 
@@ -400,7 +400,7 @@ def test_checkpoint_ref_links_to_terminal_job(tmp_path: Path) -> None:
 
 
 def test_checkpoint_ref_without_job_stays_unknown(tmp_path: Path) -> None:
-    """Covers: ADR-0003 D6 -- unlinked checkpoint refs fail closed to UNKNOWN."""
+    """Covers: unlinked checkpoint refs fail closed to UNKNOWN."""
     repo = _repo(tmp_path)
     base = GitManager.get_head_commit(repo)
     GitManager.anchor_checkpoint_ref(repo, "ghost", 0, base)
@@ -412,7 +412,7 @@ def test_checkpoint_ref_without_job_stays_unknown(tmp_path: Path) -> None:
 
 
 def test_owned_caches_are_discovered_and_protected(tmp_path: Path) -> None:
-    """Covers: ADR-0003 D6 -- engine-owned caches are inventoried and kept."""
+    """Covers: engine-owned caches are inventoried and kept."""
     import subprocess as _subprocess
 
     repo = _repo(tmp_path)

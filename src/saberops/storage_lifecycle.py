@@ -6,14 +6,14 @@ filesystem walks, no deletions, no database mutation, no subprocess calls,
 and no CLI or scheduler integration. It only answers "what would the
 accepted retention policy allow?" so a future GC service can execute it.
 
-Accepted policy implemented here (ADR-0003 D4/D6, Q1/Q4; frozen values):
+Accepted policy implemented here (frozen values):
 
 - Evidence: compress after 7 days (anchored at creation, non-destructive);
   deletion only for terminal runs with an explicit timezone-aware terminal
   timestamp, measured from terminal time: accepted runs 90 days, other
   terminal runs 30 days (owner-configurable via :func:`plan_gc` arguments).
   The terminal anchor is an UNAPPROVED conservative retention safety floor,
-  not an ADR decision: ADR-0003 D6/Q4 does not settle the anchor, and the
+  not an ADR decision: it does not settle the anchor, and the
   owner must rule on the canonical anchor before any GC execution.
 - Checkpoint refs (``refs/saberops/checkpoints/<job_id>/<n>``): retained
   until 7 days after the owning job is terminal. The ref's embedded job
@@ -29,7 +29,7 @@ Accepted policy implemented here (ADR-0003 D4/D6, Q1/Q4; frozen values):
   worktree is gone or itself eligible for removal).
 - Owner DB: ``VACUUM`` eligible weekly when the free-page ratio exceeds 20 %.
 - Unowned items are NEVER eligible for deletion in this slice. Orphan
-  reclamation (ADR-0003 D6) needs engine ownership records that do not exist
+  reclamation needs engine ownership records that do not exist
   yet (Steps 001/002); until then unknown ownership fails closed to KEEP.
 
 Fail-closed rules: unknown, missing, non-enum or unrecognized ownership
@@ -87,7 +87,7 @@ __all__ = [
     "plan_gc",
 ]
 
-# Frozen accepted-policy values (ADR-0003 D6 + Q1/Q4).
+# Frozen accepted-policy values.
 EVIDENCE_COMPRESS_AFTER = timedelta(days=7)
 EVIDENCE_ACCEPTED_RETENTION = timedelta(days=90)
 EVIDENCE_OTHER_RETENTION = timedelta(days=30)
@@ -269,7 +269,7 @@ class GcPlan:
 
 
 def _owner_ok(owner: str | None, state: object) -> bool:
-    """Covers: fail-closed ownership (ADR-0003 D6 orphan rule, provisional).
+    """Covers: fail-closed ownership (orphan rule, provisional).
 
     Ownership is authorized only by an exact :class:`OwnerState` member that
     is not ``UNKNOWN``. Raw strings (``"unknown"``, ``"known-dead"``),
@@ -308,7 +308,7 @@ def _check_filesystem_path(path: str, owned_roots: Sequence[str]) -> str | None:
     """Return None when ``path`` is safe, else the KEEP reason code.
 
     Covers: outside-root escapes, ``..`` traversals and owned-root
-    self-protection (ADR-0003 D6 root confinement). A path equal to an owned
+    self-protection (root confinement). A path equal to an owned
     root is never eligible (``root-itself-protected``); only a strict
     descendant of a usable owned root is. Purely lexical: blind to symlink,
     mount/bind, and TOCTOU escapes. Eligible verdicts are policy proposals
@@ -341,7 +341,7 @@ def _check_filesystem_path(path: str, owned_roots: Sequence[str]) -> str | None:
 def _check_ref(ref: str, job_id: str | None) -> str | None:
     """Return None when ``ref`` is exactly ``<job_id>/<seq>`` in-namespace.
 
-    Covers: checkpoint ref↔job ownership binding (ADR-0003 D6 "the OWNING
+    Covers: checkpoint ref↔job ownership binding ("the OWNING
     job"). Terminal metadata belonging to a different job must never
     authorize deletion, and a merely valid prefix never implies ownership.
     """
@@ -376,7 +376,7 @@ def _plan_scratch(
     owned_roots: Sequence[str],
     failed_scratch_cap_bytes: int,
 ) -> PlanDecision:
-    """Covers: ADR-0003 D4/D6 gate-scratch retention (end of gate, newest-kept)."""
+    """Covers: gate-scratch retention (end of gate, newest-kept)."""
     _ = now
     reason = _check_filesystem_path(item.path, owned_roots)
     if reason is not None:
@@ -421,7 +421,7 @@ def _plan_scratch(
 def _plan_worktree(
     item: AttemptWorktree, *, now: datetime, owned_roots: Sequence[str]
 ) -> PlanDecision:
-    """Covers: ADR-0003 D6 attempt-worktree retention (pending/preempted kept)."""
+    """Covers: attempt-worktree retention (pending/preempted kept)."""
     _ = now
     reason = _check_filesystem_path(item.path, owned_roots)
     if reason is not None:
@@ -468,7 +468,7 @@ def _plan_worktree(
 def _plan_checkpoint(
     item: CheckpointRef, *, now: datetime, checkpoint_retention: timedelta
 ) -> PlanDecision:
-    """Covers: ADR-0003 D6 checkpoint refs (job terminal + 7 days, job-bound)."""
+    """Covers: checkpoint refs (job terminal + 7 days, job-bound)."""
     reason = _check_ref(item.ref, item.job_id)
     if reason is not None:
         return _keep(item.artifact_id, ArtifactKind.CHECKPOINT_REF, reason, item.owner)
@@ -508,7 +508,7 @@ def _plan_evidence(
     accepted_retention: timedelta,
     other_retention: timedelta,
 ) -> PlanDecision:
-    """Covers: ADR-0003 D6/Q4 evidence (compress 7d; delete from terminal time)."""
+    """Covers: evidence (compress 7d; delete from terminal time)."""
     reason = _check_filesystem_path(item.path, owned_roots)
     if reason is not None:
         return _keep(item.artifact_id, ArtifactKind.EVIDENCE, reason, item.owner)
@@ -551,7 +551,7 @@ def _plan_evidence(
 
 
 def _plan_venv(item: WorktreeVenv, *, now: datetime, owned_roots: Sequence[str]) -> PlanDecision:
-    """Covers: ADR-0003 D6 worktree venvs (die with the worktree)."""
+    """Covers: worktree venvs (die with the worktree)."""
     _ = now
     reason = _check_filesystem_path(item.path, owned_roots)
     if reason is not None:
@@ -576,7 +576,7 @@ def _plan_venv(item: WorktreeVenv, *, now: datetime, owned_roots: Sequence[str])
 def _plan_owner_db(
     item: OwnerDatabase, *, now: datetime, owned_roots: Sequence[str]
 ) -> PlanDecision:
-    """Covers: ADR-0003 D6 owner DB (weekly VACUUM above 20 % free pages)."""
+    """Covers: owner DB (weekly VACUUM above 20 % free pages)."""
     reason = _check_filesystem_path(item.path, owned_roots)
     if reason is not None:
         return _keep(item.artifact_id, ArtifactKind.OWNER_DB, reason, item.owner)

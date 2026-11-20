@@ -1119,7 +1119,6 @@ def test_deprecated_tier_flags_warn_and_supervisor_forwards_selectively(
     # The stubbed launcher never claims an owner, so the exit code reflects
     # that; what matters here is the run was created/launched and warned.
     assert launches
-    assert "ADR-0002" in err
     assert "--tier is deprecated" in err
     assert "--max-tier is deprecated" in err
     # Default runs forward neither flag (no deprecation noise in detached logs).

@@ -34,7 +34,7 @@ def owner_connection(db: Database) -> Iterator[sqlite3.Connection]:
     """Open the owner DB with the same pragmas and D7 timeout as the class.
 
     The busy timeout is the shared :data:`saberops.sqlite_policy.BUSY_TIMEOUT_MS`
-    (ADR-0003 D7) rather than a second, weaker 5 s value, so this store cannot
+    rather than a second, weaker 5 s value, so this store cannot
     become an under-protected write path beside the main database helper.
     """
     from saberops.db import Database as _Db
@@ -67,7 +67,7 @@ def owner_write_connection(
 ) -> Iterator[sqlite3.Connection]:
     """Open a bounded ``BEGIN IMMEDIATE`` write transaction on the owner DB.
 
-    ADR-0003 D7: WAL, a 30 s busy timeout narrowed to one shared deadline, a
+    WAL, a 30 s busy timeout narrowed to one shared deadline, a
     single bounded ``BEGIN IMMEDIATE`` with backoff, commit on success and
     rollback on failure.  Lock exhaustion raises a typed ``SqliteBusyError`` for
     the owning scheduler/run boundary rather than a raw ``OperationalError``.

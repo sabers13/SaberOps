@@ -1,4 +1,4 @@
-"""Deterministic write-scope, test-retirement and gate-protection checks (ADR-0004 D3).
+"""Deterministic write-scope, test-retirement and gate-protection checks.
 
 Three pre-G1 checks the engine raises itself, all pure and fail-closed:
 

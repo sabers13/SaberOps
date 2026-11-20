@@ -1,4 +1,4 @@
-"""Contract: orchestrator dispatches through role chains (ADR-0002 §11).
+"""Contract: orchestrator dispatches through role chains.
 
 The classifier still labels the run tier, but it no longer selects routes:
 every dispatch resolves the build route, and an escalation moves that route to
@@ -51,7 +51,7 @@ def _write_synthetic_verified_postures(config_home: Path) -> None:
     """Seed an isolated owner config with a verified posture for the synthetic
     ``h3`` candidate used by this module.
 
-    Covers: ADR-0002 D2 / WORKFLOW §7 authorized setup-only fixture migration.
+    Covers: WORKFLOW §7 authorized setup-only fixture migration.
     This adds ONLY a synthetic provider/posture record needed to preserve the
     module's historical control-flow assertions now that unverified routes
     fail closed (F1); no assertion or expected behaviour is changed and no real
@@ -260,7 +260,7 @@ def _events_by_type(events: list[Any], event_type: str) -> list[Any]:
 def test_auto_run_labelled_t1_dispatches_worker_chain_head(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
-    """Covers: ADR-0002 §11 item 3 (classifier labels, role chain routes)."""
+    """Covers: classifier labels, role chain routes."""
     repo = tmp_path / "repo"
     _init_repo(repo)
     log: list[str] = []
@@ -530,7 +530,7 @@ def test_explicit_worker_timeout_overrides_role_default(
 def test_schema2_frozen_snapshot_continuation_keeps_bytes_and_worker_chain(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
-    """Covers: ADR-0002 §11 item 2 (frozen snapshots keep tier provenance)."""
+    """Covers: frozen snapshots keep tier provenance."""
     import json
 
     from saberops.routing_config import _content_hash, payload_to_snapshot
@@ -769,7 +769,7 @@ def _owning_job(db: Database, repo: Path, base: str, job_id: str, run_id: str) -
 def test_quota_exhausted_job_run_preempts_with_resume_capsule(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
-    """Covers: ADR-0002 D8 trigger end to end (quota + no admitted fallback group).
+    """Covers: trigger end to end (quota + no admitted fallback group).
 
     A durable job-owned run whose only fallback-group candidate reports
     genuine QUOTA_EXHAUSTED ends PREEMPTED (terminal for the run, not the
@@ -847,7 +847,7 @@ def test_quota_exhausted_job_run_preempts_with_resume_capsule(
 def test_quota_exhausted_multi_candidate_chain_records_no_eligible(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
-    """Covers: ADR-0002 D8 multi-fallback shape records the ladder verdict.
+    """Covers: multi-fallback shape records the ladder verdict.
 
     Every fallback-group candidate reports quota: the ladder records a
     ``no_eligible_candidate`` event (the coordinator's first rule) and the
@@ -906,7 +906,7 @@ def test_quota_exhausted_multi_candidate_chain_records_no_eligible(
 def test_mixed_quota_gate_failure_and_skip_chain_does_not_preempt(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
-    """Covers: ADR-0002 D8 F1 -- the real 3-candidate mixed-chain ladder shape.
+    """Covers: the real 3-candidate mixed-chain ladder shape.
 
     Chain ``[A/h3/m1 -> QUOTA_EXHAUSTED]`` then ``[B/h4/m2 -> admitted, gate
     FAILED]`` then ``[C/h3/m3 -> skipped as quota-blocked]``.  The production
@@ -1015,7 +1015,7 @@ def test_mixed_quota_gate_failure_and_skip_chain_does_not_preempt(
 def test_quota_exhausted_standalone_run_keeps_failed_behavior(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
-    """Covers: ADR-0002 D8 standalone runs keep truthful failure (keep-compat)."""
+    """Covers: standalone runs keep truthful failure (keep-compat)."""
     repo = tmp_path / "repo"
     _init_repo(repo)
     log: list[str] = []

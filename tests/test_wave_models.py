@@ -80,7 +80,7 @@ def _wave(**overrides: object) -> Wave:
 
 
 def test_valid_lane_and_wave_construct() -> None:
-    """Covers: ADR-0004 D2 (lane/wave fields)."""
+    """Covers: lane/wave fields."""
     lane = _lane()
     assert lane.lane_id == "L1"
     assert lane.touches == ["src/saberops/a.py"]
@@ -108,13 +108,13 @@ def test_valid_lane_and_wave_construct() -> None:
     ],
 )
 def test_invalid_lane_is_refused(overrides: dict[str, object]) -> None:
-    """Covers: ADR-0004 D2 (lane validation fails closed)."""
+    """Covers: lane validation fails closed."""
     with pytest.raises(WaveModelError):
         _lane_from(overrides)
 
 
 def test_touches_escaping_the_repository_are_refused() -> None:
-    """Covers: ADR-0004 D2 (repo-relative write scope)."""
+    """Covers: repo-relative write scope."""
     with pytest.raises(WaveModelError):
         _lane(touches=["../outside"])
 
@@ -134,19 +134,19 @@ def test_touches_escaping_the_repository_are_refused() -> None:
     ],
 )
 def test_invalid_wave_is_refused(overrides: dict[str, object]) -> None:
-    """Covers: ADR-0004 D2 (wave validation fails closed)."""
+    """Covers: wave validation fails closed."""
     with pytest.raises(WaveModelError):
         _wave(**overrides)
 
 
 def test_duplicate_lane_ids_are_refused() -> None:
-    """Covers: ADR-0004 D2 (merge_order is a permutation of the lane ids)."""
+    """Covers: merge_order is a permutation of the lane ids."""
     with pytest.raises(WaveModelError):
         _wave(lanes=[_lane(), _lane()], merge_order=["L1", "L1"])
 
 
 def test_merge_order_must_cover_every_lane_exactly_once() -> None:
-    """Covers: ADR-0004 D2 + §4 invariant 3 (deterministic merge order)."""
+    """Covers: deterministic merge order."""
     lanes = [_lane("L1"), _lane("L2")]
     with pytest.raises(WaveModelError):
         _wave(lanes=lanes, merge_order=["L1"])
@@ -155,7 +155,7 @@ def test_merge_order_must_cover_every_lane_exactly_once() -> None:
 
 
 def test_budget_bounds_are_enforced() -> None:
-    """Covers: ADR-0004 D4 + §4 invariant 10 (budgets)."""
+    """Covers: budgets."""
     assert _wave(budgets={"g3_runs": MAX_G3_RUNS_PER_WAVE}).budgets["g3_runs"] == 4
     assert _wave(budgets={"fix_rounds": MAX_FIX_ROUNDS_PER_FAILURE}).budgets["fix_rounds"] == 2
     with pytest.raises(WaveModelError):
@@ -169,7 +169,7 @@ def test_budget_bounds_are_enforced() -> None:
 
 
 def test_budget_values_must_be_json_serializable() -> None:
-    """Covers: ADR-0004 D2 (SQLite/JSON-compatible budgets)."""
+    """Covers: SQLite/JSON-compatible budgets."""
 
     class _Opaque:
         pass
@@ -179,7 +179,7 @@ def test_budget_values_must_be_json_serializable() -> None:
 
 
 def test_lane_by_id_rejects_unknown_ids() -> None:
-    """Covers: ADR-0004 D2 (lane identity)."""
+    """Covers: lane identity."""
     wave = _wave()
     assert wave.lane_by_id("L1").lane_id == "L1"
     with pytest.raises(WaveModelError):
@@ -190,7 +190,7 @@ def test_lane_by_id_rejects_unknown_ids() -> None:
 
 
 def test_wave_happy_path_is_the_adr_sequence() -> None:
-    """Covers: ADR-0004 D2 (PLANNED..RUNNING..INTEGRATING..GATED..ACCEPTED)."""
+    """Covers: PLANNED..RUNNING..INTEGRATING..GATED..ACCEPTED."""
     state = WaveState.PLANNED
     for target in (
         WaveState.RUNNING,
@@ -205,7 +205,7 @@ def test_wave_happy_path_is_the_adr_sequence() -> None:
 
 
 def test_wave_illegal_transitions_raise() -> None:
-    """Covers: ADR-0004 D2 (fail-closed wave state machine)."""
+    """Covers: fail-closed wave state machine."""
     with pytest.raises(WaveModelError):
         transition_wave(WaveState.PLANNED, WaveState.ACCEPTED)
     with pytest.raises(WaveModelError):
@@ -219,7 +219,7 @@ def test_wave_illegal_transitions_raise() -> None:
 
 
 def test_wave_blocked_is_transient_and_cancelled_is_terminal() -> None:
-    """Covers: ADR-0004 D2 (BLOCKED resumes; CANCELLED is terminal)."""
+    """Covers: BLOCKED resumes; CANCELLED is terminal."""
     assert transition_wave(WaveState.RUNNING, WaveState.BLOCKED) is WaveState.BLOCKED
     assert transition_wave(WaveState.BLOCKED, WaveState.RUNNING) is WaveState.RUNNING
     assert transition_wave(WaveState.BLOCKED, WaveState.CANCELLED) is WaveState.CANCELLED
@@ -228,7 +228,7 @@ def test_wave_blocked_is_transient_and_cancelled_is_terminal() -> None:
 
 
 def test_lane_happy_path_and_fix_up_round_trip() -> None:
-    """Covers: ADR-0004 D2 (lane states mirror the BOARD)."""
+    """Covers: lane states mirror the BOARD."""
     state = transition_lane(LaneState.PLANNED, LaneState.RUNNING)
     state = transition_lane(state, LaneState.REVIEW)
     state = transition_lane(state, LaneState.FIX_UP_K)
@@ -241,7 +241,7 @@ def test_lane_happy_path_and_fix_up_round_trip() -> None:
 
 
 def test_lane_illegal_transitions_raise() -> None:
-    """Covers: ADR-0004 D2 (fail-closed lane state machine)."""
+    """Covers: fail-closed lane state machine."""
     with pytest.raises(WaveModelError):
         transition_lane(LaneState.REVIEW, LaneState.ACCEPTED)
     with pytest.raises(WaveModelError):
@@ -252,7 +252,7 @@ def test_lane_illegal_transitions_raise() -> None:
 
 
 def test_transition_tables_cover_every_state() -> None:
-    """Covers: ADR-0004 D2 (total transition tables)."""
+    """Covers: total transition tables."""
     assert set(WAVE_ALLOWED_TRANSITIONS) == set(WaveState)
     assert set(LANE_ALLOWED_TRANSITIONS) == set(LaneState)
     for wave_source, wave_targets in WAVE_ALLOWED_TRANSITIONS.items():
@@ -280,7 +280,7 @@ def test_preempted_lane_parks_and_resumes() -> None:
 
 
 def test_json_round_trip_is_lossless_and_canonical() -> None:
-    """Covers: ADR-0004 D2 (JSON serialization)."""
+    """Covers: JSON serialization."""
     wave = _wave(named_glue=["src/saberops/glue.py"], budgets={"g3_runs": 4})
     restored = Wave.from_json(wave.to_json())
     assert restored == wave
@@ -290,7 +290,7 @@ def test_json_round_trip_is_lossless_and_canonical() -> None:
 
 
 def test_sqlite_row_round_trip_is_lossless() -> None:
-    """Covers: ADR-0004 D2 (SQLite-compatible dictionary)."""
+    """Covers: SQLite-compatible dictionary."""
     wave = _wave(named_glue=["glue.py"], budgets={"fix_rounds": 2})
     row = wave.as_sqlite_row()
     assert set(row) == {
@@ -307,7 +307,7 @@ def test_sqlite_row_round_trip_is_lossless() -> None:
 
 
 def test_from_dict_fails_closed_on_bad_types() -> None:
-    """Covers: ADR-0004 D2 (deserialization validates)."""
+    """Covers: deserialization validates."""
     with pytest.raises(WaveModelError):
         Wave.from_dict("not a mapping")
     with pytest.raises(WaveModelError):
@@ -327,7 +327,7 @@ def test_from_dict_fails_closed_on_bad_types() -> None:
 
 
 def test_from_sqlite_row_fails_closed_on_bad_json() -> None:
-    """Covers: ADR-0004 D2 (SQLite row validation)."""
+    """Covers: SQLite row validation."""
     row = _wave().as_sqlite_row()
     row["lanes_json"] = "{not json"
     with pytest.raises(WaveModelError):
@@ -339,13 +339,13 @@ def test_from_sqlite_row_fails_closed_on_bad_json() -> None:
 
 
 def test_from_json_rejects_unparseable_text() -> None:
-    """Covers: ADR-0004 D2 (JSON parse is fail-closed)."""
+    """Covers: JSON parse is fail-closed."""
     with pytest.raises(WaveModelError):
         Wave.from_json("{oops")
 
 
 def test_wave_from_sequence_normalizes_scopes_and_defaults_merge_order() -> None:
-    """Covers: ADR-0004 D2 (convenience constructor normalizes)."""
+    """Covers: convenience constructor normalizes."""
     wave = wave_from_sequence(
         wave_id="w-seq",
         base_sha=SHA_B,
@@ -368,7 +368,7 @@ def test_wave_from_sequence_normalizes_scopes_and_defaults_merge_order() -> None
 
 
 def test_models_are_immutable() -> None:
-    """Covers: ADR-0004 D2 (immutable models)."""
+    """Covers: immutable models."""
     lane = _lane()
     with pytest.raises(dataclasses.FrozenInstanceError):
         lane.lane_id = "other"  # type: ignore[misc]
@@ -378,6 +378,6 @@ def test_models_are_immutable() -> None:
 
 
 def test_identical_inputs_produce_identical_models() -> None:
-    """Covers: ADR-0004 D2 (deterministic construction)."""
+    """Covers: deterministic construction."""
     assert _wave() == _wave()
     assert _wave().to_json() == _wave().to_json()

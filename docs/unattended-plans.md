@@ -11,7 +11,7 @@ the questions an overnight run must answer without the owner awake:
 * when the run must shout (the no-silent-stall alarm);
 * what the owner reads in the morning (the morning report).
 
-It encodes ADR-0004 **D14** (overnight readiness) and the roadmap's **RD-1**
+It encodes the overnight-readiness policy and the roadmap's **RD-1**
 acceptance criteria. It is an **advice-and-record projection only**: the runtime
 still owns the plan, the scheduler, the notification
 transport, the owner-question queue, the audit store and the candidate's git

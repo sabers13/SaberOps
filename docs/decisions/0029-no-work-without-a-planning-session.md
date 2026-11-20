@@ -8,7 +8,6 @@
   [ADR-0028](0028-away-mode-standing-decisions.md) (away standing decisions),
   [ADR-0025](0025-read-only-tmux-watch.md) (read-only watch view),
   [ADR-0015](0015-plan-files-and-rendered-plan-state.md) (plan-lane pause seam),
-  [ADR-0002](0002-routing-admission-and-quota.md) (quota preemption/resume),
   [ADR-0011](0011-bounded-automatic-actions.md) (no silent work)
 
 ## 1. Context

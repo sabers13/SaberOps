@@ -177,7 +177,7 @@ def _normalize_role(role: Any) -> str:
 
 
 def _role_for_tier_alias(tier: Any | None) -> str:
-    """Legacy tier alias (ADR-0002 §11): every tier starts on the build route.
+    """Legacy tier alias: every tier starts on the build route.
 
     The old T3 chain is now the build route's ``strong_start`` setting; a
     legacy caller that passes ``tier`` still selects ``BUILD`` and the caller
@@ -215,7 +215,7 @@ def resolve_candidate_chain(
     Args:
         role: Routing role.  ``BUILD`` is the only routed role; retired names
             resolve to it.
-        tier: Deprecated alias (ADR-0002 §11): every tier selects ``BUILD``.
+        tier: Deprecated alias: every tier selects ``BUILD``.
             Passing both ``role`` and ``tier`` raises ``ValueError``.
         strong_start: Select the build route's stronger-model setting.  Used
             for a manual high-tier run or an escalation; falls back to the

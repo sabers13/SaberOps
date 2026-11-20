@@ -3,15 +3,14 @@
 - **Status:** Accepted. Implemented in Phase 1 lane F10 (Wave 3).
 - **Date:** 2026-11-19
 - **Decider:** Saber (owner), Phase 1 plan lane F10
-- **Related:** [ADR-0004](0004-mcp-authority-and-evidence.md) (D6 question
-  authority), [ADR-0011](0011-bounded-automatic-actions.md) (no silent work),
+- **Related:** [ADR-0011](0011-bounded-automatic-actions.md) (no silent work),
   [ADR-0020](0020-owner-mode.md) (one owner mode)
 
 ## 1. Context
 
 The owner asked for a mode in which the orchestrator answers routine questions
 itself and asks only what it judges critical. The question queue already derived
-answer authority from the decision class (ADR-0004 D6) and stored an
+answer authority from the decision class and stored an
 orchestrator-alone answer with evidence and a rejected alternative, but nothing
 marked a question as critical, and `answer_question` accepted a planning-session
 answer in every mode. The owner-only split covered the most dangerous classes,
@@ -21,7 +20,7 @@ yet a routine class could still be escalated on judgment and had no durable tag.
 
 1. **Every question carries a derived `critical` tag.** It is the union of: an
    owner-only decision class; the acceptance class (acceptance has no delegable
-   form); a never-delegable question kind (the ADR-0004 D14 list: test gate,
+   form); a never-delegable question kind (the list of such kinds: test gate,
    data/training policy, roadmap scope, budget cap, credentials, destructive
    operations, publishing); or an explicit orchestrator escalation. Orchestrator
    judgment is additive only: no field, caller or mode can remove a reason. The

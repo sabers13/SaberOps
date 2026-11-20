@@ -3,8 +3,7 @@
 - **Status:** Accepted. Implemented in Phase 1 lane F11 (Wave 3).
 - **Date:** 2026-11-19
 - **Decider:** Saber (owner), Phase 1 plan lane F11
-- **Related:** [ADR-0004](0004-mcp-authority-and-evidence.md) (D14 unattended
-  policy), [ADR-0011](0011-bounded-automatic-actions.md) (no silent work),
+- **Related:** [ADR-0011](0011-bounded-automatic-actions.md) (no silent work),
   [ADR-0020](0020-owner-mode.md) (one owner mode that only narrows)
 
 ## 1. Context

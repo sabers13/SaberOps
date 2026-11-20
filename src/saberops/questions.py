@@ -2,9 +2,9 @@
 
 What this module is
 -------------------
-One service layer for the owner question queue of ADR-0004 §3 D6 and the
+One service layer for the owner question queue and the
 Step 012 outcome.  A question is **keyed**: the same key asked twice is one
-question, never a duplicate (idempotent tool contract, ADR-0004 invariant 13).
+question, never a duplicate (idempotent tool contract).
 Any role may raise one, including a worker mid-run.
 
 The invariants this module owns
@@ -36,7 +36,7 @@ Orchestrator's recommendation.  A question cannot exist without all five parts.
 Authority
 ---------
 :func:`resolve_answer_authority` maps a :class:`DecisionClass` onto its answer
-authority.  The owner-only classes of ADR-0004 D6 (moving ``main``, pushing,
+authority. The owner-only classes (moving ``main``, pushing,
 quarantine, billing/posture, test changes against an accepted ADR, deleting
 outside the engine's own folders, approving config proposals) resolve to
 ``OWNER``; the Orchestrator-answerable criteria (classifying review findings,
@@ -275,11 +275,11 @@ class QuestionStatus(StrEnum):
 class DecisionClass(StrEnum):
     """The decision kind a question asks about.
 
-    The split is the ADR-0004 D6 one.  Owner-only decisions can only ever be
-    answered by the owner (ADR-0004 invariant 6).
+    The split is the one. Owner-only decisions can only ever be
+    answered by the owner.
     """
 
-    # Owner-only (ADR-0004 D6).
+    # Owner-only.
     MOVE_MAIN = "MOVE_MAIN"
     PUSH = "PUSH"
     QUARANTINE = "QUARANTINE"
@@ -289,7 +289,7 @@ class DecisionClass(StrEnum):
     APPROVE_CONFIG_PROPOSAL = "APPROVE_CONFIG_PROPOSAL"
     #: Accepting a candidate is always critical; no self-answer path exists.
     ACCEPTANCE = "ACCEPTANCE"
-    # Orchestrator-answerable (ADR-0004 D6, accepted answer Q2).
+    # Orchestrator-answerable.
     REVIEW_FINDING_CLASSIFICATION = "REVIEW_FINDING_CLASSIFICATION"
     FIX_UP_CONTENT = "FIX_UP_CONTENT"
     G3_FAILURE_ROUTING = "G3_FAILURE_ROUTING"
@@ -298,7 +298,7 @@ class DecisionClass(StrEnum):
     OTHER = "OTHER"
 
 
-#: Decisions only the owner may take (ADR-0004 D6).
+#: Decisions only the owner may take.
 OWNER_ONLY_DECISION_CLASSES: frozenset[DecisionClass] = frozenset(
     {
         DecisionClass.MOVE_MAIN,
@@ -312,7 +312,7 @@ OWNER_ONLY_DECISION_CLASSES: frozenset[DecisionClass] = frozenset(
     }
 )
 
-#: Decisions the Orchestrator may answer without the owner (ADR-0004 D6 / Q2).
+#: Decisions the Orchestrator may answer without the owner.
 ORCHESTRATOR_ANSWERABLE_DECISION_CLASSES: frozenset[DecisionClass] = frozenset(
     {
         DecisionClass.REVIEW_FINDING_CLASSIFICATION,
@@ -322,7 +322,7 @@ ORCHESTRATOR_ANSWERABLE_DECISION_CLASSES: frozenset[DecisionClass] = frozenset(
     }
 )
 
-#: Question kinds that are never delegable (the ADR-0004 D14 list).  A question
+#: Question kinds that are never delegable (the list of such kinds). A question
 #: raised with one of these kinds is critical even when its decision class is
 #: otherwise routine: the orchestrator can add criticality, never remove it.
 CRITICAL_QUESTION_KINDS: frozenset[str] = frozenset(

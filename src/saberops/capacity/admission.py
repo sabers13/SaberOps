@@ -1,4 +1,4 @@
-"""Canonical admission and scoring policy (ADR-0002 D7, pure).
+"""Canonical admission and scoring policy (pure).
 
 Shared at BOTH dispatch points:
 1. Queued job primary route selection (scheduler).
@@ -137,7 +137,7 @@ class AdmissionDecision:
 
     @property
     def is_allowed(self) -> bool:
-        """Alias for admitted matching ADR-0002 contract."""
+        """Alias for admitted matching contract."""
         return self.admitted
 
 
@@ -314,7 +314,7 @@ def check_capacity_tables_exist(db: Any) -> bool:
     discovery raises ``sqlite3.OperationalError``/``sqlite3.DatabaseError``
     instead of returning a bool, so callers wrapped in a fail-closed
     boundary map it to ``QUOTA_EVIDENCE_REQUIRED`` rather than mistaking a
-    half-built ledger for "no debt" (ADR-0002 D2/D7).
+    half-built ledger for "no debt".
     """
     if db is None or (not hasattr(db, "db_path") and not hasattr(db, "owner_db")):
         return False
@@ -550,7 +550,7 @@ def admit(
                 reason=GOVERNED_INSTRUCTIONS_UNSUPPORTED,
             )
 
-    # 6. Billing posture (ADR-0002 D2)
+    # 6. Billing posture
     posture = posture_decision(
         candidate.provider,
         candidate.model,
@@ -575,8 +575,8 @@ def admit(
             details={"expires_on": posture.expires_on},
         )
 
-    # Posture UNVERIFIED fails closed across BOTH seams unconditionally (ADR-0002 D2, F1):
-    # Under ADR-0002 D2, no record is treated as X; unverified posture cannot launch or be
+    # Posture UNVERIFIED fails closed across BOTH seams unconditionally:
+    # No record is treated as X; unverified posture cannot launch or be
     # bypassed by owner overrides or unconfigured capacity grace.
     if posture.reason == POSTURE_UNVERIFIED:
         return AdmissionDecision(
@@ -659,7 +659,7 @@ def admit(
     # 8. Quota pools & windows
     pool_policies = effective_quota_pools(effective_policy, activate_overage=activate_overage)
     pool_plans = effective_pool_plans(effective_policy)
-    # ADR-0002 D1/D7 QuotaPool binding contract: a bound route draws its
+    # QuotaPool binding contract: a bound route draws its
     # ``binding_pool_id`` plus every pool whose ``members`` match the candidate
     # (declared shared scarcity), and NEVER the synthesized provider-wide
     # default from ``pools_for``'s no-match fallback.  The unbound path

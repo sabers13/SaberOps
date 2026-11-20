@@ -16,7 +16,7 @@ function.  This module turns it into an *executable* lifecycle service:
   recoverable and idempotent; a successful removal whose audit write fails
   surfaces uncertainty and stops instead of touching another target.
 
-Safety posture (ADR-0003 Amendment 1 and Amendment 2):
+Safety posture:
 
 * Only the exact native Git operations ``git worktree remove`` (no force) and
   ``git branch -d`` (no force) retire Git objects.  No ``git worktree prune``,
@@ -137,7 +137,7 @@ class GcPolicy:
     """A validated, owner-scoped standing lifecycle policy.
 
     Absent/unapproved policy has ``approved=False`` and authorizes nothing
-    destructive.  ``evidence_anchor`` is ``None`` while ADR-0003 Amendment 1's
+    destructive. ``evidence_anchor`` is ``None`` while 's
     retention anchor is unsettled, and evidence deletion stays refused until an
     explicit policy settles it.
     """
@@ -643,7 +643,7 @@ def _plan_evidence_item(
             detail={**item.detail, "evidence_anchor": policy.evidence_anchor},
         )
     # Compression is anchored at creation and independent of the held deletion
-    # rule (ADR-0003 D6: compress after 7 days).
+    # rule (compress after 7 days).
     created_at = _parse_iso(item.detail.get("created_at"))
     if (
         policy.allow_evidence_compression

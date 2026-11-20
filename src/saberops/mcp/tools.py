@@ -1,4 +1,4 @@
-"""The Orchestrator contract tools exposed over MCP (ADR-0004 D7, M3).
+"""The Orchestrator contract tools exposed over MCP.
 
 The following tools are exposed::
 
@@ -64,39 +64,39 @@ __all__ = [
     "build_default_registry",
 ]
 
-#: Operations ADR-0004 D7 permanently refuses over MCP, with the invariant at
+#: Operations permanently refuses over MCP, with the invariant at
 #: stake.  Aliases are listed so a client cannot reach a prohibited authority
 #: through a synonym.
 FORBIDDEN_OPERATIONS: dict[str, str] = {
-    "approve_config_proposal": "config approval is owner-only (ADR-0004 D7/D8)",
-    "approve_proposal": "config approval is owner-only (ADR-0004 D7/D8)",
-    "config_approve": "config approval is owner-only (ADR-0004 D7/D8)",
-    "record_config_decision": "config approval is owner-only (ADR-0004 D7/D8)",
-    "merge_main": "moving main is owner-only (ADR-0004 D7)",
-    "move_main": "moving main is owner-only (ADR-0004 D7)",
-    "fast_forward_main": "moving main is owner-only (ADR-0004 D7)",
-    "merge_ff_only": "moving main is owner-only (ADR-0004 D7)",
-    "push": "pushing is owner-only (ADR-0004 D7)",
-    "git_push": "pushing is owner-only (ADR-0004 D7)",
-    "push_remote": "pushing is owner-only (ADR-0004 D7)",
-    "approve_quarantine": "quarantine approval is owner-only (ADR-0004 D7)",
-    "quarantine_approve": "quarantine approval is owner-only (ADR-0004 D7)",
-    "attest_posture": "posture attestation is owner-only (ADR-0004 D7)",
-    "posture_attest": "posture attestation is owner-only (ADR-0004 D7)",
-    "run_gate": "gate execution is engine/owner-only (ADR-0004 D7)",
-    "gate_run": "gate execution is engine/owner-only (ADR-0004 D7)",
-    "gate_full": "gate execution is engine/owner-only (ADR-0004 D7)",
-    "run_full_gate": "gate execution is engine/owner-only (ADR-0004 D7)",
-    "edit_source": "no direct tracked-source edits over MCP (ADR-0004 D7)",
-    "write_file": "no direct tracked-source edits over MCP (ADR-0004 D7)",
-    "apply_patch": "no direct tracked-source edits over MCP (ADR-0004 D7)",
-    "delete_path": "deletions outside .orch are owner-only (ADR-0004 D7)",
-    "delete_outside_orch": "deletions outside .orch are owner-only (ADR-0004 D7)",
-    "remove_path": "deletions outside .orch are owner-only (ADR-0004 D7)",
-    "read_credentials": "read tools never return credentials (ADR-0004 D7)",
-    "get_credentials": "read tools never return credentials (ADR-0004 D7)",
-    "read_secret": "read tools never return credentials (ADR-0004 D7)",
-    "read_token": "read tools never return credentials (ADR-0004 D7)",
+    "approve_config_proposal": "config approval is owner-only",
+    "approve_proposal": "config approval is owner-only",
+    "config_approve": "config approval is owner-only",
+    "record_config_decision": "config approval is owner-only",
+    "merge_main": "moving main is owner-only",
+    "move_main": "moving main is owner-only",
+    "fast_forward_main": "moving main is owner-only",
+    "merge_ff_only": "moving main is owner-only",
+    "push": "pushing is owner-only",
+    "git_push": "pushing is owner-only",
+    "push_remote": "pushing is owner-only",
+    "approve_quarantine": "quarantine approval is owner-only",
+    "quarantine_approve": "quarantine approval is owner-only",
+    "attest_posture": "posture attestation is owner-only",
+    "posture_attest": "posture attestation is owner-only",
+    "run_gate": "gate execution is engine/owner-only",
+    "gate_run": "gate execution is engine/owner-only",
+    "gate_full": "gate execution is engine/owner-only",
+    "run_full_gate": "gate execution is engine/owner-only",
+    "edit_source": "no direct tracked-source edits over MCP",
+    "write_file": "no direct tracked-source edits over MCP",
+    "apply_patch": "no direct tracked-source edits over MCP",
+    "delete_path": "deletions outside .orch are owner-only",
+    "delete_outside_orch": "deletions outside .orch are owner-only",
+    "remove_path": "deletions outside .orch are owner-only",
+    "read_credentials": "read tools never return credentials",
+    "get_credentials": "read tools never return credentials",
+    "read_secret": "read tools never return credentials",
+    "read_token": "read tools never return credentials",
 }
 
 #: Tools that mutate state; these require the single-writer lease.
@@ -1447,7 +1447,7 @@ def _answer_question(context: ServerContext, arguments: Mapping[str, Any]) -> di
     if authority is AnswerAuthority.OWNER:
         raise ForbiddenOperationError(
             "owner authority is not exercisable over MCP; the owner answers "
-            "through the CLI or the local web surface (ADR-0004 D7)",
+            "through the CLI or the local web surface",
             data={"operation": "answer_question", "authority": "OWNER"},
         )
     queue = context.question_queue()

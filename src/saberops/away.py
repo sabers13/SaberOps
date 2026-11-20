@@ -1,6 +1,6 @@
 """Away mode: owner-authored standing decisions wired into the scheduler.
 
-`unattended.py` owns the policy projection (ADR-0004 D14) but had no production
+`unattended.py` owns the policy projection but had no production
 caller.  This module is the caller.  It adds the three durable pieces a run
 path needs to act on that policy while the owner is away:
 

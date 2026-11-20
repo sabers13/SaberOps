@@ -299,7 +299,7 @@ def gate_scratch_root(*, mountinfo_path: Path | None = None) -> Path:
 
 
 # Evidence labels: kind + producer are part of the history ledger contract
-# (ADR-0004 D3).  ``kind`` classifies the lifecycle point; ``producer`` proves
+# ``kind`` classifies the lifecycle point; ``producer`` proves
 # the gate was run by the engine, never by a model during iteration (G0).
 KIND_ENV = "SABEROPS_GATE_KIND"
 PRODUCER_ENV = "SABEROPS_GATE_PRODUCER"
@@ -1663,7 +1663,7 @@ def evaluate(
 def history_path(common: Path) -> Path:
     """Full-gate history file shared by all worktrees of one checkout.
 
-    Covers: ADR-0003 D5 (flaky tracking history format).
+    Covers: flaky tracking history format.
     """
     return common / HISTORY_DIRNAME / HISTORY_FILENAME
 
@@ -2066,7 +2066,7 @@ class Runner:
             signal.signal(sig, self.interrupt)
 
     def history_kind(self) -> str:
-        """Lifecycle kind recorded in the history ledger (ADR-0004 D3)."""
+        """Lifecycle kind recorded in the history ledger."""
         explicit = os.environ.get(KIND_ENV, "").strip()
         if explicit in KNOWN_KINDS:
             return explicit
@@ -2080,7 +2080,7 @@ class Runner:
         return os.environ.get(PRODUCER_ENV, "").strip() or DEFAULT_PRODUCER
 
     def profile_name(self) -> str:
-        """Gate profile this run corresponds to (ADR-0003 D2)."""
+        """Gate profile this run corresponds to."""
         explicit = os.environ.get(PROFILE_ENV, "").strip()
         if explicit:
             return explicit

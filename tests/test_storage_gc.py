@@ -1,6 +1,6 @@
 """GS-1 guarded GC planner/executor contracts.
 
-Covers: ADR-0003 Amendment 1 (Guarded lifecycle: exact native Git order, dry-run
+Covers: Guarded lifecycle: exact native Git order, dry-run
 no-op, scoped owner authority, refusal on every race) and D6 (retention classes,
 evidence-deletion hold).
 """
@@ -184,7 +184,7 @@ def _inventory(repo: Path, items: tuple[InventoryItem, ...]) -> Inventory:
 
 
 def test_preview_changes_nothing_on_disk(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 1 §Acceptance -- dry-run is a true no-op."""
+    """Covers: §Acceptance -- dry-run is a true no-op."""
     repo = _repo(tmp_path)
     db_path = tmp_path / "orch.db"
     db = Database(db_path)
@@ -207,7 +207,7 @@ def test_preview_changes_nothing_on_disk(tmp_path: Path) -> None:
 
 
 def test_no_policy_authorizes_nothing(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 1 §7 -- absent standing policy stays report-only."""
+    """Covers: absent standing policy stays report-only."""
     repo = _repo(tmp_path)
     db = Database(tmp_path / "orch.db")
     wt = GitManager.get_default_worktree_base(repo) / "run1" / "a1"
@@ -224,7 +224,7 @@ def test_no_policy_authorizes_nothing(tmp_path: Path) -> None:
 
 
 def test_pending_review_worktree_is_never_a_candidate(tmp_path: Path) -> None:
-    """Covers: ADR-0003 D6 -- a candidate awaiting review keeps its worktree."""
+    """Covers: a candidate awaiting review keeps its worktree."""
     repo = _repo(tmp_path)
     db = Database(tmp_path / "orch.db")
     wt = GitManager.get_default_worktree_base(repo) / "run1" / "a1"
@@ -283,7 +283,7 @@ def test_pending_review_worktree_is_never_a_candidate(tmp_path: Path) -> None:
 
 
 def test_terminal_worktree_and_branch_retire_by_native_git(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 1 §3 -- worktree remove then branch -d, no force."""
+    """Covers: worktree remove then branch -d, no force."""
     repo = _repo(tmp_path)
     db = Database(tmp_path / "orch.db")
     wt = GitManager.get_default_worktree_base(repo) / "run1" / "a1"
@@ -306,7 +306,7 @@ def test_terminal_worktree_and_branch_retire_by_native_git(tmp_path: Path) -> No
 
 
 def test_nondefault_target_branch_is_handled(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 1 §3 -- a non-``main`` target retires cleanly."""
+    """Covers: a non-``main`` target retires cleanly."""
     repo = _repo(tmp_path)
     _git(repo, "checkout", "-q", "-b", "develop")
     (repo / "b.txt").write_text("x\n", encoding="utf-8")
@@ -325,7 +325,7 @@ def test_nondefault_target_branch_is_handled(tmp_path: Path) -> None:
 
 
 def test_already_missing_and_repeat_invocation_are_idempotent(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 1 §Acceptance -- interrupted/repeat cleanup is safe."""
+    """Covers: §Acceptance -- interrupted/repeat cleanup is safe."""
     repo = _repo(tmp_path)
     db = Database(tmp_path / "orch.db")
     wt = GitManager.get_default_worktree_base(repo) / "run1" / "a1"
@@ -368,7 +368,7 @@ def _worktree_item_with_consumer(repo: Path, wt: Path, consumer: Consumer) -> In
 
 
 def test_dirty_worktree_is_refused(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 1 §2 -- dirty worktrees are preserved."""
+    """Covers: dirty worktrees are preserved."""
     repo = _repo(tmp_path)
     db = Database(tmp_path / "orch.db")
     wt = GitManager.get_default_worktree_base(repo) / "run1" / "a1"
@@ -389,7 +389,7 @@ def test_dirty_worktree_is_refused(tmp_path: Path) -> None:
 
 
 def test_unique_ignored_content_is_refused(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 1 §2 -- unique ignored content keeps the worktree."""
+    """Covers: unique ignored content keeps the worktree."""
     repo = _repo(tmp_path)
     (repo / ".gitignore").write_text("build/\n", encoding="utf-8")
     _git(repo, "add", "-A")
@@ -412,7 +412,7 @@ def test_unique_ignored_content_is_refused(tmp_path: Path) -> None:
 
 
 def test_symlinked_worktree_path_is_refused(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 1 §4 -- never follow a symlink into user data."""
+    """Covers: never follow a symlink into user data."""
     repo = _repo(tmp_path)
     db = Database(tmp_path / "orch.db")
     base = GitManager.get_default_worktree_base(repo)
@@ -436,7 +436,7 @@ def test_symlinked_worktree_path_is_refused(tmp_path: Path) -> None:
 
 
 def test_candidate_outside_worktree_base_is_refused(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 1 §2 -- outside-root paths are never eligible."""
+    """Covers: outside-root paths are never eligible."""
     repo = _repo(tmp_path)
     db = Database(tmp_path / "orch.db")
     outside = tmp_path / "elsewhere"
@@ -455,7 +455,7 @@ def test_candidate_outside_worktree_base_is_refused(tmp_path: Path) -> None:
 
 
 def test_branch_tip_change_after_preview_is_refused(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 1 §3 -- a moved branch tip fails closed."""
+    """Covers: a moved branch tip fails closed."""
     repo = _repo(tmp_path)
     db = Database(tmp_path / "orch.db")
     _git(repo, "branch", "orch/run1/a1")
@@ -479,7 +479,7 @@ def test_branch_tip_change_after_preview_is_refused(tmp_path: Path) -> None:
 
 
 def test_selection_widening_a_preview_is_refused(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 1 §6 -- apply cannot widen a stale preview."""
+    """Covers: apply cannot widen a stale preview."""
     repo = _repo(tmp_path)
     db = Database(tmp_path / "orch.db")
     preview = preview_gc(_inventory(repo, ()), policy=_approved())
@@ -499,7 +499,7 @@ def test_selection_widening_a_preview_is_refused(tmp_path: Path) -> None:
 
 
 def test_audit_failure_surfaces_uncertainty_and_stops(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 1 §4 -- removal with failed audit is uncertain."""
+    """Covers: removal with failed audit is uncertain."""
     repo = _repo(tmp_path)
     db = Database(tmp_path / "orch.db")
     wt = GitManager.get_default_worktree_base(repo) / "run1" / "a1"
@@ -523,7 +523,7 @@ def test_audit_failure_surfaces_uncertainty_and_stops(tmp_path: Path) -> None:
 
 
 def test_evidence_deletion_requires_a_settled_anchor(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 1 retention-anchor caveat -- no assumed anchor."""
+    """Covers: retention-anchor caveat -- no assumed anchor."""
     policy_file = tmp_path / "policy.json"
     policy_file.write_text(
         json.dumps({"approved": True, "allow_evidence_deletion": True}), encoding="utf-8"
@@ -533,7 +533,7 @@ def test_evidence_deletion_requires_a_settled_anchor(tmp_path: Path) -> None:
 
 
 def test_default_policy_disables_evidence_deletion(tmp_path: Path) -> None:
-    """Covers: ADR-0003 D6 -- evidence deletion stays disabled by default."""
+    """Covers: evidence deletion stays disabled by default."""
     policy_file = tmp_path / "policy.json"
     policy_file.write_text(json.dumps({"approved": True}), encoding="utf-8")
     policy = load_gc_policy(policy_file)
@@ -541,7 +541,7 @@ def test_default_policy_disables_evidence_deletion(tmp_path: Path) -> None:
 
 
 def test_corrupt_policy_fails_closed(tmp_path: Path) -> None:
-    """Covers: ADR-0003 D6 -- corrupt/unknown policy is never silently adopted."""
+    """Covers: corrupt/unknown policy is never silently adopted."""
     policy_file = tmp_path / "policy.json"
     policy_file.write_text("{not json", encoding="utf-8")
     with pytest.raises(GcPolicyError):
@@ -553,7 +553,7 @@ def test_corrupt_policy_fails_closed(tmp_path: Path) -> None:
 
 
 def test_unknown_owner_is_never_a_candidate(tmp_path: Path) -> None:
-    """Covers: ADR-0003 D6 -- unknown ownership fails closed to KEEP."""
+    """Covers: unknown ownership fails closed to KEEP."""
     repo = _repo(tmp_path)
     item = _item(
         ArtifactClass.ATTEMPT_WORKTREE,
@@ -573,7 +573,7 @@ def test_unknown_owner_is_never_a_candidate(tmp_path: Path) -> None:
 
 
 def test_legacy_cleanup_has_no_prune_and_keeps_dirty(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 1 §3 -- no repo-wide prune / force escape."""
+    """Covers: no repo-wide prune / force escape."""
     repo = _repo(tmp_path)
     db = Database(tmp_path / "orch.db")
     clean = GitManager.get_default_worktree_base(repo) / "run1" / "a1"
@@ -621,7 +621,7 @@ def test_legacy_cleanup_has_no_prune_and_keeps_dirty(tmp_path: Path) -> None:
 
 
 def test_legacy_cleanup_refuses_running_run(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 1 §2 -- a running run is never cleaned."""
+    """Covers: a running run is never cleaned."""
     repo = _repo(tmp_path)
     db = Database(tmp_path / "orch.db")
     base_sha = GitManager.get_head_commit(repo)
@@ -649,7 +649,7 @@ def test_legacy_cleanup_refuses_running_run(tmp_path: Path) -> None:
 
 
 def test_intent_audit_failure_mutates_nothing_and_is_not_applied(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 1 §4 -- no durable intent => no action/claim."""
+    """Covers: no durable intent => no action/claim."""
     repo = _repo(tmp_path)
     db = Database(tmp_path / "orch.db")
     wt = GitManager.get_default_worktree_base(repo) / "run1" / "a1"
@@ -670,7 +670,7 @@ def test_intent_audit_failure_mutates_nothing_and_is_not_applied(tmp_path: Path)
 
 
 def test_result_audit_failure_after_action_is_uncertain_not_silent(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 1 §4 -- action done + audit lost => uncertainty."""
+    """Covers: action done + audit lost => uncertainty."""
     repo = _repo(tmp_path)
     db = Database(tmp_path / "orch.db")
     wt = GitManager.get_default_worktree_base(repo) / "run1" / "a1"
@@ -690,7 +690,7 @@ def test_result_audit_failure_after_action_is_uncertain_not_silent(tmp_path: Pat
 
 
 def test_refused_action_with_audit_failure_stays_refused(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 1 §4 -- a refusal is never relabelled applied."""
+    """Covers: a refusal is never relabelled applied."""
     repo = _repo(tmp_path)
     db = Database(tmp_path / "orch.db")
     wt = GitManager.get_default_worktree_base(repo) / "run1" / "a1"
@@ -730,7 +730,7 @@ def _preview_with_worktree(tmp_path: Path) -> tuple[Path, Database, Path, GcPrev
 
 
 def test_tampered_action_is_refused_not_executed(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 1 §6 -- same class/ref/identity is not permission."""
+    """Covers: same class/ref/identity is not permission."""
     repo, db, wt, preview = _preview_with_worktree(tmp_path)
     original = preview.candidates[0]
     forged = GcCandidate(
@@ -752,7 +752,7 @@ def test_tampered_action_is_refused_not_executed(tmp_path: Path) -> None:
 
 
 def test_tampered_detail_is_refused(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 1 §6 -- authority-relevant data is pinned."""
+    """Covers: authority-relevant data is pinned."""
     repo, db, wt, preview = _preview_with_worktree(tmp_path)
     original = preview.candidates[0]
     forged = GcCandidate(
@@ -774,7 +774,7 @@ def test_tampered_detail_is_refused(tmp_path: Path) -> None:
 
 
 def test_duplicate_selection_is_refused_once(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 1 §6 -- a repeated target is not re-executed."""
+    """Covers: a repeated target is not re-executed."""
     repo, db, wt, preview = _preview_with_worktree(tmp_path)
     candidate = preview.candidates[0]
     _events, sink = _audit_sink()
@@ -810,7 +810,7 @@ def _evidence_item(repo: Path, path: Path, *, age_days: int) -> InventoryItem:
 
 
 def test_evidence_compression_round_trips_and_is_atomic(tmp_path: Path) -> None:
-    """Covers: ADR-0003 D6 -- evidence compression preserves readable content."""
+    """Covers: evidence compression preserves readable content."""
     import tarfile
 
     repo = _repo(tmp_path)
@@ -840,7 +840,7 @@ def test_evidence_compression_round_trips_and_is_atomic(tmp_path: Path) -> None:
 
 
 def test_evidence_compression_is_idempotent(tmp_path: Path) -> None:
-    """Covers: ADR-0003 D6 -- a repeated compression reports already-compressed."""
+    """Covers: a repeated compression reports already-compressed."""
     repo = _repo(tmp_path)
     db = Database(tmp_path / "orch.db")
     bundle = tmp_path / "bundle2"
@@ -859,7 +859,7 @@ def test_evidence_compression_is_idempotent(tmp_path: Path) -> None:
 
 
 def test_evidence_deletion_remains_held_without_anchor(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 1 -- no evidence deletion without a settled anchor."""
+    """Covers: no evidence deletion without a settled anchor."""
     repo = _repo(tmp_path)
     bundle = tmp_path / "bundle3"
     bundle.mkdir()
@@ -873,7 +873,7 @@ def test_evidence_deletion_remains_held_without_anchor(tmp_path: Path) -> None:
 
 
 def test_owned_cache_is_excluded_and_forged_apply_refused(tmp_path: Path) -> None:
-    """Covers: ADR-0003 D6 -- owned caches surface bytes but never delete."""
+    """Covers: owned caches surface bytes but never delete."""
     repo = _repo(tmp_path)
     db = Database(tmp_path / "orch.db")
     cache = tmp_path / "saberops-mypy-cache"

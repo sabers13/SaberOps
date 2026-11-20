@@ -1,4 +1,4 @@
-"""Adversarial contract tests for the unattended plan policy (ADR-0004 D14, RD-1).
+"""Adversarial contract tests for the unattended plan policy (RD-1).
 
 Every test states what it protects with a ``Covers:`` docstring line. The whole
 file is hermetic: no provider, CLI, login, network, database, filesystem
@@ -341,7 +341,7 @@ def test_only_the_owner_may_author_a_standing_decision() -> None:
 
 def test_owner_words_are_recorded_verbatim() -> None:
     """Covers: RD-1 requirement 1 owner exact words are stored, never paraphrased."""
-    words = "Yes: wave 3 may rewrite tests under ADR-0002 D5.\nSkip the wave on budget exhaustion."
+    words = "Yes: wave 3 may rewrite tests.\nSkip the wave on budget exhaustion."
     standing = _standing(owner_words=words)
     resolution = resolve_decision(_sheet(standing), _decision(), now=NOW, current_turn=1)
     assert resolution.owner_words == words

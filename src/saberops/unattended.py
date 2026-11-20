@@ -1,4 +1,4 @@
-"""Unattended plan execution policy (ADR-0004 D14, Step 017 / RD-1).
+"""Unattended plan execution policy (Step 017 / RD-1).
 
 This module owns one bounded, deterministic concern: given explicit typed facts
 about an **unattended plan run**, it decides *who may decide what*, *what must
@@ -10,7 +10,7 @@ imports from the session, runtime, job, database, web, MCP or CLI layers.
 Every instant and counter is supplied by the caller, so identical immutable
 input yields byte-identical output.
 
-The frozen ADR-0004 D14 rules encoded here:
+The frozen rules encoded here:
 
 1. **Decision sheet.** A run carries an owner-frozen :class:`DecisionSheet` of
    bounded :class:`StandingDecision` answers. A standing decision applies **only
@@ -99,7 +99,7 @@ _NON_CANONICAL_PATH_SEGMENTS = ("", ".", "..")
 
 
 class NeverDelegableKind(StrEnum):
-    """The immutable never-delegable decision list (ADR-0004 D14).
+    """The immutable never-delegable decision list.
 
     A decision of one of these kinds can never be taken autonomously, by a
     standing decision or by the Orchestrator's recommendation. It parks its own
@@ -144,7 +144,7 @@ NEVER_DELEGABLE_KINDS: Final[tuple[NeverDelegableKind, ...]] = tuple(NEVER_DELEG
 
 
 class DecisionClass(StrEnum):
-    """The three autonomous decision classes (ADR-0004 D14, roadmap RD-1)."""
+    """The three autonomous decision classes (roadmap RD-1)."""
 
     CLASS_1_GATED_ACCEPT = "class_1_gated_accept"
     CLASS_2_RECOMMENDED = "class_2_recommended"

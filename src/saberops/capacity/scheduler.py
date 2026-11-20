@@ -1,4 +1,4 @@
-"""Pure deterministic pacing scheduler (ADR-0002 D7, pure).
+"""Pure deterministic pacing scheduler (pure).
 
 Evaluates queued jobs against routing configuration, billing posture,
 quota pools/windows, and current reservations/running counts.
@@ -129,7 +129,7 @@ def schedule(
     blocked_providers: Mapping[str, str] | None = None,
     scout_routes: Mapping[str, str] | None = None,
 ) -> list[SchedulerDecision]:
-    """Pure deterministic pacing scheduler (ADR-0002 D7).
+    """Pure deterministic pacing scheduler.
 
     Evaluates queued jobs in strict D7 order:
     - Dependency-blocked jobs wait with their recorded reason (F8) before any

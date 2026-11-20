@@ -1,6 +1,6 @@
 """Deterministic host-wide storage budget and reservations for concurrent work.
 
-Covers: ADR-0003 Amendment 2 (concurrent-run adaptive storage admission).
+Covers: concurrent-run adaptive storage admission.
 
 The Orchestrator *estimates*; this module *decides and enforces*.  Nothing here
 calls a model, a provider or the network: every number is either a declared
@@ -31,7 +31,7 @@ identity cannot be read is corruption that blocks every mutation while its
 capacity stays charged.  The identity evidence is non-secret OS state, so this
 fences cooperating processes rather than sandboxing a malicious local user.
 
-Deliberate scope limits (see ADR-0003 Amendment 2 §Rollout): this slice is not
+Deliberate scope limits (until the rollout lands): this slice is not
 wired into ``scripts/gate_tools.py`` or the engine capacity loop.  The existing
 live free-space floor therefore remains binding until the later, separately
 reviewed integration replaces every launch path.
@@ -134,7 +134,7 @@ MAX_RENEWAL_FACTOR: Final[float] = 2.0
 
 #: Shadow-only placeholder recovery margin.  It is used *exclusively* by
 #: shadow reports (``margin_authorised=False``) and can never authorise an
-#: admission: ADR-0003 Amendment 2 requires an owner-approved numeric policy
+#: admission: requires an owner-approved numeric policy
 #: before the margin becomes admission fact.  Deliberately below the old
 #: fixed ``max(10 GiB, 10 %)`` floor, never zero.
 SHADOW_MARGIN_BYTES: Final[int] = 1 << 30
@@ -477,7 +477,7 @@ class OwnerToken:
         recorded owner when this very process is that owner
         (owner-approved fail-closed identity doctrine).  The evidence is
         non-secret OS state, so this fences cooperating processes rather than
-        sandboxing a malicious local user (see ADR-0003 Amendment 2).
+        sandboxing a malicious local user.
         """
         return self.identity if self.identity is not None else ProcessIdentity.for_self()
 
@@ -948,7 +948,7 @@ def _parse_iso(raw: object) -> datetime | None:
 def compute_required_free(emergency_margin: int, active_remaining: int, candidate: int) -> int:
     """Return the canonical per-filesystem requirement.
 
-    Covers: ADR-0003 Amendment 2 (``required = margin + sum(active) + candidate``).
+    Covers: (``required = margin + sum(active) + candidate``).
     """
     if min(emergency_margin, active_remaining, candidate) < 0:
         raise EstimateUnavailableError("negative byte component in the storage requirement")

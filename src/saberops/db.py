@@ -2335,7 +2335,7 @@ class Database:
     ) -> dict[str, Any] | None:
         """RUNNING -> PREEMPTED, fenced to one exact predecessor generation.
 
-        ADR-0002 D8 crash recovery needs a *narrower* terminal transition than
+         crash recovery needs a *narrower* terminal transition than
         :meth:`terminalize_run_fenced`:
 
         * the run must be exactly ``RUNNING`` (a terminal or PENDING run is
@@ -5150,7 +5150,7 @@ class Database:
         )
 
     # ------------------------------------------------------------------
-    # GS-1 storage lifecycle persistence (ADR-0003 D6/Amendment 1, D7)
+    # GS-1 storage lifecycle persistence
     #
     # These tables are additive: ``DB_SCHEMA_VERSION`` stays 1 and the
     # unknown/legacy-schema protection in ``_init_db`` is unchanged.  Every
@@ -5172,7 +5172,7 @@ class Database:
     def write_transaction(
         self, *, total_seconds: float = 30.0
     ) -> Iterator[sqlite3.Connection]:
-        """Yield one bounded ``BEGIN IMMEDIATE`` write transaction (ADR-0003 D7).
+        """Yield one bounded ``BEGIN IMMEDIATE`` write transaction.
 
         This is the shared write path for the database's mutators: WAL, a 30 s
         busy timeout narrowed to the remaining shared deadline, a single

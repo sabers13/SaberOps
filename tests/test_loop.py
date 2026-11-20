@@ -1,4 +1,4 @@
-"""Unit tests for scheduler loop, single-instance lease, and atomic dispatch (ADR-0002 D7)."""
+"""Unit tests for scheduler loop, single-instance lease, and atomic dispatch."""
 
 from __future__ import annotations
 
@@ -190,7 +190,7 @@ def owner_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Database:
 
 
 def test_acquire_and_renew_lease_basic(owner_db: Database) -> None:
-    """Covers: ADR-0002 D7 single owner DB lease transactional claim and renewal."""
+    """Covers: single owner DB lease transactional claim and renewal."""
     t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
     lease = acquire_lease(owner_db, "sched_1", ttl_seconds=30.0, now=t0)
     assert lease is not None
@@ -212,7 +212,7 @@ def test_acquire_and_renew_lease_basic(owner_db: Database) -> None:
 
 
 def test_racing_schedulers_only_one_wins_lease(owner_db: Database) -> None:
-    """Covers: ADR-0002 D7 two racing scheduler instances acquire only one fenced lease."""
+    """Covers: two racing scheduler instances acquire only one fenced lease."""
     t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
     lease1 = acquire_lease(owner_db, "instance_A", ttl_seconds=30.0, now=t0)
     assert lease1 is not None
@@ -223,7 +223,7 @@ def test_racing_schedulers_only_one_wins_lease(owner_db: Database) -> None:
 
 
 def test_lease_expiry_and_takeover_increments_fencing_token(owner_db: Database) -> None:
-    """Covers: ADR-0002 D7 lease expiry takeover by second instance with fenced token increment."""
+    """Covers: lease expiry takeover by second instance with fenced token increment."""
     t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
     lease1 = acquire_lease(owner_db, "instance_A", ttl_seconds=30.0, now=t0)
     assert lease1 is not None
@@ -246,7 +246,7 @@ def test_lease_expiry_and_takeover_increments_fencing_token(owner_db: Database) 
 def test_loss_of_lease_before_launch_compensates(
     owner_db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: ADR-0002 D7 loss-of-lease before launch aborts dispatch and compensates."""
+    """Covers: loss-of-lease before launch aborts dispatch and compensates."""
     t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
     lease = acquire_lease(owner_db, "instance_A", ttl_seconds=30.0, now=t0)
     assert lease is not None
@@ -316,7 +316,7 @@ def test_loss_of_lease_before_launch_compensates(
 
 
 def test_launch_failure_compensates_cas_and_reservation(owner_db: Database, tmp_path: Path) -> None:
-    """Covers: ADR-0002 D7 launch failure compensates partial dispatch and releases reservation."""
+    """Covers: launch failure compensates partial dispatch and releases reservation."""
     t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
     lease = acquire_lease(owner_db, "instance_A", ttl_seconds=30.0, now=t0)
     assert lease is not None
@@ -368,7 +368,7 @@ def test_launch_failure_compensates_cas_and_reservation(owner_db: Database, tmp_
 def test_reconcile_terminal_runs_settles_or_releases_reservations(
     owner_db: Database, tmp_path: Path
 ) -> None:
-    """Covers: ADR-0002 D7 startup reconciliation settles COMPLETED and releases FAILED."""
+    """Covers: startup reconciliation settles COMPLETED and releases FAILED."""
     t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
     lease = acquire_lease(owner_db, "instance_A", ttl_seconds=30.0, now=t0)
     assert lease is not None
@@ -452,7 +452,7 @@ def test_reconcile_terminal_runs_settles_or_releases_reservations(
 
 
 def test_scheduler_tick_dispatches_highest_priority_job(owner_db: Database, tmp_path: Path) -> None:
-    """Covers: ADR-0002 D7 scheduler tick end-to-end dispatch of queued job."""
+    """Covers: scheduler tick end-to-end dispatch of queued job."""
     t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
     lease = acquire_lease(owner_db, "instance_A", ttl_seconds=30.0, now=t0)
     assert lease is not None
@@ -512,7 +512,7 @@ def test_scheduler_tick_dispatches_highest_priority_job(owner_db: Database, tmp_
 
 
 def test_scheduler_tick_wait_and_probe_decisions(owner_db: Database, tmp_path: Path) -> None:
-    """Covers: ADR-0002 D7 scheduler tick applies wait reasons and runs forced probes."""
+    """Covers: scheduler tick applies wait reasons and runs forced probes."""
     t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
     lease = acquire_lease(owner_db, "instance_A", ttl_seconds=30.0, now=t0)
     assert lease is not None
@@ -562,7 +562,7 @@ def test_scheduler_tick_wait_and_probe_decisions(owner_db: Database, tmp_path: P
 
 
 def test_run_scheduler_loop_once_clean_exit(owner_db: Database) -> None:
-    """Covers: ADR-0002 D7 scheduler loop --once execution exits cleanly and releases lease."""
+    """Covers: scheduler loop --once execution exits cleanly and releases lease."""
     t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
     res = run_scheduler_loop(owner_db, once=True, now_fn=lambda: t0)
     assert res is not None
@@ -593,7 +593,7 @@ def test_loop_reports_lease_loss_after_successful_tick(
 
 
 def test_run_scheduler_loop_can_be_stopped(owner_db: Database) -> None:
-    """Covers: ADR-0002 D7 scheduler loop can be stopped via stop_event without busy spin."""
+    """Covers: scheduler loop can be stopped via stop_event without busy spin."""
     t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
     stop_event = threading.Event()
 
@@ -622,7 +622,7 @@ def test_run_scheduler_loop_can_be_stopped(owner_db: Database) -> None:
 
 
 def test_valid_empty_chain_never_crashes_tick(owner_db: Database, tmp_path: Path) -> None:
-    """Covers: ADR-0002 D7 / R-002: valid empty worker chain does not crash scheduler tick."""
+    """Covers: valid empty worker chain does not crash scheduler tick."""
     t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
     lease = acquire_lease(owner_db, "instance_empty", ttl_seconds=30.0, now=t0)
     assert lease is not None
@@ -676,7 +676,7 @@ def test_valid_empty_chain_never_crashes_tick(owner_db: Database, tmp_path: Path
 
 
 def test_simultaneous_first_acquire_race_returns_denial(owner_db: Database) -> None:
-    """Covers: ADR-0002 D7 first lease race returns denial instead of unhandled IntegrityError."""
+    """Covers: first lease race returns denial instead of unhandled IntegrityError."""
     t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
     ensure_capacity_tables(owner_db)
 
@@ -690,7 +690,7 @@ def test_simultaneous_first_acquire_race_returns_denial(owner_db: Database) -> N
 
 
 def test_cancel_running_job_releases_ledger_reservation(owner_db: Database, tmp_path: Path) -> None:
-    """Covers: ADR-0002 D7 cancellation of running job releases ledger reservation."""
+    """Covers: cancellation of running job releases ledger reservation."""
     from saberops.jobs.service import cancel_job
 
     t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
@@ -736,7 +736,7 @@ def test_cancel_running_job_releases_ledger_reservation(owner_db: Database, tmp_
 def test_mid_tick_lease_expiry_fences_subsequent_launches(
     owner_db: Database, tmp_path: Path
 ) -> None:
-    """Covers: ADR-0002 D7 mid-tick lease expiry / takeover fences subsequent dispatches."""
+    """Covers: mid-tick lease expiry / takeover fences subsequent dispatches."""
     t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
     current_time = [t0]
 
@@ -803,7 +803,7 @@ def test_mid_tick_lease_expiry_fences_subsequent_launches(
 def test_partial_launch_with_existing_run_does_not_requeue(
     owner_db: Database, tmp_path: Path
 ) -> None:
-    """Covers: ADR-0002 D7 launcher failure after run row creation does not requeue job."""
+    """Covers: launcher failure after run row creation does not requeue job."""
     t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
     lease = acquire_lease(owner_db, "sched_partial", ttl_seconds=30.0, now=t0)
     assert lease is not None
@@ -867,7 +867,7 @@ def test_partial_launch_with_existing_run_does_not_requeue(
 def test_readiness_unavailable_executable_does_not_dispatch(
     owner_db: Database, tmp_path: Path
 ) -> None:
-    """Covers: ADR-0002 D7 / F12: route with unavailable executable is denied without CAS."""
+    """Covers: route with unavailable executable is denied without CAS."""
     from saberops.model_access.readiness_service import ReadinessAdmission
     from saberops.models import ProviderReadiness
 
@@ -926,7 +926,7 @@ def test_readiness_unavailable_executable_does_not_dispatch(
 def test_production_shape_lease_expiry_without_clock_fn_fences_launches(
     owner_db: Database, tmp_path: Path
 ) -> None:
-    """Covers: ADR-0002 D7 / F10: call without clock_fn fences launches on lease expiry."""
+    """Covers: call without clock_fn fences launches on lease expiry."""
     # 1. Lease expired in the past: production semantics = concrete now, clock_fn=None
     t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
     lease = acquire_lease(owner_db, "sched_prod", ttl_seconds=0.001, now=t0)
@@ -1027,7 +1027,7 @@ def test_production_shape_lease_expiry_without_clock_fn_fences_launches(
 def test_simultaneous_first_acquire_race_catches_integrity_error(
     owner_db: Database, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: ADR-0002 D7 / F6: first acquisition race catches IntegrityError on insert."""
+    """Covers: first acquisition race catches IntegrityError on insert."""
     import sqlite3
 
     from saberops.capacity import loop
@@ -1087,7 +1087,7 @@ def test_simultaneous_first_acquire_race_catches_integrity_error(
 def test_scheduler_tick_aborts_on_ledger_read_error(
     owner_db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: ADR-0002 D7 scheduler_tick aborts fail-closed on ledger read error."""
+    """Covers: scheduler_tick aborts fail-closed on ledger read error."""
     import saberops.capacity.loop as loop_mod
     from saberops.capacity.loop import acquire_lease, scheduler_tick
 
@@ -1285,7 +1285,7 @@ def _cap_tick_kwargs(routes: RoutingSnapshot, policy: ControlPlanePolicy) -> dic
 def test_scheduler_tick_explicit_limit_cannot_exceed_owner_cap(
     owner_db: Database, tmp_path: Path
 ) -> None:
-    """Covers: ADR-0002 D7 / F3 a programmatic global_slot_limit cannot raise
+    """Covers: a programmatic global_slot_limit cannot raise
     admission above the owner-configured concurrency.max_global cap.
     """
     t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
@@ -1324,7 +1324,7 @@ def test_scheduler_tick_explicit_limit_cannot_exceed_owner_cap(
 def test_scheduler_tick_explicit_limit_lowers_below_default(
     owner_db: Database, tmp_path: Path
 ) -> None:
-    """Covers: ADR-0002 D7 / F3 an explicit injection limit lowers the effective
+    """Covers: an explicit injection limit lowers the effective
     ceiling below the 15 default (2 running with an injected limit of 2 waits).
     """
     t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
@@ -1361,7 +1361,7 @@ def test_scheduler_tick_explicit_limit_lowers_below_default(
 def test_scheduler_tick_cli_and_explicit_limits_both_lower(
     owner_db: Database, tmp_path: Path
 ) -> None:
-    """Covers: ADR-0002 D7 / F3 the effective ceiling is the minimum of the owner
+    """Covers: the effective ceiling is the minimum of the owner
     cap, the CLI override and any explicit injection.
     """
     t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
@@ -1399,7 +1399,7 @@ def test_scheduler_tick_cli_and_explicit_limits_both_lower(
 def test_scheduler_tick_invalid_explicit_limit_fails_closed(
     owner_db: Database, tmp_path: Path, bad: int
 ) -> None:
-    """Covers: ADR-0002 D7 / F3 an invalid explicit limit fails closed and is
+    """Covers: an invalid explicit limit fails closed and is
     never interpreted as unlimited.
     """
     t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
@@ -1522,7 +1522,7 @@ def _seed_reserved_pool_jobs(
 def test_scheduler_tick_fails_closed_on_pool_occupancy_read_error(
     owner_db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: ADR-0002 D7 / R3-M1 an unreadable per-pool RUNNING occupancy scan
+    """Covers: an unreadable per-pool RUNNING occupancy scan
     aborts the tick with `ledger_read_error` — never zero or partial occupancy.
     """
     t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
@@ -1560,7 +1560,7 @@ def test_scheduler_tick_fails_closed_on_pool_occupancy_read_error(
 def test_scheduler_tick_partial_pool_occupancy_read_fails_closed(
     owner_db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: ADR-0002 D7 / R3-M1 a partially counted occupancy scan (first
+    """Covers: a partially counted occupancy scan (first
     running job read, next read fails) must abort, never admit on partial counts.
     """
     t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
@@ -1597,7 +1597,7 @@ def test_scheduler_tick_partial_pool_occupancy_read_fails_closed(
 def test_scheduler_tick_pool_max_concurrent_waits_when_occupancy_read_succeeds(
     owner_db: Database, tmp_path: Path
 ) -> None:
-    """Covers: ADR-0002 D7 / F3 normal case — when the occupancy read succeeds the
+    """Covers: normal case — when the occupancy read succeeds the
     owner per-pool `max_concurrent=1` is honoured (queued job waits, no dispatch).
     """
     t0 = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
@@ -1638,7 +1638,7 @@ def test_scheduler_tick_pool_max_concurrent_waits_when_occupancy_read_succeeds(
 def test_scheduler_tick_reconciles_preempted_run_and_releases_reservation(
     owner_db: Database, tmp_path: Path
 ) -> None:
-    """Covers: ADR-0002 D8 tick completes a crashed preemption and releases.
+    """Covers: tick completes a crashed preemption and releases.
 
     A RUNNING job whose run is conclusively PREEMPTED (crash between run
     terminalization and job requeue) is requeued QUEUED/PREEMPTED with its
@@ -1799,7 +1799,7 @@ def test_scheduler_tick_reconciles_preempted_run_and_releases_reservation(
 def test_default_run_launcher_stages_verified_resume(
     owner_db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: ADR-0002 D8 dispatch wires the verified capsule into the new run.
+    """Covers: dispatch wires the verified capsule into the new run.
 
     The launcher anchors the new run at the original job base and stages the
     checkpoint plus capsule through the run's ordinary worker-checkpoint
@@ -1918,14 +1918,14 @@ def test_default_run_launcher_stages_verified_resume(
 
 
 # ---------------------------------------------------------------------------
-# ADR-0002 D7 — legacy RUNNING without a trustworthy reservation fails closed
+# Legacy RUNNING without a trustworthy reservation fails closed
 # ---------------------------------------------------------------------------
 
 
 def test_scheduler_tick_fails_closed_on_legacy_running_without_reservation(
     owner_db: Database, tmp_path: Path
 ) -> None:
-    """Covers: ADR-0002 D7 a RUNNING job with no live RESERVED row holds the
+    """Covers: a RUNNING job with no live RESERVED row holds the
     whole tick: no reconcile side effect, no schedule, no dispatch, no CAS, no
     provider call and no ledger write.  A successful empty reservation read is
     not proof the pool is free.
@@ -2065,7 +2065,7 @@ def test_scheduler_tick_fails_closed_on_legacy_running_without_reservation(
 def test_scheduler_tick_fails_closed_on_running_job_without_run_id(
     owner_db: Database, tmp_path: Path, blank_run_id: str | None
 ) -> None:
-    """Covers: ADR-0002 D7 a *real* legacy RUNNING row persisted with a NULL or
+    """Covers: a *real* legacy RUNNING row persisted with a NULL or
     empty ``current_run_id`` is never silently treated as zero occupancy and
     never aborts the tick by raising.
 
@@ -2206,7 +2206,7 @@ def test_scheduler_tick_fails_closed_on_running_job_without_run_id(
 def test_scheduler_tick_legacy_guard_allows_valid_reserved_running_job(
     owner_db: Database, tmp_path: Path
 ) -> None:
-    """Covers: ADR-0002 D7 the legacy-RUNNING guard does not block a valid
+    """Covers: the legacy-RUNNING guard does not block a valid
     in-use pool: a RUNNING job with a live RESERVED row still counts against
     its pool, stays untouched, and an eligible queued job still dispatches
     when a pool slot is free.
@@ -2302,7 +2302,7 @@ def test_scheduler_tick_legacy_guard_allows_valid_reserved_running_job(
 def test_scheduler_tick_holds_split_store_running_run_instead_of_failing_it(
     owner_db: Database, tmp_path: Path
 ) -> None:
-    """Covers: ADR-0002 D7/D8 an owner-only status lookup cannot see a
+    """Covers: an owner-only status lookup cannot see a
     project-local execution run held in a second SQLite store, so the tick must
     fail closed: no false FAILED job, no RELEASED reservation, no dispatch.
 
@@ -2418,7 +2418,7 @@ class _ReservationSetFailingConn:
 def test_scheduler_tick_legacy_guard_reservation_read_error_fails_closed(
     owner_db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: ADR-0002 D7 an unreadable RUNNING reservation-occupancy snapshot
+    """Covers: an unreadable RUNNING reservation-occupancy snapshot
     aborts the tick with ``ledger_read_error`` before any reconcile or
     dispatch -- an unknown reservation map is never treated as free capacity.
     """

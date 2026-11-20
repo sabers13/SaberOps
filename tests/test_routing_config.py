@@ -64,7 +64,7 @@ def role_chain_ids(payload: dict[str, Any], role: str) -> list[str]:
 
 
 def test_legacy_chains_merge_stably_without_mutating_source() -> None:
-    """Covers: ADR-0002 §11 item 2 (v1 merge then v2 → v3 migration)."""
+    """Covers: v1 merge then v2 → v3 migration."""
     old = legacy_document()
     original = copy.deepcopy(old)
     current = canonical_routing_payload(old)
@@ -77,7 +77,7 @@ def test_legacy_chains_merge_stably_without_mutating_source() -> None:
 
 
 def test_v2_to_v3_migration_is_exact() -> None:
-    """Covers: ADR-0002 §11 item 2 (WORKER union order, SURGEON = T3)."""
+    """Covers: WORKER union order, SURGEON = T3."""
     old = v2_document()
     original = copy.deepcopy(old)
     current = canonical_routing_payload(old)
@@ -97,7 +97,7 @@ def test_v2_to_v3_migration_is_exact() -> None:
 
 
 def test_v2_migration_preserves_approvals_verbatim() -> None:
-    """Covers: ADR-0002 §11 item 2 (approved_candidates carried verbatim)."""
+    """Covers: approved_candidates carried verbatim."""
     approval = _approval()
     old = v2_document()
     old["approved_candidates"] = {approval.candidate_id: approval.to_dict()}
@@ -111,7 +111,7 @@ def test_v2_migration_preserves_approvals_verbatim() -> None:
 
 
 def test_packaged_default_is_migration_of_embedded_document() -> None:
-    """Covers: ADR-0002 §11 item 2 (packaged default = migrated schema-2 file)."""
+    """Covers: packaged default = migrated schema-2 file."""
     embedded_32ab051 = {
         "schema_version": 2,
         "T1": {
@@ -250,7 +250,7 @@ def test_legacy_owner_file_loads_without_rewriting_history(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Covers: ADR-0002 §11 item 2 (schema-1/2 user file loads as schema 3)."""
+    """Covers: schema-1/2 user file loads as schema 3."""
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     monkeypatch.delenv("SABEROPS_PROFILE", raising=False)
     path = get_user_routing_path()
@@ -275,7 +275,7 @@ def test_legacy_v2_owner_file_loads_with_migrated_from_2(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Covers: ADR-0002 §11 item 2 (schema-2 user file loads as schema 3)."""
+    """Covers: schema-2 user file loads as schema 3."""
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     monkeypatch.delenv("SABEROPS_PROFILE", raising=False)
     path = get_user_routing_path()

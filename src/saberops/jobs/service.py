@@ -1091,7 +1091,7 @@ def reconcile_jobs(
     ``COMPLETED`` -> SUCCEEDED; ``FAILED`` -> FAILED ``RUN_FAILED``;
     ``None`` (run not found) -> FAILED ``RUN_MISSING``; ``ORPHANED`` ->
     FAILED ``RUN_FAILED``; ``PENDING`` and ``RUNNING`` stay (recovery belongs to the
-    supervisor) with no event.  ``PREEMPTED`` (ADR-0002 D8, M2-5) completes
+    supervisor) with no event. ``PREEMPTED`` completes
     an interrupted preemption idempotently: the run is conclusively
     terminal, so the job is requeued to QUEUED/PREEMPTED with its verified
     resume capsule instead of failing.  Idempotent: a second call changes

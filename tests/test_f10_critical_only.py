@@ -327,7 +327,7 @@ def test_critical_question_is_refused_to_the_planner(
 def test_owner_only_class_is_refused_before_the_mode_policy(
     isolated: Path, tmp_path: Path
 ) -> None:
-    """The ADR-0004 D6 split still refuses an owner-only class outright."""
+    """The split still refuses an owner-only class outright."""
     set_owner_mode(OwnerMode.CRITICAL_ONLY)
     store = isolated / "questions.json"
     _ask(store, _request(decision_class=DecisionClass.MOVE_MAIN))

@@ -186,19 +186,19 @@ def _decisions(artifacts: list[Artifact]) -> tuple[PlanDecision, ...]:
 
 
 def test_scratch_succeeded_eligible() -> None:
-    """Covers: ADR-0003 D4/D6 gate scratch removed at end of gate."""
+    """Covers: gate scratch removed at end of gate."""
     (d,) = _decisions([_scratch()])
     assert (d.action, d.reason) == (Action.ELIGIBLE_DELETE, "scratch-succeeded-eligible")
 
 
 def test_scratch_running_kept() -> None:
-    """Covers: ADR-0003 D6 live gate scratch never eligible mid-run."""
+    """Covers: live gate scratch never eligible mid-run."""
     (d,) = _decisions([_scratch(gate_finished=False, gate_succeeded=False)])
     assert (d.action, d.reason) == (Action.KEEP, "gate-running")
 
 
 def test_scratch_newest_failed_kept_under_cap() -> None:
-    """Covers: ADR-0003 D4 newest failed scratch kept under the 2 GB cap."""
+    """Covers: newest failed scratch kept under the 2 GB cap."""
     (d,) = _decisions(
         [_scratch(gate_succeeded=False, is_newest_failed=True, size_bytes=1024)]
     )
@@ -206,7 +206,7 @@ def test_scratch_newest_failed_kept_under_cap() -> None:
 
 
 def test_scratch_older_failed_eligible() -> None:
-    """Covers: ADR-0003 D4 older failed scratch pruned, newest kept."""
+    """Covers: older failed scratch pruned, newest kept."""
     (d,) = _decisions(
         [_scratch(gate_succeeded=False, is_newest_failed=False, size_bytes=1024)]
     )
@@ -214,7 +214,7 @@ def test_scratch_older_failed_eligible() -> None:
 
 
 def test_scratch_newest_failed_cap_boundary() -> None:
-    """Covers: ADR-0003 D4 newest-failed size-cap boundary (fail closed below)."""
+    """Covers: newest-failed size-cap boundary (fail closed below)."""
     from saberops.storage_lifecycle import FAILED_SCRATCH_SIZE_CAP_BYTES as cap
 
     (at,) = _decisions(
@@ -244,7 +244,7 @@ def test_scratch_missing_metadata_kept() -> None:
 
 
 def test_worktree_terminal_states_eligible() -> None:
-    """Covers: ADR-0003 D6 worktree removed for accepted/rejected/superseded."""
+    """Covers: worktree removed for accepted/rejected/superseded."""
     for state in (
         CandidateState.ACCEPTED,
         CandidateState.REJECTED,
@@ -258,7 +258,7 @@ def test_worktree_terminal_states_eligible() -> None:
 
 
 def test_worktree_pending_review_kept() -> None:
-    """Covers: ADR-0003 D6 worktree kept while a candidate awaits review."""
+    """Covers: worktree kept while a candidate awaits review."""
     for state in (CandidateState.PENDING_REVIEW, CandidateState.ACTIVE):
         (d,) = _decisions(
             [_worktree(attempt_terminal=True, candidate_state=state, worktree_live=False)]
@@ -267,7 +267,7 @@ def test_worktree_pending_review_kept() -> None:
 
 
 def test_worktree_active_or_live_kept() -> None:
-    """Covers: ADR-0003 D6 live worktrees and active attempts never eligible."""
+    """Covers: live worktrees and active attempts never eligible."""
     (d1,) = _decisions([_worktree(attempt_terminal=False)])
     assert (d1.action, d1.reason) == (Action.KEEP, "attempt-active")
     (d2,) = _decisions([_worktree(worktree_live=True)])
@@ -275,13 +275,13 @@ def test_worktree_active_or_live_kept() -> None:
 
 
 def test_worktree_preempted_unterminated_kept() -> None:
-    """Covers: ADR-0003 D6 preempted job worktree kept until job terminal."""
+    """Covers: preempted job worktree kept until job terminal."""
     (d,) = _decisions([_worktree(job_preempted=True, job_terminal=False)])
     assert (d.action, d.reason) == (Action.KEEP, "job-preempted")
 
 
 def test_worktree_preempted_terminal_eligible() -> None:
-    """Covers: ADR-0003 D6 preempted-then-terminal worktree recreatable, eligible."""
+    """Covers: preempted-then-terminal worktree recreatable, eligible."""
     (d,) = _decisions([_worktree(job_preempted=True, job_terminal=True)])
     assert d.action == Action.ELIGIBLE_DELETE
 
@@ -293,7 +293,7 @@ def test_worktree_unknown_candidate_kept() -> None:
 
 
 def test_checkpoint_retention_boundary() -> None:
-    """Covers: ADR-0003 D6 checkpoint refs kept until 7d after terminal."""
+    """Covers: checkpoint refs kept until 7d after terminal."""
     (early,) = _decisions([_checkpoint(terminal_at=NOW - timedelta(days=6))])
     assert (early.action, early.reason) == (Action.KEEP, "checkpoint-retained")
     (exact,) = _decisions([_checkpoint(terminal_at=NOW - timedelta(days=7))])
@@ -306,7 +306,7 @@ def test_checkpoint_retention_boundary() -> None:
 
 
 def test_checkpoint_active_or_preempted_kept() -> None:
-    """Covers: ADR-0003 D6 preempted-job and active-job checkpoints preserved."""
+    """Covers: preempted-job and active-job checkpoints preserved."""
     (d1,) = _decisions([_checkpoint(job_terminal=False, job_preempted=False)])
     assert (d1.action, d1.reason) == (Action.KEEP, "checkpoint-job-active")
     (d2,) = _decisions(
@@ -329,7 +329,7 @@ def test_checkpoint_ref_namespace_escape_kept() -> None:
 
 
 def test_evidence_compress_boundary() -> None:
-    """Covers: ADR-0003 D6/Q4 evidence compressed after 7 days."""
+    """Covers: evidence compressed after 7 days."""
     recent_terminal = NOW - timedelta(days=1)
     young = _evidence(
         run_accepted=False,
@@ -361,7 +361,7 @@ def test_evidence_compress_boundary() -> None:
 
 
 def test_evidence_accepted_90d_boundary() -> None:
-    """Covers: ADR-0003 Q4 accepted evidence deleted 90d after terminal time."""
+    """Covers: accepted evidence deleted 90d after terminal time."""
     old_created = NOW - timedelta(days=200)
     for days, eligible in ((89, False), (90, True), (91, True)):
         item = _evidence(
@@ -375,7 +375,7 @@ def test_evidence_accepted_90d_boundary() -> None:
 
 
 def test_evidence_other_terminal_30d_boundary() -> None:
-    """Covers: ADR-0003 Q4 other terminal evidence deleted 30d after terminal."""
+    """Covers: other terminal evidence deleted 30d after terminal."""
     old_created = NOW - timedelta(days=200)
     for days, eligible in ((29, False), (30, True), (31, True)):
         item = _evidence(
@@ -409,7 +409,7 @@ def test_evidence_delete_requires_size_and_acceptance() -> None:
 
 
 def test_venv_follows_parent_worktree() -> None:
-    """Covers: ADR-0003 D6 venvs die with their worktree, never alone."""
+    """Covers: venvs die with their worktree, never alone."""
     (d1,) = _decisions([_venv(parent_worktree_live=True, parent_eligible_for_removal=False)])
     assert (d1.action, d1.reason) == (Action.KEEP, "venv-parent-live")
     (d2,) = _decisions([_venv(parent_worktree_live=False, parent_eligible_for_removal=False)])
@@ -422,7 +422,7 @@ def test_venv_follows_parent_worktree() -> None:
 
 
 def test_owner_db_vacuum_rules() -> None:
-    """Covers: ADR-0003 D6 weekly VACUUM above 20 % free pages, never delete."""
+    """Covers: weekly VACUUM above 20 % free pages, never delete."""
     (d1,) = _decisions(
         [_ownerdb(last_vacuum_at=NOW - timedelta(days=7), free_page_ratio=0.21)]
     )
@@ -469,7 +469,7 @@ def test_unowned_items_never_deleted() -> None:
 
 
 def test_outside_roots_decoy_kept() -> None:
-    """Covers: ADR-0003 D6 GC never touches anything outside owned roots."""
+    """Covers: GC never touches anything outside owned roots."""
     items: list[Artifact] = [
         _scratch(path="/etc/passwd", artifact_id="m1"),
         _worktree(path="/tmp/evil-wt", artifact_id="m2"),

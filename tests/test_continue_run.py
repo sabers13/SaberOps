@@ -48,7 +48,7 @@ def _seed_verified_codex_posture(config_home: Path) -> None:
     """Seed an isolated owner config with a verified posture for the synthetic
     ``codex/test-model`` candidate used by this module's fixtures.
 
-    Covers: ADR-0002 D2 / WORKFLOW §7 authorized setup-only fixture migration.
+    Covers: WORKFLOW §7 authorized setup-only fixture migration.
     This adds ONLY the synthetic provider/posture record needed to preserve
     the module's historical continuation assertions now that unverified routes
     fail closed (M2-4b D7); no assertion or expected behaviour is changed and

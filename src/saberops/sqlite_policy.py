@@ -1,4 +1,4 @@
-"""Shared bounded SQLite connection/transaction policy (ADR-0003 D7, GS-1).
+"""Shared bounded SQLite connection/transaction policy (GS-1).
 
 D7 requires the engine's SQLite writes to be robust to contention:
 
@@ -58,7 +58,7 @@ __all__ = [
     "write_connection",
 ]
 
-#: ADR-0003 D7: ``busy_timeout`` of 30 s.  Also the total shared write budget.
+#: ``busy_timeout`` of 30 s. Also the total shared write budget.
 BUSY_TIMEOUT_MS: Final[int] = 30_000
 
 #: Total wall-clock budget for one bounded write attempt, in seconds.

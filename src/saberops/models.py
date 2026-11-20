@@ -21,7 +21,7 @@ class RunStatus(StrEnum):
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     ORPHANED = "ORPHANED"
-    # ADR-0002 D8 (M2-5): quota-preempted run.  Terminal for the RUN, but
+    # Quota-preempted run. Terminal for the RUN, but
     # NOT terminal for the owning JOB: the job returns to QUEUED with
     # waiting_reason PREEMPTED and a verified resume capsule, and a later
     # dispatch starts a NEW run.  Never an accepted candidate and never a

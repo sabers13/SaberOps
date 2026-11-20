@@ -78,7 +78,7 @@ from saberops.workers.registry import AdapterRegistry
 def _isolate_xdg_config(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> Generator[None, None, None]:
-    """Covers: ADR-0002 D2 / WORKFLOW §7 authorized setup-only fixture migration
+    """Covers: WORKFLOW §7 authorized setup-only fixture migration
     for synthetic h3 candidates.
     """
     mpatch = pytest.MonkeyPatch()

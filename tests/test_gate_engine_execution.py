@@ -158,7 +158,7 @@ def _executor(**kwargs: object) -> EngineGateExecutor:
 def test_engine_g3_pass_records_engine_history(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: ADR-0004 D3 (G3 engine evidence, outcome.json + kind/producer)."""
+    """Covers: G3 engine evidence, outcome.json + kind/producer."""
     repo = _init_repo(tmp_path / "repo")
     monkeypatch.setenv("SABEROPS_TEST_OUTCOME", "PASS")
     request = _request(repo, "G3", tmp_path / "evidence")
@@ -181,7 +181,7 @@ def test_engine_g3_pass_records_engine_history(
 
 
 def test_engine_g1_fail_is_repair_input(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Covers: ADR-0003 D1 (FAIL is a code failure with the failing ids)."""
+    """Covers: FAIL is a code failure with the failing ids."""
     repo = _init_repo(tmp_path / "repo")
     monkeypatch.setenv("SABEROPS_TEST_OUTCOME", "FAIL")
     monkeypatch.setenv("SABEROPS_TEST_FAILED", "tests/test_a.py::test_x")
@@ -192,7 +192,7 @@ def test_engine_g1_fail_is_repair_input(tmp_path: Path, monkeypatch: pytest.Monk
 
 
 def test_engine_g1_flaky_pass_accepted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Covers: ADR-0003 D1 (G1 FLAKY_PASS needs no quarantine)."""
+    """Covers: G1 FLAKY_PASS needs no quarantine."""
     repo = _init_repo(tmp_path / "repo")
     monkeypatch.setenv("SABEROPS_TEST_OUTCOME", "FLAKY_PASS")
     monkeypatch.setenv("SABEROPS_TEST_FLAKY", "tests/test_a.py::test_x")
@@ -222,7 +222,7 @@ def test_engine_pass_without_checks_evidence_is_blocked(
 def test_engine_gate_refuses_write_scope_violation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: ADR-0004 D3 (out-of-scope edit blocks before any command runs)."""
+    """Covers: out-of-scope edit blocks before any command runs."""
     repo = _init_repo(tmp_path / "repo")
     monkeypatch.setenv("SABEROPS_TEST_OUTCOME", "PASS")
     request = _request(
@@ -245,7 +245,7 @@ def test_engine_gate_refuses_write_scope_violation(
 def test_engine_gate_refuses_unauthorized_retirement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: ADR-0004 D3 (unauthorized test deletion blocks)."""
+    """Covers: unauthorized test deletion blocks."""
     repo = _init_repo(tmp_path / "repo")
     base = {"tests/test_mod.py": "def test_a():\n    assert True\n"}
     head = {"tests/test_mod.py": "def test_b():\n    assert True\n"}
@@ -282,7 +282,7 @@ def test_engine_gate_allows_authorized_retirement(
 
 
 def test_engine_gate_disk_low_is_infra_and_recorded(tmp_path: Path) -> None:
-    """Covers: ADR-0003 D4 (below floor -> INFRA DISK_LOW, never a pass)."""
+    """Covers: below floor -> INFRA DISK_LOW, never a pass."""
     repo = _init_repo(tmp_path / "repo")
     executor = EngineGateExecutor(
         slot_pool=_FakePool(),
@@ -312,7 +312,7 @@ def _pin_mem(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, budget_bytes: int)
 
 
 def test_engine_gate_slot_timeout_is_infra(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Covers: ADR-0003 D3 (budget wait exceeded -> INFRA SLOT_WAIT_TIMEOUT)."""
+    """Covers: budget wait exceeded -> INFRA SLOT_WAIT_TIMEOUT."""
     repo = _init_repo(tmp_path / "repo")
     common = (repo / ".git").resolve()
     _pin_mem(tmp_path, monkeypatch, gt.COLD_START_PEAK_BYTES + 100 * gt.MIB)
@@ -328,7 +328,7 @@ def test_engine_gate_slot_timeout_is_infra(tmp_path: Path, monkeypatch: pytest.M
 
 
 def test_kind_selects_slot_class(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Covers: ADR-0003 D3 (G1/G2 light; G3/main-gate heavy+light)."""
+    """Covers: G1/G2 light; G3/main-gate heavy+light."""
     repo = _init_repo(tmp_path / "repo")
     monkeypatch.setenv("SABEROPS_TEST_OUTCOME", "PASS")
     light_pool = _FakePool()
@@ -405,7 +405,7 @@ def test_slot_pool_concurrent_small_reservations(
 
 
 def test_host_disk_admission_floor_blocks(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Covers: ADR-0003 D4 (shared floor is always enforced)."""
+    """Covers: shared floor is always enforced."""
     import saberops.gate_runner as gate_runner
 
     monkeypatch.setattr(
@@ -415,7 +415,7 @@ def test_host_disk_admission_floor_blocks(monkeypatch: pytest.MonkeyPatch, tmp_p
 
 
 def test_history_rejects_non_engine_producer(tmp_path: Path) -> None:
-    """Covers: ADR-0004 D3 (G0/model runs are never evidence)."""
+    """Covers: G0/model runs are never evidence."""
     with pytest.raises(GateHistoryError):
         require_engine_evidence({"producer": "model"})
     with pytest.raises(GateHistoryError):
@@ -509,12 +509,12 @@ def test_engine_history_refuses_producer_after_append(tmp_path: Path) -> None:
 
 
 def test_gate_kind_enum_covers_lifecycle_points() -> None:
-    """Covers: ADR-0004 D3 (kind taxonomy G1|G2|G3|main-gate|manual)."""
+    """Covers: kind taxonomy G1|G2|G3|main-gate|manual."""
     assert {kind.value for kind in GateKind} == {"G1", "G2", "G3", "main-gate", "manual"}
 
 
 def test_engine_executor_requires_wall_budget() -> None:
-    """Covers: ADR-0003 D2 (profiles always carry a wall budget)."""
+    """Covers: profiles always carry a wall budget."""
     with pytest.raises(GateProfileError):
         GateProfile(
             name=GateProfileName.FAST,

@@ -6,7 +6,7 @@ say about each object?*  It never deletes anything, never writes the owner
 database, and never writes the filesystem.  ``orch gc --dry-run`` and the
 scheduled maintenance pass both consume it.
 
-Authority rules (ADR-0003 Amendment 1 §1, §2):
+Authority rules:
 
 * Ownership comes from real persisted provenance -- run/attempt rows, the
   candidate lifecycle projection, the execution-owner lease table and the job
@@ -164,7 +164,7 @@ def measure_path_bytes(
     the walk is truncated, or the path cannot be stat-ed, both byte counts are
     ``None`` (unknown), never zero.
 
-    Covers: ADR-0003 Amendment 1 §5 (reclaimable-byte estimates account for
+    Covers: reclaimable-byte estimates account for
     hard-linked package caches), D6 (unknown size fails closed).
     """
     target = Path(path)
@@ -1083,7 +1083,7 @@ def _discover_owned_caches(
     scheduling it for deletion.  Unreadable roots are reported as ``UNKNOWN``
     (still protected) rather than guessed at.
 
-    Covers: ADR-0003 D6 (owned caches are inventoried and protected).
+    Covers: owned caches are inventoried and protected.
     """
     candidates: list[tuple[Path, str]] = []
     try:

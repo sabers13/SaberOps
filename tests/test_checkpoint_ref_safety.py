@@ -1,4 +1,4 @@
-"""Adversarial Git checkpoint-ref safety regressions (ADR-0002 D8 R3).
+"""Adversarial Git checkpoint-ref safety regressions.
 
 R3: the engine-owned checkpoint ref (``refs/saberops/checkpoints/<job_id>/<n>``)
 was written with a bare ``git update-ref <ref> <sha>`` -- no compare-and-swap
@@ -67,7 +67,7 @@ def _branch(value_ref: str = "refs/heads/valuable") -> str:
 
 
 def test_anchor_refuses_symbolic_ref_to_user_branch(tmp_path: Path) -> None:
-    """Covers: ADR-0002 D8 R3 symbolic-ref injection must not move a branch."""
+    """Covers: symbolic-ref injection must not move a branch."""
     repo = tmp_path / "repo"
     base = _repo(repo)
     _git(["branch", "valuable"], repo)
@@ -91,7 +91,7 @@ def test_anchor_refuses_symbolic_ref_to_user_branch(tmp_path: Path) -> None:
 def test_anchor_refuses_symbolic_injected_between_listing_and_create(
     tmp_path: Path,
 ) -> None:
-    """Covers: ADR-0002 D8 R3 ref injected after enumeration must fail closed.
+    """Covers: ref injected after enumeration must fail closed.
 
     The preemption coordinator enumerates the job's checkpoint refs and then
     anchors the newest SHA.  A symbolic ref installed inside that window must
@@ -119,7 +119,7 @@ def test_anchor_refuses_symbolic_injected_between_listing_and_create(
 
 
 def test_reuse_path_refuses_symbolic_checkpoint_ref(tmp_path: Path) -> None:
-    """Covers: ADR-0002 D8 R3 coordinator reuse path must not trust a symlink."""
+    """Covers: coordinator reuse path must not trust a symlink."""
     repo = tmp_path / "repo"
     base = _repo(repo)
     _git(["branch", "valuable"], repo)
@@ -136,7 +136,7 @@ def test_reuse_path_refuses_symbolic_checkpoint_ref(tmp_path: Path) -> None:
 
 
 def test_dangling_symbolic_ref_is_refused_not_rewritten(tmp_path: Path) -> None:
-    """Covers: ADR-0002 D8 R3 dangling symref is still a symbolic ref."""
+    """Covers: dangling symref is still a symbolic ref."""
     repo = tmp_path / "repo"
     base = _repo(repo)
     checkpoint_ref = "refs/saberops/checkpoints/job1/0"
@@ -158,7 +158,7 @@ def test_dangling_symbolic_ref_is_refused_not_rewritten(tmp_path: Path) -> None:
 def test_anchor_refuses_direct_ref_collision_and_keeps_old_sha(
     tmp_path: Path,
 ) -> None:
-    """Covers: ADR-0002 D8 R3 create-only CAS preserves a colliding anchor."""
+    """Covers: create-only CAS preserves a colliding anchor."""
     repo = tmp_path / "repo"
     base = _repo(repo)
     newer = _commit(repo, "wip.txt", "wip\n")
@@ -175,7 +175,7 @@ def test_anchor_refuses_direct_ref_collision_and_keeps_old_sha(
 def test_anchor_refuses_direct_ref_injected_between_listing_and_create(
     tmp_path: Path,
 ) -> None:
-    """Covers: ADR-0002 D8 R3 a direct ref injected after listing is not taken."""
+    """Covers: a direct ref injected after listing is not taken."""
     repo = tmp_path / "repo"
     base = _repo(repo)
     newer = _commit(repo, "wip.txt", "wip\n")
@@ -193,7 +193,7 @@ def test_anchor_refuses_direct_ref_injected_between_listing_and_create(
 def test_anchor_reuses_identical_direct_ref_and_refuses_packed_collision(
     tmp_path: Path,
 ) -> None:
-    """Covers: ADR-0002 D8 R3 packed refs: same-SHA retry reuses, collision fails."""
+    """Covers: packed refs: same-SHA retry reuses, collision fails."""
     repo = tmp_path / "repo"
     base = _repo(repo)
     newer = _commit(repo, "wip.txt", "wip\n")
@@ -222,7 +222,7 @@ def test_anchor_reuses_identical_direct_ref_and_refuses_packed_collision(
 
 
 def test_read_and_list_refuse_symbolic_checkpoint_ref(tmp_path: Path) -> None:
-    """Covers: ADR-0002 D8 R3 read/list must not dereference a symlink anchor."""
+    """Covers: read/list must not dereference a symlink anchor."""
     repo = tmp_path / "repo"
     base = _repo(repo)
     _git(["branch", "valuable"], repo)
@@ -247,7 +247,7 @@ def test_read_and_list_refuse_symbolic_checkpoint_ref(tmp_path: Path) -> None:
 
 
 def test_read_checkpoint_ref_returns_none_when_absent(tmp_path: Path) -> None:
-    """Covers: ADR-0002 D8 R3 absent direct ref reads as None, not an error."""
+    """Covers: absent direct ref reads as None, not an error."""
     repo = tmp_path / "repo"
     _repo(repo)
     assert GitManager.read_checkpoint_ref(repo, "job1", 0) is None
@@ -260,7 +260,7 @@ def test_read_checkpoint_ref_returns_none_when_absent(tmp_path: Path) -> None:
 
 
 def test_anchor_requires_existing_exact_target_commit(tmp_path: Path) -> None:
-    """Covers: ADR-0002 D8 R3 unverified target SHA is refused before any write."""
+    """Covers: unverified target SHA is refused before any write."""
     repo = tmp_path / "repo"
     _repo(repo)
     checkpoint_ref = "refs/saberops/checkpoints/job1/0"
@@ -277,7 +277,7 @@ def test_anchor_requires_existing_exact_target_commit(tmp_path: Path) -> None:
 
 
 def test_create_only_cas_fails_closed_on_namespace_conflict(tmp_path: Path) -> None:
-    """Covers: ADR-0002 D8 R3 an unusable namespace cannot yield a false anchor."""
+    """Covers: an unusable namespace cannot yield a false anchor."""
     repo = tmp_path / "repo"
     base = _repo(repo)
     # ``.../job1/0`` becomes a directory, so the exact ref name cannot exist.
@@ -300,7 +300,7 @@ def test_create_only_cas_fails_closed_on_namespace_conflict(tmp_path: Path) -> N
 def test_valid_anchor_keeps_wip_reachable_after_branch_moves_and_gc(
     tmp_path: Path,
 ) -> None:
-    """Covers: ADR-0002 D8 R3 a real direct anchor survives ref advance + gc."""
+    """Covers: a real direct anchor survives ref advance + gc."""
     repo = tmp_path / "repo"
     base = _repo(repo)
     wip = _commit(repo, "wip.txt", "wip\n")

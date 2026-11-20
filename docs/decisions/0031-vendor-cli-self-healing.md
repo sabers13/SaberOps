@@ -4,8 +4,8 @@
 - **Date:** 2026-11-19
 - **Decider:** Saber (owner), via the Phase 1 plan lane F18
 - **Related:** [ADR-0018](0018-vendor-cli-update-guard.md) (the no-prompt
-  version guard this record acts on), [ADR-0002](0002-routing-admission-and-quota.md)
-  (routing and admission), [ADR-0011](0011-bounded-automatic-actions.md)
+  version guard this record acts on),
+  [ADR-0011](0011-bounded-automatic-actions.md)
   (bounded automatic actions), [ADR-0024](0024-model-family-tokens.md) (family
   tokens used to keep a repair off the broken vendor),
   [ADR-0029](0029-no-work-without-a-planning-session.md) (the work gate that

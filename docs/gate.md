@@ -123,7 +123,7 @@ Mechanism (`saberops.gate_scope`, `saberops.gate_runner`):
 
 Owner escalation workflow:
 
-1. The block raises an owner question (ADR-0004 D6): accept the definition change
+1. The block raises an owner question: accept the definition change
    into the base SHA and re-run the gate against the new base, or reject the change.
 2. An accepted definition change reaches the base SHA through the normal owner
    merge; the next gate then loads the new definition from that new base. A lane
@@ -239,7 +239,7 @@ are registered and strict marker validation is enabled. The timing/process-contr
 modules `test_session_control.py` and `test_parallel_work.py` keep their `serial`
 marker as documentation, but there is no serial tier: they run in the single
 bounded parallel pass and, if they flake, are rerun once serially with just their
-node IDs (a still-flaky unquarantined test fails the full gate per D5). Additional
+node IDs (a still-flaky unquarantined test fails the full gate). Additional
 marks require evidence; no test logic is changed. Plain pytest retains only failed
 tmp_path directories, with a retention count of one.
 

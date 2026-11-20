@@ -22,7 +22,7 @@ from saberops.process import ProcessResult, run_process
 from saberops.session_control import ControlConflict, SessionControls
 from saberops.workers import ClaudeCodeAdapter, CodexAdapter, OpenCodeAdapter
 
-# ADR-0003 §2: contention flakes pass when run serially.
+# Contention flakes pass when run serially.
 pytestmark = pytest.mark.serial
 
 def live_identity() -> str:
@@ -461,7 +461,7 @@ def _seed_verified_codex_posture(config_home: Path) -> None:
     """Seed an isolated owner config with a verified class-A posture for the
     synthetic ``codex`` provider this orchestrator-dispatch run uses.
 
-    Covers: ADR-0002 D2 setup-only posture migration (D-0024), following the
+    Covers: setup-only posture migration, following the
     accepted 0074109 precedent in ``tests/test_worker_hermetic_env.py``.  The run
     dispatches a synthetic ``codex`` candidate with no matching posture record,
     so the accepted M2-4b F1 admission seam rightfully skips it
@@ -505,7 +505,7 @@ def test_manual_stop_terminalizes_run_before_gate_or_automatic_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Covers: ADR-0002 D2 setup-only posture migration (D-0024)."""
+    """Covers: setup-only posture migration."""
     from saberops.db import Database
     from saberops.models import RunStatus
     from saberops.orchestrator import Orchestrator

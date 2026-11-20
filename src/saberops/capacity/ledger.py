@@ -884,7 +884,7 @@ def post_observation_charges(
 ) -> dict[tuple[str, str], float]:
     """Return map of (pool_id, window_id) -> total cost_pct of counted reservations/settled rows.
 
-    Fail-closed schema rule (ADR-0002 D2/D7, F2 follow-up): ``{}`` is only
+    Fail-closed schema rule (follow-up): ``{}`` is only
     returned when there is positive, authoritative proof that **every**
     required capacity table is absent, i.e. a genuinely uninitialized owner
     DB.  If the schema is partially initialized, if schema discovery itself

@@ -1,6 +1,6 @@
 """Adversarial tests for the host-wide adaptive storage budget.
 
-Covers: ADR-0003 Amendment 2 (concurrent-run adaptive storage admission).
+Covers: concurrent-run adaptive storage admission.
 
 Every test here is hermetic: a fake filesystem probe supplies capacities, no
 large file is written, no provider/model is reachable, and no file is deleted.
@@ -175,7 +175,7 @@ def tree_snapshot(root: Path) -> set[str]:
 
 
 def test_four_sessions_sum_independently(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (four estimates are added once, not N-way)."""
+    """Covers: four estimates are added once, not N-way."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
     with StorageLedger(make_config(tmp_path), fs) as ledger:
         totals: list[int] = []
@@ -212,7 +212,7 @@ def test_four_sessions_sum_independently(tmp_path: Path) -> None:
 
 
 def test_candidate_joining_three_live_sessions_makes_four_reservations(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (one reservation per live session plus one)."""
+    """Covers: one reservation per live session plus one."""
     fs = FakeFilesystem({tmp_path: ("fs", 32 * GB, 16 * GB)})
     with StorageLedger(make_config(tmp_path), fs) as ledger:
         for index in range(3):
@@ -232,7 +232,7 @@ def test_candidate_joining_three_live_sessions_makes_four_reservations(tmp_path:
 
 @pytest.mark.parametrize("sessions", [1, 2, 4, 15])
 def test_one_two_four_fifteen_sessions_across_projects(tmp_path: Path, sessions: int) -> None:
-    """Covers: ADR-0003 Amendment 2 (1/2/4/15 sessions and multiple projects)."""
+    """Covers: 1/2/4/15 sessions and multiple projects."""
     fs = FakeFilesystem({tmp_path: ("fs", 64 * GB, 32 * GB)})
     with StorageLedger(make_config(tmp_path), fs) as ledger:
         for index in range(sessions):
@@ -247,7 +247,7 @@ def test_one_two_four_fifteen_sessions_across_projects(tmp_path: Path, sessions:
 
 
 def test_shared_parent_wave_budget_is_counted_once(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (a common parent wave is not counted four times)."""
+    """Covers: a common parent wave is not counted four times."""
     fs = FakeFilesystem({tmp_path: ("fs", 32 * GB, 16 * GB)})
     with StorageLedger(make_config(tmp_path), fs) as ledger:
         for index in range(4):
@@ -269,7 +269,7 @@ def test_shared_parent_wave_budget_is_counted_once(tmp_path: Path) -> None:
 
 
 def test_same_filesystem_path_alias_counts_once(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (same-filesystem alias must not double count)."""
+    """Covers: same-filesystem alias must not double count."""
     real = tmp_path / "real"
     real.mkdir()
     link = tmp_path / "alias"
@@ -292,7 +292,7 @@ def test_same_filesystem_path_alias_counts_once(tmp_path: Path) -> None:
 
 
 def test_distinct_paths_on_one_filesystem_add_up(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (distinct growth locations on one device sum)."""
+    """Covers: distinct growth locations on one device sum."""
     first = tmp_path / "first"
     second = tmp_path / "second"
     first.mkdir()
@@ -313,7 +313,7 @@ def test_distinct_paths_on_one_filesystem_add_up(tmp_path: Path) -> None:
 
 
 def test_different_filesystems_are_independent_and_ordered(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (distinct devices independent, deterministic order)."""
+    """Covers: distinct devices independent, deterministic order."""
     home = tmp_path / "home"
     scratch = tmp_path / "scratch"
     home.mkdir()
@@ -344,7 +344,7 @@ def test_different_filesystems_are_independent_and_ordered(tmp_path: Path) -> No
 
 
 def test_multi_filesystem_order_is_declaration_independent(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (deterministic multi-filesystem lock order)."""
+    """Covers: deterministic multi-filesystem lock order."""
     home = tmp_path / "home"
     scratch = tmp_path / "scratch"
     home.mkdir()
@@ -379,7 +379,7 @@ def test_multi_filesystem_order_is_declaration_independent(tmp_path: Path) -> No
 
 
 def test_missing_filesystem_fails_closed(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (misidentified filesystem fails closed)."""
+    """Covers: misidentified filesystem fails closed."""
     watched = tmp_path / "watched"
     watched.mkdir()
     fs = FakeFilesystem({watched: ("fs", 16 * GB, 8 * GB)})
@@ -395,7 +395,7 @@ def test_missing_filesystem_fails_closed(tmp_path: Path) -> None:
 
 
 def test_real_filesystem_identity_measures_this_host(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (mount/device identity, not just a path)."""
+    """Covers: mount/device identity, not just a path."""
     identity = real_filesystem_identity(tmp_path)
     assert identity.key.startswith(socket.gethostname())
     assert identity.total_bytes > 0
@@ -413,7 +413,7 @@ def test_real_filesystem_identity_measures_this_host(tmp_path: Path) -> None:
 
 
 def test_active_vs_waiting_jobs_and_release_frees_capacity(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (a waiting job holds no storage liability)."""
+    """Covers: a waiting job holds no storage liability."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 10 * GB)})
     with StorageLedger(make_config(tmp_path), fs) as ledger:
         keys = [make_key(session=f"s{index}") for index in range(4)]
@@ -437,7 +437,7 @@ def test_active_vs_waiting_jobs_and_release_frees_capacity(tmp_path: Path) -> No
 
 
 def test_retained_preempted_wip_keeps_a_reduced_liability(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (preempted WIP keeps liability, no executing slot)."""
+    """Covers: preempted WIP keeps liability, no executing slot."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
     with StorageLedger(make_config(tmp_path), fs) as ledger:
         owner = OwnerToken("preempted", 1)
@@ -454,7 +454,7 @@ def test_retained_preempted_wip_keeps_a_reduced_liability(tmp_path: Path) -> Non
 
 
 def test_duplicate_and_changed_session_key(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (idempotent key, stale generation fenced)."""
+    """Covers: idempotent key, stale generation fenced."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
     with StorageLedger(make_config(tmp_path), fs) as ledger:
         key = make_key()
@@ -474,7 +474,7 @@ def test_duplicate_and_changed_session_key(tmp_path: Path) -> None:
 
 
 def test_killed_before_and_after_reserve_replay(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (crash before/after booking never double books)."""
+    """Covers: crash before/after booking never double books."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
     base = datetime(2026, 10, 15, 12, 0, 0, tzinfo=UTC)
     with StorageLedger(make_config(tmp_path, lease_seconds=60.0), fs) as ledger:
@@ -506,7 +506,7 @@ def test_killed_before_and_after_reserve_replay(tmp_path: Path) -> None:
 
 
 def test_tight_headroom_replay_does_not_double_count(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (a replay never charges the row to itself)."""
+    """Covers: a replay never charges the row to itself."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 4 * GB)})
     base = datetime(2026, 10, 15, 12, 0, 0, tzinfo=UTC)
     with StorageLedger(make_config(tmp_path, lease_seconds=60.0), fs) as ledger:
@@ -537,7 +537,7 @@ def test_tight_headroom_replay_does_not_double_count(tmp_path: Path) -> None:
 
 
 def test_idempotent_settle_and_release_refusal(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (settlement is idempotent and fenced)."""
+    """Covers: settlement is idempotent and fenced."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
     with StorageLedger(make_config(tmp_path), fs) as ledger:
         key = make_key()
@@ -561,7 +561,7 @@ def test_idempotent_settle_and_release_refusal(tmp_path: Path) -> None:
 
 
 def test_settle_requires_the_owner_generation(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (fenced single-writer settlement)."""
+    """Covers: fenced single-writer settlement."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
     with StorageLedger(make_config(tmp_path), fs) as ledger:
         key = make_key()
@@ -572,7 +572,7 @@ def test_settle_requires_the_owner_generation(tmp_path: Path) -> None:
 
 
 def test_settle_and_release_reject_a_foreign_incarnation(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (a copied token cannot close another incarnation)."""
+    """Covers: a copied token cannot close another incarnation."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
     with StorageLedger(make_config(tmp_path), fs) as ledger:
         recorded = ProcessIdentity.for_self()
@@ -617,7 +617,7 @@ def test_settle_and_release_reject_a_foreign_incarnation(tmp_path: Path) -> None
 
 
 def test_omitted_identity_resolves_to_the_actual_process(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (an omitted identity is the live caller).
+    """Covers: an omitted identity is the live caller.
 
     Policy correction (owner-approved): the former "no-identity delegation"
     doctrine is revoked.  A token that omits its identity is resolved to the
@@ -649,7 +649,7 @@ def test_omitted_identity_resolves_to_the_actual_process(tmp_path: Path) -> None
 
 
 def test_reopen_refuses_a_stale_generation_replay(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (no stale resurrection of a settled key)."""
+    """Covers: no stale resurrection of a settled key."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
     with StorageLedger(make_config(tmp_path), fs) as ledger:
         key = make_key()
@@ -673,7 +673,7 @@ def test_reopen_refuses_a_stale_generation_replay(tmp_path: Path) -> None:
 def test_reopen_refuses_a_foreign_owner_while_the_predecessor_lives(
     tmp_path: Path,
 ) -> None:
-    """Covers: ADR-0003 Amendment 2 (a live predecessor blocks foreign reopen)."""
+    """Covers: a live predecessor blocks foreign reopen."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
     with StorageLedger(make_config(tmp_path), fs) as ledger:
         key = make_key()
@@ -689,7 +689,7 @@ def test_reopen_refuses_a_foreign_owner_while_the_predecessor_lives(
 
 
 def test_reopen_by_an_authorised_successor_preserves_audit_timing(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (crash-after-settle reopen keeps created_at)."""
+    """Covers: crash-after-settle reopen keeps created_at."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
     base = datetime(2026, 10, 15, 12, 0, 0, tzinfo=UTC)
     with StorageLedger(make_config(tmp_path, lease_seconds=60.0), fs) as ledger:
@@ -725,7 +725,7 @@ def test_reopen_by_an_authorised_successor_preserves_audit_timing(tmp_path: Path
 def test_reopen_refuses_a_foreign_live_incarnation_sharing_the_owner_id(
     tmp_path: Path,
 ) -> None:
-    """Covers: ADR-0003 Amendment 2 (a live foreign incarnation cannot reopen)."""
+    """Covers: a live foreign incarnation cannot reopen."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
     child = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(60)"],
@@ -765,7 +765,7 @@ def test_reopen_refuses_a_foreign_live_incarnation_sharing_the_owner_id(
 
 
 def test_reopen_by_a_distinct_incarnation_after_proven_death(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (recovery survives a legitimate identity change)."""
+    """Covers: recovery survives a legitimate identity change."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
     base = datetime(2026, 10, 15, 12, 0, 0, tzinfo=UTC)
     with StorageLedger(make_config(tmp_path, lease_seconds=60.0), fs) as ledger:
@@ -802,7 +802,7 @@ def test_reopen_by_a_distinct_incarnation_after_proven_death(tmp_path: Path) -> 
 
 
 def test_reopen_of_a_dead_predecessor_still_needs_a_lapsed_lease(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (proven death alone does not release the lease)."""
+    """Covers: proven death alone does not release the lease."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
     base = datetime(2026, 10, 15, 12, 0, 0, tzinfo=UTC)
     with StorageLedger(make_config(tmp_path, lease_seconds=60.0), fs) as ledger:
@@ -830,7 +830,7 @@ def test_reopen_of_a_dead_predecessor_still_needs_a_lapsed_lease(tmp_path: Path)
 def test_omitted_identity_takeover_requires_proven_death_and_lapsed_lease(
     tmp_path: Path,
 ) -> None:
-    """Covers: ADR-0003 Amendment 2 (takeover: proven death + lapsed lease + new gen)."""
+    """Covers: takeover: proven death + lapsed lease + new gen."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
     base = datetime(2026, 10, 15, 12, 0, 0, tzinfo=UTC)
     with StorageLedger(make_config(tmp_path, lease_seconds=60.0), fs) as ledger:
@@ -876,7 +876,7 @@ def _corrupt_owner_identity(config: LedgerConfig, value: str) -> None:
 def test_corrupt_recorded_identity_denies_every_mutation_and_stays_charged(
     tmp_path: Path, corrupt: str
 ) -> None:
-    """Covers: ADR-0003 Amendment 2 (unreadable recorded identity fails closed)."""
+    """Covers: unreadable recorded identity fails closed."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
     config = make_config(tmp_path)
     key = make_key()
@@ -909,7 +909,7 @@ def test_corrupt_recorded_identity_denies_every_mutation_and_stays_charged(
 
 
 def test_corrupt_recorded_identity_denies_terminal_reopen(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (a corrupt terminal row is not resurrectable)."""
+    """Covers: a corrupt terminal row is not resurrectable."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
     config = make_config(tmp_path)
     key = make_key()
@@ -937,7 +937,7 @@ def test_corrupt_recorded_identity_denies_terminal_reopen(tmp_path: Path) -> Non
 
 
 def test_unknown_reservation_mutations_are_typed_refusals(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (an unknown key is a typed refusal, never a write)."""
+    """Covers: an unknown key is a typed refusal, never a write."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
     with StorageLedger(make_config(tmp_path), fs) as ledger:
         absent = make_key(session="absent")
@@ -1039,7 +1039,7 @@ print(json.dumps(results))
 def test_foreign_process_omitted_identity_cannot_mutate_a_live_reservation(
     tmp_path: Path,
 ) -> None:
-    """Covers: ADR-0003 Amendment 2 (omitting identity is not cross-process authority)."""
+    """Covers: omitting identity is not cross-process authority."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
     config = make_config(tmp_path)
     script = tmp_path / "foreign_omitted.py"
@@ -1103,7 +1103,7 @@ def test_foreign_process_omitted_identity_cannot_mutate_a_live_reservation(
 
 
 def test_state_restart_keeps_the_same_reservation(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (restart/durability, no missing-ledger all-clear)."""
+    """Covers: restart/durability, no missing-ledger all-clear."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
     config = make_config(tmp_path)
     with StorageLedger(config, fs) as ledger:
@@ -1131,7 +1131,7 @@ def test_state_restart_keeps_the_same_reservation(tmp_path: Path) -> None:
 
 
 def test_lease_expiry_and_pid_reuse(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (stale lease/PID reuse, no premature reclaim)."""
+    """Covers: stale lease/PID reuse, no premature reclaim."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
     base = datetime(2026, 10, 15, 12, 0, 0, tzinfo=UTC)
     with StorageLedger(make_config(tmp_path, lease_seconds=60.0), fs) as ledger:
@@ -1163,7 +1163,7 @@ def test_lease_expiry_and_pid_reuse(tmp_path: Path) -> None:
 
 
 def test_owner_token_rejects_empty_id_and_nonpositive_generation(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (an unvalidated fencing token is refused)."""
+    """Covers: an unvalidated fencing token is refused."""
     for owner_id, generation in (("", 1), ("   ", 1), ("o", 0), ("o", -3)):
         with pytest.raises(sb.FencingError):
             OwnerToken(owner_id, generation)
@@ -1176,7 +1176,7 @@ def test_owner_token_rejects_empty_id_and_nonpositive_generation(tmp_path: Path)
 
 
 def test_same_generation_from_another_incarnation_is_fenced(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (PID-reuse replay is not the recorded owner)."""
+    """Covers: PID-reuse replay is not the recorded owner."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
     with StorageLedger(make_config(tmp_path), fs) as ledger:
         key = make_key()
@@ -1203,7 +1203,7 @@ def test_same_generation_from_another_incarnation_is_fenced(tmp_path: Path) -> N
 
 
 def test_corrupt_reservation_row_fails_closed(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (a tampered row is corruption, not a crash)."""
+    """Covers: a tampered row is corruption, not a crash."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
     config = make_config(tmp_path)
     with StorageLedger(config, fs) as ledger:
@@ -1224,7 +1224,7 @@ def test_corrupt_reservation_row_fails_closed(tmp_path: Path) -> None:
 
 
 def test_corrupt_owner_identity_stays_charged(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (unreadable owner state fails closed, never 0)."""
+    """Covers: unreadable owner state fails closed, never 0."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
     base = datetime(2026, 10, 15, 12, 0, 0, tzinfo=UTC)
     config = make_config(tmp_path, lease_seconds=60.0)
@@ -1245,7 +1245,7 @@ def test_corrupt_owner_identity_stays_charged(tmp_path: Path) -> None:
 def test_assessment_does_not_probe_live_leases(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: ADR-0003 Amendment 2 (bounded owner scan, unexpired lease charged)."""
+    """Covers: bounded owner scan, unexpired lease charged."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
     base = datetime(2026, 10, 15, 12, 0, 0, tzinfo=UTC)
     calls: list[int] = []
@@ -1274,7 +1274,7 @@ def test_assessment_does_not_probe_live_leases(
 
 
 def test_stale_reservations_stay_fully_charged(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (an unproven owner never shrinks a reservation)."""
+    """Covers: an unproven owner never shrinks a reservation."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
     base = datetime(2026, 10, 15, 12, 0, 0, tzinfo=UTC)
     with StorageLedger(make_config(tmp_path, lease_seconds=60.0), fs) as ledger:
@@ -1295,7 +1295,7 @@ def test_stale_reservations_stay_fully_charged(tmp_path: Path) -> None:
 
 
 def test_observed_vs_remaining_byte_accounting(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (observed owned consumption, conservative shared)."""
+    """Covers: observed owned consumption, conservative shared."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
     with StorageLedger(make_config(tmp_path), fs) as ledger:
         owner = OwnerToken("owner", 1)
@@ -1318,7 +1318,7 @@ def test_observed_vs_remaining_byte_accounting(tmp_path: Path) -> None:
 
 
 def test_observed_overshoot_pauses_new_starts_only(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (unknown spike pauses new starts, never kills)."""
+    """Covers: unknown spike pauses new starts, never kills."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
     with StorageLedger(make_config(tmp_path), fs) as ledger:
         owner = OwnerToken("owner", 1)
@@ -1341,7 +1341,7 @@ def test_observed_overshoot_pauses_new_starts_only(tmp_path: Path) -> None:
 
 
 def test_observe_rejects_foreign_filesystem_and_bad_owner(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (attribution only where it is authoritative)."""
+    """Covers: attribution only where it is authoritative."""
     home = tmp_path / "home"
     scratch = tmp_path / "scratch"
     home.mkdir()
@@ -1363,7 +1363,7 @@ def test_observe_rejects_foreign_filesystem_and_bad_owner(tmp_path: Path) -> Non
 
 
 def test_renewal_is_bounded_and_fit_checked(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (bounded renewal, dynamic lower-only admission)."""
+    """Covers: bounded renewal, dynamic lower-only admission."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
     with StorageLedger(make_config(tmp_path), fs) as ledger:
         owner = OwnerToken("owner", 1)
@@ -1386,7 +1386,7 @@ def test_renewal_is_bounded_and_fit_checked(tmp_path: Path) -> None:
 
 
 def test_requirement_arithmetic_rejects_negatives(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (nonnegativity and bounds)."""
+    """Covers: nonnegativity and bounds."""
     assert compute_required_free(GB, 2 * GB, 3 * GB) == 6 * GB
     with pytest.raises(EstimateUnavailableError):
         compute_required_free(-1, 0, 0)
@@ -1410,7 +1410,7 @@ def test_requirement_arithmetic_rejects_negatives(tmp_path: Path) -> None:
 
 
 def test_unknown_historical_samples_fail_closed(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (unknown samples are never read as zero)."""
+    """Covers: unknown samples are never read as zero."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
     with StorageLedger(make_config(tmp_path), fs) as ledger:
         owner = OwnerToken("o", 1)
@@ -1449,7 +1449,7 @@ def test_unknown_historical_samples_fail_closed(tmp_path: Path) -> None:
 
 
 def test_invalid_margins_and_missing_policy_fail_closed(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (margin calibration is an owner matter)."""
+    """Covers: margin calibration is an owner matter."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
     bad: list[dict[str, object]] = [
         {"approved": "yes"},
@@ -1494,7 +1494,7 @@ def test_invalid_margins_and_missing_policy_fail_closed(tmp_path: Path) -> None:
 
 
 def test_fractional_margin_is_bounded(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (bounded, non-zero, owner-calibrated margin)."""
+    """Covers: bounded, non-zero, owner-calibrated margin."""
     path = write_policy(tmp_path, fixed_bytes=None, fraction=0.2, min_bytes=GB, max_bytes=2 * GB)
     policy = load_margin_policy(path)
     assert policy.approved and policy.fixed_bytes is None and policy.fraction == 0.2
@@ -1509,7 +1509,7 @@ def test_fractional_margin_is_bounded(tmp_path: Path) -> None:
 
 
 def test_corrupt_ledger_fails_closed(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (corrupt ledger is never an all-clear)."""
+    """Covers: corrupt ledger is never an all-clear."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
     config = make_config(tmp_path)
     with StorageLedger(config, fs):
@@ -1528,7 +1528,7 @@ def test_corrupt_ledger_fails_closed(tmp_path: Path) -> None:
 
 
 def test_missing_schema_version_is_corruption(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (durable schema versioning is enforced)."""
+    """Covers: durable schema versioning is enforced."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
     config = make_config(tmp_path)
     with StorageLedger(config, fs):
@@ -1542,7 +1542,7 @@ def test_missing_schema_version_is_corruption(tmp_path: Path) -> None:
 
 
 def test_ledger_scope_rejects_path_redirection(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (verified ledger identity, no redirection)."""
+    """Covers: verified ledger identity, no redirection."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
     original = LedgerConfig(
         root=tmp_path / "one", policy_path=write_policy(tmp_path), allow_isolated=True
@@ -1564,7 +1564,7 @@ def test_ledger_scope_rejects_path_redirection(tmp_path: Path) -> None:
 def test_default_root_must_be_the_shared_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: ADR-0003 Amendment 2 (reject silently independent ledgers)."""
+    """Covers: reject silently independent ledgers."""
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.delenv("SABEROPS_PROFILE", raising=False)
@@ -1580,7 +1580,7 @@ def test_default_root_must_be_the_shared_one(
 def test_canonical_root_and_policy_ignore_the_profile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: ADR-0003 Amendment 2 (one ledger/policy, never per profile)."""
+    """Covers: one ledger/policy, never per profile."""
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     resolved: set[Path] = set()
@@ -1605,7 +1605,7 @@ def test_canonical_root_and_policy_ignore_the_profile(
 def test_two_profiles_share_one_ledger_and_accounting(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: ADR-0003 Amendment 2 (profiles cannot each book free-minus-margin)."""
+    """Covers: profiles cannot each book free-minus-margin."""
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setenv("SABEROPS_PROFILE", "alpha")
@@ -1640,7 +1640,7 @@ def test_two_profiles_share_one_ledger_and_accounting(
 def test_conflicting_margin_policy_is_rejected_on_the_shared_ledger(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: ADR-0003 Amendment 2 (one authoritative margin, no per-profile policy)."""
+    """Covers: one authoritative margin, no per-profile policy."""
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.delenv("SABEROPS_PROFILE", raising=False)
@@ -1711,7 +1711,7 @@ with StorageLedger(config, probe) as ledger:
 
 
 def test_cross_profile_processes_share_one_ledger(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (two profiles, one host ledger: no overbook)."""
+    """Covers: two profiles, one host ledger: no overbook."""
     state = tmp_path / "state"
     config_dir = tmp_path / "config"
     policy = config_dir / "saberops" / sb.POLICY_FILENAME
@@ -1755,7 +1755,7 @@ def test_cross_profile_processes_share_one_ledger(tmp_path: Path) -> None:
 
 
 def test_ledger_is_owner_only_and_symlinks_are_refused(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (owner-only persistence, no symlink redirection)."""
+    """Covers: owner-only persistence, no symlink redirection."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
     config = make_config(tmp_path)
     with StorageLedger(config, fs):
@@ -1782,7 +1782,7 @@ def test_ledger_is_owner_only_and_symlinks_are_refused(tmp_path: Path) -> None:
 
 
 def test_lock_contention_is_bounded_and_typed(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (bounded locks; contention is a typed INFRA)."""
+    """Covers: bounded locks; contention is a typed INFRA."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
     config = dataclasses.replace(make_config(tmp_path), lock_timeout_seconds=0.2)
     holder = StorageLedger(config, fs)
@@ -1801,7 +1801,7 @@ def test_lock_contention_is_bounded_and_typed(tmp_path: Path) -> None:
 
 
 def test_report_shape_and_determinism(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (deterministic reasoned per-FS report)."""
+    """Covers: deterministic reasoned per-FS report."""
     fs = FakeFilesystem({tmp_path: ("fs-2", 16 * GB, 8 * GB)})
     decision = StorageLedger(make_config(tmp_path), fs).try_reserve(
         make_key(), OwnerToken("o", 1), make_estimate(tmp_path, GB, uncertainty=256 * MIB)
@@ -1840,7 +1840,7 @@ def test_report_shape_and_determinism(tmp_path: Path) -> None:
 
 
 def test_module_has_no_model_or_network_dependency() -> None:
-    """Covers: ADR-0003 Amendment 2 (deterministic, zero-token decision path)."""
+    """Covers: deterministic, zero-token decision path."""
     source = Path(sb.__file__).read_text(encoding="utf-8")
     tree = ast.parse(source)
     imported: set[str] = set()
@@ -1858,7 +1858,7 @@ def test_module_has_no_model_or_network_dependency() -> None:
 
 
 def test_operations_never_delete_owner_files(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (no arbitrary deletion of user data)."""
+    """Covers: no arbitrary deletion of user data."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
     owner_data = tmp_path / "owner-data"
     owner_data.mkdir()
@@ -1950,7 +1950,7 @@ with StorageLedger(config, probe) as ledger:
 
 
 def test_cross_process_race_admits_only_what_fits(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (four competing processes cannot overbook)."""
+    """Covers: four competing processes cannot overbook."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
     config = make_config(tmp_path)
     script = tmp_path / "race_child.py"
@@ -2001,7 +2001,7 @@ def test_cross_process_race_admits_only_what_fits(tmp_path: Path) -> None:
 
 
 def test_concurrent_threads_do_not_overbook(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (competing in-process writers, one winner set)."""
+    """Covers: competing in-process writers, one winner set."""
     fs = FakeFilesystem({tmp_path: ("fs", 16 * GB, 8 * GB)})
     config = make_config(tmp_path)
 
@@ -2036,7 +2036,7 @@ def test_concurrent_threads_do_not_overbook(tmp_path: Path) -> None:
 
 
 def test_unavailable_decisions_expose_the_typed_reason(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 (typed INFRA vocabulary for callers)."""
+    """Covers: typed INFRA vocabulary for callers."""
     assert sb.StorageBudgetError.reason_code == sb.REASON_UNAVAILABLE
     assert sb.LockContentionError.reason_code == "LOCK_CONTENTION"
     assert sb.LedgerCorruptError.reason_code == "LEDGER_CORRUPT"

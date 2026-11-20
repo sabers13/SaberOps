@@ -296,7 +296,7 @@ def _merge_legacy_to_v2(validated: dict[str, list[str]]) -> dict[str, list[str]]
 
 
 def _migrate_v2_to_v3_roles(merged: dict[str, list[str]]) -> dict[str, list[list[str]]]:
-    """Migrate merged v2 chains to schema-3 chains (ADR-0002 §11 item 2).
+    """Migrate merged v2 chains to schema-3 chains.
 
     The worker union (T2 order first, then unseen T1/T3) becomes the build
     route; the T3 order becomes the build route's ``strong_start`` setting.
@@ -505,7 +505,7 @@ def canonical_routing_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Return the canonical schema-3 document for any accepted input (1, 2, 3).
 
     Pure: the input is never mutated. Schema 1 merges exactly as before,
-    then migrates 2 → 3 per ADR-0002 §11 item 2. A document that names a
+    then migrates 2 → 3. A document that names a
     retired role is migrated to the build route and its ``strong_start``
     setting.
     """
@@ -1012,7 +1012,7 @@ def payload_to_snapshot(payload: Any, run_id: str | None = None) -> RoutingSnaps
             return tuple(_parse_candidate_id(cid) for cid in validated[k])
 
         legacy_chains = tuple((ctx_key, to_candidates(ctx_key)) for ctx_key in validated)
-        # Derive the role chains with the migration (ADR-0002 §11 item 2).
+        # Derive the role chains with the migration.
         merged = _merge_legacy_to_v2(validated)
         migrated_roles = _migrate_v2_to_v3_roles(merged)
         role_chains = (

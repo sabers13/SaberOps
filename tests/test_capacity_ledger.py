@@ -460,7 +460,7 @@ def test_l10_no_samples_for_all_keys_or_owner(tmp_path: Path) -> None:
 
 
 def test_l10_learn_from_probe_per_window_and_row_id(tmp_path: Path) -> None:
-    """Covers: ADR-0002 D5/W2 #9 and #10 per-window probe observation and row ID skip."""
+    """Covers: per-window probe observation and row ID skip."""
     from saberops.capacity.ledger import record_probe_window_observation
 
     db = _db(tmp_path)
@@ -529,7 +529,7 @@ def test_l13_legacy_policy_deleted() -> None:
 def test_post_observation_charges_raises_operational_error_on_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: ADR-0002 D7 / F2 fail-closed reservation read on sqlite OperationalError."""
+    """Covers: fail-closed reservation read on sqlite OperationalError."""
     from contextlib import contextmanager
     from typing import Any
 
@@ -564,7 +564,7 @@ def test_post_observation_charges_raises_operational_error_on_failure(
 
 
 def test_post_observation_charges_returns_empty_when_tables_absent(tmp_path: Path) -> None:
-    """Covers: ADR-0002 D7 graceful empty charges when capacity tables do not exist."""
+    """Covers: graceful empty charges when capacity tables do not exist."""
     from saberops.capacity.ledger import post_observation_charges
 
     # Fresh DB without ensure_tables: capacity_observations does not exist
@@ -576,7 +576,7 @@ def test_post_observation_charges_returns_empty_when_tables_absent(tmp_path: Pat
 
 
 def test_post_observation_charges_preserves_cutoff_and_reset_semantics(tmp_path: Path) -> None:
-    """Covers: ADR-0002 D5/D7 no double charge before observation and window roll reset."""
+    """Covers: no double charge before observation and window roll reset."""
     from saberops.capacity.ledger import (
         post_observation_charges,
         record_probe_window_observation,
@@ -636,7 +636,7 @@ def test_post_observation_charges_preserves_cutoff_and_reset_semantics(tmp_path:
 def test_post_observation_charges_partial_schema_reservations_only_fails_closed(
     tmp_path: Path,
 ) -> None:
-    """Covers: ADR-0002 D2/D7 partial capacity schema (reservations present,
+    """Covers: partial capacity schema (reservations present,
     observations missing) must never be reported as zero debt.
     """
     from saberops.capacity.ledger import post_observation_charges
@@ -665,7 +665,7 @@ def test_post_observation_charges_partial_schema_reservations_only_fails_closed(
 def test_post_observation_charges_partial_schema_observations_only_fails_closed(
     tmp_path: Path,
 ) -> None:
-    """Covers: ADR-0002 D2/D7 reversed partial schema (observations present,
+    """Covers: reversed partial schema (observations present,
     reservations missing) also fails closed rather than reporting zero debt.
     """
     from saberops.capacity.ledger import (
@@ -689,7 +689,7 @@ def test_post_observation_charges_partial_schema_observations_only_fails_closed(
 
 
 def test_capacity_tables_present_reports_required_subset(tmp_path: Path) -> None:
-    """Covers: ADR-0002 D2/D7 schema discovery distinguishes absent from partial."""
+    """Covers: schema discovery distinguishes absent from partial."""
     from saberops.capacity.ledger import (
         REQUIRED_CAPACITY_TABLES,
         capacity_tables_present,

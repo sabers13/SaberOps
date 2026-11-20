@@ -2,9 +2,9 @@
 
 Typed, deterministic, hermetic evaluators for self-dogfooding readiness:
 
-- ADR-0004 section 8 Q4 qualification criteria.
+- The Q4 qualification criteria.
 - Safe accepted-wave closure and bounded storage/worktree cleanup contract
-  (ADR-0003 Amendment 1; Step 008 ``storage_gc`` semantics).
+  (Step 008 ``storage_gc`` semantics).
 - All nine resilience scenario verifiers.
 - Explicit owner self-dogfood authorization hook.
 
@@ -139,7 +139,7 @@ class CertificationError(ValueError):
 
 
 # ---------------------------------------------------------------------------
-# Q4 qualification (ADR-0004 section 8)
+# Q4 qualification
 # ---------------------------------------------------------------------------
 
 
@@ -170,7 +170,7 @@ Q4_MIN_GREEN_WAVES = 3
 
 
 def evaluate_q4(waves: tuple[WaveRecord, ...] | list[WaveRecord]) -> CertificationResult:
-    """Evaluate the four ADR-0004 section 8 Q4 qualification criteria.
+    """Evaluate the four qualification criteria.
 
     Q4-A: at least three green waves on distinct independent/fixture repos.
     Q4-B: at least one real G3 failure correctly routed to a build repair
@@ -214,12 +214,12 @@ def evaluate_q4(waves: tuple[WaveRecord, ...] | list[WaveRecord]) -> Certificati
             details="owner-only decisions require explicit owner confirmation first",
         ),
     )
-    checklist = CertificationChecklist(title="ADR-0004 Q4 qualification", checks=checks)
+    checklist = CertificationChecklist(title="Q4 qualification", checks=checks)
     return checklist.result()
 
 
 # ---------------------------------------------------------------------------
-# Safe wave closure & bounded storage cleanup (ADR-0003 Amd.1 / storage_gc)
+# Safe wave closure & bounded storage cleanup (Amd.1 / storage_gc)
 # ---------------------------------------------------------------------------
 
 

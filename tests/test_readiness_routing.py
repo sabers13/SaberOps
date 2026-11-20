@@ -172,7 +172,7 @@ def _synthetic_policy() -> ControlPlanePolicy:
     """Isolated synthetic policy with verified class-A posture for the fixture's
     synthetic providers.
 
-    Covers: ADR-0002 D2 / WORKFLOW §7 authorized setup-only fixture migration.
+    Covers: WORKFLOW §7 authorized setup-only fixture migration.
     Under the accepted M2-4b F1 admission seam an unmatched route fails closed
     with ``POSTURE_UNVERIFIED``, so this characterization's real preflight seam
     would skip every synthetic route unless the fixture supplies a verified
@@ -417,7 +417,7 @@ def test_r1a_unverified_route_still_fails_closed() -> None:
     fail-closed behavior (``POSTURE_UNVERIFIED``), proving the fixture seed
     did not globally waive posture admission.
 
-    Covers: ADR-0002 D2 (posture fail-closed; POSTURE_UNVERIFIED)
+    Covers: (posture fail-closed; POSTURE_UNVERIFIED)
     """
     policy = _synthetic_policy()
     target = _candidate("unverified-vendor", "unverified-model")
@@ -529,7 +529,7 @@ def isolated_state(
 ) -> dict[str, Path]:
     """Isolate owner state/config plus the readiness store override.
 
-    Covers: ADR-0002 D2 / WORKFLOW §7 authorized setup-only fixture migration
+    Covers: WORKFLOW §7 authorized setup-only fixture migration
     for synthetic r1b candidates.
     """
     state = tmp_path / "state"

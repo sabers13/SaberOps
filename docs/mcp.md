@@ -1,6 +1,6 @@
 # MCP interface (Step 014 / M3)
 
-SaberOps exposes the **Orchestrator contract** of ADR-0004 D7 as a Model
+SaberOps exposes the **Orchestrator contract** as a Model
 Context Protocol (MCP) server speaking JSON-RPC 2.0 over standard I/O. The
 implementation is `saberops.mcp`; it is a thin adapter: every tool validates its
 arguments, then calls an existing service function, and holds no authority of
@@ -242,8 +242,7 @@ accepted and mapped). Owner authority is not exercisable over MCP:
 `authority: "OWNER"` is refused with `-32010`, and a question whose decision
 class is owner-only is refused the same way. A planning session can never answer
 its own finding, and answers are idempotent --
-repeating an identical answer records a confirmation and changes nothing
-(ADR-0004 invariants 6 and 13).
+repeating an identical answer records a confirmation and changes nothing.
 
 `list_questions` returns a derived `critical` tag and its reasons for every
 question. Critical is the union of an owner-only or acceptance class, a
@@ -258,8 +257,7 @@ planning session no self-answer is possible and no background planner starts
 
 `propose_config_change` validates the change and returns an approval-ready
 proposal. It **applies nothing**: only the owner approving through
-`orch config approve <id>` or the local web surface writes the config ledger
-(ADR-0004 D8.2, invariant 7).
+`orch config approve <id>` or the local web surface writes the config ledger.
 
 `get_mode` is read-only: it returns the effective owner mode, the authority
 preset it intersects, and every decision the mode permits or parks. A mode only
@@ -277,7 +275,7 @@ must run `orch resume`.
 
 ## Never exposed
 
-ADR-0004 D7 and REHEARSAL §3 pin a list of authorities that MCP must never
+The MCP contract and REHEARSAL §3 pin a list of authorities that MCP must never
 reach. The registry refuses each one *before* any handler runs, with JSON-RPC
 error code `-32010` and a message naming the invariant:
 

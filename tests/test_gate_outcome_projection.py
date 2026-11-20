@@ -325,7 +325,7 @@ def test_mapping_never_invents_taxonomy() -> None:
 
 
 def test_direct_omitted_provenance_blocked() -> None:
-    """Covers: ADR-0003 D1/D5 omitted provenance is never accepted green."""
+    """Covers: omitted provenance is never accepted green."""
     decision = project_gate_outcome(
         GateEvidence(raw_outcome="PASS", exit_code=0, checks_ok=True, tests_ran=1)
     )
@@ -336,7 +336,7 @@ def test_direct_omitted_provenance_blocked() -> None:
 
 
 def test_direct_omitted_provenance_flaky_blocked() -> None:
-    """Covers: ADR-0003 D1/D5 omitted provenance blocks FLAKY_PASS too."""
+    """Covers: omitted provenance blocks FLAKY_PASS too."""
     decision = project_gate_outcome(
         GateEvidence(
             raw_outcome="FLAKY_PASS",
@@ -352,7 +352,7 @@ def test_direct_omitted_provenance_flaky_blocked() -> None:
 
 
 def test_explicit_false_provenance_blocked() -> None:
-    """Covers: ADR-0003 D1/D5 provenance asserted False stays blocked."""
+    """Covers: provenance asserted False stays blocked."""
     decision = project_gate_outcome(
         GateEvidence(
             raw_outcome="PASS",
@@ -367,7 +367,7 @@ def test_explicit_false_provenance_blocked() -> None:
 
 
 def test_omitted_checks_ok_blocks_pass() -> None:
-    """Covers: ADR-0003 D1/D5 unknown lint/type result is never accepted."""
+    """Covers: unknown lint/type result is never accepted."""
     decision = project_gate_outcome(
         GateEvidence(raw_outcome="PASS", exit_code=0, has_provenance=True, tests_ran=1)
     )
@@ -376,7 +376,7 @@ def test_omitted_checks_ok_blocks_pass() -> None:
 
 
 def test_omitted_checks_ok_blocks_flaky_pass() -> None:
-    """Covers: ADR-0003 D1/D5 unknown lint/type result blocks FLAKY_PASS."""
+    """Covers: unknown lint/type result blocks FLAKY_PASS."""
     decision = project_gate_outcome(
         GateEvidence(
             raw_outcome="FLAKY_PASS",
@@ -392,7 +392,7 @@ def test_omitted_checks_ok_blocks_flaky_pass() -> None:
 
 
 def test_omitted_checks_ok_blocks_g3_quarantined_flaky() -> None:
-    """Covers: ADR-0003 D1/D5 quarantine cannot excuse unknown lint/type evidence."""
+    """Covers: quarantine cannot excuse unknown lint/type evidence."""
     flaky = ("tests/test_a.py::test_x",)
     decision = project_gate_outcome(
         GateEvidence(
@@ -410,7 +410,7 @@ def test_omitted_checks_ok_blocks_g3_quarantined_flaky() -> None:
 
 
 def test_omitted_tests_ran_blocks_pass_nonempty() -> None:
-    """Covers: ADR-0003 D1/D5 nonempty selection with unknown count is blocked."""
+    """Covers: nonempty selection with unknown count is blocked."""
     decision = project_gate_outcome(
         GateEvidence(
             raw_outcome="PASS",
@@ -425,7 +425,7 @@ def test_omitted_tests_ran_blocks_pass_nonempty() -> None:
 
 
 def test_omitted_tests_ran_blocks_flaky_pass_nonempty() -> None:
-    """Covers: ADR-0003 D1/D5 FLAKY_PASS with unknown count is blocked."""
+    """Covers: FLAKY_PASS with unknown count is blocked."""
     decision = project_gate_outcome(
         GateEvidence(
             raw_outcome="FLAKY_PASS",
@@ -442,7 +442,7 @@ def test_omitted_tests_ran_blocks_flaky_pass_nonempty() -> None:
 
 @pytest.mark.parametrize("count", [0, -1, -7])
 def test_nonpositive_tests_ran_blocks_pass(count: int) -> None:
-    """Covers: ADR-0003 D1/D5 zero/negative executed count is never green."""
+    """Covers: zero/negative executed count is never green."""
     decision = project_gate_outcome(
         GateEvidence(
             raw_outcome="PASS",
@@ -458,7 +458,7 @@ def test_nonpositive_tests_ran_blocks_pass(count: int) -> None:
 
 @pytest.mark.parametrize("count", [True, False, "3", 1.5])
 def test_malformed_tests_ran_blocks_pass(count: object) -> None:
-    """Covers: ADR-0003 D1/D5 bool/non-int counts fail closed."""
+    """Covers: bool/non-int counts fail closed."""
     decision = project_gate_outcome(
         GateEvidence(
             raw_outcome="PASS",
@@ -473,7 +473,7 @@ def test_malformed_tests_ran_blocks_pass(count: object) -> None:
 
 
 def test_empty_selection_allows_zero_ran_lint_only() -> None:
-    """Covers: ADR-0003 D1/D5 explicit empty selection permits a zero count."""
+    """Covers: explicit empty selection permits a zero count."""
     decision = project_gate_outcome(
         GateEvidence(
             raw_outcome="PASS",
@@ -489,7 +489,7 @@ def test_empty_selection_allows_zero_ran_lint_only() -> None:
 
 
 def test_empty_selection_allows_unknown_ran() -> None:
-    """Covers: ADR-0003 D1/D5 explicit empty selection permits unknown count."""
+    """Covers: explicit empty selection permits unknown count."""
     decision = project_gate_outcome(
         GateEvidence(
             raw_outcome="PASS",
@@ -504,7 +504,7 @@ def test_empty_selection_allows_unknown_ran() -> None:
 
 
 def test_empty_selection_with_positive_ran_blocked() -> None:
-    """Covers: ADR-0003 D1/D5 count for an explicitly empty selection contradicts."""
+    """Covers: count for an explicitly empty selection contradicts."""
     decision = project_gate_outcome(
         GateEvidence(
             raw_outcome="PASS",
@@ -523,7 +523,7 @@ def test_empty_selection_with_positive_ran_blocked() -> None:
 
 
 def test_pass_with_selector_defect_reason_blocked() -> None:
-    """Covers: ADR-0003 D1/D5 contradictory selector reason cannot be green."""
+    """Covers: contradictory selector reason cannot be green."""
     decision = project_gate_outcome(
         GateEvidence(
             raw_outcome="PASS",
@@ -543,7 +543,7 @@ def test_pass_with_selector_defect_reason_blocked() -> None:
 
 
 def test_flaky_pass_with_selector_defect_reason_blocked() -> None:
-    """Covers: ADR-0003 D1/D5 FLAKY_PASS + selector reason cannot be green."""
+    """Covers: FLAKY_PASS + selector reason cannot be green."""
     decision = project_gate_outcome(
         GateEvidence(
             raw_outcome="FLAKY_PASS",
@@ -569,7 +569,7 @@ def test_flaky_pass_with_selector_defect_reason_blocked() -> None:
     ],
 )
 def test_pass_with_producer_fail_only_reason_blocked(reason: str) -> None:
-    """Covers: ADR-0003 D1/D5 other producer FAIL-only reasons never go green."""
+    """Covers: other producer FAIL-only reasons never go green."""
     decision = project_gate_outcome(
         GateEvidence(
             raw_outcome="PASS",
@@ -586,7 +586,7 @@ def test_pass_with_producer_fail_only_reason_blocked(reason: str) -> None:
 
 
 def test_fail_selector_defect_preserved() -> None:
-    """Covers: ADR-0003 D1/D5 normal selector FAIL/exit5 stays FAIL, flagged."""
+    """Covers: normal selector FAIL/exit5 stays FAIL, flagged."""
     decision = project_gate_outcome(
         GateEvidence(
             raw_outcome="FAIL",
@@ -609,7 +609,7 @@ def test_fail_selector_defect_preserved() -> None:
 
 
 def test_full_evidence_pass_accepted_direct() -> None:
-    """Covers: ADR-0003 D1/D5 complete evidence yields PASS."""
+    """Covers: complete evidence yields PASS."""
     decision = project_gate_outcome(
         GateEvidence(
             raw_outcome="PASS",
@@ -626,7 +626,7 @@ def test_full_evidence_pass_accepted_direct() -> None:
 
 
 def test_full_evidence_flaky_pass_g1_accepted_direct() -> None:
-    """Covers: ADR-0003 D1/D5 complete G1 evidence yields FLAKY_PASS."""
+    """Covers: complete G1 evidence yields FLAKY_PASS."""
     flaky = ("tests/test_a.py::test_x",)
     decision = project_gate_outcome(
         GateEvidence(
@@ -645,7 +645,7 @@ def test_full_evidence_flaky_pass_g1_accepted_direct() -> None:
 
 
 def test_full_evidence_flaky_pass_g3_quarantined_accepted_direct() -> None:
-    """Covers: ADR-0003 D5 complete G3 quarantined evidence yields FLAKY_PASS."""
+    """Covers: complete G3 quarantined evidence yields FLAKY_PASS."""
     flaky = ("tests/test_a.py::test_x",)
     decision = project_gate_outcome(
         GateEvidence(
@@ -665,7 +665,7 @@ def test_full_evidence_flaky_pass_g3_quarantined_accepted_direct() -> None:
 
 
 def test_g2_pass_accepted() -> None:
-    """Covers: ADR-0003 D1/D2 G2 fast-gate PASS is accepted."""
+    """Covers: G2 fast-gate PASS is accepted."""
     decision = project_gate_outcome(
         GateEvidence(
             raw_outcome="PASS",
@@ -682,7 +682,7 @@ def test_g2_pass_accepted() -> None:
 
 
 def test_g2_flaky_pass_needs_no_quarantine() -> None:
-    """Covers: ADR-0003 D1/D2/D5 G2 accepts unquarantined FLAKY_PASS."""
+    """Covers: G2 accepts unquarantined FLAKY_PASS."""
     decision = project_gate_outcome(
         GateEvidence(
             raw_outcome="FLAKY_PASS",
@@ -742,7 +742,7 @@ def _project_producer(
 
 
 def test_producer_evaluate_round_trip_maps_cleanly() -> None:
-    """Covers: ADR-0003 D1/D5 real evaluate() evidence projects consistently."""
+    """Covers: real evaluate evidence projects consistently."""
     gate_tools = _load_gate_tools()
 
     passing = gate_tools.Evidence(
@@ -777,12 +777,12 @@ def test_producer_evaluate_round_trip_maps_cleanly() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Engine producer contract (ADR-0004 D3): only engine-run gates are evidence
+# Engine producer contract: only engine-run gates are evidence
 # ---------------------------------------------------------------------------
 
 
 def test_engine_producer_green_pass_accepted() -> None:
-    """Covers: ADR-0004 D3 (engine-run gate is authoritative evidence)."""
+    """Covers: engine-run gate is authoritative evidence."""
     decision = project_gate_outcome(ev(producer=PRODUCER_ENGINE))
     assert decision.decision is ProjectedDecisionKind.PASS
     assert decision.accepted is True
@@ -797,7 +797,7 @@ def test_unspecified_producer_keeps_legacy_contract() -> None:
 
 @pytest.mark.parametrize("producer", ["model", "G0", "worker", "unknown", ""])
 def test_non_engine_producer_blocked_even_when_green_shaped(producer: str) -> None:
-    """Covers: ADR-0004 D3 (G0/model runs are never accepted as evidence)."""
+    """Covers: G0/model runs are never accepted as evidence."""
     decision = project_gate_outcome(ev(producer=producer))
     assert decision.decision is ProjectedDecisionKind.BLOCKED
     assert decision.accepted is False

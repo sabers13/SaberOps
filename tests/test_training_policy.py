@@ -111,7 +111,7 @@ def _synthetic_policy() -> ControlPlanePolicy:
     """Isolated synthetic policy with verified class-A posture for the synthetic
     providers these training-policy fixtures use.
 
-    Covers: ADR-0002 D2 / WORKFLOW §7 authorized setup-only fixture migration.
+    Covers: WORKFLOW §7 authorized setup-only fixture migration.
     These fixtures dispatch synthetic ``dynacustom`` / ``opencode`` / ``codex``
     candidates with no matching posture record, so the accepted M2-4b F1
     admission seam rightfully returns ``quota_blocked``

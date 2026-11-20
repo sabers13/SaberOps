@@ -1,6 +1,6 @@
 """GS-1 service-integration contracts across the storage lifecycle and its seams.
 
-Covers: ADR-0003 D4/D6/D7 and Amendments 1/2 -- the production caller path, the
+Covers: storage lifecycle integration -- the production caller path, the
 durable audit record, the SB-1 accounting/fencing surviving consolidation, the
 scheduler maintenance hook, and the honest non-activation of adaptive admission.
 """
@@ -126,7 +126,7 @@ def _approved() -> GcPolicy:
 
 
 def test_end_to_end_retire_and_durable_audit(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 1 §4 -- provenance and audit survive cleanup."""
+    """Covers: provenance and audit survive cleanup."""
     repo = _repo(tmp_path)
     db = Database(tmp_path / "orch.db")
     wt = GitManager.get_default_worktree_base(repo) / "run1" / "a1"
@@ -158,7 +158,7 @@ def test_end_to_end_retire_and_durable_audit(tmp_path: Path) -> None:
 
 
 def test_apply_requires_a_standing_policy(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 1 §7 -- no policy means no destructive apply."""
+    """Covers: no policy means no destructive apply."""
     repo = _repo(tmp_path)
     db = Database(tmp_path / "orch.db")
     wt = GitManager.get_default_worktree_base(repo) / "run1" / "a1"
@@ -172,7 +172,7 @@ def test_apply_requires_a_standing_policy(tmp_path: Path) -> None:
 
 
 def test_sb1_accounting_and_fencing_survive_consolidation(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 2 -- 1/2/4 sessions sum, duplicates are one."""
+    """Covers: 1/2/4 sessions sum, duplicates are one."""
     policy = tmp_path / "margin.json"
     policy.write_text(
         json.dumps(
@@ -250,7 +250,7 @@ def test_sb1_accounting_and_fencing_survive_consolidation(tmp_path: Path) -> Non
 def test_scheduler_loop_invokes_maintenance_and_surfaces_typed_infra(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: ADR-0003 D7/Amendment 1 -- typed INFRA surfaces, no crash/relaunch."""
+    """Covers: typed INFRA surfaces, no crash/relaunch."""
     from saberops.capacity.loop import TickResult
 
     db = Database(tmp_path / "orch.db")
@@ -278,7 +278,7 @@ def test_scheduler_loop_invokes_maintenance_and_surfaces_typed_infra(
 def test_scheduler_loop_runs_periodic_maintenance_on_its_cadence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: ADR-0003 Amendment 1 §5 -- hourly periodic maintenance cadence."""
+    """Covers: hourly periodic maintenance cadence."""
     from datetime import timedelta
 
     from saberops.capacity.loop import TickResult
@@ -311,7 +311,7 @@ def test_scheduler_loop_runs_periodic_maintenance_on_its_cadence(
 
 
 def test_maintenance_invocation_never_raises_into_the_loop() -> None:
-    """Covers: ADR-0003 D7 -- an infra failure is a typed reason, never a crash."""
+    """Covers: an infra failure is a typed reason, never a crash."""
     def boom(_trigger: str) -> str | None:
         raise SqliteBusyError("locked")
 
@@ -326,7 +326,7 @@ def test_maintenance_invocation_never_raises_into_the_loop() -> None:
 def test_disk_low_maintenance_launches_no_workers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: ADR-0003 D4 -- DISK_LOW parks the real scheduler with zero launches."""
+    """Covers: DISK_LOW parks the real scheduler with zero launches."""
     from saberops.storage_maintenance import MaintenanceTrigger
 
     repo = _repo(tmp_path)
@@ -360,7 +360,7 @@ def test_disk_low_maintenance_launches_no_workers(
 
 
 def test_corrupt_or_unknown_database_is_never_adopted(tmp_path: Path) -> None:
-    """Covers: ADR-0003 D6 -- corrupt/foreign/unknown DB fails closed."""
+    """Covers: corrupt/foreign/unknown DB fails closed."""
     db_path = tmp_path / "orch.db"
     Database(db_path)
     # Simulate a foreign/unknown schema version without touching the service.
@@ -380,7 +380,7 @@ def test_corrupt_or_unknown_database_is_never_adopted(tmp_path: Path) -> None:
 
 
 def test_cli_gc_dry_run_creates_nothing(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """Covers: ADR-0003 Amendment 1 §6 -- CLI dry-run on a missing store is a no-op."""
+    """Covers: CLI dry-run on a missing store is a no-op."""
     from saberops.cli import main
 
     repo = _repo(tmp_path)
@@ -398,7 +398,7 @@ def test_cli_gc_dry_run_creates_nothing(tmp_path: Path, capsys: pytest.CaptureFi
 def test_cli_gc_apply_requires_explicit_authority(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Covers: ADR-0003 Amendment 1 §7 -- apply without a policy is refused."""
+    """Covers: apply without a policy is refused."""
     from saberops.cli import main
 
     repo = _repo(tmp_path)
@@ -412,7 +412,7 @@ def test_cli_gc_apply_requires_explicit_authority(
 def test_cli_cleanup_uses_guarded_route_and_never_prunes(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Covers: ADR-0003 Amendment 1 §3 -- legacy cleanup keeps protections, no prune."""
+    """Covers: legacy cleanup keeps protections, no prune."""
     from saberops.cli import main
 
     repo = _repo(tmp_path)
@@ -488,7 +488,7 @@ def _seed_queued_job(db: Database, repo: Path) -> str:
 def test_scheduler_parks_before_any_tick_on_disk_low(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: ADR-0003 D4 -- startup maintenance precedes the tick; zero launches."""
+    """Covers: startup maintenance precedes the tick; zero launches."""
     from saberops.jobs.models import JobState
     from saberops.jobs.store import get_job
     from saberops.storage_maintenance import MaintenanceTrigger, StorageMaintenance
@@ -531,7 +531,7 @@ def test_scheduler_parks_before_any_tick_on_disk_low(
 def test_tick_launch_guard_blocks_dispatch_without_side_effects(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: ADR-0003 D4 -- the per-tick guard blocks between maintenance passes."""
+    """Covers: the per-tick guard blocks between maintenance passes."""
     from saberops.capacity.loop import acquire_lease, release_lease, scheduler_tick
     from saberops.jobs.models import JobState
     from saberops.jobs.store import get_job
@@ -568,7 +568,7 @@ def test_tick_launch_guard_blocks_dispatch_without_side_effects(
 def test_scheduler_proceeds_when_disk_is_healthy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: ADR-0003 D4 -- a healthy floor does not block the tick."""
+    """Covers: a healthy floor does not block the tick."""
     from saberops.storage_maintenance import MaintenanceTrigger, StorageMaintenance
 
     repo = _repo(tmp_path)
@@ -600,7 +600,7 @@ def test_scheduler_proceeds_when_disk_is_healthy(
 
 
 def test_gate_runner_disk_guard_blocks_before_any_subprocess(tmp_path: Path) -> None:
-    """Covers: ADR-0003 D4 -- the real GateRunner hits the floor guard."""
+    """Covers: the real GateRunner hits the floor guard."""
     from saberops.gate_runner import GateRunner, GateRunnerDiskLowError, GateRunnerRequest
 
     repo = _repo(tmp_path)

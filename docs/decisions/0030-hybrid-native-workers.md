@@ -3,8 +3,7 @@
 - **Status:** Accepted. Implemented in Phase 1 lane F16 (Wave 3).
 - **Date:** 2026-11-19
 - **Decider:** Saber (owner), Phase 1 plan lane F16
-- **Related:** [ADR-0004](0004-mcp-authority-and-evidence.md) (MCP authority and
-  evidence), [ADR-0008](0008-candidate-bound-acceptance.md) (candidate-bound
+- **Related:** [ADR-0008](0008-candidate-bound-acceptance.md) (candidate-bound
   acceptance), [ADR-0016](0016-steering-note-channel.md) (steering notes),
   [ADR-0020](0020-owner-mode.md) (owner mode),
   [ADR-0023](0023-proxy-subagents-per-cli.md) (proxy subagents),

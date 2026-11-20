@@ -545,7 +545,7 @@ def test_strong_start_only_capability_is_not_feasible_at_submit() -> None:
 
 
 def test_reconcile_preempted_run_completes_requeue(tmp_path: Path) -> None:
-    """Covers: ADR-0002 D8 reconciler finishes a crashed preemption (service)."""
+    """Covers: reconciler finishes a crashed preemption (service)."""
     from saberops import preemption
     from saberops.git import GitManager
     from saberops.handoff import create_handoffs

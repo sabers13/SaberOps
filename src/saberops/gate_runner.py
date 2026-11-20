@@ -598,7 +598,7 @@ def sweep_gate_scratch(
 ) -> tuple[str, ...]:
     """Delete only *provably dead-owned* gate scratch directories under ``root``.
 
-    Safety contract (ADR-0003 Amendment 1 §2, review F5):
+    Safety contract (review F5):
 
     * a live owner is never swept, regardless of age;
     * an unknown owner (no record, unreadable record, unknown liveness) is never
@@ -680,7 +680,7 @@ def disk_floor_ok(
 
 
 class GateRunnerDiskLowError(GateRunnerInfrastructureError):
-    """The gate launch was blocked by the current free-space floor (ADR-0003 D4).
+    """The gate launch was blocked by the current free-space floor.
 
     A typed INFRA block: no gate subprocess ran and no scratch was created.
     """
@@ -1149,7 +1149,7 @@ class GateRunner:
             raise RuntimeError("Gate Runner has already executed; reuse is forbidden")
         self._disabled = True
 
-        # GS-1 / ADR-0003 D4: consult the current free-space floor BEFORE any
+        # GS-1 /: consult the current free-space floor BEFORE any
         # backend choice, scratch creation or subprocess.  A below-floor or
         # unknown reading is a typed INFRA block with zero launches.  The
         # parameter exists so a caller can inject a bound guard; the default is
@@ -1774,7 +1774,7 @@ class GateSlotPoolProtocol(Protocol):
 
 
 class GateSlotPool:
-    """The engine's host-wide memory reservation pool (ADR-0003 D3 + A8).
+    """The engine's host-wide memory reservation pool (+ A8).
 
     Delegates directly to :class:`gate_tools.MemoryLedger` so every SaberOps
     copy, shell gate, and engine gate draws from one shared memory ledger.
@@ -1842,7 +1842,7 @@ def host_disk_admission(
 
     Two layers, both deterministic:
 
-    1. the shared current free-space floor (ADR-0003 D4) is always enforced;
+    1. the shared current free-space floor is always enforced;
     2. when the storage ledger is available, the gate's declared estimate is
        admitted through ``host-disk`` (Step 008 admission).  An ``EXCEEDED``
        decision blocks; an ``UNAVAILABLE`` ledger stays advisory because the
@@ -2091,7 +2091,7 @@ def verify_gate_definitions(
 
 @dataclass(frozen=True)
 class EngineGateRequest:
-    """Inputs to one engine-run, evidence-producing gate (ADR-0004 D3)."""
+    """Inputs to one engine-run, evidence-producing gate."""
 
     target_repo: Path
     kind: GateKind | str
@@ -2255,7 +2255,7 @@ class EngineGateExecutor:
                     findings=(*findings, "GATE_BASE_UNVERIFIABLE", str(exc)),
                 )
         if protection is not None and not protection.allowed:
-            # GT-1 / ADR-0004 D3: the candidate edited the definitions its own
+            # GT-1 /: the candidate edited the definitions its own
             # gate would load.  No command runs; the change is an owner question.
             gate_block = f"GATE_PROTECTION_BLOCKED: {protection.reason}"
             return self._record(

@@ -1,4 +1,4 @@
-"""CLI tests for `orch scheduler run` and `orch capacity show` (ADR-0002 D7).
+"""CLI tests for `orch scheduler run` and `orch capacity show`.
 
 Verifies:
 1. `orch scheduler run --once` exits cleanly (exit 0).
@@ -43,7 +43,7 @@ def _cli(*argv: str, capsys: pytest.CaptureFixture[str]) -> tuple[int, str, str]
 def test_scheduler_run_once_clean_exit(
     isolated_env: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Covers: ADR-0002 D7 orch scheduler run --once executes a tick and exits 0."""
+    """Covers: orch scheduler run --once executes a tick and exits 0."""
     db_path = isolated_env / "test_jobs.db"
     db = Database(db_path)
     ensure_capacity_tables(db)
@@ -56,7 +56,7 @@ def test_scheduler_run_once_clean_exit(
 def test_scheduler_second_instance_denied(
     isolated_env: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Covers: ADR-0002 D7 second scheduler instance is denied when active lease is held."""
+    """Covers: second scheduler instance is denied when active lease is held."""
     db_path = isolated_env / "test_jobs.db"
     db = Database(db_path)
     ensure_capacity_tables(db)
@@ -77,7 +77,7 @@ def test_scheduler_second_instance_denied(
 def test_scheduler_second_instance_continuous_denied_returns_exit_2(
     isolated_env: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Covers: ADR-0002 D7 / F8: second continuous scheduler returns exit 2 on lease denial."""
+    """Covers: second continuous scheduler returns exit 2 on lease denial."""
     db_path = isolated_env / "test_jobs.db"
     db = Database(db_path)
     ensure_capacity_tables(db)
@@ -96,7 +96,7 @@ def test_scheduler_second_instance_continuous_denied_returns_exit_2(
 def test_capacity_show_read_only_creates_no_tables(
     isolated_env: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Covers: ADR-0002 D5/D7 orch capacity show honours read-only DBs and creates no tables."""
+    """Covers: orch capacity show honours read-only DBs and creates no tables."""
     db_path = isolated_env / "ro_check.db"
     Database(db_path)
 
@@ -120,7 +120,7 @@ def test_capacity_show_read_only_creates_no_tables(
 def test_capacity_show_json_output(
     isolated_env: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Covers: ADR-0002 D7 orch capacity show --json outputs structured CapacityView."""
+    """Covers: orch capacity show --json outputs structured CapacityView."""
     db_path = isolated_env / "test_cap.db"
     db = Database(db_path)
     ensure_capacity_tables(db)
@@ -139,7 +139,7 @@ def test_capacity_show_json_output(
 def test_scheduler_run_accepts_lowering_max_concurrent(
     isolated_env: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Covers: ADR-0002 D7 / F3 `orch scheduler run --max-concurrent N` accepts a
+    """Covers: `orch scheduler run --max-concurrent N` accepts a
     positive override and completes a tick.
     """
     db_path = isolated_env / "test_jobs.db"
@@ -158,7 +158,7 @@ def test_scheduler_run_accepts_lowering_max_concurrent(
 def test_scheduler_run_rejects_invalid_max_concurrent(
     isolated_env: Path, bad: str
 ) -> None:
-    """Covers: ADR-0002 D7 / F3 an invalid --max-concurrent value is refused by
+    """Covers: an invalid --max-concurrent value is refused by
     argparse (fail closed) rather than silently disabling the ceiling.
     """
     db_path = isolated_env / "bad_jobs.db"
@@ -171,7 +171,7 @@ def test_scheduler_run_rejects_invalid_max_concurrent(
 def test_scheduler_run_invalid_owner_concurrency_config_fails_closed(
     isolated_env: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Covers: ADR-0002 D7 / F3 an invalid owner concurrency.max_global fails the
+    """Covers: an invalid owner concurrency.max_global fails the
     scheduler closed instead of running unbounded.
     """
     from saberops.paths import get_control_plane_config_path

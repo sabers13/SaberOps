@@ -104,7 +104,7 @@ now redirects on success to the page that owns it (`/setup`, `/routing`,
 
 ## Security architecture
 
-- **Localhost only.** The server binds `127.0.0.1` (ADR-0004 §8 Q3).
+- **Localhost only.** The server binds `127.0.0.1`.
 - **Host & Origin protection.** A middleware refuses any request whose `Host`
   is not loopback (or the synthetic `testserver` scope) with `403`, before any
   owner data is returned. Every `POST` is treated as a state mutation: a

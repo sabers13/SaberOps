@@ -492,7 +492,7 @@ def _seed_verified_worker_posture(config_home: Path) -> None:
     """Seed an isolated owner config with a verified Class-A posture for the
     fake adapter's exact candidate identity used by the lifecycle test.
 
-    Covers: ADR-0002 D2 / WORKFLOW §7 — explicitly authorized SETUP-ONLY
+    Covers: WORKFLOW §7 — explicitly authorized SETUP-ONLY
     fixture addition (orchestrator disposition `orch-f561e-disposition.md`,
     finding B1). This adds ONLY a synthetic, test-only policy record for the
     deterministic fake route; no production default, packaged policy, existing

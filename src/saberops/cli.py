@@ -237,17 +237,17 @@ def _resolve_cli_run_config(args: argparse.Namespace, repo: Path | str) -> RunCo
 
 
 def _warn_deprecated_routing_flags(args: argparse.Namespace) -> None:
-    """Print one deprecation line per explicitly given routing flag (ADR-0002 §11)."""
+    """Print one deprecation line per explicitly given routing flag."""
     if hasattr(args, "tier"):
         print(
-            "[!] --tier is deprecated (ADR-0002 §11): "
+            "[!] --tier is deprecated: "
             "--tier T1|T2 runs the build route without escalation, "
             "--tier T3 starts on the build route's strong_start setting.",
             file=sys.stderr,
         )
     if hasattr(args, "max_tier"):
         print(
-            "[!] --max-tier is deprecated (ADR-0002 §11): "
+            "[!] --max-tier is deprecated: "
             "--max-tier T1|T2 disables escalation to the strong_start setting, "
             "--max-tier T3 (default) allows it.",
             file=sys.stderr,
@@ -777,13 +777,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         choices=["auto", "T1", "T2", "T3"],
         default=argparse.SUPPRESS,
-        help="Deprecated (ADR-0002 §11): routing mode auto (default) or a manual tier override.",
+        help="Deprecated: routing mode auto (default) or a manual tier override.",
     )
     run_parser.add_argument(
         "--max-tier",
         choices=["T1", "T2", "T3"],
         default=argparse.SUPPRESS,
-        help="Deprecated (ADR-0002 §11): maximum automatic routing tier (default: T3).",
+        help="Deprecated: maximum automatic routing tier (default: T3).",
     )
     run_parser.add_argument(
         "--provider",
@@ -2462,7 +2462,7 @@ def build_parser() -> argparse.ArgumentParser:
     # orch scheduler run [--once] [--interval-seconds INT]
     scheduler_parser = subparsers.add_parser(
         "scheduler",
-        help="Run the pacing scheduler loop (ADR-0002 D7).",
+        help="Run the pacing scheduler loop.",
     )
     scheduler_sub = scheduler_parser.add_subparsers(
         dest="scheduler_command", required=True
@@ -4540,7 +4540,7 @@ def handle_monitor(args: argparse.Namespace) -> int:
                 return 1
             print(render_monitor_frame(report))
             print("", flush=True)
-            # ADR-0002 D8 (M2-5) readout-only: a PREEMPTED run is terminal
+            # Readout-only: a PREEMPTED run is terminal
             # for the run, so the monitor must stop here.  The canonical
             # set is authoritative; is_terminal_report() still enumerates
             # the pre-D8 statuses (see the Step 001 report for the narrow

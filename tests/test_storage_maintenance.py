@@ -1,7 +1,7 @@
 """GS-1 bounded storage-maintenance contracts.
 
-Covers: ADR-0003 D4/D6 (current floor, weekly vacuum, bounded sweep),
-ADR-0003 Amendment 1 §5 (bounded GC on DISK_LOW), and the explicit
+Covers: (current floor, weekly vacuum, bounded sweep),
+ (bounded GC on DISK_LOW), and the explicit
 non-activation of adaptive admission (Amendment 2).
 """
 
@@ -124,7 +124,7 @@ def _maintenance(
 
 
 def test_current_floor_matches_the_live_guard(tmp_path: Path) -> None:
-    """Covers: ADR-0003 D4/Q1 -- the fixed floor is consumed, never lowered."""
+    """Covers: the fixed floor is consumed, never lowered."""
     assert current_disk_floor_bytes(100 * _GB) == 10 * _GB
     assert current_disk_floor_bytes(100 * _GB, DEFAULT_DISK_FLOOR_GB) == 10 * _GB
     assert current_disk_floor_bytes(2000 * _GB) == 200 * _GB  # 10 % wins
@@ -132,7 +132,7 @@ def test_current_floor_matches_the_live_guard(tmp_path: Path) -> None:
 
 
 def test_assess_disk_states(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Covers: ADR-0003 D4 -- LOW / OK / UNKNOWN are distinguished honestly."""
+    """Covers: LOW / OK / UNKNOWN are distinguished honestly."""
     db = Database(tmp_path / "orch.db")
     maintenance = _maintenance(db, tmp_path)
     total = 100 * _GB
@@ -155,7 +155,7 @@ def test_assess_disk_states(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_maintenance_without_policy_is_non_destructive(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 1 §7 -- no policy means no destructive GC."""
+    """Covers: no policy means no destructive GC."""
     repo = _repo(tmp_path)
     db = Database(tmp_path / "orch.db")
     wt = GitManager.get_default_worktree_base(repo) / "run1" / "a1"
@@ -171,7 +171,7 @@ def test_maintenance_without_policy_is_non_destructive(tmp_path: Path) -> None:
 
 
 def test_maintenance_applies_bounded_gc_under_policy(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 1 §5 -- bounded GC under a standing policy."""
+    """Covers: bounded GC under a standing policy."""
     repo = _repo(tmp_path)
     db = Database(tmp_path / "orch.db")
     wt = GitManager.get_default_worktree_base(repo) / "run1" / "a1"
@@ -194,7 +194,7 @@ def test_maintenance_applies_bounded_gc_under_policy(tmp_path: Path) -> None:
 
 
 def test_disk_low_runs_gc_then_rechecks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Covers: ADR-0003 D4/Amendment 1 §5 -- GC then a real recheck on DISK_LOW."""
+    """Covers: GC then a real recheck on DISK_LOW."""
     repo = _repo(tmp_path)
     db = Database(tmp_path / "orch.db")
     wt = GitManager.get_default_worktree_base(repo) / "run1" / "a1"
@@ -225,7 +225,7 @@ def test_disk_low_runs_gc_then_rechecks(tmp_path: Path, monkeypatch: pytest.Monk
 def test_disk_low_still_low_is_a_typed_infra_park(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: ADR-0003 D4 -- insufficient/unknown space stays a typed INFRA."""
+    """Covers: insufficient/unknown space stays a typed INFRA."""
     repo = _repo(tmp_path)
     db = Database(tmp_path / "orch.db")
     total = 10 * _GB
@@ -241,7 +241,7 @@ def test_disk_low_still_low_is_a_typed_infra_park(
 def test_preflight_launch_parks_on_low_and_unknown(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: ADR-0003 D4 -- a launch below the floor/unknown never starts."""
+    """Covers: a launch below the floor/unknown never starts."""
     db = Database(tmp_path / "orch.db")
     maintenance = _maintenance(db, tmp_path)
     monkeypatch.setattr(
@@ -260,7 +260,7 @@ def test_preflight_launch_parks_on_low_and_unknown(
 
 
 def test_weekly_vacuum_respects_ratio_and_interval(tmp_path: Path) -> None:
-    """Covers: ADR-0003 D6 -- weekly owner-DB VACUUM above 20 % free pages."""
+    """Covers: weekly owner-DB VACUUM above 20 % free pages."""
     repo = _repo(tmp_path)
     db_path = tmp_path / "orch.db"
     db = Database(db_path)
@@ -286,7 +286,7 @@ def test_weekly_vacuum_respects_ratio_and_interval(tmp_path: Path) -> None:
 
 
 def test_gate_scratch_sweep_removes_only_stale(tmp_path: Path) -> None:
-    """Covers: ADR-0003 D4 -- scratch sweep uses real liveness/age, bounded root."""
+    """Covers: scratch sweep uses real liveness/age, bounded root."""
     from saberops.gate_runner import sweep_gate_scratch
 
     root = tmp_path / "shm"
@@ -310,7 +310,7 @@ def test_gate_scratch_sweep_removes_only_stale(tmp_path: Path) -> None:
 
 
 def test_gate_scratch_sweep_never_adopts_unowned_by_age(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 1 §2 -- age/name is never removal authority."""
+    """Covers: age/name is never removal authority."""
     from saberops.gate_runner import sweep_gate_scratch
 
     root = tmp_path / "shm"
@@ -326,7 +326,7 @@ def test_gate_scratch_sweep_never_adopts_unowned_by_age(tmp_path: Path) -> None:
 
 
 def test_gate_scratch_sweep_preserves_live_owner_regardless_of_age(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 1 §2 -- a live owner is never swept by age."""
+    """Covers: a live owner is never swept by age."""
     import os
     import time
 
@@ -346,7 +346,7 @@ def test_gate_scratch_sweep_preserves_live_owner_regardless_of_age(tmp_path: Pat
 
 
 def test_gate_scratch_sweep_skips_symlink_entries(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 1 §2 -- symlinked scratch is never followed."""
+    """Covers: symlinked scratch is never followed."""
     from saberops.gate_runner import sweep_gate_scratch
 
     root = tmp_path / "shm"
@@ -361,7 +361,7 @@ def test_gate_scratch_sweep_skips_symlink_entries(tmp_path: Path) -> None:
 
 
 def test_gate_scratch_sweep_removes_pid_reuse_only_when_identity_dead(tmp_path: Path) -> None:
-    """Covers: ADR-0003 Amendment 1 §2 -- a reused PID is not a live owner."""
+    """Covers: a reused PID is not a live owner."""
     import os
 
     from saberops.gate_runner import sweep_gate_scratch
@@ -388,7 +388,7 @@ def test_gate_scratch_sweep_removes_pid_reuse_only_when_identity_dead(tmp_path: 
 def test_maintenance_without_approved_policy_never_sweeps_dead_scratch(
     tmp_path: Path,
 ) -> None:
-    """Covers: ADR-0003 D4 / D6 -- unapproved policy never sweeps dead scratch."""
+    """Covers: unapproved policy never sweeps dead scratch."""
     import json as _json
 
     repo = _repo(tmp_path)
@@ -428,7 +428,7 @@ def test_maintenance_without_approved_policy_never_sweeps_dead_scratch(
 
 
 def test_maintenance_exhausted_budget_skips_vacuum_and_sweep(tmp_path: Path) -> None:
-    """Covers: ADR-0003 D4 -- an expensive GC phase cannot spill past budget."""
+    """Covers: an expensive GC phase cannot spill past budget."""
     import json as _json
 
     repo = _repo(tmp_path)

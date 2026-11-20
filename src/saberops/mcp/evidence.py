@@ -1,4 +1,4 @@
-"""Allowed evidence roots and filename allowlist (ADR-0004 D7, M3).
+"""Allowed evidence roots and filename allowlist.
 
 ``read_evidence`` may only read the operator evidence the engine itself
 produced.  Two independent gates must both pass:
@@ -33,7 +33,7 @@ __all__ = [
     "discover_evidence_roots",
 ]
 
-#: Evidence file names the MCP interface may read (ADR-0004 D7).
+#: Evidence file names the MCP interface may read.
 ALLOWED_EVIDENCE_PATTERNS: tuple[str, ...] = (
     "prompt.md",
     "report.md",

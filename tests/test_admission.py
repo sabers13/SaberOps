@@ -1,4 +1,4 @@
-"""Comprehensive tests for canonical admission and scoring policy (ADR-0002 D7).
+"""Comprehensive tests for canonical admission and scoring policy.
 
 All tests carry docstring `Covers: ...` and run purely in-process without I/O or network.
 """
@@ -86,7 +86,7 @@ def _make_policy(
 
 
 def test_admit_purity_and_determinism() -> None:
-    """Covers: ADR-0002 D7 purity and determinism."""
+    """Covers: purity and determinism."""
     now = datetime(2026, 10, 14, 12, 0, tzinfo=UTC)
     candidate = _make_candidate()
     today_str = (now.date() - timedelta(days=5)).isoformat()
@@ -133,7 +133,7 @@ def test_admit_purity_and_determinism() -> None:
 
 
 def test_admit_monotonicity_lower_capacity_never_admits_more() -> None:
-    """Covers: ADR-0002 D7 parametric monotonicity."""
+    """Covers: parametric monotonicity."""
     now = datetime(2026, 10, 14, 12, 0, tzinfo=UTC)
     candidate = _make_candidate()
     postures = {
@@ -181,7 +181,7 @@ def test_admit_monotonicity_lower_capacity_never_admits_more() -> None:
 
 
 def test_score_calculation_and_invalid_inputs_fail_closed() -> None:
-    """Covers: ADR-0002 D7 score formula and fail closed."""
+    """Covers: score formula and fail closed."""
     res = score(
         remaining_pct=50.0,
         red_line_pct=15.0,
@@ -209,7 +209,7 @@ def test_score_calculation_and_invalid_inputs_fail_closed() -> None:
 
 
 def test_admit_posture_fail_closed() -> None:
-    """Covers: ADR-0002 D2 billing posture fail closed."""
+    """Covers: billing posture fail closed."""
     now = datetime(2026, 10, 14, 12, 0, tzinfo=UTC)
     cand = _make_candidate()
     fresh_state = QuotaState(
@@ -299,7 +299,7 @@ def test_admit_posture_fail_closed() -> None:
 
 
 def test_admit_requirements_role_and_capabilities() -> None:
-    """Covers: ADR-0002 D7 requirements check."""
+    """Covers: requirements check."""
     now = datetime(2026, 10, 14, 12, 0, tzinfo=UTC)
     policy = _make_policy(
         postures={"codex": PostureRecord("codex", "A", ttl_days=30, verified_on="2026-10-01")}
@@ -325,7 +325,7 @@ def test_admit_requirements_role_and_capabilities() -> None:
 
 
 def test_admit_model_family_include_and_exclude() -> None:
-    """Covers: ADR-0002 D7 model family include and exclude."""
+    """Covers: model family include and exclude."""
     now = datetime(2026, 10, 14, 12, 0, tzinfo=UTC)
     policy = _make_policy(
         postures={
@@ -385,7 +385,7 @@ def test_admit_model_family_include_and_exclude() -> None:
 
 
 def test_admit_pool_mode_off() -> None:
-    """Covers: ADR-0002 D4 pool mode off."""
+    """Covers: pool mode off."""
     now = datetime(2026, 10, 14, 12, 0, tzinfo=UTC)
     cand = _make_candidate()
     policy = _make_policy(
@@ -404,7 +404,7 @@ def test_admit_pool_mode_off() -> None:
 
 
 def test_admit_active_exclusion() -> None:
-    """Covers: ADR-0002 D4 active exclusions."""
+    """Covers: active exclusions."""
     now = datetime(2026, 10, 14, 12, 0, tzinfo=UTC)
     cand = _make_candidate()
     policy = _make_policy(
@@ -438,7 +438,7 @@ def test_admit_active_exclusion() -> None:
 
 
 def test_admit_overage_possible_requires_fresh_evidence() -> None:
-    """Covers: ADR-0002 D4 overage evidence rule."""
+    """Covers: overage evidence rule."""
     now = datetime(2026, 10, 14, 12, 0, tzinfo=UTC)
     cand = _make_candidate()
     policy = _make_policy(
@@ -494,7 +494,7 @@ def test_admit_overage_possible_requires_fresh_evidence() -> None:
 
 
 def test_admit_red_line_and_projected_cost() -> None:
-    """Covers: ADR-0002 D4 red line and cost multiplier."""
+    """Covers: red line and cost multiplier."""
     now = datetime(2026, 10, 14, 12, 0, tzinfo=UTC)
     cand = _make_candidate()
     policy = _make_policy(
@@ -538,7 +538,7 @@ def test_admit_red_line_and_projected_cost() -> None:
 
 
 def test_admit_reserves_time_of_day_and_tz() -> None:
-    """Covers: ADR-0002 D5 time-of-day reserves."""
+    """Covers: time-of-day reserves."""
     now_in_reserve = datetime(2026, 10, 14, 14, 0, tzinfo=UTC)
     now_outside_reserve = datetime(2026, 10, 14, 20, 0, tzinfo=UTC)
 
@@ -588,7 +588,7 @@ def test_admit_reserves_time_of_day_and_tz() -> None:
 
 
 def test_admit_concurrency_limits() -> None:
-    """Covers: ADR-0002 D4 concurrency limits."""
+    """Covers: concurrency limits."""
     now = datetime(2026, 10, 14, 12, 0, tzinfo=UTC)
     cand = _make_candidate()
     policy = _make_policy(
@@ -615,7 +615,7 @@ def test_admit_concurrency_limits() -> None:
 
 
 def test_admit_multiple_windows_binds_at_minimum_pace() -> None:
-    """Covers: ADR-0002 D7 multi-window binding pace."""
+    """Covers: multi-window binding pace."""
     now = datetime(2026, 10, 14, 12, 0, tzinfo=UTC)
     cand = _make_candidate()
     policy = _make_policy(
@@ -662,7 +662,7 @@ def test_admit_multiple_windows_binds_at_minimum_pace() -> None:
 
 
 def test_posture_first_prevents_unconfigured_fail_open() -> None:
-    """Covers: ADR-0002 D2/F1 posture checked before unconfigured capacity grace (fail-closed)."""
+    """Covers: posture checked before unconfigured capacity grace (fail-closed)."""
     now = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
     cand = WorkerCandidate("codex", "gpt-5.6-sol")
 
@@ -722,7 +722,7 @@ def test_posture_first_prevents_unconfigured_fail_open() -> None:
 
 
 def test_admit_subtracts_reservations_before_redline() -> None:
-    """Covers: ADR-0002 D5/D7/F2 admit subtracts outstanding reservations before red-line check."""
+    """Covers: admit subtracts outstanding reservations before red-line check."""
     now = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
     cand = _make_candidate()
     policy = _make_policy(
@@ -766,7 +766,7 @@ def test_admit_subtracts_reservations_before_redline() -> None:
 
 
 def test_admit_computes_draws_for_all_drawn_pools() -> None:
-    """Covers: ADR-0002 D1/D7/F2 route drawing multiple pools records draws for all pools."""
+    """Covers: route drawing multiple pools records draws for all pools."""
     now = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
     cand = _make_candidate("opencode", "gpt-5")
     policy = _make_policy(
@@ -821,7 +821,7 @@ def test_admit_computes_draws_for_all_drawn_pools() -> None:
 
 
 def test_in_run_unverified_policy_unknown_fails_closed_on_unconfigured_db(tmp_path: Path) -> None:
-    """Covers: ADR-0002 D2 / F1 in-run unverified route fails closed even on unconfigured DB
+    """Covers: in-run unverified route fails closed even on unconfigured DB
     or with override.
     """
     from saberops.db import Database
@@ -854,7 +854,7 @@ def test_in_run_unverified_policy_unknown_fails_closed_on_unconfigured_db(tmp_pa
     assert dec.admitted is False
     assert dec.reason == POSTURE_UNVERIFIED
 
-    # 2. Explicit owner override CANNOT bypass unverified posture (ADR-0002 D2)
+    # 2. Explicit owner override CANNOT bypass unverified posture
     dec_override = admit(
         cand,
         now=now,
@@ -884,7 +884,7 @@ def test_in_run_unverified_policy_unknown_fails_closed_on_unconfigured_db(tmp_pa
 
 
 def test_in_run_two_pool_binding_does_not_discard_second_pool() -> None:
-    """Covers: ADR-0002 D1/D7 / F2 / M-3: binding_pool_id does not discard second pool
+    """Covers: binding_pool_id does not discard second pool
     constraints.
     """
     now = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
@@ -947,7 +947,7 @@ def test_in_run_two_pool_binding_does_not_discard_second_pool() -> None:
 
 
 def test_in_run_safely_derives_db_reservations(tmp_path: Path) -> None:
-    """Covers: ADR-0002 D7 / F2: in-run admission safely derives reservations from db."""
+    """Covers: in-run admission safely derives reservations from db."""
     from saberops.capacity.ledger import reserve
     from saberops.capacity.store import ensure_tables
     from saberops.db import Database
@@ -1007,7 +1007,7 @@ def test_in_run_safely_derives_db_reservations(tmp_path: Path) -> None:
 def test_admit_operational_error_on_reservations_read_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: ADR-0002 D7 / F2 fail-closed admission on SQLite reservation read error."""
+    """Covers: fail-closed admission on SQLite reservation read error."""
     import sqlite3
 
     from saberops.capacity.ledger import PoolDraw, reserve
@@ -1083,7 +1083,7 @@ def test_admit_operational_error_on_reservations_read_fails_closed(
 def test_admit_authoritative_zero_vs_read_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: ADR-0002 D7 distinguish known zero debt from failed read."""
+    """Covers: distinguish known zero debt from failed read."""
     import sqlite3
 
     from saberops.capacity.store import ensure_tables
@@ -1157,7 +1157,7 @@ def test_admit_authoritative_zero_vs_read_error(
 
 
 def test_admit_two_matching_pools_nonbinding_debt_enforces_redline() -> None:
-    """Covers: ADR-0002 D4 / D7 / F2 nonbinding member pool debt enforces red-line."""
+    """Covers: nonbinding member pool debt enforces red-line."""
     now = datetime(2026, 10, 14, 12, 0, 0, tzinfo=UTC)
     cand = _make_candidate("openai", "gpt-5")
     policy = _make_policy(
@@ -1223,7 +1223,7 @@ def test_admit_two_matching_pools_nonbinding_debt_enforces_redline() -> None:
 
 
 def test_check_capacity_tables_exist_partial_schema_raises(tmp_path: Path) -> None:
-    """Covers: ADR-0002 D2/D7 schema probe fails closed on a partial ledger."""
+    """Covers: schema probe fails closed on a partial ledger."""
     import sqlite3
 
     from saberops.capacity.admission import check_capacity_tables_exist
@@ -1241,7 +1241,7 @@ def test_check_capacity_tables_exist_partial_schema_raises(tmp_path: Path) -> No
 
 
 def test_check_capacity_tables_exist_all_absent_is_false(tmp_path: Path) -> None:
-    """Covers: ADR-0002 D2/D7 a wholly uninitialized DB is unconfigured, not partial."""
+    """Covers: a wholly uninitialized DB is unconfigured, not partial."""
     from saberops.capacity.admission import check_capacity_tables_exist
     from saberops.db import Database
 
@@ -1250,7 +1250,7 @@ def test_check_capacity_tables_exist_all_absent_is_false(tmp_path: Path) -> None
 
 
 def test_admit_partial_capacity_schema_fails_closed(tmp_path: Path) -> None:
-    """Covers: ADR-0002 D2/D7 live admit() seam returns typed
+    """Covers: live admit seam returns typed
     QUOTA_EVIDENCE_REQUIRED (never zero debt) on a partial capacity schema.
     """
     from saberops.capacity.store import ensure_tables, owner_connection

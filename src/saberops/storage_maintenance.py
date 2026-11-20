@@ -6,7 +6,7 @@ drops below the current floor.  It is deliberately bounded and lease-aware:
 * it never monopolises the scheduler tick or an owner lock -- it takes a short
   wall-clock budget and reports the remainder;
 * it keeps today's fixed free-space floor on every production path.  The
-  adaptive admission policy of ADR-0003 Amendment 2 is **not** activated here
+  adaptive admission policy is **not** activated here
   and this service never claims that it is: :func:`current_disk_floor_bytes`
   reimplements the existing ``max(min_budget, 10 %)`` guard verbatim as a
   *consumer* of it, so no live guard is lowered or bypassed;
@@ -117,7 +117,7 @@ class MaintenanceResult:
 def current_disk_floor_bytes(total_bytes: int, minimum_gb: float = DEFAULT_DISK_FLOOR_GB) -> int:
     """Return the existing fixed free-space floor for one filesystem.
 
-    This is the ADR-0003 D4/Q1 ``max(min_gb, 10 %)`` guard reimplemented as a
+    This is the ``max(min_gb, 10 %)`` guard reimplemented as a
     read-only consumer so the storage service and the developer gate can never
     disagree about the effective floor.  It is **not** the adaptive replacement
     of Amendment 2 and it never returns a smaller reserve than the live guard.

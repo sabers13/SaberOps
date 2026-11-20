@@ -4,8 +4,7 @@
 - **Date:** 2026-11-19
 - **Decider:** Saber (owner), through the Phase 1 plan's E4 lane
 - **Related:** [ADR-0001](0001-saberops-engine-mcp-first.md) §3.3 (MCP-first
-  evidence reads), [ADR-0004](0004-mcp-authority-and-evidence.md) (dispatch
-  evidence), [ADR-0011](0011-bounded-automatic-actions.md).
+  evidence reads), [ADR-0011](0011-bounded-automatic-actions.md).
 
 ## 1. Decision
 

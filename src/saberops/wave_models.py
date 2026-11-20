@@ -1,6 +1,6 @@
 """Wave and lane data models plus their deterministic, fail-closed state machines.
 
-Covers: ADR-0004 §3 D2 (wave model, wave and lane state machines) and §4
+Covers: (wave model, wave and lane state machines) and §4
 invariants 2 (overlapping lane file sets are rejected at submit) and 3 (merges
 use pinned SHAs).
 
@@ -63,10 +63,10 @@ __all__ = [
     "transition_wave",
 ]
 
-#: ADR-0004 D4 budget: at most four G3 runs per wave before the owner is asked.
+#: budget: at most four G3 runs per wave before the owner is asked.
 MAX_G3_RUNS_PER_WAVE = 4
 
-#: ADR-0004 D4 budget: at most two fix rounds per failure before the owner is asked.
+#: budget: at most two fix rounds per failure before the owner is asked.
 MAX_FIX_ROUNDS_PER_FAILURE = 2
 
 _SHA_RE = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
@@ -77,7 +77,7 @@ class WaveModelError(ValueError):
 
 
 class WaveState(StrEnum):
-    """Lifecycle state of one wave (ADR-0004 D2)."""
+    """Lifecycle state of one wave."""
 
     PLANNED = "PLANNED"
     RUNNING = "RUNNING"
@@ -523,7 +523,7 @@ class LanePreemption:
 
 @dataclass(frozen=True)
 class Wave:
-    """A wave: base SHA, lanes, merge order, named glue and budgets (ADR-0004 D2)."""
+    """A wave: base SHA, lanes, merge order, named glue and budgets."""
 
     wave_id: str
     base_sha: str

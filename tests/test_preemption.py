@@ -250,7 +250,7 @@ def _seed_quota_attempt(
 
 
 def test_validate_checkpoint_ref_shape(tmp_path: Path) -> None:
-    """Covers: ADR-0002 D8 engine-owned ref namespace + injection guard."""
+    """Covers: engine-owned ref namespace + injection guard."""
     assert (
         validate_checkpoint_ref("job_abc-123", 0)
         == "refs/saberops/checkpoints/job_abc-123/0"
@@ -274,7 +274,7 @@ def test_validate_checkpoint_ref_shape(tmp_path: Path) -> None:
 
 
 def test_anchor_read_list_roundtrip(tmp_path: Path) -> None:
-    """Covers: ADR-0002 D8 anchor + verify + monotonic bounded index."""
+    """Covers: anchor + verify + monotonic bounded index."""
     repo = tmp_path / "repo"
     base = _repo(repo)
     ref0 = GitManager.anchor_checkpoint_ref(repo, "job1", 0, base)
@@ -475,7 +475,7 @@ def _stage_and_dispatch_resume(
 
 
 def test_recorded_anchor_does_not_shadow_newer_verified_commit(tmp_path: Path) -> None:
-    """Covers: ADR-0002 D8 R4 newer clean committed work outranks stale anchor."""
+    """Covers: newer clean committed work outranks stale anchor."""
     repo = tmp_path / "repo"
     base = _repo(repo)
     db = _db(tmp_path)
@@ -514,7 +514,7 @@ def test_recorded_anchor_does_not_shadow_newer_verified_commit(tmp_path: Path) -
 
 
 def test_newer_dirty_wip_supersedes_recorded_anchor(tmp_path: Path) -> None:
-    """Covers: ADR-0002 D8 R4 dirty newer WIP is snapshotted over old anchor."""
+    """Covers: dirty newer WIP is snapshotted over old anchor."""
     repo = tmp_path / "repo"
     base = _repo(repo)
     db = _db(tmp_path)
@@ -542,7 +542,7 @@ def test_newer_dirty_wip_supersedes_recorded_anchor(tmp_path: Path) -> None:
 
 
 def test_divergent_unrelated_head_fails_closed(tmp_path: Path) -> None:
-    """Covers: ADR-0002 D8 R4 untrusted divergent HEAD declines, keeps artifacts."""
+    """Covers: untrusted divergent HEAD declines, keeps artifacts."""
     repo = tmp_path / "repo"
     base = _repo(repo)
     db = _db(tmp_path)
@@ -582,7 +582,7 @@ def test_divergent_unrelated_head_fails_closed(tmp_path: Path) -> None:
 
 
 def test_recorded_anchor_covers_clean_worktree_behind_it(tmp_path: Path) -> None:
-    """Covers: ADR-0002 D8 R4 a record ahead of a clean HEAD is not discarded."""
+    """Covers: a record ahead of a clean HEAD is not discarded."""
     repo = tmp_path / "repo"
     base = _repo(repo)
     db = _db(tmp_path)
@@ -628,7 +628,7 @@ def _repo_state(path: Path) -> tuple[str, str, str, str]:
 
 
 def test_foreign_dirty_repo_is_never_committed_without_record(tmp_path: Path) -> None:
-    """Covers: ADR-0002 D8 R4-M1 a foreign dirty repo is never staged/committed."""
+    """Covers: a foreign dirty repo is never staged/committed."""
     repo = tmp_path / "repo"
     base = _repo(repo)
     foreign = tmp_path / "foreign"
@@ -659,7 +659,7 @@ def test_foreign_dirty_repo_is_never_committed_without_record(tmp_path: Path) ->
 def test_foreign_dirty_repo_with_recorded_anchor_stays_untouched(
     tmp_path: Path,
 ) -> None:
-    """Covers: ADR-0002 D8 R4-M1 foreign WIP is never staged even when S exists."""
+    """Covers: foreign WIP is never staged even when S exists."""
     repo = tmp_path / "repo"
     base = _repo(repo)
     db = _db(tmp_path)
@@ -691,7 +691,7 @@ def test_foreign_dirty_repo_with_recorded_anchor_stays_untouched(
 
 
 def test_unrelated_repo_sharing_object_store_fails_closed(tmp_path: Path) -> None:
-    """Covers: ADR-0002 D8 R4-M1 a shared object-SHA foreign HEAD is not elected."""
+    """Covers: a shared object-SHA foreign HEAD is not elected."""
     repo = tmp_path / "repo"
     base = _repo(repo)
     clone = tmp_path / "clone"
@@ -725,7 +725,7 @@ def test_unrelated_repo_sharing_object_store_fails_closed(tmp_path: Path) -> Non
 
 
 def test_subdirectory_of_job_repo_is_not_a_trusted_worktree(tmp_path: Path) -> None:
-    """Covers: ADR-0002 D8 R4-M1 a subdirectory never stages a commit."""
+    """Covers: a subdirectory never stages a commit."""
     repo = tmp_path / "repo"
     base = _repo(repo)
     sub = repo / "nested"
@@ -749,7 +749,7 @@ def test_subdirectory_of_job_repo_is_not_a_trusted_worktree(tmp_path: Path) -> N
 
 
 def test_nested_repo_inside_job_repo_is_rejected(tmp_path: Path) -> None:
-    """Covers: ADR-0002 D8 R4-M1 a nested checkout is not the attempt worktree."""
+    """Covers: a nested checkout is not the attempt worktree."""
     repo = tmp_path / "repo"
     base = _repo(repo)
     nested = repo / "nested_repo"
@@ -772,7 +772,7 @@ def test_nested_repo_inside_job_repo_is_rejected(tmp_path: Path) -> None:
 
 
 def test_symlinked_foreign_repo_is_rejected(tmp_path: Path) -> None:
-    """Covers: ADR-0002 D8 R4-M1 a symlink alias cannot redirect the commit."""
+    """Covers: a symlink alias cannot redirect the commit."""
     repo = tmp_path / "repo"
     base = _repo(repo)
     foreign = tmp_path / "foreign"
@@ -796,7 +796,7 @@ def test_symlinked_foreign_repo_is_rejected(tmp_path: Path) -> None:
 
 
 def test_legitimate_linked_worktree_wip_is_still_snapshotted(tmp_path: Path) -> None:
-    """Covers: ADR-0002 D8 R4-M1 verified linked worktrees keep WIP snapshots."""
+    """Covers: verified linked worktrees keep WIP snapshots."""
     repo = tmp_path / "repo"
     base = _repo(repo)
     wt = tmp_path / "wt_linked"
@@ -825,7 +825,7 @@ def test_legitimate_linked_worktree_wip_is_still_snapshotted(tmp_path: Path) -> 
 def test_main_repo_recorded_as_attempt_worktree_still_snapshots(
     tmp_path: Path,
 ) -> None:
-    """Covers: ADR-0002 D8 R4-M1 the job's own main worktree stays trusted."""
+    """Covers: the job's own main worktree stays trusted."""
     repo = tmp_path / "repo"
     base = _repo(repo)
     (repo / "main_wip.txt").write_text("main wip\n", encoding="utf-8")
@@ -1068,7 +1068,7 @@ def test_mixed_quota_and_gate_failure_does_not_preempt(tmp_path: Path) -> None:
 def test_quota_then_admitted_gate_failure_with_no_eligible_event_declines(
     tmp_path: Path,
 ) -> None:
-    """Covers: ADR-0002 D8 F1 -- a durable no_eligible_candidate event must not
+    """Covers: a durable no_eligible_candidate event must not
     convert an admitted, gate-failing fallback into quota preemption.
 
     The production ladder writes ``no_eligible_candidate`` for MIXED chains
@@ -1121,7 +1121,7 @@ def test_quota_then_admitted_gate_failure_with_no_eligible_event_declines(
 def test_earlier_quota_evidence_plus_later_admitted_failure_declines(
     tmp_path: Path,
 ) -> None:
-    """Covers: ADR-0002 D8 F1 -- cross-generation pairing must not preempt.
+    """Covers: cross-generation pairing must not preempt.
 
     Genuine quota evidence from an *earlier* chain/package (here the durable
     ``quota_exhaustion_recorded`` event channel, with no quota attempt) must
@@ -1168,7 +1168,7 @@ def test_earlier_quota_evidence_plus_later_admitted_failure_declines(
 
 
 def test_admitted_timeout_attempt_blocks_quota_only_preemption(tmp_path: Path) -> None:
-    """Covers: ADR-0002 D8 F1 -- any admitted non-quota failure is disqualifying.
+    """Covers: any admitted non-quota failure is disqualifying.
 
     A timeout (or any non-quota failure) is not quota exhaustion; combined with
     genuine quota and a durable no_eligible_candidate event it makes the run's
@@ -1210,7 +1210,7 @@ def test_admitted_timeout_attempt_blocks_quota_only_preemption(tmp_path: Path) -
 def test_later_quota_only_chain_after_earlier_success_still_preempts(
     tmp_path: Path,
 ) -> None:
-    """Covers: ADR-0002 D8 -- the conservative predicate is not a blanket rule.
+    """Covers: the conservative predicate is not a blanket rule.
 
     An admitted candidate that *succeeded* in an earlier plan package is
     compatible with a later, genuinely quota-only chain: the run still has no
@@ -1253,7 +1253,7 @@ def test_later_quota_only_chain_after_earlier_success_still_preempts(
 
 
 def test_quota_only_multi_candidate_skip_still_preempts(tmp_path: Path) -> None:
-    """Covers: ADR-0002 D8 -- quota-only multi-candidate exhaustion still preempts.
+    """Covers: quota-only multi-candidate exhaustion still preempts.
 
     Attempts are exclusively quota while the ladder skipped the remaining
     candidates: the durable event plus the quota-only attempt history is the

@@ -138,7 +138,7 @@ def test_ping_works_without_initialization(tmp_path: Path) -> None:
 
 
 def test_tools_list_exposes_registered_tools(tmp_path: Path) -> None:
-    """Covers: ADR-0004 D7 tool set (no more, no fewer)."""
+    """Covers: tool set (no more, no fewer)."""
     server = _server(tmp_path)
     _ready(server)
     result = _call(server, "tools/list")["result"]
@@ -435,7 +435,7 @@ def test_read_only_client_refuses_mutations_but_allows_reads(tmp_path: Path) -> 
 
 
 def test_redaction_masks_secret_named_keys_and_credential_values() -> None:
-    """Covers: ADR-0004 D7 'Read tools never return credentials'."""
+    """Covers: 'Read tools never return credentials'."""
     payload = {
         "api_key": "whatever",
         "nested": {"oauth_token": "abc", "safe": "value"},
@@ -452,7 +452,7 @@ def test_redaction_masks_secret_named_keys_and_credential_values() -> None:
 
 
 def test_read_evidence_redacts_credential_values(tmp_path: Path) -> None:
-    """Covers: ADR-0004 D7 (no secret reference values over MCP)."""
+    """Covers: no secret reference values over MCP."""
     orch = tmp_path / ".orch"
     orch.mkdir(parents=True, exist_ok=True)
     (orch / "hygiene.md").write_text(

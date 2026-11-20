@@ -577,7 +577,7 @@ def _validation_bool(data: dict[str, Any], name: str, default: bool) -> bool:
 # *supersedes*.  The ledger is evidence: it is never rewritten, so the audit
 # history cannot be altered by a later run.
 
-#: Owner-declared 3x5 concurrency ceiling (ADR-0004 Amendment 7): at most three
+#: Owner-declared 3x5 concurrency ceiling: at most three
 #: concurrently active tasks and at most five worker sessions per project.  These
 #: are CEILINGS, never utilization targets.
 MAX_CONCURRENT_TASKS: Final[int] = 3

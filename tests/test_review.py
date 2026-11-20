@@ -60,7 +60,7 @@ def _seed_verified_opencode_posture(config_home: Path) -> None:
     """Seed an isolated owner config with a verified class-A posture for the
     synthetic ``opencode`` provider used by this module's dispatch fixtures.
 
-    Covers: ADR-0002 D2 / WORKFLOW §7 authorized setup-only fixture migration.
+    Covers: WORKFLOW §7 authorized setup-only fixture migration.
     The R3E1 fixtures dispatch synthetic ``opencode/<model>`` candidates with no
     matching posture record, so the accepted M2-4b admission seam rightfully
     returns ``quota_blocked`` (POSTURE_UNVERIFIED fails closed).  This seeds
@@ -162,7 +162,7 @@ class _ScriptedAdapter(WorkerAdapter):
 def _seed_reviewable_run(db: Database, repo: Path, run_id: str) -> None:
     """Seed one reviewable run bound to the isolated owner control plane.
 
-    Covers: ADR-0002 D2 / WORKFLOW §7 authorized setup-only fixture migration
+    Covers: WORKFLOW §7 authorized setup-only fixture migration
     for the synthetic r3e1 reviewable run.  Attaching the frozen owner
     control-plane snapshot (with the ``dispatch_posture`` fixture's verified
     synthetic ``opencode`` posture) is setup only: the run's frozen contract now

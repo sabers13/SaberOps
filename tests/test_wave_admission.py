@@ -90,7 +90,7 @@ def _admit(
 
 
 def test_scope_covers_is_prefix_exact() -> None:
-    """Covers: ADR-0004 D2 (path-prefix overlap semantics)."""
+    """Covers: path-prefix overlap semantics."""
     assert scope_covers("src/saberops", "src/saberops/a.py")
     assert scope_covers("src/saberops", "src/saberops")
     assert not scope_covers("src/saberops", "src/saberops-other/a.py")
@@ -98,7 +98,7 @@ def test_scope_covers_is_prefix_exact() -> None:
 
 
 def test_scopes_overlap_detects_nesting_and_symmetry() -> None:
-    """Covers: ADR-0004 D2 (disjoint file sets)."""
+    """Covers: disjoint file sets."""
     assert scopes_overlap(["src"], ["src/saberops/a.py"])
     assert scopes_overlap(["src/saberops/a.py"], ["src"])
     assert scopes_overlap(["src/a.py"], ["src/a.py"])
@@ -107,7 +107,7 @@ def test_scopes_overlap_detects_nesting_and_symmetry() -> None:
 
 
 def test_lane_touch_overlaps_reports_the_offending_patterns() -> None:
-    """Covers: ADR-0004 D2 (overlap is reported deterministically)."""
+    """Covers: overlap is reported deterministically."""
     pairs = lane_touch_overlaps(
         _lane("L1", ["src/saberops"]), _lane("L2", ["src/saberops/a.py"])
     )
@@ -118,7 +118,7 @@ def test_lane_touch_overlaps_reports_the_offending_patterns() -> None:
 
 
 def test_disjoint_wave_with_valid_posture_and_ancestry_is_admitted() -> None:
-    """Covers: ADR-0004 D2 + §4 invariant 2 (admission happy path)."""
+    """Covers: admission happy path."""
     decision = _admit()
     assert decision.admitted is True
     assert decision.reasons == []
@@ -126,7 +126,7 @@ def test_disjoint_wave_with_valid_posture_and_ancestry_is_admitted() -> None:
 
 
 def test_overlapping_touches_are_rejected() -> None:
-    """Covers: ADR-0004 D2 + §4 invariant 2 (overlap rejected at submit)."""
+    """Covers: overlap rejected at submit."""
     wave = _wave(
         [
             _lane("L1", ["src/saberops"]),
@@ -141,7 +141,7 @@ def test_overlapping_touches_are_rejected() -> None:
 
 
 def test_a_lane_may_not_touch_what_it_must_not_touch() -> None:
-    """Covers: ADR-0004 D2 (self-conflict fails closed)."""
+    """Covers: self-conflict fails closed."""
     # The model refuses a self-overlap on construction, so force it past the
     # constructor to prove admission is independently fail-closed too.
     wave = _wave([_lane("L1", ["src/a.py"])])
@@ -155,28 +155,28 @@ def test_a_lane_may_not_touch_what_it_must_not_touch() -> None:
 
 
 def test_base_that_is_not_an_ancestor_is_rejected() -> None:
-    """Covers: ADR-0004 D2 (base must be an ancestor of the target branch)."""
+    """Covers: base must be an ancestor of the target branch."""
     decision = _admit(ancestry_checker=NEVER_ANCESTOR)
     assert decision.admitted is False
     assert decision.reasons == [f"{BASE_NOT_ANCESTOR}:{SHA_A}:{SHA_B}"]
 
 
 def test_ancestry_is_unverified_without_a_checker_or_a_repo() -> None:
-    """Covers: ADR-0004 D2 (no silent ancestry assumption)."""
+    """Covers: no silent ancestry assumption."""
     decision = admit_wave(_wave(), SHA_B, ALWAYS_VALID)
     assert decision.admitted is False
     assert decision.reasons == [f"{ANCESTRY_UNVERIFIED}:{SHA_A}:{SHA_B}"]
 
 
 def test_target_head_shape_is_validated() -> None:
-    """Covers: ADR-0004 D2 (target head must be a commit SHA)."""
+    """Covers: target head must be a commit SHA."""
     decision = _admit(target="HEAD")
     assert decision.admitted is False
     assert INVALID_TARGET_HEAD in decision.reasons
 
 
 def test_invalid_worker_and_reviewer_posture_are_rejected() -> None:
-    """Covers: ADR-0004 D2 (every route has valid posture)."""
+    """Covers: every route has valid posture."""
     decision = _admit(posture_validator=ALWAYS_INVALID)
     assert decision.admitted is False
     assert decision.reasons == [
@@ -188,7 +188,7 @@ def test_invalid_worker_and_reviewer_posture_are_rejected() -> None:
 
 
 def test_posture_validator_receives_role_and_route() -> None:
-    """Covers: ADR-0004 D2 (posture is asked per role and route)."""
+    """Covers: posture is asked per role and route."""
     seen: list[tuple[str, str]] = []
 
     def validator(role: str, route: str) -> bool:
@@ -205,7 +205,7 @@ def test_posture_validator_receives_role_and_route() -> None:
 
 
 def test_an_empty_route_is_reported_without_calling_the_validator() -> None:
-    """Covers: ADR-0004 D2 (empty route cannot be in valid posture)."""
+    """Covers: empty route cannot be in valid posture."""
     wave = _wave([_lane("L1", ["src/a.py"])])
     object.__setattr__(wave.lanes[0], "worker_route", "  ")
 
@@ -219,7 +219,7 @@ def test_an_empty_route_is_reported_without_calling_the_validator() -> None:
 
 
 def test_all_independent_failures_are_reported_together() -> None:
-    """Covers: ADR-0004 D2 (one attempt reports every problem)."""
+    """Covers: one attempt reports every problem."""
     wave = _wave(
         [
             _lane("L1", ["src/saberops"], worker_route="bad"),
@@ -238,7 +238,7 @@ def test_all_independent_failures_are_reported_together() -> None:
 
 
 def test_structural_wave_problems_are_reported() -> None:
-    """Covers: ADR-0004 D2 (admission re-checks the wave description)."""
+    """Covers: admission re-checks the wave description."""
     wave = _wave()
     object.__setattr__(wave, "lanes", list(wave.lanes) + [wave.lanes[0]])
     decision = _admit(wave)
@@ -247,7 +247,7 @@ def test_structural_wave_problems_are_reported() -> None:
 
 
 def test_a_broken_ancestry_checker_fails_closed() -> None:
-    """Covers: ADR-0004 D2 (a broken predicate never admits)."""
+    """Covers: a broken predicate never admits."""
 
     def exploding(ancestor: str, descendant: str) -> bool:
         raise RuntimeError("git unavailable")
@@ -258,7 +258,7 @@ def test_a_broken_ancestry_checker_fails_closed() -> None:
 
 
 def test_decisions_are_deterministic() -> None:
-    """Covers: ADR-0004 D2 (deterministic admission)."""
+    """Covers: deterministic admission."""
     wave = _wave(
         [
             _lane("L1", ["src"]),
@@ -294,7 +294,7 @@ def _commit(path: Path, name: str) -> str:
 
 
 def test_git_ancestry_checker_accepts_an_ancestor_and_rejects_unrelated(tmp_path: Path) -> None:
-    """Covers: ADR-0004 D2 (ancestry verified via git merge-base)."""
+    """Covers: ancestry verified via git merge-base."""
     repo = tmp_path / "repo"
     base = _init_repo(repo)
     head = _commit(repo, "second.txt")
@@ -311,7 +311,7 @@ def test_git_ancestry_checker_accepts_an_ancestor_and_rejects_unrelated(tmp_path
 
 
 def test_admit_wave_with_a_real_repository_admits_an_ancestor_base(tmp_path: Path) -> None:
-    """Covers: ADR-0004 D2 + §4 invariant 2 (real git admission path)."""
+    """Covers: real git admission path."""
     repo = tmp_path / "repo"
     base = _init_repo(repo)
     head = _commit(repo, "second.txt")

@@ -1079,8 +1079,8 @@ def run_engine_gate(
 ) -> EngineGateResult:
     """Run one engine-owned gate and record ``producer: engine`` evidence.
 
-    Covers: ADR-0004 D3 (engine is the only producer of gate evidence),
-    ADR-0004 D3 write-scope preflight, ADR-0003 D2 profiles and D3 slots.
+    Covers: (engine is the only producer of gate evidence),
+     write-scope preflight, profiles and D3 slots.
 
     A model's own run of the same commands stays G0: it never reaches the
     history ledger and is rejected by :func:`project_gate_outcome` as
@@ -1213,7 +1213,7 @@ def _reconstruct_frozen_worker_binding_registry(payload: Any | None) -> Any | No
 def _current_executor_owner_token(db: Any, run_id: str) -> tuple[str | None, int | None]:
     """Return ``(owner_id, generation)`` iff *this process* is the executor.
 
-    ADR-0002 D8 crash recovery binds a decision receipt to the exact executor
+     crash recovery binds a decision receipt to the exact executor
     generation that made it, so the receipt must name the durable owner row
     only when that row's recorded process incarnation **is this process**.
     Looking up "whatever owner row happens to exist" would let a stale process
@@ -3606,7 +3606,7 @@ class Orchestrator:
                     def _autonomous_stop(stop_summary: str, stop_reason: str) -> RunResult:
                         """Terminalize the run for a supervisor STOP (fail closed)."""
                         if stop_reason == SupervisorStopReason.NO_ELIGIBLE_BINDING.value:
-                            # ADR-0002 D8 (M2-5): a durable job-owned run that
+                            # A durable job-owned run that
                             # suffered genuine quota exhaustion with no
                             # admitted fallback route parks (PREEMPTED +
                             # requeue with resume capsule) instead of failing.
@@ -9059,7 +9059,7 @@ class Orchestrator:
                     f"All {chain_attempt_count} attempt(s) failed to pass gate "
                     f"'{gate_command}'."
                 )
-            # ADR-0002 D8 (M2-5): quota-preemption owns this terminal outcome
+            # Quota-preemption owns this terminal outcome
             # when the run suffered genuine quota exhaustion with no admitted
             # fallback route and a durable job owns it.  The coordinator
             # declines (owned=False) for ordinary gate failures, standalone
@@ -9481,7 +9481,7 @@ class Orchestrator:
     ) -> EngineGateResult:
         """Orchestrator-owned entry point for engine-run G1/G2/G3 evidence.
 
-        Covers: ADR-0004 D3 (engine gate evidence + write-scope preflight).
+        Covers: engine gate evidence + write-scope preflight.
 
         Delegates to the deterministic :func:`run_engine_gate` seam so the
         engine (and only the engine) produces authoritative gate evidence; a
@@ -9515,7 +9515,7 @@ class Orchestrator:
     ) -> WaveAdmissionDecision:
         """Deterministic, fail-closed admission decision for one wave.
 
-        Covers: ADR-0004 D2 (admission) and §4 invariant 2.
+        Covers: (admission) and §4 invariant 2.
 
         Delegates to the pure :func:`saberops.wave_admission.admit_wave`. The
         caller supplies the route-posture predicate from the owner-state

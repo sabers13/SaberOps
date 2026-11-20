@@ -27,7 +27,7 @@ from saberops.gate_profiles import (
 
 
 def test_default_budgets_and_names() -> None:
-    """Covers: ADR-0003 D2 (fast 10 min, acceptance 20 min, full 30 min)."""
+    """Covers: fast 10 min, acceptance 20 min, full 30 min."""
     profiles = default_profiles()
     assert set(profiles) == {
         GateProfileName.FAST,
@@ -57,7 +57,7 @@ def test_default_budgets_and_names() -> None:
     ],
 )
 def test_required_profile_mapping(kind: str, expected: GateProfileName) -> None:
-    """Covers: ADR-0003 D2 lifecycle-to-profile mapping (engine policy)."""
+    """Covers: lifecycle-to-profile mapping (engine policy)."""
     assert required_profile(kind) is expected
     assert required_profile(GateKind(kind)) is expected
 
@@ -125,7 +125,7 @@ def test_selector_nodes_are_shell_quoted() -> None:
 
 
 def test_parse_profiles_accepts_override() -> None:
-    """Covers: ADR-0003 D2 (profiles are project data)."""
+    """Covers: profiles are project data."""
     data = {
         "version": 1,
         "profiles": {
@@ -202,7 +202,7 @@ def test_load_profiles_reads_valid_document(tmp_path: Path) -> None:
 
 
 def test_acceptance_profile_is_acceptance() -> None:
-    """Covers: ADR-0003 D2 acceptance = fast + rerun + map freshness."""
+    """Covers: acceptance = fast + rerun + map freshness."""
     profile = acceptance_profile()
     assert profile.name is GateProfileName.ACCEPTANCE
     assert profile.rerun_failures is True

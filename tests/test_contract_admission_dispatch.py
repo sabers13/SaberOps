@@ -1,4 +1,4 @@
-"""Contract test: two dispatch points share canonical admit() and score() (ADR-0002 D7).
+"""Contract test: two dispatch points share canonical admit and score.
 
 Verifies:
 1. Shared canonical admission and scoring policy across queued scheduler and in-run dispatch.
@@ -172,7 +172,7 @@ class _AvailableAdapter:
 
 
 def test_two_dispatch_points_share_canonical_admit_score(owner_db: Database) -> None:
-    """Covers: ADR-0002 D7 queued scheduler and in-run dispatch reach identical admission."""
+    """Covers: queued scheduler and in-run dispatch reach identical admission."""
     now = _NOW
     cand = _make_candidate("openai", "gpt-5")
     policy = _make_policy()
@@ -236,7 +236,7 @@ def test_two_dispatch_points_share_canonical_admit_score(owner_db: Database) -> 
 def test_unconfigured_capacity_degrades_gracefully(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: ADR-0002 D2/D7 posture fail-closed on blank DB;
+    """Covers: posture fail-closed on blank DB;
     unconfigured capacity grace for verified A/C only.
     """
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "empty_cfg"))
@@ -391,7 +391,7 @@ def test_unconfigured_capacity_degrades_gracefully(
 def test_exhausted_shared_pool_denies_across_harnesses_at_both_dispatch_points(
     owner_db: Database,
 ) -> None:
-    """Covers: ADR-0002 D7 quota exhaustion on shared pool denies all routes across harnesses."""
+    """Covers: quota exhaustion on shared pool denies all routes across harnesses."""
     now = _NOW
     policy = _make_policy()
 
@@ -452,7 +452,7 @@ def test_exhausted_shared_pool_denies_across_harnesses_at_both_dispatch_points(
 
 
 def test_reviewer_dispatch_preserves_model_family_exclusion() -> None:
-    """Covers: ADR-0002 D7 reviewer dispatch refuses candidates in the worker model family."""
+    """Covers: reviewer dispatch refuses candidates in the worker model family."""
     from saberops.review import _pre_dispatch_skip_reason
 
     worker = _make_candidate("codex", "gpt-5.6-sol")
@@ -488,7 +488,7 @@ def test_reviewer_dispatch_preserves_model_family_exclusion() -> None:
 
 
 def test_order_candidates_for_role_intra_group_pacing(owner_db: Database) -> None:
-    """Covers: ADR-0002 D7 order_candidates_for_role orders by intra-group pacing score."""
+    """Covers: order_candidates_for_role orders by intra-group pacing score."""
     now = _NOW
     policy = _make_policy()
 
@@ -539,7 +539,7 @@ def test_order_candidates_for_role_intra_group_pacing(owner_db: Database) -> Non
 def test_in_run_dispatch_fails_closed_on_sqlite_reservation_read_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Covers: ADR-0002 D7 in-run worker/repair/review fails closed on SQLite read error."""
+    """Covers: in-run worker/repair/review fails closed on SQLite read error."""
     import sqlite3
 
     from saberops.control_plane.quota_policy import QUOTA_EVIDENCE_REQUIRED
@@ -619,7 +619,7 @@ def test_in_run_dispatch_fails_closed_on_sqlite_reservation_read_error(
 def test_partial_capacity_schema_fails_closed_at_live_boundaries(
     tmp_path: Path,
 ) -> None:
-    """Covers: ADR-0002 D2/D7 a partially initialized capacity schema (some
+    """Covers: a partially initialized capacity schema (some
     required tables present, others missing) must fail closed with typed
     QUOTA_EVIDENCE_REQUIRED at the live control_plane_decision boundary and
     SKIP_QUOTA_BLOCKED at the worker/repair seam, never zero debt.
