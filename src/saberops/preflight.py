@@ -138,7 +138,7 @@ def collect_preflight(repo: Path, db_path: Path | None = None) -> list[Finding]:
     from saberops.capacity.snapshot import effective_quota_states
     from saberops.control_plane.binding_store import load_owner_bindings
     from saberops.control_plane.bindings import BindingRole
-    from saberops.control_plane.plans import effective_quota_pools
+    from saberops.control_plane.plans import resolve_binding_quota_pools
     from saberops.control_plane.policy import load_control_plane_policy
     from saberops.control_plane.posture import posture_decision
     from saberops.control_plane.quota_policy import pools_for, quota_decision
@@ -343,7 +343,6 @@ def collect_preflight(repo: Path, db_path: Path | None = None) -> list[Finding]:
     path = db_path or get_default_db_path()
     db = Database(path, read_only=True) if path.exists() else None
     rows = effective_quota_states(db, run_probes=False) if db else []
-    policies = effective_quota_pools(policy)
     now = datetime.now(UTC)
     quota_routes: list[tuple[WorkerCandidate, str | None]] = [
         (candidate, None) for candidate in workers
@@ -353,7 +352,15 @@ def collect_preflight(repo: Path, db_path: Path | None = None) -> list[Finding]:
             (WorkerCandidate(reviewer.provider, reviewer.model), reviewer.quota_pool_id)
         )
     for candidate, binding_pool in quota_routes:
-        for pool in [binding_pool] if binding_pool else pools_for(candidate, policies):
+        candidate_policies, _ = resolve_binding_quota_pools(
+            policy, candidate, binding_pool, activate_overage=True, quota_states=rows
+        )
+        pools = pools_for(candidate, candidate_policies)
+        if binding_pool:
+            pools = list(dict.fromkeys(
+                [binding_pool, *[p for p in pools if p != candidate.provider]]
+            ))
+        for pool in pools:
             relevant_rows = [
                 row
                 for row in rows
@@ -369,7 +376,7 @@ def collect_preflight(repo: Path, db_path: Path | None = None) -> list[Finding]:
                 None,
             )
             quota_result = quota_decision(
-                candidate, rows, pool_policies=policies, pool_id=pool, now=now
+                candidate, rows, pool_policies=candidate_policies, pool_id=pool, now=now
             )
             ok = current is not None and quota_result.eligible
             age = format_age(

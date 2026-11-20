@@ -12,7 +12,7 @@ from saberops.control_plane.capabilities import (
     capability_profile_for,
     normalize_required_capabilities,
 )
-from saberops.control_plane.plans import effective_quota_pools
+from saberops.control_plane.plans import resolve_binding_quota_pools
 from saberops.control_plane.policy import (
     ControlPlanePolicy,
     ProviderPolicyState,
@@ -175,6 +175,7 @@ def evaluate_control_plane(
     this contract and behave exactly as before.  The default ``False``
     preserves every existing caller exactly.
     """
+    quota_states = tuple(quota_states)
     effective_policy = policy or load_control_plane_policy()
     provider_policy = effective_policy.provider(candidate.provider)
     profile: CapabilityProfile = capability_profile_for(adapter, candidate.provider)
@@ -211,7 +212,9 @@ def evaluate_control_plane(
     quota = quota_decision(
         candidate,
         quota_states,
-        pool_policies=effective_quota_pools(effective_policy),
+        pool_policies=resolve_binding_quota_pools(
+            effective_policy, candidate, binding_pool_id, quota_states=quota_states
+        )[0],
         reserve_override=reserve_override,
         pool_id=binding_pool_id,
     )

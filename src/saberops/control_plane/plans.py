@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
@@ -29,6 +30,7 @@ from saberops.control_plane.quota_policy import QuotaPoolMode, QuotaPoolPolicy
 
 if TYPE_CHECKING:
     from saberops.control_plane.policy import ControlPlanePolicy
+    from saberops.models import QuotaState
 
 
 WINDOW_IDS: frozenset[str] = frozenset(
@@ -665,3 +667,44 @@ def effective_quota_pools(
         for pool_id, pool in policy.quota_pools.items()
     })
     return pools
+
+
+def resolve_binding_quota_pools(
+    policy: ControlPlanePolicy,
+    candidate: object,
+    binding_pool_id: str | None,
+    *,
+    activate_overage: bool = False,
+    quota_states: Iterable[QuotaState] = (),
+) -> tuple[dict[str, QuotaPoolPolicy], dict[str, PoolPlan]]:
+    """Apply a provider's packaged default to its discovered connection identity.
+
+    Explicit owner pools remain independent shared constraints. An ambiguous
+    default is never guessed, and the binding identity supplies no evidence.
+    """
+    pools = effective_quota_pools(policy, activate_overage=activate_overage)
+    plans = effective_pool_plans(policy)
+    provider = str(getattr(candidate, "provider", "")).strip().lower()
+    if not binding_pool_id or not binding_pool_id.startswith("discovered-pool:"):
+        return pools, plans
+    if binding_pool_id in pools:
+        return pools, plans
+    matches = [
+        pid for pid, plan in plans.items()
+        if pid not in policy.quota_pools
+        and pid not in policy.plans.pool_plans
+        and tuple(member.route.lower() for member in plan.members) == (provider,)
+    ]
+    if len(matches) == 1:
+        source = matches[0]
+        pools[binding_pool_id] = replace(pools[source], pool_id=binding_pool_id)
+        plans[binding_pool_id] = replace(plans[source], pool_id=binding_pool_id)
+        # Existing observations or exclusions for the packaged pool remain
+        # independent constraints; never discard restrictive evidence.
+        if not any(
+            (getattr(state, "pool_id", None) or getattr(state, "pool", None)) == source
+            for state in quota_states
+        ):
+            del pools[source]
+            del plans[source]
+    return pools, plans

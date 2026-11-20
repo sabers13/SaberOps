@@ -46,7 +46,7 @@ def test_configured_rig_reports_readiness(monkeypatch: pytest.MonkeyPatch, tmp_p
     rig = build_lifecycle_rig(tmp_path, monkeypatch)
     findings = collect_preflight(rig.repo)
     failures = [item.message for item in findings if item.severity == "FAIL"]
-    assert any("reviewer" not in failure and "quota:" in failure for failure in failures)
+    assert not any("quota:" in failure for failure in failures)
     assert failures[-1] == "scheduler: not running"
     from saberops.cli import main
 

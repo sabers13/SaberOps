@@ -108,6 +108,45 @@ def test_rig_fresh_store_registers_two_providers_and_reviewer(rig: RigEnvironmen
     assert settings.gate_command == rig.gate_command
 
 
+def test_discovered_reviewer_quota_admitted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from saberops.preflight import collect_preflight
+
+    rig = build_lifecycle_rig(
+        tmp_path, monkeypatch, reviewer_pool="discovered-pool:claude-code-subscription"
+    )
+    findings = collect_preflight(rig.repo)
+    assert any(
+        finding.severity == "OK"
+        and "anthropic/discovered-pool:claude-code-subscription quota: available"
+        in finding.message
+        for finding in findings
+    )
+    _run_supervised_and_accept(rig, task="Exercise discovered reviewer quota")
+
+
+@pytest.mark.parametrize("remaining", [None, 0])
+def test_discovered_reviewer_quota_refuses_missing_or_low(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, remaining: int | None
+) -> None:
+    rig = build_lifecycle_rig(
+        tmp_path, monkeypatch, reviewer_pool="discovered-pool:claude-code-subscription",
+        reviewer_remaining=remaining,
+    )
+    with pytest.raises(AssertionError, match="Required independent review"):
+        _run_supervised_and_accept(rig, task="Exercise refused reviewer quota")
+
+
+def test_discovered_reviewer_respects_existing_shared_pool_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rig = build_lifecycle_rig(tmp_path, monkeypatch)
+    rig.db().set_quota("anthropic", "claude-pro", 0.0)
+    with pytest.raises(AssertionError, match="Required independent review"):
+        _run_supervised_and_accept(rig, task="Exercise shared reviewer quota")
+
+
 def test_lifecycle_happy_path_via_scheduler(rig: RigEnvironment) -> None:
     """Job submitted -> scheduler dispatches -> worker commits -> review -> owner accepts."""
     db = rig.db()

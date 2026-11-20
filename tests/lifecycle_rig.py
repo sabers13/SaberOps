@@ -277,6 +277,8 @@ def build_lifecycle_rig(
     *,
     gate_command: str | None = None,
     attended: bool = True,
+    reviewer_pool: str = "discovered-pool:claude-code-subscription",
+    reviewer_remaining: int | None = 93,
 ) -> RigEnvironment:
     """Create a fresh empty store + toy repo wired with fake workers and reviewer.
 
@@ -395,8 +397,10 @@ def build_lifecycle_rig(
     for provider, pool in (
         ("codex", "chatgpt-plus"),
         ("opencode", "opencode-go"),
-        ("anthropic", "claude-pro"),
+        ("anthropic", reviewer_pool),
     ):
+        if provider == "anthropic" and reviewer_remaining is None:
+            continue
         assert (
             cli_main(
                 [
@@ -405,7 +409,7 @@ def build_lifecycle_rig(
                     provider,
                     pool,
                     "--remaining",
-                    "80",
+                    str(reviewer_remaining) if provider == "anthropic" else "80",
                     "--reset-at",
                     future_reset,
                 ]

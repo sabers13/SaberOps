@@ -40,8 +40,7 @@ from saberops.control_plane.capabilities import (
 )
 from saberops.control_plane.plans import (
     Window,
-    effective_pool_plans,
-    effective_quota_pools,
+    resolve_binding_quota_pools,
 )
 from saberops.control_plane.policy import (
     ControlPlanePolicy,
@@ -400,6 +399,7 @@ def admit(
     9. Scoring across windows (computes pace and binding window)
     """
     moment = _utcnow(now)
+    quota_states = tuple(quota_states)
 
     # 1. Identity validity
     if not isinstance(candidate, WorkerCandidate) or not candidate.provider or not candidate.model:
@@ -657,8 +657,10 @@ def admit(
         )
 
     # 8. Quota pools & windows
-    pool_policies = effective_quota_pools(effective_policy, activate_overage=activate_overage)
-    pool_plans = effective_pool_plans(effective_policy)
+    pool_policies, pool_plans = resolve_binding_quota_pools(
+        effective_policy, candidate, binding_pool_id, activate_overage=activate_overage,
+        quota_states=quota_states,
+    )
     # QuotaPool binding contract: a bound route draws its
     # ``binding_pool_id`` plus every pool whose ``members`` match the candidate
     # (declared shared scarcity), and NEVER the synthesized provider-wide
