@@ -613,5 +613,5 @@ _ALL_SPECS: tuple[str, ...] = (
     "anthropic sign-in: NOT_AUTHENTICATED (no credentials)",
     "codex provider is blocked",
     "anthropic/* billing: not confirmed",
-    "codex/chatgpt-plus quota: missing, stale or blocked (age 2d)",
+    "codex/chatgpt-plus quota: stale (age 2d)",
 )

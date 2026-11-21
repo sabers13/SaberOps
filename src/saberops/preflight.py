@@ -5,7 +5,9 @@ from __future__ import annotations
 import os
 import shlex
 import shutil
+from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -76,6 +78,53 @@ def sign_in_remedy(provider: str, reason: str, connection: str) -> str:
     return check
 
 
+def _newest_observation(rows: Sequence[object]) -> datetime | None:
+    """Return the newest parseable ``updated_at`` among evidence rows."""
+    from saberops.capacity.exclusions import parse_iso
+
+    return max(
+        (
+            parsed
+            for row in rows
+            if (parsed := parse_iso(getattr(row, "updated_at", None))) is not None
+        ),
+        default=None,
+    )
+
+
+def quota_status(
+    decision: object, rows: Sequence[object], now: datetime
+) -> tuple[bool, str]:
+    """Return ``(available, label)`` for one pool from its canonical decision.
+
+    ``ok`` mirrors ``quota_decision`` -- the same eligibility the dispatch
+    admission path evaluates against the same resolved pool policy -- so
+    preflight cannot disagree with admission.  When the pool is unavailable the
+    label names the actual condition instead of collapsing missing evidence,
+    stale evidence and a red-line refusal into one phrase.
+    """
+    from saberops.capacity.freshness import format_age
+
+    if getattr(decision, "eligible", False):
+        return True, "available"
+    reason = str(getattr(decision, "reason", "") or "")
+    if reason.startswith("RED_LINE"):
+        remaining = getattr(decision, "normalized_remaining_pct", None)
+        red_line = getattr(decision, "red_line_pct", None)
+        figure = f"{float(remaining):g}%" if remaining is not None else "unknown"
+        limit = f"{float(red_line):g}%" if red_line is not None else "unknown"
+        return False, f"below red line ({figure} < {limit})"
+    if reason == "QUOTA_EXCLUDED_UNTIL_RESET":
+        until = getattr(decision, "reset_at", None) or "unknown"
+        return False, f"blocked by exclusion until {until}"
+    if reason == "POOL_OFF":
+        return False, "blocked (pool off)"
+    newest = _newest_observation(rows)
+    if newest is None:
+        return False, "missing (no observation)"
+    return False, f"stale (age {format_age(newest.isoformat(), now)})"
+
+
 def vendor_cli_version_findings(
     provider: str, executable: str, version: str, manifest: Manifest
 ) -> list[Finding]:
@@ -133,7 +182,7 @@ def collect_preflight(repo: Path, db_path: Path | None = None) -> list[Finding]:
 
     from saberops._gate_tools import gate_tools
     from saberops.capacity.admission import matches_model_family
-    from saberops.capacity.freshness import format_age, freshness
+    from saberops.capacity.freshness import format_age
     from saberops.capacity.loop import scheduler_alive
     from saberops.capacity.snapshot import effective_quota_states
     from saberops.control_plane.binding_store import load_owner_bindings
@@ -366,30 +415,16 @@ def collect_preflight(repo: Path, db_path: Path | None = None) -> list[Finding]:
                 for row in rows
                 if row.provider == candidate.provider and (row.pool_id or row.pool) == pool
             ]
-            current = next(
-                (
-                    row
-                    for row in relevant_rows
-                    if (row.freshness or freshness(row.updated_at, row.window_id, row.source, now))
-                    == "FRESH"
-                ),
-                None,
-            )
             quota_result = quota_decision(
                 candidate, rows, pool_policies=candidate_policies, pool_id=pool, now=now
             )
-            ok = current is not None and quota_result.eligible
-            age = format_age(
-                current.updated_at
-                if current
-                else (relevant_rows[0].updated_at if relevant_rows else None),
-                now,
-            )
-            quota_status = "available" if ok else "missing, stale or blocked"
+            ok, quota_status_label = quota_status(quota_result, relevant_rows, now)
+            newest = _newest_observation(relevant_rows)
+            age = format_age(newest.isoformat() if newest is not None else None, now)
             results.append(
                 Finding(
                     "OK" if ok else "FAIL",
-                    f"{candidate.provider}/{pool} quota: {quota_status} (age {age})",
+                    f"{candidate.provider}/{pool} quota: {quota_status_label} (age {age})",
                     ""
                     if ok
                     else (

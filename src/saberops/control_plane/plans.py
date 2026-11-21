@@ -679,8 +679,14 @@ def resolve_binding_quota_pools(
 ) -> tuple[dict[str, QuotaPoolPolicy], dict[str, PoolPlan]]:
     """Apply a provider's packaged default to its discovered connection identity.
 
-    Explicit owner pools remain independent shared constraints. An ambiguous
-    default is never guessed, and the binding identity supplies no evidence.
+    A packaged plan governs the discovered binding when the plan declares the
+    candidate's provider as a member -- the exact provider-wide case
+    ``members == (provider,)`` is the common shape, but a plan shared with
+    another vendor route (``chatgpt-plus`` lists ``codex`` and
+    ``opencode/openai/*``) still governs its provider's own discovered
+    connection.  Explicit owner pools remain independent shared constraints.
+    An ambiguous default (more than one packaged plan names the provider) is
+    never guessed, and the binding identity supplies no evidence.
     """
     pools = effective_quota_pools(policy, activate_overage=activate_overage)
     plans = effective_pool_plans(policy)
@@ -693,7 +699,7 @@ def resolve_binding_quota_pools(
         pid for pid, plan in plans.items()
         if pid not in policy.quota_pools
         and pid not in policy.plans.pool_plans
-        and tuple(member.route.lower() for member in plan.members) == (provider,)
+        and any(member.route.strip().lower() == provider for member in plan.members)
     ]
     if len(matches) == 1:
         source = matches[0]

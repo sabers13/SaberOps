@@ -54,6 +54,7 @@ from saberops.models import (
     WorkerRequest,
 )
 from saberops.paths import owner_state_dir
+from saberops.preflight import Finding
 from saberops.project_settings import load_project_settings
 from saberops.provenance import mint_run_provenance
 from saberops.review import ReviewEngine
@@ -145,6 +146,142 @@ def test_discovered_reviewer_respects_existing_shared_pool_evidence(
     rig.db().set_quota("anthropic", "claude-pro", 0.0)
     with pytest.raises(AssertionError, match="Required independent review"):
         _run_supervised_and_accept(rig, task="Exercise shared reviewer quota")
+
+
+_CODEX_REVIEWER_BINDING_ID = (
+    "discovered-binding:reviewer:codex-chatgpt-account:gpt-5.6-terra"
+)
+_CODEX_REVIEWER_POOL = "discovered-pool:codex-chatgpt-account"
+
+
+def _codex_reviewer_rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> RigEnvironment:
+    """Build the rig with a codex reviewer on its discovered binding pool."""
+    rig = build_lifecycle_rig(tmp_path, monkeypatch)
+    rig.service().set_reviewer_binding(_CODEX_REVIEWER_BINDING_ID)
+    return rig
+
+
+def _quota_line(findings: list[Finding], pool: str) -> str:
+    prefix = f"codex/{pool} quota:"
+    return next(finding.message for finding in findings if finding.message.startswith(prefix))
+
+
+def _reviewer_admission(rig: RigEnvironment) -> Any:
+    """Ask the dispatch admission path about the codex reviewer binding."""
+    from datetime import UTC, datetime
+
+    from saberops.capacity.admission import admit
+    from saberops.capacity.snapshot import effective_quota_states
+    from saberops.control_plane.policy import load_control_plane_policy
+    from saberops.models import WorkerCandidate
+
+    moment = datetime.now(UTC)
+    return admit(
+        WorkerCandidate("codex", "gpt-5.6-terra"),
+        now=moment,
+        policy=load_control_plane_policy(),
+        quota_states=effective_quota_states(rig.db(), run_probes=False, now=moment),
+        binding_pool_id=_CODEX_REVIEWER_POOL,
+        explicit_override=True,
+        activate_overage=True,
+    )
+
+
+def test_discovered_codex_reviewer_pool_agrees_with_admission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A multi-member packaged plan still governs its provider's binding pool.
+
+    A7 regression: ``chatgpt-plus`` lists ``codex`` plus an opencode route, so
+    the binding pool kept no policy; preflight called a 41%-remaining pool
+    "missing, stale or blocked" while admission admitted it.  Both now resolve
+    the packaging plan that names the provider.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from saberops.cli import main as cli_main
+    from saberops.preflight import collect_preflight
+
+    rig = _codex_reviewer_rig(tmp_path, monkeypatch)
+    reset_at = (datetime.now(UTC) + timedelta(hours=4)).isoformat()
+    assert (
+        cli_main(
+            [
+                "quota",
+                "set",
+                "codex",
+                _CODEX_REVIEWER_POOL,
+                "--remaining",
+                "41",
+                "--reset-at",
+                reset_at,
+            ]
+        )
+        == 0
+    )
+    findings = collect_preflight(rig.repo)
+    line = _quota_line(findings, _CODEX_REVIEWER_POOL)
+    assert line.startswith(f"codex/{_CODEX_REVIEWER_POOL} quota: available"), line
+    decision = _reviewer_admission(rig)
+    assert decision.admitted is True, decision.reason
+
+
+def test_discovered_codex_reviewer_pool_below_red_line_still_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from saberops.cli import main as cli_main
+    from saberops.preflight import collect_preflight
+
+    rig = _codex_reviewer_rig(tmp_path, monkeypatch)
+    reset_at = (datetime.now(UTC) + timedelta(hours=4)).isoformat()
+    assert (
+        cli_main(
+            [
+                "quota",
+                "set",
+                "codex",
+                _CODEX_REVIEWER_POOL,
+                "--remaining",
+                "5",
+                "--reset-at",
+                reset_at,
+            ]
+        )
+        == 0
+    )
+    findings = collect_preflight(rig.repo)
+    line = _quota_line(findings, _CODEX_REVIEWER_POOL)
+    assert "below red line (5% < 15%)" in line, line
+    decision = _reviewer_admission(rig)
+    assert decision.admitted is False
+    assert decision.reason is not None and decision.reason.startswith("RED_LINE")
+
+
+def test_discovered_codex_reviewer_pool_stale_still_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from saberops.preflight import collect_preflight
+
+    rig = _codex_reviewer_rig(tmp_path, monkeypatch)
+    observed_at = datetime.now(UTC) - timedelta(days=2)
+    reset_at = (datetime.now(UTC) + timedelta(hours=4)).isoformat()
+    rig.db().set_quota(
+        "codex",
+        _CODEX_REVIEWER_POOL,
+        41.0,
+        reset_at=reset_at,
+        now=observed_at,
+    )
+    findings = collect_preflight(rig.repo)
+    line = _quota_line(findings, _CODEX_REVIEWER_POOL)
+    assert line.startswith(f"codex/{_CODEX_REVIEWER_POOL} quota: stale (age 2d)"), line
+    decision = _reviewer_admission(rig)
+    assert decision.admitted is False
+    assert decision.reason == "QUOTA_EVIDENCE_REQUIRED"
 
 
 def test_lifecycle_happy_path_via_scheduler(rig: RigEnvironment) -> None:

@@ -209,7 +209,7 @@ def test_owner_only_steps_are_marked_and_never_runnable() -> None:
     ):
         spec = _classify(message)
         assert spec is not None and spec.key == key and spec.kind == "owner", message
-    quota = _classify("codex/chatgpt-plus quota: missing, stale or blocked (age 2d)")
+    quota = _classify("codex/chatgpt-plus quota: stale (age 2d)")
     assert quota is not None and quota.kind == "answer"
     step = WalkthroughStep(
         key=key,
