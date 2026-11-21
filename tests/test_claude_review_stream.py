@@ -25,6 +25,8 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
+import pytest
+
 from saberops.agent_sessions import observe_invocation
 from saberops.models import AttemptStatus, WorkerRequest, WorkerResult
 from saberops.process import ProcessResult
@@ -173,3 +175,137 @@ def test_incomplete_capture_is_reported_and_never_success(tmp_path: Path) -> Non
 
     assert result.status is AttemptStatus.FAILED
     assert "output capture was incomplete" in (result.error or "")
+
+
+# Claude Code 2.1.330 exits 0 before flushing its async stdout writes, so the
+# stream ends mid-frame with no assistant/result tail reaching the pipe while
+# the CLI's own session transcript records the completed turn.  This fake CLI
+# reproduces exactly that: bytes cut inside a JSON frame, exit 0, and (when the
+# config dir is provided) a durable transcript of the finished turn.
+_TRUNCATING_CLI = '''#!{python}
+"""Truncate stream-json output like Claude Code 2.1.330; no provider call."""
+import datetime
+import json
+import os
+import re
+import sys
+
+SESSION_ID = "{session_id}"
+STAMP = "{stamp}"
+AUTH = '{{"loggedIn": true, "authMethod": "claude.ai", "apiProvider": "firstParty"}}'
+
+
+def write_session(worktree: str) -> None:
+    config = os.environ.get("CLAUDE_CONFIG_DIR")
+    if not config:
+        return
+    encoded = re.sub(r"[^A-Za-z0-9]", "-", worktree)
+    folder = os.path.join(config, "projects", encoded)
+    os.makedirs(folder, exist_ok=True)
+    if STAMP:
+        stamp = STAMP
+    else:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        stamp = now.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    final = {{
+        "type": "assistant",
+        "timestamp": stamp,
+        "message": {{
+            "stop_reason": "end_turn",
+            "content": [{{"type": "text", "text": "VERDICT: PASS\\n\\nAll checks passed."}}],
+        }},
+    }}
+    with open(os.path.join(folder, SESSION_ID + ".jsonl"), "w", encoding="utf-8") as handle:
+        prompt_entry = {{"type": "user", "message": {{"role": "user", "content": "prompt"}}}}
+        handle.write(json.dumps(prompt_entry))
+        handle.write("\\n")
+        handle.write(json.dumps(final))
+        handle.write("\\n")
+        handle.write(json.dumps({{"type": "cost-state", "sessionId": SESSION_ID}}))
+        handle.write("\\n")
+
+
+def main() -> int:
+    if "auth" in sys.argv[1:]:
+        sys.stdout.write(AUTH)
+        sys.stdout.flush()
+        return 0
+    sys.stdin.read()
+    out = sys.stdout.buffer
+    out.write((json.dumps({{"type": "system", "subtype": "init",
+                            "model": "claude-native-id",
+                            "session_id": SESSION_ID}}) + "\\n").encode())
+    out.write((json.dumps({{"type": "assistant",
+                            "message": {{"content": [{{"type": "text", "text": "working"}}]}},
+                            "session_id": SESSION_ID}}) + "\\n").encode())
+    out.flush()
+    write_session(os.getcwd())
+    # The lost tail: a frame cut mid-JSON with no newline, then exit 0.
+    out.write(b'{{"type":"stream_event","event":{{"delta":{{"text":"No')
+    out.flush()
+    return 0
+
+
+raise SystemExit(main())
+'''
+
+_SESSION_ID = "5df316e3-ab45-48f2-a803-815f95e6aac6"
+
+
+def _install_truncating_cli(
+    directory: Path, *, stamp: str | None = None
+) -> Path:
+    path = directory / "claude"
+    path.write_text(
+        _TRUNCATING_CLI.format(
+            python=sys.executable,
+            session_id=_SESSION_ID,
+            stamp=stamp or "",
+        ),
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+    return path
+
+
+def test_mid_frame_stream_is_reported_as_truncated_provider_output(
+    tmp_path: Path,
+) -> None:
+    claude = _install_truncating_cli(tmp_path)
+
+    result = _review(_candidate_worktree(tmp_path), claude, tmp_path / "sessions")
+
+    assert result.status is AttemptStatus.FAILED
+    assert "truncated" in (result.error or "")
+    assert "did not report successful task completion" not in (result.error or "")
+    assert result.provider_terminal_status == "FAILED"
+
+
+def test_truncated_stream_recovers_completion_from_native_transcript(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
+    claude = _install_truncating_cli(tmp_path)
+
+    result = _review(_candidate_worktree(tmp_path), claude, tmp_path / "sessions")
+
+    assert result.status is AttemptStatus.SUCCESS, result.error
+    assert result.error is None
+    assert result.provider_terminal_status == "SUCCESS"
+    assert "VERDICT: PASS" in result.stdout
+    # The truncation stays visible in the evidence rather than being hidden.
+    assert "truncated" in result.stderr
+    assert "recovered" in result.stderr
+
+
+def test_session_recovery_ignores_an_earlier_completed_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A resumed session's previous turn must never stand in for this one."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
+    claude = _install_truncating_cli(tmp_path, stamp="2020-01-01T00:00:00.000Z")
+
+    result = _review(_candidate_worktree(tmp_path), claude, tmp_path / "sessions")
+
+    assert result.status is AttemptStatus.FAILED
+    assert "truncated" in (result.error or "")

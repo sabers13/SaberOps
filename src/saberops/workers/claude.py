@@ -8,8 +8,13 @@ from __future__ import annotations
 import base64
 import json
 import mimetypes
+import re
 import shutil
+import time
 from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from saberops.git import GitManager
@@ -29,19 +34,53 @@ from saberops.workers.exhaustion import (
 _SETTINGS = json.dumps({"forceLoginMethod": "claudeai", "disableAllHooks": True,
                         "promptSuggestionEnabled": False})
 
+# Exit 0 without a terminal ``result`` frame means the provider stream stopped
+# before it could report completion.  Name that condition instead of claiming
+# the provider itself failed to complete, which hides a lost stream.
+_TRUNCATED_MID_FRAME = (
+    "Claude Code provider output was truncated: the stream ended mid-frame "
+    "before the terminal result frame"
+)
+_TRUNCATED_NO_RESULT = (
+    "Claude Code provider output was truncated: the stream ended before the "
+    "terminal result frame"
+)
+_RECOVERED_NOTE = (
+    "[Provider stream was truncated before the terminal result frame; "
+    "completion was recovered from the durable Claude Code session transcript]"
+)
 
-def _native_result(stdout: str) -> tuple[str, bool, str | None]:
+
+@dataclass(frozen=True)
+class _NativeOutput:
+    """Native completion evidence parsed from the CLI's stream-json stdout."""
+
+    text: str
+    completed: bool
+    actual_model: str | None
+    saw_result: bool
+    ends_mid_frame: bool
+    session_id: str | None
+
+
+def _native_result(stdout: str) -> _NativeOutput:
     """Read only native completion evidence; an exit code alone is not success."""
     completed = False
+    saw_result = False
     text: list[str] = []
     actual_model: str | None = None
-    for line in stdout.splitlines():
+    session_id: str | None = None
+    lines = stdout.splitlines()
+    for line in lines:
         try:
             message = json.loads(line)
         except ValueError:
             continue
         if not isinstance(message, dict):
             continue
+        frame_session = message.get("session_id")
+        if session_id is None and isinstance(frame_session, str) and frame_session:
+            session_id = frame_session
         if message.get("type") == "system" and message.get("subtype") == "init":
             model = message.get("model")
             if isinstance(model, str) and model:
@@ -53,13 +92,129 @@ def _native_result(stdout: str) -> tuple[str, bool, str | None]:
                             if isinstance(item, dict) and item.get("type") == "text"
                             and isinstance(item.get("text"), str))
         if message.get("type") == "result":
+            saw_result = True
             completed = (message.get("subtype") == "success"
                          and message.get("is_error") is False
                          and not message.get("permission_denials"))
             result = message.get("result")
             if isinstance(result, str) and result:
                 text = [result]
-    return "\n".join(text), completed, actual_model
+    ends_mid_frame = False
+    if lines and not stdout.endswith(("\n", "\r")):
+        try:
+            json.loads(lines[-1])
+        except ValueError:
+            # The last bytes captured are not a complete JSON frame: the
+            # provider stream stopped in the middle of a write.
+            ends_mid_frame = True
+    return _NativeOutput(
+        text="\n".join(text),
+        completed=completed,
+        actual_model=actual_model,
+        saw_result=saw_result,
+        ends_mid_frame=ends_mid_frame,
+        session_id=session_id,
+    )
+
+
+def _entry_epoch(value: object) -> float | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _session_file(
+    worktree: Path, env: dict[str, str], session_id: str | None, since: float
+) -> Path | None:
+    """Locate the CLI's own durable transcript for this dispatch, if any.
+
+    Claude Code appends every turn to ``<config>/projects/<encoded cwd>/
+    <session>.jsonl``.  That file is written by the CLI itself through a
+    different path than stdout, so it survives a truncated stdout flush.
+    """
+    config = env.get("CLAUDE_CONFIG_DIR")
+    home = env.get("HOME")
+    if config:
+        projects = Path(config) / "projects"
+    elif home:
+        projects = Path(home) / ".claude" / "projects"
+    else:
+        return None
+    encoded = re.sub(r"[^A-Za-z0-9]", "-", str(worktree.resolve()))
+    directory = projects / encoded
+    if not directory.is_dir():
+        return None
+    if session_id:
+        candidate = directory / f"{session_id}.jsonl"
+        return candidate if candidate.is_file() else None
+    newest: tuple[float, Path] | None = None
+    for path in directory.glob("*.jsonl"):
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        if mtime + 1.0 < since:
+            continue
+        if newest is None or mtime > newest[0]:
+            newest = (mtime, path)
+    return newest[1] if newest is not None else None
+
+
+def _completed_turn_text(path: Path, since: float) -> str | None:
+    """Return the final assistant text only for a turn completed after *since*.
+
+    Completion requires the last conversational entry to be an assistant
+    message that ended its turn normally (``end_turn``, no error).  The
+    timestamp guard keeps a resumed session's earlier turn from being read as
+    this dispatch's completion.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    last: tuple[str, dict[str, Any]] | None = None
+    for line in raw.splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        kind = entry.get("type")
+        if kind not in ("assistant", "user"):
+            continue
+        if isinstance(entry.get("message"), dict):
+            last = (kind, entry)
+    if last is None or last[0] != "assistant":
+        return None
+    entry = last[1]
+    message = entry["message"]
+    if message.get("stop_reason") != "end_turn" or message.get("is_error") is True:
+        return None
+    stamp = _entry_epoch(entry.get("timestamp"))
+    if stamp is None or stamp < since:
+        return None
+    content = message.get("content")
+    if not isinstance(content, list):
+        return None
+    text = "".join(
+        item["text"] for item in content
+        if isinstance(item, dict) and item.get("type") == "text"
+        and isinstance(item.get("text"), str)
+    )
+    return text or None
+
+
+def _recover_completion(
+    worktree: Path, env: dict[str, str], session_id: str | None, since: float
+) -> str | None:
+    path = _session_file(worktree, env, session_id, since)
+    if path is None:
+        return None
+    return _completed_turn_text(path, since)
 
 
 class ClaudeCodeAdapter(WorkerAdapter):
@@ -173,13 +328,32 @@ class ClaudeCodeAdapter(WorkerAdapter):
         kwargs: dict[str, Any] = streaming_process_kwargs(request)
         kwargs.update(cwd=request.worktree_path, timeout=remaining, env=env,
                       inherit_env=False, input_text=input_text)
+        launched_at = time.time()
         process = launch_worker_process(argv, runner=self.runner, **kwargs)
-        output, completed, actual_model = _native_result(process.stdout)
+        native = _native_result(process.stdout)
+        output = native.text
+        # A clean exit without any terminal result frame is the signature of a
+        # provider stream whose tail never reached the pipe (Claude Code
+        # 2.1.330 exits before flushing its async stdout writes).  The CLI's
+        # own durable transcript still records the completed turn, so recover
+        # the terminal evidence from there instead of failing the dispatch.
+        recovered: str | None = None
+        if process.passed and not native.saw_result:
+            recovered = _recover_completion(
+                request.worktree_path, env, native.session_id, launched_at
+            )
+            if recovered is not None:
+                output = recovered
+        stderr_text = process.stderr
+        if recovered is not None:
+            stderr_text = (
+                f"{stderr_text}\n{_RECOVERED_NOTE}" if stderr_text else _RECOVERED_NOTE
+            )
         if process.control_interrupted:
             from saberops.models import WorkerInterruptionReason
             return WorkerResult(provider=self.provider_name, model=request.model,
                 status=AttemptStatus.FAILED, summary="Interrupted for manual control",
-                stdout=output, stderr=process.stderr, has_changes=False,
+                stdout=output, stderr=stderr_text, has_changes=False,
                 interruption_reason=WorkerInterruptionReason.ABORTED,
                 duration_seconds=process.duration_seconds)
         changes = GitManager.get_changed_paths(request.worktree_path)
@@ -190,7 +364,12 @@ class ClaudeCodeAdapter(WorkerAdapter):
             status, outcome, error = (AttemptStatus.FAILED,
                                       DispatchOutcome.PROVIDER_OR_RUNTIME_FAILURE,
                                       "Claude Code process termination could not be confirmed")
-        elif process.passed and completed:
+        elif process.passed and native.completed:
+            status, outcome, error = AttemptStatus.SUCCESS, None, None
+        elif process.passed and recovered is not None:
+            # The model finished the turn and the CLI persisted that turn, but
+            # its stdout lost the tail.  Complete on the durable native
+            # evidence and keep the truncation visible in stderr.
             status, outcome, error = AttemptStatus.SUCCESS, None, None
         elif process.passed and process.output_incomplete:
             # The child exited cleanly, but not every byte it wrote reached
@@ -201,6 +380,14 @@ class ClaudeCodeAdapter(WorkerAdapter):
                                       DispatchOutcome.PROVIDER_OR_RUNTIME_FAILURE,
                                       "Claude Code output capture was incomplete; "
                                       "the terminal result frame was not observed")
+        elif process.passed and not native.saw_result:
+            # The provider stream stopped before its terminal result frame and
+            # left no durable completion behind: this is truncated provider
+            # output, not a provider that declined to complete the task.
+            status, outcome, error = (AttemptStatus.FAILED,
+                                      DispatchOutcome.PROVIDER_OR_RUNTIME_FAILURE,
+                                      _TRUNCATED_MID_FRAME if native.ends_mid_frame
+                                      else _TRUNCATED_NO_RESULT)
         else:
             status, outcome, error = (AttemptStatus.FAILED,
                                       DispatchOutcome.PROVIDER_OR_RUNTIME_FAILURE,
@@ -231,14 +418,17 @@ class ClaudeCodeAdapter(WorkerAdapter):
         return WorkerResult(
             provider=self.provider_name, model=request.model, status=status,
             summary=error or output.strip()[:300] or "Claude Code completed",
-            stdout=output, stderr=process.stderr, changed_paths=changes, has_changes=bool(changes),
+            stdout=output, stderr=stderr_text, changed_paths=changes, has_changes=bool(changes),
             error=error, outcome=outcome,
             interruption_reason=interruption_reason, quota_reset_at=quota_reset_at,
             quota_window=quota_window, quota_model_scope=quota_model_scope,
             quota_reset_confidence=quota_reset_confidence,
             provider_exit_code=process.exit_code,
             execution_quiescent=not process.termination_incomplete,
-            provider_terminal_status="SUCCESS" if completed else "FAILED",
+            provider_terminal_status=(
+                "SUCCESS" if native.completed or recovered is not None else "FAILED"
+            ),
             duration_seconds=auth.duration_seconds + process.duration_seconds,
-            prompt_bytes=prompt_bytes, prompt_transport_used="stdin", actual_model=actual_model,
+            prompt_bytes=prompt_bytes, prompt_transport_used="stdin",
+            actual_model=native.actual_model,
         )
