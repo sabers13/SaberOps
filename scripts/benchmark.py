@@ -119,9 +119,12 @@ def _print_plan(store: Path, repo_root: Path, models: dict[str, str]) -> None:
         print(f"    worker {worker:<52} reviewer {reviewer}")
         print("      tasks: " + ", ".join(task.task_id for task in batch.tasks))
     print()
-    print("Real mode will refuse to submit until the isolated store's preflight is")
-    print("green.  Configure the owner's billing confirmations, quota facts and an")
-    print("independent reviewer in that store first; the refusal prints each remedy.")
+    print("Real mode discovers the three account CLIs in the isolated store, confirms")
+    print("the packaged plan-only billing posture, records owner quota for every pool")
+    print("the run dispatches through, and materializes the different-vendor reviewers")
+    print("before it submits the first task.  It refuses if a default model id is not")
+    print("discovered on this machine or a vendor CLI is missing; the refusal prints")
+    print("the remedy.")
 
 
 def _run_real(args: argparse.Namespace) -> int:

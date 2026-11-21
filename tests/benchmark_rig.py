@@ -32,6 +32,7 @@ from saberops.benchmark import (
     DrillResult,
     TaskResult,
     aggregate_subscription_usage,
+    count_block_verdicts,
 )
 from saberops.capacity.loop import run_scheduler_loop, scheduler_alive
 from saberops.cli import main as cli_main
@@ -286,6 +287,11 @@ def run_fake_benchmark(
                 owner_actions=owner_actions,
                 subscription=_subscription_for(db, job_id),
                 detail=detail,
+                block_verdicts=(
+                    count_block_verdicts(db, job.current_run_id)
+                    if job.current_run_id is not None
+                    else 0
+                ),
             )
         )
 

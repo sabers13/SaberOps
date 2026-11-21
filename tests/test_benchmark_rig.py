@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import sys
+import textwrap
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -46,15 +47,20 @@ from saberops.benchmark import (
     DRILL_TASKS,
     QUESTION_TASK,
     TASKS,
+    TASKS_BY_ID,
     RealModeRefused,
+    TaskResult,
     configure_real_reviewer,
     create_toy_repository,
     isolated_environment,
+    prepare_real_store,
     real_batches,
     real_family_requirements,
     real_mode_presence,
     real_model_for,
+    real_worker_candidates,
     validate_real_mode,
+    wait_for_batch,
 )
 from saberops.capacity.loop import run_scheduler_loop
 from saberops.capacity.store import ensure_tables as ensure_capacity_tables
@@ -129,6 +135,9 @@ def test_fake_benchmark_ten_tasks_reach_final_state(
         assert result.final_state == "FAILED"
         assert result.accepted_commit is None
         assert result.detail
+        # N3: the expectation is "the reviewer blocked at least once", which
+        # the fake reviewer records durably just as a real one does.
+        assert result.block_verdicts >= 1
     # Both fake subscriptions are exercised.
     providers = {result.subscription.split("/")[0] for result in report.results}
     assert providers == {"codex", "opencode"}
@@ -611,6 +620,323 @@ def test_benchmark_script_real_mode_dry_run_creates_nothing(tmp_path: Path) -> N
     assert "nothing started" in result.stdout
     assert "custom-codex-model" in result.stdout
     assert not store.exists()
+
+
+# --------------------------------------------------------------------------
+# Shipped real-mode entry point on a fresh store (N1) and honest latency (N5)
+# --------------------------------------------------------------------------
+
+
+_FAKE_CODEX_CLI = """\
+#!/usr/bin/env python3
+import json
+import sys
+
+args = sys.argv[1:]
+if args == ["--version"]:
+    print("0.0.0-fake")
+elif args == ["doctor", "--json"]:
+    print(json.dumps({"schemaVersion": 1, "checks": {
+        "auth.credentials": {"status": "ok"}}}))
+elif args == ["debug", "models"]:
+    print(json.dumps({"models": ["gpt-6-luna"]}))
+elif args == ["--help"]:
+    print("fake codex help")
+else:
+    print(f"fake codex: unexpected args {args!r}", file=sys.stderr)
+    raise SystemExit(1)
+"""
+
+_FAKE_CLAUDE_CLI = """\
+#!/usr/bin/env python3
+import json
+import sys
+
+args = sys.argv[1:]
+if args == ["--version"]:
+    print("0.0.0-fake")
+elif args == ["auth", "status", "--json"]:
+    print(json.dumps({"loggedIn": True}))
+elif "--input-format" in args:
+    request = json.loads(sys.stdin.readline())
+    reply = {"type": "control_response", "response": {
+        "subtype": "success",
+        "request_id": request.get("request_id"),
+        "response": {"models": [{"value": "claude-haiku-4-5-20251001"}]},
+    }}
+    print(json.dumps(reply), flush=True)
+elif args == ["--help"]:
+    print("fake claude help")
+else:
+    print(f"fake claude: unexpected args {args!r}", file=sys.stderr)
+    raise SystemExit(1)
+"""
+
+_FAKE_OPENCODE_CLI = """\
+#!/usr/bin/env python3
+import json
+import sys
+
+args = sys.argv[1:]
+if args == ["--version"]:
+    print("0.0.0-fake")
+elif args == ["auth", "list", "--format", "json", "--standalone"]:
+    print(json.dumps([{"id": "opencode-go", "connections": [
+        {"id": "cred_fake", "type": "credential"}]}]))
+elif args in (["models"], ["models", "--standalone"]):
+    print("opencode-go/deepseek-v4.1-flash")
+elif args == ["--help"]:
+    print("fake opencode help")
+else:
+    print(f"fake opencode: unexpected args {args!r}", file=sys.stderr)
+    raise SystemExit(1)
+"""
+
+
+def _install_fake_vendor_clis(root: Path) -> Path:
+    """Write discovery-capable fake ``codex``/``claude``/``opencode`` executables."""
+    bin_dir = root / "fake-bin"
+    bin_dir.mkdir(parents=True)
+    for name, body in (
+        ("codex", _FAKE_CODEX_CLI),
+        ("claude", _FAKE_CLAUDE_CLI),
+        ("opencode", _FAKE_OPENCODE_CLI),
+    ):
+        path = bin_dir / name
+        path.write_text(textwrap.dedent(body), encoding="utf-8")
+        path.chmod(0o755)
+    return bin_dir
+
+
+def _load_benchmark_script() -> object:
+    import importlib.util
+
+    script = Path(__file__).resolve().parents[1] / "scripts" / "benchmark.py"
+    spec = importlib.util.spec_from_file_location("saberops_benchmark_entry", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class _StopAfterSubmission(Exception):
+    """Sentinel that stops the shipped entry point at its first job submission."""
+
+
+@pytest.mark.no_attendance
+def test_benchmark_script_real_mode_prepares_a_fresh_store_and_submits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """N1: the shipped real path reaches its first job on a fresh store.
+
+    The fake vendor CLIs answer only the documented discovery, sign-in status
+    and model-listing seams, so this proves preparation -- not a real provider
+    prompt.  ``submit_job`` is the first durable write the run needs; stopping
+    there keeps the test provider-free while still exercising the real
+    discovery -> routing -> posture -> quota -> preflight chain.
+    """
+    bin_dir = _install_fake_vendor_clis(tmp_path)
+    store = tmp_path / "store"
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("TMPDIR", "/var/tmp")
+    # The shipped path installs the isolated store into ``os.environ``; pinning
+    # these through monkeypatch keeps teardown from leaking it into later tests.
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "ambient-state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "ambient-config"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "ambient-cache"))
+    monkeypatch.delenv("SABEROPS_PROFILE", raising=False)
+
+    submitted: list[dict[str, object]] = []
+
+    def stop_submit(db: object, **kwargs: object) -> None:
+        submitted.append(kwargs)
+        raise _StopAfterSubmission
+
+    monkeypatch.setattr("saberops.jobs.service.submit_job", stop_submit)
+    script = _load_benchmark_script()
+
+    with pytest.raises(_StopAfterSubmission):
+        script.main(  # type: ignore[attr-defined]
+            ["--mode", "real", "--yes-real-cli", "--store", str(store)]
+        )
+
+    assert len(submitted) == 1
+    first = TASKS_BY_ID["add-function"]
+    assert submitted[0]["goal"] == first.goal
+    assert submitted[0]["acceptance"] == first.acceptance
+    assert Path(str(submitted[0]["repo"])).name == f"toy-{first.task_id}"
+
+    models = {
+        "codex": DEFAULT_CODEX_MODEL,
+        "opencode": DEFAULT_OPENCODE_MODEL,
+        "claude": DEFAULT_CLAUDE_MODEL,
+    }
+    from saberops.routing_config import load_effective_routing_payload
+
+    payload = load_effective_routing_payload()
+    routes = [route for group in payload["roles"]["BUILD"] for route in group["routes"]]
+    for candidate in real_worker_candidates(models):
+        assert candidate in routes
+
+    from saberops.control_plane.policy import load_control_plane_policy
+    from saberops.control_plane.posture import posture_decision
+    from saberops.db import Database
+
+    policy = load_control_plane_policy()
+    for provider, model in (
+        ("codex", models["codex"]),
+        ("opencode", models["opencode"]),
+        ("anthropic", models["claude"]),
+    ):
+        assert posture_decision(
+            provider, model, plans=policy.plans, today=datetime.now(UTC).date()
+        ).admitted_unattended
+
+    db = Database()
+    quota_rows = {(row.provider, row.pool) for row in db.list_quota()}
+    assert ("codex", "chatgpt-plus") in quota_rows
+    assert ("opencode", "opencode-go") in quota_rows
+    assert ("anthropic", "claude-pro") in quota_rows
+    # Reviewer bindings are discovered pools, the identity the recheck had to
+    # record by hand (N1/N2).
+    for pool in (
+        "discovered-pool:claude-code-subscription",
+        "discovered-pool:codex-chatgpt-account",
+        "discovered-pool:opencode-account",
+    ):
+        assert any(pool == row[1] for row in quota_rows), pool
+
+
+@pytest.mark.no_attendance
+def test_prepare_real_store_is_idempotent_on_its_own_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """N1: a second preparation neither aborts nor rewrites the routing document."""
+    bin_dir = _install_fake_vendor_clis(tmp_path)
+    store = tmp_path / "store"
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("TMPDIR", "/var/tmp")
+    monkeypatch.setenv("XDG_STATE_HOME", str(store / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(store / "config"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(store / "cache"))
+    monkeypatch.delenv("SABEROPS_PROFILE", raising=False)
+
+    from saberops.db import Database
+    from saberops.routing_config import load_effective_routing_payload
+
+    models = {
+        "codex": DEFAULT_CODEX_MODEL,
+        "opencode": DEFAULT_OPENCODE_MODEL,
+        "claude": DEFAULT_CLAUDE_MODEL,
+    }
+    reviewers = ("anthropic", "opencode", "codex")
+    db = Database()
+    prepare_real_store(db=db, models=models, reviewer_subscriptions=reviewers)
+    first = load_effective_routing_payload()
+
+    # Before N1 this raised "User routing config already exists ... use --force".
+    prepare_real_store(db=db, models=models, reviewer_subscriptions=reviewers)
+    assert load_effective_routing_payload() == first
+
+
+def _review_blocked_result(*, block_verdicts: int) -> TaskResult:
+    return TaskResult(
+        task_id="review-block-a",
+        kind="must fail review",
+        expect="review_blocked",
+        final_state="SUCCEEDED",
+        accepted_commit=None,
+        submitted_at=100.0,
+        started_at=101.0,
+        terminal_at=110.0,
+        accepted_at=None,
+        notice_at=111.0,
+        owner_actions=0,
+        subscription="codex/gpt-6-luna",
+        block_verdicts=block_verdicts,
+    )
+
+
+def test_review_blocked_expectation_scores_the_block_verdict() -> None:
+    """N3: a BLOCK verdict is the measurement, not an unattainable FAILED state."""
+    blocked = _review_blocked_result(block_verdicts=1)
+    assert blocked.passed, "a real BLOCK followed by a legitimate repair still passes"
+    assert _review_blocked_result(block_verdicts=0).passed is False
+    assert blocked.time_to_candidate == pytest.approx(10.0)
+
+
+def test_wait_for_batch_accepts_the_first_eligible_candidate() -> None:
+    """N5: acceptance happens on arrival, not after the batch's slowest task."""
+    tasks = (TASKS_BY_ID["add-function"], TASKS_BY_ID["review-block-a"])
+    jobs = {"add-function": "job-a", "review-block-a": "job-b"}
+    events: list[str] = []
+    state = {"ticks": 0, "now": 0.0}
+
+    def tick() -> None:
+        state["ticks"] += 1
+        events.append(f"tick-{state['ticks']}")
+
+    def job_state(job_id: str) -> str:
+        if job_id == "job-a":
+            return "SUCCEEDED"
+        return "SUCCEEDED" if state["ticks"] >= 2 else "RUNNING"
+
+    def accept_job(job_id: str) -> str:
+        events.append(f"accept-{job_id}")
+        return "sha-a"
+
+    def notice_delivered(job_id: str, final_state: str) -> bool:
+        return state["ticks"] >= 2
+
+    def monotonic() -> float:
+        state["now"] += 0.1
+        return state["now"]
+
+    outcome = wait_for_batch(
+        tasks=tasks,
+        jobs=jobs,
+        tick=tick,
+        job_state=job_state,
+        accept_job=accept_job,
+        notice_delivered=notice_delivered,
+        max_wait=10.0,
+        monotonic=monotonic,
+        sleep=lambda _seconds: None,
+    )
+
+    assert events.index("accept-job-a") < events.index("tick-2")
+    assert "accept-job-b" not in events
+    assert outcome.accepted["add-function"][0] == "sha-a"
+    assert set(outcome.terminal) == {"add-function", "review-block-a"}
+
+
+def test_benchmark_table_reports_candidate_and_acceptance_latency() -> None:
+    """N5: both honest times are visible in the printed table."""
+    results = (
+        TaskResult(
+            task_id="add-function",
+            kind="add a function",
+            expect="accepted",
+            final_state="SUCCEEDED",
+            accepted_commit="abcdef123456",
+            submitted_at=100.0,
+            started_at=101.0,
+            terminal_at=140.0,
+            accepted_at=141.0,
+            notice_at=141.5,
+            owner_actions=1,
+            subscription="codex/gpt-6-luna",
+        ),
+    )
+    from saberops.benchmark import BenchmarkReport
+
+    table = BenchmarkReport(
+        mode="real", results=results, started_at=100.0, finished_at=200.0
+    ).table()
+    assert "to candidate" in table
+    assert "to accepted" in table
+    assert "40.0s" in table
+    assert "41.0s" in table
 
 
 # --------------------------------------------------------------------------
