@@ -354,16 +354,26 @@ stay QUEUED for now.
 
 States: QUEUED → RUNNING → SUCCEEDED | FAILED | CANCELLED, and
 RUNNING → QUEUED on preemption. QUEUED carries a waiting reason: NEW |
-NO_CAPACITY | PROBE_PENDING | PREEMPTED | CONCURRENCY | MEMORY_LOW |
-DEPENDENCY | DEPENDENCY_FAILED. Requirements no route could ever satisfy,
-even with full capacity, store FAILED with `NO_ROUTE_FOR_REQUIREMENTS` at
-submit, so jobs never park forever.
+NO_CAPACITY | PROBE_PENDING | QUOTA_EVIDENCE_REQUIRED | PREEMPTED |
+CONCURRENCY | MEMORY_LOW | DEPENDENCY | DEPENDENCY_FAILED. Requirements no
+route could ever satisfy, even with full capacity, store FAILED with
+`NO_ROUTE_FOR_REQUIREMENTS` at submit, so jobs never park forever.
+
+`PROBE_PENDING` means a probe the engine runs by itself is in flight. A pool
+whose usage can only be read interactively (Anthropic/Claude today) never uses
+it: the job waits with `QUOTA_EVIDENCE_REQUIRED` instead, the `waiting` event
+carries the exact `orch quota set <provider> <pool> --remaining <percent>`
+command, and `wait_job` returns it as needs-attention immediately. The job
+starts on the next scheduler tick after the evidence is recorded.
 
 Dependencies: `depends_on` (CLI `--depends-on JOB_ID`, repeatable; MCP
 `submit_job` `depends_on`) names jobs that must be **accepted** first, not
 merely finished. The scheduler parks a dependant with `DEPENDENCY`, naming the
 outstanding dependencies on its `waiting` event, until every one carries a
-durable `run_accepted` event from the owner's acceptance. A dependency that
+durable `run_accepted` event from the owner's acceptance. A dependant's run is
+anchored on the newest accepted dependency's landing commit, not the base
+recorded at submit time, so the worker starts from the tree that contains the
+work it builds on. A dependency that
 ends FAILED or CANCELLED parks the dependant with `DEPENDENCY_FAILED` for good:
 it never starts, and `wait_job` returns it as needs-attention instead of
 waiting out its timeout. Unknown dependencies and any dependency edge that

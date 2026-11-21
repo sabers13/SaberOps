@@ -270,8 +270,11 @@ its reason, the plan and worker state, the paused jobs and the one call that
 resumes. Closing the planning CLI pauses all work in every mode (ADR-0029).
 `resume_work` is the only confirmation that clears a pause; it is mutating, so a
 read-only client cannot call it. Nothing resumes by itself: a returning session
-sees the pause in `catch_up` and must confirm with `resume_work` or the owner
-must run `orch resume`.
+sees the pause in `catch_up`, in every `get_job` result, and in the
+`saberops_on` reply, and must confirm with `resume_work` or the owner must run
+`orch resume`. While the gate is closed `wait_job` returns
+`outcome: "paused"` immediately with the same resume action instead of waiting
+out its timeout and reporting that nothing needs the owner.
 
 ## Never exposed
 
@@ -573,16 +576,17 @@ use the snippet under "Client configuration" below.
 
 `orch mcp status` separates shared access from chat activation (which the CLI
 cannot observe) and shows the planning holder, PID, session, epoch, last
-activity, idle time, active job count and lease-file scope. The in-session
+activity, idle time, running job count and lease-file scope. The in-session
 `saberops://lease` resource reports ownership for that session.
 
 An idle session can be replaced after 15 minutes without a tool call; set
 `SABEROPS_MCP_IDLE_SECONDS` to a positive number of seconds to change that
-bound. The previous session is fenced from later writes. Jobs submitted by the
-holder protect its lease while they are queued or running. To hand off sooner,
-run `orch mcp release --holder <session-id-or-pid>` using the holder shown by
-status. This targets only that holder and refuses if its work is active or its
-work state cannot be checked. A live legacy owner without fencing must be closed
+bound. The previous session is fenced from later writes. Only a **running** job
+protects the holder's lease: a queued job has not started and stays durable, so
+the next planning session dispatches it. To hand off sooner, run
+`orch mcp release --holder <session-id-or-pid>` using the holder shown by
+status. This targets only that holder and refuses if its work is executing or
+its work state cannot be checked. A live legacy owner without fencing must be closed
 before its lease can be released. The release does not turn off shared access.
 
 Every tool result starts with `Orchestrator:`, and the guide asks the agent to

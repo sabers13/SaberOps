@@ -189,6 +189,51 @@ def test_pinned_run_refusal_on_failing_or_unsafe_reader_names_remedy(
     assert "orch quota set anthropic" in claude_res.summary
 
 
+def test_parked_job_quota_evidence_refusal_names_the_exact_command(
+    isolated_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The planner sees the remedy for a pool only the owner can supply."""
+    from saberops.jobs import store
+    from saberops.jobs.service import submit_job
+    from saberops.mcp.tools import ServerContext, _job_guidance, build_default_registry
+
+    repo = isolated_env / "repo-guidance"
+    _init_repo(repo)
+    db = Database(isolated_env / "guidance.db")
+    job = submit_job(db, repo=repo, goal="needs owner quota evidence").job
+    store.set_waiting(
+        db,
+        job.job_id,
+        reason="QUOTA_EVIDENCE_REQUIRED",
+        details={
+            "diagnostic": "QUOTA_EVIDENCE_REQUIRED",
+            "provider": "anthropic",
+            "pool_id": "claude-pro",
+            "remedy": "orch quota set anthropic claude-pro --remaining <percent>",
+        },
+    )
+    current = store.get_job(db, job.job_id)
+    assert current is not None
+    guidance = _job_guidance(current, db)
+    assert guidance is not None
+    assert "orch quota set anthropic claude-pro --remaining <percent>" in guidance
+    assert "owner" in guidance.lower()
+
+    # wait_job cannot clear this by waiting, so it reports it at once with the
+    # same remedy instead of timing out and looking idle.
+    monkeypatch.setattr(
+        "saberops.runtime_gate.gate_facts",
+        lambda **_kwargs: {"closed": False, "label": "running"},
+    )
+    registry = build_default_registry(ServerContext(db_path=db.db_path))
+    waited = registry.call(
+        "wait_job", {"job_id": job.job_id, "timeout_seconds": 30}
+    )
+    assert waited["outcome"] == "needs_attention"
+    assert waited["timed_out"] is False
+    assert "orch quota set anthropic claude-pro" in waited["reason"]
+
+
 def test_quota_list_on_fresh_store_does_not_claim_normal(
     isolated_env: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

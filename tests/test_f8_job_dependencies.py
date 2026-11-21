@@ -169,6 +169,53 @@ def test_chain_starts_only_after_the_dependency_is_accepted(
     assert started is not None and started.state == JobState.RUNNING
 
 
+def test_dependant_dispatches_on_the_accepted_dependency_landing_sha(
+    rig: RigEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dependant's run starts from what the dependency landed, not its own base.
+
+    The submit-time ``base_sha`` is request identity: it records where the plan
+    was when the job was written.  By the time the dependent is eligible the
+    dependency has been accepted and integrated, so the run must be anchored on
+    that landing commit or the worker sees the old tree.
+    """
+    db = rig.db()
+    dependency = submit_job(db, repo=rig.repo, goal="first step").job
+    dependant = submit_job(
+        db, repo=rig.repo, goal="second step", depends_on=(dependency.job_id,)
+    ).job
+    run_id = _accepted_dependency(rig, db, dependency.job_id)
+
+    import subprocess
+
+    subprocess.run(
+        ["git", "-C", str(rig.repo), "commit", "--allow-empty", "-m", "landed"],
+        check=True,
+        capture_output=True,
+    )
+    landing = subprocess.run(
+        ["git", "-C", str(rig.repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert landing != rig.base_sha
+    db.record_event(run_id, "run_accepted", payload={"candidate_sha": landing})
+
+    # The default launcher would spawn a worker; the run row is what records
+    # the base, so a stub supervisor is enough to verify the anchor.
+    monkeypatch.setattr(
+        "saberops.supervisor.RunSupervisor.ensure_running",
+        lambda self, run_id, config: True,
+    )
+    assert _tick(db) == [dependant.job_id]
+    started = get_job(db, dependant.job_id)
+    assert started is not None and started.current_run_id is not None
+    run = db.get_run(started.current_run_id)
+    assert run is not None
+    assert run.base_commit == landing
+
+
 def test_fan_in_waits_for_every_dependency(rig: RigEnvironment) -> None:
     """A joined job lifts only when the last of its dependencies is accepted."""
     db = rig.db()

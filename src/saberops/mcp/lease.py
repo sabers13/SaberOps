@@ -240,12 +240,15 @@ class OrchestratorLease:
 
     @staticmethod
     def active_work(record: LeaseRecord) -> int | None:
-        """Jobs this session still has *executing* (not parked, not terminal).
+        """Jobs this session still has *executing*: only ``RUNNING`` counts.
 
-        F17: a parked job (``PAUSED`` or quota ``PREEMPTED``) is durable work
-        waiting for a decision, not work in flight.  Counting it here would
-        keep the dead session's lease unreclaimable forever, so the returning
-        planning session could never take over and confirm the resume.
+        A QUEUED job has not started, so it does not need the session that
+        submitted it to stay alive: it is durable work the next planning
+        session may dispatch.  Counting queued jobs here made a dead session's
+        lease permanently unreclaimable (``release refused: Owner has N active
+        job(s)``) and left deleting the lease file as the only way forward.
+        Parked jobs (``PAUSED``/quota ``PREEMPTED``) are waiting for a decision
+        for the same reason.
         """
         if not record.session_id or not record.db_path:
             return 0
@@ -262,9 +265,7 @@ class OrchestratorLease:
                     return 0
                 row = conn.execute(
                     "SELECT count(*) FROM mcp_job_owners o JOIN jobs j ON j.job_id=o.job_id "
-                    "WHERE o.session_id=? AND j.state NOT IN ('SUCCEEDED','FAILED','CANCELLED') "
-                    "AND (j.state = 'RUNNING' OR j.waiting_reason IS NULL "
-                    "     OR j.waiting_reason NOT IN ('PAUSED','PREEMPTED'))",
+                    "WHERE o.session_id=? AND j.state = 'RUNNING'",
                     (record.session_id,),
                 ).fetchone()
                 return int(row[0])

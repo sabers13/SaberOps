@@ -235,6 +235,48 @@ def test_active_job_blocks_expiry_and_targeted_release(tmp_path: Path, monkeypat
         assert not owned
 
 
+def test_dead_lease_with_only_never_started_queued_jobs_is_recoverable(
+    tmp_path: Path,
+) -> None:
+    """A dead planner's queued-but-never-started jobs must not block recovery.
+
+    ``active_work`` means *executing* work.  A QUEUED job has not started, so a
+    dead session that owns only queued jobs leaves nothing to protect and the
+    next session must be able to take the lease and release the dead holder
+    without deleting the lease file.
+    """
+    import json
+    import sqlite3
+    import time
+
+    from saberops.mcp.lease import OrchestratorLease
+
+    lease_path = tmp_path / "lease"
+    db_path = tmp_path / "owner.db"
+    owner = OrchestratorLease(lease_path)
+    owner.configure_database(db_path)
+    assert owner.acquire()
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE jobs (job_id TEXT PRIMARY KEY, state TEXT NOT NULL,"
+            " waiting_reason TEXT)"
+        )
+        conn.execute("CREATE TABLE mcp_job_owners (job_id TEXT, session_id TEXT)")
+        conn.execute("INSERT INTO jobs (job_id, state) VALUES ('job', 'QUEUED')")
+        conn.execute("INSERT INTO mcp_job_owners VALUES ('job', ?)", (owner.session_id,))
+    record = json.loads(lease_path.read_text())
+    record["pid"] = 999_999
+    record["holder"] = "orch-pid-999999"
+    record["last_activity"] = time.time() - 3600
+    lease_path.write_text(json.dumps(record))
+
+    next_session = OrchestratorLease(lease_path, pid=1)
+    assert next_session.is_stale(next_session.read()) is True
+    released, message = next_session.release_target(owner.session_id)
+    assert released, message
+    assert next_session.acquire()
+
+
 def test_client_killed_closes_stdin_and_releases(tmp_path: Path) -> None:
     import json
     import signal

@@ -59,10 +59,12 @@ the owner may still reject.
 
 - A planner can submit a chain or a fan-in in one session and leave; the queue
   advances as the owner accepts.
-- A dependant ships from the base its dependency landed on only if it is
-  dispatched after that acceptance — the base is still resolved at submit
-  time. Refreshing a candidate onto a moved target stays the existing
-  `refresh_candidate` path (ADR-0006); F12's landing queue is separate work.
+- A dependant's run is anchored on the newest accepted dependency's landing
+  commit (the `candidate_sha` of its durable `run_accepted` event), resolved at
+  dispatch. The submit-time `base_sha` stays part of the request identity but
+  never becomes the dispatch base for a dependant. Refreshing a candidate onto
+  a moved target stays the existing `refresh_candidate` path (ADR-0006); F12's
+  landing queue is separate work.
 - A failed dependency strands its dependants in a visible parked state that
   only owner action clears (cancel, or resubmit against a replacement). The
   engine does not guess a replacement dependency.

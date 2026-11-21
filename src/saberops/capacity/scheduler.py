@@ -433,10 +433,22 @@ def schedule(
 
         if not job_dispatched:
             # All groups exhausted without dispatch or prefer_wait
-            # Check for needed probes across denied candidates
+            # Check for needed probes across denied candidates.  A harness the
+            # probe subsystem never runs automatically (Claude's interactive
+            # usage reader) must not be promised as a probe: that parked the
+            # job in PROBE_PENDING forever with no remedy (D9).  Collect those
+            # denials as an owner-only quota-evidence refusal instead.
+            from saberops.capacity.probes import AUTO_SAFE_HARNESSES
+
+            owner_evidence: list[AdmissionDecision] = []
+            job_probe_needed = False
             for g_dec in all_group_decisions:
                 for d in g_dec:
                     if d.needs_probe and d.probe_harness and d.pool_id:
+                        if d.probe_harness not in AUTO_SAFE_HARNESSES:
+                            owner_evidence.append(d)
+                            continue
+                        job_probe_needed = True
                         if d.probe_harness not in probes_needed:
                             probes_needed[d.probe_harness] = ProbeDecision(
                                 pool_id=d.pool_id,
@@ -459,27 +471,59 @@ def schedule(
                             best_eta_dec = d
 
             dec_for_wait = best_eta_dec if best_eta_dec is not None else first_dec
-            has_probe = bool(probes_needed)
+            # Per job: another queued job's probe never makes this job's
+            # owner-only denial look probeable.
+            has_probe = job_probe_needed
+            quota_refusal = owner_evidence[0] if owner_evidence else None
             is_concurrency = any(
                 d.reason in ("CONCURRENCY_LIMIT", "GLOBAL_CONCURRENCY_LIMIT")
                 for g in all_group_decisions
                 for d in g
             )
+            if quota_refusal is not None and not has_probe:
+                dec_for_wait = quota_refusal
             wait_reason = (
                 WaitingReason.PROBE_PENDING.value
                 if has_probe
                 else (
-                    WaitingReason.CONCURRENCY.value
-                    if is_concurrency
-                    else WaitingReason.NO_CAPACITY.value
+                    WaitingReason.QUOTA_EVIDENCE_REQUIRED.value
+                    if quota_refusal is not None
+                    else (
+                        WaitingReason.CONCURRENCY.value
+                        if is_concurrency
+                        else WaitingReason.NO_CAPACITY.value
+                    )
                 )
             )
             eta = dec_for_wait.eta if dec_for_wait else None
             confidence = dec_for_wait.wait_confidence if dec_for_wait else None
             details: dict[str, Any] = {}
+            if quota_refusal is not None and not has_probe:
+                refusal_provider = (
+                    quota_refusal.candidate.provider
+                    if quota_refusal.candidate is not None
+                    else None
+                )
+                refusal_pool = quota_refusal.pool_id
+                remedy = (
+                    f"orch quota set {refusal_provider} {refusal_pool} "
+                    "--remaining <percent>"
+                    if refusal_provider and refusal_pool
+                    else "orch quota set <provider> <pool> --remaining <percent>"
+                )
+                details = {
+                    "diagnostic": "QUOTA_EVIDENCE_REQUIRED",
+                    "provider": refusal_provider,
+                    "pool_id": refusal_pool,
+                    "harness": quota_refusal.probe_harness,
+                    "remedy": remedy,
+                }
             if vendor_blocked:
                 details = {
-                    "diagnostic": "VENDOR_CLI_UNVERIFIED",
+                    **details,
+                    "diagnostic": (
+                        details.get("diagnostic") or "VENDOR_CLI_UNVERIFIED"
+                    ),
                     "vendor_unverified": dict(sorted(vendor_blocked.items())),
                 }
             decisions.append(

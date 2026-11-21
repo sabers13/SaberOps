@@ -122,8 +122,10 @@ terminal session is open: `orch watch` (F23) while a terminal is attached, or
   `WaitingReason.PAUSED` (not `PREEMPTED`) on the job and why the preemption
   budget is untouched. The durable D8 receipt and checkpoint verification are
   unchanged, so a crash at any point in a pause still converges on recovery.
-- A planning lease left behind by a dead session no longer blocks takeover once
-  its jobs are parked: `active_work` counts executing work, not parked work.
+- A planning lease left behind by a dead session never blocks takeover for work
+  that is not executing: `active_work` counts `RUNNING` jobs only, so parked
+  and queued-but-never-started jobs stay durable for the next session instead
+  of making the lease unreclaimable.
 - No provider, model, billing-posture or acceptance decision is made or
   bypassed here. This lane only stops spending; F15's local auto-accept is a
   separate, mode-scoped stage (ADR-0008 §4) and is paused like all other work.

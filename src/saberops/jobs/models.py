@@ -110,6 +110,11 @@ class WaitingReason(StrEnum):
     NEW = "NEW"
     NO_CAPACITY = "NO_CAPACITY"
     PROBE_PENDING = "PROBE_PENDING"
+    #: The route's pool needs quota evidence the engine will not collect on
+    #: its own (an interactive usage reader such as Claude).  Only the owner can
+    #: supply it; guidance names the exact ``orch quota set`` command.  Unlike
+    #: ``PROBE_PENDING`` no tick can ever clear it by probing.
+    QUOTA_EVIDENCE_REQUIRED = "QUOTA_EVIDENCE_REQUIRED"
     PREEMPTED = "PREEMPTED"
     CONCURRENCY = "CONCURRENCY"
     MEMORY_LOW = "MEMORY_LOW"

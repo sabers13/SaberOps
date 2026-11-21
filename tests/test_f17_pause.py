@@ -511,6 +511,70 @@ def test_catch_up_and_mcp_show_and_clear_the_pause(
     assert evaluate_gate(db=db).closed is False
 
 
+def test_turn_on_and_job_reads_surface_the_paused_gate(
+    rig: RigEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A paused store is never silent: turn-on, get_job and wait_job all say so."""
+    from saberops.mcp.protocol import McpServer
+    from saberops.mcp.tools import build_default_registry
+
+    monkeypatch.setenv("SABEROPS_DISABLE_AUTO_SCHEDULER", "1")
+    set_authority_mode("autonomous")
+    lease = _live_session(rig, monkeypatch)
+    db = rig.db()
+    submitted = submit_job(db, repo=rig.repo, goal="paused gate").job
+    set_pause(PauseReason.OWNER, "owner stop")
+
+    context = ServerContext(db_path=Path(db.db_path), lease=lease)
+    registry = build_default_registry(context)
+
+    # get_job carries the gate facts, so a planner that reads before waiting
+    # sees the same pause the resume tool clears.
+    view = registry.call("get_job", {"job_id": submitted.job_id})
+    assert view["pause"]["closed"] is True
+    assert view["pause"]["reason"] == PauseReason.OWNER.value
+    assert view["pause"]["resume_command"] == "orch resume"
+    assert view["pause"]["resume_tool"] == "resume_work"
+
+    # wait_job must return the paused outcome immediately instead of burning
+    # its timeout and reporting that nothing needs the owner.
+    started = time.monotonic()
+    waited = registry.call(
+        "wait_job", {"job_id": submitted.job_id, "timeout_seconds": 30}
+    )
+    assert time.monotonic() - started < 5.0
+    assert waited["outcome"] == "paused"
+    assert waited["timed_out"] is False
+    assert waited["resume"]["command"] == "orch resume"
+    assert waited["resume"]["tool"] == "resume_work"
+
+    # Turning SaberOps on in a fresh session states the gate and the resume
+    # action before the planner can submit anything else.
+    server = McpServer(context, start_active=False)
+    assert server.handle(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"clientInfo": {"name": "planner"}},
+        }
+    ) is not None
+    server.handle({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    turned_on = server.handle(
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": "saberops_on", "arguments": {}},
+        }
+    )
+    assert turned_on is not None
+    text = turned_on["result"]["content"][0]["text"]
+    assert "paused by the owner" in text
+    assert "orch resume" in text
+    assert "resume_work" in text
+
+
 def test_session_loss_records_one_event_and_one_notice(
     rig: RigEnvironment, monkeypatch: pytest.MonkeyPatch
 ) -> None:

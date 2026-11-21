@@ -508,6 +508,54 @@ def test_scheduler_probe_demand_collection() -> None:
     assert wait_dec.reason == WaitingReason.PROBE_PENDING.value
 
 
+def test_scheduler_refuses_quota_evidence_no_safe_probe_can_collect() -> None:
+    """An Anthropic build route must not promise a probe it never runs.
+
+    Claude usage needs an interactive reader, so the engine never probes it
+    automatically.  A pool that needs evidence therefore parks with a typed
+    quota-evidence refusal and the exact owner command, not with a
+    ``PROBE_PENDING`` wait that no tick can ever clear.
+    """
+    c1 = _cand("anthropic", "claude-haiku-4-5-20251001")
+    snapshot = _make_snapshot(((c1,),))
+    pool = _make_pool_plan("claude-pro", [("anthropic", 1.0)], overage_possible=True)
+    today_str = (_NOW.date() - timedelta(days=5)).isoformat()
+    policy = _make_policy(
+        {"claude-pro": pool},
+        postures={
+            "anthropic": PostureRecord(
+                "anthropic", "A", ttl_days=30, verified_on=today_str
+            ),
+        },
+    )
+    q = _make_quota_state(
+        provider="anthropic",
+        pool="claude-pro",
+        remaining_percent=80.0,
+        reset_at=(_NOW + timedelta(hours=2)).isoformat(),
+    )
+
+    decisions = schedule(
+        now=_NOW,
+        queued=[_job("j1")],
+        routing_snapshot=snapshot,
+        policy=policy,
+        quota_states=[q],
+    )
+
+    assert not any(isinstance(decision, ProbeDecision) for decision in decisions)
+    assert len(decisions) == 1
+    wait_dec = decisions[0]
+    assert isinstance(wait_dec, WaitDecision)
+    assert wait_dec.reason == WaitingReason.QUOTA_EVIDENCE_REQUIRED.value
+    assert wait_dec.details["diagnostic"] == "QUOTA_EVIDENCE_REQUIRED"
+    assert wait_dec.details["pool_id"] == "claude-pro"
+    assert (
+        wait_dec.details["remedy"]
+        == "orch quota set anthropic claude-pro --remaining <percent>"
+    )
+
+
 def test_scheduler_not_before_delay() -> None:
     """Covers: D7 job order: not_before in the future emits WaitDecision(NEW)."""
     c1 = _cand("codex", "gpt-5.6-sol")

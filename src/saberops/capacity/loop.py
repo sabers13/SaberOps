@@ -722,6 +722,7 @@ def _default_run_launcher(
     from saberops.authority import load_authority_settings
     from saberops.config import freeze_owner_binding_registry_payload
     from saberops.control_plane import freeze_control_plane_policy
+    from saberops.jobs.dependencies import dispatch_base_sha
     from saberops.jobs.service import job_dispatch_spec
     from saberops.models import Run
     from saberops.preemption import prepare_resume
@@ -732,6 +733,9 @@ def _default_run_launcher(
     from saberops.tooling import freeze_tool_contract
 
     spec = job_dispatch_spec(job)
+    # D5: a dependant starts from the revision its accepted dependencies
+    # landed, not the base recorded when it was submitted.
+    run_base_sha = dispatch_base_sha(db, job)
     cand = decision.candidate
     effort_value: str | None = spec.effort.value if spec.effort is not None else None
     if spec.effort is not None and cand.binding_id:
@@ -771,7 +775,7 @@ def _default_run_launcher(
         id=run_id,
         task=config.task,
         target_repo=config.target_repo,
-        base_commit=spec.base_sha,
+        base_commit=run_base_sha,
         tier=config.initial_tier,
         training_allowed=config.training_allowed,
         gate_command=config.gate_command,

@@ -150,9 +150,17 @@ CLI (`orch mode set`) or the Questions page.
   a safe point with its worktree, checkpoint and evidence preserved. Nothing
   resumes on its own: call `get_pause` to see what is parked and why, and
   `resume_work` only when the owner asks to continue. `orch pause` and
-  `orch resume` are the owner's own stop and resume. While away or
-  critical-only, a periodic digest notice lists running jobs, the subscriptions
-  in use and the usage so far.
+  `orch resume` are the owner's own stop and resume. The turn-on reply states a
+  paused gate, and while it is closed `get_job` carries `pause` facts and
+  `wait_job` returns `outcome: "paused"` immediately with the resume action:
+  tell the owner work is paused instead of waiting or claiming nothing is
+  pending. While away or critical-only, a periodic digest notice lists running
+  jobs, the subscriptions in use and the usage so far.
+- A job waiting with `QUOTA_EVIDENCE_REQUIRED` needs evidence the engine cannot
+  collect safely itself (for example Anthropic/Claude usage). `wait_job`
+  returns `outcome: "needs_attention"` and the guidance carries the exact
+  `orch quota set <provider> <pool> --remaining <percent>` command the owner
+  must run; the job starts by itself on the next tick after that.
 
 ## Talking to the user
 - Start every message that relays SaberOps (a submission, a status, a result, a

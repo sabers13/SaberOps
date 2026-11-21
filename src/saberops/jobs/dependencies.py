@@ -127,6 +127,76 @@ def run_is_accepted(db: Any, run_id: str) -> bool:
     return False
 
 
+def _canonical_sha(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if len(text) != 40 or any(ch not in "0123456789abcdef" for ch in text):
+        return None
+    return text
+
+
+def accepted_landing_sha(db: Any, dependency_id: str) -> tuple[str, int, str] | None:
+    """The newest ``run_accepted`` landing SHA of one accepted dependency.
+
+    Only :class:`~saberops.accept.AcceptEngine` writes ``run_accepted``; its
+    payload carries the integrated commit as ``candidate_sha``.  Runtime state
+    is project-local, so the event may live in the run's own store; the
+    ``(created_at, event_id)`` pair orders acceptances even across stores.
+    Returns ``None`` when no readable acceptance exists -- a dependant then
+    keeps its frozen base rather than guessing a revision.
+    """
+    dependency = store.get_job(db, dependency_id)
+    if dependency is None or dependency.state not in _ACCEPTABLE_JOB_STATES:
+        return None
+    best: tuple[str, int, str] | None = None
+    for run_id in dependency.run_ids:
+        for candidate in _run_databases(db, run_id):
+            try:
+                events = candidate.get_events_by_type(run_id, "run_accepted")
+            except Exception:
+                continue
+            for event in events:
+                payload = getattr(event, "payload", None)
+                if not isinstance(payload, dict):
+                    continue
+                sha = _canonical_sha(payload.get("candidate_sha"))
+                if sha is None:
+                    continue
+                try:
+                    event_id = int(getattr(event, "id", 0) or 0)
+                except (TypeError, ValueError):
+                    event_id = 0
+                created_at = str(getattr(event, "created_at", "") or "")
+                if best is None or (created_at, event_id) > (best[0], best[1]):
+                    best = (created_at, event_id, sha)
+    return best
+
+
+def dispatch_base_sha(db: Any, job: Job) -> str:
+    """The commit a job's run should start from.
+
+    A job without dependencies keeps its submit-time ``base_sha``: that value
+    is part of the request identity.  A dependant starts from what its
+    dependencies actually landed.  The scheduler dispatches it only after every
+    dependency is accepted, so the newest acceptance is the revision that
+    contains the work the dependant was written against; anchoring on the
+    submit-time base made the worker rebuild the old tree and fail with
+    ``base_revision_mismatch`` (D5).
+    """
+    if not job.depends_on:
+        return job.base_sha
+    landings = [
+        landed
+        for dependency_id in job.depends_on
+        if (landed := accepted_landing_sha(db, dependency_id)) is not None
+    ]
+    if not landings:
+        return job.base_sha
+    landings.sort(key=lambda item: (item[0], item[1]))
+    return landings[-1][2]
+
+
 def _run_databases(db: Any, run_id: str) -> list[Any]:
     """Stores whose events may hold ``run_id``'s acceptance: ``db``, then its project."""
     databases: list[Any] = [db]
@@ -212,7 +282,9 @@ __all__ = [
     "DEPENDENCY_FAILED_GUIDANCE",
     "DependencyCycleError",
     "UnknownDependencyError",
+    "accepted_landing_sha",
     "dependency_blockers",
+    "dispatch_base_sha",
     "job_is_accepted",
     "normalize_depends_on",
     "run_is_accepted",

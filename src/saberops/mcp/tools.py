@@ -33,6 +33,7 @@ this client is not the writer.
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
@@ -443,7 +444,7 @@ def _submit_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[st
     payload = {
         "v": SNAPSHOT_SCHEMA_VERSION,
         "result": _job_result(db, result.job),
-        "guidance": _job_guidance(result.job),
+        "guidance": _job_guidance(result.job, db),
         "job_id": result.job.job_id,
         "state": result.job.state.value,
         "created": result.created,
@@ -536,7 +537,7 @@ def _submit_plan(context: ServerContext, arguments: Mapping[str, Any]) -> dict[s
     return payload
 
 
-def _job_guidance(job: Any) -> str | None:
+def _job_guidance(job: Any, db: Any | None = None) -> str | None:
     from saberops.jobs.models import WaitingReason
 
     if job.failure_reason == "NO_ROUTE_FOR_REQUIREMENTS":
@@ -580,7 +581,39 @@ def _job_guidance(job: Any) -> str | None:
             "owner question (or set the away preflight policy) and the job "
             "starts again; independent jobs were not stopped."
         )
+    if waiting == WaitingReason.QUOTA_EVIDENCE_REQUIRED:
+        remedy = _latest_waiting_details(db, job).get("remedy")
+        command = (
+            str(remedy)
+            if remedy
+            else "orch quota set <provider> <pool> --remaining <percent>"
+        )
+        return (
+            "This route needs quota evidence the engine cannot collect safely on "
+            f"its own (for example Anthropic/Claude usage). Only the owner can set it: "
+            f"run `{command}`. The job starts by itself on the next scheduler tick "
+            "after the evidence is recorded."
+        )
     return None
+
+
+def _latest_waiting_details(db: Any, job: Any) -> dict[str, Any]:
+    """The most recent durable waiting details for a job (F8/F9F evidence)."""
+    if db is None:
+        return {}
+    try:
+        from saberops.jobs import store
+
+        for event in reversed(store.list_events(db, job.job_id)):
+            if event.get("kind") != "waiting":
+                continue
+            payload = json.loads(str(event.get("payload_json") or "{}"))
+            details = payload.get("details")
+            if isinstance(details, dict):
+                return details
+    except Exception:  # noqa: BLE001 - guidance never breaks a status read
+        return {}
+    return {}
 
 
 def _chosen_worker(db: Any, job: Any) -> dict[str, Any] | None:
@@ -642,6 +675,7 @@ def _job_result(db: Any, job: Any) -> dict[str, Any]:
 
 def _get_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
     from saberops.jobs.service import get_job, job_status_view
+    from saberops.runtime_gate import gate_facts
 
     job_id = _require_text(arguments, "job_id", what="job_id")
     db = context.database(read_only=True)
@@ -654,7 +688,11 @@ def _get_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, 
         "job": job_status_view(db, job),
         "result": result,
         "usage": result["usage"],
-        "guidance": _job_guidance(job),
+        "guidance": _job_guidance(job, db),
+        # D2: a paused store is a fact about the job's progress, so every
+        # reader sees why nothing moves and the one call that resumes it --
+        # before it waits out a timeout and reports no owner action.
+        "pause": gate_facts(db=db),
     }
 
 
@@ -691,7 +729,7 @@ def _promote_scout(context: ServerContext, arguments: Mapping[str, Any]) -> dict
     payload = {
         "v": SNAPSHOT_SCHEMA_VERSION,
         "result": _job_result(db, result.job),
-        "guidance": _job_guidance(result.job),
+        "guidance": _job_guidance(result.job, db),
         "job_id": result.job.job_id,
         "state": result.job.state.value,
         "created": result.created,
@@ -1245,6 +1283,37 @@ def _wait_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str,
         job = result["job"]
         if job["state"] in {"SUCCEEDED", "FAILED", "CANCELLED"}:
             return {**result, "timed_out": False, "outcome": "final"}
+        pause = result.get("pause") or {}
+        if pause.get("closed"):
+            # D2: a closed work gate means this job cannot move, however long
+            # the caller waits.  Report the pause and how to resume instead of
+            # a timeout that reads as "no owner action is pending".
+            since = pause.get("since")
+            detail = pause.get("detail")
+            return {
+                **result,
+                "timed_out": False,
+                "outcome": "paused",
+                "reason": (
+                    f"{pause.get('label') or 'the work gate is closed'}"
+                    f"{f' since {since}' if since else ''}"
+                    f"{f' ({detail})' if detail else ''}"
+                ),
+                "resume": {
+                    "command": pause.get("resume_command", "orch resume"),
+                    "tool": pause.get("resume_tool", "resume_work"),
+                },
+            }
+        if job.get("waiting_reason") == "QUOTA_EVIDENCE_REQUIRED":
+            # D9: waiting cannot clear this on its own; the owner must record
+            # the quota evidence (the guidance names the exact command).
+            return {
+                **result,
+                "timed_out": False,
+                "outcome": "needs_attention",
+                "reason": result.get("guidance")
+                or "This job needs quota evidence only the owner can set.",
+            }
         if job.get("waiting_reason") == "DEPENDENCY_FAILED":
             # The job can never start, so waiting cannot change anything.
             # Return immediately instead of burning the caller's timeout.

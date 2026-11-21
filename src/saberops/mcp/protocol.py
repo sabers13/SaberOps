@@ -473,6 +473,7 @@ class McpServer:
                 if not self.read_only
                 else "Another agent session is already planning; this one can only read."
             )
+            from saberops.runtime_gate import gate_facts
             from saberops.walkthrough import intro_text, store_needs_introduction
 
             opening = (
@@ -481,10 +482,27 @@ class McpServer:
                 if store_needs_introduction(self._context.db_path)
                 else ""
             )
+            # A paused store must never be silent (D2): the returning session
+            # would otherwise submit a job, wait out its timeout, and tell the
+            # owner that nothing needs doing.  The gate facts are stable facts
+            # about the store, not this reader's own presence.
+            gate = gate_facts(db=self.context.database(read_only=True))
+            if gate.get("closed"):
+                since = gate.get("since")
+                detail = gate.get("detail")
+                gate_line = (
+                    f" Work gate: {gate.get('label')}"
+                    f"{f' since {since}' if since else ''}"
+                    f"{f' ({detail})' if detail else ''}. Nothing dispatches until it "
+                    "is resumed: tell the owner, and call resume_work (or let the "
+                    "owner run `orch resume`) before submitting or waiting on work."
+                )
+            else:
+                gate_line = f" Work gate: {gate.get('label')}."
             text = (
                 f"{PREFIX} SaberOps is on. {role}{opening} Start every message that relays "
-                f"SaberOps to the user with \"{PREFIX}\". Call preflight with the project "
-                f"repository (or run `orch preflight --repo /path/to/project`) before "
+                f"SaberOps to the user with \"{PREFIX}\".{gate_line} Call preflight with the "
+                f"project repository (or run `orch preflight --repo /path/to/project`) before "
                 f"submitting work. Follow this guide:\n\n{GUIDE}"
             )
         else:
