@@ -17,8 +17,8 @@ honest enough to run against real subscriptions once, with the owner present.
 
 ## 2. Decision
 
-One catalogue of ten fixed tasks lives in `saberops/benchmark.py` and is shared
-by both modes. The table records, per task, the final state, the accepted
+One catalogue of ten measured tasks (plus a drill-only `routine-question` task)
+lives in `saberops/benchmark.py` and is shared by both modes. The table records, per task, the final state, the accepted
 commit, submit-to-start, time to the accepted commit, completion-notice delay,
 owner actions and the subscription actually used.
 
@@ -59,14 +59,19 @@ output and total tokens per subscription from the durable records `get_job` and
 never inferred.
 
 **Real mode** drives real Codex, Claude and OpenCode Go CLIs and is run by hand
-with the owner present. It is not part of the test suite. It refuses to start
-without an explicit acknowledgement flag and an isolated, empty store, and it
-never reuses the owner's real SaberOps state or config directories. It removes
-pay-per-token credentials from the child environment so a subscription run
-cannot silently fall back to API billing. Its default routes are configurable:
-OpenCode Go `opencode-go/deepseek-v4.1-flash`, Claude `claude-haiku-4-5-20251001` and
-Codex `gpt-6-luna`. It refuses to submit until the isolated store's preflight is
-green, and prints the owner command that fixes each missing item.
+with the owner present. It is not part of the test suite. It runs the ten-task
+catalogue once per CLI as three sequential batches on freshly seeded toy
+repositories, and each batch selects a reviewer from a different vendor. It
+refuses to start without an explicit acknowledgement flag and an isolated, empty
+store, and it never reuses the owner's real SaberOps state or config
+directories. It removes pay-per-token credentials from the child environment so
+a subscription run cannot silently fall back to API billing, leaves
+`XDG_DATA_HOME` alone so OpenCode keeps its sign-in, and disables the detached
+auto-started scheduler while it holds an attended terminal for its own ticks. Its
+default routes are configurable: OpenCode Go `opencode-go/deepseek-v4.1-flash`,
+Claude `claude-haiku-4-5-20251001` and Codex `gpt-6-luna`. It refuses to submit
+until the isolated store's preflight is green, and prints the owner command that
+fixes each missing item.
 
 Fake-mode tests are marked `slow`: the full gate runs them, and the per-change
 gate may skip that marker (lane E2 owns the selection change). The Wave 3 drills

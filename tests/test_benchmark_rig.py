@@ -43,11 +43,17 @@ from saberops.benchmark import (
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_CODEX_MODEL,
     DEFAULT_OPENCODE_MODEL,
+    DRILL_TASKS,
+    QUESTION_TASK,
     TASKS,
     RealModeRefused,
+    configure_real_reviewer,
+    create_toy_repository,
     isolated_environment,
+    real_batches,
     real_family_requirements,
-    real_subscription,
+    real_mode_presence,
+    real_model_for,
     validate_real_mode,
 )
 from saberops.capacity.loop import run_scheduler_loop
@@ -93,6 +99,11 @@ def test_benchmark_catalogue_has_ten_fixed_tasks() -> None:
         "must fail review",
     ):
         assert expected in kinds
+    # D21: the catalogue also carries a drill task that forces a routine
+    # question, so critical-only self-answering is measurable.
+    assert [task.task_id for task in DRILL_TASKS] == ["routine-question"]
+    assert QUESTION_TASK in DRILL_TASKS
+    assert "question" in QUESTION_TASK.goal.lower()
 
 
 def test_fake_benchmark_ten_tasks_reach_final_state(
@@ -365,6 +376,7 @@ def test_isolated_environment_moves_state_and_drops_pay_per_token_keys(
         store,
         base={
             "HOME": "/home/owner",
+            "XDG_DATA_HOME": "/home/owner/.local/share",
             "OPENAI_API_KEY": "secret",
             "ANTHROPIC_API_KEY": "secret",
             "GEMINI_API_KEY": "secret",
@@ -378,21 +390,179 @@ def test_isolated_environment_moves_state_and_drops_pay_per_token_keys(
     assert env["XDG_STATE_HOME"] == str(store / "state")
     assert env["XDG_CONFIG_HOME"] == str(store / "config")
     assert env["XDG_CACHE_HOME"] == str(store / "cache")
-    assert env["XDG_DATA_HOME"] == str(store / "data")
+    # D2: OpenCode keeps its sign-in under XDG_DATA_HOME; real mode must not
+    # redirect it into the isolated store.
+    assert env["XDG_DATA_HOME"] == "/home/owner/.local/share"
+    # D3: one scheduler driver.  Real mode ticks in-process.
+    assert env["SABEROPS_DISABLE_AUTO_SCHEDULER"] == "1"
+
+
+def test_isolated_environment_leaves_an_unset_data_home_alone(tmp_path: Path) -> None:
+    env = isolated_environment(tmp_path / "store", base={"HOME": "/home/owner"})
+    assert "XDG_DATA_HOME" not in env
+
+
+def test_real_batches_run_ten_tasks_per_cli_with_a_different_vendor_reviewer() -> None:
+    models = {"codex": "gpt-6-luna", "opencode": "oc-model", "claude": "claude-model"}
+    batches = real_batches()
+    assert [batch.subscription for batch in batches] == ["codex", "opencode", "claude"]
+    for batch in batches:
+        assert len(batch.tasks) == 10
+        assert batch.reviewer_subscription != batch.subscription
+        assert batch.reviewer_subscription in {"codex", "opencode", "anthropic"}
+        assert real_model_for(batch.reviewer_subscription, models)
+        # Review routing is independent of the worker's family filter, so a
+        # different-vendor reviewer is always reachable.
+        assert batch.reviewer_subscription in {"codex", "opencode", "anthropic"}
+
+
+def test_configure_real_reviewer_selects_a_check_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The batch reviewer is an exact CHECK binding, not free provider text."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    from saberops.control_plane.binding_store import load_owner_bindings
+    from saberops.control_plane.bindings import BindingRole
+
+    binding_id = configure_real_reviewer("anthropic", DEFAULT_CLAUDE_MODEL)
+    owner = load_owner_bindings()
+    assert owner.reviewer_binding_ids == (binding_id,)
+    binding = owner.registry.try_get(binding_id)
+    assert binding is not None
+    assert binding.binding_role is BindingRole.CHECK
+    assert binding.provider == "anthropic"
+    assert binding.model == DEFAULT_CLAUDE_MODEL
 
 
 def test_real_routes_default_to_the_owner_models() -> None:
     assert DEFAULT_OPENCODE_MODEL == "opencode-go/deepseek-v4.1-flash"
     assert DEFAULT_CLAUDE_MODEL == "claude-haiku-4-5-20251001"
     assert DEFAULT_CODEX_MODEL == "gpt-6-luna"
-    assert {real_subscription(index) for index in range(10)} == {
-        "codex",
-        "opencode",
-        "claude",
-    }
     for subscription in ("codex", "opencode", "claude"):
         excluded = real_family_requirements(subscription)
         assert subscription not in excluded
+
+
+def _git_status(repo: Path) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+
+def test_toy_repository_gate_does_not_mutate_the_worktree(tmp_path: Path) -> None:
+    """D1: the shipped gate imports app and must leave the worktree clean."""
+    repo, _sha = create_toy_repository(
+        tmp_path / "repos", "toy-add", task_id="add-function"
+    )
+    assert (repo / ".gitignore").exists()
+    subprocess.run([sys.executable, "-c", "import app"], cwd=repo, check=True)
+    assert _git_status(repo) == ""
+
+
+def test_toy_repository_is_well_posed_for_every_task(tmp_path: Path) -> None:
+    """D5: every catalogue task can actually be attempted on the seeded repo."""
+    parent = tmp_path / "repos"
+    repos = {
+        task.task_id: create_toy_repository(
+            parent, f"toy-{task.task_id}", task_id=task.task_id
+        )[0]
+        for task in TASKS
+    }
+    app = (repos["add-function"] / "app.py").read_text(encoding="utf-8")
+    assert "def greet(name: str)" in app
+    assert "def farewell" not in app
+    cli = repos["cli-flag"] / "cli.py"
+    assert cli.exists()
+    cli_run = subprocess.run(
+        [sys.executable, "cli.py", "Ada"],
+        cwd=repos["cli-flag"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert cli_run.stdout.strip() == "hello Ada"
+
+    # fix-failing-test alone starts red.
+    failing = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "test_app.py"],
+        cwd=repos["fix-failing-test"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert failing.returncode != 0
+    passing = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "test_app.py"],
+        cwd=repos["add-function"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert passing.returncode == 0, passing.stdout + passing.stderr
+
+    # The validation task still has work to do, and the two must-fail-review
+    # tasks start from real validation so their goals are meaningful.
+    for task_id in ("validation", "review-block-a", "review-block-b"):
+        repo = repos[task_id]
+        empty = subprocess.run(
+            [sys.executable, "-c", "import app; app.greet('')"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert "ValueError" in empty.stderr, (task_id, empty.stderr)
+    whitespace = subprocess.run(
+        [sys.executable, "-c", "import app; print(app.greet('   '))"],
+        cwd=repos["validation"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert whitespace.returncode == 0, whitespace.stderr
+
+
+@pytest.mark.no_attendance
+def test_real_mode_presence_establishes_attendance_and_clears_a_presence_pause(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D3: real mode holds attendance and clears only an engine presence pause."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setenv("SABEROPS_ATTENDANCE_DIR", str(tmp_path / "attendance"))
+    from saberops.attendance import live_attendance
+    from saberops.runtime_gate import evaluate_gate, note_presence_seen, set_pause
+
+    note_presence_seen()
+    set_pause("no_planning_session", "paused: no planning session", by="engine")
+    assert evaluate_gate().closed is True
+    assert live_attendance() is None
+
+    with real_mode_presence():
+        assert live_attendance() is not None
+        assert evaluate_gate().closed is False
+    assert live_attendance() is None
+
+
+@pytest.mark.no_attendance
+def test_real_mode_presence_never_clears_an_owner_pause(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setenv("SABEROPS_ATTENDANCE_DIR", str(tmp_path / "attendance"))
+    from saberops.runtime_gate import evaluate_gate, set_pause
+
+    set_pause("owner_pause", "paused by the owner", by="owner")
+    with real_mode_presence():
+        state = evaluate_gate()
+        assert state.closed is True
+        assert state.reason == "owner_pause"
 
 
 def test_benchmark_script_real_mode_refuses_without_flag(tmp_path: Path) -> None:

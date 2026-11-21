@@ -531,16 +531,30 @@ actions and the subscription used.
   closes, a fake worker dies, the scheduler restarts and a fresh MCP session's
   `catch_up` reports the failed job, its reason and the preserved work location.
 - **Real mode** drives real Codex, Claude and OpenCode Go CLIs and is run by
-  hand with the owner present (lane B3). It refuses without `--yes-real-cli` and
-  an empty isolated `--store`, never reuses the owner's real SaberOps state or
-  config, drops pay-per-token credentials from the child environment, and
-  refuses to submit until the isolated store's preflight is green. Models are
-  configurable; the defaults are OpenCode Go `opencode-go/deepseek-v4.1-flash`,
-  Claude `claude-haiku-4-5-20251001` and Codex `gpt-6-luna`. Use `--dry-run` to print the
-  plan without starting anything.
+  hand with the owner present (lane B3). It runs the ten-task catalogue once per
+  CLI — three sequential batches of ten, each on freshly seeded toy
+  repositories — and selects a reviewer from a different vendor for every batch
+  (`--dry-run` prints the worker/reviewer routes). It refuses without
+  `--yes-real-cli` and an empty isolated `--store`, never reuses the owner's
+  real SaberOps state or config, drops pay-per-token credentials from the child
+  environment, and refuses to submit until the isolated store's preflight is
+  green. It holds an attended-terminal session for the whole run and disables
+  the detached auto-started scheduler, so exactly one scheduler driver ticks;
+  a sticky pause is cleared only when it is the engine's own
+  `no_planning_session` pause, never an owner pause. `XDG_DATA_HOME` is left
+  alone because OpenCode keeps its sign-in there. The toy seed carries
+  `greet(name)`, a CLI entry point and a `.gitignore` (so the gate's import
+  leaves the worktree clean); only `fix-failing-test` starts with a failing
+  test. Models are configurable; the defaults are OpenCode Go
+  `opencode-go/deepseek-v4.1-flash`, Claude `claude-haiku-4-5-20251001` and
+  Codex `gpt-6-luna`. Use `--dry-run` to print the plan without starting
+  anything.
 
-The benchmark tests are marked `slow`: the full gate runs them; the per-change
-gate may skip that marker.
+The critical-only drill raises the catalogue's `routine-question` task (its goal
+asks the worker for one routine choice), so F10 self-answering is measured from
+the catalogue rather than from an ad-hoc injected question. The benchmark tests
+are marked `slow`: the full gate runs them; the per-change gate may skip that
+marker.
 
 ## Main gate
 

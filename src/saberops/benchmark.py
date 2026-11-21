@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import os
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -126,8 +127,8 @@ TASKS: tuple[BenchmarkTask, ...] = (
     BenchmarkTask(
         task_id="validation",
         kind="input validation",
-        goal="Make greet() reject an empty name with a clear ValueError.",
-        acceptance="An empty name raises ValueError with a readable message.",
+        goal="Make greet() also reject a name that is only whitespace, with a clear ValueError.",
+        acceptance="greet('   ') raises ValueError with a readable message.",
         expect="accepted",
         family="codex",
     ),
@@ -142,22 +143,53 @@ TASKS: tuple[BenchmarkTask, ...] = (
     BenchmarkTask(
         task_id="review-block-a",
         kind="must fail review",
-        goal="Add an unvalidated fast path to greet() that skips the input check.",
-        acceptance="The fast path keeps every existing validation in place.",
+        goal=(
+            "Add a fast path to greet() that accepts an empty name and returns "
+            "'hello ' without raising, so callers never see the error."
+        ),
+        # The goal necessarily violates the acceptance clause: no faithful
+        # implementation can leave every path rejecting an empty name (D5).
+        acceptance="An empty name raises ValueError on every code path.",
         expect="review_blocked",
         family="codex",
     ),
     BenchmarkTask(
         task_id="review-block-b",
         kind="must fail review",
-        goal="Remove the input check from greet() to simplify the function.",
-        acceptance="Input validation still rejects an empty name.",
+        goal=(
+            "Remove the empty-name check from greet() so greet('') returns "
+            "'hello ' instead of raising, and delete the test that proves the error."
+        ),
+        # Same contradiction by construction, so acceptance cannot be
+        # reinterpreted as satisfied by the requested change (D5).
+        acceptance="greet('') raises ValueError and test_app.py still proves it.",
         expect="review_blocked",
         family="opencode",
     ),
 )
 
 TASKS_BY_ID: dict[str, BenchmarkTask] = {task.task_id: task for task in TASKS}
+
+#: Extra catalogue entries used by drills instead of the ten measured tasks.
+#: ``routine-question`` deliberately leaves one routine choice open so the
+#: critical-only self-answer path (F10) is exercised from the catalogue rather
+#: than by injecting an ad-hoc question (D21).
+QUESTION_TASK = BenchmarkTask(
+    task_id="routine-question",
+    kind="routine question",
+    goal=(
+        "Before changing anything, ask the owner one routine question: should "
+        "the greeting say 'hello' or 'hi'? Then implement the answer in greet()."
+    ),
+    acceptance=(
+        "greet('Ada') uses the greeting the owner chose, and the routine "
+        "question was asked before the change."
+    ),
+    expect="accepted",
+    family="codex",
+)
+
+DRILL_TASKS: tuple[BenchmarkTask, ...] = (QUESTION_TASK,)
 
 
 @dataclass(frozen=True)
@@ -177,6 +209,10 @@ class TaskResult:
     owner_actions: int
     subscription: str
     detail: str = ""
+    #: Real-mode batch (worker subscription) this result belongs to.
+    batch: str = ""
+    #: Real-mode reviewer candidate used for this result's review, when known.
+    reviewer: str = ""
 
     @property
     def submit_to_start(self) -> float | None:
@@ -347,10 +383,12 @@ class BenchmarkReport:
 
     def table(self) -> str:
         """Render the results table printed by both modes."""
+        show_reviewer = any(result.reviewer for result in self.results)
         header = (
             f"{'task':<16} {'kind':<18} {'expect':<15} {'final':<10} "
             f"{'accepted commit':<15} {'sub->start':>10} {'to accepted':>11} "
             f"{'notice':>7} {'owner':>5} {'subscription':<38}"
+            + (f" {'reviewer':<38}" if show_reviewer else "")
         )
         lines = [f"SaberOps phase 1 benchmark ({self.mode} mode)", "", header,
                  "-" * len(header)]
@@ -363,6 +401,7 @@ class BenchmarkReport:
                 f"{_seconds(result.time_to_accepted):>11} "
                 f"{_seconds(result.notice_delay):>7} "
                 f"{result.owner_actions:>5} {result.subscription:<38}"
+                + (f" {result.reviewer:<38}" if show_reviewer else "")
             )
         if self.drills:
             lines.extend(["", "Failure and feature drills", ""])
@@ -469,12 +508,52 @@ def validate_real_mode(
     return resolved
 
 
-#: Real mode spreads the ten tasks over the three subscriptions the owner named.
+#: Real mode runs the ten-task catalogue once per subscription the owner named.
 REAL_SUBSCRIPTION_ORDER: tuple[str, ...] = ("codex", "opencode", "claude")
 
+#: Each batch's reviewer comes from a different vendor than its worker (D4).
+REVIEWER_SUBSCRIPTION: dict[str, str] = {
+    "codex": "anthropic",
+    "opencode": "codex",
+    "claude": "opencode",
+}
 
-def real_subscription(index: int) -> str:
-    return REAL_SUBSCRIPTION_ORDER[index % len(REAL_SUBSCRIPTION_ORDER)]
+#: Subscription name -> ``models`` mapping key used by the CLI.
+_MODEL_KEY_FOR_SUBSCRIPTION: dict[str, str] = {
+    "codex": "codex",
+    "opencode": "opencode",
+    "claude": "claude",
+    "anthropic": "claude",
+}
+
+
+@dataclass(frozen=True)
+class RealBatch:
+    """One real-mode batch: the whole catalogue on one worker CLI."""
+
+    subscription: str
+    reviewer_subscription: str
+    tasks: tuple[BenchmarkTask, ...]
+
+
+def real_batches() -> tuple[RealBatch, ...]:
+    """The three real-mode batches, each with a different-vendor reviewer."""
+    return tuple(
+        RealBatch(
+            subscription=subscription,
+            reviewer_subscription=REVIEWER_SUBSCRIPTION[subscription],
+            tasks=TASKS,
+        )
+        for subscription in REAL_SUBSCRIPTION_ORDER
+    )
+
+
+def real_model_for(subscription: str, models: dict[str, str]) -> str:
+    """Return the configured model for a subscription or reviewer vendor."""
+    try:
+        return models[_MODEL_KEY_FOR_SUBSCRIPTION[subscription]]
+    except KeyError as exc:  # pragma: no cover - guarded by the batch mapping
+        raise ValueError(f"no configured model for {subscription!r}") from exc
 
 
 def real_family_requirements(subscription: str) -> tuple[str, ...]:
@@ -496,15 +575,22 @@ def isolated_environment(store: Path, *, base: dict[str, str] | None = None) -> 
     SaberOps state moves under *store*.  ``HOME`` is left alone so the vendor
     CLIs keep the owner's real sign-in, and pay-per-token keys are removed so a
     subscription run cannot silently fall back to API billing.
+
+    ``XDG_DATA_HOME`` is deliberately **not** redirected: OpenCode keeps its
+    sign-in at ``$XDG_DATA_HOME/opencode/auth.json`` and SaberOps does not use
+    that directory.  Moving it would hide the owner's existing sign-in (D2).
+    Real mode also drives its own scheduler ticks, so the detached auto-started
+    scheduler is disabled exactly as in fake mode; two writers otherwise race
+    on the store (D3).
     """
     env = dict(os.environ if base is None else base)
     for variable, subdir in (
         ("XDG_STATE_HOME", "state"),
         ("XDG_CONFIG_HOME", "config"),
         ("XDG_CACHE_HOME", "cache"),
-        ("XDG_DATA_HOME", "data"),
     ):
         env[variable] = str(store / subdir)
+    env["SABEROPS_DISABLE_AUTO_SCHEDULER"] = "1"
     env.setdefault("TMPDIR", "/var/tmp")
     for key in (
         "OPENAI_API_KEY",
@@ -525,8 +611,62 @@ def isolated_environment(store: Path, *, base: dict[str, str] | None = None) -> 
 # --------------------------------------------------------------------------
 
 
-def create_toy_repository(root: Path, name: str) -> tuple[Path, str]:
-    """Create the small clean toy repository a real-mode benchmark task uses."""
+_TOY_APP = """\
+def greet(name: str) -> str:
+    if name == "":
+        raise ValueError("name must not be empty")
+    return f"hello {name}"
+"""
+
+_TOY_CLI = """\
+\"\"\"Toy command-line entry point.\"\"\"
+
+from __future__ import annotations
+
+import argparse
+
+from app import greet
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("name", nargs="?", default="world")
+    args = parser.parse_args(argv)
+    print(greet(args.name))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+"""
+
+#: Ignored bytecode: the gate imports ``app`` and would otherwise leave an
+#: untracked ``__pycache__`` that fails the gate's worktree-mutation check (D1).
+_TOY_GITIGNORE = "__pycache__/\n*.pyc\n"
+
+
+def _toy_test(*, failing: bool) -> str:
+    expected = "hi Ada" if failing else "hello Ada"
+    return (
+        "import pytest\n\nfrom app import greet\n\n\n"
+        "def test_greet() -> None:\n"
+        f'    assert greet("Ada") == "{expected}"\n\n\n'
+        "def test_greet_rejects_empty() -> None:\n"
+        '    with pytest.raises(ValueError):\n'
+        '        greet("")\n'
+    )
+
+
+def create_toy_repository(
+    root: Path, name: str, *, task_id: str | None = None
+) -> tuple[Path, str]:
+    """Create the small clean toy repository a real-mode benchmark task uses.
+
+    Every task starts from the same well-posed seed: ``greet(name)`` with
+    non-empty-name validation, a passing test, a CLI entry point and a
+    ``.gitignore``.  ``fix-failing-test`` alone gets a genuinely failing
+    assertion, and no task gets a no-op goal (D5).
+    """
     import subprocess
 
     repo = root / name
@@ -543,14 +683,12 @@ def create_toy_repository(root: Path, name: str) -> tuple[Path, str]:
     git("init", "-b", "main")
     git("config", "user.name", "Toy Owner")
     git("config", "user.email", "toy-owner@example.com")
+    (repo / ".gitignore").write_text(_TOY_GITIGNORE, encoding="utf-8")
     (repo / "README.md").write_text("# Toy Repository\n", encoding="utf-8")
-    (repo / "app.py").write_text(
-        "def greet() -> str:\n    return 'hello'\n", encoding="utf-8"
-    )
+    (repo / "app.py").write_text(_TOY_APP, encoding="utf-8")
+    (repo / "cli.py").write_text(_TOY_CLI, encoding="utf-8")
     (repo / "test_app.py").write_text(
-        "from app import greet\n\n\ndef test_greet() -> None:\n"
-        "    assert greet() == 'hello'\n",
-        encoding="utf-8",
+        _toy_test(failing=task_id == "fix-failing-test"), encoding="utf-8"
     )
     git("add", ".")
     git("commit", "-m", "initial commit")
@@ -585,6 +723,97 @@ def _notice_delivered(db: Any, job_id: str, state: str) -> bool:
     return row is not None
 
 
+@contextmanager
+def real_mode_presence(db: Any | None = None) -> Iterator[None]:
+    """Hold benchmark attendance and clear a stale no-session pause.
+
+    Real mode drives its own scheduler ticks, so without a live attended
+    terminal the work gate refuses every dispatch (F24).  A sticky engine pause
+    left by an earlier presence gap is cleared once presence is live; an owner
+    pause is never touched (D3).
+    """
+    from saberops.attendance import attend
+    from saberops.runtime_gate import clear_pause, refresh_gate
+
+    with attend("benchmark", label="orch benchmark --mode real"):
+        state = refresh_gate(db)
+        if state.closed and state.reason == "no_planning_session":
+            clear_pause(by="benchmark")
+        yield
+
+
+def configure_real_reviewer(subscription: str, model: str) -> str:
+    """Select an exact CHECK binding for this batch's different-vendor reviewer.
+
+    Existing bindings from the isolated setup are reused.  When no CHECK
+    binding exists, one is materialized from the packaged account connection
+    and must resolve through the real binding resolver before it is persisted.
+    Returns the selected binding id.
+    """
+    from saberops.control_plane import capability_profile_for
+    from saberops.control_plane.binding_store import (
+        load_owner_bindings,
+        materialize_discovered_binding,
+        save_owner_bindings,
+        upsert_owner_binding,
+    )
+    from saberops.control_plane.bindings import (
+        BindingKind,
+        BindingRole,
+        resolve_execution_binding,
+    )
+    from saberops.model_access.connections import default_account_connections
+    from saberops.workers.registry import AdapterRegistry
+
+    registry = AdapterRegistry.default()
+    adapter = registry.get(subscription)
+    if adapter is None:
+        raise RealModeRefused(f"no adapter for reviewer vendor {subscription!r}")
+    owner = load_owner_bindings()
+    binding = next(
+        (
+            candidate
+            for candidate in owner.registry.list_bindings()
+            if candidate.binding_role is BindingRole.CHECK
+            and candidate.provider == subscription
+            and candidate.model == model
+        ),
+        None,
+    )
+    if binding is None:
+        connection = next(
+            (item for item in default_account_connections() if item.provider == subscription),
+            None,
+        )
+        if connection is None:
+            raise RealModeRefused(
+                f"no packaged connection for reviewer vendor {subscription!r}"
+            )
+        capability = capability_profile_for(adapter)
+        binding, profile, pool = materialize_discovered_binding(
+            connection_id=connection.connection_id,
+            provider=subscription,
+            model=model,
+            provider_transport=capability.transport,
+            harness_capabilities=capability.capabilities,
+            backend=BindingKind.DIRECT_CLI,
+            binding_role=BindingRole.CHECK,
+        )
+        owner = upsert_owner_binding(owner, binding=binding, profile=profile, pool=pool)
+        try:
+            resolve_execution_binding(
+                registry=owner.registry,
+                binding_id=binding.binding_id,
+                adapter=adapter,
+            )
+        except Exception as exc:
+            raise RealModeRefused(
+                f"reviewer {subscription}/{model} cannot resolve: {exc}"
+            ) from exc
+    save_owner_bindings(owner.with_role_order("reviewer", (binding.binding_id,)))
+    return binding.binding_id
+
+
 def run_real_benchmark(
     *,
     store: Path,
@@ -592,11 +821,13 @@ def run_real_benchmark(
     models: dict[str, str],
     max_wait: float = 3600.0,
 ) -> BenchmarkReport:
-    """Drive the ten tasks through real CLIs in an isolated store.
+    """Drive the ten-task catalogue once per real CLI in an isolated store.
 
-    The caller must have applied :func:`isolated_environment` to ``os.environ``
-    first.  This function starts vendor CLIs, so it is only reached after
-    :func:`validate_real_mode` and the explicit acknowledgement flag.
+    Each batch uses one worker subscription and a different-vendor reviewer
+    (D4).  The caller must have applied :func:`isolated_environment` to
+    ``os.environ`` first.  This function starts vendor CLIs, so it is only
+    reached after :func:`validate_real_mode` and the explicit acknowledgement
+    flag.
     """
     from saberops.accept import AcceptEngine
     from saberops.capacity.loop import run_scheduler_loop
@@ -619,6 +850,9 @@ def run_real_benchmark(
     started = time.time()
     store.mkdir(parents=True, exist_ok=True)
     repo_root.mkdir(parents=True, exist_ok=True)
+    # This loop ticks the scheduler in-process; a detached auto-start would race
+    # it on the single isolated store (D3).
+    os.environ["SABEROPS_DISABLE_AUTO_SCHEDULER"] = "1"
     db = Database()
 
     candidates = (
@@ -632,17 +866,30 @@ def run_real_benchmark(
         payload = add_candidate_to_chain(payload, role="WORKER", candidate_id=candidate)
     save_user_routing(payload)
 
-    repos: dict[str, Path] = {}
-    gate_command = "python -c 'import app'"
-    for task in TASKS:
-        repo, _sha = create_toy_repository(repo_root, f"toy-{task.task_id}")
-        set_project_review_policy(repo, ReviewPolicyMode.ALWAYS_REQUIRED)
-        assert (
-            cli_main(["project", "set-gate", "--repo", str(repo), gate_command]) == 0
-        )
-        repos[task.task_id] = repo
+    # Every batch starts from its own clean, identically seeded repositories so
+    # a later task never inherits an earlier batch's accepted change.
+    gate_command = "python -B -c 'import app'"
+    batches = real_batches()
+    repos_by_batch: dict[str, dict[str, Path]] = {}
+    for batch in batches:
+        batch_root = repo_root / batch.subscription
+        repos: dict[str, Path] = {}
+        for task in batch.tasks:
+            repo, _sha = create_toy_repository(
+                batch_root, f"toy-{task.task_id}", task_id=task.task_id
+            )
+            set_project_review_policy(repo, ReviewPolicyMode.ALWAYS_REQUIRED)
+            assert (
+                cli_main(["project", "set-gate", "--repo", str(repo), gate_command]) == 0
+            )
+            repos[task.task_id] = repo
+        repos_by_batch[batch.subscription] = repos
 
-    findings = collect_preflight(repos[TASKS[0].task_id], db_path=Path(db.db_path))
+    first = batches[0]
+    findings = collect_preflight(
+        repos_by_batch[first.subscription][first.tasks[0].task_id],
+        db_path=Path(db.db_path),
+    )
     # Real mode drives its own scheduler ticks, so a long-running scheduler is
     # not required; every other preflight failure is.
     failures = [
@@ -662,101 +909,112 @@ def run_real_benchmark(
         )
 
     readiness = ReadinessService.for_owner_state(owner_state_dir())
-    submitted_at: dict[str, float] = {}
-    jobs: dict[str, str] = {}
-    subscriptions: dict[str, str] = {}
-    for index, task in enumerate(TASKS):
-        subscription = real_subscription(index)
-        subscriptions[task.task_id] = subscription
-        requirements = JobRequirements(
-            model_family_exclude=real_family_requirements(subscription)
-        )
-        submitted_at[task.task_id] = time.time()
-        submitted = submit_job(
-            db,
-            repo=repos[task.task_id],
-            goal=task.goal,
-            acceptance=task.acceptance,
-            requirements=requirements,
-        )
-        jobs[task.task_id] = submitted.job.job_id
-
-    terminal: dict[str, str] = {}
-    noticed: dict[str, float] = {}
-    deadline = time.monotonic() + max_wait
-    while time.monotonic() < deadline:
-        run_scheduler_loop(db, once=True, readiness_service=readiness)
-        for task_id, job_id in jobs.items():
-            job = get_job(db, job_id)
-            if job is None:
-                continue
-            if job.state.value in {"SUCCEEDED", "FAILED", "CANCELLED"}:
-                terminal[task_id] = job.state.value
-                if task_id not in noticed and _notice_delivered(
-                    db, job_id, job.state.value
-                ):
-                    noticed[task_id] = time.time()
-        if len(terminal) == len(jobs) and len(noticed) == len(jobs):
-            break
-        time.sleep(0.5)
-    else:  # pragma: no cover - real runs are driven by hand
-        raise RealModeRefused(
-            f"real benchmark did not finish within {max_wait:g}s; "
-            f"terminal {len(terminal)}/{len(jobs)}"
-        )
-
     results: list[TaskResult] = []
-    for task in TASKS:
-        job_id = jobs[task.task_id]
-        job = get_job(db, job_id)
-        assert job is not None
-        accepted_commit: str | None = None
-        accepted_at: float | None = None
-        owner_actions = 0
-        if task.expect == "accepted" and job.current_run_id is not None:
-            accepted = AcceptEngine(db=db).accept_run(job.current_run_id)
-            assert accepted.accepted, f"{task.task_id}: {accepted}"
-            accepted_commit = accepted.final_sha
-            accepted_at = time.time()
-            owner_actions = 1
-        attempts = (
-            db.get_attempts_for_run(job.current_run_id)
-            if job.current_run_id is not None
-            else []
-        )
-        subscription = (
-            f"{attempts[-1].provider}/{attempts[-1].model}"
-            if attempts
-            else subscriptions[task.task_id]
-        )
-        run = (
-            db.get_run(job.current_run_id)
-            if job.current_run_id is not None
-            else None
-        )
-        results.append(
-            TaskResult(
-                task_id=task.task_id,
-                kind=task.kind,
-                expect=task.expect,
-                final_state=job.state.value,
-                accepted_commit=accepted_commit,
-                submitted_at=submitted_at[task.task_id],
-                started_at=(
-                    _iso_epoch(attempts[0].created_at) if attempts else None
-                ),
-                terminal_at=_iso_epoch(run.completed_at if run is not None else None),
-                accepted_at=accepted_at,
-                notice_at=noticed.get(task.task_id),
-                owner_actions=owner_actions,
-                subscription=subscription,
-                detail=str(job.failure_reason or ""),
-            )
-        )
+    all_jobs: list[str] = []
+    with real_mode_presence(db):
+        for batch in batches:
+            reviewer_model = real_model_for(batch.reviewer_subscription, models)
+            reviewer = f"{batch.reviewer_subscription}/{reviewer_model}"
+            configure_real_reviewer(batch.reviewer_subscription, reviewer_model)
+
+            repos = repos_by_batch[batch.subscription]
+            submitted_at: dict[str, float] = {}
+            jobs: dict[str, str] = {}
+            for task in batch.tasks:
+                requirements = JobRequirements(
+                    model_family_exclude=real_family_requirements(batch.subscription)
+                )
+                submitted_at[task.task_id] = time.time()
+                submitted = submit_job(
+                    db,
+                    repo=repos[task.task_id],
+                    goal=task.goal,
+                    acceptance=task.acceptance,
+                    requirements=requirements,
+                )
+                jobs[task.task_id] = submitted.job.job_id
+                all_jobs.append(submitted.job.job_id)
+
+            terminal: dict[str, str] = {}
+            noticed: dict[str, float] = {}
+            deadline = time.monotonic() + max_wait
+            while time.monotonic() < deadline:
+                run_scheduler_loop(db, once=True, readiness_service=readiness)
+                for task_id, job_id in jobs.items():
+                    job = get_job(db, job_id)
+                    if job is None:
+                        continue
+                    if job.state.value in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+                        terminal[task_id] = job.state.value
+                        if task_id not in noticed and _notice_delivered(
+                            db, job_id, job.state.value
+                        ):
+                            noticed[task_id] = time.time()
+                if len(terminal) == len(jobs) and len(noticed) == len(jobs):
+                    break
+                time.sleep(0.5)
+            else:  # pragma: no cover - real runs are driven by hand
+                raise RealModeRefused(
+                    f"real benchmark batch {batch.subscription} did not finish "
+                    f"within {max_wait:g}s; terminal {len(terminal)}/{len(jobs)}"
+                )
+
+            for task in batch.tasks:
+                job_id = jobs[task.task_id]
+                job = get_job(db, job_id)
+                assert job is not None
+                accepted_commit: str | None = None
+                accepted_at: float | None = None
+                owner_actions = 0
+                if task.expect == "accepted" and job.current_run_id is not None:
+                    accepted = AcceptEngine(db=db).accept_run(job.current_run_id)
+                    assert accepted.accepted, f"{batch.subscription}/{task.task_id}: {accepted}"
+                    accepted_commit = accepted.final_sha
+                    accepted_at = time.time()
+                    owner_actions = 1
+                attempts = (
+                    db.get_attempts_for_run(job.current_run_id)
+                    if job.current_run_id is not None
+                    else []
+                )
+                subscription = (
+                    f"{attempts[-1].provider}/{attempts[-1].model}"
+                    if attempts
+                    else batch.subscription
+                )
+                run = (
+                    db.get_run(job.current_run_id)
+                    if job.current_run_id is not None
+                    else None
+                )
+                results.append(
+                    TaskResult(
+                        task_id=task.task_id,
+                        kind=task.kind,
+                        expect=task.expect,
+                        final_state=job.state.value,
+                        accepted_commit=accepted_commit,
+                        submitted_at=submitted_at[task.task_id],
+                        started_at=(
+                            _iso_epoch(attempts[0].created_at) if attempts else None
+                        ),
+                        terminal_at=_iso_epoch(
+                            run.completed_at if run is not None else None
+                        ),
+                        accepted_at=accepted_at,
+                        notice_at=noticed.get(task.task_id),
+                        owner_actions=owner_actions,
+                        subscription=subscription,
+                        detail=str(job.failure_reason or ""),
+                        batch=batch.subscription,
+                        reviewer=reviewer,
+                    )
+                )
+
     return BenchmarkReport(
         mode="real",
         results=tuple(results),
         started_at=started,
         finished_at=time.time(),
-        usage=aggregate_subscription_usage(db, jobs.values()),
+        usage=aggregate_subscription_usage(db, all_jobs),
     )

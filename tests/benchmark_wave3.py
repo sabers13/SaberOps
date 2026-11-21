@@ -53,7 +53,12 @@ from saberops.auto_accept import (
     evaluate_auto_accept,
     undo_auto_accept,
 )
-from saberops.benchmark import DrillResult, SubscriptionUsage, aggregate_subscription_usage
+from saberops.benchmark import (
+    QUESTION_TASK,
+    DrillResult,
+    SubscriptionUsage,
+    aggregate_subscription_usage,
+)
 from saberops.capacity.loop import run_scheduler_loop
 from saberops.cli import main as cli_main
 from saberops.db import Database, current_iso_timestamp
@@ -217,10 +222,11 @@ def _question_request(
     blocks: tuple[str, ...] = (),
     escalated: bool = False,
     run_id: str | None = None,
+    subject: str | None = None,
 ) -> QuestionRequest:
     return QuestionRequest(
         key=key,
-        subject=f"question {key}",
+        subject=subject or f"question {key}",
         kind=kind,
         decision_class=decision_class,
         raised_by_role=AskRole.BUILD,
@@ -316,7 +322,14 @@ def _drill_critical_only(rig: RigEnvironment) -> DrillResult:
     set_owner_mode(OwnerMode.CRITICAL_ONLY)
     store_path = rig.root / "drill-questions-critical.json"
     queue = OwnerQuestionQueue(store_path)
-    queue.ask(_question_request("q-routine", decision_class=DecisionClass.FIX_UP_CONTENT))
+    routine_key = QUESTION_TASK.task_id
+    queue.ask(
+        _question_request(
+            routine_key,
+            decision_class=DecisionClass.FIX_UP_CONTENT,
+            subject=QUESTION_TASK.goal,
+        )
+    )
     queue.ask(
         _question_request(
             "q-critical",
@@ -330,7 +343,7 @@ def _drill_critical_only(rig: RigEnvironment) -> DrillResult:
         answered = registry.call(
             "answer_question",
             {
-                "question_id_or_key": "q-routine",
+                "question_id_or_key": routine_key,
                 "answer_text": "take the recommended option",
                 "authority": "PLAN",
                 "answered_by": "fake-planner",
@@ -369,7 +382,10 @@ def _drill_critical_only(rig: RigEnvironment) -> DrillResult:
         passed=True,
         final_state="ANSWERED",
         reason="routine answered and logged; critical held for the owner",
-        detail=f"{len(audit)} logged self-answer; critical still open",
+        detail=(
+            f"{len(audit)} logged self-answer from catalogue task "
+            f"{QUESTION_TASK.task_id}; critical still open"
+        ),
     )
 
 

@@ -26,11 +26,11 @@ from saberops.benchmark import (  # noqa: E402
     DEFAULT_CODEX_MODEL,
     DEFAULT_OPENCODE_MODEL,
     REAL_MODE_FLAG,
-    TASKS,
     RealModeRefused,
     fake_mode_environment,
     isolated_environment,
-    real_subscription,
+    real_batches,
+    real_model_for,
     validate_real_mode,
 )
 
@@ -109,13 +109,15 @@ def _print_plan(store: Path, repo_root: Path, models: dict[str, str]) -> None:
     print("SaberOps phase 1 benchmark: real mode plan (nothing started)")
     print(f"  store:     {store}")
     print(f"  toy repos: {repo_root}")
-    print("  routes:")
-    print(f"    codex    codex/{models['codex']}")
-    print(f"    opencode opencode/{models['opencode']}")
-    print(f"    claude   anthropic/{models['claude']}")
-    print("  tasks:")
-    for index, task in enumerate(TASKS):
-        print(f"    {task.task_id:<18} {task.kind:<18} -> {real_subscription(index)}")
+    print("  batches (ten tasks each, different-vendor reviewer):")
+    for batch in real_batches():
+        worker = f"{batch.subscription}/{real_model_for(batch.subscription, models)}"
+        reviewer = (
+            f"{batch.reviewer_subscription}/"
+            f"{real_model_for(batch.reviewer_subscription, models)}"
+        )
+        print(f"    worker {worker:<52} reviewer {reviewer}")
+        print("      tasks: " + ", ".join(task.task_id for task in batch.tasks))
     print()
     print("Real mode will refuse to submit until the isolated store's preflight is")
     print("green.  Configure the owner's billing confirmations, quota facts and an")
