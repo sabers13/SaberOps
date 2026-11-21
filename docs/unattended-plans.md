@@ -418,6 +418,14 @@ orch away summary
 orch away reset-breaker --repo .
 ```
 
+`--path` is a repository-relative path (`src`, `tests`, `README.md`); an
+absolute path or `.` is refused when the policy is saved, because the policy
+loader could never accept it. Saving a valid policy leaves jobs the preflight
+parked queued, and the next scheduler tick re-evaluates them against it;
+`orch away policy set` says whether a scheduler is running to do that.
+`orch mode set away` warns at away-mode time when no policy exists, so nothing
+is discovered only after a task silently parked.
+
 This lane deliberately leaves auto-accept (F15) and close-the-CLI pausing (F17)
 out of its own scope; both are separate engine stages recorded in
 [ADR-0008](decisions/0008-candidate-bound-acceptance.md) §4 and

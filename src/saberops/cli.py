@@ -63,6 +63,7 @@ from saberops.observability.run_report import (
 )
 from saberops.owner_mode import (
     OWNER_MODE_ORDER,
+    OwnerMode,
     OwnerModeError,
     clear_owner_mode,
     mode_view,
@@ -654,6 +655,26 @@ def _positive_int_arg(value: str) -> int:
         raise argparse.ArgumentTypeError(f"invalid integer value: {value!r}") from exc
     if parsed < 1:
         raise argparse.ArgumentTypeError("must be a positive integer (>= 1)")
+    return parsed
+
+
+def _percent_arg(value: str) -> float:
+    """argparse type for a 0-100 percentage, accepting an optional ``%``.
+
+    An owner answering "94%" must not turn into an argparse error; the percent
+    sign carries no information the value does not already have.
+    """
+    text = str(value).strip()
+    if text.endswith("%"):
+        text = text[:-1].strip()
+    try:
+        parsed = float(text)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(
+            f"invalid percentage value: {value!r} (give a number from 0 to 100)"
+        ) from exc
+    if not 0.0 <= parsed <= 100.0:
+        raise argparse.ArgumentTypeError("percentage must be between 0 and 100")
     return parsed
 
 
@@ -1586,9 +1607,9 @@ def build_parser() -> argparse.ArgumentParser:
     quota_set.add_argument("pool", type=str, help="Pool name (e.g. 'weekly').")
     quota_set.add_argument(
         "--remaining",
-        type=float,
+        type=_percent_arg,
         required=True,
-        help="Remaining quota percentage (0-100).",
+        help="Remaining quota percentage (0-100; a trailing %% is accepted).",
     )
     quota_set.add_argument(
         "--reset-at",
@@ -1780,7 +1801,10 @@ def build_parser() -> argparse.ArgumentParser:
     away_grant.add_argument("--words", required=True, help="The owner's exact words.")
     away_grant.add_argument("--id", default=None, help="Optional standing decision id.")
     away_grant.add_argument(
-        "--path", action="append", default=[], help="Exact repo-relative path (repeatable)."
+        "--path",
+        action="append",
+        default=[],
+        help="Repository-relative path (repeatable; never absolute and never '.')",
     )
     away_grant.add_argument("--expires-at", default=None, help="Absolute ISO-8601 end time.")
     away_grant.add_argument("--ttl-turns", type=int, default=None, help="Turn-bounded grant.")
@@ -1806,7 +1830,14 @@ def build_parser() -> argparse.ArgumentParser:
     away_policy_set.add_argument("--wall-clock-seconds", type=int, required=True)
     away_policy_set.add_argument("--worker-cap", type=int, required=True)
     away_policy_set.add_argument(
-        "--path", action="append", default=[], required=True, help="Exact authorized path."
+        "--path",
+        action="append",
+        default=[],
+        required=True,
+        help=(
+            "Repository-relative path the run may touch, e.g. src (repeatable; "
+            "never absolute and never '.')"
+        ),
     )
     away_policy_set.add_argument("--json", action="store_true", help="JSON output")
     away_policy_clear = away_policy_sub.add_parser("clear", help="Remove the away policy.")
@@ -2493,6 +2524,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     scheduler_run.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
     scheduler_run.add_argument("--json", action="store_true", help="JSON output")
+    scheduler_start = scheduler_sub.add_parser(
+        "start",
+        help="Start the scheduler in the background and return.",
+    )
+    scheduler_start.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
+    scheduler_start.add_argument("--json", action="store_true", help="JSON output")
 
     # orch capacity show [--json]
     capacity_parser = subparsers.add_parser(
@@ -4592,13 +4629,40 @@ def handle_monitor(args: argparse.Namespace) -> int:
         return 130
 
 
+def _owner_store_runs(repo_arg: Path | str, limit: int) -> tuple[Any, list[Any]] | None:
+    """Runs for one project from the owner store the scheduler writes to.
+
+    Jobs and their runs are owned by the owner store (``orch scheduler run``
+    and the MCP server both open it), so a project-local listing alone can miss
+    every scheduled run.  Returns ``(owner_db, runs)`` or ``None`` when there is
+    no owner store yet or the path is not a repository.
+    """
+    from saberops.db import get_default_db_path
+    from saberops.project import ProjectIdentityError, compute_project_identity
+
+    owner_path = get_default_db_path()
+    if not Path(owner_path).exists():
+        return None
+    try:
+        project_id = compute_project_identity(repo_arg).project_id
+    except ProjectIdentityError:
+        return None
+    owner_db = Database(owner_path, read_only=True)
+    return owner_db, owner_db.list_runs(limit=limit, project_id=project_id)
+
+
 def handle_list(args: argparse.Namespace) -> int:
     """Handle `orch list` command.
 
     Without an explicit ``--db`` the listing is project-local so runs from
-    unrelated repositories are never presented together.
+    unrelated repositories are never presented together.  Scheduled runs live
+    in the owner store, so that store is read for this project's runs too and
+    both stores are named in the output: a run the scheduler created must never
+    look missing.
     """
     repo_arg = getattr(args, "repo", None) or Path.cwd()
+    owner_runs: list[Any] = []
+    owner_db: Database | None = None
     if _explicit_db(args) is not None:
         db = Database(_explicit_db(args))
     else:
@@ -4609,10 +4673,25 @@ def handle_list(args: argparse.Namespace) -> int:
         except ProjectIdentityError:
             # Not a repository at all: show the preserved global store.
             db = Database(get_default_db_path())
+        else:
+            found = _owner_store_runs(repo_arg, args.limit)
+            if found is not None and Path(found[0].db_path) != Path(db.db_path):
+                owner_db, owner_runs = found
     service = OrchestratorService(db=db)
-    runs = service.list_runs(limit=args.limit)
+    project_runs = service.list_runs(limit=args.limit)
+    merged: dict[str, Any] = {run.id: run for run in project_runs}
+    run_services: dict[str, OrchestratorService] = {run.id: service for run in project_runs}
+    if owner_db is not None:
+        owner_service = OrchestratorService(db=owner_db)
+        for run in owner_runs:
+            if run.id not in merged:
+                merged[run.id] = run
+                run_services[run.id] = owner_service
+    runs = sorted(merged.values(), key=lambda run: run.created_at, reverse=True)[: args.limit]
     if not runs:
         print(f"No runs found in database {service.db.db_path}.")
+        if owner_db is not None:
+            print(f"Also checked the owner database {owner_db.db_path}: no runs for this project.")
         return 0
 
     header = f"{'RUN ID':<16} {'STATUS':<12} {'ROLE':<10} {'CREATED AT':<24} {'TASK'}"
@@ -4620,11 +4699,19 @@ def handle_list(args: argparse.Namespace) -> int:
     print("─" * len(header))
     for r in runs:
         task_snippet = (r.task[:40] + "...") if len(r.task) > 40 else r.task
+        # Each row is read from the store that owns it: a merged listing must
+        # not ask one store about another store's run.
+        try:
+            role = run_services[r.id].run_routing_role(r.id)
+        except Exception:  # noqa: BLE001 - a role label never hides a run
+            role = ""
         print(
-            f"{r.id:<16} {r.status.value:<12} {service.run_routing_role(r.id):<10} "
+            f"{r.id:<16} {r.status.value:<12} {role:<10} "
             f"{r.created_at[:19]:<24} {task_snippet}"
         )
     print(f"Database: {service.db.db_path}")
+    if owner_db is not None:
+        print(f"Owner database: {owner_db.db_path}")
     return 0
 
 
@@ -6031,6 +6118,37 @@ def handle_mode_show(args: argparse.Namespace) -> int:
     return 0
 
 
+AWAY_POLICY_COMMAND = (
+    "orch away policy set --budget-units 20 --wall-clock-seconds 36000 "
+    "--worker-cap 2 --path src"
+)
+
+
+def _away_policy_warning() -> tuple[str, str | None]:
+    """Return ``(state, warning)`` for the away preflight policy.
+
+    ``state`` is ``set``, ``not-set`` or ``unreadable``.  The warning is the
+    plain sentence the owner sees; it is ``None`` only when the policy can let
+    away dispatch start work.
+    """
+    from saberops import away as away_module
+
+    try:
+        policy = away_module.load_away_policy()
+    except (away_module.AwayError, OSError) as exc:
+        return "unreadable", (
+            "Away mode parks every job: the away preflight policy cannot be read "
+            f"({exc}). Fix it with: {AWAY_POLICY_COMMAND}"
+        )
+    if policy is None:
+        return "not-set", (
+            "Away mode parks every job until an away preflight policy sets its "
+            "limits, so nothing starts while you are away. Add one now with: "
+            f"{AWAY_POLICY_COMMAND}"
+        )
+    return "set", None
+
+
 def handle_mode_set(args: argparse.Namespace) -> int:
     """Handle `orch mode set <mode> [--until ISO-8601]`."""
     try:
@@ -6041,25 +6159,31 @@ def handle_mode_set(args: argparse.Namespace) -> int:
     except (OwnerModeError, OSError) as exc:
         print(f"[!] Could not persist owner mode: {exc}", file=sys.stderr)
         return 1
+    away_state, away_warning = ("not-set", None)
+    if mode is OwnerMode.AWAY:
+        away_state, away_warning = _away_policy_warning()
     if getattr(args, "json", False):
-        print(
-            json.dumps(
-                {
-                    "mode": mode.value,
-                    "until": args.until,
-                    "max_jobs": args.max_jobs,
-                    "config_path": str(path),
-                    "note": "a mode only narrows the authority preset",
-                },
-                indent=2,
-            )
-        )
+        payload: dict[str, Any] = {
+            "mode": mode.value,
+            "until": args.until,
+            "max_jobs": args.max_jobs,
+            "config_path": str(path),
+            "note": "a mode only narrows the authority preset",
+        }
+        if mode is OwnerMode.AWAY:
+            payload["away_policy"] = away_state
+            if away_warning:
+                payload["away_warning"] = away_warning
+                payload["away_policy_command"] = AWAY_POLICY_COMMAND
+        print(json.dumps(payload, indent=2))
         return 0
     until = f" until {args.until}" if args.until else ""
     if args.max_jobs:
         until += f", up to {args.max_jobs} job(s)"
     print(f"Owner mode set to '{mode.value}'{until} at {path}")
     print("A mode only narrows the authority preset; it never widens it.")
+    if away_warning:
+        print(f"[!] {away_warning}")
     return 0
 
 
@@ -6250,6 +6374,19 @@ def handle_away_policy_show(args: argparse.Namespace) -> int:
     return 0
 
 
+def _scheduler_running() -> bool:
+    """True when the scheduler that would dispatch parked work is alive."""
+    from types import SimpleNamespace
+
+    from saberops.capacity.loop import scheduler_alive
+    from saberops.db import get_default_db_path
+
+    try:
+        return scheduler_alive(SimpleNamespace(db_path=get_default_db_path()))
+    except Exception:  # noqa: BLE001 - a read-only convenience for the message
+        return False
+
+
 def handle_away_policy_set(args: argparse.Namespace) -> int:
     """Handle `orch away policy set`."""
     away = _away_stack()
@@ -6269,10 +6406,29 @@ def handle_away_policy_set(args: argparse.Namespace) -> int:
         print(f"[!] Could not save the away policy: {exc}", file=sys.stderr)
         return 1
     if getattr(args, "json", False):
-        print(json.dumps({"policy": policy.as_dict(), "path": str(path)}, indent=2))
+        print(
+            json.dumps(
+                {
+                    "policy": policy.as_dict(),
+                    "path": str(path),
+                    "scheduler_running": _scheduler_running(),
+                },
+                indent=2,
+            )
+        )
     else:
         print(f"Saved the away preflight policy at {path}")
         print("Away dispatch now refuses to start when any of these limits are unmet.")
+        # Jobs the preflight parked are still queued: the next tick re-evaluates
+        # them against this policy, so say exactly that and what to do when no
+        # scheduler is alive to tick.
+        if _scheduler_running():
+            print("Jobs parked by the away preflight resume on the next scheduler tick.")
+        else:
+            print(
+                "Jobs parked by the away preflight resume once a scheduler runs; "
+                "start one with: orch scheduler start"
+            )
     return 0
 
 
@@ -7230,6 +7386,7 @@ def handle_job_get(args: argparse.Namespace) -> int:
     """Handle `orch job get`."""
     from saberops.db import Database as _Database
     from saberops.jobs.service import get_job as _get
+    from saberops.jobs.service import owner_action_view as _owner_view
     from saberops.jobs.service import steering_notes as _notes
 
     db = _Database(args.db)
@@ -7242,10 +7399,15 @@ def handle_job_get(args: argparse.Namespace) -> int:
         print(f"Error: unknown job: {args.job_id}", file=sys.stderr)
         return 1
     notes = _notes(db, job.job_id)
+    owner = _owner_view(db, job)
     if getattr(args, "json", False):
         print(
             json.dumps(
-                {**_job_payload(job), "steering_notes": [n.to_dict() for n in notes]},
+                {
+                    **_job_payload(job),
+                    "steering_notes": [n.to_dict() for n in notes],
+                    "result": owner,
+                },
                 indent=2,
                 sort_keys=True,
             )
@@ -7272,6 +7434,13 @@ def handle_job_get(args: argparse.Namespace) -> int:
             print("Report     : (not written yet)")
     print(f"Goal       : {job.goal}")
     print(f"Repo       : {job.repo} @ {job.base_ref} ({job.base_sha})")
+    if owner["candidate_sha"]:
+        run_label = f" ({owner['run_id']})" if owner["run_id"] else ""
+        print(f"Candidate  : {owner['candidate_sha']}{run_label}")
+    if owner["owner_action"]:
+        print(f"Owner action: {owner['owner_action']}")
+    elif owner["candidate_sha"]:
+        print("Owner action: none yet; this candidate is not eligible right now")
     if job.waiting_reason is not None:
         print(f"Waiting    : {job.waiting_reason.value}")
     if job.depends_on:
@@ -7462,6 +7631,48 @@ def _scheduler_storage_callbacks(
     return _maintenance, _guard
 
 
+def handle_scheduler_start(args: argparse.Namespace) -> int:
+    """Handle `orch scheduler start`: one detached scheduler, then return.
+
+    The F25 walkthrough used to hand a non-technical owner the blocking
+    ``orch scheduler run``; this is the same engine start the web UI performs,
+    so an agent step can start the background helper without holding a
+    terminal.
+    """
+    from types import SimpleNamespace
+
+    from saberops.capacity.loop import ensure_scheduler_running, scheduler_alive
+    from saberops.db import Database as _Database
+
+    db_path = getattr(args, "db", None)
+    db = _Database(db_path) if db_path else _Database()
+    was_alive = scheduler_alive(SimpleNamespace(db_path=db.db_path))
+    started = False
+    if not was_alive:
+        try:
+            started = ensure_scheduler_running(db, respect_disable=False)
+        except (OSError, RuntimeError, TimeoutError) as exc:
+            print(f"[!] Could not start the scheduler: {exc}", file=sys.stderr)
+            return 1
+    alive = started or was_alive or scheduler_alive(SimpleNamespace(db_path=db.db_path))
+    if getattr(args, "json", False):
+        print(
+            json.dumps(
+                {"started": started, "running": alive, "db": str(db.db_path)}, indent=2
+            )
+        )
+        return 0 if alive else 1
+    if started:
+        print("Scheduler started in the background; it keeps running after this command.")
+    elif alive:
+        print("The scheduler is already running.")
+    else:
+        print("[!] The scheduler did not acquire its lease", file=sys.stderr)
+        return 1
+    print(f"Database: {db.db_path}")
+    return 0
+
+
 def handle_scheduler_run(args: argparse.Namespace) -> int:
     """Handle `orch scheduler run [--once] [--interval-seconds INT]`."""
     from saberops.capacity.loop import run_scheduler_loop
@@ -7555,6 +7766,7 @@ def handle_vendor(args: argparse.Namespace) -> int:
     """Handle `orch vendor status|check|smoke|pin|unpin|smoke-model` (F18)."""
     from saberops import vendor_health
     from saberops.db import Database as _Database
+    from saberops.vendor_cli_fixtures import ManifestUnavailable
 
     db_path = getattr(args, "db", None)
     command = str(getattr(args, "vendor_command", ""))
@@ -7591,12 +7803,20 @@ def handle_vendor(args: argparse.Namespace) -> int:
         return 0
     if command == "pin":
         vendor_health.set_pin(db, str(args.vendor), str(args.version))
-        vendor_health.detect_changes(db)
+        try:
+            vendor_health.detect_changes(db)
+        except ManifestUnavailable as exc:
+            print(f"[!] {exc}", file=sys.stderr)
+            return 1
         print(f"pinned {args.vendor} to {args.version}")
         return 0
     if command == "unpin":
         vendor_health.clear_pin(db, str(args.vendor))
-        vendor_health.detect_changes(db)
+        try:
+            vendor_health.detect_changes(db)
+        except ManifestUnavailable as exc:
+            print(f"[!] {exc}", file=sys.stderr)
+            return 1
         print(f"pin cleared for {args.vendor}")
         return 0
     if command == "smoke-model":
@@ -7605,12 +7825,16 @@ def handle_vendor(args: argparse.Namespace) -> int:
         return 0
     if command == "check":
         selected = getattr(args, "vendor", None)
-        vendor_health.detect_changes(db)
-        results = vendor_health.run_checks(
-            db,
-            vendors=(selected,) if selected else None,
-            force=bool(getattr(args, "force", False)),
-        )
+        try:
+            vendor_health.detect_changes(db)
+            results = vendor_health.run_checks(
+                db,
+                vendors=(selected,) if selected else None,
+                force=bool(getattr(args, "force", False)),
+            )
+        except ManifestUnavailable as exc:
+            print(f"[!] {exc}", file=sys.stderr)
+            return 1
         if getattr(args, "json", False):
             print(
                 json.dumps(
@@ -7635,13 +7859,19 @@ def handle_self_update(args: argparse.Namespace) -> int:
     from saberops import vendor_health
     from saberops.db import Database as _Database
     from saberops.self_update import perform_self_update
+    from saberops.vendor_cli_fixtures import ManifestUnavailable
 
     db_path = getattr(args, "db", None)
     db = _Database(db_path) if db_path else _Database()
 
     def recheck() -> list[dict[str, object]]:
-        vendor_health.detect_changes(db)
-        return [item.to_dict() for item in vendor_health.run_checks(db)]
+        try:
+            vendor_health.detect_changes(db)
+            return [item.to_dict() for item in vendor_health.run_checks(db)]
+        except ManifestUnavailable:
+            # A build without a dated capture cannot re-verify vendor health;
+            # self-update still reports its own result.
+            return []
 
     result = perform_self_update(
         db,
@@ -8544,6 +8774,8 @@ def _dispatch(args: argparse.Namespace) -> int:
     elif args.command == "scheduler":
         if args.scheduler_command == "run":
             return handle_scheduler_run(args)
+        elif args.scheduler_command == "start":
+            return handle_scheduler_start(args)
     elif args.command == "capacity":
         if args.capacity_command == "show":
             return handle_capacity_show(args)

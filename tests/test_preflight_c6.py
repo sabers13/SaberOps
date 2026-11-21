@@ -78,8 +78,6 @@ def test_fresh_store_walks_printed_commands(
 ) -> None:
     import os
     import shlex
-    import subprocess
-    import sys
     import time
 
     from lifecycle_rig import _install_shim, create_toy_repo
@@ -128,11 +126,10 @@ def test_fresh_store_walks_printed_commands(
     run(remedy("codex sign-in:"))
     run(remedy("anthropic sign-in:"))
     for provider in ("codex", "anthropic"):
-        run(
-            remedy(f"{provider}/* billing:")
-            .replace("<owner-confirmed-class>", "A")
-            .replace("<policy-url>", "https://example.com/policy")
-        )
+        billing = remedy(f"{provider}/* billing:")
+        # The recorded posture carries the class and the policy pages already.
+        assert "<" not in billing, billing
+        run(billing)
     run(remedy("build route:"))
     run(remedy("reviewer route:"))
     run(remedy("reviewer route:"))
@@ -142,28 +139,27 @@ def test_fresh_store_walks_printed_commands(
         ]
         if not quota:
             break
-        run(quota[0].remedy.replace("<percent>", "80"))
+        run(quota[0].remedy.replace("<number from 0 to 100>", "80"))
     remaining = [f.message for f in collect_preflight(repo) if f.severity == "FAIL"]
     assert remaining == ["scheduler: not running"]
+    # The walkthrough's scheduler step starts a detached scheduler and returns.
     scheduler_command = shlex.split(remedy("scheduler:"))
     assert scheduler_command.pop(0) == "orch"
-    process = subprocess.Popen(
-        [sys.executable, "-m", "saberops.cli", *scheduler_command],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    assert scheduler_command == ["scheduler", "start"]
+    assert main(scheduler_command) == 0
     try:
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             failures = [f for f in collect_preflight(repo) if f.severity == "FAIL"]
             if not failures:
                 break
-            assert process.poll() is None
             time.sleep(0.2)
         assert not failures
     finally:
-        process.terminate()
-        process.wait(timeout=10)
+        from saberops.capacity.loop import stop_scheduler
+        from saberops.db import Database
+
+        stop_scheduler(Database())
 
 
 def test_mcp_preflight_uses_same_findings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -243,3 +239,41 @@ def test_quota_status_does_not_call_fresh_evidence_stale() -> None:
     )
     assert quota_status(decision, [stale], now) == (False, "stale")
     assert quota_status(decision, [], now) == (False, "missing")
+
+
+def test_billing_remedy_names_the_recorded_class_and_policy_pages() -> None:
+    """D11: no unexplained placeholders when the plan registry already knows them."""
+    from saberops.preflight import _posture_verify_remedy
+
+    remedy = _posture_verify_remedy("codex")
+    assert remedy.startswith("orch posture verify codex --class A --url ")
+    assert "learn.chatgpt.com" in remedy
+    assert "<" not in remedy
+
+    unknown = _posture_verify_remedy("nobody/never-heard-of-it")
+    assert "--class '<A if this use is included in a plan you already pay for>'" in unknown
+    assert "--url '<the page on your plan that says so>'" in unknown
+
+
+def test_disk_finding_reads_in_gigabytes_and_the_step_quotes_only_the_failure() -> None:
+    """D11: an OK filesystem must never read like part of a disk problem."""
+    from saberops.preflight import Finding
+    from saberops.walkthrough import _steps_from_findings
+
+    target = "/p"
+    findings = [
+        Finding("OK", "target/gate: /p (filesystem mounted at /, probe /p): "
+                       "18.6 GB available (18600000000 bytes); "
+                       "12.4 GB required (12400000000 bytes)"),
+        Finding("FAIL", "scratch: /s (filesystem mounted at /s, probe /s): "
+                        "0.4 GB available (400000000 bytes); "
+                        "12.4 GB required (12400000000 bytes)",
+                "export SABEROPS_GATE_TMP=/path/on/a/filesystem/with/free/space"),
+    ]
+    steps = _steps_from_findings(findings)
+    assert len(steps) == 1
+    disk = steps[0]
+    assert disk.key == "disk"
+    assert "0.4 GB available" in disk.detail
+    assert "18.6 GB" not in disk.detail
+    assert target not in disk.detail

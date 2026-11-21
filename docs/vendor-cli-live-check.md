@@ -42,6 +42,16 @@ prints an `INVALID manifest` block and exits `2` **without** running the drift
 comparison: a version comparison over an unverified manifest could otherwise
 print a misleading `no drift`.
 
+Where the manifest comes from: the tooling looks for
+`<package>/fixtures/vendor_cli/manifest.json` first (a build that ships the
+captures as package data), then `<checkout>/tests/fixtures/vendor_cli/`, then
+the directory named by `SABEROPS_VENDOR_FIXTURES`.  An installation that
+carries none of them is a typed **unavailable** state, not a fault: preflight
+prints one `vendor CLI fixture manifest unavailable` warning and the
+scheduler's vendor health step skips detection without a traceback.  Run
+`python -m saberops.vendor_cli_fixtures check` from a source checkout (or point
+`SABEROPS_VENDOR_FIXTURES` at the captures) to check drift there.
+
 ## 2. Capture (owner-run, token-free)
 
 ```bash

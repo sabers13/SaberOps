@@ -569,8 +569,14 @@ def agent_file_path(agent: Agent, target: str, *, home: Path | None = None) -> P
 
 
 def _proxy_body(agent: Agent, proxy: Proxy) -> str:
-    """The common contract every proxy carries, without CLI-specific syntax."""
-    from saberops.mcp.guide import GUIDE
+    """The common contract every proxy carries, without CLI-specific syntax.
+
+    The body stays short on purpose: every launch pays for this text, so the
+    full working guide is referenced as the ``saberops://guide`` resource (also
+    served as the ``saberops-guide`` prompt) instead of being inlined.  The
+    loop below is complete for a handoff; the resource is depth, not a
+    prerequisite.
+    """
     from saberops.mcp.tools import TOOL_NAMES
 
     missing = [name for name in PROXY_TOOLS if name not in TOOL_NAMES]
@@ -618,7 +624,10 @@ def _proxy_body(agent: Agent, proxy: Proxy) -> str:
         "silently become something else.\n\n"
         "Never claim acceptance, never push and never merge. The owner accepts from\n"
         "the SaberOps page or with the exact command catch_up returns.\n\n"
-        "## Full SaberOps guide\n\n" + GUIDE
+        "## More detail\n\n"
+        "The full working guide is the `saberops://guide` resource (and the\n"
+        "`saberops-guide` prompt) on the server already connected to this session.\n"
+        "Read it once if a handoff is unusual; the loop above is enough otherwise.\n"
     )
 
 

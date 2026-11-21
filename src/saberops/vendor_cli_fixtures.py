@@ -44,27 +44,99 @@ from typing import Any
 
 __all__ = [
     "CHECK_INVALID_MANIFEST_EXIT",
+    "FIXTURES_ENV",
     "CaptureRecord",
     "Drift",
     "FakeOnly",
     "Fixture",
     "Manifest",
+    "ManifestUnavailable",
     "RedactionError",
     "VersionCheck",
     "VersionSupport",
     "assert_redacted",
     "capture",
     "check_version_support",
+    "default_manifest_path",
     "detect_drift",
+    "fixture_root_candidates",
     "load_manifest",
     "main",
     "read_installed_version",
     "redact",
+    "resolve_fixtures_root",
     "validate_manifest",
 ]
 
+#: Source-checkout root. Only meaningful in a checkout: an installed wheel has
+#: no ``tests/`` tree, so the manifest is resolved through
+#: :func:`resolve_fixtures_root` instead of this path.
 REPO_ROOT = Path(__file__).resolve().parents[2]
-FIXTURES_ROOT = REPO_ROOT / "tests" / "fixtures" / "vendor_cli"
+
+#: Optional explicit fixtures directory (an escape hatch for a relocated
+#: checkout or a package that ships the dated captures elsewhere).
+FIXTURES_ENV = "SABEROPS_VENDOR_FIXTURES"
+
+
+class ManifestUnavailable(LookupError):
+    """The dated vendor-CLI fixture manifest is not reachable from this install.
+
+    A source checkout carries it under ``tests/fixtures/vendor_cli``; an
+    installed build only carries it when the fixtures are shipped as package
+    data. The error is typed so every caller can degrade to an explicit
+    "unavailable" state instead of failing deep inside a scheduler tick.
+    """
+
+    def __init__(self, message: str, *, searched: Sequence[Path] = ()) -> None:
+        self.searched = tuple(searched)
+        detail = ""
+        if self.searched:
+            detail = " (searched: " + ", ".join(str(item) for item in self.searched) + ")"
+        super().__init__(message + detail)
+
+
+def fixture_root_candidates() -> tuple[Path, ...]:
+    """Directories that may hold ``manifest.json``, most specific first."""
+    module_root = Path(__file__).resolve().parent
+    candidates: list[Path] = []
+    override = os.environ.get(FIXTURES_ENV, "").strip()
+    if override:
+        candidates.append(Path(override).expanduser())
+    # A package that ships the captures as package data resolves here.
+    candidates.append(module_root / "fixtures" / "vendor_cli")
+    # A source checkout: src/saberops -> repository root -> tests/fixtures.
+    candidates.append(module_root.parents[1] / "tests" / "fixtures" / "vendor_cli")
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        unique.append(candidate)
+    return tuple(unique)
+
+
+def resolve_fixtures_root() -> Path | None:
+    """Return the first candidate that actually holds a manifest, else ``None``."""
+    for candidate in fixture_root_candidates():
+        if (candidate / "manifest.json").is_file():
+            return candidate
+    return None
+
+
+def default_manifest_path() -> Path:
+    """Return the committed manifest path or raise :class:`ManifestUnavailable`."""
+    root = resolve_fixtures_root()
+    if root is None:
+        raise ManifestUnavailable(
+            "vendor CLI fixture manifest unavailable: this installation ships no "
+            "dated fixture capture",
+            searched=fixture_root_candidates(),
+        )
+    return root / "manifest.json"
+
+
+FIXTURES_ROOT = resolve_fixtures_root() or fixture_root_candidates()[-1]
 MANIFEST_PATH = FIXTURES_ROOT / "manifest.json"
 
 #: Fixture content kinds.  ``config_help`` feeds the adapter flag-pinning check;
@@ -296,9 +368,20 @@ class Manifest:
         )
 
 
-def load_manifest(path: str | Path = MANIFEST_PATH) -> Manifest:
-    """Read a fixture manifest from ``path`` (default: the committed one)."""
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
+def load_manifest(path: str | Path | None = None) -> Manifest:
+    """Read a fixture manifest from ``path`` (default: the resolved committed one).
+
+    Raises :class:`ManifestUnavailable` when the default manifest cannot be
+    found, so callers can report a typed "unavailable" instead of a traceback.
+    """
+    target = default_manifest_path() if path is None else Path(path)
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ManifestUnavailable(
+            f"vendor CLI fixture manifest unavailable: {target} does not exist",
+            searched=(target.parent,),
+        ) from exc
     fixtures = tuple(
         Fixture(
             vendor=entry["vendor"],
@@ -1042,7 +1125,7 @@ CHECK_INVALID_MANIFEST_EXIT = 2
 
 
 def run_check(
-    manifest_path: str | Path = MANIFEST_PATH,
+    manifest_path: str | Path | None = None,
     *,
     which: Callable[[str], str | None] = shutil.which,
     run: RunFn | None = None,
@@ -1073,7 +1156,7 @@ def run_check(
     API still exists.
     """
     out = stream if stream is not None else sys.stdout
-    path = Path(manifest_path)
+    path = default_manifest_path() if manifest_path is None else Path(manifest_path)
     manifest = load_manifest(path)
     # Fixture ``file`` entries are relative to the manifest's own directory
     # (``tests/fixtures/vendor_cli/`` for the committed manifest), so an
@@ -1158,7 +1241,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m saberops.vendor_cli_fixtures")
     subparsers = parser.add_subparsers(dest="command", required=True)
     check_parser = subparsers.add_parser("check", help="report installed-version drift")
-    check_parser.add_argument("--manifest", default=str(MANIFEST_PATH))
+    check_parser.add_argument(
+        "--manifest",
+        default=None,
+        help="manifest path (default: the manifest this installation ships)",
+    )
     check_parser.add_argument(
         "--no-server-api",
         action="store_true",
@@ -1169,7 +1256,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     capture_parser.add_argument("--out", required=True, help="output directory outside the repo")
     args = parser.parse_args(argv)
     if args.command == "check":
-        return run_check(args.manifest, probe_server_api=not args.no_server_api)
+        try:
+            return run_check(args.manifest, probe_server_api=not args.no_server_api)
+        except ManifestUnavailable as exc:
+            print(f"[!] {exc}", file=sys.stderr)
+            return CHECK_INVALID_MANIFEST_EXIT
     records = capture(args.vendor, args.out)
     _print_capture(records)
     return 0

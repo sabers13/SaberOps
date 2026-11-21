@@ -1652,7 +1652,13 @@ def _require_known_candidate_id(
 
 
 def suggest_default_routes(*, provider: str | None = None) -> list[dict[str, str]]:
-    """Suggest one default build route per discovered, billing-confirmed provider."""
+    """Suggest one default build route per discovered, billing-confirmed provider.
+
+    The suggestion is the cheapest admitted plan model of each provider, not the
+    strongest one in catalog order: a first run is usually small, and a fresh
+    install should not spend the owner's most expensive model by default.  The
+    owner can still add any other route with ``orch routing add``.
+    """
     from datetime import date
 
     from saberops.access_ops import load_catalog_safely
@@ -1668,6 +1674,7 @@ def suggest_default_routes(*, provider: str | None = None) -> list[dict[str, str
     )
     from saberops.control_plane.posture import posture_decision
     from saberops.model_access.discovery import ExecutionSupport
+    from saberops.scout_routing import is_cheap_scout_model
 
     catalog = load_catalog_safely()
     policy = load_control_plane_policy()
@@ -1678,10 +1685,14 @@ def suggest_default_routes(*, provider: str | None = None) -> list[dict[str, str
 
     suggestions: list[dict[str, str]] = []
     seen_providers: set[str] = set()
-    # Prefer supported, non-stale models first while preserving catalog order.
+    # Cheapest plan model first, then supported before unknown, while
+    # preserving catalog order inside each group.
     ordered = sorted(
         (m for m in catalog.list_models() if not m.stale),
-        key=lambda m: 0 if m.execution_support is ExecutionSupport.SUPPORTED else 1,
+        key=lambda m: (
+            0 if is_cheap_scout_model(m.provider, m.model_id) else 1,
+            0 if m.execution_support is ExecutionSupport.SUPPORTED else 1,
+        ),
     )
     for model in ordered:
         prov = model.provider.strip().lower()

@@ -243,3 +243,25 @@ def test_quota_list_on_fresh_store_does_not_claim_normal(
     assert "treated as NORMAL" not in captured.out
     assert "QUOTA_EVIDENCE_REQUIRED" in captured.out
     assert "orch quota set" in captured.out
+
+
+def test_quota_set_accepts_the_percentage_an_owner_actually_answers(
+    isolated_env: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D11: an answer of "94%" is a number, not an argparse error."""
+    db_path = isolated_env / "orch.db"
+    code = main(
+        ["quota", "set", "anthropic", "discovered-pool:claude-code-subscription",
+         "--remaining", "94%", "--db", str(db_path)]
+    )
+    out = capsys.readouterr().out
+    assert code == 0, out
+    assert "remaining     : 94%" in out
+
+    # A bare number still works, and out-of-range values stay refused.
+    assert main(["quota", "set", "codex", "weekly", "--remaining", "60",
+                 "--db", str(db_path)]) == 0
+    capsys.readouterr()
+    with pytest.raises(SystemExit):
+        main(["quota", "set", "codex", "weekly", "--remaining", "140%",
+              "--db", str(db_path)])

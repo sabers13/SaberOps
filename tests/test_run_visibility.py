@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -117,3 +119,123 @@ def test_list_and_web_without_repo_state_which_store_is_read(
     assert resp.status_code == 200
     assert "c9 default store task" in resp.text
     assert str(default_db_path) in resp.text
+
+
+# ---------------------------------------------------------------------------
+# D7: the owner store the scheduler writes to, and the exact owner action
+# ---------------------------------------------------------------------------
+
+
+def test_list_for_a_repo_also_reads_the_owner_store_the_scheduler_writes(
+    isolated_env: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D7: a scheduled run lives in the owner store; listing must find it."""
+    from saberops.db import get_default_db_path
+    from saberops.project import compute_project_identity
+
+    repo = _make_repo(isolated_env / "scheduled-proj")
+    project_id = compute_project_identity(repo).project_id
+    owner_path = get_default_db_path()
+    owner_db = Database(owner_path)
+    owner_db.create_run(
+        Run(
+            id="run_d7_owner_store",
+            task="d7 scheduled task",
+            target_repo=str(repo),
+            gate_command="true",
+            base_commit="0000000",
+            training_allowed=False,
+            created_at=current_iso_timestamp(),
+            status=RunStatus.COMPLETED,
+            tier=Tier.T1,
+            project_id=project_id,
+        )
+    )
+
+    code = main(["list", "--repo", str(repo)])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "run_d7_owner_store" in out, out
+    assert str(owner_path) in out
+    assert str(project_db_path_for_repo(repo)) in out
+
+
+def test_job_get_names_the_exact_owner_action(
+    isolated_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """D7: ``orch job get`` must surface the same owner action ``wait_job`` does."""
+    from saberops import candidate_lifecycle
+    from saberops.accept import AcceptEngine
+    from saberops.jobs import store as job_store
+
+    db = Database(get_default_db_path())
+    job_store.ensure_tables(db)
+    repo = _make_repo(isolated_env / "job-get-proj")
+    job_store.insert_job(
+        db,
+        _queued_job("job-d7-owner-action", repo, run_ids=("run_d7_action",)),
+    )
+
+    class _Projection:
+        candidate_sha = "c0ffee1"
+
+    monkeypatch.setattr(
+        candidate_lifecycle, "project_candidate_state", lambda _db, _run_id: _Projection()
+    )
+
+    class _Eligibility:
+        eligible = True
+
+    monkeypatch.setattr(
+        AcceptEngine, "check_accept_eligibility", lambda self, run_id: _Eligibility()
+    )
+    code = main(["job", "get", "job-d7-owner-action", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["result"]["owner_action"] == "orch accept run_d7_action"
+    assert payload["result"]["candidate_sha"] == "c0ffee1"
+
+    code = main(["job", "get", "job-d7-owner-action"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "Owner action: orch accept run_d7_action" in out
+    assert "Candidate  : c0ffee1 (run_d7_action)" in out
+
+
+def _queued_job(job_id: str, repo: Path, *, run_ids: tuple[str, ...] = ()) -> Any:
+    """One minimal queued job for store-level tests."""
+    from saberops.jobs.models import (
+        Job,
+        JobRequirements,
+        JobState,
+        Priority,
+        WaitingReason,
+    )
+
+    created = current_iso_timestamp()
+    return Job(
+        job_id=job_id,
+        idempotency_key=None,
+        caller_id="test",
+        repo=str(repo),
+        base_ref="main",
+        base_sha="0000000",
+        goal="d7 owner action",
+        acceptance=None,
+        requirements=JobRequirements(),
+        priority=Priority.NORMAL,
+        deadline=None,
+        not_before=None,
+        state=JobState.QUEUED,
+        waiting_reason=WaitingReason.NEW,
+        failure_reason=None,
+        eta=None,
+        eta_confidence=None,
+        current_run_id=None,
+        run_ids=run_ids,
+        created_at=created,
+        updated_at=created,
+        request_digest=f"digest-{job_id}",
+    )

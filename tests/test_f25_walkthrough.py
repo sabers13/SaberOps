@@ -9,8 +9,6 @@ from __future__ import annotations
 import json
 import os
 import shlex
-import subprocess
-import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -81,21 +79,31 @@ def _with_answer(command: str) -> str:
     """Fill the placeholders with the values an owner would give."""
     return (
         command.replace("<check command>", "true")
+        .replace("<number from 0 to 100>", "80")
         .replace("<percent>", "80")
         .replace("<owner-confirmed-class>", "A")
         .replace("<policy-url>", "https://example.com/policy")
     )
 
 
-def _start_scheduler(command: str, log_path: Path) -> subprocess.Popen[bytes]:
+def _start_scheduler(command: str) -> None:
+    """Run the walkthrough's scheduler step: it must return, not block."""
     words = shlex.split(command)
     assert words.pop(0) == "orch"
-    log = open(log_path, "wb")
-    return subprocess.Popen(
-        [sys.executable, "-m", "saberops.cli", *words],
-        stdout=log,
-        stderr=subprocess.STDOUT,
-    )
+    from saberops.cli import main
+
+    assert main(words) == 0, command
+
+
+def _stop_scheduler() -> None:
+    """Stop the detached scheduler this test process started."""
+    from saberops.capacity.loop import stop_scheduler
+    from saberops.db import Database
+
+    try:
+        stop_scheduler(Database())
+    except Exception:  # noqa: BLE001 - cleanup never fails the test
+        pass
 
 
 # --------------------------------------------------------------------------- #
@@ -238,9 +246,7 @@ def test_scripted_conversation_reaches_a_green_preflight(
     from saberops.preflight import collect_preflight
 
     repo, _ = _fresh_store(monkeypatch, tmp_path)
-    process: subprocess.Popen[bytes] | None = None
     owner_steps: list[str] = []
-    scheduler_log = tmp_path / "scheduler.log"
     try:
         for _ in range(40):
             walk = build_walkthrough(repo)
@@ -249,18 +255,14 @@ def test_scripted_conversation_reaches_a_green_preflight(
                 break
             assert step.command, step.key
             if step.key == "scheduler":
-                process = _start_scheduler(step.command, scheduler_log)
+                _start_scheduler(step.command)
                 deadline = time.monotonic() + 15
                 while time.monotonic() < deadline:
                     if not [f for f in collect_preflight(repo) if f.severity == "FAIL"]:
                         break
-                    assert process.poll() is None, scheduler_log.read_text()
                     time.sleep(0.2)
                 else:
-                    pytest.fail(
-                        "preflight never turned green with the walkthrough: "
-                        + scheduler_log.read_text()
-                    )
+                    pytest.fail("preflight never turned green with the walkthrough")
                 continue
             words = _with_answer(step.command)
             if step.kind == "owner":
@@ -278,9 +280,7 @@ def test_scripted_conversation_reaches_a_green_preflight(
         text = render_text(final)
         assert "Setup is done" in text and SAMPLE_FIRST_JOB["goal"] in text
     finally:
-        if process is not None:
-            process.terminate()
-            process.wait(timeout=10)
+        _stop_scheduler()
 
 
 # --------------------------------------------------------------------------- #
@@ -390,7 +390,7 @@ def test_turn_on_opens_with_the_introduction_only_on_a_fresh_store(
 
 @pytest.mark.packaged_routing_default
 def test_first_job_from_the_walkthrough_reaches_owner_accept(
-    rig: Any, tmp_path: Path
+    rig: Any, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Green preflight, one tiny job, the owner accepts with the printed command."""
     from saberops.cli import main
@@ -398,10 +398,11 @@ def test_first_job_from_the_walkthrough_reaches_owner_accept(
     from saberops.models import RunStatus
     from saberops.preflight import collect_preflight
 
+    def capsys_read() -> str:
+        return capsys.readouterr().out
+
     # Finish setup by following the walkthrough's own steps, exactly as the
     # conversation would: answer steps take the owner's value, agent steps run.
-    process: subprocess.Popen[bytes] | None = None
-    log = tmp_path / "scheduler.log"
     try:
         for _ in range(20):
             walk = build_walkthrough(rig.repo)
@@ -410,15 +411,14 @@ def test_first_job_from_the_walkthrough_reaches_owner_accept(
                 break
             assert step.command, step.key
             if step.key == "scheduler":
-                process = _start_scheduler(step.command, log)
+                _start_scheduler(step.command)
                 deadline = time.monotonic() + 15
                 while time.monotonic() < deadline:
                     if not [f for f in collect_preflight(rig.repo) if f.severity == "FAIL"]:
                         break
-                    assert process.poll() is None, log.read_text()
                     time.sleep(0.2)
                 else:
-                    pytest.fail("preflight never turned green: " + log.read_text())
+                    pytest.fail("preflight never turned green")
                 continue
             for argv in _owner_args(_with_answer(step.command)):
                 assert main(argv) == 0, (step.key, argv)
@@ -444,14 +444,48 @@ def test_first_job_from_the_walkthrough_reaches_owner_accept(
             if row is not None and row.current_run_id is not None:
                 break
             time.sleep(0.2)
-        assert row is not None and row.current_run_id is not None, log.read_text()
+        assert row is not None and row.current_run_id is not None
         run = rig.wait_for_run(row.current_run_id, timeout=30.0)
         assert run.status is RunStatus.COMPLETED, run.result_summary
+
+        # D7: the CLI job view names the same owner action the MCP tools do.
+        assert main(["job", "get", submitted.job.job_id]) == 0
+        job_view = capsys_read()
+        assert f"Owner action: orch accept {run.id}" in job_view, job_view
 
         # Exactly the command the walkthrough tells the owner to use.
         assert main(["accept", run.id]) == 0
         assert build_walkthrough(rig.repo).needed is False
     finally:
-        if process is not None:
-            process.terminate()
-            process.wait(timeout=10)
+        _stop_scheduler()
+
+
+def test_turn_on_never_asks_the_agent_to_run_a_shell_command(tmp_path: Path) -> None:
+    """D14: the turn-on reply names the MCP tool, never a shell command.
+
+    A shell suggestion made hosts show a second approval dialog and then label
+    the turn "1 failed": on a fresh store ``orch preflight`` exits non-zero on
+    purpose, because it has setup failures to report.
+    """
+    from saberops.mcp.evidence import EvidenceRoots
+    from saberops.mcp.ledger import EventLedger
+    from saberops.mcp.protocol import McpServer
+    from saberops.mcp.tools import ServerContext
+
+    context = ServerContext(
+        db_path=tmp_path / "mcp.db",
+        questions_store=tmp_path / "questions.json",
+        config_ledger_path=tmp_path / "config.jsonl",
+        evidence=EvidenceRoots(roots=(tmp_path / ".orch",)),
+        ledger=EventLedger(tmp_path / "events.jsonl"),
+    )
+    server = McpServer(context, start_active=False)
+    server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+    server.handle({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    turned_on = server.handle(
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "saberops_on"}}
+    )
+    assert turned_on is not None
+    on = turned_on["result"]["content"][0]["text"]
+    assert "Call the preflight tool" in on
+    assert "orch preflight" not in on

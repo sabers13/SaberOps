@@ -1874,9 +1874,7 @@ def run_walkthrough_drill(
     """Following only the walkthrough's prompts reaches a green preflight."""
     started = time.monotonic()
     repo, _bindir = _fresh_walkthrough_store(tmp_path, monkeypatch)
-    process: subprocess.Popen[bytes] | None = None
     owner_steps: list[str] = []
-    scheduler_log = tmp_path / "walkthrough-scheduler.log"
     try:
         for _ in range(40):
             walk = build_walkthrough(repo)
@@ -1885,19 +1883,19 @@ def run_walkthrough_drill(
                 break
             assert step.command, step.key
             if step.key == "scheduler":
-                process = _start_walkthrough_scheduler(step.command, scheduler_log)
+                # The walkthrough's agent step starts the scheduler in the
+                # background and returns; it never holds the terminal.
+                for argv in _walkthrough_argv(step.command):
+                    assert cli_main(argv) == 0, (step.key, argv)
                 deadline = time.monotonic() + 20
                 while time.monotonic() < deadline:
                     from saberops.preflight import collect_preflight
 
                     if not [f for f in collect_preflight(repo) if f.severity == "FAIL"]:
                         break
-                    assert process.poll() is None, scheduler_log.read_text()
                     time.sleep(0.2)
                 else:
-                    raise AssertionError(
-                        "preflight never turned green: " + scheduler_log.read_text()
-                    )
+                    raise AssertionError("preflight never turned green")
                 continue
             if step.kind == "owner":
                 owner_steps.append(step.key)
@@ -1908,9 +1906,14 @@ def run_walkthrough_drill(
         assert final.next_step is None
         assert owner_steps, "a fresh store has owner-only steps to hand over"
     finally:
-        if process is not None:
-            process.terminate()
-            process.wait(timeout=10)
+        # Stop the detached scheduler this drill started, in this process.
+        from saberops.capacity.loop import stop_scheduler
+        from saberops.db import Database
+
+        try:
+            stop_scheduler(Database())
+        except Exception:  # noqa: BLE001 - cleanup never fails the drill
+            pass
     text = intro_text()
     assert "subscriptions you already pay for" in text
     assert store_needs_introduction() is True
@@ -1964,20 +1967,10 @@ def _walkthrough_argv(command: str) -> list[list[str]]:
 def _with_walkthrough_answers(command: str) -> str:
     return (
         command.replace("<check command>", "true")
+        .replace("<number from 0 to 100>", "80")
         .replace("<percent>", "80")
         .replace("<owner-confirmed-class>", "A")
         .replace("<policy-url>", "https://example.com/policy")
-    )
-
-
-def _start_walkthrough_scheduler(command: str, log_path: Path) -> subprocess.Popen[bytes]:
-    words = shlex.split(command)
-    assert words.pop(0) == "orch"
-    log = open(log_path, "wb")
-    return subprocess.Popen(
-        [sys.executable, "-m", "saberops.cli", *words],
-        stdout=log,
-        stderr=subprocess.STDOUT,
     )
 
 

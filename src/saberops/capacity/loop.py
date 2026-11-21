@@ -147,9 +147,15 @@ def scheduler_alive(db: Any) -> bool:
         return False
 
 
-def ensure_scheduler_running(db: Any) -> bool:
-    """Start one detached scheduler per owner store, returning whether we started it."""
-    if os.environ.get("SABEROPS_DISABLE_AUTO_SCHEDULER") == "1":
+def ensure_scheduler_running(db: Any, *, respect_disable: bool = True) -> bool:
+    """Start one detached scheduler per owner store, returning whether we started it.
+
+    ``respect_disable`` keeps the environment switch authoritative for every
+    *automatic* start (an MCP turn-on, the web UI).  An explicit owner command
+    (``orch scheduler start``) passes ``False``: the owner asked for it, and a
+    silent no-op would be a lie.
+    """
+    if respect_disable and os.environ.get("SABEROPS_DISABLE_AUTO_SCHEDULER") == "1":
         return False
     path = _scheduler_path(db)
     path.parent.mkdir(parents=True, exist_ok=True)

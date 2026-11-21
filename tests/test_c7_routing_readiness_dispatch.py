@@ -375,3 +375,22 @@ else:
     assert res2.actual_model == "unreported"
     assert res2.requested_variant == "unreported"
     assert res2.reported_variant == "unreported"
+
+
+def test_default_route_suggestion_prefers_the_cheapest_admitted_model(
+    isolated_env: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D11: a first-run default must not spend the strongest model by default."""
+    # The catalog lists the strong model first, as a vendor's listing does.
+    _seed_discovered_model(model_id="gpt-6.2-sol")
+    _seed_discovered_model(model_id="gpt-6-luna")
+    assert main(["posture", "verify", "codex"]) == 0
+    capsys.readouterr()
+
+    assert main(["routing", "suggest", "--json"]) == 0
+    suggestions = json.loads(capsys.readouterr().out)["suggestions"]
+    assert [item["candidate_id"] for item in suggestions] == ["codex/gpt-6-luna"]
+
+    assert main(["routing", "accept-default", "--json"]) == 0
+    accepted = json.loads(capsys.readouterr().out)["accepted"]
+    assert accepted == ["codex/gpt-6-luna"]

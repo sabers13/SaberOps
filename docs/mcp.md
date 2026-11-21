@@ -447,6 +447,13 @@ generated files and keeps any sibling the owner wrote. Re-running `connect
 marker is never overwritten or deleted. Definitions are generated from the live
 MCP tool list, so a renamed tool cannot leave a stale proxy behind.
 
+Each definition carries only the short handoff contract and points at the
+`saberops://guide` resource (also served as the `saberops-guide` prompt) for
+depth, instead of inlining the whole guide: an inlined copy made every
+definition about 21 KB and every launch paid for it. The definition is now
+about the size of the `saberops-worker` one, and the guide stays on the server
+where it can be updated without regenerating agent files.
+
 | Host CLI | Proxy subagents | Cheapest host model | Target family token |
 | --- | --- | --- | --- |
 | Claude Code | `codex-worker`, `opencode-go-worker` | `haiku` | `codex`, `opencode-go` |

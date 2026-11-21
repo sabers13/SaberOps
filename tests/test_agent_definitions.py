@@ -365,3 +365,21 @@ def test_cli_agents_mode_does_not_touch_mcp_config(
     capsys.readouterr()
     assert config.read_text(encoding="utf-8") == original
     assert (home / ".config" / "opencode" / "agents" / "claude-worker.md").is_file()
+
+
+def test_proxy_definition_stays_short_and_references_the_guide_resource() -> None:
+    """D12: every proxy launch pays for its body; the guide is a resource.
+
+    The whole working guide used to be inlined, making each definition ~21 KB.
+    It stays on the server as ``saberops://guide`` and the definition only
+    points at it.
+    """
+    from saberops.agent_connect import WORKER_VENDOR, worker_document
+    from saberops.mcp.guide import GUIDE_URI
+
+    worker_size = max(len(worker_document(slug)) for slug in WORKER_VENDOR)
+    for slug, target, document in _documents():
+        assert GUIDE_URI in document, (slug, target)
+        # The guide's own opening heading is the marker of an inlined copy.
+        assert "# Working with SaberOps" not in document, (slug, target)
+        assert len(document) < worker_size + 2_000, (slug, target, len(document))

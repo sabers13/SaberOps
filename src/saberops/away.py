@@ -25,10 +25,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
@@ -378,6 +379,30 @@ def _parse_aware_instant(value: object, label: str) -> datetime:
     return parsed.astimezone(UTC)
 
 
+def _validated_policy_paths(paths: Sequence[object], *, where: str) -> tuple[str, ...]:
+    """Canonicalise the authorized paths, or raise a plain, owner-actionable error.
+
+    A policy is loaded through exactly this check, so it is enforced when the
+    policy is *saved* too: a path that loads as unreadable (an absolute path,
+    ``.``, a wildcard) must be refused at the moment the owner types it, never
+    written and then silently unable to let any work start.
+    """
+    if not paths:
+        raise AwayError(f"{where}: at least one authorized path is required")
+    try:
+        # DecisionScope validates canonical, wildcard-free repository paths.
+        return DecisionScope(
+            project_id="policy",
+            task_id="policy",
+            paths=tuple(str(item) for item in paths),
+        ).paths
+    except ValueError as exc:
+        raise AwayError(
+            f"{where}: authorized paths are repository-relative, for example 'src' "
+            f"or 'README.md' (never an absolute path or '.'): {exc}"
+        ) from exc
+
+
 def load_away_policy(path: Path | None = None) -> AwayPolicy | None:
     """Load the owner-authored away policy, failing closed on corruption."""
     target = path if path is not None else get_away_policy_path()
@@ -411,15 +436,7 @@ def load_away_policy(path: Path | None = None) -> AwayPolicy | None:
     raw_paths = data.get("paths")
     if not isinstance(raw_paths, list) or not raw_paths:
         raise AwayError(f"away policy at {target}: at least one authorized path is required")
-    try:
-        # DecisionScope validates canonical, wildcard-free repository paths.
-        paths = DecisionScope(
-            project_id="policy",
-            task_id="policy",
-            paths=tuple(str(item) for item in raw_paths),
-        ).paths
-    except ValueError as exc:
-        raise AwayError(f"away policy at {target}: {exc}") from exc
+    paths = _validated_policy_paths(raw_paths, where=f"away policy at {target}")
     set_by = data.get("set_by")
     if set_by != "owner":
         raise AwayError(f"away policy at {target}: only the owner authors an away policy")
@@ -444,8 +461,11 @@ def save_away_policy(
     if policy.set_by != "owner":
         raise AwayError("only the owner authors an away policy")
     _parse_aware_instant(policy.set_at, "away policy set_at")
-    if not policy.paths:
-        raise AwayError("at least one authorized path is required")
+    # Validate exactly what ``load_away_policy`` will accept: a policy that
+    # cannot be read back must never be written.
+    paths = _validated_policy_paths(policy.paths, where="away policy")
+    if paths != tuple(policy.paths):
+        policy = replace(policy, paths=paths)
     target = path if path is not None else get_away_policy_path()
     return _atomic_write(target, json.dumps(policy.as_dict(), indent=2) + "\n")
 
@@ -962,7 +982,16 @@ def evaluate_dispatch(
     resolved_journal = journal if journal is not None else AwayJournal()
     resolved_queue = queue if queue is not None else OwnerQuestionQueue()
     resolved_project = project_id or project_scope_id(repo)
-    resolved_policy = load_away_policy() if policy is ... else policy
+    resolved_policy: AwayPolicy | None | object = policy
+    if policy is ...:
+        try:
+            resolved_policy = load_away_policy()
+        except AwayError as exc:
+            # An unreadable policy is the same fact as no policy: away dispatch
+            # parks every job.  Report it once here instead of raising into the
+            # scheduler tick, where it would repeat as a traceback every tick.
+            logging.getLogger(__name__).warning("away policy is unreadable: %s", exc)
+            resolved_policy = None
 
     if resolved_journal.halted(resolved_project):
         return _blocked(

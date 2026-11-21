@@ -6,6 +6,7 @@ toy repository path.  No vendor CLI, model, network or desktop notice is used.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -546,3 +547,181 @@ def test_cli_grants_exact_bounded_owner_decision(
         authority_mode=AuthorityMode.SUPERVISED,
     )
     assert resolution.disposition is DecisionDisposition.APPLY_STANDING_DECISION
+
+
+# ---------------------------------------------------------------------------
+# D10: say what away mode needs, and let a policy set unpark the queue
+# ---------------------------------------------------------------------------
+
+
+def _away_policy_cli(repo: Path) -> list[str]:
+    return [
+        "away",
+        "policy",
+        "set",
+        "--budget-units",
+        "5",
+        "--wall-clock-seconds",
+        "3600",
+        "--worker-cap",
+        "2",
+        "--path",
+        "src",
+    ]
+
+
+def test_mode_set_away_warns_until_a_policy_exists(
+    owner_env: dict[str, Path], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D10: the owner learns at away-mode time that every job would be parked."""
+    from saberops.cli import main
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    until = "2999-01-01T00:00:00+00:00"
+
+    assert main(["mode", "set", "away", "--until", until]) == 0
+    out = capsys.readouterr().out
+    assert "Away mode parks every job" in out
+    assert "orch away policy set" in out
+
+    assert main(["mode", "set", "away", "--until", until, "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["away_policy"] == "not-set"
+    assert "away_warning" in payload
+
+    assert main(_away_policy_cli(repo)) == 0
+    capsys.readouterr()
+    assert main(["mode", "set", "away", "--until", until, "--json"]) == 0
+    quiet = json.loads(capsys.readouterr().out)
+    assert quiet["away_policy"] == "set"
+    assert "away_warning" not in quiet
+
+    assert main(["mode", "clear"]) == 0
+    capsys.readouterr()
+    # No away mode, no away warning: the policy is only relevant while away.
+    assert main(["mode", "set", "ask-me"]) == 0
+    assert "Away mode parks every job" not in capsys.readouterr().out
+
+
+def test_saving_the_away_policy_resumes_the_parked_queue(
+    owner_env: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D10: a preflight-parked job dispatches on the first tick after the policy."""
+    monkeypatch.setenv("SABEROPS_GATE_MEMORY_GUARD", "0")
+    set_owner_mode(OwnerMode.AWAY, until=_FUTURE, set_by="owner")
+
+    db = _owner_db(tmp_path)
+    lease = acquire_lease(db, "scheduler", ttl_seconds=600.0, now=_NOW)
+    assert lease is not None
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    store.insert_job(
+        db,
+        _make_job(
+            "job_away",
+            str(repo),
+            created_at=_NOW.isoformat(),
+            updated_at=_NOW.isoformat(),
+            request_digest="digest-job_away",
+        ),
+        now=_NOW,
+    )
+    record_owner_quota(db, "openai", "chatgpt-plus", 100.0, None, source="OWNER", now=_NOW)
+    routes = _make_routes(((_make_candidate("openai", "gpt-5"),),))
+    policy = _make_policy(posture_now=_NOW)
+    launched: list[str] = []
+
+    def launcher(job: Any, decision: Any, run_id: str) -> None:
+        launched.append(job.job_id)
+
+    def tick(moment: Any) -> Any:
+        return scheduler_tick(
+            db,
+            lease,
+            now=moment,
+            routes=routes,
+            policy=policy,
+            run_launcher=launcher,
+            run_status=lambda run_id: RunStatus.RUNNING,
+            clock_fn=lambda: moment,
+        )
+
+    first = tick(_NOW)
+    assert first.ran is True
+    parked = store.get_job(db, "job_away")
+    assert parked is not None
+    assert parked.waiting_reason is WaitingReason.AWAY_PARKED
+    assert launched == []
+
+    away.save_away_policy(
+        away.AwayPolicy(
+            budget_units=5,
+            wall_clock_seconds=3_600,
+            worker_cap=2,
+            paths=("src",),
+            set_at=_NOW.isoformat(),
+            set_by="owner",
+        )
+    )
+    later = _NOW + timedelta(seconds=30)
+    second = tick(later)
+    assert second.ran is True
+    assert launched == ["job_away"]
+
+
+def test_an_absolute_policy_path_is_refused_when_it_is_saved(
+    owner_env: dict[str, Path], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D10: the policy loader only accepts repo-relative paths; saving must too."""
+    from saberops.cli import main
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    with pytest.raises(away.AwayError) as caught:
+        away.save_away_policy(
+            away.AwayPolicy(
+                budget_units=5,
+                wall_clock_seconds=3_600,
+                worker_cap=2,
+                paths=(str(repo),),
+                set_at=_NOW.isoformat(),
+                set_by="owner",
+            )
+        )
+    assert "repository-relative" in str(caught.value)
+    assert not owner_env["policy"].exists()
+
+    assert (
+        main(
+            [
+                "away",
+                "policy",
+                "set",
+                "--budget-units",
+                "5",
+                "--wall-clock-seconds",
+                "3600",
+                "--worker-cap",
+                "2",
+                "--path",
+                str(repo),
+            ]
+        )
+        == 1
+    )
+    assert "repository-relative" in capsys.readouterr().err
+    assert not owner_env["policy"].exists()
+
+
+def test_an_unreadable_policy_blocks_dispatch_instead_of_raising(
+    owner_env: dict[str, Path], tmp_path: Path
+) -> None:
+    """D10: a corrupt policy parks work; it never raises into the scheduler tick."""
+    owner_env["policy"].write_text("{not json", encoding="utf-8")
+    gate = away.evaluate_dispatch(job_id="job_a", repo=str(tmp_path), now=_NOW)
+    assert gate.allowed is False
+    assert gate.code == "preflight"

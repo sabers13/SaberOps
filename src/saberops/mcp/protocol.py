@@ -499,11 +499,15 @@ class McpServer:
                 )
             else:
                 gate_line = f" Work gate: {gate.get('label')}."
+            # The turn-on reply names the ``preflight`` MCP tool only (D14).
+            # Suggesting a shell command here made hosts ask a second approval
+            # dialog and then label the turn "1 failed" when a fresh store's
+            # preflight exits non-zero by design (it has setup FAILs to report).
             text = (
                 f"{PREFIX} SaberOps is on. {role}{opening} Start every message that relays "
-                f"SaberOps to the user with \"{PREFIX}\".{gate_line} Call preflight with the "
-                f"project repository (or run `orch preflight --repo /path/to/project`) before "
-                f"submitting work. Follow this guide:\n\n{GUIDE}"
+                f"SaberOps to the user with \"{PREFIX}\".{gate_line} Call the preflight tool "
+                f"with the project repository before submitting work. Follow this "
+                f"guide:\n\n{GUIDE}"
             )
         else:
             text = (

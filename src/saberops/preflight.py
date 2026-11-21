@@ -12,6 +12,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+    from typing import Any
+
     from saberops.vendor_cli_fixtures import Manifest
 
 
@@ -22,6 +25,10 @@ class Finding:
     severity: str
     message: str
     remedy: str = ""
+
+
+#: Decimal gigabytes: the unit the owner reads, matching the web diagnostics.
+BILLION = 1_000_000_000
 
 
 def disk_findings(target: Path, scratch: Path, state: Path | None = None) -> list[Finding]:
@@ -57,12 +64,16 @@ def disk_findings(target: Path, scratch: Path, state: Path | None = None) -> lis
         mount = anchor.resolve()
         while mount.parent != mount and not os.path.ismount(mount):
             mount = mount.parent
+        # Gigabytes first: the owner reads the unit they know, and the exact
+        # byte counts stay beside it so two probes can be compared precisely.
+        free_gb = free / BILLION
+        required_gb = required / BILLION
         findings.append(
             Finding(
                 "OK" if free >= required else "FAIL",
                 f"{label}: {path} (filesystem mounted at {mount}, probe {anchor}): "
-                f"{free} bytes available; "
-                f"{required} bytes required",
+                f"{free_gb:.1f} GB available ({free} bytes); "
+                f"{required_gb:.1f} GB required ({required} bytes)",
                 "" if free >= required else remedy,
             )
         )
@@ -139,6 +150,18 @@ def quota_status(
     return False, "stale"
 
 
+def _fixture_manifest_hint() -> str:
+    """One owner-facing sentence for an installation without a fixture manifest."""
+    from saberops.vendor_cli_fixtures import FIXTURES_ENV
+
+    return (
+        "This is not a fault: this installation ships no dated vendor-CLI capture, "
+        "so version drift is not checked. Run "
+        "`python -m saberops.vendor_cli_fixtures check` from a source checkout, or "
+        f"point {FIXTURES_ENV} at a directory that holds manifest.json."
+    )
+
+
 def vendor_cli_version_findings(
     provider: str, executable: str, version: str, manifest: Manifest
 ) -> list[Finding]:
@@ -189,6 +212,45 @@ def vendor_cli_version_findings(
     return findings
 
 
+def _effective_posture_records() -> Mapping[str, Any]:
+    """The owner-over-packaged plan postures, or an empty mapping."""
+    from saberops.control_plane.plans import (
+        load_packaged_plans_raw,
+        overlay_plan_docs,
+        validate_plan_sections,
+    )
+    from saberops.control_plane.policy import _read_raw_doc
+
+    try:
+        merged, _ = overlay_plan_docs(load_packaged_plans_raw(), _read_raw_doc())
+        return validate_plan_sections(merged, "effective plans").postures
+    except ValueError:
+        return {}
+
+
+def _posture_verify_remedy(selector: str) -> str:
+    """One runnable ``orch posture verify`` command with no unexplained placeholders.
+
+    The effective plan registry already records the owner's billing class and
+    the policy pages for each selector (packaged defaults fill the common
+    providers), so the owner is never asked to invent them.  A selector with no
+    recorded facts still gets a command, and the placeholder says in words what
+    belongs there.
+    """
+    record = _effective_posture_records().get(selector)
+    if record is not None and record.posture_class != "X" and record.policy_urls:
+        urls = " ".join(f"--url {shlex.quote(url)}" for url in record.policy_urls)
+        return (
+            f"orch posture verify {shlex.quote(selector)} "
+            f"--class {record.posture_class} {urls}"
+        )
+    return (
+        f"orch posture verify {shlex.quote(selector)} "
+        "--class '<A if this use is included in a plan you already pay for>' "
+        "--url '<the page on your plan that says so>'"
+    )
+
+
 def collect_preflight(repo: Path, db_path: Path | None = None) -> list[Finding]:
     """Inspect current project setup without sending a model prompt."""
     from datetime import UTC, date, datetime
@@ -219,6 +281,7 @@ def collect_preflight(repo: Path, db_path: Path | None = None) -> list[Finding]:
     from saberops.routing_config import load_effective_routing
     from saberops.vendor_cli_fixtures import (
         MISSING,
+        ManifestUnavailable,
         load_manifest,
         read_installed_version,
     )
@@ -336,8 +399,25 @@ def collect_preflight(repo: Path, db_path: Path | None = None) -> list[Finding]:
     manifest = None
     try:
         manifest = load_manifest()
-    except (OSError, ValueError):
-        results.append(Finding("WARN", "vendor CLI fixture manifest unavailable"))
+    except ManifestUnavailable:
+        # An installed build that ships no dated capture is a normal state:
+        # report it once, in owner words, and skip the version guard.
+        results.append(
+            Finding(
+                "WARN",
+                "vendor CLI fixture manifest unavailable",
+                _fixture_manifest_hint(),
+            )
+        )
+    except (OSError, ValueError) as exc:
+        results.append(
+            Finding(
+                "WARN",
+                "vendor CLI fixture manifest unavailable",
+                f"The manifest could not be read ({type(exc).__name__}); run from a source "
+                "checkout to check vendor CLI drift.",
+            )
+        )
     for provider in providers:
         descriptor = next((d for d in ACCOUNT_BACKENDS if d.provider == provider), None)
         if descriptor is None:
@@ -395,12 +475,7 @@ def collect_preflight(repo: Path, db_path: Path | None = None) -> list[Finding]:
             Finding(
                 "OK" if decision.admitted_unattended else "FAIL",
                 f"{provider}/{model or '*'} billing: {decision.reason or 'confirmed'}",
-                ""
-                if decision.admitted_unattended
-                else (
-                    f"orch posture verify {shlex.quote(provider)} "
-                    "--class '<owner-confirmed-class>' --url '<policy-url>'"
-                ),
+                "" if decision.admitted_unattended else _posture_verify_remedy(provider),
             )
         )
     path = db_path or get_default_db_path()
@@ -443,7 +518,7 @@ def collect_preflight(repo: Path, db_path: Path | None = None) -> list[Finding]:
                     if ok
                     else (
                         f"orch quota set {shlex.quote(candidate.provider)} "
-                        f"{shlex.quote(pool)} --remaining '<percent>'"
+                        f"{shlex.quote(pool)} --remaining '<number from 0 to 100>'"
                     ),
                 )
             )
@@ -458,7 +533,7 @@ def collect_preflight(repo: Path, db_path: Path | None = None) -> list[Finding]:
         Finding(
             "OK" if alive else "FAIL",
             f"scheduler: {'alive' if alive else 'not running'}",
-            "" if alive else "orch scheduler run",
+            "" if alive else "orch scheduler start",
         )
     )
     return results

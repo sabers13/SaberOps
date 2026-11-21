@@ -47,6 +47,7 @@ from saberops.vendor_cli_fixtures import (
     REPO_ROOT,
     VENDOR_CLI,
     Manifest,
+    ManifestUnavailable,
     VersionSupport,
     check_version_support,
     load_manifest,
@@ -258,6 +259,10 @@ class VendorCheckResult:
 
 SmokeRunner = Callable[[str, str | None], SmokeResult]
 
+#: Set once the "no fixture manifest in this install" warning was logged, so
+#: a scheduler tick never repeats it.
+_MANIFEST_UNAVAILABLE_REPORTED = False
+
 
 # ---------------------------------------------------------------------------
 # Durable store
@@ -445,6 +450,22 @@ def set_smoke_model(db: Database, vendor: str, model: str | None) -> None:
     if vendor not in VENDORS:
         raise ValueError(f"unknown vendor {vendor!r}")
     _set_setting(db, f"smoke_model:{vendor}", (model or "").strip() or None)
+
+
+def _report_manifest_unavailable(exc: ManifestUnavailable) -> None:
+    """Say once that this install carries no fixture manifest (never a traceback).
+
+    The scheduler calls this path every tick; a missing dated capture is a
+    normal property of an installed build, not a recurring failure, so it is
+    reported at most once per process.
+    """
+    global _MANIFEST_UNAVAILABLE_REPORTED
+    if _MANIFEST_UNAVAILABLE_REPORTED:
+        return
+    _MANIFEST_UNAVAILABLE_REPORTED = True
+    logging.getLogger(__name__).warning(
+        "vendor CLI health is unavailable: %s; dispatch continues", exc
+    )
 
 
 def blocked_providers(db: Database) -> dict[str, str]:
@@ -1348,7 +1369,14 @@ def maybe_check(
         last = parse_iso(last_raw)
         if last is not None and (moment - last).total_seconds() < interval:
             return []
-    changes = detect_changes(db, now=moment)
+    try:
+        changes = detect_changes(db, now=moment)
+    except ManifestUnavailable as exc:
+        # An installed build may carry no dated capture.  That is a typed
+        # "unavailable" state, never a traceback per tick: no change can be
+        # detected, and nothing is parked on a guess (ADR-0018 rule 4).
+        _report_manifest_unavailable(exc)
+        return []
     _set_setting(db, "last_detected_at", _now_iso(moment))
     health = load_health(db)
     due = [

@@ -632,9 +632,7 @@ def _chosen_worker(db: Any, job: Any) -> dict[str, Any] | None:
 
 def _job_result(db: Any, job: Any) -> dict[str, Any]:
     """Read-only result projection, reusable by completion tools."""
-    from saberops.accept import AcceptEngine
-    from saberops.candidate_lifecycle import project_candidate_state
-    from saberops.jobs.service import job_usage_view
+    from saberops.jobs.service import job_usage_view, owner_action_view
     from saberops.scout import latest_report
 
     report: dict[str, Any] | None = None
@@ -642,34 +640,22 @@ def _job_result(db: Any, job: Any) -> dict[str, Any]:
         report = latest_report(db, job.job_id)
     except Exception:  # noqa: BLE001 - a report read never breaks a result view
         report = None
+    owner_view = owner_action_view(db, job)
     result: dict[str, Any] = {
-        "run_id": None,
-        "candidate_sha": None,
+        "run_id": owner_view["run_id"],
+        "candidate_sha": owner_view["candidate_sha"],
         "diff": None,
-        "owner_action": None,
+        "owner_action": owner_view["owner_action"],
         "worker": _chosen_worker(db, job),
         "report": report,
         "usage": job_usage_view(db, job),
     }
-    for run_id in reversed(job.run_ids):
-        projection = project_candidate_state(db, run_id)
-        if projection.candidate_sha is None:
-            continue
-        eligible = AcceptEngine(db).check_accept_eligibility(run_id).eligible
-        if result["candidate_sha"] is not None and not eligible:
-            continue
-        result.update(
-            run_id=run_id,
-            candidate_sha=projection.candidate_sha,
-            diff={
-                "repo": job.repo,
-                "base_sha": job.base_sha,
-                "candidate_sha": projection.candidate_sha,
-            },
-        )
-        if eligible:
-            result["owner_action"] = f"orch accept {run_id}"
-            break
+    if owner_view["candidate_sha"] is not None:
+        result["diff"] = {
+            "repo": job.repo,
+            "base_sha": job.base_sha,
+            "candidate_sha": owner_view["candidate_sha"],
+        }
     return result
 
 

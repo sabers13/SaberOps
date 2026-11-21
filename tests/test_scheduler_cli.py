@@ -198,3 +198,30 @@ def test_scheduler_run_invalid_owner_concurrency_config_fails_closed(
     assert code == 1
     assert "concurrency.max_global" in err
 
+
+
+def test_scheduler_start_returns_and_reports_an_already_running_helper(
+    isolated_env: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D11: the walkthrough's scheduler step must not hold the terminal."""
+    db_path = isolated_env / "start_jobs.db"
+    db = Database(db_path)
+
+    code, out, err = _cli(
+        "scheduler", "start", "--db", str(db_path), capsys=capsys
+    )
+    assert code == 0, err
+    assert "started in the background" in out
+    assert str(db_path) in out
+
+    # A second call is honest about what it found instead of starting a fleet.
+    code, out, err = _cli(
+        "scheduler", "start", "--db", str(db_path), "--json", capsys=capsys
+    )
+    payload = json.loads(out)
+    assert code == 0, err
+    assert payload["started"] is False and payload["running"] is True
+
+    from saberops.capacity.loop import stop_scheduler
+
+    stop_scheduler(db)

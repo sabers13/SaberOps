@@ -424,3 +424,87 @@ def test_guard_helpers_are_part_of_the_module_surface() -> None:
     assert "check_version_support" in vcf.__all__
     assert "VersionSupport" in vcf.__all__
     assert set(HELP_COMMANDS) == set(vcf.VENDOR_CLI)
+
+
+# ---------------------------------------------------------------------------
+# D6: an installed build has no ``tests/`` tree
+# ---------------------------------------------------------------------------
+
+
+def _fake_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    with_package_data: bool,
+) -> Path:
+    """Simulate a wheel layout: ``lib/python3.12/site-packages/saberops``.
+
+    The module's own ``__file__`` decides where it looks, so pointing it at a
+    directory with no repository ``tests/`` tree reproduces an installed build
+    exactly.  The installed package never contains ``tests/``.
+    """
+    package = tmp_path / "venv" / "lib" / "python3.12" / "site-packages" / "saberops"
+    package.mkdir(parents=True)
+    (package / "vendor_cli_fixtures.py").write_text("", encoding="utf-8")
+    if with_package_data:
+        data = package / "fixtures" / "vendor_cli"
+        data.mkdir(parents=True)
+        (data / "manifest.json").write_text(
+            json.dumps({"version": 1, "fixtures": [], "fake_only": []}), encoding="utf-8"
+        )
+    monkeypatch.setattr(vcf, "__file__", str(package / "vendor_cli_fixtures.py"))
+    monkeypatch.delenv(vcf.FIXTURES_ENV, raising=False)
+    return package
+
+
+def test_installed_build_without_a_manifest_is_a_typed_unavailable_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D6: a wheel has no ``tests/fixtures``; that is typed, never a traceback."""
+    _fake_install(tmp_path, monkeypatch, with_package_data=False)
+    assert vcf.resolve_fixtures_root() is None
+    with pytest.raises(vcf.ManifestUnavailable) as caught:
+        vcf.load_manifest()
+    assert "vendor CLI fixture manifest unavailable" in str(caught.value)
+    # The typed error names what it searched, so a bug report is actionable.
+    assert any("site-packages" in str(path) for path in caught.value.searched)
+    with pytest.raises(vcf.ManifestUnavailable):
+        vcf.run_check(stream=io.StringIO())
+
+
+def test_manifest_resolves_from_shipped_package_data(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D6: a build that ships the captures finds them without a checkout."""
+    package = _fake_install(tmp_path, monkeypatch, with_package_data=True)
+    assert vcf.resolve_fixtures_root() == package / "fixtures" / "vendor_cli"
+    assert vcf.load_manifest().fixtures == ()
+    # The environment override wins over both defaults.
+    override = tmp_path / "elsewhere"
+    override.mkdir()
+    (override / "manifest.json").write_text(
+        json.dumps({"version": 1, "fixtures": [], "fake_only": [
+            {"vendor": "codex", "kind": "usage_panel", "consumer": "c", "reason": "r"}
+        ]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(vcf.FIXTURES_ENV, str(override))
+    assert vcf.resolve_fixtures_root() == override
+    assert len(vcf.load_manifest().fake_only) == 1
+
+
+def test_preflight_reports_a_missing_manifest_as_one_plain_warn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D6: the owner sees one WARN with the remedy, never one traceback per tick."""
+    _fake_install(tmp_path, monkeypatch, with_package_data=False)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    findings = preflight.collect_preflight(repo)
+    warnings = [
+        item for item in findings if item.message == "vendor CLI fixture manifest unavailable"
+    ]
+    assert len(warnings) == 1
+    assert warnings[0].severity == "WARN"
+    assert vcf.FIXTURES_ENV in warnings[0].remedy

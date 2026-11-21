@@ -257,28 +257,31 @@ orch preflight --repo /path/to/project
 
 Use the commands printed for your own connections and project. For a Codex
 worker and Claude reviewer, a fresh store typically asks for the commands below.
-Replace the bracketed values with your own check command, billing classification,
-policy URL, quota percentage and the binding ID shown by discovery. Billing
-confirmation and quota values must come from the owner; do not guess them.
+Replace the bracketed values with your own check command, a remaining plan amount
+and the binding ID shown by discovery; the billing commands already carry your
+plan's class and policy pages. Billing confirmation and quota values must come
+from the owner; do not guess them.
 
 ```bash
 orch project set-gate --repo /path/to/project '<check command>'
 orch access test codex-chatgpt-account
 orch access test claude-code-subscription
-orch posture verify codex --class '<owner-confirmed-class>' --url '<policy-url>'
-orch posture verify anthropic --class '<owner-confirmed-class>' --url '<policy-url>'
+orch posture verify codex --class A --url https://learn.chatgpt.com/docs/pricing
+orch posture verify anthropic --class A --url https://code.claude.com/docs/en/legal-and-compliance
 orch access discover codex-chatgpt-account && orch routing accept-default --provider codex
 orch access discover claude-code-subscription
 orch reviewer select '<binding-id>'
-orch quota set codex '<pool>' --remaining '<percent>'
-orch quota set anthropic '<pool>' --remaining '<percent>'
-orch scheduler run
+orch quota set codex '<pool>' --remaining 80
+orch quota set anthropic '<pool>' --remaining 80
+orch scheduler start
 ```
 
-Run the scheduler in its own terminal, then rerun `orch preflight --repo
-/path/to/project` until it reports no failures. If a CLI is missing, install it
-using the command preflight prints; sign in through that CLI before running its
-access test. Discovery and the access tests do not send a model prompt.
+`orch scheduler start` returns after starting the background helper, so setup
+does not occupy a terminal (`orch scheduler run` still runs it in the
+foreground). Rerun `orch preflight --repo /path/to/project` until it reports no
+failures. If a CLI is missing, install it using the command preflight prints;
+sign in through that CLI before running its access test. Discovery and the
+access tests do not send a model prompt.
 
 Connect your agent with `orch mcp serve`. After you say “turn on SaberOps”,
 the agent can call the `preflight` MCP tool with the repository path. Submit a

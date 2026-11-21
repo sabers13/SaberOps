@@ -398,7 +398,7 @@ def _classify(message: str) -> _Spec | None:
             f"billing_{provider}",
             f"Confirm your {_pretty(provider)} plan",
             f"I need your OK that {_pretty(provider)} work stays inside the plan "
-            "you already pay for.",
+            "you already pay for. The command already names its class and policy page.",
             "owner",
             40,
         )
@@ -451,7 +451,9 @@ def _steps_from_findings(findings: Iterable[Any]) -> tuple[WalkthroughStep, ...]
         spec = specs[key]
         failed = [item for item in items if item.severity == "FAIL"]
         command = next((item.remedy for item in failed if item.remedy), "")
-        detail = "; ".join(str(item.message) for item in items)
+        # Only the failing findings describe the problem: an OK sibling (for
+        # example one filesystem with space) must never read like part of it.
+        detail = "; ".join(str(item.message) for item in failed)
         steps.append(
             WalkthroughStep(
                 key=key,

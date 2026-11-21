@@ -1211,6 +1211,38 @@ def _usage_totals(rows: list[Any]) -> dict[str, Any]:
     }
 
 
+def owner_action_view(db: Any, job: Job) -> dict[str, Any]:
+    """Project the newest candidate and the exact owner action, read-only.
+
+    ``wait_job``, ``get_job`` (MCP and ``orch job get``) all read this one
+    projection, so the command an owner is told to type cannot differ per
+    surface.  ``owner_action`` is set only when the accept engine says the run
+    is eligible right now; a candidate without eligibility is still reported,
+    because it is evidence the owner may want to inspect.
+    """
+    from saberops.accept import AcceptEngine
+    from saberops.candidate_lifecycle import project_candidate_state
+
+    view: dict[str, Any] = {
+        "run_id": None,
+        "candidate_sha": None,
+        "owner_action": None,
+    }
+    engine = AcceptEngine(db)
+    for run_id in reversed(job.run_ids):
+        projection = project_candidate_state(db, run_id)
+        if projection.candidate_sha is None:
+            continue
+        eligible = engine.check_accept_eligibility(run_id).eligible
+        if view["candidate_sha"] is not None and not eligible:
+            continue
+        view.update(run_id=run_id, candidate_sha=projection.candidate_sha)
+        if eligible:
+            view["owner_action"] = f"orch accept {run_id}"
+            break
+    return view
+
+
 def job_usage_view(db: Any, job: Job) -> dict[str, Any]:
     """Per-attempt and per-subscription usage from durable records.
 

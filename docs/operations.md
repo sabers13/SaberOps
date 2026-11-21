@@ -93,6 +93,12 @@ Retry, continue and try-worker launch through the durable supervisor like
 its checks and review finish. The new run id is printed with `orch wait` /
 `orch status` hints.
 
+`orch list [--repo PATH] [--limit N]` lists recent runs. Without `--db` it
+reads the project's own store **and** the owner store for that project's runs,
+because `orch scheduler run` and the MCP server write to the owner store; both
+store paths are printed so an empty project store is never mistaken for "the
+run is missing".
+
 ## Build routing policy
 
 SaberOps has three roles (ADR-0005 §3): **plan** (the external CLI session the
@@ -147,7 +153,12 @@ provider/model.
 ## Pacing scheduler (`orch scheduler run`)
 
 `orch scheduler run [--once] [--interval-seconds INT] [--max-concurrent N]`
-runs the deterministic pacing scheduler loop. Queued jobs are
+runs the deterministic pacing scheduler loop in the foreground.
+`orch scheduler start` starts the same loop detached (one scheduler per owner
+store) and returns; it is the command `preflight` and the first-run walkthrough
+give an owner, so setup never has to occupy a terminal. Both start paths take
+the shared scheduler lease, so a second call reports the running helper instead
+of starting a second one. Queued jobs are
 scheduled in strict priority order: `URGENT` > `NORMAL` > `BACKGROUND`, with
 earliest deadline first, then FIFO by creation time. `BACKGROUND` jobs require
 binding-window pace >= 4.0 %/h.
@@ -406,6 +417,10 @@ key always creates a new job.
   Exit 3 means stored but FAILED at submit
   (`NO_ROUTE_FOR_REQUIREMENTS`); the job is printed.
 - `orch job get JOB_ID [--json]`, e.g. `orch job get <job-id> --json`.
+  The view names the newest candidate (`Candidate: <sha> (<run>)`) and, when
+  that run is eligible now, the exact owner action (`Owner action: orch accept
+  <run>`). It is the same projection `wait_job` and `get_job` return as
+  `result.owner_action`, so a CLI reader and an agent cannot disagree.
 - `orch job list [--state STATE] [--limit N] [--json]`, e.g.
   `orch job list --state QUEUED --limit 20 --json`, ordered URGENT,
   NORMAL, BACKGROUND, then oldest first.
