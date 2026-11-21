@@ -333,3 +333,149 @@ def test_force_harnesses_runs_injected_probe_without_exclusion(
     )
     assert outcomes["codex"] == "ran"
     assert record.get("called") is True
+
+
+# ---------------------------------------------------------------------------
+# N2: a discovered binding's pool must agree with the probe that just ran
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def _isolated_owner_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Point owner config/state at ``tmp_path`` so packaged plans are the only source."""
+    for name in ("state", "config", "cache"):
+        (tmp_path / name).mkdir()
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setenv("ORCH_BINDING_STORE", str(tmp_path / "state" / "bindings.json"))
+    monkeypatch.delenv("SABEROPS_PROFILE", raising=False)
+
+
+def _discovered_reviewer_quota(db: Database, pool_id: str, now: datetime) -> Any:
+    """The quota decision for a discovered binding pool (N2's refusal seam)."""
+    from saberops.control_plane.plans import resolve_binding_quota_pools
+    from saberops.control_plane.policy import load_control_plane_policy
+    from saberops.control_plane.quota_policy import quota_decision
+    from saberops.models import WorkerCandidate
+
+    candidate = WorkerCandidate("opencode", "opencode-go/deepseek-v4.1-flash")
+    states = effective_quota_states(db, now=now, run_probes=False)
+    pools, _plans = resolve_binding_quota_pools(
+        load_control_plane_policy(),
+        candidate,
+        pool_id,
+        quota_states=states,
+        activate_overage=True,
+    )
+    return quota_decision(candidate, states, pool_policies=pools, pool_id=pool_id, now=now)
+
+
+def test_discovered_binding_pool_is_satisfied_by_the_probe_that_ran(
+    _isolated_owner_config: None, tmp_path: Path
+) -> None:
+    """N2: the reviewer's own probe must feed the discovered binding's pool.
+
+    The binding names ``discovered-pool:opencode-account`` while the packaged
+    plan (and the probe) names ``opencode-go``.  A fresh probe used to leave
+    the discovered pool with no evidence, so review admission refused with
+    ``QUOTA_EVIDENCE_REQUIRED`` even though the probe had just succeeded.
+    """
+    from saberops.capacity.probes import try_safe_quota_probe
+
+    db = _db(tmp_path)
+    now = datetime(2026, 11, 21, 12, 0, tzinfo=UTC)
+    reset = now + timedelta(hours=5)
+    pool_id = "discovered-pool:opencode-account"
+
+    before = _discovered_reviewer_quota(db, pool_id, now)
+    assert before.eligible is False
+    assert before.reason == "QUOTA_EVIDENCE_REQUIRED"
+
+    record: dict[str, Any] = {}
+    outcome = try_safe_quota_probe(
+        db,
+        provider="opencode",
+        now=now,
+        probes={
+            "opencode-go": _FakeProbe(
+                "opencode-go",
+                [("5h", 59.0, reset, "EXACT"), ("weekly", 72.0, reset, "EXACT")],
+                record,
+            )
+        },
+    )
+    assert outcome == "ran"
+    assert record.get("called") is True
+
+    after = _discovered_reviewer_quota(db, pool_id, now)
+    assert after.eligible is True, after.reason
+    assert after.pool_id == pool_id
+
+
+def test_discovered_pool_evidence_stays_binding_scoped(
+    _isolated_owner_config: None, tmp_path: Path
+) -> None:
+    """N2 companion: an account pool never blocks unrelated provider routes.
+
+    Discovered evidence is connection-scoped.  An exhausted OpenCode Go
+    account must refuse its own binding pool, but must not turn into a
+    provider-wide block for OpenCode Zen routes evaluated without a binding.
+    """
+    from saberops.control_plane.plans import effective_quota_pools
+    from saberops.control_plane.policy import load_control_plane_policy
+    from saberops.control_plane.quota_policy import quota_decision
+    from saberops.models import WorkerCandidate
+
+    db = _db(tmp_path)
+    now = datetime(2026, 11, 21, 12, 0, tzinfo=UTC)
+    pool_id = "discovered-pool:opencode-account"
+    db.set_quota(
+        "opencode",
+        pool_id,
+        0.0,
+        reset_at=(now + timedelta(hours=5)).isoformat(),
+        now=now,
+    )
+    states = effective_quota_states(db, now=now, run_probes=False)
+    policy = load_control_plane_policy()
+
+    zen = quota_decision(
+        WorkerCandidate("opencode", "opencode/big-pickle"),
+        states,
+        pool_policies=effective_quota_pools(policy),
+        now=now,
+    )
+    assert zen.eligible is True
+
+    bound = _discovered_reviewer_quota(db, pool_id, now)
+    assert bound.eligible is False
+    assert bound.pool_id == pool_id
+
+
+def test_discovered_binding_pool_still_blocks_without_fresh_evidence(
+    _isolated_owner_config: None, tmp_path: Path
+) -> None:
+    """N2 fail-safe: missing or stale evidence still refuses the binding pool."""
+    db = _db(tmp_path)
+    now = datetime(2026, 11, 21, 12, 0, tzinfo=UTC)
+    pool_id = "discovered-pool:opencode-account"
+
+    # Missing evidence: no probe has ever run for this account.
+    missing = _discovered_reviewer_quota(db, pool_id, now)
+    assert missing.eligible is False
+    assert missing.reason == "QUOTA_EVIDENCE_REQUIRED"
+
+    # Genuinely stale evidence: a two-day-old reading is past the windows.
+    db.set_quota(
+        "opencode",
+        pool_id,
+        80.0,
+        reset_at=(now + timedelta(days=1)).isoformat(),
+        now=now - timedelta(days=2),
+    )
+    stale = _discovered_reviewer_quota(db, pool_id, now)
+    assert stale.eligible is False
+    assert stale.reason == "QUOTA_EVIDENCE_REQUIRED"

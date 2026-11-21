@@ -504,6 +504,70 @@ class RealModeRefused(RuntimeError):
     """Real mode was asked to start without its safety conditions."""
 
 
+#: Credential-bearing environment variables whose use bills per token / call.
+#: Real mode removes every one of them so a subscription run cannot silently
+#: fall back to API billing.  The list names every provider preset SaberOps can
+#: route (see :data:`saberops.model_access.connections._PRESET_DEFAULTS` plus
+#: the vendor CLIs' own SDK names) and the gateway keys an ambient shell can
+#: carry (``TOKENROUTER_API_KEY``, ``YDC_API_KEY``).
+METERED_CREDENTIAL_ENV_KEYS: tuple[str, ...] = (
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "CODEX_API_KEY",
+    "CODEX_ACCESS_TOKEN",
+    "CLAUDE_API_KEY",
+    "OPENCODE_API_KEY",
+    "TOKENROUTER_API_KEY",
+    "OPENROUTER_API_KEY",
+    "MINIMAX_API_KEY",
+    "GENERAL_COMPUTE_API_KEY",
+    "OMNIROUTE_API_KEY",
+    "YDC_API_KEY",
+)
+
+#: The shape every provider API key takes.  A name with this suffix is treated
+#: as metered even when the vendor is not in the known list: the shape is the
+#: class, so an unknown gateway cannot slip through an allowlist of names.
+METERED_CREDENTIAL_ENV_SUFFIX = "_API_KEY"
+
+
+def metered_credential_keys(
+    base: dict[str, str] | None = None,
+) -> tuple[str, ...]:
+    """Return ambient metered credential names (known list plus API-key shape)."""
+    source = os.environ if base is None else base
+    return tuple(
+        sorted(
+            key
+            for key in source
+            if key in METERED_CREDENTIAL_ENV_KEYS
+            or key.endswith(METERED_CREDENTIAL_ENV_SUFFIX)
+        )
+    )
+
+
+def unclassified_metered_credentials(
+    base: dict[str, str] | None = None,
+) -> tuple[str, ...]:
+    """Return API-key-shaped names the known metered class does not name.
+
+    Real mode refuses these instead of guessing: an unknown vendor key could
+    bill per token through a route the subscription run never intends to use.
+    Names are reported; values never are.
+    """
+    source = os.environ if base is None else base
+    return tuple(
+        sorted(
+            key
+            for key in source
+            if key.endswith(METERED_CREDENTIAL_ENV_SUFFIX)
+            and key not in METERED_CREDENTIAL_ENV_KEYS
+        )
+    )
+
+
 def owner_store_paths(home: Path | None = None) -> tuple[Path, Path]:
     """The owner's real SaberOps state and config directories."""
     root = Path(home) if home is not None else Path.home()
@@ -511,12 +575,18 @@ def owner_store_paths(home: Path | None = None) -> tuple[Path, Path]:
 
 
 def validate_real_mode(
-    *, acknowledged: bool, store: Path, home: Path | None = None
+    *,
+    acknowledged: bool,
+    store: Path,
+    home: Path | None = None,
+    base: dict[str, str] | None = None,
 ) -> Path:
     """Refuse real mode unless it is explicit and points at an isolated store.
 
     Returns the resolved store path.  This runs before any vendor CLI is
-    started or any SaberOps state is written.
+    started or any SaberOps state is written.  An ambient API key the metered
+    class does not name is refused (names only, never values) so a real run
+    cannot silently reach an unknown pay-per-token gateway (N6).
     """
     if not acknowledged:
         raise RealModeRefused(
@@ -537,6 +607,13 @@ def validate_real_mode(
         raise RealModeRefused(
             f"refusing non-empty store {resolved}; real mode starts from an "
             "empty isolated directory"
+        )
+    unknown = unclassified_metered_credentials(base)
+    if unknown:
+        raise RealModeRefused(
+            "real mode refuses API keys it cannot classify: "
+            + ", ".join(unknown)
+            + "; unset them for the run so a metered key can never reach a worker"
         )
     return resolved
 
@@ -680,7 +757,10 @@ def isolated_environment(store: Path, *, base: dict[str, str] | None = None) -> 
 
     SaberOps state moves under *store*.  ``HOME`` is left alone so the vendor
     CLIs keep the owner's real sign-in, and pay-per-token keys are removed so a
-    subscription run cannot silently fall back to API billing.
+    subscription run cannot silently fall back to API billing.  Every known
+    metered credential is removed, plus every name with the ``*_API_KEY``
+    shape, so an unknown gateway key cannot survive even if it appeared after
+    :func:`validate_real_mode` checked (N6).
 
     ``XDG_DATA_HOME`` is deliberately **not** redirected: OpenCode keeps its
     sign-in at ``$XDG_DATA_HOME/opencode/auth.json`` and SaberOps does not use
@@ -698,18 +778,29 @@ def isolated_environment(store: Path, *, base: dict[str, str] | None = None) -> 
         env[variable] = str(store / subdir)
     env["SABEROPS_DISABLE_AUTO_SCHEDULER"] = "1"
     env.setdefault("TMPDIR", "/var/tmp")
-    for key in (
-        "OPENAI_API_KEY",
-        "ANTHROPIC_API_KEY",
-        "GEMINI_API_KEY",
-        "GOOGLE_API_KEY",
-        "CODEX_API_KEY",
-        "CODEX_ACCESS_TOKEN",
-        "CLAUDE_API_KEY",
-        "OPENCODE_API_KEY",
-    ):
+    for key in metered_credential_keys(env):
         env.pop(key, None)
     return env
+
+
+def apply_isolated_environment(
+    store: Path, *, environ: dict[str, str] | None = None
+) -> dict[str, str]:
+    """Apply :func:`isolated_environment` in place and return the result.
+
+    Assigning the returned mapping onto ``os.environ`` is not enough to remove
+    a key: an update only adds or replaces entries.  Real mode therefore
+    replaces the ambient environment through this helper, which deletes every
+    key the isolated environment does not carry, so a stripped metered
+    credential cannot stay behind in the process that starts vendor CLIs (N6).
+    """
+    target = os.environ if environ is None else environ
+    isolated = isolated_environment(store, base=dict(target))
+    for key in list(target):
+        if key not in isolated:
+            del target[key]
+    target.update(isolated)
+    return isolated
 
 
 # --------------------------------------------------------------------------

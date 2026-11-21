@@ -148,6 +148,13 @@ def _matches(state: QuotaState, candidate: WorkerCandidate, policy: QuotaPoolPol
                 raw_members.append(member)
         return any(_member_matches(member, candidate) for member in raw_members)
     # No members: provider-scoped (legacy) semantics.
+    # A discovered binding pool is a connection-scoped identity, never the
+    # provider-wide default (see ``materialize_discovered_binding``): without a
+    # resolved policy its evidence must not govern unbound candidates of the
+    # same provider.  Otherwise one account's probe (e.g. OpenCode Go) would
+    # block unrelated routes of that provider (OpenCode Zen) - N2.
+    if str(state_pool).startswith("discovered-pool:"):
+        return False
     exclusion_pool = getattr(state, "pool_id", None)
     if exclusion_pool and getattr(state, "exclusion_id", None):
         # Synthesized exclusion without a member list: it belongs to the

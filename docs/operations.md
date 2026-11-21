@@ -543,7 +543,8 @@ actions and the subscription used.
   (`--dry-run` prints the worker/reviewer routes). It refuses without
   `--yes-real-cli` and an empty isolated `--store`, never reuses the owner's
   real SaberOps state or config, drops pay-per-token credentials from the child
-  environment, and refuses to submit until the isolated store's preflight is
+  environment (and refuses to start when an unrecognised `*_API_KEY` is
+  present), and refuses to submit until the isolated store's preflight is
   green. It holds an attended-terminal session for the whole run and disables
   the detached auto-started scheduler, so exactly one scheduler driver ticks;
   a sticky pause is cleared only when it is the engine's own

@@ -279,6 +279,45 @@ def test_cancel_running_uses_canceller(
     assert _StubSupervisor.seen == ["run_live_1"]
 
 
+def test_cancel_queued_job_id_cancels_the_job(
+    isolated: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """N4: a QUEUED job has no run yet; `orch cancel <job_id>` cancels the job.
+
+    The owner-facing list prints job ids, so a queued job must be cancellable
+    with the same reference even before the scheduler dispatches it.  The
+    reference previously resolved to nothing and exited 1 as "unknown run or
+    job", while `orch job cancel <job_id>` already handled it.
+    """
+    from saberops.jobs.store import get_job
+
+    repo = _git_repo(isolated / "repo")
+    _, payload, _ = _submit(isolated, capsys, repo)
+    job_id = payload["job"]["job_id"]
+    assert payload["job"]["state"] == "QUEUED"
+
+    code, out, err = _cli(
+        "cancel", job_id, "--db", _db_path(isolated), capsys=capsys
+    )
+    assert code == 0, err
+    result = json.loads(out)
+    assert result["job_id"] == job_id
+    assert result["cancelled"] is True
+    assert result["status"] == "CANCELLED"
+    job = get_job(Database(_db_path(isolated)), job_id)
+    assert job is not None and job.state.value == "CANCELLED"
+
+
+def test_cancel_unknown_reference_still_exits_1(
+    isolated: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, _, err = _cli(
+        "cancel", "no-such-reference", "--db", _db_path(isolated), capsys=capsys
+    )
+    assert code == 1
+    assert "unknown run or job" in err
+
+
 def test_cancel_accepts_the_job_id_printed_by_job_list(
     isolated: Path, capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,

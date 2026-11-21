@@ -65,7 +65,10 @@ repositories, and each batch selects a reviewer from a different vendor. It
 refuses to start without an explicit acknowledgement flag and an isolated, empty
 store, and it never reuses the owner's real SaberOps state or config
 directories. It removes pay-per-token credentials from the child environment so
-a subscription run cannot silently fall back to API billing, leaves
+a subscription run cannot silently fall back to API billing (every known
+metered credential plus every `*_API_KEY`-shaped name), and it refuses to start
+when the ambient shell carries an API key it does not recognise, naming the
+variable but never its value. It leaves
 `XDG_DATA_HOME` alone so OpenCode keeps its sign-in, and disables the detached
 auto-started scheduler while it holds an attended terminal for its own ticks. Its
 default routes are configurable: OpenCode Go `opencode-go/deepseek-v4.1-flash`,

@@ -225,6 +225,33 @@ _PROVIDER_TO_PROBE_HARNESS: dict[str, str] = {
 }
 
 
+def _canonical_connection_for_provider(provider: str) -> str | None:
+    """Return the account connection the local probe actually reads.
+
+    A probe reads the single account signed into the local CLI, so its windows
+    describe exactly that account's quota.  Discovered bindings name that
+    account as ``discovered-pool:<connection id>`` while packaged plans name
+    the provider route; both identity spellings must receive the same evidence
+    (N2).  More than one account connection for a provider is ambiguous -- the
+    probe cannot prove which one it read -- so no alias is invented.
+    """
+    wanted = provider.strip().lower()
+    if not wanted:
+        return None
+    try:
+        from saberops.model_access.connections import ACCOUNT_BACKENDS
+    except Exception:
+        return None
+    matches = [
+        backend.connection_id
+        for backend in ACCOUNT_BACKENDS
+        if backend.provider.strip().lower() == wanted
+    ]
+    if len(matches) != 1:
+        return None
+    return matches[0]
+
+
 def pools_for_probe(
     harness: str, pool_policies: dict[str, Any] | None
 ) -> list[str]:
@@ -268,6 +295,24 @@ def pools_for_probe(
     return matched or [provider]
 
 
+def discovered_pool_aliases(harness: str) -> list[str]:
+    """Discovered binding pools the probe's reading is evidence for.
+
+    A probe reads the single account signed into the local CLI.  A discovered
+    binding names that same account as ``discovered-pool:<connection id>``
+    (see :func:`saberops.control_plane.binding_store.materialize_discovered_binding`),
+    while packaged plans name the provider route.  The probe therefore records
+    its windows under both identities so a fresh reading satisfies the
+    binding's pool without an owner-written row (N2).  No alias is invented
+    when the provider has no single canonical account connection.
+    """
+    provider = HARNESS_PROVIDER.get(harness, harness)
+    connection = _canonical_connection_for_provider(provider)
+    if connection is None:
+        return []
+    return [f"discovered-pool:{connection}"]
+
+
 def _load_pool_policies() -> dict[str, Any]:
     try:
         from saberops.control_plane.plans import effective_quota_pools
@@ -295,6 +340,14 @@ def handle_probe_result(
     moment = _utcnow(now)
     policies = pool_policies if pool_policies is not None else _load_pool_policies()
     pools = pools_for_probe(harness, policies)
+    # Ledger evidence is also recorded against the canonical account
+    # connection's discovered pool: that is the same account the probe read and
+    # the identity a discovered binding names (N2).  Exclusions and red-line
+    # rows keep their existing pool scope.
+    evidence_pools = [*pools]
+    for alias in discovered_pool_aliases(harness):
+        if alias not in evidence_pools:
+            evidence_pools.append(alias)
     provider = HARNESS_PROVIDER.get(harness, harness)
     now_iso = moment.isoformat()
     for window_id, remaining, reset, confidence in windows:
@@ -323,7 +376,7 @@ def handle_probe_result(
                 pass
         except Exception:
             pass
-        for pool_id in pools:
+        for pool_id in evidence_pools:
             try:
                 from saberops.capacity.ledger import record_probe_window_observation
 
@@ -637,6 +690,7 @@ __all__ = [
     "HARNESS_PROVIDER",
     "REGISTERED_HARNESSES",
     "Probe",
+    "discovered_pool_aliases",
     "duration_to_window",
     "read_codex_windows",
     "read_claude_windows",

@@ -28,7 +28,6 @@ from saberops.benchmark import (  # noqa: E402
     REAL_MODE_FLAG,
     RealModeRefused,
     fake_mode_environment,
-    isolated_environment,
     real_batches,
     real_model_for,
     validate_real_mode,
@@ -143,9 +142,11 @@ def _run_real(args: argparse.Namespace) -> int:
         _print_plan(store, repo_root, models)
         return 0
 
-    from saberops.benchmark import run_real_benchmark
+    from saberops.benchmark import apply_isolated_environment, run_real_benchmark
 
-    os.environ.update(isolated_environment(store))
+    # Replace the ambient environment: an update alone would leave a stripped
+    # metered key behind in this process (N6).
+    apply_isolated_environment(store)
     report = run_real_benchmark(store=store, repo_root=repo_root, models=models)
     print(report.table())
     return 0 if report.passed else 1

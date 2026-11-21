@@ -3457,13 +3457,33 @@ def handle_cancel(args: argparse.Namespace) -> int:
 
     The owner-facing lists show job ids, while runs are the cancellation unit.
     A job reference resolves to its live (or newest recorded) run so the owner
-    never has to translate the id by hand.
+    never has to translate the id by hand.  A job that has no run yet (QUEUED)
+    is cancelled as a job record, exactly like `orch job cancel`.
     """
     reference = str(args.run_id).strip()
-    run_id, db = _resolve_cancel_reference(args, reference)
+    run_id, job, db = _resolve_cancel_reference(args, reference)
     if run_id is None:
-        print(f"Error: unknown run or job: {reference}", file=sys.stderr)
-        return 1
+        if job is None:
+            print(f"Error: unknown run or job: {reference}", file=sys.stderr)
+            return 1
+        # N4: a QUEUED job has no run to cancel; cancel the job record itself
+        # through the jobs service so it never starts.  Any other run-less job
+        # reports its unchanged state (`cancelled: false`) instead of failing.
+        from saberops.jobs.service import cancel_job as _cancel_job
+
+        try:
+            result = _cancel_job(db, job.job_id, run_canceller=lambda _run_id: False)
+        except ValueError as exc:
+            print(f"[!] Invalid job cancel: {exc}", file=sys.stderr)
+            return 2
+        payload: dict[str, object] = {
+            "job_id": result.job.job_id,
+            "cancelled": result.cancelled,
+            "status": result.job.state.value,
+            "owner_state": None,
+        }
+        print(json.dumps(payload, sort_keys=True))
+        return 0
     run = db.get_run(run_id)
     if run is None:
         print(f"Error: unknown run: {run_id}", file=sys.stderr)
@@ -3471,7 +3491,7 @@ def handle_cancel(args: argparse.Namespace) -> int:
     cancelled = RunSupervisor(db=db).cancel(run_id)
     after = db.get_run(run_id)
     owner = db.get_execution_owner(run_id)
-    payload: dict[str, object] = {
+    payload = {
         "run_id": run_id,
         "cancelled": cancelled,
         "status": after.status.value if after is not None else None,
@@ -3485,18 +3505,20 @@ def handle_cancel(args: argparse.Namespace) -> int:
 
 def _resolve_cancel_reference(
     args: argparse.Namespace, reference: str
-) -> tuple[str | None, Database]:
+) -> tuple[str | None, Any | None, Database]:
     """Resolve a run id or the job id printed by `orch job list`.
 
     A direct run reference keeps the existing project-store lookup.  A job
     reference is resolved from the owner job store to its current run, or the
-    newest recorded run when the job is no longer RUNNING.
+    newest recorded run when the job is no longer RUNNING.  The resolved job is
+    returned too so a run-less (still QUEUED) job can be cancelled as a job
+    record rather than reported as unknown (N4).
     """
     from saberops.jobs.store import get_job
 
     db = db_for_run(args, reference)
     if db.get_run(reference) is not None:
-        return reference, db
+        return reference, None, db
     try:
         jobs_db = Database(_explicit_db(args))
     except Exception:
@@ -3504,12 +3526,14 @@ def _resolve_cancel_reference(
     job = get_job(jobs_db, reference)
     if job is None and jobs_db.db_path != db.db_path:
         job = get_job(db, reference)
+        if job is not None:
+            jobs_db = db
     if job is None:
-        return None, db
+        return None, None, db
     resolved = job.current_run_id or (job.run_ids[-1] if job.run_ids else None)
     if not resolved:
-        return None, db
-    return resolved, db_for_run(args, resolved)
+        return None, job, jobs_db
+    return resolved, job, db_for_run(args, resolved)
 
 
 def handle_review(args: argparse.Namespace) -> int:

@@ -50,15 +50,18 @@ from saberops.benchmark import (
     TASKS_BY_ID,
     RealModeRefused,
     TaskResult,
+    apply_isolated_environment,
     configure_real_reviewer,
     create_toy_repository,
     isolated_environment,
+    metered_credential_keys,
     prepare_real_store,
     real_batches,
     real_family_requirements,
     real_mode_presence,
     real_model_for,
     real_worker_candidates,
+    unclassified_metered_credentials,
     validate_real_mode,
     wait_for_batch,
 )
@@ -390,11 +393,22 @@ def test_isolated_environment_moves_state_and_drops_pay_per_token_keys(
             "ANTHROPIC_API_KEY": "secret",
             "GEMINI_API_KEY": "secret",
             "CODEX_API_KEY": "secret",
+            "TOKENROUTER_API_KEY": "secret",
+            "YDC_API_KEY": "secret",
+            "SOME_UNKNOWN_GATEWAY_API_KEY": "secret",
             "PATH": "/usr/bin",
         },
     )
     assert env["HOME"] == "/home/owner"
-    for key in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "CODEX_API_KEY"):
+    for key in (
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GEMINI_API_KEY",
+        "CODEX_API_KEY",
+        "TOKENROUTER_API_KEY",
+        "YDC_API_KEY",
+        "SOME_UNKNOWN_GATEWAY_API_KEY",
+    ):
         assert key not in env
     assert env["XDG_STATE_HOME"] == str(store / "state")
     assert env["XDG_CONFIG_HOME"] == str(store / "config")
@@ -404,6 +418,72 @@ def test_isolated_environment_moves_state_and_drops_pay_per_token_keys(
     assert env["XDG_DATA_HOME"] == "/home/owner/.local/share"
     # D3: one scheduler driver.  Real mode ticks in-process.
     assert env["SABEROPS_DISABLE_AUTO_SCHEDULER"] == "1"
+
+
+def test_metered_credential_class_covers_known_and_shaped_keys() -> None:
+    """N6: the metered class names every known gateway plus the API-key shape."""
+    base = {
+        "TOKENROUTER_API_KEY": "secret",
+        "YDC_API_KEY": "secret",
+        "OPENAI_API_KEY": "secret",
+        "GEMINI_API_KEY": "secret",
+        "CODEX_ACCESS_TOKEN": "secret",
+        "SOME_FUTURE_VENDOR_API_KEY": "secret",
+        "PATH": "/usr/bin",
+        "ANTHROPIC_AUTH_TOKEN": "not-an-api-key-name",
+    }
+    assert metered_credential_keys(base) == (
+        "CODEX_ACCESS_TOKEN",
+        "GEMINI_API_KEY",
+        "OPENAI_API_KEY",
+        "SOME_FUTURE_VENDOR_API_KEY",
+        "TOKENROUTER_API_KEY",
+        "YDC_API_KEY",
+    )
+    assert unclassified_metered_credentials(base) == ("SOME_FUTURE_VENDOR_API_KEY",)
+
+
+def test_validate_real_mode_refuses_an_unclassified_api_key(
+    tmp_path: Path,
+) -> None:
+    """N6 fail-safe: an unknown metered key aborts before any vendor CLI runs."""
+    store = tmp_path / "isolated"
+    base = {"HOME": "/home/owner", "ACME_GATEWAY_API_KEY": "sk-never-print-me"}
+    with pytest.raises(RealModeRefused, match="ACME_GATEWAY_API_KEY") as refused:
+        validate_real_mode(acknowledged=True, store=store, base=base)
+    assert "sk-never-print-me" not in str(refused.value)
+
+
+def test_validate_real_mode_accepts_only_the_known_metered_class(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "isolated"
+    base = {
+        "HOME": "/home/owner",
+        "OPENAI_API_KEY": "secret",
+        "TOKENROUTER_API_KEY": "secret",
+        "YDC_API_KEY": "secret",
+    }
+    assert validate_real_mode(acknowledged=True, store=store, base=base) == store.resolve()
+
+
+def test_apply_isolated_environment_removes_stripped_keys_in_place(
+    tmp_path: Path,
+) -> None:
+    """N6: an update alone leaves a popped key behind; applying must delete it."""
+    environ = {
+        "HOME": "/home/owner",
+        "PATH": "/usr/bin",
+        "TOKENROUTER_API_KEY": "secret",
+        "YDC_API_KEY": "secret",
+        "OPENAI_API_KEY": "secret",
+    }
+    apply_isolated_environment(tmp_path / "store", environ=environ)
+    assert "TOKENROUTER_API_KEY" not in environ
+    assert "YDC_API_KEY" not in environ
+    assert "OPENAI_API_KEY" not in environ
+    assert environ["HOME"] == "/home/owner"
+    assert environ["XDG_STATE_HOME"] == str(tmp_path / "store" / "state")
 
 
 def test_isolated_environment_leaves_an_unset_data_home_alone(tmp_path: Path) -> None:
