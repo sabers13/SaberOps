@@ -629,7 +629,28 @@ def test_c16b1_changed_paths_from_durable_checkpoint(tmp_path: Path) -> None:
 
     report = build_run_report(db, "run_c16b1")
     assert report["workspace"]["changed_paths"] == ["a.md", "b.md"]
-    assert report["workspace"]["cleanup_state"] == UNKNOWN
+    assert report["workspace"]["cleanup_state"] == "CLEANED_UNRECORDED"
+
+
+def test_c16b1_cleanup_state_from_durable_storage_event(tmp_path: Path) -> None:
+    """A recorded worktree removal is durable cleanup evidence, not a guess."""
+    db = Database(tmp_path / "state.db")
+    _run(db, status=RunStatus.COMPLETED, completed_at=_COMPLETED, final_attempt_id="att_1")
+    _attempt(db, "run_c16b1", "att_1", 1, status=AttemptStatus.SUCCESS, commit_sha="cand")
+    db.record_storage_event(
+        at=_COMPLETED,
+        phase="result",
+        action="remove-worktree",
+        artifact_class="attempt-worktree",
+        artifact_ref="/tmp/does-not-exist-wt",
+        artifact_identity="/tmp/does-not-exist-wt",
+        reason="test cleanup",
+        run_id="run_c16b1",
+    )
+
+    report = build_run_report(db, "run_c16b1")
+    assert report["workspace"]["cleanup_state"] == "CLEANED"
+    assert not any("cleanup" in gap for gap in report["evidence_gaps"])
 
 
 # --- CLI + API surfaces -----------------------------------------------------

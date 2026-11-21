@@ -284,6 +284,72 @@ def test_discovered_codex_reviewer_pool_stale_still_fails(
     assert decision.reason == "QUOTA_EVIDENCE_REQUIRED"
 
 
+def test_discovered_opencode_reviewer_pool_agrees_with_admission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A model-route glob in a packaged plan still governs its discovered pool.
+
+    A7 regression: OpenCode's packaged plans express membership as
+    ``opencode/opencode-go/*`` (not the bare provider), so a discovered
+    OpenCode reviewer pool resolved no policy and preflight called its fresh
+    41% evidence "stale (age 0s)" while admission refused it.  One plan matches
+    the candidate route, so it governs the discovered pool exactly as it
+    governs the packaged one.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from saberops.capacity.admission import admit
+    from saberops.capacity.snapshot import effective_quota_states
+    from saberops.cli import main as cli_main
+    from saberops.control_plane.binding_store import load_owner_bindings
+    from saberops.control_plane.policy import load_control_plane_policy
+    from saberops.models import WorkerCandidate
+    from saberops.preflight import collect_preflight
+
+    rig = build_lifecycle_rig(tmp_path, monkeypatch)
+    owner = load_owner_bindings()
+    binding = next(
+        entry
+        for entry in owner.registry.bindings
+        if entry.provider == "opencode" and entry.binding_role.value == "CHECK"
+    )
+    rig.service().set_reviewer_binding(binding.binding_id)
+    reset_at = (datetime.now(UTC) + timedelta(hours=4)).isoformat()
+    assert (
+        cli_main(
+            [
+                "quota",
+                "set",
+                "opencode",
+                binding.quota_pool_id,
+                "--remaining",
+                "41",
+                "--reset-at",
+                reset_at,
+            ]
+        )
+        == 0
+    )
+
+    findings = collect_preflight(rig.repo)
+    prefix = f"opencode/{binding.quota_pool_id} quota:"
+    line = next(finding.message for finding in findings if finding.message.startswith(prefix))
+    assert line.startswith(f"{prefix} available"), line
+    assert line.count("(age ") == 1, line
+
+    moment = datetime.now(UTC)
+    decision = admit(
+        WorkerCandidate(binding.provider, binding.model),
+        now=moment,
+        policy=load_control_plane_policy(),
+        quota_states=effective_quota_states(rig.db(), run_probes=False, now=moment),
+        binding_pool_id=binding.quota_pool_id,
+        explicit_override=True,
+        activate_overage=True,
+    )
+    assert decision.admitted is True, decision.reason
+
+
 def test_lifecycle_happy_path_via_scheduler(rig: RigEnvironment) -> None:
     """Job submitted -> scheduler dispatches -> worker commits -> review -> owner accepts."""
     db = rig.db()

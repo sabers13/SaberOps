@@ -5572,12 +5572,12 @@ class Orchestrator:
                         run_id, attempt_number, WorkerActivationState.SUCCEEDED
                     )
                     # Check for candidate changes
-                    has_changes = GitManager.has_diff_against_base(
-                        wt_path,
+                    diff_base_sha = (
                         base_commit
                         if continued_source or config.execution_mode == "parallel"
-                        else lineage_base_sha,
+                        else lineage_base_sha
                     )
+                    has_changes = GitManager.has_diff_against_base(wt_path, diff_base_sha)
                     changed_paths_in_wt = GitManager.get_changed_paths(wt_path)
                     if changed_paths_in_wt:
                         # Capture and commit changes in worktree
@@ -5626,14 +5626,23 @@ class Orchestrator:
                             cwd=wt_path,
                             timeout=config.gate_timeout,
                         )
-                    changed_paths = tuple(GitManager.get_changed_paths(wt_path))
-                    post_gate_has_diff = (
-                        GitManager.has_diff_against_base(
-                            wt_path,
-                            base_commit
-                            if continued_source or config.execution_mode == "parallel"
-                            else lineage_base_sha,
+                    # Changed paths must describe the candidate, not the now-clean
+                    # worktree: the commit landed before the gate ran, so
+                    # ``git status`` alone always reported nothing.  Union the
+                    # committed diff against the attempt base with any files the
+                    # gate left behind so the report can name what changed.
+                    changed_paths = tuple(
+                        sorted(
+                            set(
+                                GitManager.get_changed_paths_between(
+                                    wt_path, diff_base_sha, commit_sha
+                                )
+                            )
+                            | set(GitManager.get_changed_paths(wt_path))
                         )
+                    )
+                    post_gate_has_diff = (
+                        GitManager.has_diff_against_base(wt_path, diff_base_sha)
                         if not has_changes
                         else True
                     )
@@ -7398,6 +7407,10 @@ class Orchestrator:
                                         f"({cand_provider}/{cand_model})"
                                     ),
                                 )
+                                if to_sha_local is None:
+                                    raise RuntimeError(
+                                        "Repair candidate commit unexpectedly has no SHA"
+                                    )
                                 repair_dispatch_evidence.candidate_sha = to_sha_local
                                 self.db.update_dispatch_evidence(repair_dispatch_evidence)
                                 self.db.record_event(
@@ -7419,7 +7432,18 @@ class Orchestrator:
                                     gate_args_local, cwd=local_wt_path, timeout=config.gate_timeout
                                 )
                                 changed_paths_local_t = tuple(
-                                    GitManager.get_changed_paths(local_wt_path)
+                                    sorted(
+                                        set(
+                                            GitManager.get_changed_paths_between(
+                                                local_wt_path,
+                                                base_sha_local,
+                                                to_sha_local,
+                                            )
+                                        )
+                                        | set(
+                                            GitManager.get_changed_paths(local_wt_path)
+                                        )
+                                    )
                                 )
                                 rep_disposition = _classify_gate_outcome(
                                     gate_res_local,

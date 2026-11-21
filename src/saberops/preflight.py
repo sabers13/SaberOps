@@ -76,9 +76,14 @@ def sign_in_remedy(provider: str, reason: str, connection: str) -> str:
     if reason == "NOT_AUTHENTICATED" and login:
         return f"{login} && {check}"
     if provider == "opencode" and reason == "INSUFFICIENT_EVIDENCE":
-        # The v2.3 ``auth list`` probe is the supported zero-inference check;
-        # when it could not run, only a real turn can prove sign-in.
-        return f"OpenCode sign-in is confirmed only by a first successful run; {check}"
+        # The v2.3 ``auth list`` probe is the supported zero-inference check.
+        # An unreadable probe must not read as a broken login: the attended
+        # run proceeds, and a first successful run also confirms sign-in.
+        return (
+            "OpenCode sign-in is not proven yet; this does not block an attended "
+            f"run. The zero-inference check is {check}; a first successful run "
+            "also confirms it."
+        )
     return check
 
 
@@ -105,10 +110,9 @@ def quota_status(
     admission path evaluates against the same resolved pool policy -- so
     preflight cannot disagree with admission.  When the pool is unavailable the
     label names the actual condition instead of collapsing missing evidence,
-    stale evidence and a red-line refusal into one phrase.
+    stale evidence and a red-line refusal into one phrase.  The caller appends
+    the observation age, so the label itself never carries one.
     """
-    from saberops.capacity.freshness import format_age
-
     if getattr(decision, "eligible", False):
         return True, "available"
     reason = str(getattr(decision, "reason", "") or "")
@@ -123,10 +127,16 @@ def quota_status(
         return False, f"blocked by exclusion until {until}"
     if reason == "POOL_OFF":
         return False, "blocked (pool off)"
+    if reason == "QUOTA_EVIDENCE_REQUIRED" and any(
+        str(getattr(row, "freshness", "") or "").upper() == "FRESH" for row in rows
+    ):
+        # A fresh observation exists but the pool policy could not use it.
+        # Saying "stale" at age 0s would misname the condition.
+        return False, "unusable evidence for this pool"
     newest = _newest_observation(rows)
     if newest is None:
-        return False, "missing (no observation)"
-    return False, f"stale (age {format_age(newest.isoformat(), now)})"
+        return False, "missing"
+    return False, "stale"
 
 
 def vendor_cli_version_findings(

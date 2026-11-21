@@ -204,3 +204,42 @@ def test_login_remedy_refreshes_evidence_after_signin() -> None:
     assert sign_in_remedy("codex", "NO_EVIDENCE", "codex-chatgpt-account") == (
         "orch access test codex-chatgpt-account"
     )
+
+
+def test_opencode_login_remedy_does_not_require_a_first_run() -> None:
+    """A7: the check must not claim only a run can prove OpenCode sign-in.
+
+    The v2.3 ``auth list`` probe makes ``orch access test`` a zero-inference
+    check, and an attended run proceeds even when the probe cannot read a
+    verdict.  The remedy must say that instead of implying a broken login.
+    """
+    from saberops.preflight import sign_in_remedy
+
+    remedy = sign_in_remedy("opencode", "INSUFFICIENT_EVIDENCE", "opencode-account")
+    assert "orch access test opencode-account" in remedy
+    assert "does not block an attended run" in remedy
+    assert "only by a first successful run" not in remedy
+
+
+def test_quota_status_does_not_call_fresh_evidence_stale() -> None:
+    """A7: a fresh observation that the pool policy cannot use is not "stale".
+
+    The caller appends the age, so a fresh row must never produce
+    ``stale (age 0s)`` -- the condition is unusable evidence, not staleness.
+    """
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from saberops.preflight import quota_status
+
+    now = datetime.now(UTC)
+    decision = SimpleNamespace(eligible=False, reason="QUOTA_EVIDENCE_REQUIRED")
+    fresh = SimpleNamespace(updated_at=now.isoformat(), freshness="FRESH")
+    stale = SimpleNamespace(updated_at=now.isoformat(), freshness="STALE")
+
+    assert quota_status(decision, [fresh], now) == (
+        False,
+        "unusable evidence for this pool",
+    )
+    assert quota_status(decision, [stale], now) == (False, "stale")
+    assert quota_status(decision, [], now) == (False, "missing")

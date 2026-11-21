@@ -4260,7 +4260,7 @@ def handle_recover(args: argparse.Namespace) -> int:
     print("─" * 60)
     print(f"Run ID      : {result.run_id}")
     print(f"Status      : {result.status.value}")
-    print(f"Gate Passed : {'YES' if result.passed else 'NO'}")
+    print(f"Gate Passed : {gate_summary_label(db, run_id)}")
     print(f"Summary     : {result.summary}")
     if result.branch_name:
         print(f"Branch      : {result.branch_name}")

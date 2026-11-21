@@ -645,9 +645,10 @@ def _workspace_section(
     Changed paths union durable ``worker_checkpoints`` rows and
     ``changed_paths`` payloads on the event log.  Worktree existence is
     a point-in-time filesystem observation (read-only), explicitly
-    labelled as such: it is not durable evidence.  Cleanup has no
-    durable record anywhere in the execution path, so cleanup state is
-    always ``UNKNOWN``.
+    labelled as such: it is not durable evidence.  Cleanup comes from
+    durable ``storage_cleanup_events`` rows; when those are absent, the
+    observed worktree presence is named as unrecorded rather than
+    claimed as a durable cleanup state.
     """
     changed: set[str] = set()
     for checkpoint in db.get_worker_checkpoints_for_run(run_id):
@@ -686,15 +687,42 @@ def _workspace_section(
                 "exists_now": exists,
             }
         )
-    gaps.append(
-        "cleanup state is not durably recorded by the execution path; "
-        "worktree existence above is a point-in-time observation only"
-    )
+    try:
+        cleanup_events = db.list_storage_events(run_id=run_id, limit=1000)
+    except Exception:
+        cleanup_events = []
+    removals = [
+        event
+        for event in cleanup_events
+        if str(event.get("action") or "") == "remove-worktree"
+    ]
+    if removals:
+        cleanup_state: str = "CLEANED"
+    elif not worktrees or all(
+        entry["worktree_path"] == UNKNOWN for entry in worktrees
+    ):
+        cleanup_state = UNKNOWN
+        gaps.append(
+            "cleanup state is not durably recorded by the execution path; "
+            "worktree existence above is a point-in-time observation only"
+        )
+    elif any(entry["exists_now"] is True for entry in worktrees):
+        cleanup_state = "NOT_CLEANED"
+        gaps.append(
+            "no durable cleanup record exists; 'NOT_CLEANED' is a "
+            "point-in-time observation, not a durable state"
+        )
+    else:
+        cleanup_state = "CLEANED_UNRECORDED"
+        gaps.append(
+            "no durable cleanup record exists; worktrees are absent now, but "
+            "their removal was not recorded"
+        )
     return {
         "changed_paths": changed_paths,
         "worktrees": worktrees,
         "worktree_observation_note": "exists_now is a point-in-time observation, not evidence",
-        "cleanup_state": UNKNOWN,
+        "cleanup_state": cleanup_state,
     }
 
 

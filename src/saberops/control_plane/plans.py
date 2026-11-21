@@ -26,11 +26,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from saberops.control_plane.quota_policy import QuotaPoolMode, QuotaPoolPolicy
+from saberops.control_plane.quota_policy import (
+    QuotaPoolMode,
+    QuotaPoolPolicy,
+    _member_matches,
+)
 
 if TYPE_CHECKING:
     from saberops.control_plane.policy import ControlPlanePolicy
-    from saberops.models import QuotaState
+    from saberops.models import QuotaState, WorkerCandidate
 
 
 WINDOW_IDS: frozenset[str] = frozenset(
@@ -671,7 +675,7 @@ def effective_quota_pools(
 
 def resolve_binding_quota_pools(
     policy: ControlPlanePolicy,
-    candidate: object,
+    candidate: WorkerCandidate,
     binding_pool_id: str | None,
     *,
     activate_overage: bool = False,
@@ -679,18 +683,18 @@ def resolve_binding_quota_pools(
 ) -> tuple[dict[str, QuotaPoolPolicy], dict[str, PoolPlan]]:
     """Apply a provider's packaged default to its discovered connection identity.
 
-    A packaged plan governs the discovered binding when the plan declares the
-    candidate's provider as a member -- the exact provider-wide case
+    A packaged plan governs the discovered binding when one of its members
+    matches the candidate's route -- the exact provider-wide case
     ``members == (provider,)`` is the common shape, but a plan shared with
     another vendor route (``chatgpt-plus`` lists ``codex`` and
-    ``opencode/openai/*``) still governs its provider's own discovered
-    connection.  Explicit owner pools remain independent shared constraints.
-    An ambiguous default (more than one packaged plan names the provider) is
-    never guessed, and the binding identity supplies no evidence.
+    ``opencode/openai/*``) or expressed as a model-route glob
+    (``opencode-go`` lists ``opencode/opencode-go/*``) still governs its own
+    discovered connection.  Explicit owner pools remain independent shared
+    constraints.  An ambiguous default (more than one packaged plan matches the
+    candidate) is never guessed, and the binding identity supplies no evidence.
     """
     pools = effective_quota_pools(policy, activate_overage=activate_overage)
     plans = effective_pool_plans(policy)
-    provider = str(getattr(candidate, "provider", "")).strip().lower()
     if not binding_pool_id or not binding_pool_id.startswith("discovered-pool:"):
         return pools, plans
     if binding_pool_id in pools:
@@ -699,7 +703,7 @@ def resolve_binding_quota_pools(
         pid for pid, plan in plans.items()
         if pid not in policy.quota_pools
         and pid not in policy.plans.pool_plans
-        and any(member.route.strip().lower() == provider for member in plan.members)
+        and any(_member_matches(member.route, candidate) for member in plan.members)
     ]
     if len(matches) == 1:
         source = matches[0]
