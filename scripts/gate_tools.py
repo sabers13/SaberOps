@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import contextlib
 import fcntl
 import json
@@ -80,6 +81,11 @@ DEFAULT_FREEZE_COOLDOWN_SECONDS = 2.0
 
 EWMA_DECAY_ALPHA = 0.4
 MAX_STOPPED_RERUNS = 3
+# Bound on how long any step cgroup may stay frozen.  A frozen step cannot run
+# its own coordination, so the freezer (the gate that observed pressure) must
+# either thaw it on exit or let another pass bound the freeze.
+DEFAULT_MAX_FREEZE_SECONDS = 300.0
+MAX_FREEZE_ENV = "SABEROPS_GATE_MAX_FREEZE_SECONDS"
 
 _MEMINFO_PATH = Path("/proc/meminfo")
 _PRESSURE_PATH = Path("/proc/pressure/memory")
@@ -634,6 +640,23 @@ def resolve_wait_seconds(wait: float | None = None, env: dict[str, str] | None =
     return parsed
 
 
+def resolve_max_freeze_seconds(
+    value: float | None = None, env: dict[str, str] | None = None
+) -> float:
+    """Return the positive bound on how long one step may stay frozen."""
+    if value is not None:
+        return max(1.0, float(value))
+    environ = os.environ if env is None else env
+    raw = environ.get(MAX_FREEZE_ENV, "").strip()
+    if not raw:
+        return DEFAULT_MAX_FREEZE_SECONDS
+    try:
+        parsed = float(raw)
+    except ValueError:
+        return DEFAULT_MAX_FREEZE_SECONDS
+    return parsed if parsed > 0 else DEFAULT_MAX_FREEZE_SECONDS
+
+
 def _ewma_peak(prev: int | None, sample: int) -> int:
     """Asymmetric EWMA: jump upward immediately on spike, decay smoothly downward."""
     if sample <= 0:
@@ -751,6 +774,12 @@ class MemoryLease:
             self.holder_id, cgroup_path=str(self.cgroup_path), unit_name=unit_name
         )
 
+    def set_freeze_eligible(self, eligible: bool = True) -> None:
+        """Mark this holder as a real gate step that may be frozen under pressure."""
+        if self._released:
+            return
+        self._ledger.update_holder(self.holder_id, freeze_eligible=bool(eligible))
+
     def snapshot_holder(self) -> dict[str, Any]:
         record = _read_json_dict(self._meta_path)
         return record if record is not None else {}
@@ -797,6 +826,9 @@ class MemoryLedger:
         wall_clock: Callable[[], float] | None = None,
         sleep: Callable[[float], None] | None = None,
         freeze_cooldown: float = DEFAULT_FREEZE_COOLDOWN_SECONDS,
+        max_freeze_seconds: float | None = None,
+        pid_fn: Callable[[], int] | None = None,
+        pid_alive_fn: Callable[[int], bool] | None = None,
     ) -> None:
         self.root = Path(root)
         self.holders_dir = self.root / "holders"
@@ -816,6 +848,10 @@ class MemoryLedger:
         self._wall_clock = wall_clock or time.time
         self._sleep = sleep or time.sleep
         self._freeze_cooldown = max(0.0, float(freeze_cooldown))
+        self._max_freeze_seconds = resolve_max_freeze_seconds(max_freeze_seconds)
+        self._pid = pid_fn or os.getpid
+        self._pid_alive = pid_alive_fn or alive
+        self._exit_thaw_registered = False
 
     @contextlib.contextmanager
     def _locked(self) -> Iterator[None]:
@@ -856,6 +892,11 @@ class MemoryLedger:
                 probe.close()
                 continue
             try:
+                # The owner is gone.  A frozen step must be thawed before its
+                # record disappears, or the cgroup stays frozen forever.
+                self._thaw_holder_locked(
+                    _read_json_dict(self.holders_dir / f"{hid}.json") or {}
+                )
                 (self.holders_dir / f"{hid}.json").unlink(missing_ok=True)
                 lock_file.unlink(missing_ok=True)
             finally:
@@ -866,12 +907,77 @@ class MemoryLedger:
             hid = meta_file.stem
             lock_file = self.holders_dir / f"{hid}.lock"
             if not lock_file.exists():
+                self._thaw_holder_locked(_read_json_dict(meta_file) or {})
                 meta_file.unlink(missing_ok=True)
                 continue
             record = _read_json_dict(meta_file)
             if record is not None:
                 live.append(record)
         return live
+
+    def _thaw_holder_locked(self, record: dict[str, Any]) -> bool:
+        """Thaw a holder's cgroup and clear its frozen bookkeeping (lock held)."""
+        if not record.get("frozen"):
+            return False
+        record["frozen"] = False
+        record["frozen_at"] = 0.0
+        record["frozen_by_pid"] = 0
+        cg_raw = record.get("cgroup_path")
+        if not isinstance(cg_raw, str) or not cg_raw:
+            return False
+        return self._thaw(Path(cg_raw), str(record.get("unit_name", "")))
+
+    def _thaw_abandoned_frozen_locked(
+        self, now: float, live_holders: list[dict[str, Any]]
+    ) -> None:
+        """Thaw frozen steps whose freezer died or whose freeze has expired."""
+        for holder in live_holders:
+            if not holder.get("frozen"):
+                continue
+            frozen_at = float(holder.get("frozen_at", 0.0) or 0.0)
+            freezer_pid = int(holder.get("frozen_by_pid", 0) or 0)
+            expired = frozen_at > 0.0 and (now - frozen_at) >= self._max_freeze_seconds
+            orphaned = freezer_pid <= 0 or not self._pid_alive(freezer_pid)
+            unknown = frozen_at <= 0.0
+            if not (expired or orphaned or unknown):
+                continue
+            if self._thaw_holder_locked(holder):
+                count = holder.get("thaw_count", 0)
+                holder["thaw_count"] = (int(count) if isinstance(count, int) else 0) + 1
+            hid = str(holder.get("holder_id", ""))
+            if hid:
+                _atomic_write_json(self.holders_dir / f"{hid}.json", holder)
+
+    def _register_exit_thaw(self) -> None:
+        if self._exit_thaw_registered:
+            return
+        self._exit_thaw_registered = True
+        atexit.register(self.thaw_holders_frozen_by_me)
+
+    def thaw_holders_frozen_by_me(self) -> int:
+        """Thaw every frozen step this process froze; safe from atexit/finally."""
+        return self.thaw_frozen_holders(freezer_pid=self._pid())
+
+    def thaw_frozen_holders(self, *, freezer_pid: int | None = None) -> int:
+        """Thaw frozen holders, optionally only those frozen by ``freezer_pid``."""
+        with self._locked():
+            if not self.holders_dir.is_dir():
+                return 0
+            thawed = 0
+            for meta_file in sorted(self.holders_dir.glob("*.json")):
+                record = _read_json_dict(meta_file)
+                if record is None or not record.get("frozen"):
+                    continue
+                if freezer_pid is not None and int(
+                    record.get("frozen_by_pid", 0) or 0
+                ) != freezer_pid:
+                    continue
+                self._thaw_holder_locked(record)
+                count = record.get("thaw_count", 0)
+                record["thaw_count"] = (int(count) if isinstance(count, int) else 0) + 1
+                _atomic_write_json(meta_file, record)
+                thawed += 1
+            return thawed
 
     def _predict_peak_locked(self, step: str, size_bucket: str) -> int:
         data = self._load_peaks_locked()
@@ -1043,8 +1149,13 @@ class MemoryLedger:
             return self._reap_dead_holders_locked()
 
     def _evaluate_pressure_locked(
-        self, now: float, live_holders: list[dict[str, Any]]
+        self,
+        now: float,
+        live_holders: list[dict[str, Any]],
+        *,
+        caller_holder_id: str | None = None,
     ) -> dict[str, Any]:
+        self._thaw_abandoned_frozen_locked(now, live_holders)
         pressure = self._read_pressure()
         state = _read_json_dict(self.pressure_state_path) or {}
         was_active = bool(state.get("pressure_active", False))
@@ -1074,8 +1185,11 @@ class MemoryLedger:
                     frozen,
                     key=lambda h: (float(h.get("started_at", 0.0)), str(h.get("holder_id", ""))),
                 )
-                if self._thaw(Path(str(target["cgroup_path"])), str(target.get("unit_name", ""))):
-                    target["frozen"] = False
+                if self._thaw_holder_locked(target):
+                    count = target.get("thaw_count", 0)
+                    target["thaw_count"] = (
+                        int(count) if isinstance(count, int) else 0
+                    ) + 1
                     hid = str(target["holder_id"])
                     _atomic_write_json(self.holders_dir / f"{hid}.json", target)
                     frozen.remove(target)
@@ -1094,6 +1208,7 @@ class MemoryLedger:
                     h
                     for h in live_holders
                     if not h.get("frozen")
+                    and h.get("freeze_eligible") is True
                     and isinstance(h.get("cgroup_path"), str)
                     and bool(h.get("cgroup_path"))
                 ]
@@ -1106,10 +1221,18 @@ class MemoryLedger:
                             str(h.get("holder_id", "")),
                         ),
                     )
-                    if self._freeze(
+                    # Never freeze the coordinator's own step: it cannot thaw
+                    # itself while frozen, so it would depend on another pass.
+                    if caller_holder_id is not None and str(
+                        newest.get("holder_id", "")
+                    ) == caller_holder_id:
+                        newest = {}
+                    if newest and self._freeze(
                         Path(str(newest["cgroup_path"])), str(newest.get("unit_name", ""))
                     ):
                         newest["frozen"] = True
+                        newest["frozen_at"] = now
+                        newest["frozen_by_pid"] = self._pid()
                         count_val = newest.get("freeze_count", 0)
                         newest["freeze_count"] = (
                             int(count_val) if isinstance(count_val, int) else 0
@@ -1117,6 +1240,7 @@ class MemoryLedger:
                         hid = str(newest["holder_id"])
                         _atomic_write_json(self.holders_dir / f"{hid}.json", newest)
                         last_freeze_at = now
+                        self._register_exit_thaw()
         new_state = {
             "pressure_active": new_active,
             "last_some_avg10": some,
@@ -1127,12 +1251,14 @@ class MemoryLedger:
         _atomic_write_json(self.pressure_state_path, new_state)
         return new_state
 
-    def step_feedback(self) -> dict[str, Any]:
+    def step_feedback(self, *, caller_holder_id: str | None = None) -> dict[str, Any]:
         """Run one PSI pressure & freeze/thaw coordination pass under the ledger lock."""
         now = float(self._wall_clock())
         with self._locked():
             live = self._reap_dead_holders_locked()
-            return self._evaluate_pressure_locked(now, live)
+            return self._evaluate_pressure_locked(
+                now, live, caller_holder_id=caller_holder_id
+            )
 
     def update_holder(self, holder_id: str, **fields: Any) -> None:
         meta_path = self.holders_dir / f"{holder_id}.json"
@@ -1148,6 +1274,8 @@ class MemoryLedger:
     ) -> None:
         try:
             with self._locked():
+                # Never leave a frozen step behind when its owner exits.
+                self._thaw_holder_locked(_read_json_dict(meta_path) or {})
                 meta_path.unlink(missing_ok=True)
                 try:
                     fcntl.flock(lock_file, fcntl.LOCK_UN)
@@ -1173,7 +1301,7 @@ class MemoryLedger:
         guard_enabled = memory_guard_enabled()
         self.root.mkdir(parents=True, exist_ok=True)
         self.holders_dir.mkdir(parents=True, exist_ok=True)
-        holder_id = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
+        holder_id = f"{self._pid()}-{uuid.uuid4().hex[:8]}"
         lock_path = self.holders_dir / f"{holder_id}.lock"
         meta_path = self.holders_dir / f"{holder_id}.json"
         lock_file = lock_path.open("a+", encoding="utf-8")
@@ -1203,7 +1331,7 @@ class MemoryLedger:
                 grant = self.effective_grant(predicted, step, size_bucket, remaining)
                 record: dict[str, Any] = {
                     "holder_id": holder_id,
-                    "pid": os.getpid(),
+                    "pid": self._pid(),
                     "worktree": worktree,
                     "step": step,
                     "size_bucket": size_bucket,
@@ -1212,7 +1340,11 @@ class MemoryLedger:
                     "unit_name": "",
                     "cgroup_path": "",
                     "frozen": False,
+                    "frozen_at": 0.0,
+                    "frozen_by_pid": 0,
+                    "freeze_eligible": False,
                     "freeze_count": 0,
+                    "thaw_count": 0,
                 }
                 _atomic_write_json(meta_path, record)
                 return (
@@ -1241,13 +1373,14 @@ class MemoryLedger:
         worktree: str = "",
         wait: float | None = None,
         notify: Callable[[str], None] = print,
+        freeze_eligible: bool = False,
     ) -> MemoryLease:
         """Reserve ``step:size_bucket`` predicted peak, waiting on pressure or budget."""
         budget_wait = resolve_wait_seconds(wait)
         guard_enabled = memory_guard_enabled()
         self.root.mkdir(parents=True, exist_ok=True)
         self.holders_dir.mkdir(parents=True, exist_ok=True)
-        holder_id = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
+        holder_id = f"{self._pid()}-{uuid.uuid4().hex[:8]}"
         lock_path = self.holders_dir / f"{holder_id}.lock"
         meta_path = self.holders_dir / f"{holder_id}.json"
         lock_file = lock_path.open("a+", encoding="utf-8")
@@ -1282,7 +1415,7 @@ class MemoryLedger:
                         )
                         record: dict[str, Any] = {
                             "holder_id": holder_id,
-                            "pid": os.getpid(),
+                            "pid": self._pid(),
                             "worktree": worktree,
                             "step": step,
                             "size_bucket": size_bucket,
@@ -1291,7 +1424,11 @@ class MemoryLedger:
                             "unit_name": "",
                             "cgroup_path": "",
                             "frozen": False,
+                            "frozen_at": 0.0,
+                            "frozen_by_pid": 0,
+                            "freeze_eligible": bool(freeze_eligible),
                             "freeze_count": 0,
+                            "thaw_count": 0,
                         }
                         _atomic_write_json(meta_path, record)
                         return MemoryLease(
@@ -1346,12 +1483,16 @@ def run_with_lease(
     max_reruns: int = MAX_STOPPED_RERUNS,
     scope_prefix_fn: Callable[[int, str, Path], list[str]] | None = None,
     on_lease: Callable[[MemoryLease | None], None] | None = None,
+    freeze_eligible: bool = False,
 ) -> tuple[Any, MemoryRunStats]:
     """Execute ``invoke(scoped_cmd, env_updates, grant_bytes, workers)`` under a memory lease.
 
     Handles ledger reservation, systemd scope wrapping with ``MemoryHigh=grant``,
     background PSI feedback monitoring, measured ``memory.peak`` learning, and
     re-running stopped test invocations without misreporting failure.
+
+    ``freeze_eligible`` marks this as a real gate step, so pressure coordination
+    may freeze its cgroup; the same call thaws everything it froze on exit.
     """
     prefix_builder = scope_prefix_fn or (
         lambda g, unit, meta: build_cgroup_scope_prefix(g, unit_name=unit, meta_dir=meta)
@@ -1364,158 +1505,183 @@ def run_with_lease(
     last_grant = 0
     last_workers = 1
 
-    while True:
-        lease: MemoryLease | None = existing_lease
-        owns_lease = False
-        if lease is None:
-            if external_grant_bytes is not None and external_grant_bytes > 0:
-                last_grant = int(external_grant_bytes)
-            elif os.environ.get(EXTERNAL_LEASE_ENV) == "1":
-                raw_grant = os.environ.get(GRANTED_MEMORY_ENV, "").strip()
-                last_grant = (
-                    int(raw_grant)
-                    if raw_grant.isdigit() and int(raw_grant) > 0
-                    else ledger.predict_peak(step, size_bucket)
-                )
-            else:
-                lease = ledger.acquire(
-                    step, size_bucket, worktree=worktree, wait=wait, notify=notify
-                )
-                owns_lease = True
-                last_grant = lease.grant_bytes
-                total_wait += lease.wait_seconds
-        else:
-            last_grant = lease.grant_bytes
-            total_wait = lease.wait_seconds
-        if on_lease is not None:
-            on_lease(lease)
-
-        workers = (
-            ledger.workers_for_grant(last_grant, step, size_bucket) if compute_workers else 1
-        )
-        last_workers = workers
-
-        meta_base = disk_scratch_base()
-        meta_base.mkdir(parents=True, exist_ok=True)
-        meta_dir = Path(tempfile.mkdtemp(prefix="saberops-cg-meta-", dir=str(meta_base)))
-        unit_name = f"saberops-gate-{os.getpid()}-{uuid.uuid4().hex[:8]}"
-        prefix = prefix_builder(last_grant, unit_name, meta_dir)
-        scoped_cmd = [*prefix, *cmd] if prefix else list(cmd)
-
-        env_updates = dict(env or {})
-        env_updates.setdefault(GRANTED_MEMORY_ENV, str(last_grant))
-        env_updates.setdefault(GRANTED_WORKERS_ENV, str(workers))
-        for tmp_key in ("TMPDIR", "TMP", "TEMP"):
-            if tmp_key not in env_updates:
-                current_val = os.environ.get(tmp_key, "").strip()
-                if not current_val or is_tmpfs_path(Path(current_val)):
-                    env_updates[tmp_key] = str(meta_base)
-
-        stop_monitor = threading.Event()
-        observed_peak = 0
-        published_cg = False
-
-        def monitor_loop(
-            _meta_dir: Path = meta_dir,
-            _stop_monitor: threading.Event = stop_monitor,
-            _lease: MemoryLease | None = lease,
-            _unit_name: str = unit_name,
-        ) -> None:
-            nonlocal observed_peak, published_cg
-            cg_file = _meta_dir / "cgroup_path"
-            cg_dir: Path | None = None
-            while not _stop_monitor.wait(0.25):
-                if cg_dir is None and cg_file.is_file():
-                    try:
-                        raw_cg = cg_file.read_text(encoding="utf-8", errors="replace").strip()
-                    except OSError:
-                        raw_cg = ""
-                    if raw_cg:
-                        cg_dir = Path(raw_cg)
-                        if _lease is not None and not published_cg:
-                            _lease.set_cgroup_path(cg_dir, unit_name=_unit_name)
-                            published_cg = True
-                if cg_dir is not None:
-                    pk = read_cgroup_peak(cg_dir)
-                    if pk is not None and pk > observed_peak:
-                        observed_peak = pk
-                with contextlib.suppress(OSError):
-                    ledger.step_feedback()
-
-        monitor = threading.Thread(target=monitor_loop, daemon=True)
-        monitor.start()
-        timed_out = False
-        interrupted = False
-        exit_code = -1
-        payload: Any = None
-        try:
-            exit_code, timed_out, interrupted, payload = invoke(
-                scoped_cmd, env_updates, last_grant, workers
-            )
-        finally:
-            stop_monitor.set()
-            monitor.join(timeout=2.0)
-
-            peak_file = meta_dir / "memory.peak"
-            if peak_file.is_file():
-                try:
-                    file_peak = int(peak_file.read_text(encoding="utf-8").strip())
-                    if file_peak > observed_peak:
-                        observed_peak = file_peak
-                except (OSError, ValueError):
-                    pass
-            events_file = meta_dir / "memory.events"
-            oom_kill = 0
-            if events_file.is_file():
-                with contextlib.suppress(OSError):
-                    oom_kill = parse_memory_events_oom_kill(
-                        events_file.read_text(encoding="utf-8", errors="replace")
+    try:
+        while True:
+            lease: MemoryLease | None = existing_lease
+            owns_lease = False
+            if lease is None:
+                if external_grant_bytes is not None and external_grant_bytes > 0:
+                    last_grant = int(external_grant_bytes)
+                elif os.environ.get(EXTERNAL_LEASE_ENV) == "1":
+                    raw_grant = os.environ.get(GRANTED_MEMORY_ENV, "").strip()
+                    last_grant = (
+                        int(raw_grant)
+                        if raw_grant.isdigit() and int(raw_grant) > 0
+                        else ledger.predict_peak(step, size_bucket)
                     )
-            if lease is not None:
-                total_freezes += lease.freeze_count()
-            launch_failed = (meta_dir / "launch_failed").is_file()
-            shutil.rmtree(meta_dir, ignore_errors=True)
-            if owns_lease and lease is not None:
-                lease.release()
+                else:
+                    lease = ledger.acquire(
+                        step,
+                        size_bucket,
+                        worktree=worktree,
+                        wait=wait,
+                        notify=notify,
+                        freeze_eligible=freeze_eligible,
+                    )
+                    owns_lease = True
+                    last_grant = lease.grant_bytes
+                    total_wait += lease.wait_seconds
+            else:
+                last_grant = lease.grant_bytes
+                total_wait = lease.wait_seconds
+            if lease is not None and freeze_eligible:
+                lease.set_freeze_eligible()
+            if on_lease is not None:
+                on_lease(lease)
 
-        last_oom = oom_kill
-        if observed_peak > best_peak:
-            best_peak = observed_peak
-        if record_peak and observed_peak > 0:
-            ledger.record_peak(
-                step,
-                size_bucket,
-                observed_peak,
-                workers=workers if compute_workers else None,
+            workers = (
+                ledger.workers_for_grant(last_grant, step, size_bucket)
+                if compute_workers
+                else 1
             )
+            last_workers = workers
 
-        was_stopped = (
-            not launch_failed
-            and not timed_out
-            and not interrupted
-            and (exit_code < 0 or exit_code in _STOPPED_EXIT_CODES or oom_kill > 0)
-        )
-        if rerun_if_stopped and was_stopped and attempt < max_reruns:
-            attempt += 1
-            notify(
-                f"[memory-budget] step={step} was stopped (exit={exit_code} oom={oom_kill}); "
-                f"waiting and re-running ({attempt}/{max_reruns})"
+            meta_base = disk_scratch_base()
+            meta_base.mkdir(parents=True, exist_ok=True)
+            meta_dir = Path(
+                tempfile.mkdtemp(prefix="saberops-cg-meta-", dir=str(meta_base))
             )
-            continue
+            unit_name = f"saberops-gate-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+            prefix = prefix_builder(last_grant, unit_name, meta_dir)
+            scoped_cmd = [*prefix, *cmd] if prefix else list(cmd)
 
-        stats = MemoryRunStats(
-            step=step,
-            size_bucket=size_bucket,
-            grant_bytes=last_grant,
-            measured_peak_bytes=best_peak,
-            wait_seconds=total_wait,
-            freeze_count=total_freezes,
-            workers=last_workers,
-            oom_kill=last_oom,
-            rerun_count=attempt,
-            launch_failed=launch_failed,
-        )
-        return payload, stats
+            env_updates = dict(env or {})
+            env_updates.setdefault(GRANTED_MEMORY_ENV, str(last_grant))
+            env_updates.setdefault(GRANTED_WORKERS_ENV, str(workers))
+            for tmp_key in ("TMPDIR", "TMP", "TEMP"):
+                if tmp_key not in env_updates:
+                    current_val = os.environ.get(tmp_key, "").strip()
+                    if not current_val or is_tmpfs_path(Path(current_val)):
+                        env_updates[tmp_key] = str(meta_base)
+
+            stop_monitor = threading.Event()
+            observed_peak = 0
+            published_cg = False
+
+            def monitor_loop(
+                _meta_dir: Path = meta_dir,
+                _stop_monitor: threading.Event = stop_monitor,
+                _lease: MemoryLease | None = lease,
+                _unit_name: str = unit_name,
+            ) -> None:
+                nonlocal observed_peak, published_cg
+                cg_file = _meta_dir / "cgroup_path"
+                cg_dir: Path | None = None
+                while not _stop_monitor.wait(0.25):
+                    if cg_dir is None and cg_file.is_file():
+                        try:
+                            raw_cg = cg_file.read_text(
+                                encoding="utf-8", errors="replace"
+                            ).strip()
+                        except OSError:
+                            raw_cg = ""
+                        if raw_cg:
+                            cg_dir = Path(raw_cg)
+                            if _lease is not None and not published_cg:
+                                _lease.set_cgroup_path(cg_dir, unit_name=_unit_name)
+                                published_cg = True
+                    if cg_dir is not None:
+                        pk = read_cgroup_peak(cg_dir)
+                        if pk is not None and pk > observed_peak:
+                            observed_peak = pk
+                    with contextlib.suppress(OSError):
+                        ledger.step_feedback(
+                            caller_holder_id=(
+                                _lease.holder_id if _lease is not None else None
+                            )
+                        )
+
+            monitor = threading.Thread(target=monitor_loop, daemon=True)
+            monitor.start()
+            timed_out = False
+            interrupted = False
+            exit_code = -1
+            payload: Any = None
+            try:
+                exit_code, timed_out, interrupted, payload = invoke(
+                    scoped_cmd, env_updates, last_grant, workers
+                )
+            finally:
+                stop_monitor.set()
+                monitor.join(timeout=2.0)
+
+                peak_file = meta_dir / "memory.peak"
+                if peak_file.is_file():
+                    try:
+                        file_peak = int(peak_file.read_text(encoding="utf-8").strip())
+                        if file_peak > observed_peak:
+                            observed_peak = file_peak
+                    except (OSError, ValueError):
+                        pass
+                events_file = meta_dir / "memory.events"
+                oom_kill = 0
+                if events_file.is_file():
+                    with contextlib.suppress(OSError):
+                        oom_kill = parse_memory_events_oom_kill(
+                            events_file.read_text(encoding="utf-8", errors="replace")
+                        )
+                if lease is not None:
+                    total_freezes += lease.freeze_count()
+                launch_failed = (meta_dir / "launch_failed").is_file()
+                shutil.rmtree(meta_dir, ignore_errors=True)
+                if owns_lease and lease is not None:
+                    lease.release()
+
+            last_oom = oom_kill
+            if observed_peak > best_peak:
+                best_peak = observed_peak
+            if record_peak and observed_peak > 0:
+                ledger.record_peak(
+                    step,
+                    size_bucket,
+                    observed_peak,
+                    workers=workers if compute_workers else None,
+                )
+
+            was_stopped = (
+                not launch_failed
+                and not timed_out
+                and not interrupted
+                and (exit_code < 0 or exit_code in _STOPPED_EXIT_CODES or oom_kill > 0)
+            )
+            if rerun_if_stopped and was_stopped and attempt < max_reruns:
+                attempt += 1
+                notify(
+                    f"[memory-budget] step={step} was stopped "
+                    f"(exit={exit_code} oom={oom_kill}); "
+                    f"waiting and re-running ({attempt}/{max_reruns})"
+                )
+                continue
+
+            stats = MemoryRunStats(
+                step=step,
+                size_bucket=size_bucket,
+                grant_bytes=last_grant,
+                measured_peak_bytes=best_peak,
+                wait_seconds=total_wait,
+                freeze_count=total_freezes,
+                workers=last_workers,
+                oom_kill=last_oom,
+                rerun_count=attempt,
+                launch_failed=launch_failed,
+            )
+            return payload, stats
+    finally:
+        # Whatever ended this call (return, timeout, exception or signal), never
+        # leave another step frozen on our account.
+        if freeze_eligible:
+            with contextlib.suppress(OSError):
+                ledger.thaw_holders_frozen_by_me()
 
 
 def wait_process_with_freeze_pause(
@@ -1921,6 +2087,7 @@ def _run_passthrough_step(
             compute_workers=compute_workers,
             rerun_if_stopped=rerun_if_stopped,
             on_lease=lambda active: lease_ref.__setitem__(0, active),
+            freeze_eligible=True,
         )
     except TimeoutError:
         print("INFRA SLOT_WAIT_TIMEOUT", flush=True)
@@ -2192,6 +2359,7 @@ class Runner:
             record_peak=do_record,
             rerun_if_stopped=rerun_stopped,
             on_lease=lambda active: lease_ref.__setitem__(0, active),
+            freeze_eligible=True,
         )
         print(stats.format_line(), flush=True)
         self.memory_peak_bytes = max(self.memory_peak_bytes, stats.measured_peak_bytes)
@@ -2427,9 +2595,13 @@ class Runner:
                 return self.run_checks(base, also, precomputed_targets=precomputed_targets)
 
             with self.ledger.acquire(
-                self.memory_step, self.memory_bucket, worktree=str(self.repo)
+                self.memory_step,
+                self.memory_bucket,
+                worktree=str(self.repo),
+                freeze_eligible=True,
             ) as lease:
                 self._active_lease = lease
+                lease.set_freeze_eligible()
                 self.memory_grant_bytes = lease.grant_bytes
                 self.memory_wait_seconds = lease.wait_seconds
                 self.memory_workers = self.ledger.workers_for_grant(
@@ -2449,6 +2621,11 @@ class Runner:
         except OSError as error:
             verdict = ("INFRA", "ENOSPC" if error.errno == 28 else "PYTEST_INTERNAL", 3, [], [])
             print(str(error), flush=True)
+        finally:
+            # Every exit path (return, timeout, exception, signal) thaws the
+            # targets this gate froze; a frozen step must not outlive us.
+            with contextlib.suppress(OSError):
+                self.ledger.thaw_holders_frozen_by_me()
         return self.finish(verdict, self.test_count)
 
     def run_checks(

@@ -1311,6 +1311,7 @@ class GateRunner:
                     worktree=str(target),
                     env={_gt.EXTERNAL_LEASE_ENV: "1"},
                     rerun_if_stopped=False,
+                    freeze_eligible=True,
                 )
             except TimeoutError as exc:
                 raise GateRunnerInfrastructureError(
@@ -1805,6 +1806,7 @@ class GateSlotPool:
                 worktree=str(self.common),
                 wait=budget_wait,
                 notify=print,
+                freeze_eligible=True,
             )
         except TimeoutError as exc:
             raise GateSlotWaitTimeout("host-gates slot wait exceeded") from exc
@@ -2535,6 +2537,7 @@ class EngineGateExecutor:
                     worktree=str(repo),
                     existing_lease=lease,
                     rerun_if_stopped=True,
+                    freeze_eligible=True,
                 )
                 assert isinstance(payload, ProcessResult)
                 max_peak = max(max_peak, stats.measured_peak_bytes)

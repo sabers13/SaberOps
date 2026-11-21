@@ -188,6 +188,7 @@ def test_rising_pressure_freezes_newest_gate_and_resumes_on_clear(tmp_path: Path
     def run_gate1() -> None:
         with ledger.acquire("full", "full") as lease:
             lease.set_cgroup_path(cg1, unit_name="cg-older")
+            lease.set_freeze_eligible()
             gate1_entered.set()
             assert gate1_release.wait(timeout=10.0)
 
@@ -228,6 +229,7 @@ def test_rising_pressure_freezes_newest_gate_and_resumes_on_clear(tmp_path: Path
             invoke=invoke,
             cmd=["true"],
             scope_prefix_fn=scope_prefix,
+            freeze_eligible=True,
         )
         gate2_stats_box["res"] = stats
         assert res == 0

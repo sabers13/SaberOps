@@ -9769,6 +9769,7 @@ def _run_configured_gate(
                     worktree=str(cwd),
                     env={gt.EXTERNAL_LEASE_ENV: "1"},
                     rerun_if_stopped=True,
+                    freeze_eligible=True,
                 )
                 assert isinstance(result, ProcessResult)
                 mutated = (

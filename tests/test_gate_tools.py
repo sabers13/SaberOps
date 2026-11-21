@@ -469,6 +469,9 @@ def test_exclusive_passthrough_and_timeout(
     _init_main_repo(repo)
     monkeypatch.chdir(repo)
     monkeypatch.setenv("SABEROPS_GATE_TMP", str(tmp_path / "gate-tmp"))
+    # This test compares two separate repositories' cold-start budgets; keep
+    # their ledgers repo-local instead of the per-test isolated ledger.
+    monkeypatch.delenv(g.LEDGER_ENV, raising=False)
     meminfo = tmp_path / "meminfo"
     avail_kb = (g.DESKTOP_RESERVE_BYTES + 2 * g.COLD_START_PEAK_BYTES) // 1024
     meminfo.write_text(f"MemTotal: {avail_kb * 2} kB\nMemAvailable: {avail_kb} kB\n")

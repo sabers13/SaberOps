@@ -81,3 +81,26 @@ def _disable_desktop_notifications(monkeypatch: pytest.MonkeyPatch) -> None:
     back in with ``SABEROPS_DESKTOP_NOTIFICATIONS=1``.
     """
     monkeypatch.setenv("SABEROPS_DESKTOP_NOTIFICATIONS", "0")
+
+
+@pytest.fixture(autouse=True)
+def _isolated_memory_ledger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[None]:
+    """Keep every test off the real per-user shared gate memory ledger.
+
+    A gate that freezes step cgroups records them in a host-wide ledger.  A
+    test that launches its own scope (the memory-budget tests do) must never
+    register there, or a concurrent lane's gate can freeze the test's launch
+    and leave it stuck.  The ledger lives beside ``tmp_path`` so it is disposed
+    with the test and shared only by that test's own subprocesses.
+    """
+    monkeypatch.setenv(
+        "SABEROPS_MEMORY_LEDGER", str(tmp_path.parent / f"{tmp_path.name}-memory-ledger")
+    )
+    # Real host PSI must not freeze a test's own scoped launch: tests that care
+    # about pressure inject ``pressure_fn`` instead.
+    monkeypatch.setenv(
+        "SABEROPS_PROC_PRESSURE_MEMORY", str(tmp_path.parent / f"{tmp_path.name}-no-psi")
+    )
+    yield
