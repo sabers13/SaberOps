@@ -1211,11 +1211,26 @@ class AcceptEngine:
     def _accepted_payload_for_candidate(
         self, run_id: str, candidate_sha: str
     ) -> dict[str, Any] | None:
-        """Return the newest durable acceptance for exactly ``candidate_sha``."""
+        """Return the newest durable acceptance for exactly ``candidate_sha``.
+
+        An acceptance that was explicitly undone no longer describes the
+        target, so a later undo must still see the manual re-acceptance as the
+        latest owner decision.
+        """
+        from saberops.auto_accept import ACCEPT_UNDONE_EVENT
+
+        undone_ids = [
+            int(event.id)
+            for event in self.db.get_events_by_type(run_id, ACCEPT_UNDONE_EVENT)
+            if (event.payload or {}).get("candidate_sha") == candidate_sha
+        ]
         for event in reversed(self.db.get_events_by_type(run_id, "run_accepted")):
             payload = event.payload
-            if isinstance(payload, dict) and payload.get("candidate_sha") == candidate_sha:
-                return payload
+            if not isinstance(payload, dict) or payload.get("candidate_sha") != candidate_sha:
+                continue
+            if any(undone_id > int(event.id) for undone_id in undone_ids):
+                continue
+            return payload
         return None
 
     def candidate_review_evidence(
