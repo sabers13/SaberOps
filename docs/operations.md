@@ -536,7 +536,7 @@ actions and the subscription used.
   config, drops pay-per-token credentials from the child environment, and
   refuses to submit until the isolated store's preflight is green. Models are
   configurable; the defaults are OpenCode Go `opencode-go/deepseek-v4.1-flash`,
-  Claude `claude-haiku-5-5` and Codex `gpt-6-luna`. Use `--dry-run` to print the
+  Claude `claude-haiku-4-5-20251001` and Codex `gpt-6-luna`. Use `--dry-run` to print the
   plan without starting anything.
 
 The benchmark tests are marked `slow`: the full gate runs them; the per-change

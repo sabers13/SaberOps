@@ -401,9 +401,12 @@ supplies exactly those paths; it is not a prefix, glob or wildcard for the job.
 Every step appends to `away-journal.jsonl` with `fsync` before the next step:
 resolutions (with their `build_morning_report` fragment), preflight results,
 plan impact and outcomes.  `build_return_summary` rebuilds "while you were
-away" from that journal alone; `catch_up` returns the same object and the
-notifier sends it once per journal revision.  A scheduler killed mid-run
-therefore resumes with the same audit instead of losing it.
+away" from that journal plus read-only projections of the engine's own records:
+the plan section behind `STATE.md` and every SUCCEEDED candidate that still
+waits for acceptance, named with its exact `orch accept` command.  `catch_up`
+returns the same object and the notifier sends it once per journal revision.  A
+scheduler killed mid-run therefore resumes with the same audit instead of
+losing it.
 
 Owner surface (no MCP writer exists):
 

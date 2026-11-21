@@ -725,3 +725,46 @@ def test_an_unreadable_policy_blocks_dispatch_instead_of_raising(
     gate = away.evaluate_dispatch(job_id="job_a", repo=str(tmp_path), now=_NOW)
     assert gate.allowed is False
     assert gate.code == "preflight"
+
+
+def test_return_summary_lists_candidates_awaiting_acceptance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B3 D17: a standalone away candidate is named with its accept command.
+
+    The four away jobs in the B3 drill were SUCCEEDED with candidate SHAs, but
+    ``orch away summary`` read only the journal and plan lanes, so it said
+    ``0 parked`` and omitted them entirely.
+    """
+    from lifecycle_rig import build_lifecycle_rig
+
+    from saberops.capacity.loop import run_scheduler_loop
+    from saberops.jobs.service import get_job, submit_job
+    from saberops.model_access.readiness_service import ReadinessService
+    from saberops.paths import owner_state_dir
+
+    rig = build_lifecycle_rig(tmp_path, monkeypatch)
+    db = rig.db()
+    submitted = submit_job(
+        db, repo=rig.repo, goal="Away candidate awaiting the owner"
+    )
+    readiness = ReadinessService.for_owner_state(owner_state_dir())
+    tick = run_scheduler_loop(db, once=True, readiness_service=readiness)
+    assert tick is not None and tick.ran and tick.dispatched == 1
+    job = get_job(db, submitted.job.job_id)
+    assert job is not None and job.current_run_id is not None
+    run = rig.wait_for_run(job.current_run_id, timeout=60.0)
+    assert run.status is RunStatus.COMPLETED, run.result_summary
+    run_scheduler_loop(db, once=True, readiness_service=readiness)
+
+    job = get_job(db, submitted.job.job_id)
+    assert job is not None and job.state is JobState.SUCCEEDED
+    summary = away.build_return_summary(db=db)
+    assert len(summary.awaiting_acceptance) == 1
+    entry = summary.awaiting_acceptance[0]
+    assert entry["job_id"] == job.job_id
+    assert entry["run_id"] == job.current_run_id
+    assert entry["candidate_sha"]
+    assert entry["owner_action"] == f"orch accept {job.current_run_id}"
+    assert "1 candidate(s) awaiting acceptance" in summary.one_line()
+    assert summary.as_dict()["awaiting_acceptance"][0]["run_id"] == job.current_run_id

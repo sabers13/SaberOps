@@ -9,6 +9,7 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -52,23 +53,72 @@ def set_notifications_enabled(enabled: bool) -> None:
         Path(name).unlink(missing_ok=True)
 
 
-def notify_once(ledger: Path, key: str, title: str, body: str) -> None:
-    """Send a notice once per key, serialized across scheduler processes."""
+def _ensure_delivery_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS delivery (
+            event_key TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            detail TEXT NOT NULL,
+            attempted_at TEXT NOT NULL
+        )
+        """
+    )
+
+
+def _record_attempt(
+    conn: sqlite3.Connection, key: str, status: str, detail: str = ""
+) -> None:
+    """Record one delivery attempt independently of desktop success."""
+    _ensure_delivery_table(conn)
+    conn.execute(
+        """
+        INSERT INTO delivery (event_key, status, detail, attempted_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(event_key) DO UPDATE SET
+            status = excluded.status,
+            detail = excluded.detail,
+            attempted_at = excluded.attempted_at
+        """,
+        (key, status, detail, datetime.now(UTC).isoformat()),
+    )
+
+
+def notify_once(ledger: Path, key: str, title: str, body: str) -> str:
+    """Send a notice once per key, serialized across scheduler processes.
+
+    The desktop channel is best effort, but the *attempt* is durable: when
+    ``notify-send`` is missing or has no session bus (headless hosts, a
+    benchmark store with no desktop), the outcome is recorded as
+    ``unavailable``/``failed`` instead of leaving the key absent.  Callers that
+    account for notice delivery (the real-mode benchmark) can therefore wait on
+    the engine's own record instead of requiring a working desktop bus.  A
+    failed attempt is retried on the next tick until it succeeds.
+    """
     try:
         if not notifications_enabled():
-            return
+            return "disabled"
     except (OSError, ValueError) as exc:
         logger.warning("invalid desktop notification settings: %s", exc)
-        return
-    command = shutil.which("notify-send")
-    if command is None:
-        return
+        return "disabled"
     ledger.parent.mkdir(parents=True, exist_ok=True)
+    command = shutil.which("notify-send")
     with sqlite3.connect(ledger, timeout=10) as conn:
         conn.execute("CREATE TABLE IF NOT EXISTS sent (event_key TEXT PRIMARY KEY)")
+        _ensure_delivery_table(conn)
         conn.execute("BEGIN IMMEDIATE")
         if conn.execute("SELECT 1 FROM sent WHERE event_key = ?", (key,)).fetchone():
-            return
+            return "duplicate"
+        if command is None:
+            previous = conn.execute(
+                "SELECT status FROM delivery WHERE event_key = ?", (key,)
+            ).fetchone()
+            if previous is not None and str(previous[0]) == "unavailable":
+                # A headless host would otherwise rewrite the same row on
+                # every scheduler tick; the first attempt is the durable fact.
+                return "unavailable"
+            _record_attempt(conn, key, "unavailable", "notify-send is not installed")
+            return "unavailable"
         try:
             subprocess.run(
                 [command, title, body],
@@ -79,10 +129,27 @@ def notify_once(ledger: Path, key: str, title: str, body: str) -> None:
             )
         except (OSError, subprocess.SubprocessError) as exc:
             logger.warning("desktop notification failed: %s", exc)
-            return
+            _record_attempt(conn, key, "failed", str(exc)[:500])
+            return "failed"
+        _record_attempt(conn, key, "delivered")
         # The desktop service cannot participate in SQLite transactions. A crash
         # after delivery but before this commit can produce a duplicate on restart.
         conn.execute("INSERT INTO sent VALUES (?)", (key,))
+        return "delivered"
+
+
+def notice_attempted(ledger: Path, key: str) -> bool:
+    """True once any delivery attempt for *key* was durably recorded."""
+    if not ledger.exists():
+        return False
+    try:
+        with sqlite3.connect(ledger, timeout=5) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM delivery WHERE event_key = ?", (key,)
+            ).fetchone()
+    except sqlite3.Error:
+        return False
+    return row is not None
 
 
 def deliver_pending(db: Any) -> None:

@@ -45,7 +45,7 @@ from saberops.jobs.store import (
     JobNotFoundError,
     JobTransitionError,
 )
-from saberops.models import AttemptStatus, HealthState, ManagerState, RunStatus
+from saberops.models import AttemptStatus, DispatchStage, HealthState, ManagerState, RunStatus
 from saberops.routing_config import RoutingSnapshot, load_effective_routing
 from saberops.run_creation import RunRequest
 
@@ -1263,9 +1263,12 @@ def job_usage_view(db: Any, job: Job) -> dict[str, Any]:
     """
     usage_by_run: dict[str, list[Any]] = {}
     attempts: list[dict[str, Any]] = []
+    reviews: list[dict[str, Any]] = []
     attempt_rows: dict[str, list[Any]] = {}
+    review_rows: dict[str, list[Any]] = {}
     subscription_rows: dict[str, list[Any]] = {}
     subscription_attempts: dict[str, list[str]] = {}
+    subscription_reviews: dict[str, list[str]] = {}
     run_ids = list(job.run_ids)
     if job.current_run_id and job.current_run_id not in run_ids:
         run_ids.append(job.current_run_id)
@@ -1282,6 +1285,12 @@ def job_usage_view(db: Any, job: Job) -> dict[str, Any]:
         for row in rows:
             if row.attempt_id:
                 rows_by_attempt.setdefault(str(row.attempt_id), []).append(row)
+            elif row.stage is DispatchStage.REVIEW:
+                # An independent review is a dispatch, not an attempt: its
+                # usage belongs to the reviewer's own subscription exactly as
+                # the review dispatch evidence records it.
+                review_key = str(row.review_id or row.association_id)
+                review_rows.setdefault(review_key, []).append(row)
         for attempt in db.get_attempts_for_run(run_id):
             subscription = subscription_for_provider(attempt.provider)
             attempt_usage = rows_by_attempt.get(attempt.id, [])
@@ -1300,21 +1309,67 @@ def job_usage_view(db: Any, job: Job) -> dict[str, Any]:
                     "usage": _usage_totals(attempt_usage),
                 }
             )
-    all_rows = [row for rows in attempt_rows.values() for row in rows]
+    for review_key, rows in review_rows.items():
+        provider = str(rows[0].provider)
+        model = str(rows[0].model)
+        subscription = subscription_for_provider(provider)
+        subscription_rows.setdefault(subscription, []).extend(rows)
+        subscription_reviews.setdefault(subscription, []).append(review_key)
+        reviews.append(
+            {
+                "review_id": review_key,
+                "run_id": rows[0].run_id,
+                "provider": provider,
+                "subscription": subscription,
+                "model": model,
+                "usage": _usage_totals(rows),
+            }
+        )
+    all_rows = [
+        row
+        for rows in (*attempt_rows.values(), *review_rows.values())
+        for row in rows
+    ]
+    all_entries = [*attempts, *reviews]
     return {
         "attempts": attempts,
+        "reviews": reviews,
         "subscriptions": [
             {
                 "subscription": subscription,
-                "attempt_ids": subscription_attempts[subscription],
+                "attempt_ids": subscription_attempts.get(subscription, []),
+                "review_ids": subscription_reviews.get(subscription, []),
                 "usage": _usage_totals(subscription_rows.get(subscription, [])),
             }
-            for subscription in sorted(subscription_attempts)
+            for subscription in sorted(subscription_rows)
         ],
         "total": _usage_totals(all_rows),
-        "coverage_complete": bool(attempts)
-        and all(entry["usage"]["reported"] for entry in attempts),
+        "coverage_complete": bool(all_entries)
+        and all(entry["usage"]["reported"] for entry in all_entries),
     }
+
+
+def _stall_attention_evidence(db: Any, run_id: str | None) -> bool:
+    """True when a durable output-quiet stall is the latest attention signal.
+
+    Monitor health transitions (QUIET/AMBIGUOUS_BUSY/TERMINATING) only update
+    the supervision row; the soft-inactivity callback additionally records a
+    ``worker_stalled`` run event, and ``worker_resumed`` records the recovery.
+    Comparing the two durable events keeps the real post-nudge attention path
+    while ignoring a transient projection that is about to clear itself.
+    """
+    if not run_id:
+        return False
+    try:
+        stalls = db.get_events_by_type(run_id, "worker_stalled")
+        resumes = db.get_events_by_type(run_id, "worker_resumed")
+    except Exception:  # noqa: BLE001 - activity is advisory, never authoritative
+        return False
+    if not stalls:
+        return False
+    latest_stall = max(stalls, key=lambda event: event.id)
+    latest_resume = max(resumes, key=lambda event: event.id, default=None)
+    return latest_resume is None or latest_stall.id > latest_resume.id
 
 
 def job_status_view(db: Any, job: Job) -> dict[str, Any]:
@@ -1411,16 +1466,28 @@ def job_status_view(db: Any, job: Job) -> dict[str, Any]:
 
     _, liveness = RunSupervisor(db=db).owner_evidence(job.current_run_id)
     supervision = db.get_supervision(job.current_run_id)
-    if liveness is Liveness.DEAD:
+    if liveness is Liveness.DEAD and run is not None and run.status is RunStatus.RUNNING:
+        # A release or process exit after the worker finished is normal handoff
+        # bookkeeping: the run is already terminal and the job is reconciled on
+        # the next tick, so it must not flash owner attention.  Proving the
+        # owner dead on a still-RUNNING run is the safety hold.
         view["activity"] = "needs_attention"
         view["reason"] = "execution owner is dead; worker safety is being checked"
     elif supervision is not None and (
         supervision.health_state == HealthState.STALLED
         # A healthy worker overrides a stale manager attention flag: recovery
         # paths refresh health without clearing the older attention mark.
+        #
+        # UNCERTAIN is "attention-but-continuing" (monitor QUIET, AMBIGUOUS_BUSY
+        # or TERMINATING): those are transient projections of a live process, so
+        # they never raise owner attention on their own.  The pre-existing
+        # attention path is the output-quiet stall event, which is durable; it
+        # surfaces only after that stall (and, with F14 enabled, after the one
+        # automatic nudge was spent).
         or (
-            supervision.health_state != HealthState.HEALTHY
+            supervision.health_state is HealthState.UNCERTAIN
             and supervision.manager_state == ManagerState.ATTENTION_REQUIRED
+            and _stall_attention_evidence(db, job.current_run_id)
         )
     ):
         view["activity"] = "needs_attention"

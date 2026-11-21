@@ -34,8 +34,10 @@ FAKE_REVIEW_BLOCK_SENTINEL = "FAKE-REVIEW: BLOCK"
 DEFAULT_OPENCODE_MODEL = "opencode-go/deepseek-v4.1-flash"
 #: Routing validates exact candidate ids (static registry, owner approval or
 #: discovered catalog); the Claude CLI's ``haiku`` alias is not a routing id, so
-#: the current Haiku model is named explicitly.
-DEFAULT_CLAUDE_MODEL = "claude-haiku-5-5"
+#: the discovered Haiku id is named explicitly.  ``claude-haiku-5-5`` was never
+#: in Claude's discovered catalogue, so a real run refused the default route
+#: before dispatch.
+DEFAULT_CLAUDE_MODEL = "claude-haiku-4-5-20251001"
 DEFAULT_CODEX_MODEL = "gpt-6-luna"
 
 #: The explicit real-mode acknowledgement flag.  Real mode refuses without it.
@@ -556,16 +558,27 @@ def create_toy_repository(root: Path, name: str) -> tuple[Path, str]:
 
 
 def _notice_delivered(db: Any, job_id: str, state: str) -> bool:
+    """True once the engine recorded an attempt for this terminal notice.
+
+    Delivery accounting is deliberately independent of a working desktop bus:
+    a headless host records ``unavailable``/``failed`` and the benchmark moves
+    on instead of waiting to ``max_wait`` for a notice that can never arrive.
+    """
     import sqlite3
+
+    from saberops.notifications import notice_attempted
 
     path = Path(db.db_path)
     ledger = path.with_name(path.name + ".notifications.sqlite3")
+    key = f"job:{job_id}:{state}"
+    if notice_attempted(ledger, key):
+        return True
     if not ledger.exists():
         return False
     try:
         with sqlite3.connect(ledger, timeout=5) as conn:
             row = conn.execute(
-                "SELECT 1 FROM sent WHERE event_key = ?", (f"job:{job_id}:{state}",)
+                "SELECT 1 FROM sent WHERE event_key = ?", (key,)
             ).fetchone()
     except sqlite3.Error:
         return False

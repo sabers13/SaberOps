@@ -64,7 +64,7 @@ without an explicit acknowledgement flag and an isolated, empty store, and it
 never reuses the owner's real SaberOps state or config directories. It removes
 pay-per-token credentials from the child environment so a subscription run
 cannot silently fall back to API billing. Its default routes are configurable:
-OpenCode Go `opencode-go/deepseek-v4.1-flash`, Claude `claude-haiku-5-5` and
+OpenCode Go `opencode-go/deepseek-v4.1-flash`, Claude `claude-haiku-4-5-20251001` and
 Codex `gpt-6-luna`. It refuses to submit until the isolated store's preflight is
 green, and prints the owner command that fixes each missing item.
 

@@ -383,7 +383,7 @@ def test_isolated_environment_moves_state_and_drops_pay_per_token_keys(
 
 def test_real_routes_default_to_the_owner_models() -> None:
     assert DEFAULT_OPENCODE_MODEL == "opencode-go/deepseek-v4.1-flash"
-    assert DEFAULT_CLAUDE_MODEL == "claude-haiku-5-5"
+    assert DEFAULT_CLAUDE_MODEL == "claude-haiku-4-5-20251001"
     assert DEFAULT_CODEX_MODEL == "gpt-6-luna"
     assert {real_subscription(index) for index in range(10)} == {
         "codex",

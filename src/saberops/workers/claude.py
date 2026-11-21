@@ -18,7 +18,13 @@ from pathlib import Path
 from typing import Any
 
 from saberops.git import GitManager
-from saberops.models import AttemptStatus, DispatchOutcome, WorkerRequest, WorkerResult
+from saberops.models import (
+    AttemptStatus,
+    DispatchOutcome,
+    ProviderUsage,
+    WorkerRequest,
+    WorkerResult,
+)
 from saberops.process import ProcessResult, launch_worker_process, run_process
 from saberops.workers.base import WorkerAdapter, streaming_process_kwargs
 from saberops.workers.env import hermetic_env
@@ -51,6 +57,49 @@ _RECOVERED_NOTE = (
 )
 
 
+def _token_count(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def _usage_from_payload(payload: object, *, source: str) -> ProviderUsage | None:
+    """Read the CLI's own token counters from a ``usage`` object.
+
+    Claude reports the turn's input/output counters and the cache counters as
+    separate fields.  No counter is inferred: a field the CLI did not report
+    stays ``None``, and ``total`` is only input + output when both are known
+    (cache reads/writes are subsets of input, as in the Codex parser).
+    """
+    if not isinstance(payload, dict):
+        return None
+    input_tokens = _token_count(payload.get("input_tokens"))
+    output_tokens = _token_count(payload.get("output_tokens"))
+    cache_read = _token_count(payload.get("cache_read_input_tokens"))
+    cache_write = _token_count(payload.get("cache_creation_input_tokens"))
+    if all(
+        value is None
+        for value in (input_tokens, output_tokens, cache_read, cache_write)
+    ):
+        return None
+    total = (
+        input_tokens + output_tokens
+        if input_tokens is not None and output_tokens is not None
+        else None
+    )
+    return ProviderUsage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cached_tokens=cache_read,
+        total_tokens=total,
+        cache_read_tokens=cache_read,
+        cache_write_tokens=cache_write,
+        reasoning_tokens=None,
+        usage_source=source,
+        raw_payload=json.dumps({"usage": payload}, sort_keys=True)[:4000],
+    )
+
+
 @dataclass(frozen=True)
 class _NativeOutput:
     """Native completion evidence parsed from the CLI's stream-json stdout."""
@@ -61,6 +110,7 @@ class _NativeOutput:
     saw_result: bool
     ends_mid_frame: bool
     session_id: str | None
+    usage: list[ProviderUsage]
 
 
 def _native_result(stdout: str) -> _NativeOutput:
@@ -70,6 +120,7 @@ def _native_result(stdout: str) -> _NativeOutput:
     text: list[str] = []
     actual_model: str | None = None
     session_id: str | None = None
+    usages: list[ProviderUsage] = []
     lines = stdout.splitlines()
     for line in lines:
         try:
@@ -99,6 +150,14 @@ def _native_result(stdout: str) -> _NativeOutput:
             result = message.get("result")
             if isinstance(result, str) and result:
                 text = [result]
+            usage = _usage_from_payload(
+                message.get("usage"), source="claude_result_json"
+            )
+            usages.append(
+                usage
+                if usage is not None
+                else ProviderUsage(usage_source="claude_result_without_usage")
+            )
     ends_mid_frame = False
     if lines and not stdout.endswith(("\n", "\r")):
         try:
@@ -114,6 +173,7 @@ def _native_result(stdout: str) -> _NativeOutput:
         saw_result=saw_result,
         ends_mid_frame=ends_mid_frame,
         session_id=session_id,
+        usage=usages,
     )
 
 
@@ -163,13 +223,23 @@ def _session_file(
     return newest[1] if newest is not None else None
 
 
-def _completed_turn_text(path: Path, since: float) -> str | None:
-    """Return the final assistant text only for a turn completed after *since*.
+@dataclass(frozen=True)
+class _RecoveredTurn:
+    """The durable transcript's completed turn: its text and token counters."""
+
+    text: str
+    usage: ProviderUsage | None
+
+
+def _completed_turn(path: Path, since: float) -> _RecoveredTurn | None:
+    """Return the final assistant turn only when it completed after *since*.
 
     Completion requires the last conversational entry to be an assistant
     message that ended its turn normally (``end_turn``, no error).  The
     timestamp guard keeps a resumed session's earlier turn from being read as
-    this dispatch's completion.
+    this dispatch's completion.  The message's own ``usage`` object carries the
+    same counters the lost terminal result frame would have reported, so the
+    recovered dispatch still records exact usage instead of ``unknown``.
     """
     try:
         raw = path.read_text(encoding="utf-8", errors="replace")
@@ -205,16 +275,21 @@ def _completed_turn_text(path: Path, since: float) -> str | None:
         if isinstance(item, dict) and item.get("type") == "text"
         and isinstance(item.get("text"), str)
     )
-    return text or None
+    if not text:
+        return None
+    usage = _usage_from_payload(
+        message.get("usage"), source="claude_transcript_json"
+    )
+    return _RecoveredTurn(text=text, usage=usage)
 
 
 def _recover_completion(
     worktree: Path, env: dict[str, str], session_id: str | None, since: float
-) -> str | None:
+) -> _RecoveredTurn | None:
     path = _session_file(worktree, env, session_id, since)
     if path is None:
         return None
-    return _completed_turn_text(path, since)
+    return _completed_turn(path, since)
 
 
 class ClaudeCodeAdapter(WorkerAdapter):
@@ -337,13 +412,13 @@ class ClaudeCodeAdapter(WorkerAdapter):
         # 2.1.330 exits before flushing its async stdout writes).  The CLI's
         # own durable transcript still records the completed turn, so recover
         # the terminal evidence from there instead of failing the dispatch.
-        recovered: str | None = None
+        recovered: _RecoveredTurn | None = None
         if process.passed and not native.saw_result:
             recovered = _recover_completion(
                 request.worktree_path, env, native.session_id, launched_at
             )
             if recovered is not None:
-                output = recovered
+                output = recovered.text
         stderr_text = process.stderr
         if recovered is not None:
             stderr_text = (
@@ -431,4 +506,9 @@ class ClaudeCodeAdapter(WorkerAdapter):
             duration_seconds=auth.duration_seconds + process.duration_seconds,
             prompt_bytes=prompt_bytes, prompt_transport_used="stdin",
             actual_model=native.actual_model,
+            usage=(
+                [recovered.usage]
+                if recovered is not None and recovered.usage is not None
+                else native.usage
+            ),
         )

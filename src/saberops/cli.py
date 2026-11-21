@@ -6230,17 +6230,20 @@ def _normalize_cli_instant(value: str | None) -> str | None:
     return parsed.astimezone(UTC).isoformat()
 
 
-def _plan_summaries_for_cli() -> tuple[dict[str, Any], ...]:
-    """Read the plan section without creating a store from a read command."""
+def _return_summary_for_cli(away: Any) -> Any:
+    """Read the plan and awaiting-acceptance sections without creating a store."""
     from saberops.plan_state import plan_return_summaries
 
     path = get_default_db_path()
     if not path.exists():
-        return ()
+        return away.build_return_summary()
     try:
-        return plan_return_summaries(Database(path, read_only=True))
+        db = Database(path, read_only=True)
+        return away.build_return_summary(
+            plans=plan_return_summaries(db), db=db
+        )
     except Exception:
-        return ()
+        return away.build_return_summary()
 
 
 def handle_away_show(args: argparse.Namespace) -> int:
@@ -6249,7 +6252,7 @@ def handle_away_show(args: argparse.Namespace) -> int:
     try:
         decisions = away.render_standing_decisions()
         policy = away.load_away_policy()
-        summary = away.build_return_summary(plans=_plan_summaries_for_cli())
+        summary = _return_summary_for_cli(away)
     except (away.AwayError, OSError) as exc:
         print(f"[!] Away state unavailable: {exc}", file=sys.stderr)
         return 1
@@ -6452,7 +6455,7 @@ def handle_away_summary(args: argparse.Namespace) -> int:
     """Handle `orch away summary`."""
     away = _away_stack()
     try:
-        summary = away.build_return_summary(plans=_plan_summaries_for_cli())
+        summary = _return_summary_for_cli(away)
     except (away.AwayError, OSError) as exc:
         print(f"[!] Away journal unavailable: {exc}", file=sys.stderr)
         return 1
@@ -6466,6 +6469,19 @@ def handle_away_summary(args: argparse.Namespace) -> int:
         print(f"  parked: {entry.get('decision_id')} ({entry.get('never_delegable')})")
     for entry in summary.escalations:
         print(f"  escalated: {entry.get('decision_id')} ({entry.get('reason')})")
+    for entry in summary.awaiting_acceptance:
+        sha = str(entry.get("candidate_sha") or "")
+        commit = f" ({sha[:12]})" if sha else ""
+        command = entry.get("owner_action")
+        if command:
+            print(
+                f"  candidate: {entry.get('job_id')}{commit}: `{command}`"
+            )
+        else:
+            print(
+                f"  candidate: {entry.get('job_id')}{commit} is not acceptable yet "
+                f"({entry.get('reason')})"
+            )
     for plan in summary.plans:
         waiting = ", ".join(plan.get("waiting_for_owner") or ()) or "none"
         print(

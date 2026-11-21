@@ -279,3 +279,123 @@ def test_attempt_without_provider_counters_reports_unknown(
     assert usage["subscriptions"][0]["usage"]["input_tokens"] == "unknown"
     assert usage["total"]["input_tokens"] == "unknown"
     assert usage["coverage_complete"] is False
+
+
+def test_review_usage_belongs_to_the_reviewer_subscription(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B3 D8: a review dispatch's tokens are not dropped from the job view.
+
+    The Codex batch showed only codex calls because ``job_usage_view`` walked
+    attempts only; review usage rows are a separate dispatch (no attempt id).
+    """
+    from saberops.jobs.service import get_job, job_usage_view
+    from saberops.models import ProviderUsage, WorkerResult
+
+    rig = build_lifecycle_rig(tmp_path, monkeypatch)
+    db = rig.db()
+    job_id = "job-f2-review-usage"
+    run_id = "run-f2-review-usage"
+    _seed_job(db, rig, job_id=job_id, run_id=run_id)
+    now = current_iso_timestamp()
+    attempt_id = f"{run_id}-a1"
+    db.create_attempt(
+        Attempt(
+            id=attempt_id,
+            run_id=run_id,
+            attempt_number=1,
+            provider="codex",
+            model=CODEX_MODEL,
+            worktree_path=str(rig.repo),
+            branch_name=f"orch/{run_id}/a1",
+            status=AttemptStatus.SUCCESS,
+            created_at=now,
+            completed_at=now,
+        )
+    )
+    persist_worker_usage(
+        db,
+        run_id=run_id,
+        association_id=attempt_id,
+        attempt_id=attempt_id,
+        review_id=None,
+        stage=DispatchStage.IMPLEMENTATION,
+        tier=Tier.T1,
+        provider="codex",
+        model=CODEX_MODEL,
+        prompt_bytes=10,
+        transport="stdin",
+        result=WorkerResult(
+            provider="codex",
+            model=CODEX_MODEL,
+            status=AttemptStatus.SUCCESS,
+            summary="done",
+            stdout="",
+            stderr="",
+            usage=[
+                ProviderUsage(
+                    input_tokens=12,
+                    output_tokens=8,
+                    total_tokens=20,
+                    usage_source="codex_turn_completed_json",
+                )
+            ],
+        ),
+    )
+    persist_worker_usage(
+        db,
+        run_id=run_id,
+        association_id="rev-review-1",
+        attempt_id=None,
+        review_id="rev-review-1",
+        stage=DispatchStage.REVIEW,
+        tier=Tier.T1,
+        provider="anthropic",
+        model="claude-haiku-4-5-20251001",
+        prompt_bytes=10,
+        transport="stdin",
+        result=WorkerResult(
+            provider="anthropic",
+            model="claude-haiku-4-5-20251001",
+            status=AttemptStatus.SUCCESS,
+            summary="VERDICT: PASS",
+            stdout="VERDICT: PASS",
+            stderr="",
+            usage=[
+                ProviderUsage(
+                    input_tokens=100,
+                    output_tokens=20,
+                    total_tokens=120,
+                    cache_read_tokens=5,
+                    cache_write_tokens=7,
+                    usage_source="claude_result_json",
+                )
+            ],
+        ),
+    )
+
+    job = get_job(db, job_id)
+    assert job is not None
+    usage = job_usage_view(db, job)
+    assert [entry["subscription"] for entry in usage["subscriptions"]] == [
+        "claude",
+        "codex",
+    ]
+    reviewer = usage["subscriptions"][0]
+    assert reviewer["attempt_ids"] == []
+    assert reviewer["review_ids"] == ["rev-review-1"]
+    assert reviewer["usage"]["input_tokens"] == 100
+    assert reviewer["usage"]["output_tokens"] == 20
+    assert reviewer["usage"]["cache_read_tokens"] == 5
+    assert reviewer["usage"]["cache_write_tokens"] == 7
+    assert usage["reviews"][0]["review_id"] == "rev-review-1"
+    assert usage["coverage_complete"] is True
+
+    from saberops.benchmark import aggregate_subscription_usage
+
+    rows = aggregate_subscription_usage(db, [job_id])
+    by_subscription = {row.subscription: row for row in rows}
+    assert set(by_subscription) == {"claude", "codex"}
+    assert by_subscription["claude"].input_tokens == 100
+    assert by_subscription["claude"].output_tokens == 20
+    assert by_subscription["claude"].reported is True

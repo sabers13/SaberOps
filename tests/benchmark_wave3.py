@@ -1008,13 +1008,21 @@ def _drill_usage_per_subscription(rig: RigEnvironment) -> DrillResult:
 
     usage = aggregate_subscription_usage(db, job_ids)
     by_subscription = {row.subscription: row for row in usage}
-    assert set(by_subscription) == {"codex", "opencode"}, by_subscription
-    for row in usage:
+    # B3 D8: the independent reviews are dispatches too, so their calls belong
+    # to the reviewer's own subscription instead of disappearing from the table.
+    assert set(by_subscription) == {"codex", "opencode", "claude"}, by_subscription
+    for subscription in ("codex", "opencode"):
+        row = by_subscription[subscription]
         assert row.jobs == 1, row
         assert row.calls > 0, row
-        if not row.reported:
-            # A counter the provider did not report is never invented.
-            assert row.input_tokens is None and row.unknown_calls == row.calls, row
+        assert row.reported is True, row
+    reviewer = by_subscription["claude"]
+    assert reviewer.jobs == 2, reviewer
+    assert reviewer.calls > 0, reviewer
+    # The fake reviewer reports no counters; a counter the provider did not
+    # report is never invented.
+    assert reviewer.reported is False, reviewer
+    assert reviewer.input_tokens is None and reviewer.unknown_calls == reviewer.calls, reviewer
     assert by_subscription["codex"].reported is True, by_subscription["codex"]
     codex_attempts = db.get_attempts_for_run(codex_run)
     assert [attempt.provider for attempt in codex_attempts] == ["codex"]
@@ -1024,7 +1032,10 @@ def _drill_usage_per_subscription(rig: RigEnvironment) -> DrillResult:
         started=started,
         passed=True,
         final_state="SUCCEEDED",
-        reason="codex and opencode each reported their own calls and tokens",
+        reason=(
+            "codex and opencode each reported their own calls and tokens; the "
+            "reviewer's calls are attributed to its own subscription"
+        ),
         detail=", ".join(
             f"{row.subscription}: {row.calls} calls / "
             f"{row.total_tokens if row.total_tokens is not None else 'unknown'} tokens"

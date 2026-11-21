@@ -368,3 +368,52 @@ def test_tick_delivers_notice_while_fail_closed_guard_holds(
     assert result.legacy_running_jobs == ("legacy_null_run",)
     lines = log.read_text().splitlines()
     assert len(lines) == 1 and "failed" in lines[0]
+
+
+# ---------------------------------------------------------------------------
+# B3 D10: notice accounting must not require a working desktop bus
+# ---------------------------------------------------------------------------
+
+
+def test_missing_notify_send_records_a_durable_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A headless host records the attempt instead of leaving the key absent."""
+    from saberops.benchmark import _notice_delivered
+    from saberops.notifications import notice_attempted, notify_once
+
+    monkeypatch.setenv("SABEROPS_DESKTOP_NOTIFICATIONS", "1")
+    empty = tmp_path / "bin"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+    ledger = tmp_path / "owner.db.notifications.sqlite3"
+
+    assert notify_once(ledger, "job:job-1:SUCCEEDED", "Done", "job-1") == "unavailable"
+    assert notice_attempted(ledger, "job:job-1:SUCCEEDED") is True
+
+    class _Db:
+        db_path = tmp_path / "owner.db"
+
+    assert _notice_delivered(_Db(), "job-1", "SUCCEEDED") is True
+
+
+def test_failed_notify_send_still_counts_as_an_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from saberops.benchmark import _notice_delivered
+    from saberops.notifications import notice_attempted, notify_once
+
+    monkeypatch.setenv("SABEROPS_DESKTOP_NOTIFICATIONS", "1")
+    command = tmp_path / "notify-send"
+    command.write_text("#!/bin/sh\nexit 3\n", encoding="utf-8")
+    command.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    ledger = tmp_path / "owner.db.notifications.sqlite3"
+
+    assert notify_once(ledger, "job:job-2:FAILED", "Failed", "job-2") == "failed"
+    assert notice_attempted(ledger, "job:job-2:FAILED") is True
+
+    class _Db:
+        db_path = tmp_path / "owner.db"
+
+    assert _notice_delivered(_Db(), "job-2", "FAILED") is True

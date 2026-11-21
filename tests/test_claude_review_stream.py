@@ -213,6 +213,12 @@ def write_session(worktree: str) -> None:
         "message": {{
             "stop_reason": "end_turn",
             "content": [{{"type": "text", "text": "VERDICT: PASS\\n\\nAll checks passed."}}],
+            "usage": {{
+                "input_tokens": 11,
+                "output_tokens": 7,
+                "cache_read_input_tokens": 3,
+                "cache_creation_input_tokens": 4,
+            }},
         }},
     }}
     with open(os.path.join(folder, SESSION_ID + ".jsonl"), "w", encoding="utf-8") as handle:
@@ -309,3 +315,51 @@ def test_session_recovery_ignores_an_earlier_completed_turn(
 
     assert result.status is AttemptStatus.FAILED
     assert "truncated" in (result.error or "")
+
+
+# ---------------------------------------------------------------------------
+# B3 D8: Claude token counters survive both the normal and the recovered path
+# ---------------------------------------------------------------------------
+
+
+def test_result_frame_records_claude_token_counters(tmp_path: Path) -> None:
+    frames = FIXTURE.read_text(encoding="utf-8").splitlines()
+    usage = json.loads(frames[-1])["usage"]
+    claude = _install_fake_cli(tmp_path, frames)
+
+    result = _review(_candidate_worktree(tmp_path), claude, tmp_path / "sessions")
+
+    assert result.status is AttemptStatus.SUCCESS, result.error
+    assert len(result.usage) == 1
+    entry = result.usage[0]
+    assert entry.usage_source == "claude_result_json"
+    assert entry.input_tokens == usage["input_tokens"]
+    assert entry.output_tokens == usage["output_tokens"]
+    assert entry.cache_read_tokens == usage["cache_read_input_tokens"]
+    assert entry.cache_write_tokens == usage["cache_creation_input_tokens"]
+    assert entry.total_tokens == usage["input_tokens"] + usage["output_tokens"]
+
+
+def test_recovered_completion_keeps_transcript_token_counters(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The transcript's assistant message carries the same usage as the frame.
+
+    Before this fix every Claude batch row was ``unknown``: the recovery path
+    returned text only, and the adapter never populated ``WorkerResult.usage``
+    at all.
+    """
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
+    claude = _install_truncating_cli(tmp_path)
+
+    result = _review(_candidate_worktree(tmp_path), claude, tmp_path / "sessions")
+
+    assert result.status is AttemptStatus.SUCCESS, result.error
+    assert len(result.usage) == 1
+    entry = result.usage[0]
+    assert entry.usage_source == "claude_transcript_json"
+    assert entry.input_tokens == 11
+    assert entry.output_tokens == 7
+    assert entry.cache_read_tokens == 3
+    assert entry.cache_write_tokens == 4
+    assert entry.total_tokens == 18

@@ -1178,7 +1178,7 @@ def _catch_up_return_summary(
 
         db = context.database(read_only=True)
         plans = plan_return_summaries(db) if db is not None else ()
-        payload = build_return_summary(plans=plans).as_dict()
+        payload = build_return_summary(plans=plans, db=db).as_dict()
         if advisor is not None:
             payload["advisor"] = dict(advisor)
         return payload

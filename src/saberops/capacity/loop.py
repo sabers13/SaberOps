@@ -1656,7 +1656,9 @@ def scheduler_tick(
 
             away_module.deliver_return_summary(
                 away_module.build_return_summary(
-                    away_journal, plans=plan_return_summaries(db, now=moment)
+                    away_journal,
+                    plans=plan_return_summaries(db, now=moment),
+                    db=db,
                 ),
                 _notification_ledger(db),
             )

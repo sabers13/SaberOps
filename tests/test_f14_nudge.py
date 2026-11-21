@@ -396,3 +396,87 @@ def test_nudged_idle_worker_resumes_and_receives_the_continue(
     final_job = get_job(db, submitted.job.job_id)
     assert final_job is not None
     assert final_job.state is JobState.SUCCEEDED
+
+
+# ---------------------------------------------------------------------------
+# B3 D19: healthy lanes never flash needs-attention on a transient projection
+# ---------------------------------------------------------------------------
+
+
+def test_transient_monitor_attention_is_not_owner_attention(
+    rig: RigEnvironment,
+) -> None:
+    """QUIET/AMBIGUOUS_BUSY/TERMINATING are continuing states, not attention.
+
+    The monitor writes UNCERTAIN + ATTENTION_REQUIRED while a live worker is
+    between output samples or terminating.  Reading that as owner attention is
+    what made healthy lanes flash ``needs-attention`` for 1-3 s before their
+    candidate landed.
+    """
+    db, job_id, run_id, _attempt_id = _live_job(rig)
+    assert db.update_supervision_health(
+        run_id,
+        health_state=HealthState.UNCERTAIN,
+        health_reason="attention: ambiguous_busy continuing (not stall-confirmed)",
+        manager_state=ManagerState.ATTENTION_REQUIRED,
+    )
+    job = get_job(db, job_id)
+    assert job is not None
+    assert job_status_view(db, job)["activity"] == "running"
+
+
+def test_worker_stall_attention_still_surfaces(rig: RigEnvironment) -> None:
+    """The durable output-quiet stall remains the owner-attention path."""
+    db, job_id, run_id, attempt_id = _live_job(rig)
+    on_stall, _on_resume = _idle_hook(db, run_id, attempt_id)
+    on_stall(301.0)
+
+    job = get_job(db, job_id)
+    assert job is not None
+    assert job_status_view(db, job)["activity"] == "needs_attention"
+
+
+def test_terminal_run_handoff_never_flashes_attention(
+    rig: RigEnvironment,
+) -> None:
+    """A released owner after a terminal run is normal handoff bookkeeping."""
+    import os
+
+    from saberops.models import RunStatus
+    from saberops.ownership import ProcessIdentity
+
+    db, job_id, run_id, _attempt_id = _live_job(rig)
+    identity = ProcessIdentity.for_pid(os.getpid())
+    assert identity is not None
+    owner = db.claim_execution_owner(run_id, identity=identity)
+    db.update_run(run_id, RunStatus.COMPLETED)
+    assert db.release_execution_owner(
+        run_id, owner_id=owner.owner_id, generation=owner.generation
+    )
+
+    job = get_job(db, job_id)
+    assert job is not None and job.state is JobState.RUNNING
+    assert job_status_view(db, job)["activity"] == "running"
+
+
+def test_dead_owner_on_a_running_run_still_needs_attention(
+    rig: RigEnvironment,
+) -> None:
+    """The safety hold itself is not weakened by the transient-state fix."""
+    import os
+
+    from saberops.ownership import ProcessIdentity
+
+    db, job_id, run_id, _attempt_id = _live_job(rig)
+    identity = ProcessIdentity.for_pid(os.getpid())
+    assert identity is not None
+    owner = db.claim_execution_owner(run_id, identity=identity)
+    assert db.release_execution_owner(
+        run_id, owner_id=owner.owner_id, generation=owner.generation
+    )
+
+    job = get_job(db, job_id)
+    assert job is not None
+    view = job_status_view(db, job)
+    assert view["activity"] == "needs_attention"
+    assert view["reason"] == "execution owner is dead; worker safety is being checked"

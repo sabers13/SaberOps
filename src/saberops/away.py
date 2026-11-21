@@ -667,6 +667,7 @@ class ReturnSummary:
     plan_impact: dict[str, Any] | None
     preflight: dict[str, Any] | None
     plans: tuple[dict[str, Any], ...] = ()
+    awaiting_acceptance: tuple[dict[str, Any], ...] = ()
 
     @property
     def has_items(self) -> bool:
@@ -678,6 +679,7 @@ class ReturnSummary:
             or self.audit_entries
             or self.stall_alarms
             or self.halts
+            or self.awaiting_acceptance
             or any(
                 plan.get("waiting_for_owner") or plan.get("parked")
                 for plan in self.plans
@@ -692,6 +694,10 @@ class ReturnSummary:
             f"{len(self.escalations)} escalated",
             f"{len(self.audit_entries)} audited",
         ]
+        if self.awaiting_acceptance:
+            parts.append(
+                f"{len(self.awaiting_acceptance)} candidate(s) awaiting acceptance"
+            )
         waiting = sum(
             len(plan.get("waiting_for_owner") or ()) for plan in self.plans
         )
@@ -719,19 +725,77 @@ class ReturnSummary:
             "plan_impact": self.plan_impact,
             "preflight": self.preflight,
             "plans": list(self.plans),
+            "awaiting_acceptance": list(self.awaiting_acceptance),
         }
+
+
+def awaiting_acceptance(db: Any, *, limit: int = 1000) -> tuple[dict[str, Any], ...]:
+    """Every SUCCEEDED job whose candidate still waits for the owner.
+
+    The away journal records decisions, not jobs, so a fresh return summary
+    that read only the journal omitted standalone away candidates (D17).  This
+    projection is read-only and reuses the same candidate lifecycle and owner
+    action the job surfaces show: the command named here is the exact one the
+    owner can type.
+    """
+    import sqlite3
+
+    from saberops.candidate_lifecycle import project_candidate_state
+    from saberops.jobs.models import JobState
+    from saberops.jobs.service import owner_action_view
+    from saberops.jobs.store import list_jobs_tolerant
+    from saberops.models import CandidateState
+
+    terminal = {CandidateState.ACCEPTED, CandidateState.REJECTED, CandidateState.CLEANED}
+    try:
+        jobs, _ = list_jobs_tolerant(
+            db, state=JobState.SUCCEEDED, limit=limit, quarantine=False
+        )
+    except sqlite3.Error:
+        # A read-only store that has never held a job has no candidate to name.
+        return ()
+    entries: list[dict[str, Any]] = []
+    for job in jobs:
+        view = owner_action_view(db, job)
+        run_id = view.get("run_id")
+        if not run_id or not view.get("candidate_sha"):
+            continue
+        projection = project_candidate_state(db, str(run_id))
+        if projection.candidate_sha is None or projection.state in terminal:
+            continue
+        entries.append(
+            {
+                "job_id": job.job_id,
+                "run_id": run_id,
+                "candidate_sha": projection.candidate_sha,
+                "repo": job.repo,
+                "goal": job.goal,
+                "state": (
+                    projection.state.value
+                    if projection.state is not None
+                    else None
+                ),
+                "reason": projection.reason,
+                "owner_action": view.get("owner_action"),
+            }
+        )
+    return tuple(entries)
 
 
 def build_return_summary(
     journal: AwayJournal | None = None,
     *,
     plans: Sequence[dict[str, Any]] = (),
+    db: Any | None = None,
 ) -> ReturnSummary:
-    """Assemble the return summary from the durable journal only.
+    """Assemble the return summary from durable engine records.
 
     ``plans`` is the read-only plan section of the same summary (the projection
     behind ``STATE.md``): a plan is not a journal decision, but it is durable
     engine state a fresh session must be able to read after the planner closed.
+    When ``db`` is available, standalone SUCCEEDED candidates that still wait
+    for acceptance are projected too, so "while you were away" names the exact
+    accept command instead of reporting only plan lanes.
     """
     resolved = journal if journal is not None else AwayJournal()
     records = resolved.records()
@@ -787,6 +851,7 @@ def build_return_summary(
         plan_impact=plan_impact,
         preflight=preflight,
         plans=tuple(dict(plan) for plan in plans),
+        awaiting_acceptance=(awaiting_acceptance(db) if db is not None else ()),
     )
 
 
