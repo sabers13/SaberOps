@@ -171,11 +171,13 @@ authority preset, never widen it. Only the owner switches it with
 **Closing the planning CLI pauses all work, in every mode.** No new job, plan
 lane, retry, repair or refresh starts, and every running worker is stopped at a
 safe point with its worktree, checkpoint and evidence preserved. The pause is
-sticky: it clears only with `orch resume` or the `resume_work` MCP call, never on
-its own. Use `orch pause` (or the Questions page) for an instant owner stop and
-`get_pause`/`catch_up` to see what is parked. While away or critical-only, a
-periodic digest notice lists running jobs, the subscriptions in use and the
-usage so far. See [ADR-0029](docs/decisions/0029-no-work-without-a-planning-session.md).
+sticky: it clears only when the owner runs `orch resume`, never on its own and
+never from an agent session. Use `orch pause` (or the Questions page) for an
+instant owner stop, and `get_pause`/`catch_up` to see what is parked. While
+away or critical-only, a periodic digest notice lists running jobs, the
+subscriptions in use and the usage so far. See
+[ADR-0029](docs/decisions/0029-no-work-without-a-planning-session.md) and
+[ADR-0045](docs/decisions/0045-owner-confirmed-resume.md).
 
 **Authority preset** is the ceiling. Unknown values fail closed and never degrade
 into a more permissive setting.

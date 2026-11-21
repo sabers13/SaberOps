@@ -1218,7 +1218,9 @@ def owner_action_view(db: Any, job: Job) -> dict[str, Any]:
     projection, so the command an owner is told to type cannot differ per
     surface.  ``owner_action`` is set only when the accept engine says the run
     is eligible right now; a candidate without eligibility is still reported,
-    because it is evidence the owner may want to inspect.
+    because it is evidence the owner may want to inspect. ``candidate_state``
+    is the CandidateState projection, so a terminal candidate (ACCEPTED or
+    REJECTED) is reported as such instead of reading as "not eligible yet".
     """
     from saberops.accept import AcceptEngine
     from saberops.candidate_lifecycle import project_candidate_state
@@ -1226,6 +1228,7 @@ def owner_action_view(db: Any, job: Job) -> dict[str, Any]:
     view: dict[str, Any] = {
         "run_id": None,
         "candidate_sha": None,
+        "candidate_state": None,
         "owner_action": None,
     }
     engine = AcceptEngine(db)
@@ -1236,7 +1239,13 @@ def owner_action_view(db: Any, job: Job) -> dict[str, Any]:
         eligible = engine.check_accept_eligibility(run_id).eligible
         if view["candidate_sha"] is not None and not eligible:
             continue
-        view.update(run_id=run_id, candidate_sha=projection.candidate_sha)
+        view.update(
+            run_id=run_id,
+            candidate_sha=projection.candidate_sha,
+            candidate_state=(
+                projection.state.value if projection.state is not None else None
+            ),
+        )
         if eligible:
             view["owner_action"] = f"orch accept {run_id}"
             break

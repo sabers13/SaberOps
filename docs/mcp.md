@@ -81,7 +81,9 @@ first missing step with no stored cursor.
 | `get_mode` | no | — | `saberops.owner_mode.mode_view` |
 | `propose_mode_change` | yes | `mode`, `until`, `rationale`, `proposed_by` | raises an owner question; never changes the mode |
 | `get_pause` | no | — | `saberops.runtime_gate.gate_view` |
-| `resume_work` | yes | — | `saberops.pause_work.resume_work`; the one confirmation that clears a pause |
+
+Resuming a paused work gate is owner-only: `orch resume` is the one
+confirmation. `resume_work` is not an MCP tool (ADR-0045).
 
 `submit_job` accepts **requirements only**. `provider`, `model`, `tier`,
 `billing`, `route`, `quota` and `account` are rejected at the top level and
@@ -266,14 +268,13 @@ narrows the authority preset. `propose_mode_change` raises an owner question and
 Questions page (ADR-0020).
 
 `get_pause` is read-only: it reports the work gate -- running, or paused with
-its reason, the plan and worker state, the paused jobs and the one call that
-resumes. Closing the planning CLI pauses all work in every mode (ADR-0029).
-`resume_work` is the only confirmation that clears a pause; it is mutating, so a
-read-only client cannot call it. Nothing resumes by itself: a returning session
-sees the pause in `catch_up`, in every `get_job` result, and in the
-`saberops_on` reply, and must confirm with `resume_work` or the owner must run
-`orch resume`. While the gate is closed `wait_job` returns
-`outcome: "paused"` immediately with the same resume action instead of waiting
+its reason, the plan and worker state, the paused jobs and the owner command
+that resumes. Closing the planning CLI pauses all work in every mode
+(ADR-0029). Nothing resumes by itself and no MCP tool clears a pause: a
+returning session sees the pause in `catch_up`, in every `get_job` result, and
+in the `saberops_on` reply, and asks the owner to run `orch resume`
+(ADR-0045). While the gate is closed `wait_job` returns
+`outcome: "paused"` immediately with that owner command instead of waiting
 out its timeout and reporting that nothing needs the owner.
 
 ## Never exposed
@@ -319,11 +320,20 @@ exclusive `flock` during each read-modify-write.
   `initialize` and released at EOF.
 * A second live client (a different, live `pid` holds the record) is read-only:
   calls to `submit_job`, `submit_plan`, `promote_scout`, `cancel_job`,
-  `note_job`, `answer_question`, `propose_config_change`, `propose_mode_change`
-  and `resume_work` are refused with JSON-RPC error `-32020`. Its read tools
-  (`get_job`, `catch_up`, `list_jobs`, `capacity`, `read_evidence`,
-  `list_questions`, `list_proposals`, `get_mode`, `get_pause`, `start_walkthrough`)
-  keep working.
+  `note_job`, `answer_question`, `propose_config_change` and
+  `propose_mode_change` are refused with JSON-RPC error `-32020`. Its read
+  tools (`get_job`, `catch_up`, `list_jobs`, `capacity`, `read_evidence`,
+  `list_questions`, `list_proposals`, `get_mode`, `get_pause`,
+  `start_walkthrough`) keep working.
+* **One narrow proxy exception (D13).** Some host CLIs (Codex 0.170.0) give
+  each custom-agent child its own MCP server instance, so a spawned proxy is
+  read-only even while the parent planning session still holds a live lease.
+  That child may call `submit_job` when all of these hold: the tool is
+  `submit_job` (nothing else), `caller_id` matches `proxy:<name>`, and the
+  recorded planning lease names a live PID with a session id. The job is owned
+  by that live planning session, so its running work still protects the lease.
+  With a dead or missing lease, or any other caller id, the call stays refused
+  with `-32020`.
 * **Stale self-healing:** a record whose `pid` is dead is stale and is stolen by
   the next client (`os.kill(pid, 0)` is the liveness probe), so a crashed client
   never locks out future writers. A non-empty but unreadable/malformed record is
@@ -446,6 +456,14 @@ generated files and keeps any sibling the owner wrote. Re-running `connect
 --agents` is idempotent, and a file without the `saberops-managed-agent`
 marker is never overwritten or deleted. Definitions are generated from the live
 MCP tool list, so a renamed tool cannot leave a stale proxy behind.
+
+Codex 0.170.0 gives each custom-agent child its own MCP server instance, so a
+spawned proxy cannot share the parent's writer lease even though it inherits the
+parent's MCP configuration entry. The server therefore accepts a proxy child's
+`submit_job` under the narrow live-lease exception described in
+[Single-writer Orchestrator lease](#single-writer-orchestrator-lease); every
+other mutating tool stays read-only for that child. Claude Code, OpenCode and
+Antigravity proxies reuse the parent's server and need no exception.
 
 Each definition carries only the short handoff contract and points at the
 `saberops://guide` resource (also served as the `saberops-guide` prompt) for

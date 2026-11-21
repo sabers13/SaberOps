@@ -34,6 +34,7 @@ this client is not the writer.
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
@@ -49,7 +50,7 @@ from saberops.mcp.errors import (
     ToolError,
 )
 from saberops.mcp.evidence import EvidenceRoots
-from saberops.mcp.lease import OrchestratorLease
+from saberops.mcp.lease import OrchestratorLease, pid_is_alive
 from saberops.mcp.ledger import SNAPSHOT_SCHEMA_VERSION, EventLedger
 from saberops.mcp.schema import validate_instance
 
@@ -98,6 +99,7 @@ FORBIDDEN_OPERATIONS: dict[str, str] = {
     "get_credentials": "read tools never return credentials",
     "read_secret": "read tools never return credentials",
     "read_token": "read tools never return credentials",
+    "resume_work": "resuming paused work is owner-only; the owner runs `orch resume`",
 }
 
 #: Tools that mutate state; these require the single-writer lease.
@@ -112,7 +114,6 @@ MUTATING_TOOLS: frozenset[str] = frozenset(
         "answer_question",
         "propose_config_change",
         "propose_mode_change",
-        "resume_work",
     }
 )
 
@@ -173,7 +174,6 @@ TOOL_NAMES: tuple[str, ...] = (
     "get_mode",
     "propose_mode_change",
     "get_pause",
-    "resume_work",
 )
 
 _JOB_STATES = ["QUEUED", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"]
@@ -184,6 +184,12 @@ _QUESTION_STATUSES = ["OPEN", "DEFERRED", "ANSWERED", "MOOT"]
 _ANSWER_AUTHORITIES = ["OWNER", "PLAN"]
 _ANSWER_ROLES = ["OWNER", "PLAN"]
 _OWNER_MODE_VALUES = ["ask-me", "critical-only", "away"]
+
+#: A cross-CLI proxy's self-asserted provenance label (D13).  The narrow
+#: create-only exception below accepts only this shape, never a free-form
+#: caller string, so it cannot become a general write grant for read-only
+#: clients.
+_PROXY_CALLER_ID = re.compile(r"^proxy:[a-z0-9][a-z0-9._-]{0,63}$")
 
 #: Field names that would let a caller choose a billing/model route
 #: (ADR-0001 invariant 3: callers state requirements only).
@@ -253,6 +259,19 @@ class ServerContext:
             return Database(path, read_only=False)
         return Database(path, read_only=read_only)
 
+    def submit_session_id(self) -> str:
+        """The session that owns a submitted job.
+
+        Normally this session.  A proxy submits from its own read-only server
+        while the live planning lease belongs to the parent session, so the
+        job is owned by that live planner: its running work keeps protecting
+        the lease instead of disappearing behind a short-lived child process.
+        """
+        record = self.lease.read()
+        if record is not None and record.session_id and pid_is_alive(record.pid):
+            return record.session_id
+        return self.lease.session_id
+
 
 @dataclass(frozen=True)
 class ToolSpec:
@@ -297,6 +316,27 @@ class ToolRegistry:
         """Exposed tool descriptors, ordered by name (deterministic)."""
         return [self._tools[name].descriptor() for name in self.names()]
 
+    def _proxy_submit_owner(self, name: str, arguments: Mapping[str, Any]) -> str | None:
+        """Return the live planning session allowed to accept a proxy submit.
+
+        D13: a host CLI may give each custom-agent child its own MCP server
+        instance, so the child is read-only even though the parent session is
+        still planning.  The exception is deliberately narrow: only
+        ``submit_job``, only for a ``caller_id`` shaped like ``proxy:<name>``,
+        and only while the recorded planning lease names a live process with a
+        session id.  Every other mutating tool, and every non-proxy caller,
+        stays refused; a dead or missing lease grants nothing.
+        """
+        if name != "submit_job" or self._lease is None:
+            return None
+        caller = arguments.get("caller_id")
+        if not isinstance(caller, str) or _PROXY_CALLER_ID.fullmatch(caller.strip()) is None:
+            return None
+        record = self._lease.read()
+        if record is None or not record.session_id or not pid_is_alive(record.pid):
+            return None
+        return record.session_id
+
     def call(self, name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
         """Validate and dispatch one tool call.
 
@@ -318,19 +358,27 @@ class ToolRegistry:
             )
         if not isinstance(arguments, Mapping):
             raise InvalidParamsError(f"{name}: arguments must be a JSON object")
+        proxy_submit = None
         if spec.mutating and self._lease is not None and not self._lease.writer:
-            status = self._lease.status()
-            raise LeaseReadOnlyError(
-                f"{name!r} is read-only: {status['holder']} (pid {status['holder_pid']}) "
-                "holds planning ownership; use orch mcp release --holder <pid-or-session> "
-                "for a targeted handoff",
-                data={"tool": name, "operation": "mutating", "lease_writer": False},
-            )
+            proxy_submit = self._proxy_submit_owner(name, arguments)
+            if proxy_submit is None:
+                status = self._lease.status()
+                raise LeaseReadOnlyError(
+                    f"{name!r} is read-only: {status['holder']} "
+                    f"(pid {status['holder_pid']}) holds planning ownership; ask the "
+                    "owner to run orch mcp release --holder <pid-or-session> for a "
+                    "targeted handoff",
+                    data={"tool": name, "operation": "mutating", "lease_writer": False},
+                )
         errors = validate_instance(spec.input_schema, dict(arguments))
         if errors:
             raise InvalidParamsError(
                 f"{name}: invalid arguments: {'; '.join(errors)}", data={"errors": errors}
             )
+        if proxy_submit is not None:
+            # Create-only and outside the writer's flock: the planner keeps the
+            # lease, and this call only inserts a new queued job.
+            return spec.handler(arguments)
         if self._lease is None or name == "wait_job":
             return spec.handler(arguments)
         with self._lease.guarded_call(mutating=spec.mutating) as owned:
@@ -435,7 +483,7 @@ def _submit_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[st
             depends_on=arguments.get("depends_on"),
             idempotency_key=arguments.get("idempotency_key"),
             caller_id=str(arguments.get("caller_id") or "orchestrator"),
-            mcp_session_id=context.lease.session_id,
+            mcp_session_id=context.submit_session_id(),
         )
     except IdempotencyConflictError as exc:
         raise ToolError(f"idempotency conflict: {exc}") from exc
@@ -644,6 +692,7 @@ def _job_result(db: Any, job: Any) -> dict[str, Any]:
     result: dict[str, Any] = {
         "run_id": owner_view["run_id"],
         "candidate_sha": owner_view["candidate_sha"],
+        "candidate_state": owner_view["candidate_state"],
         "diff": None,
         "owner_action": owner_view["owner_action"],
         "worker": _chosen_worker(db, job),
@@ -1287,7 +1336,7 @@ def _wait_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str,
                 ),
                 "resume": {
                     "command": pause.get("resume_command", "orch resume"),
-                    "tool": pause.get("resume_tool", "resume_work"),
+                    "tool": pause.get("resume_tool"),
                 },
             }
         if job.get("waiting_reason") == "QUOTA_EVIDENCE_REQUIRED":
@@ -1680,23 +1729,6 @@ def _get_pause(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str
 
     db = context.database(read_only=True)
     return {"v": SNAPSHOT_SCHEMA_VERSION, **gate_view(db=db)}
-
-
-def _resume_work(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
-    """Confirm a resume from the planning session; nothing resumes implicitly.
-
-    This is the one MCP call that clears a pause.  It is mutating, so it needs
-    the writer lease: a read-only client cannot resume work it does not own.
-    """
-    from saberops.pause_work import resume_work
-
-    db = context.database(read_only=False)
-    state = resume_work(db, by="planning_session")
-    context.ledger.append(
-        "work_resumed",
-        {"by": "planning_session", "mode": state.mode.value},
-    )
-    return {"v": SNAPSHOT_SCHEMA_VERSION, **state.as_dict()}
 
 
 def _propose_mode_change(
@@ -2288,15 +2320,6 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
         _get_pause,
         mutating=False,
     )
-    register(
-        "resume_work",
-        "Confirm a resume after a pause; parked work returns to the scheduler. "
-        "Nothing resumes without this call or `orch resume`.",
-        _schema({}),
-        _resume_work,
-        mutating=True,
-    )
-
     from saberops.native_workers import NATIVE_TOOL_NAMES, native_enabled
 
     if native_enabled():

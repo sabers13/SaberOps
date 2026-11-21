@@ -120,6 +120,22 @@ def test_guide_names_the_owner_only_boundaries() -> None:
         assert owner_only in GUIDE.replace("\n  ", " "), owner_only
 
 
+def test_guide_uses_tools_and_never_shells_the_owner_commands() -> None:
+    """D17: inside a session the switch and handoff are tools, not shell commands."""
+    text = " ".join(GUIDE.split())
+    for phrase in (
+        "Never run `orch mcp on`, `orch mcp off`, `orch mcp release` or `orch mcp serve`",
+        "call `saberops_on`",
+        "call `saberops_off`",
+        "tell the owner to run `orch resume`",
+        "call a resume tool",
+    ):
+        assert phrase in text, phrase
+    # D16: the guide no longer teaches the removed MCP resume tool.
+    assert "`resume_work`" not in text
+    assert "call resume_work" not in text
+
+
 def test_guide_says_which_worker_to_use_and_keeps_acceptance_in_saberops() -> None:
     text = " ".join(GUIDE.split())
     for phrase in (

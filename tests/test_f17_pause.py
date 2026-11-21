@@ -23,8 +23,15 @@ from saberops.authority import set_authority_mode
 from saberops.cli import main
 from saberops.jobs.models import JobState, WaitingReason
 from saberops.jobs.service import get_job, submit_job
+from saberops.mcp.errors import ForbiddenOperationError
 from saberops.mcp.lease import LeaseRecord, OrchestratorLease
-from saberops.mcp.tools import ServerContext, _catch_up, _get_pause, _resume_work
+from saberops.mcp.tools import (
+    TOOL_NAMES,
+    ServerContext,
+    _catch_up,
+    _get_pause,
+    build_default_registry,
+)
 from saberops.model_access.readiness_service import ReadinessService
 from saberops.models import RunStatus
 from saberops.owner_mode import (
@@ -247,8 +254,8 @@ def test_nothing_resumes_without_confirmation(
     assert state.closed is True
     assert state.reason == PauseReason.NO_PLANNING_SESSION.value
 
-    # One explicit confirmation does.
-    resumed = resume_work(db, by="planning_session")
+    # One explicit owner confirmation does; the planning session cannot.
+    resumed = resume_work(db, by="owner")
     assert resumed.closed is False
 
     def redispatch() -> bool:
@@ -490,7 +497,7 @@ def test_digest_lists_running_work_and_usage(
 # --------------------------------------------------------------------------- #
 
 
-def test_catch_up_and_mcp_show_and_clear_the_pause(
+def test_catch_up_and_mcp_show_the_pause_but_only_the_owner_resumes(
     rig: RigEnvironment, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     set_authority_mode("autonomous")
@@ -506,8 +513,16 @@ def test_catch_up_and_mcp_show_and_clear_the_pause(
     catch = _catch_up(context, {"job_id": submitted.job_id})
     assert catch["pause"]["closed"] is True
 
-    resumed = _resume_work(context, {})
-    assert resumed["closed"] is False
+    # D16: an agent cannot clear a pause over MCP, even as the writer.
+    assert "resume_work" not in TOOL_NAMES
+    assert "resume_work" not in build_default_registry(context).names()
+    with pytest.raises(ForbiddenOperationError):
+        build_default_registry(context).call("resume_work", {})
+    assert evaluate_gate(db=db).closed is True
+
+    # The owner's own `orch resume` path still works.
+    resumed = resume_work(db, by="owner")
+    assert resumed.closed is False
     assert evaluate_gate(db=db).closed is False
 
 
@@ -534,7 +549,7 @@ def test_turn_on_and_job_reads_surface_the_paused_gate(
     assert view["pause"]["closed"] is True
     assert view["pause"]["reason"] == PauseReason.OWNER.value
     assert view["pause"]["resume_command"] == "orch resume"
-    assert view["pause"]["resume_tool"] == "resume_work"
+    assert view["pause"]["resume_tool"] is None
 
     # wait_job must return the paused outcome immediately instead of burning
     # its timeout and reporting that nothing needs the owner.
@@ -546,7 +561,7 @@ def test_turn_on_and_job_reads_surface_the_paused_gate(
     assert waited["outcome"] == "paused"
     assert waited["timed_out"] is False
     assert waited["resume"]["command"] == "orch resume"
-    assert waited["resume"]["tool"] == "resume_work"
+    assert waited["resume"]["tool"] is None
 
     # Turning SaberOps on in a fresh session states the gate and the resume
     # action before the planner can submit anything else.
@@ -572,7 +587,7 @@ def test_turn_on_and_job_reads_surface_the_paused_gate(
     text = turned_on["result"]["content"][0]["text"]
     assert "paused by the owner" in text
     assert "orch resume" in text
-    assert "resume_work" in text
+    assert "resume_work" not in text
 
 
 def test_session_loss_records_one_event_and_one_notice(

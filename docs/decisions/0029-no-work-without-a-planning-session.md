@@ -1,6 +1,8 @@
 # ADR-0029: No work runs without a connected planning session
 
 - **Status:** Accepted. Implemented in Phase 1 lanes F17 and F24 (Wave 3).
+  Decision 3 amended by [ADR-0045](0045-owner-confirmed-resume.md): resuming is
+  owner-only and the MCP `resume_work` call is no longer offered.
 - **Date:** 2026-11-19
 - **Decider:** Saber (owner), Phase 1 plan lanes F17 and F24
 - **Related:** [ADR-0020](0020-owner-mode.md) (owner mode),
@@ -62,9 +64,11 @@ terminal session is open: `orch watch` (F23) while a terminal is attached, or
    bounded tick in every mode.
 3. **A pause is sticky and never resumes silently.** The returning session sees
    the pause in `catch_up` and `get_pause`; work continues only after one
-   explicit confirmation: `orch resume` (owner) or the mutating MCP
-   `resume_work` (the planning session). An absent session that comes back is
-   not a confirmation.
+   explicit confirmation from the owner: `orch resume`. An absent session that
+   comes back is not a confirmation, and neither is an agent's own request.
+   (Originally this decision also allowed the mutating MCP `resume_work` call;
+   ADR-0045 removed it after a real-client recheck showed models resuming
+   without the owner.)
 4. **Running workers are stopped at a safe point, never discarded.** A closed
    gate parks every RUNNING job through the existing fenced stop plus the D8
    checkpoint/anchor/capsule protocol: the worker tree and execution owner are

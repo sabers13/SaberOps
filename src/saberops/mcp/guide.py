@@ -96,6 +96,8 @@ SHORT_INSTRUCTIONS = (
     "call catch_up. Owner-only decisions "
     "(accepting changes, approving config, billing, "
     "merging, pushing) are never available here: tell the owner to use the SaberOps page. "
+    "Use these MCP tools, never a shell `orch mcp ...` command or `orch resume`; "
+    "the owner runs those. "
     "Read the full guide in the saberops-guide prompt or the saberops://guide resource before "
     "your first submission."
 )
@@ -103,7 +105,7 @@ SHORT_INSTRUCTIONS = (
 PAUSED_INSTRUCTIONS = (
     f"{PREFIX} SaberOps is switched off by the owner right now, so it offers no tools. Work as "
     "you normally would. The owner turns it back on with `orch mcp on` or on the SaberOps Setup "
-    "page."
+    "page; never run that command yourself."
 )
 
 GUIDE = """\
@@ -148,9 +150,10 @@ CLI (`orch mode set`) or the Questions page.
 - Closing the planning CLI pauses everything, in every mode. No new job, plan
   lane, retry, repair or refresh starts, and every running worker is stopped at
   a safe point with its worktree, checkpoint and evidence preserved. Nothing
-  resumes on its own: call `get_pause` to see what is parked and why, and
-  `resume_work` only when the owner asks to continue. `orch pause` and
-  `orch resume` are the owner's own stop and resume. The turn-on reply states a
+  resumes on its own: call `get_pause` to see what is parked and why, and tell
+  the owner to run `orch resume`; only the owner can confirm a resume. Never
+  call a resume tool and never run `orch resume` yourself. `orch pause` is the
+  owner's own stop. The turn-on reply states a
   paused gate, and while it is closed `get_job` carries `pause` facts and
   `wait_job` returns `outcome: "paused"` immediately with the resume action:
   tell the owner work is paused instead of waiting or claiming nothing is
@@ -161,6 +164,18 @@ CLI (`orch mode set`) or the Questions page.
   returns `outcome: "needs_attention"` and the guidance carries the exact
   `orch quota set <provider> <pool> --remaining <percent>` command the owner
   must run; the job starts by itself on the next tick after that.
+
+## Tools, not the shell
+- Use the SaberOps MCP tools offered in this session. When a tool covers an
+  action, call the tool; do not run the equivalent `orch` command in a shell.
+- The switch is `saberops_on` / `saberops_off`: call `saberops_on` when the
+  owner asks to turn it on, and call `saberops_off` when they ask to stop.
+  Never run `orch mcp on`,
+  `orch mcp off`, `orch mcp release` or `orch mcp serve` in a shell from inside
+  a session: `orch mcp release` is the owner's targeted handoff, and a second
+  server started with `orch mcp serve` does not share this session's lease.
+- `orch resume` is the owner's explicit confirmation. Ask the owner to run it;
+  do not run it yourself.
 
 ## Talking to the user
 - Start every message that relays SaberOps (a submission, a status, a result, a

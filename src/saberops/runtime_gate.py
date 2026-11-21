@@ -313,7 +313,9 @@ class GateState:
             "paused_jobs": list(self.paused_jobs),
             "resume_requires": self.resume_requires,
             "resume_command": "orch resume",
-            "resume_tool": "resume_work",
+            # D16: resuming is owner-only.  No MCP tool clears a pause, so the
+            # projection names the owner's command and no tool.
+            "resume_tool": None,
         }
 
 

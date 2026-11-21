@@ -1634,7 +1634,7 @@ def _drill_pause_and_resume(rig: RigEnvironment) -> DrillResult:
     assert evaluate_gate(db=db).closed is True
 
     rig.set_worker_mode("commit", target_file="resumed.txt", content="ok\n")
-    resumed = resume_work(db, by="planning_session")
+    resumed = resume_work(db, by="owner")
     assert resumed.closed is False
 
     def redispatched() -> bool:

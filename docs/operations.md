@@ -66,8 +66,8 @@ Closing the terminal or Ctrl-C ends presence within the heartbeat bound.
 
 A fresh store is closed but not paused: `orch job submit` queues, and work
 starts as soon as a session opens. Once a session has been seen and then lost,
-the pause is sticky: work resumes only after `orch resume` (owner) or the
-`resume_work` MCP tool. A plain `orch run` refuses to start while the gate is
+the pause is sticky: work resumes only after the owner runs `orch resume`. No
+MCP tool clears a pause. A plain `orch run` refuses to start while the gate is
 closed; `orch run --attended` is the terminal form that holds presence itself.
 See [ADR-0029](decisions/0029-no-work-without-a-planning-session.md).
 

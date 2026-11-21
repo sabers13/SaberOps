@@ -9,6 +9,7 @@ split, and ``propose_config_change`` validates without applying anything.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from collections.abc import Mapping
@@ -54,6 +55,12 @@ def _isolated_owner_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setenv("XDG_STATE_HOME", str(state))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(config))
     monkeypatch.delenv("SABEROPS_PROFILE", raising=False)
+
+
+def _dead_pid() -> int:
+    proc = subprocess.Popen(["true"])
+    proc.wait()
+    return proc.pid
 
 
 def _git_repo(path: Path) -> Path:
@@ -180,12 +187,101 @@ def test_owner_only_authorities_cannot_be_reached_by_alias(tmp_path: Path) -> No
         assert response["error"]["code"] == -32010, alias
 
 
+def test_resume_work_is_never_exposed(tmp_path: Path) -> None:
+    """D16: resuming paused work is the owner's `orch resume`, not an MCP tool."""
+    server = _server(tmp_path)
+    assert "resume_work" not in TOOL_NAMES
+    response = _call(server, "resume_work", {})
+    assert response["error"]["code"] == -32010, response
+    assert "owner" in response["error"]["message"]
+
+
 @pytest.mark.parametrize("tool", sorted(MUTATING_TOOLS))
 def test_mutating_tools_require_the_writer_lease(tmp_path: Path, tool: str) -> None:
     """Covers: prompt section 'read-only second client' (mutating refusal)."""
     server = _server(tmp_path, read_only=True)
     response = _call(server, tool, {})
     assert response["error"]["code"] == -32020, response
+
+
+def _read_only_server_with_live_planner(tmp_path: Path) -> McpServer:
+    """One read-only MCP server beside a planning session that holds the lease."""
+    lease_path = tmp_path / "lease.json"
+    planner = OrchestratorLease(lease_path, holder="planner", pid=os.getpid())
+    assert planner.acquire() is True
+    server = McpServer(_context(tmp_path, lease_pid=os.getpid()))
+    assert server.read_only is True
+    server.handle({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {}})
+    server.handle({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    return server
+
+
+def test_proxy_submit_is_create_only_while_the_planner_lease_is_live(
+    tmp_path: Path,
+) -> None:
+    """D13: a proxy's own MCP server may submit while the planner lease is live."""
+    import sqlite3
+
+    repo = _git_repo(tmp_path / "proxy-repo")
+    server = _read_only_server_with_live_planner(tmp_path)
+    result = _payload(
+        server,
+        "submit_job",
+        {
+            "repo": str(repo),
+            "goal": "proxy handoff",
+            "caller_id": "proxy:opencode-go-worker",
+        },
+    )
+    assert result["created"] is True
+    job_id = result["job_id"]
+
+    # Ownership belongs to the live planning session, not the proxy's own
+    # read-only session, so its running work still protects the lease.
+    planner = OrchestratorLease(tmp_path / "lease.json").read()
+    assert planner is not None
+    with sqlite3.connect(tmp_path / "mcp.db") as conn:
+        row = conn.execute(
+            "SELECT session_id FROM mcp_job_owners WHERE job_id=?", (job_id,)
+        ).fetchone()
+    assert row is not None and row[0] == planner.session_id
+
+    # Every other mutating call stays refused, and a proxy caller id is not a
+    # general write grant.
+    refused = _call(
+        server,
+        "submit_job",
+        {"repo": str(repo), "goal": "not a proxy", "caller_id": "orchestrator"},
+    )
+    assert refused["error"]["code"] == -32020, refused
+    cancelled = _call(server, "cancel_job", {"job_id": job_id, "reason": "proxy"})
+    assert cancelled["error"]["code"] == -32020, cancelled
+
+
+def test_proxy_submit_is_refused_without_a_live_planner(tmp_path: Path) -> None:
+    """D13: the exception needs a live planning owner; a dead record never grants it."""
+    from saberops.mcp.errors import LeaseReadOnlyError
+    from saberops.mcp.tools import build_default_registry
+
+    repo = _git_repo(tmp_path / "proxy-dead-repo")
+    planner = OrchestratorLease(tmp_path / "lease.json", holder="planner", pid=os.getpid())
+    assert planner.acquire() is True
+    registry = build_default_registry(_context(tmp_path, lease_pid=os.getpid()))
+    record = planner.read()
+    assert record is not None
+    (tmp_path / "lease.json").write_text(
+        json.dumps({**record.to_mapping(), "pid": _dead_pid()}), encoding="utf-8"
+    )
+    with pytest.raises(LeaseReadOnlyError) as refused:
+        registry.call(
+            "submit_job",
+            {
+                "repo": str(repo),
+                "goal": "dead planner",
+                "caller_id": "proxy:opencode-go-worker",
+            },
+        )
+    assert refused.value.code == -32020, refused.value
 
 
 def test_read_tools_succeed_for_a_read_only_client(tmp_path: Path) -> None:
@@ -542,7 +638,7 @@ def test_c5_result_identifies_eligible_candidate(
     del project_candidate_state
     monkeypatch.setattr(
         "saberops.candidate_lifecycle.project_candidate_state",
-        lambda db, run_id: SimpleNamespace(candidate_sha="a" * 40),
+        lambda db, run_id: SimpleNamespace(candidate_sha="a" * 40, state=None),
     )
     monkeypatch.setattr(
         AcceptEngine, "check_accept_eligibility",

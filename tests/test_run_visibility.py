@@ -180,6 +180,7 @@ def test_job_get_names_the_exact_owner_action(
 
     class _Projection:
         candidate_sha = "c0ffee1"
+        state = None
 
     monkeypatch.setattr(
         candidate_lifecycle, "project_candidate_state", lambda _db, _run_id: _Projection()
@@ -202,6 +203,55 @@ def test_job_get_names_the_exact_owner_action(
     assert code == 0
     assert "Owner action: orch accept run_d7_action" in out
     assert "Candidate  : c0ffee1 (run_d7_action)" in out
+
+
+def test_job_get_reports_an_accepted_candidate_as_accepted(
+    isolated_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """D7 residual: an accepted candidate is never "not eligible right now"."""
+    from saberops import candidate_lifecycle
+    from saberops.accept import AcceptEngine
+    from saberops.jobs import store as job_store
+    from saberops.models import CandidateState
+
+    db = Database(get_default_db_path())
+    job_store.ensure_tables(db)
+    repo = _make_repo(isolated_env / "job-get-accepted")
+    job_store.insert_job(
+        db,
+        _queued_job("job-d7-accepted", repo, run_ids=("run_d7_accepted",)),
+    )
+
+    class _Projection:
+        candidate_sha = "accepted1"
+        state = CandidateState.ACCEPTED
+
+    monkeypatch.setattr(
+        candidate_lifecycle, "project_candidate_state", lambda _db, _run_id: _Projection()
+    )
+
+    class _Eligibility:
+        eligible = False
+
+    monkeypatch.setattr(
+        AcceptEngine, "check_accept_eligibility", lambda self, run_id: _Eligibility()
+    )
+    code = main(["job", "get", "job-d7-accepted", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["result"]["candidate_sha"] == "accepted1"
+    assert payload["result"]["candidate_state"] == "ACCEPTED"
+    assert payload["result"]["owner_action"] is None
+
+    code = main(["job", "get", "job-d7-accepted"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "Candidate  : accepted1 (run_d7_accepted)" in out
+    assert "Candidate state: ACCEPTED" in out
+    assert "accepted" in out.lower()
+    assert "not eligible right now" not in out
 
 
 def _queued_job(job_id: str, repo: Path, *, run_ids: tuple[str, ...] = ()) -> Any:

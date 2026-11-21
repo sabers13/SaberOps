@@ -289,6 +289,18 @@ def test_skill_carries_the_worker_choice_guidance() -> None:
         assert phrase in loop, phrase
 
 
+def test_skill_never_shells_the_owner_commands() -> None:
+    """D17/D16: the skill uses the MCP tools and leaves `orch resume` to the owner."""
+    loop = " ".join(skill_document().split("## Full guide", 1)[0].split())
+    for phrase in (
+        "Never run `orch mcp on`, `orch mcp off`, `orch mcp release`",
+        "call `saberops_on`",
+        "tell the owner to run `orch resume`",
+    ):
+        assert phrase in loop, phrase
+    assert "`resume_work`" not in loop
+
+
 def test_skill_matches_the_live_mcp_tool_list() -> None:
     document = skill_document()
     switch_tools = {"saberops_on", "saberops_off"}

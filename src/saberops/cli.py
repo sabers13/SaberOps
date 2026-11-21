@@ -6565,7 +6565,7 @@ def _print_gate_view(view: dict[str, Any]) -> None:
         print(f"              : {presence['detail']}")
     if view.get("paused_jobs"):
         print(f"Paused jobs   : {', '.join(view['paused_jobs'])}")
-    print(f"Resume with   : {view['resume_command']} or the resume_work MCP tool")
+    print(f"Resume with   : {view['resume_command']} (owner confirmation only)")
 
 
 def _render_bindings_human(title: str, bindings: list[dict[str, Any]]) -> None:
@@ -7437,8 +7437,14 @@ def handle_job_get(args: argparse.Namespace) -> int:
     if owner["candidate_sha"]:
         run_label = f" ({owner['run_id']})" if owner["run_id"] else ""
         print(f"Candidate  : {owner['candidate_sha']}{run_label}")
+    if owner.get("candidate_state"):
+        print(f"Candidate state: {owner['candidate_state']}")
     if owner["owner_action"]:
         print(f"Owner action: {owner['owner_action']}")
+    elif owner.get("candidate_state") == "ACCEPTED":
+        print("Owner action: accepted; nothing to do")
+    elif owner.get("candidate_state") == "REJECTED":
+        print("Owner action: rejected by the owner; nothing to do")
     elif owner["candidate_sha"]:
         print("Owner action: none yet; this candidate is not eligible right now")
     if job.waiting_reason is not None:

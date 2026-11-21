@@ -6,8 +6,8 @@ the part that acts on a closed gate:
 * every RUNNING job is stopped at a safe point through the existing fenced
   termination path and parked with a verified checkpoint and resume capsule, so
   the worktree, the work and the evidence survive;
-* nothing is resumed implicitly -- :func:`resume_work` is the one call the owner
-  or the returning planning session uses;
+* nothing is resumed implicitly -- :func:`resume_work` is the one call the
+  owner makes through ``orch resume``, and no agent can clear a pause;
 * the engine records one event and sends one notice per pause.
 
 No job is ever discarded here.  A stopped run is ``PREEMPTED`` (a terminal run
@@ -177,10 +177,12 @@ def pause_now(
 def resume_work(db: Any, *, by: str = "owner", now: Any = None) -> GateState:
     """Clear the pause and hand parked work back to the ordinary scheduler.
 
-    Before opening the gate, any run that the engine already stopped but could
-    not finish parking is parked now, so the next tick never mistakes a paused
-    run for an abandoned one and orphans it.  Runs are never relaunched here:
-    the job rows are the dispatch input.
+    This is the owner's explicit confirmation (``orch resume``); it is not
+    exposed as an MCP tool and no agent session can call it.  Before opening
+    the gate, any run that the engine already stopped but could not finish
+    parking is parked now, so the next tick never mistakes a paused run for an
+    abandoned one and orphans it.  Runs are never relaunched here: the job rows
+    are the dispatch input.
     """
     from saberops.preemption import complete_preemption, find_job_for_run
 

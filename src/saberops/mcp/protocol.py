@@ -494,8 +494,8 @@ class McpServer:
                     f" Work gate: {gate.get('label')}"
                     f"{f' since {since}' if since else ''}"
                     f"{f' ({detail})' if detail else ''}. Nothing dispatches until it "
-                    "is resumed: tell the owner, and call resume_work (or let the "
-                    "owner run `orch resume`) before submitting or waiting on work."
+                    "is resumed: tell the owner to run `orch resume`; only the owner "
+                    "can confirm a resume."
                 )
             else:
                 gate_line = f" Work gate: {gate.get('label')}."

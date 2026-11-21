@@ -46,7 +46,12 @@ Codex and Antigravity as well as OpenCode.
    second server process would not share the session lease, so `submit_job`
    would be refused as read-only. Claude Code references the server in its
    agent frontmatter; Codex, OpenCode and Antigravity inherit the parent's MCP
-   configuration.
+   configuration. *(Amendment, 2026-11-21: Codex 0.170.0 gives each
+   custom-agent child its own MCP server instance regardless of the inherited
+   configuration, so the child cannot share the parent's writer role. The
+   server now accepts a child's `submit_job` only while the recorded planning
+   lease is live and the caller id is `proxy:<name>`; every other mutating call
+   stays read-only. See `docs/mcp.md` § Single-writer Orchestrator lease.)*
 6. **Host cost stays on the host.** Each definition names the host CLI's
    cheapest suitable model for the proxy turn. The proxy itself never edits
    files, runs shell or git, accepts, merges, pushes or approves billing, and it
