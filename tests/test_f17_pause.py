@@ -449,15 +449,31 @@ def test_away_job_budget_pauses_once_with_a_notice(
     assert len(notices) == 1  # one notice per pause, never per tick
 
 
-def test_away_end_time_pauses(
+def test_expired_away_mode_ignores_its_own_sticky_pause(
     rig: RigEnvironment, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A legacy AWAY_ENDED record cannot keep work paused after the grant ends."""
+    set_authority_mode("autonomous")
+    set_owner_mode("away", until="2026-01-01T00:00:00Z")
+    _live_session(rig, monkeypatch)
+    set_pause(PauseReason.AWAY_ENDED, "the away session ended")
+    state = refresh_gate(rig.db())
+    assert state.closed is False
+    assert state.reason is None
+
+
+def test_expired_away_mode_does_not_pause_work(
+    rig: RigEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An ended away grant narrows to ask-me; it never becomes a sticky pause."""
     set_authority_mode("autonomous")
     set_owner_mode("away", until="2026-01-01T00:00:00Z")
     _live_session(rig, monkeypatch)
     state = refresh_gate(rig.db())
-    assert state.closed is True
-    assert state.reason == PauseReason.AWAY_ENDED.value
+    assert state.closed is False
+    assert state.reason is None
+    assert state.mode.value == "ask-me"
+    assert state.away is not None and state.away.expired is True
 
 
 # --------------------------------------------------------------------------- #

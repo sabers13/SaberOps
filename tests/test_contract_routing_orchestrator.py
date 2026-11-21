@@ -8,6 +8,7 @@ its stronger-model ``strong_start`` setting (ADR-0005 §3: no second role).
 from __future__ import annotations
 
 import json
+import os
 import sys
 from collections.abc import Generator
 from datetime import UTC, datetime
@@ -1010,6 +1011,108 @@ def test_mixed_quota_gate_failure_and_skip_chain_does_not_preempt(
     assert not _events_by_type(db.get_events(run_id), "run_preempted")
     assert not _events_by_type(db.get_events(run_id), "preemption_committed")
     assert GitManager.list_checkpoint_refs(repo, "job1") == {}
+
+
+def test_d24_pinned_dispatch_keeps_quota_skipped_routes_visible(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """A scheduler pin must not erase the routes that were considered."""
+    monkeypatch.setenv("SABEROPS_GATE_MEMORY_GUARD", "0")
+    from saberops.control_plane.policy import set_quota_pool_policy
+
+    cfg_dir = Path(os.environ["XDG_CONFIG_HOME"]) / "saberops"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    today_iso = datetime.now(UTC).date().isoformat()
+    (cfg_dir / "control_plane.json").write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "providers": {
+                    "h3": {"state": "ALLOWED"},
+                    "blocked-provider": {"state": "ALLOWED"},
+                },
+                "quota_pools": {},
+                "postures": {
+                    "h3": {
+                        "class": "A",
+                        "policy_urls": ["https://example.com/h3-policy"],
+                        "ttl_days": 90,
+                        "verified_on": today_iso,
+                        "note": "synthetic verified posture",
+                    },
+                    "blocked-provider": {
+                        "class": "A",
+                        "policy_urls": ["https://example.com/blocked-policy"],
+                        "ttl_days": 90,
+                        "verified_on": today_iso,
+                        "note": "synthetic verified posture",
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    repo = tmp_path / "d24" / "repo"
+    _init_repo(repo)
+    set_quota_pool_policy(
+        "blocked-pool", members=("blocked-provider/model-b",)
+    )
+    db = Database(tmp_path / "d24" / "orch.db")
+    db.set_quota("blocked-provider", "blocked-pool", 0.0)
+    chain = [
+        WorkerCandidate("blocked-provider", "model-b"),
+        WorkerCandidate("h3", "good-model"),
+    ]
+
+    def resolve(
+        *,
+        model_override: str | None = None,
+        provider_override: str | None = None,
+        **_: Any,
+    ) -> list[WorkerCandidate]:
+        if model_override:
+            return [cand for cand in chain if cand.model == model_override]
+        return list(chain)
+
+    monkeypatch.setattr(
+        "saberops.orchestrator.resolve_candidate_chain", resolve
+    )
+    log: list[str] = []
+    worker = ScriptedWorker(
+        "h3", {"good-model": _success_with_file("h3", "good-model", "ok.txt", "ok\n")}, log
+    )
+    config = resolve_run_config(
+        task="pin evidence",
+        target_repo=repo,
+        gate_command=_passing_gate(),
+        model_override="good-model",
+        provider_override="h3",
+        review_disabled=True,
+        publish_candidate=False,
+    )
+    orch = Orchestrator(
+        db=db,
+        registry=AdapterRegistry(
+            [worker, ScriptedWorker("blocked-provider", {}, log)]
+        ),
+        worktree_base=tmp_path / "d24" / "wt",
+    )
+    result = orch.run(config=config, is_peak=False)
+    assert result.status is RunStatus.COMPLETED, result.summary
+    resolved = _events_by_type(db.get_events(result.run_id), "tier_candidates_resolved")
+    assert resolved and resolved[0].payload is not None
+    payload = resolved[0].payload
+    models = [str(c["model"]) for c in payload["candidates"]]
+    assert models == ["model-b", "good-model"]
+    decisions = {
+        str(item["model"]): item for item in payload["candidate_decisions"]
+    }
+    blocked = decisions["model-b"]
+    assert blocked["eligible"] is False
+    assert blocked["reason"] == "quota_blocked"
+    assert blocked["pool_id"] == "blocked-pool"
+    assert decisions["good-model"]["eligible"] is True, decisions["good-model"]
 
 
 def test_quota_exhausted_standalone_run_keeps_failed_behavior(

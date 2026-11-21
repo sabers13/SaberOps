@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from saberops.capacity.ledger import record_owner_quota, record_probe_window_observation
 from saberops.capacity.probes import handle_probe_result
 from saberops.capacity.snapshot import effective_quota_states
 from saberops.capacity.store import list_active_exclusions
@@ -205,6 +206,45 @@ def test_packaged_zero_probe_denies_plan_pool_members_with_exclusion_reason(
     assert decision.eligible is False
     assert decision.reason == "QUOTA_EXCLUDED_UNTIL_RESET"
     assert decision.pool_id == expected_pool
+
+
+def test_stale_probe_falls_back_to_fresh_owner_reading(
+    tmp_path: Path, packaged_policy: ControlPlanePolicy,
+) -> None:
+    """D14: an expired probe cannot alone turn a valid owner reading into refusal."""
+    db = Database(tmp_path / "capacity.db")
+    now = datetime.now(UTC)
+    record_owner_quota(
+        db,
+        provider="anthropic",
+        pool="claude-pro",
+        remaining_pct=90.0,
+        reset_at=None,
+        source="OWNER",
+        now=now - timedelta(hours=2),
+    )
+    for window, remaining in (("5h", 90.0), ("weekly", 59.0)):
+        record_probe_window_observation(
+            db,
+            "claude-pro",
+            window,
+            remaining,
+            None,
+            harness="claude",
+            now=now - timedelta(minutes=25),
+        )
+    states = effective_quota_states(db, now=now, run_probes=False)
+    decision = quota_decision(
+        WorkerCandidate(
+            provider="anthropic", model="claude-haiku-4-5-20251001"
+        ),
+        states,
+        pool_policies=effective_quota_pools(packaged_policy, activate_overage=True),
+        pool_id="claude-pro",
+        now=now,
+    )
+    assert decision.eligible is True, decision
+    assert decision.reason != "QUOTA_EVIDENCE_REQUIRED"
 
 
 def test_owner_pool_overrides_plan_and_overage_is_deferred(

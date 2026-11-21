@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from saberops.capacity.exclusions import is_excluding, parse_iso
-from saberops.capacity.freshness import freshness
+from saberops.capacity.freshness import freshness, is_owner_source
 from saberops.capacity.store import ensure_tables, list_active_exclusions
 
 if TYPE_CHECKING:
@@ -223,13 +223,42 @@ def effective_quota_states(
             pools_with_specific[pool_id] = newest_specific
         selected: list[tuple[str, dict[str, Any]]] = list(specific)
         all_row = win_map.get("ALL")
+        owner_fallback = False
         if all_row is not None:
+            all_ts = parse_iso(str(all_row.get("observed_at") or ""))
+            all_source = str(all_row["source"]) if all_row.get("source") else None
+            # A per-window probe can expire while the owner's long-lived
+            # reading for the same pool is still valid for its own (much
+            # longer) freshness budget.  Dropping the expired probe rows and
+            # letting the owner observation cover their windows keeps the
+            # pool decision on still-valid evidence instead of failing closed
+            # on staleness alone.  Genuinely restrictive state (an exclusion
+            # or a below-red-line owner reading) is unaffected.
+            if all_ts is not None and is_owner_source(all_source) and (
+                freshness(all_ts.isoformat(), "ALL", all_source, moment) == "FRESH"
+            ):
+                fresh_specific = [
+                    (w, r)
+                    for w, r in specific
+                    if freshness(
+                        str(r.get("observed_at") or ""),
+                        w,
+                        str(r["source"]) if r.get("source") else None,
+                        moment,
+                    )
+                    == "FRESH"
+                ]
+                if len(fresh_specific) != len(specific):
+                    selected = fresh_specific
+                    owner_fallback = True
             if not specific:
                 selected.append(("ALL", all_row))
-            else:
-                all_ts = parse_iso(str(all_row.get("observed_at") or ""))
-                if all_ts is not None and newest_specific is not None and all_ts > newest_specific:
-                    selected.append(("ALL", all_row))
+            elif owner_fallback or (
+                all_ts is not None
+                and newest_specific is not None
+                and all_ts > newest_specific
+            ):
+                selected.append(("ALL", all_row))
         for win_id, obs_row in selected:
             obs_source = str(obs_row["source"]) if obs_row.get("source") else None
             raw_prov = str(obs_row.get("legacy_provider") or "").strip().lower()

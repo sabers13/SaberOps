@@ -1208,6 +1208,16 @@ class AcceptEngine:
         historical = reviews[-1] if reviews else None
         return None, historical
 
+    def _accepted_payload_for_candidate(
+        self, run_id: str, candidate_sha: str
+    ) -> dict[str, Any] | None:
+        """Return the newest durable acceptance for exactly ``candidate_sha``."""
+        for event in reversed(self.db.get_events_by_type(run_id, "run_accepted")):
+            payload = event.payload
+            if isinstance(payload, dict) and payload.get("candidate_sha") == candidate_sha:
+                return payload
+        return None
+
     def candidate_review_evidence(
         self, run_id: str, candidate_sha: str
     ) -> tuple[ReviewResult | None, ReviewResult | None]:
@@ -1304,9 +1314,38 @@ class AcceptEngine:
                 "Working tree must be clean before accept."
             )
 
-        # Target repository HEAD must match the run's base_commit
+        # Acceptance is idempotent.  A durable ``run_accepted`` event for this
+        # exact candidate is the authoritative proof that the integration
+        # already happened; a retry (or a second owner surface) must report
+        # that success instead of refusing because the target HEAD now equals
+        # the candidate rather than the recorded base.
+        accepted_payload = self._accepted_payload_for_candidate(run_id, candidate_sha)
+        if accepted_payload is not None:
+            final_branch = str(
+                accepted_payload.get("final_branch")
+                or GitManager.get_current_branch(target_repo)
+                or "HEAD"
+            )
+            return AcceptResult(
+                run_id=run_id,
+                accepted=True,
+                target_repo=str(target_repo),
+                final_branch=final_branch,
+                final_sha=candidate_sha,
+                summary=(
+                    f"Candidate commit {candidate_sha[:8]} was already integrated "
+                    f"into '{final_branch}' (durable acceptance record)."
+                ),
+                gate_passed=self._validation_policy(run_id)[0],
+            )
+
+        # Target repository HEAD must match the run's base_commit, unless the
+        # candidate is already installed (an interrupted acceptance between
+        # the ref CAS and its durable event).  In that case the gate phase
+        # below completes the acceptance without moving the ref again.
         current_head = GitManager.get_head_commit(target_repo)
-        if current_head != run.base_commit:
+        already_installed = current_head == candidate_sha
+        if not already_installed and current_head != run.base_commit:
             raise RuntimeError(
                 f"Target repository HEAD ({current_head[:8]}) has moved from recorded base commit "
                 f"({run.base_commit[:8]}). Refusing accept."
@@ -1438,23 +1477,29 @@ class AcceptEngine:
         # closed instead, preserving the external revision.
         target_branch = GitManager.get_current_branch(target_repo)
         target_ref = f"refs/heads/{target_branch}" if target_branch else "HEAD"
-        try:
-            GitManager.compare_and_swap_ref(
-                target_repo,
-                target_ref,
-                expected_old_sha=run.base_commit,
-                new_target_sha=candidate_sha,
-            )
-            GitManager.sync_index_worktree(target_repo)
-            new_sha = GitManager.get_head_commit(target_repo)
-            if new_sha != candidate_sha:
-                raise GitRefRaceError(
-                    "target ref changed after compare-and-swap; the "
-                    "externally advanced revision is preserved and "
-                    "acceptance fails closed"
+        if already_installed:
+            # Recovered acceptance: the ref already points at the candidate, so
+            # there is no ref move to repeat.  The gate phase below still runs
+            # (or re-validates its receipt) before the durable acceptance.
+            new_sha = candidate_sha
+        else:
+            try:
+                GitManager.compare_and_swap_ref(
+                    target_repo,
+                    target_ref,
+                    expected_old_sha=run.base_commit,
+                    new_target_sha=candidate_sha,
                 )
-        except GitRefRaceError as exc:
-            raise RuntimeError(f"Cannot accept run '{run_id}': target ref race: {exc}") from exc
+                GitManager.sync_index_worktree(target_repo)
+                new_sha = GitManager.get_head_commit(target_repo)
+                if new_sha != candidate_sha:
+                    raise GitRefRaceError(
+                        "target ref changed after compare-and-swap; the "
+                        "externally advanced revision is preserved and "
+                        "acceptance fails closed"
+                    )
+            except GitRefRaceError as exc:
+                raise RuntimeError(f"Cannot accept run '{run_id}': target ref race: {exc}") from exc
 
         # ---- POST-CAS GATE PHASE: ONE centralized failure boundary ---
         # The candidate has been installed by CAS and the HEAD verified.

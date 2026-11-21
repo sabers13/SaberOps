@@ -590,6 +590,28 @@ def test_r0b_eligible_candidate_checklist_passes_and_accept_enabled(
     assert "Type the run id to confirm" in confirm.text
 
 
+def test_repeat_accept_after_durable_integration_reports_success(
+    isolated_xdg: None, tmp_path: Path
+) -> None:
+    """D22: a retry after a durable acceptance must not refuse its own move."""
+    repo, base, candidate = _make_repo(tmp_path, "repo-idempotent")
+    db_path = tmp_path / "web.db"
+    _seed_run(db_path, "run_idempotent", repo, base, candidate)
+    _add_review(db_path, "run_idempotent", ReviewVerdict.PASS)
+
+    first = AcceptEngine(db=Database(db_path)).accept_run("run_idempotent")
+    assert first.accepted
+    assert first.final_sha == candidate
+
+    second = AcceptEngine(db=Database(db_path)).accept_run("run_idempotent")
+    assert second.accepted
+    assert second.final_sha == candidate
+    assert second.target_repo == first.target_repo
+    assert "already integrated" in second.summary
+    events = Database(db_path).get_events_by_type("run_idempotent", "run_accepted")
+    assert len(events) == 1
+
+
 def test_r0b_moved_target_head_blocks_accept(
     isolated_xdg: None, tmp_path: Path
 ) -> None:

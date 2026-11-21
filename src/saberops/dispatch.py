@@ -203,6 +203,66 @@ class UnavailableReadinessService:
         return None
 
 
+def skip_reason_for_decision(
+    decision: ControlPlaneDecision, *, prompt_bytes: int = 0
+) -> str | None:
+    """Return the canonical owner-facing skip reason for one decision."""
+    if decision.eligible:
+        return None
+    if decision.reason == PROVIDER_UNAVAILABLE:
+        return SKIP_PROVIDER_UNAVAILABLE
+    if decision.reason == PROVIDER_EXECUTABLE_UNAVAILABLE:
+        return SKIP_PROVIDER_EXECUTABLE_UNAVAILABLE
+    if decision.reason == PROVIDER_READINESS_NOT_READY:
+        return SKIP_PROVIDER_READINESS_NOT_READY
+    if decision.reason == PROVIDER_READINESS_UNKNOWN:
+        return SKIP_PROVIDER_READINESS_UNKNOWN
+    if decision.reason == TRAINING_PERMISSION_DENIED:
+        return SKIP_TRAINING_POLICY
+    if decision.reason == REQUIRED_CAPABILITY_UNSUPPORTED:
+        return (
+            SKIP_PROMPT_TOO_LARGE
+            if prompt_bytes and decision.missing_capabilities == ("large_prompt_stdin",)
+            else decision.reason
+        )
+    if decision.reason in (
+        "WEEKLY_QUOTA_RED_LINE",
+        "RED_LINE_5H",
+        "RED_LINE_DAILY",
+        "RED_LINE_WEEKLY",
+        "RED_LINE_MONTHLY",
+        "RED_LINE",
+        "QUOTA_EXCLUDED_UNTIL_RESET",
+        "QUOTA_EVIDENCE_REQUIRED",
+        "POOL_OFF",
+        "POSTURE_FORBIDDEN",
+        "POSTURE_EXPIRED",
+        "POSTURE_UNVERIFIED",
+        "POSTURE_ATTENDED_ONLY",
+        "POSTURE_METERED",
+        "GLOBAL_CONCURRENCY_EXCEEDED",
+        "POOL_CONCURRENCY_EXCEEDED",
+        "GLOBAL_CONCURRENCY_LIMIT",
+        "CONCURRENCY_LIMIT",
+    ):
+        return SKIP_QUOTA_BLOCKED
+    if decision.reason == "MODEL_FAMILY_EXCLUDED":
+        return "model_family_excluded"
+    if decision.reason == "ROLE_MISMATCH":
+        return "role_mismatch"
+    if decision.reason == "READ_ONLY_UNSUPPORTED":
+        return "read_only_unsupported"
+    if decision.reason == PROVIDER_DISABLED:
+        return PROVIDER_DISABLED
+    if decision.reason == GOVERNED_INSTRUCTIONS_UNSUPPORTED:
+        return GOVERNED_INSTRUCTIONS_UNSUPPORTED
+    # Explicit ordinary overrides are intentionally not a bypass.  Retain a
+    # stable reason for callers that do not yet understand quota enums.
+    if decision.reason == PROVIDER_ALLOWED_WITH_WARNING:
+        return None
+    return decision.reason
+
+
 def evaluate_eligibility(
     *,
     candidate: WorkerCandidate,
@@ -266,60 +326,7 @@ def evaluate_eligibility(
         capacity_configured=capacity_configured,
         reservations=reservations,
     )
-    if decision.eligible:
-        return None
-    if decision.reason == PROVIDER_UNAVAILABLE:
-        return SKIP_PROVIDER_UNAVAILABLE
-    if decision.reason == PROVIDER_EXECUTABLE_UNAVAILABLE:
-        return SKIP_PROVIDER_EXECUTABLE_UNAVAILABLE
-    if decision.reason == PROVIDER_READINESS_NOT_READY:
-        return SKIP_PROVIDER_READINESS_NOT_READY
-    if decision.reason == PROVIDER_READINESS_UNKNOWN:
-        return SKIP_PROVIDER_READINESS_UNKNOWN
-    if decision.reason == TRAINING_PERMISSION_DENIED:
-        return SKIP_TRAINING_POLICY
-    if decision.reason == REQUIRED_CAPABILITY_UNSUPPORTED:
-        return (
-            SKIP_PROMPT_TOO_LARGE
-            if prompt_bytes and decision.missing_capabilities == ("large_prompt_stdin",)
-            else decision.reason
-        )
-    if decision.reason in (
-        "WEEKLY_QUOTA_RED_LINE",
-        "RED_LINE_5H",
-        "RED_LINE_DAILY",
-        "RED_LINE_WEEKLY",
-        "RED_LINE_MONTHLY",
-        "RED_LINE",
-        "QUOTA_EXCLUDED_UNTIL_RESET",
-        "QUOTA_EVIDENCE_REQUIRED",
-        "POOL_OFF",
-        "POSTURE_FORBIDDEN",
-        "POSTURE_EXPIRED",
-        "POSTURE_UNVERIFIED",
-        "POSTURE_ATTENDED_ONLY",
-        "POSTURE_METERED",
-        "GLOBAL_CONCURRENCY_EXCEEDED",
-        "POOL_CONCURRENCY_EXCEEDED",
-        "GLOBAL_CONCURRENCY_LIMIT",
-        "CONCURRENCY_LIMIT",
-    ):
-        return SKIP_QUOTA_BLOCKED
-    if decision.reason == "MODEL_FAMILY_EXCLUDED":
-        return "model_family_excluded"
-    if decision.reason == "ROLE_MISMATCH":
-        return "role_mismatch"
-    if decision.reason == "READ_ONLY_UNSUPPORTED":
-        return "read_only_unsupported"
-    if decision.reason == PROVIDER_DISABLED:
-        return PROVIDER_DISABLED
-    if decision.reason == GOVERNED_INSTRUCTIONS_UNSUPPORTED:
-        return GOVERNED_INSTRUCTIONS_UNSUPPORTED
-    # Explicit ordinary overrides are intentionally not a bypass.  Retain a
-    # stable reason for callers that do not yet understand quota enums.
-    if decision.reason == PROVIDER_ALLOWED_WITH_WARNING:
-        return None
-    return decision.reason
+    return skip_reason_for_decision(decision, prompt_bytes=prompt_bytes)
 
 
 def control_plane_decision(

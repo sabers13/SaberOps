@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from saberops.ownership import Liveness, ProcessIdentity, probe_liveness
+from saberops.sqlite_policy import immediate_transaction, write_connection
 
 
 class SessionJournal:
@@ -25,29 +26,30 @@ class SessionJournal:
     def connect(self, *, write: bool = False) -> Iterator[sqlite3.Connection]:
         if write:
             self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            conn = sqlite3.connect(self.path, timeout=10)
-            self.path.chmod(0o600)
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.executescript("""
-                CREATE TABLE IF NOT EXISTS sessions (
-                    id TEXT PRIMARY KEY, owner TEXT NOT NULL, role TEXT NOT NULL,
-                    association TEXT NOT NULL, identity TEXT, process_identity TEXT,
-                    created REAL NOT NULL);
-                CREATE TABLE IF NOT EXISTS events (
-                    sequence INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
-                    kind TEXT NOT NULL, payload TEXT NOT NULL, created REAL NOT NULL);
-                CREATE INDEX IF NOT EXISTS events_session ON events(session_id, sequence);
-                CREATE TABLE IF NOT EXISTS outcomes (
-                    session_id TEXT PRIMARY KEY, payload TEXT NOT NULL, created REAL NOT NULL);
-            """)
+            with write_connection(self.path) as conn:
+                self.path.chmod(0o600)
+                conn.executescript("""
+                    CREATE TABLE IF NOT EXISTS sessions (
+                        id TEXT PRIMARY KEY, owner TEXT NOT NULL, role TEXT NOT NULL,
+                        association TEXT NOT NULL, identity TEXT, process_identity TEXT,
+                        created REAL NOT NULL);
+                    CREATE TABLE IF NOT EXISTS events (
+                        sequence INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
+                        kind TEXT NOT NULL, payload TEXT NOT NULL, created REAL NOT NULL);
+                    CREATE INDEX IF NOT EXISTS events_session ON events(session_id, sequence);
+                    CREATE TABLE IF NOT EXISTS outcomes (
+                        session_id TEXT PRIMARY KEY, payload TEXT NOT NULL, created REAL NOT NULL);
+                """)
+                with immediate_transaction(conn) as tx:
+                    yield tx
         else:
             conn = sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True, timeout=10)
-        conn.row_factory = sqlite3.Row
-        try:
-            with conn:
-                yield conn
-        finally:
-            conn.close()
+            conn.row_factory = sqlite3.Row
+            try:
+                with conn:
+                    yield conn
+            finally:
+                conn.close()
 
     def register(
         self, sid: str, owner: str, role: str, association: str, identity: str | None

@@ -49,7 +49,9 @@ terminal session is open: `orch watch` (F23) while a terminal is attached, or
    of these holds:
    - the owner paused (`orch pause`, the Questions-page toggle);
    - no connected planning session and no attended terminal (F24);
-   - an `away` session ran past its `until` or spent its job budget;
+   - an `away` session spent its job budget, or has no end time and no job
+     budget at all (an expired `until` narrows the mode to `ask-me` instead;
+     see [ADR-0047](0047-expired-away-mode-narrows-to-ask-me.md));
    - an `away` session has no end time and no job budget at all;
    - the gate document or the owner-mode document cannot be read (fail closed).
 2. **Presence is a heartbeat from one of two sources.** An AI CLI planning

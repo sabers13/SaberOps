@@ -19,6 +19,7 @@ import saberops.cli as cli_module
 from saberops.cli import main
 from saberops.db import Database
 from saberops.jobs.service import mark_dispatched
+from saberops.models import Run, RunStatus, Tier
 
 
 @pytest.fixture()
@@ -276,6 +277,42 @@ def test_cancel_running_uses_canceller(
     assert result["cancelled"] is True
     assert result["job"]["state"] == "CANCELLED"
     assert _StubSupervisor.seen == ["run_live_1"]
+
+
+def test_cancel_accepts_the_job_id_printed_by_job_list(
+    isolated: Path, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`orch cancel <job_id>` resolves the job's live run (D11)."""
+    repo = _git_repo(isolated / "repo")
+    _, payload, _ = _submit(isolated, capsys, repo)
+    job_id = payload["job"]["job_id"]
+    db = Database(_db_path(isolated))
+    db.create_run(
+        Run(
+            id="run_live_jobref",
+            task="cancel by job id",
+            target_repo=str(repo),
+            base_commit="0" * 40,
+            tier=Tier.T1,
+            training_allowed=True,
+            gate_command="true",
+            status=RunStatus.RUNNING,
+            created_at="2026-11-21T00:00:00+00:00",
+        )
+    )
+    mark_dispatched(db, job_id, "run_live_jobref")
+
+    _patch_supervisor(monkeypatch, True)
+    code, out, _ = _cli(
+        "cancel", job_id, "--db", _db_path(isolated), capsys=capsys
+    )
+    assert code == 0
+    result = json.loads(out)
+    assert result["run_id"] == "run_live_jobref"
+    assert result["job_id"] == job_id
+    assert result["cancelled"] is True
+    assert _StubSupervisor.seen == ["run_live_jobref"]
 
 
 def test_cancel_running_canceller_false_keeps_job(

@@ -1338,9 +1338,13 @@ def build_parser() -> argparse.ArgumentParser:
     recover_parser.add_argument("--owner-db", default=None, help=argparse.SUPPRESS)
 
     cancel_parser = subparsers.add_parser(
-        "cancel", help="Explicitly cancel a run and terminate its execution owner."
+        "cancel",
+        help=(
+            "Explicitly cancel a run (or a job id from `orch job list`) and "
+            "terminate its execution owner."
+        ),
     )
-    cancel_parser.add_argument("run_id", type=str)
+    cancel_parser.add_argument("run_id", type=str, help="Run id or job id.")
     cancel_parser.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
 
     # orch promote-scout <job-id>
@@ -3449,27 +3453,63 @@ def _follow_run(db: Database, run_id: str) -> int:
 
 
 def handle_cancel(args: argparse.Namespace) -> int:
-    """Handle `orch cancel <run-id>`: the sole deliberate stop authority."""
-    db = db_for_run(args, args.run_id)
-    run = db.get_run(args.run_id)
-    if run is None:
-        print(f"Error: unknown run: {args.run_id}", file=sys.stderr)
+    """Handle `orch cancel <run-id|job-id>`: the sole deliberate stop authority.
+
+    The owner-facing lists show job ids, while runs are the cancellation unit.
+    A job reference resolves to its live (or newest recorded) run so the owner
+    never has to translate the id by hand.
+    """
+    reference = str(args.run_id).strip()
+    run_id, db = _resolve_cancel_reference(args, reference)
+    if run_id is None:
+        print(f"Error: unknown run or job: {reference}", file=sys.stderr)
         return 1
-    cancelled = RunSupervisor(db=db).cancel(args.run_id)
-    after = db.get_run(args.run_id)
-    owner = db.get_execution_owner(args.run_id)
-    print(
-        json.dumps(
-            {
-                "run_id": args.run_id,
-                "cancelled": cancelled,
-                "status": after.status.value if after is not None else None,
-                "owner_state": owner.state if owner is not None else None,
-            },
-            sort_keys=True,
-        )
-    )
+    run = db.get_run(run_id)
+    if run is None:
+        print(f"Error: unknown run: {run_id}", file=sys.stderr)
+        return 1
+    cancelled = RunSupervisor(db=db).cancel(run_id)
+    after = db.get_run(run_id)
+    owner = db.get_execution_owner(run_id)
+    payload: dict[str, object] = {
+        "run_id": run_id,
+        "cancelled": cancelled,
+        "status": after.status.value if after is not None else None,
+        "owner_state": owner.state if owner is not None else None,
+    }
+    if reference != run_id:
+        payload["job_id"] = reference
+    print(json.dumps(payload, sort_keys=True))
     return 0
+
+
+def _resolve_cancel_reference(
+    args: argparse.Namespace, reference: str
+) -> tuple[str | None, Database]:
+    """Resolve a run id or the job id printed by `orch job list`.
+
+    A direct run reference keeps the existing project-store lookup.  A job
+    reference is resolved from the owner job store to its current run, or the
+    newest recorded run when the job is no longer RUNNING.
+    """
+    from saberops.jobs.store import get_job
+
+    db = db_for_run(args, reference)
+    if db.get_run(reference) is not None:
+        return reference, db
+    try:
+        jobs_db = Database(_explicit_db(args))
+    except Exception:
+        jobs_db = db
+    job = get_job(jobs_db, reference)
+    if job is None and jobs_db.db_path != db.db_path:
+        job = get_job(db, reference)
+    if job is None:
+        return None, db
+    resolved = job.current_run_id or (job.run_ids[-1] if job.run_ids else None)
+    if not resolved:
+        return None, db
+    return resolved, db_for_run(args, resolved)
 
 
 def handle_review(args: argparse.Namespace) -> int:

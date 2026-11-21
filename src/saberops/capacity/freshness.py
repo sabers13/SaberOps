@@ -36,6 +36,11 @@ def _is_owner_source(source: str | None) -> bool:
     return low in {"owner", "manual"} or low.startswith("owner:")
 
 
+def is_owner_source(source: str | None) -> bool:
+    """True when a quota observation came from a long-lived owner reading."""
+    return _is_owner_source(source)
+
+
 def age_seconds(observed_at: str | None, now: datetime | None = None) -> int | None:
     """Return non-negative observation age in seconds, or None when unavailable."""
     observed = _parse_observed(observed_at)
@@ -98,6 +103,7 @@ __all__ = [
     "OWNER_MAX_AGE_MIN",
     "age_seconds",
     "format_age",
+    "is_owner_source",
     "max_age_minutes",
     "freshness",
 ]

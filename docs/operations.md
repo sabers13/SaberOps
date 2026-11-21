@@ -274,7 +274,10 @@ supported metadata interface where available. Local token activity
 comes from numeric session records on this machine. Local activity is not a subscription bill
 or an account-wide allowance. Missing counters remain unknown; large histories
 are explicitly labeled as samples. Readiness refresh uses no prompts, reads no
-credential files, and does not change saved routing quotas.
+credential files, and does not change saved routing quotas. An expired
+per-window probe reading does not by itself refuse a route: a still-valid owner
+reading for the same pool (24-hour freshness) is used until fresh evidence
+arrives, and the refusal names stale evidence when no valid reading remains.
 
 Native limit interfaces: [Codex app server](https://developers.openai.com/codex/app-server)
 and [Copilot usage and billing metrics](https://docs.github.com/en/copilot/how-tos/copilot-sdk/features/usage-and-billing).
@@ -427,6 +430,9 @@ key always creates a new job.
 - `orch job cancel JOB_ID [--json]`, e.g. `orch job cancel <job-id>`.
   QUEUED cancels at once; RUNNING first cancels the live run through
   the supervisor and only then marks the job CANCELLED.
+- `orch cancel RUN_ID|JOB_ID [--json]` stops the execution owner directly.
+  Both the run id and the job id printed by `orch job list` are accepted; a
+  job reference resolves to its current (or newest recorded) run.
 
 ## Per-job worker evidence and project notes
 Each run keeps a plain folder beside its store:

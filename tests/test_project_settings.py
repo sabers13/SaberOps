@@ -292,6 +292,31 @@ def test_r2a_e_old_run_immutable(isolated_xdg: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_d7_always_required_freezes_effective_review_and_owner_request(
+    isolated_xdg: Path,
+) -> None:
+    """A reviewed run records effective review truthfully and keeps the source."""
+    from saberops.project_settings import set_project_review_policy
+
+    repo = _make_repo(isolated_xdg, "d7-review")
+    set_project_gate_command(repo, "pytest -q")
+    set_project_review_policy(repo, ReviewPolicyMode.ALWAYS_REQUIRED)
+
+    config = resolve_effective_run_config(RunRequest(task="probe", repo_path=repo))
+    assert config.review_enabled is True
+    assert config.owner_review_requested is False
+
+    revived = reconstruct_run_config(json.loads(json.dumps(config.as_dict())))
+    assert revived.review_enabled is True
+    assert revived.owner_review_requested is False
+
+    explicit = resolve_effective_run_config(
+        RunRequest(task="probe", repo_path=repo, review=True)
+    )
+    assert explicit.review_enabled is True
+    assert explicit.owner_review_requested is True
+
+
 def test_r2a_f_canonical_authorities(isolated_xdg: Path) -> None:
     from saberops.gate_runner import set_project_gate_scratch_policy
     from saberops.project_settings import set_project_review_policy

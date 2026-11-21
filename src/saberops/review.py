@@ -847,6 +847,10 @@ class ReviewEngine:
         unusable_notes: list[dict[str, str | None]] = []
         review_dispatches: list[DispatchEvidence] = []
         skipped_candidate_details: list[dict[str, object]] = []
+        # A stale-evidence refusal is refreshed at most once per reviewer
+        # provider in this review cycle (A5's bounded admission rule), so a
+        # probe that cannot produce fresh evidence never loops.
+        probed_providers: set[str] = set()
         # The authoritative owner binding registry the launch
         # boundary re-resolves exact reviewer bindings against.  A
         # corrupt/unreadable store refuses bound candidates (fail closed)
@@ -933,43 +937,104 @@ class ReviewEngine:
                 if reviewer_resolved is not None
                 else None
             )
-            skip_reason = _pre_dispatch_skip_reason(
-                candidate=candidate,
-                adapter=cand_adapter,
-                training_allowed=run.training_allowed,
-                routing_snapshot=routing_snapshot,
-                quota_states=quota_states,
-                prompt_bytes=prompt_bytes,
-                policy=control_plane_policy,
-                required_capabilities=frozen_control_plane.required_capabilities,
-                control_plane_digest=frozen_control_plane.digest,
-                binding_pool_id=reviewer_pool_id,
-                readiness_state=readiness.state if readiness is not None else None,
-                readiness_reason=readiness.reason if readiness is not None else None,
-                readiness_executable_available=(
-                    readiness.executable_available if readiness is not None else True
-                ),
-                worker_candidate=final_attempt,
-                db=self.db,
-            )
-            decision = control_plane_decision(
-                candidate=candidate,
-                adapter=cand_adapter,
-                training_allowed=run.training_allowed,
-                routing_snapshot=routing_snapshot,
-                quota_states=quota_states,
-                prompt_bytes=prompt_bytes,
-                policy=control_plane_policy,
-                required_capabilities=frozen_control_plane.required_capabilities,
-                control_plane_digest=frozen_control_plane.digest,
-                binding_pool_id=reviewer_pool_id,
-                readiness_state=readiness.state if readiness is not None else None,
-                readiness_reason=readiness.reason if readiness is not None else None,
-                readiness_executable_available=(
-                    readiness.executable_available if readiness is not None else True
-                ),
-                db=self.db,
-            )
+            def _evaluate_reviewer_candidate(
+                states: list[QuotaState],
+                _candidate: WorkerCandidate = candidate,
+                _adapter: WorkerAdapter | None = cand_adapter,
+                _pool_id: str | None = reviewer_pool_id,
+                _readiness: Any = readiness,
+            ) -> tuple[str | None, Any]:
+                reason = _pre_dispatch_skip_reason(
+                    candidate=_candidate,
+                    adapter=_adapter,
+                    training_allowed=run.training_allowed,
+                    routing_snapshot=routing_snapshot,
+                    quota_states=states,
+                    prompt_bytes=prompt_bytes,
+                    policy=control_plane_policy,
+                    required_capabilities=frozen_control_plane.required_capabilities,
+                    control_plane_digest=frozen_control_plane.digest,
+                    binding_pool_id=_pool_id,
+                    readiness_state=(
+                        _readiness.state if _readiness is not None else None
+                    ),
+                    readiness_reason=(
+                        _readiness.reason if _readiness is not None else None
+                    ),
+                    readiness_executable_available=(
+                        _readiness.executable_available
+                        if _readiness is not None
+                        else True
+                    ),
+                    worker_candidate=final_attempt,
+                    db=self.db,
+                )
+                return reason, control_plane_decision(
+                    candidate=_candidate,
+                    adapter=_adapter,
+                    training_allowed=run.training_allowed,
+                    routing_snapshot=routing_snapshot,
+                    quota_states=states,
+                    prompt_bytes=prompt_bytes,
+                    policy=control_plane_policy,
+                    required_capabilities=frozen_control_plane.required_capabilities,
+                    control_plane_digest=frozen_control_plane.digest,
+                    binding_pool_id=_pool_id,
+                    readiness_state=(
+                        _readiness.state if _readiness is not None else None
+                    ),
+                    readiness_reason=(
+                        _readiness.reason if _readiness is not None else None
+                    ),
+                    readiness_executable_available=(
+                        _readiness.executable_available
+                        if _readiness is not None
+                        else True
+                    ),
+                    db=self.db,
+                )
+
+            skip_reason, decision = _evaluate_reviewer_candidate(quota_states)
+            if (
+                decision.reason == "QUOTA_EVIDENCE_REQUIRED"
+                and candidate.provider not in probed_providers
+            ):
+                # Refresh the reviewer's own reading when the only blocker is
+                # stale evidence, exactly as the worker preflight does.  A
+                # probe that cannot run (e.g. an interactive-only harness) or
+                # fails leaves the refusal intact; the owner then sees a stale
+                # evidence reason rather than a mysterious review failure.
+                probed_providers.add(candidate.provider)
+                from saberops.capacity.probes import try_safe_quota_probe
+                from saberops.control_plane.plans import effective_quota_pools
+
+                probe_outcome = try_safe_quota_probe(
+                    self.db,
+                    provider=candidate.provider,
+                    probes=getattr(self, "quota_probes", None),
+                    pool_policies=effective_quota_pools(control_plane_policy),
+                )
+                if probe_outcome == "ran":
+                    try:
+                        from saberops.capacity.snapshot import (
+                            effective_quota_states as _effective_quota_states,
+                        )
+
+                        quota_states = _effective_quota_states(self.db)
+                    except Exception:
+                        quota_states = self.db.list_quota()
+                    self.db.record_event(
+                        run_id,
+                        "review_quota_evidence_refreshed",
+                        payload={
+                            "provider": candidate.provider,
+                            "model": candidate.model,
+                            "probe_outcome": probe_outcome,
+                        },
+                    )
+                    skip_reason, decision = _evaluate_reviewer_candidate(
+                        quota_states
+                    )
             self.db.record_event(
                 run_id,
                 "control_plane_decision",
@@ -1040,6 +1105,12 @@ class ReviewEngine:
                         if skip_detail.get(key) is not None
                     },
                 }
+                if decision.reason == "QUOTA_EVIDENCE_REQUIRED":
+                    # The refusal is about expired evidence, not a worker or
+                    # reviewer failure.  Name it so the owner can refresh or
+                    # reset quota instead of re-running the review blindly.
+                    payload_merged["evidence_state"] = "stale"
+                    skip_detail["evidence_state"] = "stale"
                 self.db.record_event(
                     run_id,
                     "review_candidate_skipped",
@@ -1444,8 +1515,22 @@ class ReviewEngine:
                 },
             )
             verdict = ReviewVerdict.REVIEW_UNAVAILABLE
-            summary = "No reviewer available"
-            details = ""
+            if any(
+                detail.get("evidence_state") == "stale"
+                for detail in skipped_candidate_details
+            ):
+                summary = (
+                    "No reviewer available: reviewer quota evidence is stale "
+                    "and could not be refreshed"
+                )
+                details = (
+                    "The reviewer route is blocked only because its quota "
+                    "reading expired. Refresh the quota evidence (or record a "
+                    "long-lived owner reading) and retry the review."
+                )
+            else:
+                summary = "No reviewer available"
+                details = ""
         else:
             verdict = ReviewVerdict.REVIEW_EXECUTION_FAILED
             summary = "Reviewer execution failed (no usable verdict produced)"

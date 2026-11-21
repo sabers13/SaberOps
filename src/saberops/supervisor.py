@@ -1702,7 +1702,7 @@ class RunSupervisor:
             args.extend(["--tool", tool_ref])
         if not config.training_allowed:
             args.append("--training-denied")
-        if config.review_enabled:
+        if config.owner_review_requested:
             args.append("--review")
         # Only an explicit owner timeout is forwarded as a flag.
         # The effective timeout always survives detached execution because

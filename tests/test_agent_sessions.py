@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import socket
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ import pytest
 from saberops import agent_sessions
 from saberops.agent_sessions import observe_invocation, owner_directory, read_sessions
 from saberops.models import AttemptStatus, WorkerRequest, WorkerResult
+from saberops.session_journal import SessionJournal
 
 
 def result() -> WorkerResult:
@@ -62,6 +64,37 @@ def test_nonstreaming_adapters_keep_final_output_and_restart_read_is_observation
     assert 'did not report' in saved['native_cli_reason']
     assert saved['control_mode'] == 'DONE'
     assert before == {p: p.read_bytes() for p in owner_directory(root, 'x').iterdir()}
+
+
+def test_transient_journal_lock_does_not_fail_a_finished_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A concurrent writer's SQLITE_BUSY is retried, not reported as a manual stop."""
+    existing = SessionJournal.complete
+    calls = {"count": 0}
+
+    def flaky_complete(
+        self: SessionJournal, sid: str, payload: dict[str, object]
+    ) -> bool:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return existing(self, sid, payload)
+
+    monkeypatch.setattr(SessionJournal, "complete", flaky_complete)
+    completed = result()
+    returned = observe_invocation(
+        lambda _: completed,
+        WorkerRequest(task='t', model='m', worktree_path=tmp_path),
+        root=tmp_path / 'sessions',
+        owner='lock-retry',
+        role='worker',
+        provider='fakeprovider',
+        association='a',
+    )
+    assert returned.status is AttemptStatus.SUCCESS
+    assert returned.manual_control_stopped is False
+    assert calls["count"] == 2
 
 
 def test_broken_observer_storage_cannot_prevent_adapter_execution(tmp_path: Path) -> None:

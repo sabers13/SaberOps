@@ -108,6 +108,7 @@ from saberops.models import (
     PlanStep,
     PlanStepStatus,
     ProviderReadiness,
+    QuotaState,
     ReasoningEffort,
     ReviewResult,
     ReviewVerdict,
@@ -1763,6 +1764,92 @@ class Orchestrator:
             )
             raise
 
+    def _considered_candidate_chain(
+        self,
+        *,
+        base_candidates: list[WorkerCandidate],
+        role: Any,
+        config: RunConfig,
+        routing_snapshot: Any | None,
+        is_peak: bool | None,
+        strong_start: bool,
+    ) -> list[WorkerCandidate]:
+        """Resolve every route considered for this stage, not only a pin.
+
+        A scheduler-dispatched job freezes the admitted route as a
+        provider/model override, which would otherwise make the run record show
+        only that one candidate.  The owner must still be able to see which
+        sibling routes were considered and why they were ineligible, so the
+        unpinned chain is resolved for evidence while dispatch keeps the pin.
+        """
+        if config.model_override is None:
+            return list(base_candidates)
+        try:
+            return list(
+                resolve_candidate_chain(
+                    role=role,
+                    training_allowed=config.training_allowed,
+                    is_peak=is_peak,
+                    snapshot=routing_snapshot,
+                    strong_start=strong_start,
+                )
+            )
+        except Exception:
+            return list(base_candidates)
+
+    def _candidate_resolution_evidence(
+        self,
+        *,
+        candidates: list[WorkerCandidate],
+        config: RunConfig,
+        policy: Any,
+        quota_states: list[QuotaState],
+        routing_snapshot: Any | None,
+        required_capabilities: tuple[str, ...] = (),
+        control_plane_digest: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Emit one deterministic eligibility record per considered route."""
+        from saberops.dispatch import (
+            control_plane_decision,
+            skip_reason_for_decision,
+        )
+
+        evidence: list[dict[str, Any]] = []
+        for candidate in candidates:
+            entry: dict[str, Any] = {
+                "provider": candidate.provider,
+                "model": candidate.model,
+            }
+            try:
+                decision = control_plane_decision(
+                    candidate=candidate,
+                    adapter=self.registry.get(candidate.provider),
+                    training_allowed=config.training_allowed,
+                    routing_snapshot=routing_snapshot,
+                    quota_states=quota_states,
+                    prompt_bytes=0,
+                    policy=policy,
+                    required_capabilities=required_capabilities,
+                    control_plane_digest=control_plane_digest,
+                    db=self.db,
+                )
+            except Exception:
+                evidence.append(entry)
+                continue
+            entry["eligible"] = decision.eligible
+            reason = skip_reason_for_decision(decision, prompt_bytes=0)
+            if reason is not None:
+                entry["reason"] = reason
+                entry["control_plane_reason"] = decision.reason
+                if decision.reason == "QUOTA_EVIDENCE_REQUIRED":
+                    entry["evidence_state"] = "stale"
+            if decision.quota.pool_id:
+                entry["pool_id"] = decision.quota.pool_id
+            if decision.quota.reset_at:
+                entry["reset_at"] = decision.quota.reset_at
+            evidence.append(entry)
+        return evidence
+
     def _resolve_c13_f_review_decision(
         self,
         *,
@@ -1834,7 +1921,7 @@ class Orchestrator:
                 return decision
             except ReviewPolicyError:
                 return conservative_legacy_decision(
-                    owner_explicit_review=bool(config.review_enabled),
+                    owner_explicit_review=bool(config.owner_review_requested),
                     review_policy_mode=config.review_policy_mode,
                 )
 
@@ -1893,7 +1980,7 @@ class Orchestrator:
         decision = decide_review(
             classification=classification,
             review_policy_mode=config.review_policy_mode,
-            owner_explicit_review=bool(config.review_enabled),
+            owner_explicit_review=bool(config.owner_review_requested),
             is_autonomous=is_autonomous,
             decision_id=f"c13f-{run_id}",
         )
@@ -2997,6 +3084,14 @@ class Orchestrator:
             # facts stay chain-local.
             chain_attempt_start: int = 0
             selected_routing_context = routing_context_for_role(current_role)
+            considered_candidates = self._considered_candidate_chain(
+                base_candidates=base_candidates,
+                role=current_role,
+                config=config,
+                routing_snapshot=routing_snapshot,
+                is_peak=is_peak,
+                strong_start=strong_start_active,
+            )
             self.db.record_event(
                 run_id,
                 "tier_candidates_resolved",
@@ -3008,8 +3103,18 @@ class Orchestrator:
                     "strong_start": strong_start_active,
                     "routing_context": selected_routing_context,
                     "candidates": [
-                        {"provider": c.provider, "model": c.model} for c in base_candidates
+                        {"provider": c.provider, "model": c.model}
+                        for c in considered_candidates
                     ],
+                    "candidate_decisions": self._candidate_resolution_evidence(
+                        candidates=considered_candidates,
+                        config=config,
+                        policy=control_plane_policy,
+                        quota_states=quota_states,
+                        routing_snapshot=routing_snapshot,
+                        required_capabilities=frozen_control_plane.required_capabilities,
+                        control_plane_digest=frozen_control_plane.digest,
+                    ),
                     "effective_candidates": [
                         {"provider": c.provider, "model": c.model} for c in candidates
                     ],
@@ -3497,6 +3602,14 @@ class Orchestrator:
                         strong_start=strong_start_active,
                     )
                     selected_routing_context = routing_context_for_role(current_role)
+                    considered_candidates = self._considered_candidate_chain(
+                        base_candidates=base_candidates,
+                        role=current_role,
+                        config=config,
+                        routing_snapshot=routing_snapshot,
+                        is_peak=is_peak,
+                        strong_start=strong_start_active,
+                    )
                     self.db.record_event(
                         run_id,
                         "tier_candidates_resolved",
@@ -3508,8 +3621,20 @@ class Orchestrator:
                             "strong_start": strong_start_active,
                             "routing_context": selected_routing_context,
                             "candidates": [
-                                {"provider": c.provider, "model": c.model} for c in base_candidates
+                                {"provider": c.provider, "model": c.model}
+                                for c in considered_candidates
                             ],
+                            "candidate_decisions": self._candidate_resolution_evidence(
+                                candidates=considered_candidates,
+                                config=config,
+                                policy=control_plane_policy,
+                                quota_states=quota_states,
+                                routing_snapshot=routing_snapshot,
+                                required_capabilities=(
+                                    frozen_control_plane.required_capabilities
+                                ),
+                                control_plane_digest=frozen_control_plane.digest,
+                            ),
                             "effective_candidates": [
                                 {"provider": c.provider, "model": c.model} for c in candidates
                             ],
@@ -5909,6 +6034,14 @@ class Orchestrator:
                                     strong_start=strong_start_active,
                                 )
                                 selected_routing_context = routing_context_for_role(current_role)
+                                considered_candidates = self._considered_candidate_chain(
+                                    base_candidates=base_candidates,
+                                    role=current_role,
+                                    config=config,
+                                    routing_snapshot=routing_snapshot,
+                                    is_peak=is_peak,
+                                    strong_start=strong_start_active,
+                                )
                                 self.db.record_event(
                                     run_id,
                                     "tier_candidates_resolved",
@@ -5922,8 +6055,23 @@ class Orchestrator:
                                         "package_id": tier_decision.package_id,
                                         "candidates": [
                                             {"provider": c.provider, "model": c.model}
-                                            for c in base_candidates
+                                            for c in considered_candidates
                                         ],
+                                        "candidate_decisions": (
+                                            self._candidate_resolution_evidence(
+                                                candidates=considered_candidates,
+                                                config=config,
+                                                policy=control_plane_policy,
+                                                quota_states=quota_states,
+                                                routing_snapshot=routing_snapshot,
+                                                required_capabilities=(
+                                                    frozen_control_plane.required_capabilities
+                                                ),
+                                                control_plane_digest=(
+                                                    frozen_control_plane.digest
+                                                ),
+                                            )
+                                        ),
                                         "effective_candidates": [
                                             {"provider": c.provider, "model": c.model}
                                             for c in candidates

@@ -11,8 +11,10 @@ It has three independent inputs and **any** of them closes the gate:
 1. an explicit owner pause (``orch pause`` / the web toggle);
 2. no live planning session (the MCP planning lease is gone, its process is
    dead, or its heartbeat stopped -- a crashed CLI or a lost connection);
-3. an ``away`` session that ran out of its end time or job budget, or that was
-   never given one at all.
+3. an active ``away`` session that ran out of its job budget, or that was
+   never given one at all.  An away session whose end time has passed is no
+   longer an away grant: it narrows to ``ask-me`` and contributes no pause of
+   its own (presence still applies).
 
 Closing is **sticky**.  A returning session does not silently resume anything:
 it sees what was paused and the owner (or that session) clears the pause with one
@@ -39,7 +41,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -832,7 +834,7 @@ def evaluate_gate(
             paused_runs=(),
             paused_jobs=(),
         )
-    mode, _expired = effective_owner_mode(settings, now=moment)
+    mode, expired = effective_owner_mode(settings, now=moment)
     try:
         document = read_gate(path)
     except RuntimeGateError as exc:
@@ -856,44 +858,56 @@ def evaluate_gate(
             paused_runs=(),
             paused_jobs=(),
         )
+    if (
+        expired
+        and document.pause is not None
+        and document.pause.reason
+        in (PauseReason.AWAY_ENDED.value, PauseReason.AWAY_CAP.value)
+    ):
+        # The away grant is over.  Its own pause record can no longer govern
+        # work: an ended away session is the ``ask-me`` mode, not a permanent
+        # pause.  Presence still applies below, so a closed planning session
+        # keeps its ordinary F17 pause.
+        document = replace(document, pause=None)
     current = presence(now=moment)
     started = jobs_started
     if started is None and db is not None and settings.mode is OwnerMode.AWAY:
         started = away_jobs_started(db, settings, now=moment)
     budget = _away_budget(settings, now=moment, jobs_started=started)
-    if budget is not None and budget.unbounded:
-        return _state_from_document(
-            document,
-            mode=mode,
-            presence_value=current,
-            away=budget,
-            reason=PauseReason.AWAY_UNBOUNDED.value,
-            detail=(
-                "away mode needs an end time or a job budget; set it with "
-                "orch mode set away --until ... --max-jobs ..."
-            ),
-        )
-    if budget is not None and budget.expired:
-        return _state_from_document(
-            document,
-            mode=mode,
-            presence_value=current,
-            away=budget,
-            reason=PauseReason.AWAY_ENDED.value,
-            detail=f"the away session ended at {budget.until}",
-        )
-    if budget is not None and budget.exhausted:
-        return _state_from_document(
-            document,
-            mode=mode,
-            presence_value=current,
-            away=budget,
-            reason=PauseReason.AWAY_CAP.value,
-            detail=(
-                f"the away session used its job budget "
-                f"({budget.jobs_started}/{budget.max_jobs})"
-            ),
-        )
+    if not expired:
+        if budget is not None and budget.unbounded:
+            return _state_from_document(
+                document,
+                mode=mode,
+                presence_value=current,
+                away=budget,
+                reason=PauseReason.AWAY_UNBOUNDED.value,
+                detail=(
+                    "away mode needs an end time or a job budget; set it with "
+                    "orch mode set away --until ... --max-jobs ..."
+                ),
+            )
+        if budget is not None and budget.expired:
+            return _state_from_document(
+                document,
+                mode=mode,
+                presence_value=current,
+                away=budget,
+                reason=PauseReason.AWAY_ENDED.value,
+                detail=f"the away session ended at {budget.until}",
+            )
+        if budget is not None and budget.exhausted:
+            return _state_from_document(
+                document,
+                mode=mode,
+                presence_value=current,
+                away=budget,
+                reason=PauseReason.AWAY_CAP.value,
+                detail=(
+                    f"the away session used its job budget "
+                    f"({budget.jobs_started}/{budget.max_jobs})"
+                ),
+            )
     if not current.live:
         return _state_from_document(
             document,

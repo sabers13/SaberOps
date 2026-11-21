@@ -26,11 +26,31 @@ from saberops.ownership import Liveness, ProcessIdentity, probe_liveness
 from saberops.session_control import SessionControls
 from saberops.session_journal import SessionJournal
 from saberops.session_runtime import AgentSessionRuntime
+from saberops.sqlite_policy import is_busy_error
 from saberops.verification_snapshot import source_tree
 
 LOG_MAX_BYTES = 4 * 1024 * 1024
 VIEW_MAX_BYTES = 16000
 SESSIONS_MAX = 24
+
+#: A completion outcome is retried across short SQLITE_BUSY windows so a
+#: concurrent scheduler write can never turn a finished worker into a
+#: manual-control failure.
+_COMPLETE_BUSY_ATTEMPTS = 4
+
+
+def _complete_journal_with_retry(
+    journal: SessionJournal, session_id: str, payload: dict[str, Any]
+) -> bool:
+    """Persist one session outcome, retrying only lock contention."""
+    for attempt in range(_COMPLETE_BUSY_ATTEMPTS):
+        try:
+            return journal.complete(session_id, payload)
+        except sqlite3.OperationalError as exc:
+            if not is_busy_error(exc) or attempt == _COMPLETE_BUSY_ATTEMPTS - 1:
+                raise
+            time.sleep(min(1.0, 0.05 * (2**attempt)))
+    raise AssertionError("unreachable")
 
 
 def owner_directory(root: Path, owner: str) -> Path:
@@ -429,7 +449,7 @@ def observe_invocation(
                 controls.finish(session_id, "FAILED", result.error)
                 metadata["state"] = "FAILED"
             try:
-                journal.complete(session_id, {"status": result.status.value,
+                _complete_journal_with_retry(journal, session_id, {"status": result.status.value,
                     "source": "execution-owner", "exit_code": result.provider_exit_code,
                     "provider_terminal_status": result.provider_terminal_status
                         or (runtime.terminal_status if runtime else None),
@@ -441,11 +461,21 @@ def observe_invocation(
             except (OSError, sqlite3.Error) as exc:
                 result.status = AttemptStatus.FAILED
                 result.error = "Completion evidence could not be saved: " + str(exc)
-                result.manual_control_stopped = True
+                # A lock is storage contention, never evidence that the owner
+                # stopped automation; the bounded retry above already gave it
+                # the full budget.
+                result.manual_control_stopped = not is_busy_error(exc)
                 metadata["state"] = "FAILED"
         else:
-            journal.complete(session_id, {"status": "INTERRUPTED", "source": "execution-owner",
-                                          "quiescent": quiescent})
+            _complete_journal_with_retry(
+                journal,
+                session_id,
+                {
+                    "status": "INTERRUPTED",
+                    "source": "execution-owner",
+                    "quiescent": quiescent,
+                },
+            )
         metadata["completed"] = time.time()
         try:
             _write_json(metadata_path, metadata)

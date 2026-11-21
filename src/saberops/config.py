@@ -98,7 +98,18 @@ class RunConfig:
     worker_timeout_explicit: bool = False
     worker_inactivity_timeout: float = WORKER_INACTIVITY_TIMEOUT
     gate_timeout: float = DEFAULT_GATE_TIMEOUT
+    #: Effective independent-review policy frozen at run creation.  ``True``
+    #: means the frozen owner request or project policy guarantees that an
+    #: independent review applies to a produced candidate; ``False`` means no
+    #: guarantee was in force at creation (risk-adaptive policy may still
+    #: require one for a high-risk candidate).  This is not the owner-request
+    #: audit bit -- see :attr:`owner_review_requested`.
     review_enabled: bool = False
+    #: The owner's explicit per-run review request (``--review`` / Web
+    #: checkbox), or ``None`` for a legacy payload.  The audit source for
+    #: ``OWNER_EXPLICIT`` decisions uses :attr:`owner_review_requested`, never
+    #: the effective policy bit above.
+    review_requested: bool | None = None
     review_timeout: float = DEFAULT_REVIEW_TIMEOUT
     review_mode: ReviewMode = DEFAULT_REVIEW_MODE
     review_limit: int = DEFAULT_REVIEW_LIMIT
@@ -161,6 +172,17 @@ class RunConfig:
     parallel_plan: tuple[dict[str, Any], ...] = ()
     parallel_parent_run_id: str | None = None
     parallel_task_index: int | None = None
+
+    @property
+    def owner_review_requested(self) -> bool:
+        """Return the owner's explicit review request for audit decisions.
+
+        Legacy payloads recorded only ``review_enabled``; for those the old
+        field keeps its historical owner-explicit meaning.
+        """
+        if self.review_requested is None:
+            return self.review_enabled
+        return self.review_requested
 
     @property
     def initial_tier(self) -> Tier:
@@ -326,6 +348,7 @@ def resolve_run_config(
     worker_timeout: float | None = None,
     gate_timeout: float | None = None,
     review_enabled: bool | None = None,
+    review_requested: bool | None = None,
     review: bool | None = None,
     review_timeout: float | None = None,
     review_mode: str = "bounded",
@@ -421,6 +444,7 @@ def resolve_run_config(
         worker_timeout_explicit=explicit_worker,
         gate_timeout=float(gate_timeout) if gate_timeout is not None else DEFAULT_GATE_TIMEOUT,
         review_enabled=enabled,
+        review_requested=review_requested,
         review_timeout=(
             float(review_timeout) if review_timeout is not None else DEFAULT_REVIEW_TIMEOUT
         ),
@@ -497,6 +521,11 @@ def reconstruct_run_config(data: dict[str, Any]) -> RunConfig:
         ),
         gate_timeout=float(data.get("gate_timeout", DEFAULT_GATE_TIMEOUT)),
         review_enabled=bool(data.get("review_enabled", False)),
+        review_requested=(
+            data["review_requested"]
+            if isinstance(data.get("review_requested"), bool)
+            else None
+        ),
         review_timeout=float(data.get("review_timeout", DEFAULT_REVIEW_TIMEOUT)),
         review_mode=raw_review_mode,  # type: ignore[arg-type]
         review_limit=raw_review_limit,

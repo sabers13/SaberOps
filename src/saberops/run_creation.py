@@ -334,6 +334,13 @@ def resolve_effective_run_config(request: RunRequest) -> RunConfig:
     review_enabled = request.review_enabled
     if review_enabled is None:
         review_enabled = bool(request.review)
+    # The owner request and the effective policy are distinct audit facts.  A
+    # project ``ALWAYS_REQUIRED`` policy makes independent review apply even
+    # when the owner did not pass ``--review``; the frozen config must say so
+    # without mislabelling the requirement source as OWNER_EXPLICIT.
+    review_requested = review_enabled
+    review_policy_requires = review_policy_mode is ReviewPolicyMode.ALWAYS_REQUIRED
+    effective_review_enabled = review_enabled or review_policy_requires
     try:
         kind = _resolve_run_kind(request.kind)
     except ValueError as exc:
@@ -368,10 +375,11 @@ def resolve_effective_run_config(request: RunRequest) -> RunConfig:
             worker_timeout=request.worker_timeout,
             gate_timeout=request.gate_timeout,
             review_enabled=(
-                review_enabled
+                effective_review_enabled
                 if not snapshot.review_disabled and kind != SCOUT_RUN_KIND
                 else False
             ),
+            review_requested=review_requested,
             review_timeout=request.review_timeout,
             review_mode=snapshot.review_mode or request.review_mode,
             review_limit=snapshot.review_limit or request.review_limit,
