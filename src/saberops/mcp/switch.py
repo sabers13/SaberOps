@@ -6,6 +6,12 @@ calls with a plain message and never takes the planner lease, so the agent
 works exactly as without SaberOps. ``orch mcp on`` restores it; running
 sessions pick the change up on their next request.
 
+This is the owner's master switch.  The in-agent ``saberops_on`` /
+``saberops_off`` switch is separate: MCP clients that ignore
+``notifications/tools/list_changed`` (Codex 0.170.0) must see the full tool
+list from the first ``tools/list``, so the server always publishes it and
+refuses every tool except ``saberops_on`` until the session is on.
+
 The switch file sits next to the writer lease, so each profile has its own
 switch and a test that points the lease at a temporary path is isolated.
 Absent or unreadable means on.

@@ -152,6 +152,25 @@ def test_exact_content_per_cli(slug: str, target: str) -> None:
         assert "\ntools:" not in document  # agy hangs on unmapped tool names
 
 
+@pytest.mark.parametrize("target", EXPECTED_TARGETS["codex"])
+def test_codex_proxy_is_a_valid_custom_agent_file(target: str) -> None:
+    """Codex 0.170.0 loads ``~/.codex/agents/*.toml`` custom agents.
+
+    It requires ``name``, ``description`` and ``developer_instructions``; model
+    settings in the file override the parent, and an ``mcp_servers`` table is
+    ignored because the child inherits the parent's servers.  The generated
+    file must stay inside that schema or Codex silently skips it (D13).
+    """
+    parsed = tomllib.loads(agent_document("codex", target))
+    assert parsed["name"] == target
+    assert parsed["description"]
+    assert parsed["developer_instructions"].strip()
+    assert parsed["model"] == HOST_MODEL["codex"]
+    assert parsed["model_reasoning_effort"] == "low"
+    assert "mcp_servers" not in parsed
+    assert "saberops" in parsed["developer_instructions"]
+
+
 def test_only_live_tool_names_appear() -> None:
     for slug, target, document in _documents():
         loop = document.split("## Full SaberOps guide", 1)[0]

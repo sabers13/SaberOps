@@ -1,12 +1,17 @@
 """Connect SaberOps to coding-agent CLIs as an MCP server (``orch connect``).
 
 Every supported agent gets the same stdio server, ``<orch> mcp serve``, with
-``SABEROPS_PROFILE`` passed through when a profile is active. Where the agent
+``SABEROPS_PROFILE`` (when a profile is selected) and the resolved
+state/config/cache bases passed through, so a CLI that filters the child
+environment cannot fall back to the owner's default store. Where the agent
 ships its own registration command it is used (Claude Code, Codex,
-Antigravity), so its config stays in the format it owns. Agents configured by
-a JSON file (OpenCode, Cursor) are edited only when the file is plain JSON,
-after a timestamped backup; a file with comments is never rewritten, the
-snippet is returned for the owner to paste instead.
+Antigravity), so its config stays in the format it owns. Codex additionally
+needs ``default_tools_approval_mode = "approve"`` on the server entry, which
+``codex mcp add`` cannot write; it is pinned after registration and restored
+on every re-add. Agents configured by a JSON file (OpenCode, Cursor) are
+edited only when the file is plain JSON, after a timestamped backup; a file
+with comments is never rewritten, the snippet is returned for the owner to
+paste instead.
 
 Nothing here talks to a model or a network. Command execution and the home
 directory are injectable so tests never touch the owner's real agents.
@@ -50,8 +55,11 @@ __all__ = [
     "agent_document",
     "agent_file_path",
     "agent_rows",
+    "codex_config_path",
+    "codex_home",
     "connect",
     "disconnect",
+    "ensure_codex_tool_approval",
     "install_agents",
     "install_skill",
     "install_worker",
@@ -68,6 +76,16 @@ __all__ = [
 ]
 
 SERVER_NAME = "saberops"
+
+#: Codex 0.170.0 asks for approval before every MCP tool call unless the server
+#: entry says otherwise (``MCP tool call requires approval, but approval policy
+#: is never``).  SaberOps enforces its own authority boundaries inside the
+#: server, so the whole server entry may be approved once at registration
+#: instead of prompting per tool.
+CODEX_TOOLS_APPROVAL_KEY = "default_tools_approval_mode"
+CODEX_TOOLS_APPROVAL_MODE = "approve"
+#: The table header Codex writes for the server entry.
+_CODEX_SERVER_HEADER = f"[mcp_servers.{SERVER_NAME}]"
 
 #: Ownership marker for generated proxy subagent definitions.  A file without
 #: it was not written by SaberOps and is never overwritten or removed.
@@ -319,19 +337,116 @@ def _with_path_warning(message: str) -> str:
     )
 
 
-def _env() -> dict[str, str]:
-    profile = os.environ.get("SABEROPS_PROFILE", "").strip()
-    return {"SABEROPS_PROFILE": profile} if profile else {}
+def _env(profile: str | None = None) -> dict[str, str]:
+    """The environment a registered server child needs to find the same store.
+
+    The profile selector alone is not enough: an agent CLI may forward only the
+    variables written in its own entry (Codex does), so the resolved
+    state/config/cache bases are pinned as absolute paths too.  Without them a
+    filtered child falls back to ``~/.local/state`` and writes to the owner's
+    default store even when the connection was made for another profile.
+    """
+    from saberops import paths
+
+    selected = paths.validate_profile(profile) if profile is not None else paths.active_profile()
+    env: dict[str, str] = {}
+    if selected:
+        env["SABEROPS_PROFILE"] = selected
+    env["XDG_STATE_HOME"] = str(paths.state_home())
+    env["XDG_CONFIG_HOME"] = str(paths.config_home())
+    env["XDG_CACHE_HOME"] = str(paths.cache_home())
+    return env
 
 
 def _home(home: Path | None) -> Path:
     return home if home is not None else Path.home()
 
 
-def server_snippet(agent: Agent) -> str:
+def codex_home(home: Path | None = None) -> Path:
+    """The Codex configuration root: ``$CODEX_HOME`` or ``~/.codex``."""
+    override = os.environ.get("CODEX_HOME", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return _home(home) / ".codex"
+
+
+def codex_config_path(home: Path | None = None) -> Path:
+    """The Codex config file the registration command writes."""
+    return codex_home(home) / "config.toml"
+
+
+def _codex_header_index(lines: Sequence[str]) -> int | None:
+    pattern = re.compile(
+        r'^\[\s*mcp_servers\.(?:saberops|"saberops")\s*\]\s*(?:#.*)?$'
+    )
+    for index, line in enumerate(lines):
+        if pattern.match(line):
+            return index
+    return None
+
+
+def _codex_entry_has_approval(lines: Sequence[str], header: int) -> bool:
+    key = re.compile(rf"^\s*{CODEX_TOOLS_APPROVAL_KEY}\s*=")
+    for line in lines[header + 1 :]:
+        if line.lstrip().startswith("["):
+            return False
+        if key.match(line):
+            return True
+    return False
+
+
+def ensure_codex_tool_approval(home: Path | None = None) -> tuple[bool, str]:
+    """Pin ``default_tools_approval_mode = "approve"`` on the Codex entry.
+
+    ``codex mcp add`` cannot write this key, so it is added here after the CLI
+    has written its own table.  Re-adding the server rewrites the table, which
+    is why the patch runs on every connect instead of only once.  The result is
+    validated with ``tomllib`` before the file is replaced; an unreadable or
+    unexpected file is left untouched.
+    """
+    import tomllib
+
+    path = codex_config_path(home)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return False, f"Could not read {path} to pin tool approval ({exc})."
+    lines = text.splitlines()
+    header = _codex_header_index(lines)
+    if header is None:
+        return False, f"Could not find {_CODEX_SERVER_HEADER} in {path}."
+    if _codex_entry_has_approval(lines, header):
+        return True, f"Codex tool approval already pinned in {path}."
+    patch = lines[: header + 1] + [
+        f'{CODEX_TOOLS_APPROVAL_KEY} = "{CODEX_TOOLS_APPROVAL_MODE}"'
+    ] + lines[header + 1 :]
+    updated = "\n".join(patch)
+    if text.endswith("\n"):
+        updated += "\n"
+    try:
+        tomllib.loads(updated)
+    except tomllib.TOMLDecodeError as exc:
+        return False, (
+            f"{path} would not parse after adding tool approval ({exc}); left untouched. "
+            f'Add ``{CODEX_TOOLS_APPROVAL_KEY} = "{CODEX_TOOLS_APPROVAL_MODE}"`` under '
+            f"{_CODEX_SERVER_HEADER} by hand."
+        )
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(updated, encoding="utf-8")
+        tmp.replace(path)
+    except OSError as exc:
+        return False, f"Could not write {path} to pin tool approval ({exc})."
+    return True, (
+        f"Pinned Codex tool approval "
+        f'({CODEX_TOOLS_APPROVAL_KEY} = "{CODEX_TOOLS_APPROVAL_MODE}") in {path}.'
+    )
+
+
+def server_snippet(agent: Agent, *, profile: str | None = None) -> str:
     """The exact config an owner can paste by hand."""
     orch = orch_command()
-    env = _env()
+    env = _env(profile)
     if agent.slug == "opencode":
         entry: dict[str, Any] = {
             "type": "local",
@@ -342,7 +457,12 @@ def server_snippet(agent: Agent) -> str:
             entry["environment"] = env
         return json.dumps({"mcp": {SERVER_NAME: entry}}, indent=2)
     if agent.slug == "codex":
-        lines = [f"[mcp_servers.{SERVER_NAME}]", f'command = "{orch}"', 'args = ["mcp", "serve"]']
+        lines = [
+            f"[mcp_servers.{SERVER_NAME}]",
+            f"{CODEX_TOOLS_APPROVAL_KEY} = {json.dumps(CODEX_TOOLS_APPROVAL_MODE)}",
+            f'command = "{orch}"',
+            'args = ["mcp", "serve"]',
+        ]
         if env:
             lines += [f"[mcp_servers.{SERVER_NAME}.env]"] + [f'{k} = "{v}"' for k, v in env.items()]
         return "\n".join(lines)
@@ -423,6 +543,11 @@ def skill_document() -> str:
         "- Use a generated proxy (`claude-worker`, `codex-worker` or\n"
         "  `opencode-go-worker`) when the work belongs on another vendor's\n"
         "  subscription. A proxy only hands off one job; it never edits or accepts.\n"
+        "  On Codex the proxies are custom agents under `~/.codex/agents`: spawn the\n"
+        "  named one with `spawn_agent` and `agent_type` set to the proxy name\n"
+        "  (`claude-worker` or `opencode-go-worker`). Codex only delegates when the\n"
+        "  owner or these instructions ask for it, so a request to run the work on\n"
+        "  another subscription is that ask; do not quietly do it yourself instead.\n"
         "- Use a scout job when the deliverable is an investigation or report, not\n"
         "  a change; promote the report to a build job when the owner wants it.\n\n"
         "No CLI hosts another vendor's CLI as a native subagent. Claude cannot be\n"
@@ -942,6 +1067,11 @@ def install_agents(slug: str, *, home: Path | None = None, dry_run: bool = False
             " Restart Claude Code once: it only watches ~/.claude/agents after that"
             " folder exists."
         )
+    if agent.slug == "codex" and action in {"installed", "would-install"}:
+        message += (
+            " Codex lists each proxy by name as a custom agent; install the skill"
+            " (`orch connect codex --skill`) so the planner is told to spawn it."
+        )
     return ConnectResult(
         slug,
         ok,
@@ -1197,9 +1327,9 @@ def remove_skill(slug: str, *, home: Path | None = None) -> ConnectResult:
     )
 
 
-def _cli_add(agent: Agent, project: bool) -> list[str]:
+def _cli_add(agent: Agent, project: bool, profile: str | None = None) -> list[str]:
     orch = orch_command()
-    env = _env()
+    env = _env(profile)
     if agent.slug == "claude":
         argv = ["claude", "mcp", "add", "--scope", "project" if project else "user", SERVER_NAME]
         for key, value in env.items():
@@ -1232,7 +1362,9 @@ def _json_path(agent: Agent, *, project: Path | None, home: Path | None) -> Path
     return base / agent.config_files[0]
 
 
-def _json_edit(path: Path, agent: Agent, *, remove: bool) -> ConnectResult:
+def _json_edit(
+    path: Path, agent: Agent, *, remove: bool, profile: str | None = None
+) -> ConnectResult:
     data: dict[str, Any] = {}
     if path.is_file():
         try:
@@ -1243,7 +1375,7 @@ def _json_edit(path: Path, agent: Agent, *, remove: bool) -> ConnectResult:
                 False,
                 f"{path} has comments or is not plain JSON, so it was left untouched. "
                 "Paste the snippet into it by hand.",
-                snippet=server_snippet(agent),
+                snippet=server_snippet(agent, profile=profile),
             )
         if not isinstance(loaded, dict):
             return ConnectResult(agent.slug, False, f"{path} is not a JSON object; left untouched.")
@@ -1259,7 +1391,7 @@ def _json_edit(path: Path, agent: Agent, *, remove: bool) -> ConnectResult:
             return ConnectResult(agent.slug, True, f"{agent.name} was not connected.")
         servers.pop(SERVER_NAME)
     else:
-        servers[SERVER_NAME] = json.loads(server_snippet(agent))[key][SERVER_NAME]
+        servers[SERVER_NAME] = json.loads(server_snippet(agent, profile=profile))[key][SERVER_NAME]
     data[key] = servers
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
@@ -1300,15 +1432,26 @@ def connect(
     runner: Runner | None = None,
     home: Path | None = None,
     skill: bool = False,
+    profile: str | None = None,
 ) -> ConnectResult:
     """Register SaberOps with one agent (user scope, or ``project`` folder).
 
     With ``skill=True`` also install the small instruction file that teaches
     the submit/wait/accept loop, where the agent supports a local skill.
+
+    ``profile`` selects the owner profile the registered server runs as; the
+    entry pins the resolved store bases so a CLI that filters the child
+    environment cannot fall back to the owner's default store.
     """
+    from saberops import paths
+
     agent = agent_by_slug(slug)
     if agent is None:
         return ConnectResult(slug, False, f"Unknown agent {slug!r}.")
+    try:
+        profile = paths.validate_profile(profile) if profile is not None else None
+    except ValueError as exc:
+        return ConnectResult(slug, False, str(exc))
     if project is not None and not agent.project_scope:
         return ConnectResult(slug, False, f"{agent.name} has no per-project MCP setting.")
     if agent.method == "json":
@@ -1318,10 +1461,10 @@ def connect(
                 slug,
                 True,
                 _with_path_warning(f"Would add SaberOps to {path}."),
-                snippet=server_snippet(agent),
+                snippet=server_snippet(agent, profile=profile),
             )
             return _with_skill(preview, agent, home=home, dry_run=True) if skill else preview
-        edited = _json_edit(path, agent, remove=False)
+        edited = _json_edit(path, agent, remove=False, profile=profile)
         json_result = ConnectResult(
             edited.agent,
             edited.ok,
@@ -1332,18 +1475,27 @@ def connect(
         return _with_skill(json_result, agent, home=home, dry_run=False) if skill else json_result
     if shutil.which(agent.executable) is None and runner is None:
         return ConnectResult(
-            slug, False, f"{agent.name} is not installed.", snippet=server_snippet(agent)
+            slug,
+            False,
+            f"{agent.name} is not installed.",
+            snippet=server_snippet(agent, profile=profile),
         )
     run = runner or _run
     commands = []
     if not dry_run:
         # Re-adding replaces a stale entry (an old orch path or profile).
         run(_cli_remove(agent, project is not None), project)
-    argv = _cli_add(agent, project is not None)
+    argv = _cli_add(agent, project is not None, profile)
     commands.append(" ".join(argv))
     if dry_run:
+        would = "Would run:"
+        if agent.slug == "codex":
+            would += (
+                f" then pin {CODEX_TOOLS_APPROVAL_KEY} = \"{CODEX_TOOLS_APPROVAL_MODE}\""
+                f" in {codex_config_path(home)}"
+            )
         preview = ConnectResult(
-            slug, True, _with_path_warning("Would run:"), commands=tuple(commands)
+            slug, True, _with_path_warning(would), commands=tuple(commands)
         )
         return _with_skill(preview, agent, home=home, dry_run=True) if skill else preview
     result = run(argv, project)
@@ -1354,10 +1506,22 @@ def connect(
             False,
             f"{agent.name} refused: {detail[-1] if detail else 'exit ' + str(result.returncode)}",
             commands=tuple(commands),
-            snippet=server_snippet(agent),
+            snippet=server_snippet(agent, profile=profile),
         )
+    message = f"Connected {agent.name}."
+    if agent.slug == "codex":
+        pinned, note = ensure_codex_tool_approval(home)
+        message = f"{message} {note}"
+        if not pinned:
+            return ConnectResult(
+                slug,
+                False,
+                _with_path_warning(message),
+                commands=tuple(commands),
+                snippet=server_snippet(agent, profile=profile),
+            )
     connected = ConnectResult(
-        slug, True, _with_path_warning(f"Connected {agent.name}."), commands=tuple(commands)
+        slug, True, _with_path_warning(message), commands=tuple(commands)
     )
     return _with_skill(connected, agent, home=home, dry_run=False) if skill else connected
 
@@ -1410,7 +1574,7 @@ def is_connected(agent: Agent, *, home: Path | None = None, runner: Runner | Non
             data = json.loads((base / ".claude.json").read_text(encoding="utf-8"))
             return SERVER_NAME in (data.get("mcpServers") or {})
         if agent.slug == "codex":
-            text = (base / ".codex" / "config.toml").read_text(encoding="utf-8")
+            text = codex_config_path(home).read_text(encoding="utf-8")
             return re.search(rf"^\[mcp_servers\.{SERVER_NAME}\]", text, re.M) is not None
         if agent.slug == "antigravity":
             # Its registry format is private; its own list command is fast (~0.1 s).

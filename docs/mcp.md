@@ -381,6 +381,7 @@ orch connect codex --skill    # also install the "turn on saberops" instruction 
 orch connect --agents         # install proxy subagents for every supported CLI
 orch connect codex --agents   # install only that CLI's proxy subagents
 orch disconnect --agents      # remove only the generated proxy subagents
+orch connect codex --profile work  # register the server in that isolated profile's store
 ```
 
 `--skill` installs one small `SKILL.md` per agent where the CLI supports local
@@ -391,6 +392,40 @@ engine connection. Paths: `~/.claude/skills/saberops/`, `~/.codex/skills/saberop
 Cursor has no local skill format, so it reports **unsupported**. `--dry-run`
 prints the exact file and path; a file SaberOps did not write is never
 overwritten or removed.
+
+`--profile` selects the owner profile the registered server runs as and is
+honoured by `orch connect` itself (it is not only read from the ambient
+`SABEROPS_PROFILE`). The entry always carries the resolved store bases next to
+the profile selector, not just `SABEROPS_PROFILE`:
+
+```toml
+[mcp_servers.saberops]
+default_tools_approval_mode = "approve"
+command = "/path/to/orch"
+args = ["mcp", "serve"]
+
+[mcp_servers.saberops.env]
+SABEROPS_PROFILE = "work"
+XDG_STATE_HOME = "/home/owner/.local/state"
+XDG_CONFIG_HOME = "/home/owner/.config"
+XDG_CACHE_HOME = "/home/owner/.cache"
+```
+
+This matters because some CLIs filter the environment they pass to an MCP
+server. Codex 0.170.0 forwards only `HOME` and the variables written in its own
+entry, so `XDG_STATE_HOME` from the owner's shell never reaches the child; with
+only `SABEROPS_PROFILE` the server would fall back to the default store under
+`~/.local/state`. Pinning the bases keeps the profile isolated. An invalid
+profile name is refused before any CLI runs.
+
+Codex 0.170.0 also refuses every MCP tool call under the default approval
+policy (`MCP tool call requires approval, but approval policy is never`).
+`codex mcp add` cannot write the key, so `orch connect` pins
+`default_tools_approval_mode = "approve"` on the server entry after the CLI has
+written it, and re-pins it after every re-add. The approval covers only this
+server's tools; SaberOps still enforces its own never-exposed boundary inside
+the process. A failed re-pin fails the connect result and prints the exact line
+to add by hand instead of claiming success.
 
 ### Proxy subagents
 
@@ -420,6 +455,17 @@ Paths: `~/.claude/agents/`, `~/.codex/agents/`, `~/.config/opencode/agents/`
 and `~/.gemini/config/agents/`. Cursor has no subagent format, so it reports
 **unsupported**. The first Claude install creates `~/.claude/agents/`; Claude
 Code only watches that folder after a restart, so the command says so.
+
+On Codex 0.170.0 the proxy files are **custom agents**: one TOML file per agent
+under `~/.codex/agents/`, with the required `name`, `description` and
+`developer_instructions` fields, plus this host's cheap model and reasoning
+effort. Codex lists them by name in `spawn_agent`'s available roles, and they
+inherit the parent's `saberops` MCP server (a custom agent cannot add its own
+servers). Codex 0.170.0 only delegates when the owner or the installed skill
+explicitly asks for a subagent, so the SaberOps skill names the two Codex
+proxies and tells the planner to spawn the matching one instead of doing the
+work itself. Without that explicit instruction the proxy files load but the
+main session may keep the job, which is what the B1 check observed.
 
 Two rules keep a proxy honest:
 
@@ -511,12 +557,15 @@ use the snippet under "Client configuration" below.
 ## Turning SaberOps on and off
 
 * **Per session, in the agent.** Every agent session starts with SaberOps
-  **off**: the agent sees a single `saberops_on` tool, holds no planner lease and
-  works as a normal coding agent. Say "turn on saberops" and the agent calls
-  `saberops_on`; the full tools appear (the server sends
-  `notifications/tools/list_changed`) and that session becomes the planner. Say
-  "turn off saberops" and it calls `saberops_off`, releases the lease and is a
-  normal agent again. `orch mcp serve --active` starts a session already on.
+  **off**: it holds no planner lease and works as a normal coding agent. MCP
+  clients that follow `notifications/tools/list_changed` see the tool list
+  change; Codex 0.170.0 does not re-list after that notification, so the server
+  publishes the full tool list from the first `tools/list` and enforces the
+  switch inside `tools/call` instead. Every tool except `saberops_on` refuses
+  with "SaberOps is off in this session" until you say "turn on saberops".
+  `saberops_on` then makes that session the planner, and `saberops_off`
+  releases the lease and returns it to a normal agent. `orch mcp serve
+  --active` starts a session already on.
 * **For every agent, by the owner.** `orch mcp off` (or Setup → Turn off for all
   agents) keeps every agent registered but offers no tools at all, not even
   `saberops_on`. `orch mcp on` restores it; `orch mcp status` shows the state and
@@ -582,13 +631,18 @@ or, in `.mcp.json` at the project root:
 
 ### Codex
 
-`~/.codex/config.toml`:
+`~/.codex/config.toml` (or `$CODEX_HOME/config.toml`):
 
 ```toml
 [mcp_servers.saberops]
+default_tools_approval_mode = "approve"
 command = "orch"
 args = ["mcp", "serve"]
 ```
+
+Codex needs `default_tools_approval_mode = "approve"` on this entry; with the
+default approval policy every SaberOps tool call is refused. `orch connect
+codex` writes it for you.
 
 Checkout development (an installed package must not shadow the edited source):
 

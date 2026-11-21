@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import tomllib
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -31,6 +32,35 @@ class FakeRunner:
         return subprocess.CompletedProcess(list(argv), self.returncode, self.stdout, "")
 
 
+class CodexRunner(FakeRunner):
+    """A fake ``codex`` that writes the same table the real CLI writes."""
+
+    def __init__(self, home: Path, returncode: int = 0) -> None:
+        super().__init__(returncode=returncode)
+        self.home = home
+        self.config = home / ".codex" / "config.toml"
+
+    def __call__(self, argv: Sequence[str], cwd: Path | None) -> subprocess.CompletedProcess[str]:
+        self.calls.append((list(argv), cwd))
+        if list(argv[:3]) == ["codex", "mcp", "add"]:
+            self.config.parent.mkdir(parents=True, exist_ok=True)
+            env = [
+                argv[index + 1]
+                for index, value in enumerate(argv)
+                if value == "--env"
+            ]
+            body = (
+                '[mcp_servers.saberops]\ncommand = "/opt/orch"\nargs = ["mcp", "serve"]\n'
+            )
+            if env:
+                body += "\n[mcp_servers.saberops.env]\n"
+                for item in env:
+                    key, _, value = item.partition("=")
+                    body += f'{key} = "{value}"\n'
+            self.config.write_text(body, encoding="utf-8")
+        return subprocess.CompletedProcess(list(argv), self.returncode, self.stdout, "")
+
+
 @pytest.fixture()
 def isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for name in ("state", "config", "cache", "home"):
@@ -44,7 +74,9 @@ def isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path / "home"
 
 
-def test_claude_uses_its_own_cli_and_replaces_a_stale_entry(isolated: Path) -> None:
+def test_claude_uses_its_own_cli_and_replaces_a_stale_entry(
+    isolated: Path, tmp_path: Path
+) -> None:
     runner = FakeRunner()
     result = connect("claude", runner=runner)
     assert result.ok
@@ -56,6 +88,12 @@ def test_claude_uses_its_own_cli_and_replaces_a_stale_entry(isolated: Path) -> N
         "--scope",
         "user",
         "saberops",
+        "-e",
+        f"XDG_STATE_HOME={tmp_path / 'state'}",
+        "-e",
+        f"XDG_CONFIG_HOME={tmp_path / 'config'}",
+        "-e",
+        f"XDG_CACHE_HOME={tmp_path / 'cache'}",
         "--",
         "/opt/orch",
         "mcp",
@@ -72,10 +110,97 @@ def test_profile_is_passed_through_and_project_scope_runs_in_the_folder(
     argv, cwd = runner.calls[-1]
     assert cwd == tmp_path and "--scope" in argv and "project" in argv
     assert ["-e", "SABEROPS_PROFILE=work"] == argv[argv.index("-e") : argv.index("-e") + 2]
-    codex = FakeRunner()
-    connect("codex", runner=codex)
+    codex = CodexRunner(isolated)
+    connect("codex", runner=codex, home=isolated)
     assert "--env" in codex.calls[-1][0] and "SABEROPS_PROFILE=work" in codex.calls[-1][0]
     assert not connect("codex", project=tmp_path, runner=codex).ok  # no per-project setting
+
+
+def _codex_env_values(argv: list[str]) -> dict[str, str]:
+    pairs = [argv[index + 1] for index, item in enumerate(argv) if item == "--env"]
+    return dict(item.split("=", 1) for item in pairs)
+
+
+def test_codex_entry_pins_tool_approval_and_keeps_it_on_re_add(
+    isolated: Path, tmp_path: Path
+) -> None:
+    runner = CodexRunner(isolated)
+    result = connect("codex", runner=runner, home=isolated)
+    assert result.ok, result.message
+    config = (isolated / ".codex" / "config.toml").read_text(encoding="utf-8")
+    assert config.count("default_tools_approval_mode") == 1
+    assert 'default_tools_approval_mode = "approve"' in config
+    assert tomllib.loads(config)["mcp_servers"]["saberops"][
+        "default_tools_approval_mode"
+    ] == "approve"
+
+    # A re-add rewrites Codex's table; the approval key must come back with it.
+    again = connect("codex", runner=runner, home=isolated)
+    assert again.ok, again.message
+    config = (isolated / ".codex" / "config.toml").read_text(encoding="utf-8")
+    assert config.count("default_tools_approval_mode") == 1
+    assert tomllib.loads(config)["mcp_servers"]["saberops"][
+        "default_tools_approval_mode"
+    ] == "approve"
+
+
+def test_codex_snippet_includes_the_approval_line(isolated: Path) -> None:
+    agent = agent_connect.agent_by_slug("codex")
+    assert agent is not None
+    snippet = server_snippet(agent)
+    assert snippet.startswith("[mcp_servers.saberops]\n")
+    assert 'default_tools_approval_mode = "approve"' in snippet
+
+
+def test_codex_dry_run_names_the_approval_step(isolated: Path) -> None:
+    runner = CodexRunner(isolated)
+    result = connect("codex", dry_run=True, runner=runner, home=isolated)
+    assert result.ok
+    assert "default_tools_approval_mode" in result.message
+    assert not (isolated / ".codex" / "config.toml").exists()
+
+
+def test_profile_is_honoured_and_the_entry_pins_the_store(
+    isolated: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = CodexRunner(isolated)
+    result = connect("codex", runner=runner, home=isolated, profile="work")
+    assert result.ok, result.message
+    env = _codex_env_values(runner.calls[-1][0])
+    assert env["SABEROPS_PROFILE"] == "work"
+    assert env["XDG_STATE_HOME"] == str(tmp_path / "state")
+    assert env["XDG_CONFIG_HOME"] == str(tmp_path / "config")
+    assert env["XDG_CACHE_HOME"] == str(tmp_path / "cache")
+
+    # The CLI parser must pass --profile through; it used to be ignored.
+    seen: list[str | None] = []
+
+    def fake_connect(slug: str, **kwargs: object) -> agent_connect.ConnectResult:
+        seen.append(kwargs.get("profile"))  # type: ignore[arg-type]
+        return agent_connect.ConnectResult(slug, True, "Connected.")
+
+    monkeypatch.setattr(agent_connect, "connect", fake_connect)
+    from saberops.cli import main
+
+    assert main(["connect", "codex", "--profile", "work"]) == 0
+    assert seen == ["work"]
+
+
+def test_an_invalid_profile_is_refused_before_any_cli_runs(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    called: list[str] = []
+
+    def fake_connect(slug: str, **_: object) -> agent_connect.ConnectResult:
+        called.append(slug)
+        return agent_connect.ConnectResult(slug, True, "Connected.")
+
+    monkeypatch.setattr(agent_connect, "connect", fake_connect)
+    from saberops.cli import main
+
+    assert main(["connect", "codex", "--profile", "../escape"]) == 2
+    assert called == []
+    assert "SABEROPS_PROFILE must match" in capsys.readouterr().err
 
 
 def test_dry_run_changes_nothing(isolated: Path) -> None:

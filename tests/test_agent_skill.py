@@ -48,6 +48,24 @@ class FakeRunner:
         return subprocess.CompletedProcess(list(argv), self.returncode, self.stdout, "")
 
 
+class CodexRunner(FakeRunner):
+    """Writes the table ``codex mcp add`` writes, so approval can be pinned."""
+
+    def __init__(self, home: Path) -> None:
+        super().__init__()
+        self.home = home
+
+    def __call__(self, argv: Sequence[str], cwd: Path | None) -> subprocess.CompletedProcess[str]:
+        result = super().__call__(argv, cwd)
+        if list(argv[:3]) == ["codex", "mcp", "add"]:
+            config = self.home / ".codex" / "config.toml"
+            config.parent.mkdir(parents=True, exist_ok=True)
+            config.write_text(
+                '[mcp_servers.saberops]\ncommand = "/opt/orch"\n', encoding="utf-8"
+            )
+        return result
+
+
 @pytest.fixture()
 def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     base = tmp_path / "home"
@@ -197,7 +215,7 @@ def test_removal_still_works_when_the_cli_is_gone(
 
 
 def test_connect_without_skill_touches_no_skill_file(home: Path) -> None:
-    result = connect("codex", runner=FakeRunner(), home=home)
+    result = connect("codex", runner=CodexRunner(home), home=home)
     assert result.ok and result.skill_action == ""
     assert not _expected(home, "codex").exists()
 
@@ -262,6 +280,11 @@ def test_skill_carries_the_worker_choice_guidance() -> None:
         "Claude cannot be an OpenCode subagent",
         "Connect other coding agents",
         "Antigravity is an orchestrator only",
+        # Codex only delegates when the owner or the skill asks for it (D13).
+        "custom agents under `~/.codex/agents`",
+        "spawn_agent",
+        "agent_type",
+        "do not quietly do it yourself",
     ):
         assert phrase in loop, phrase
 
@@ -298,5 +321,8 @@ def test_skill_matches_the_live_mcp_tool_list() -> None:
         "candidate_sha",
         "diff",
         "owner_action",
+        # Host-CLI delegation vocabulary, not SaberOps tools (D13).
+        "spawn_agent",
+        "agent_type",
     }
     assert mentioned - known == set()

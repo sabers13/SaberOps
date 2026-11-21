@@ -150,12 +150,28 @@ def _cli_server(tmp_path: Path) -> McpServer:
     return McpServer(server.context, start_active=False)
 
 
-def test_agent_sessions_start_off_and_the_user_turns_them_on_and_off(tmp_path: Path) -> None:
+def test_inactive_session_still_publishes_the_full_tool_list(tmp_path: Path) -> None:
+    """A client that never re-lists (Codex 0.170.0) still sees every tool.
+
+    The on/off switch is enforced by ``tools/call``, not by shrinking the list.
+    """
     server = _cli_server(tmp_path)
     init = _ready(server)
     assert init["active"] is False and "OFF in this session" in init["instructions"]
-    assert [t["name"] for t in _call(server, "tools/list")["result"]["tools"]] == ["saberops_on"]
+    names = [t["name"] for t in _call(server, "tools/list")["result"]["tools"]]
+    assert "submit_job" in names and "preflight" in names
+    assert "saberops_on" in names and "saberops_off" in names
     assert OrchestratorLease(tmp_path / "lease.json").read() is None  # not the planner
+    refused = _call(server, "tools/call", {"name": "list_jobs", "arguments": {}})["result"]
+    assert refused["isError"] and refused["content"][0]["text"].startswith("Orchestrator:")
+    assert "off in this session" in refused["content"][0]["text"]
+
+
+def test_agent_sessions_start_off_and_the_user_turns_them_on_and_off(tmp_path: Path) -> None:
+    server = _cli_server(tmp_path)
+    init = _ready(server)
+    assert init["active"] is False
+    names_before = [t["name"] for t in _call(server, "tools/list")["result"]["tools"]]
     refused = _call(server, "tools/call", {"name": "list_jobs", "arguments": {}})["result"]
     assert refused["isError"] and refused["content"][0]["text"].startswith("Orchestrator:")
 
@@ -166,7 +182,8 @@ def test_agent_sessions_start_off_and_the_user_turns_them_on_and_off(tmp_path: P
         {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
     ]
     names = [t["name"] for t in _call(server, "tools/list")["result"]["tools"]]
-    assert "submit_job" in names and "saberops_off" in names and "saberops_on" not in names
+    assert names == names_before
+    assert "submit_job" in names and "saberops_off" in names and "saberops_on" in names
     record = OrchestratorLease(tmp_path / "lease.json").read()
     assert record is not None and record.client == "claude-code"
     listed = _call(server, "tools/call", {"name": "list_jobs", "arguments": {}})["result"]
@@ -175,7 +192,7 @@ def test_agent_sessions_start_off_and_the_user_turns_them_on_and_off(tmp_path: P
     off = _call(server, "tools/call", {"name": "saberops_off", "arguments": {}})["result"]
     assert off["content"][0]["text"].startswith("Orchestrator: SaberOps is off")
     assert server.drain_notifications()
-    assert [t["name"] for t in _call(server, "tools/list")["result"]["tools"]] == ["saberops_on"]
+    assert [t["name"] for t in _call(server, "tools/list")["result"]["tools"]] == names_before
     assert OrchestratorLease(tmp_path / "lease.json").read() is None
 
 

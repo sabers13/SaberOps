@@ -2961,7 +2961,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     connect_parser.add_argument(
-        "--profile", type=str, default=None, help="SaberOps profile the agents should use."
+        "--profile",
+        type=str,
+        default=None,
+        help=(
+            "Isolated SaberOps profile the registered MCP server should run as. "
+            "The entry also pins the resolved state/config/cache paths, so an "
+            "agent CLI that filters the child environment cannot fall back to "
+            "the default store."
+        ),
     )
     connect_parser.add_argument("--json", action="store_true", help="JSON output.")
 
@@ -7816,11 +7824,17 @@ def handle_connect(args: argparse.Namespace) -> int:
     from dataclasses import asdict
 
     from saberops.agent_connect import AGENTS, agent_rows, connect, disconnect
+    from saberops.paths import validate_profile
 
     wanted = [a.strip().lower() for a in (getattr(args, "agents", None) or []) if a.strip()]
     project = Path(args.project).expanduser().resolve() if args.project else None
     if getattr(args, "agents_mode", False):
         return _handle_agent_definitions(args, wanted)
+    try:
+        profile = validate_profile(getattr(args, "profile", None) or "")
+    except ValueError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 2
     if not wanted:
         rows = agent_rows()
         if args.json:
@@ -7842,7 +7856,13 @@ def handle_connect(args: argparse.Namespace) -> int:
         return 2
     results = [
         disconnect(slug, project=project) if args.remove
-        else connect(slug, project=project, dry_run=args.dry_run, skill=args.skill)
+        else connect(
+            slug,
+            project=project,
+            dry_run=args.dry_run,
+            skill=args.skill,
+            profile=profile or None,
+        )
         for slug in wanted
     ]
     if args.json:

@@ -133,8 +133,10 @@ def test_cli_mcp_serve_roundtrip(
     )
     assert [response["id"] for response in responses] == [1, 2]
     names = [tool["name"] for tool in responses[1]["result"]["tools"]]  # type: ignore[index]
-    # Once SaberOps is on, the D7 tools are offered, plus saberops_off.
-    assert sorted(n for n in names if n != "saberops_off") == sorted(TOOL_NAMES)
+    # The D7 tools are offered, plus both session switches.
+    assert sorted(n for n in names if n not in {"saberops_on", "saberops_off"}) == sorted(
+        TOOL_NAMES
+    )
 
 
 def test_cli_mcp_serve_starts_off_until_the_user_turns_it_on(
@@ -155,7 +157,12 @@ def test_cli_mcp_serve_starts_off_until_the_user_turns_it_on(
     )
     assert responses[0]["result"]["active"] is False  # type: ignore[index]
     names = [tool["name"] for tool in responses[1]["result"]["tools"]]  # type: ignore[index]
-    assert names == ["saberops_on"]
+    # The full list is visible so a client that never re-lists still has it;
+    # calls are refused inside the server until saberops_on.
+    assert sorted(n for n in names if n not in {"saberops_on", "saberops_off"}) == sorted(
+        TOOL_NAMES
+    )
+    assert {"saberops_on", "saberops_off"} <= set(names)
 
 
 def test_cli_mcp_default_action_serves(

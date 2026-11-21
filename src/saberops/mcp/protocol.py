@@ -294,12 +294,16 @@ class McpServer:
                     "initialize and notifications/initialized are required first"
                 )
         if method == "tools/list":
-            on = self._sync_switch()
+            self._sync_switch()
             if not self.enabled:
                 return {"tools": []}
-            if not on:
-                return {"tools": [SABEROPS_ON_TOOL]}
-            return {"tools": [*self._registry.descriptors(), SABEROPS_OFF_TOOL]}
+            # The full list is published even while this session is off.  Some
+            # clients (Codex 0.170.0) never re-list after
+            # ``notifications/tools/list_changed``, so a list that grows only
+            # after ``saberops_on`` is unusable there.  The in-session switch
+            # is still enforced: every tool except ``saberops_on`` refuses with
+            # SESSION_OFF_MESSAGE until it is turned on.
+            return {"tools": [*self._registry.descriptors(), SABEROPS_ON_TOOL, SABEROPS_OFF_TOOL]}
         if method == "tools/call":
             if self._context.lease.writer:
                 with self._context.lease.guarded_call(mutating=False):

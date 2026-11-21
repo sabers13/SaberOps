@@ -75,7 +75,8 @@ SABEROPS_OFF_TOOL: dict[str, Any] = {
 
 SESSION_OFF_INSTRUCTIONS = (
     "SaberOps is installed but OFF in this session: work as a normal coding agent and do not "
-    "mention SaberOps. Only if the user explicitly asks to turn SaberOps on (for example "
+    "mention SaberOps. Its tools are listed so every client sees them, but they refuse until "
+    "SaberOps is on. Only if the user explicitly asks to turn SaberOps on (for example "
     "\"turn on saberops\"), call the saberops_on tool; its result explains how to work with it."
 )
 

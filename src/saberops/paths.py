@@ -35,6 +35,22 @@ _PROJECTS_DIR: Final[str] = "projects"
 _PROFILE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 
 
+def validate_profile(raw: str) -> str:
+    """Validate one explicit profile name, failing closed on an invalid value.
+
+    The same rule as :func:`active_profile` applies, so an explicit selection
+    (``orch connect --profile``) can never become an arbitrary filesystem path.
+    """
+    profile = raw.strip()
+    if not profile:
+        return ""
+    if _PROFILE_RE.fullmatch(profile) is None:
+        raise ValueError(
+            f"{PROFILE_ENV} must match [A-Za-z0-9][A-Za-z0-9._-]{{0,63}}"
+        )
+    return profile
+
+
 def active_profile() -> str:
     """Return the optional isolated owner profile selected for this process.
 
@@ -43,14 +59,7 @@ def active_profile() -> str:
     identity, routing semantics, or execution authority.  An invalid profile
     fails closed instead of becoming an arbitrary filesystem path.
     """
-    raw = os.environ.get(PROFILE_ENV, "").strip()
-    if not raw:
-        return ""
-    if _PROFILE_RE.fullmatch(raw) is None:
-        raise ValueError(
-            f"{PROFILE_ENV} must match [A-Za-z0-9][A-Za-z0-9._-]{{0,63}}"
-        )
-    return raw
+    return validate_profile(os.environ.get(PROFILE_ENV, ""))
 
 
 def _profiled_app_dir(base: Path, app_dir: str) -> Path:
@@ -73,6 +82,14 @@ def config_home() -> Path:
     if xdg and xdg.strip():
         return Path(xdg.strip()).expanduser()
     return Path.home() / ".config"
+
+
+def cache_home() -> Path:
+    """Return the XDG cache base (``$XDG_CACHE_HOME`` or ``~/.cache``)."""
+    xdg = os.environ.get("XDG_CACHE_HOME", "")
+    if xdg and xdg.strip():
+        return Path(xdg.strip()).expanduser()
+    return Path.home() / ".cache"
 
 
 def saberops_state_dir() -> Path:
