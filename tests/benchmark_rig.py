@@ -54,7 +54,11 @@ from saberops.supervisor import RunSupervisor
 
 #: The fake-mode table must stay comfortably inside the gate budget; the drills
 #: have their own 120-second visible-state bound from the phase 1 exit test.
-BENCHMARK_TIMEOUT_SECONDS = 120.0
+#: Paced submission puts each task's submission work on the run's critical path
+#: (about 70s for the ten tasks on an idle host), and the gate's parallel pass
+#: runs this under heavy CPU contention, so the stall bound keeps headroom while
+#: still failing a genuinely stuck engine well inside the lane timeout.
+BENCHMARK_TIMEOUT_SECONDS = 180.0
 DRILL_VISIBLE_LIMIT_SECONDS = 120.0
 C2_RECOVERY_LIMIT_SECONDS = 60.0
 SETUP_TIMEOUT_SECONDS = 180.0
