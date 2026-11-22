@@ -13,12 +13,20 @@ lifecycle rig.
 
 from __future__ import annotations
 
+import math
 import os
 import shlex
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import (
+    Callable,
+    Iterable,
+    Iterator,
+    Mapping,
+    MutableMapping,
+    Sequence,
+)
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -46,6 +54,110 @@ DEFAULT_CODEX_MODEL = "gpt-6-luna"
 
 #: The explicit real-mode acknowledgement flag.  Real mode refuses without it.
 REAL_MODE_FLAG = "--yes-real-cli"
+
+#: How a mode submits its measured tasks.  ``paced`` (the default) submits the
+#: next task only when a worker slot is free, so a queued job is never measured:
+#: submit-to-start and time-to-accepted then describe an unqueued job, the same
+#: way daily use submits work.  ``burst`` reproduces the original all-at-once
+#: submission and is a labelled stress measurement, never a target score.
+SubmitMode = Literal["paced", "burst"]
+DEFAULT_SUBMIT_MODE: SubmitMode = "paced"
+
+#: Worker slots the paced mode may fill.  The confirming real runs dispatched
+#: two workers at a time, so two is the default; pass ``--concurrency`` to match
+#: the host's actual concurrently dispatching worker count.
+DEFAULT_SUBMIT_CONCURRENCY = 2
+
+#: The owner's final acceptance targets, measured from submit under paced
+#: submission.  Time-to-accepted is submit -> the accept actually performed;
+#: submit-to-start is submit -> the worker's first attempt starting.
+TARGET_ACCEPT_MEDIAN_SECONDS = 90.0
+TARGET_ACCEPT_P95_SECONDS = 240.0
+TARGET_SUBMIT_TO_START_P95_SECONDS = 10.0
+
+
+@dataclass(frozen=True)
+class SubmitPacer:
+    """Decide whether the next measured task may be submitted yet.
+
+    ``paced`` keeps the number of submitted-but-not-terminal tasks at or below
+    :attr:`concurrency`: the next task is submitted into a free worker slot, not
+    behind a queue.  ``burst`` always allows a submission, which is the old
+    all-at-once behaviour kept for the stress section.
+    """
+
+    mode: SubmitMode = DEFAULT_SUBMIT_MODE
+    concurrency: int = DEFAULT_SUBMIT_CONCURRENCY
+
+    def __post_init__(self) -> None:
+        if self.mode not in ("paced", "burst"):
+            raise ValueError(f"unknown submission mode {self.mode!r}")
+        if (
+            isinstance(self.concurrency, bool)
+            or not isinstance(self.concurrency, int)
+            or self.concurrency < 1
+        ):
+            raise ValueError(
+                f"submit concurrency must be an int >= 1, got {self.concurrency!r}"
+            )
+
+    @property
+    def paced(self) -> bool:
+        return self.mode == "paced"
+
+    def may_submit(self, in_flight: int) -> bool:
+        """True when one more task may be submitted with *in_flight* running."""
+        if not self.paced:
+            return True
+        return in_flight < self.concurrency
+
+
+@dataclass(frozen=True)
+class TargetRow:
+    """One final target compared with the measurement it scores."""
+
+    name: str
+    observed: float | None
+    limit: float
+
+    @property
+    def passed(self) -> bool:
+        return self.observed is not None and self.observed <= self.limit
+
+    def line(self, *, scored: bool) -> str:
+        observed = "n/a" if self.observed is None else f"{self.observed:.1f}s"
+        limit = f"{self.limit:.0f}s"
+        result = ("PASS" if self.passed else "FAIL") if scored else "not scored"
+        return f"{self.name:<34} {observed:>10} {limit:>8}   {result}"
+
+
+def nearest_rank_percentile(
+    values: Iterable[float], percentile: float
+) -> float | None:
+    """Nearest-rank percentile of *values*, or ``None`` when empty.
+
+    Nearest rank is used because it is deterministic and does not interpolate a
+    latency that no task observed: the printed p95 is always one measured task's
+    figure.
+    """
+    if not 0 < percentile <= 100:
+        raise ValueError(f"percentile must be in (0, 100], got {percentile!r}")
+    ordered = sorted(values)
+    if not ordered:
+        return None
+    rank = max(1, math.ceil(percentile / 100 * len(ordered)))
+    return ordered[rank - 1]
+
+
+def median_value(values: Iterable[float]) -> float | None:
+    """Median of *values* (mean of the middle two), or ``None`` when empty."""
+    ordered = sorted(values)
+    if not ordered:
+        return None
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2
 
 
 def fake_mode_environment() -> dict[str, str]:
@@ -279,6 +391,13 @@ class TaskResult:
         return max(0.0, self.accepted_at - self.submitted_at)
 
     @property
+    def time_to_accepted_from_start(self) -> float | None:
+        """Start -> the accept actually performed, for comparison with submit."""
+        if self.accepted_at is None or self.started_at is None:
+            return None
+        return max(0.0, self.accepted_at - self.started_at)
+
+    @property
     def notice_delay(self) -> float | None:
         if self.notice_at is None or self.terminal_at is None:
             return None
@@ -437,6 +556,85 @@ class BenchmarkReport:
     started_at: float = 0.0
     finished_at: float = 0.0
     usage: tuple[SubscriptionUsage, ...] = ()
+    #: How measured tasks were submitted (paced default, or burst stress).
+    submission_mode: SubmitMode = DEFAULT_SUBMIT_MODE
+    submit_concurrency: int = DEFAULT_SUBMIT_CONCURRENCY
+    #: Deepest count of submitted-but-not-terminal tasks seen at a submission.
+    #: Paced submission keeps this at or below ``submit_concurrency``; burst
+    #: reaches the whole catalogue size.
+    max_submit_depth: int = 0
+
+    @property
+    def scored_results(self) -> tuple[TaskResult, ...]:
+        """Acceptance-expectation rows the final targets are measured over.
+
+        A must-fail row has no accepted commit and no worker start by design, so
+        it never enters a timing target.
+        """
+        return tuple(
+            result
+            for result in self.results
+            if result.expect == "accepted"
+            and result.measured
+            and result.accepted_at is not None
+        )
+
+    def target_rows(self) -> tuple[TargetRow, ...]:
+        """The three final targets, measured from submit under pacing."""
+        rows = self.scored_results
+        return (
+            TargetRow(
+                "time to accepted, median",
+                median_value(
+                    result.time_to_accepted
+                    for result in rows
+                    if result.time_to_accepted is not None
+                ),
+                TARGET_ACCEPT_MEDIAN_SECONDS,
+            ),
+            TargetRow(
+                "time to accepted, p95",
+                nearest_rank_percentile(
+                    (
+                        result.time_to_accepted
+                        for result in rows
+                        if result.time_to_accepted is not None
+                    ),
+                    95,
+                ),
+                TARGET_ACCEPT_P95_SECONDS,
+            ),
+            TargetRow(
+                "submit to start, p95",
+                nearest_rank_percentile(
+                    (
+                        result.submit_to_start
+                        for result in rows
+                        if result.submit_to_start is not None
+                    ),
+                    95,
+                ),
+                TARGET_SUBMIT_TO_START_P95_SECONDS,
+            ),
+        )
+
+    @property
+    def targets_scored(self) -> bool:
+        """True only for a paced real run with an accepted task to score.
+
+        Fake mode is rig evidence, not a vendor latency measurement, so its
+        target rows are printed for information.  Burst submission is the
+        stress section and is never scored.
+        """
+        return (
+            self.mode == "real"
+            and self.submission_mode == "paced"
+            and bool(self.scored_results)
+        )
+
+    @property
+    def targets_passed(self) -> bool:
+        return all(row.passed for row in self.target_rows())
 
     @property
     def passed(self) -> bool:
@@ -448,6 +646,8 @@ class BenchmarkReport:
         # masquerade as a pass.
         if review_rows and not any(r.measured for r in review_rows):
             return False
+        if self.targets_scored and not self.targets_passed:
+            return False
         return all(result.passed for result in measured) and all(
             drill.passed for drill in self.drills
         )
@@ -456,18 +656,61 @@ class BenchmarkReport:
     def elapsed(self) -> float:
         return max(0.0, self.finished_at - self.started_at)
 
+    def _submission_lines(self) -> list[str]:
+        if self.submission_mode == "paced":
+            observed = (
+                f"; deepest queue {self.max_submit_depth}"
+                if self.max_submit_depth
+                else ""
+            )
+            return [
+                "submission: paced - the next task is submitted only when a "
+                f"worker slot is free (concurrency {self.submit_concurrency}"
+                f"{observed}); queue wait is not measured",
+            ]
+        return [
+            "submission: burst - every measured task is submitted at once; the "
+            "latencies below are a stress measurement and are NOT scored "
+            "against the final targets (run the default paced mode for those)",
+        ]
+
+    def _target_lines(self) -> list[str]:
+        rows = self.target_rows()
+        if not rows or all(row.observed is None for row in rows):
+            return []
+        scored = self.targets_scored
+        heading = (
+            "Final targets (time to accepted is submit -> the accept performed)"
+            if scored
+            else "Timing targets (informational, not scored in this mode)"
+        )
+        header = f"{'target':<34} {'observed':>10} {'limit':>8}   result"
+        lines = [heading, header, "-" * len(header)]
+        lines.extend(row.line(scored=scored) for row in rows)
+        if scored:
+            lines.append(
+                "target verdict: " + ("PASS" if self.targets_passed else "FAIL")
+            )
+        elif self.submission_mode == "burst":
+            lines.append(
+                "stress section: not scored; paced submission is the default "
+                "and is the number compared with the targets"
+            )
+        return lines
+
     def table(self) -> str:
         """Render the results table printed by both modes."""
         show_reviewer = any(result.reviewer for result in self.results)
         header = (
             f"{'task':<16} {'kind':<18} {'expect':<15} {'final':<10} "
             f"{'accepted commit':<15} {'sub->start':>10} {'to candidate':>12} "
-            f"{'to accepted':>11} {'blocks':>6} "
+            f"{'to accepted':>11} {'from start':>10} {'blocks':>6} "
             f"{'notice':>7} {'owner':>5} {'subscription':<38}"
             + (f" {'reviewer':<38}" if show_reviewer else "")
         )
-        lines = [f"SaberOps phase 1 benchmark ({self.mode} mode)", "", header,
-                 "-" * len(header)]
+        lines = [f"SaberOps phase 1 benchmark ({self.mode} mode)", ""]
+        lines.extend(self._submission_lines())
+        lines.extend(["", header, "-" * len(header)])
         for result in self.results:
             lines.append(
                 f"{result.task_id:<16} {result.kind:<18} {result.expect:<15} "
@@ -476,6 +719,7 @@ class BenchmarkReport:
                 f"{_seconds(result.submit_to_start):>10} "
                 f"{_seconds(result.time_to_candidate):>12} "
                 f"{_seconds(result.time_to_accepted):>11} "
+                f"{_seconds(result.time_to_accepted_from_start):>10} "
                 f"{result.block_verdicts:>6} "
                 f"{_seconds(result.notice_delay):>7} "
                 f"{result.owner_actions:>5} {result.subscription:<38}"
@@ -503,6 +747,9 @@ class BenchmarkReport:
                     f"acceptance_violation={_probe(result.acceptance_violation)} "
                     f"blocked_candidate={result.blocked_candidate_sha or '-'}"
                 )
+        target_lines = self._target_lines()
+        if target_lines:
+            lines.extend(["", *target_lines])
         if self.drills:
             lines.extend(["", "Failure and feature drills", ""])
             drill_header = (
@@ -1177,12 +1424,14 @@ class BatchOutcome:
     terminal: dict[str, str]
     noticed: dict[str, float]
     accepted: dict[str, tuple[str, float]]
+    #: Deepest submitted-but-not-terminal count this driver saw at a submission.
+    max_submit_depth: int = 0
 
 
 def wait_for_batch(
     *,
     tasks: Sequence[BenchmarkTask],
-    jobs: Mapping[str, str],
+    jobs: MutableMapping[str, str],
     tick: Callable[[], object],
     job_state: Callable[[str], str | None],
     accept_job: Callable[[str], str],
@@ -1192,6 +1441,8 @@ def wait_for_batch(
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
     poll_interval: float = 0.5,
+    submit: Callable[[BenchmarkTask], str] | None = None,
+    pacer: SubmitPacer | None = None,
 ) -> BatchOutcome:
     """Drive one batch to terminal states, accepting each candidate on arrival.
 
@@ -1199,15 +1450,43 @@ def wait_for_batch(
     eligible -- instead of the slowest task in the batch.  That keeps the
     reported "to accepted" latency honest (N5): the measured time is the
     owner-equivalent action, not the batch tail.
+
+    Passing *submit* and *pacer* lets the same loop submit the batch's tasks
+    itself.  With the default paced pacer it submits the next task only when
+    fewer than ``pacer.concurrency`` submitted tasks are still non-terminal, so
+    every measured task starts in a free worker slot instead of behind a queue;
+    with a burst pacer every task is submitted before the first tick, which is
+    the old behaviour kept for the stress section.  ``jobs`` is filled as tasks
+    are submitted, so the caller reads the final mapping afterwards.
     """
+    if (submit is None) != (pacer is None):
+        raise ValueError("paced submission needs both submit and pacer")
+    pending = list(tasks) if submit is not None else []
     terminal: dict[str, str] = {}
     noticed: dict[str, float] = {}
     accepted: dict[str, tuple[str, float]] = {}
+    max_submit_depth = 0
     deadline = monotonic() + max_wait
     while monotonic() < deadline:
+        if submit is not None and pacer is not None:
+            while pending:
+                # A submitted job with no visible state yet is still in flight:
+                # only a terminal state frees its worker slot.
+                in_flight = sum(
+                    1
+                    for job_id in jobs.values()
+                    if job_state(job_id) not in _TERMINAL_JOB_STATES
+                )
+                if not pacer.may_submit(in_flight):
+                    break
+                task = pending.pop(0)
+                jobs[task.task_id] = submit(task)
+                max_submit_depth = max(max_submit_depth, in_flight + 1)
         tick()
         for task in tasks:
-            job_id = jobs[task.task_id]
+            job_id = jobs.get(task.task_id)
+            if job_id is None:
+                continue
             state = job_state(job_id)
             if state is None:
                 continue
@@ -1224,14 +1503,22 @@ def wait_for_batch(
                         accept_job(job_id),
                         clock(),
                     )
-        if len(terminal) == len(jobs) and len(noticed) == len(jobs):
+        if (
+            not pending
+            and len(terminal) == len(jobs)
+            and len(noticed) == len(jobs)
+        ):
             return BatchOutcome(
-                terminal=terminal, noticed=noticed, accepted=accepted
+                terminal=terminal,
+                noticed=noticed,
+                accepted=accepted,
+                max_submit_depth=max_submit_depth,
             )
         sleep(poll_interval)
     raise RealModeRefused(
         f"real benchmark batch did not finish within {max_wait:g}s; "
-        f"terminal {len(terminal)}/{len(jobs)}"
+        f"terminal {len(terminal)}/{len(jobs)} "
+        f"(submitted {len(jobs)} of {len(tasks)})"
     )
 
 
@@ -1960,8 +2247,10 @@ def _drive_real_batch(
     batch: RealBatch,
     db: Any,
     readiness: Any,
-    jobs: Mapping[str, str],
+    jobs: MutableMapping[str, str],
     max_wait: float,
+    submit: Callable[[BenchmarkTask], str] | None = None,
+    pacer: SubmitPacer | None = None,
 ) -> BatchOutcome:
     """Drive one real batch with the engine's own scheduler tick."""
     from saberops.accept import AcceptEngine
@@ -1991,7 +2280,44 @@ def _drive_real_batch(
             db, job_id, state
         ),
         max_wait=max_wait,
+        submit=submit,
+        pacer=pacer,
     )
+
+
+def _worker_submitter(
+    *,
+    db: Any,
+    repos: Mapping[str, Path],
+    subscription: str,
+    submitted_at: MutableMapping[str, float],
+    all_jobs: list[str],
+) -> Callable[[BenchmarkTask], str]:
+    """Build the submit callback the paced driver calls when a slot is free.
+
+    The callback records ``submitted_at`` at the moment of submission, so a
+    paced row's latency starts when its own task entered the engine, not when
+    the batch started.
+    """
+    from saberops.jobs.models import JobRequirements
+    from saberops.jobs.service import submit_job
+
+    def submit_worker(task: BenchmarkTask) -> str:
+        requirements = JobRequirements(
+            model_family_exclude=real_family_requirements(subscription)
+        )
+        submitted_at[task.task_id] = time.time()
+        submitted = submit_job(
+            db,
+            repo=repos[task.task_id],
+            goal=task.goal,
+            acceptance=task.acceptance,
+            requirements=requirements,
+        )
+        all_jobs.append(submitted.job.job_id)
+        return submitted.job.job_id
+
+    return submit_worker
 
 
 def run_real_benchmark(
@@ -2001,6 +2327,8 @@ def run_real_benchmark(
     models: dict[str, str],
     max_wait: float = 3600.0,
     tasks: Sequence[BenchmarkTask] | Mapping[str, Sequence[BenchmarkTask]] | None = None,
+    submission_mode: SubmitMode = DEFAULT_SUBMIT_MODE,
+    submit_concurrency: int = DEFAULT_SUBMIT_CONCURRENCY,
 ) -> BenchmarkReport:
     """Drive the ten-task catalogue once per real CLI in an isolated store.
 
@@ -2011,11 +2339,17 @@ def run_real_benchmark(
     :func:`isolated_environment` to ``os.environ`` first.  This function starts
     vendor CLIs, so it is only reached after :func:`validate_real_mode` and the
     explicit acknowledgement flag.
+
+    ``submission_mode`` defaults to ``paced``: a batch submits its next task
+    only when fewer than ``submit_concurrency`` submitted tasks are still
+    non-terminal, so a measured task starts in a free worker slot instead of
+    behind a queue.  ``burst`` submits the whole batch at once and exists only
+    for the labelled stress section.
     """
+    pacer = SubmitPacer(mode=submission_mode, concurrency=submit_concurrency)
     from saberops.cli import main as cli_main
     from saberops.db import Database
-    from saberops.jobs.models import JobRequirements
-    from saberops.jobs.service import get_job, submit_job
+    from saberops.jobs.service import get_job
     from saberops.model_access.readiness_service import ReadinessService
     from saberops.models import ReviewPolicyMode
     from saberops.paths import owner_state_dir
@@ -2095,6 +2429,7 @@ def run_real_benchmark(
     readiness = ReadinessService.for_owner_state(owner_state_dir())
     result_by_key: dict[tuple[str, str], TaskResult] = {}
     all_jobs: list[str] = []
+    max_submit_depth = 0
     seeded_reviews: list[tuple[RealBatch, BenchmarkTask]] = []
     with real_mode_presence(db):
         for batch in batches:
@@ -2111,20 +2446,13 @@ def run_real_benchmark(
             )
             submitted_at: dict[str, float] = {}
             jobs: dict[str, str] = {}
-            for task in worker_tasks:
-                requirements = JobRequirements(
-                    model_family_exclude=real_family_requirements(batch.subscription)
-                )
-                submitted_at[task.task_id] = time.time()
-                submitted = submit_job(
-                    db,
-                    repo=repos[task.task_id],
-                    goal=task.goal,
-                    acceptance=task.acceptance,
-                    requirements=requirements,
-                )
-                jobs[task.task_id] = submitted.job.job_id
-                all_jobs.append(submitted.job.job_id)
+            submit_worker = _worker_submitter(
+                db=db,
+                repos=repos,
+                subscription=batch.subscription,
+                submitted_at=submitted_at,
+                all_jobs=all_jobs,
+            )
 
             outcome = (
                 _drive_real_batch(
@@ -2133,10 +2461,13 @@ def run_real_benchmark(
                     readiness=readiness,
                     jobs=jobs,
                     max_wait=max_wait,
+                    submit=submit_worker,
+                    pacer=pacer,
                 )
                 if worker_tasks
                 else BatchOutcome(terminal={}, noticed={}, accepted={})
             )
+            max_submit_depth = max(max_submit_depth, outcome.max_submit_depth)
             for task in worker_tasks:
                 job_id = jobs[task.task_id]
                 job = get_job(db, job_id)
@@ -2238,4 +2569,7 @@ def run_real_benchmark(
         started_at=started,
         finished_at=time.time(),
         usage=aggregate_subscription_usage(db, all_jobs),
+        submission_mode=pacer.mode,
+        submit_concurrency=pacer.concurrency,
+        max_submit_depth=max_submit_depth,
     )

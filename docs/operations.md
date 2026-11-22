@@ -527,9 +527,23 @@ exits, and the command reports the old and new `orch --version`.
 
 Ten fixed small tasks measure the full job, scheduler, worker, gate, review and
 acceptance path and print one results table: final state, accepted commit,
-submit-to-start, time to the accepted commit, completion-notice delay, owner
-actions and the subscription used.
+submit-to-start, time to the accepted commit, the same acceptance time measured
+from the worker start for comparison, completion-notice delay, owner actions
+and the subscription used.
 
+- **Submission pacing.** Both modes submit paced by default: the next task is
+  submitted only when a worker slot is free, so at most `--concurrency` tasks
+  (default 2, the count the confirming runs dispatched) are submitted but not
+  terminal. Submit-to-start and time-to-accepted then describe an unqueued job,
+  which is how daily use submits work. `--submit burst` keeps the original
+  all-at-once submission; its table is a labelled stress section and is **not**
+  scored against the final targets.
+- **Final targets.** A paced real run scores the owner's targets from submit:
+  time-to-accepted median ≤ 90 s, time-to-accepted p95 ≤ 240 s, and
+  submit-to-start p95 ≤ 10 s, with nearest-rank percentiles so every printed
+  figure is one measured task. A missed target fails the report; fake mode
+  prints the same figures as information only, and a burst run never scores
+  them.
 - **Fake mode** (default) runs the lifecycle rig's fake worker and reviewer
   inside the test suite: `scripts/benchmark.py --mode fake`. It also covers five
   failure drills (killed worker, killed scheduler, exhausted quota, unroutable
@@ -540,14 +554,14 @@ actions and the subscription used.
   hand with the owner present (lane B3). It runs the ten-task catalogue once per
   CLI — three sequential batches of ten, each on freshly seeded toy
   repositories — and selects a reviewer from a different vendor for every batch
-  (`--dry-run` prints the worker/reviewer routes). It refuses without
-  `--yes-real-cli` and an empty isolated `--store`, never reuses the owner's
-  real SaberOps state or config, drops pay-per-token credentials from the child
-  environment (and refuses to start when an unrecognised `*_API_KEY` is
-  present), and refuses to submit until the isolated store's preflight is
-  green. It holds an attended-terminal session for the whole run and disables
-  the detached auto-started scheduler, so exactly one scheduler driver ticks;
-  a sticky pause is cleared only when it is the engine's own
+  (`--dry-run` prints the worker/reviewer routes and the submission mode). It
+  refuses without `--yes-real-cli` and an empty isolated `--store`, never reuses
+  the owner's real SaberOps state or config, drops pay-per-token credentials
+  from the child environment (and refuses to start when an unrecognised
+  `*_API_KEY` is present), and refuses to submit until the isolated store's
+  preflight is green. It holds an attended-terminal session for the whole run
+  and disables the detached auto-started scheduler, so exactly one scheduler
+  driver ticks; a sticky pause is cleared only when it is the engine's own
   `no_planning_session` pause, never an owner pause. `XDG_DATA_HOME` is left
   alone because OpenCode keeps its sign-in there. The toy seed carries
   `greet(name)`, a CLI entry point and a `.gitignore` (so the gate's import
@@ -556,6 +570,14 @@ actions and the subscription used.
   `opencode-go/deepseek-v4.1-flash`, Claude `claude-haiku-4-5-20251001` and
   Codex `gpt-6-luna`. Use `--dry-run` to print the plan without starting
   anything.
+
+```bash
+scripts/benchmark.py --mode fake                       # paced, scored targets
+scripts/benchmark.py --mode fake --submit burst        # stress figure, unscored
+scripts/benchmark.py --mode real --yes-real-cli --store /var/tmp/bench-store
+scripts/benchmark.py --mode real --yes-real-cli --store /var/tmp/bench-store \
+  --concurrency 2 --per-cli opencode=10,codex=2,claude=2
+```
 
 The critical-only drill raises the catalogue's `routine-question` task (its goal
 asks the worker for one routine choice), so F10 self-answering is measured from

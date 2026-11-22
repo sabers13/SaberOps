@@ -13,7 +13,7 @@ import sqlite3
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -25,11 +25,15 @@ from lifecycle_rig import RigEnvironment, create_toy_repo
 from saberops._gate_tools import gate_tools
 from saberops.accept import AcceptEngine
 from saberops.benchmark import (
+    DEFAULT_SUBMIT_CONCURRENCY,
+    DEFAULT_SUBMIT_MODE,
     FAKE_REVIEW_BLOCK_SENTINEL,
     TASKS,
     BenchmarkReport,
     BenchmarkTask,
     DrillResult,
+    SubmitMode,
+    SubmitPacer,
     TaskResult,
     aggregate_subscription_usage,
     count_block_verdicts,
@@ -170,6 +174,11 @@ def _job_terminal(job_id: str, db: Any) -> bool:
     }
 
 
+def _in_flight(jobs: Mapping[str, str], db: Any) -> int:
+    """Submitted jobs that still occupy a worker slot."""
+    return sum(1 for job_id in jobs.values() if not _job_terminal(job_id, db))
+
+
 def _subscription_for(db: Any, job_id: str) -> str:
     job = get_job(db, job_id)
     if job is None or job.current_run_id is None:
@@ -209,8 +218,15 @@ def run_fake_benchmark(
     monkeypatch: pytest.MonkeyPatch,
     *,
     timeout: float = BENCHMARK_TIMEOUT_SECONDS,
+    submission_mode: SubmitMode = DEFAULT_SUBMIT_MODE,
+    submit_concurrency: int = DEFAULT_SUBMIT_CONCURRENCY,
 ) -> BenchmarkReport:
-    """Submit all ten tasks, drive the scheduler, accept eligible runs, measure."""
+    """Submit the ten tasks as worker slots free, drive, accept, measure.
+
+    Submission uses the same :class:`SubmitPacer` real mode uses: paced
+    (default) submits the next task only when a worker slot is free, burst
+    submits the whole catalogue at once for the stress figure.
+    """
     started = time.time()
     db = rig.db()
     readiness = ReadinessService.for_owner_state(owner_state_dir())
@@ -219,30 +235,42 @@ def run_fake_benchmark(
     repos = create_task_repos(rig)
     rig.set_reviewer_verdict("PASS")
 
+    pacer = SubmitPacer(mode=submission_mode, concurrency=submit_concurrency)
+    pending = list(TASKS)
     submitted_at: dict[str, float] = {}
     jobs: dict[str, str] = {}
-    for task in TASKS:
-        goal = task.goal
-        if task.expect == "review_blocked":
-            goal = f"{goal}\n\n{FAKE_REVIEW_BLOCK_SENTINEL}"
-        submitted_at[task.task_id] = time.time()
-        submitted = submit_job(
-            db,
-            repo=repos[task.task_id],
-            goal=goal,
-            acceptance=task.acceptance,
-            requirements=_family_requirements(task),
-        )
-        jobs[task.task_id] = submitted.job.job_id
+    max_submit_depth = 0
 
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
+    while True:
+        if time.monotonic() >= deadline:  # pragma: no cover - engine stall only
+            pytest.fail(
+                f"benchmark jobs did not reach a final state within {timeout:g}s"
+            )
+        while pending:
+            in_flight = _in_flight(jobs, db)
+            if not pacer.may_submit(in_flight):
+                break
+            task = pending.pop(0)
+            goal = task.goal
+            if task.expect == "review_blocked":
+                goal = f"{goal}\n\n{FAKE_REVIEW_BLOCK_SENTINEL}"
+            submitted_at[task.task_id] = time.time()
+            submitted = submit_job(
+                db,
+                repo=repos[task.task_id],
+                goal=goal,
+                acceptance=task.acceptance,
+                requirements=_family_requirements(task),
+            )
+            jobs[task.task_id] = submitted.job.job_id
+            max_submit_depth = max(max_submit_depth, in_flight + 1)
         _tick(db, readiness)
-        if all(_job_terminal(job_id, db) for job_id in jobs.values()):
+        if not pending and all(
+            _job_terminal(job_id, db) for job_id in jobs.values()
+        ):
             break
         time.sleep(0.05)
-    else:  # pragma: no cover - only on a real engine stall
-        pytest.fail(f"benchmark jobs did not reach a final state within {timeout:g}s")
 
     # One more tick delivers the terminal notices for every finished job.
     _tick(db, readiness)
@@ -306,6 +334,9 @@ def run_fake_benchmark(
         started_at=started,
         finished_at=time.time(),
         usage=aggregate_subscription_usage(db, jobs.values()),
+        submission_mode=pacer.mode,
+        submit_concurrency=pacer.concurrency,
+        max_submit_depth=max_submit_depth,
     )
 
 

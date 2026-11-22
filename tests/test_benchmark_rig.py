@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 from benchmark_rig import (
+    BENCHMARK_TIMEOUT_SECONDS,
     C2_RECOVERY_LIMIT_SECONDS,
     DRILL_VISIBLE_LIMIT_SECONDS,
     run_failure_drills,
@@ -45,11 +46,16 @@ from saberops.benchmark import (
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_CODEX_MODEL,
     DEFAULT_OPENCODE_MODEL,
+    DEFAULT_SUBMIT_CONCURRENCY,
     DRILL_TASKS,
     QUESTION_TASK,
+    TARGET_SUBMIT_TO_START_P95_SECONDS,
     TASKS,
     TASKS_BY_ID,
+    BenchmarkReport,
+    BenchmarkTask,
     RealModeRefused,
+    SubmitPacer,
     TaskResult,
     apply_isolated_environment,
     benchmark_gate_command,
@@ -58,7 +64,9 @@ from saberops.benchmark import (
     format_real_mode_preflight,
     gate_interpreter_pytest_error,
     isolated_environment,
+    median_value,
     metered_credential_keys,
+    nearest_rank_percentile,
     parse_per_cli_selector,
     prepare_real_store,
     probe_must_fail_acceptance,
@@ -157,7 +165,49 @@ def test_fake_benchmark_ten_tasks_reach_final_state(
     for result in report.results:
         assert result.started_at is not None
         assert result.notice_at is not None
-    assert report.elapsed < 120
+    # The drive loop has its own BENCHMARK_TIMEOUT_SECONDS stall bound; paced
+    # submission now places each task's submission work on the critical path, so
+    # this end-to-end bound adds room for setup, acceptance and notice delivery
+    # under the gate's parallel load while still catching a runaway run.
+    assert report.elapsed < BENCHMARK_TIMEOUT_SECONDS + 60
+
+    # Paced submission is the default: the next task waits for a free worker
+    # slot, so no task grows a queue wait.  On the pre-pacing code the same
+    # catalogue was submitted at once and the later rows measured 14-28s of
+    # queue wait here, so these bounds fail before the change and pass after.
+    assert report.submission_mode == "paced"
+    assert report.submit_concurrency == DEFAULT_SUBMIT_CONCURRENCY
+    assert "submission: paced" in report.table()
+    assert 1 <= report.max_submit_depth <= DEFAULT_SUBMIT_CONCURRENCY
+    submit_to_start = nearest_rank_percentile(
+        [
+            result.submit_to_start
+            for result in accepted
+            if result.submit_to_start is not None
+        ],
+        95,
+    )
+    assert submit_to_start is not None
+    # The p95 queue wait must stay within one task's own service time (never
+    # above the absolute target while tasks are slower than it).  This is the
+    # queue-bound proof and it scales with the host, so a loaded parallel gate
+    # cannot fail it for being slow.
+    service_seconds = median_value(
+        result.terminal_at - result.started_at
+        for result in accepted
+        if result.terminal_at is not None and result.started_at is not None
+    )
+    assert service_seconds is not None
+    queue_wait_bound = max(
+        TARGET_SUBMIT_TO_START_P95_SECONDS, service_seconds
+    )
+    assert submit_to_start <= queue_wait_bound, report.table()
+    # Target rows are informational in fake mode but still show the measurement.
+    assert {row.name for row in report.target_rows()} == {
+        "time to accepted, median",
+        "time to accepted, p95",
+        "submit to start, p95",
+    }
 
     # OpenCode Go reports the real 2.3.2 counter set: exact input/output/cache
     # counters per call, no invented total, and no identity guess.
@@ -711,6 +761,54 @@ def test_benchmark_script_real_mode_dry_run_creates_nothing(tmp_path: Path) -> N
     assert not store.exists()
 
 
+def test_benchmark_script_dry_run_states_the_submission_mode(tmp_path: Path) -> None:
+    """The plan names the default paced submission and the burst stress option."""
+    script = Path(__file__).resolve().parents[1] / "scripts" / "benchmark.py"
+    base = [
+        sys.executable,
+        str(script),
+        "--mode",
+        "real",
+        "--yes-real-cli",
+        "--dry-run",
+    ]
+    env = {
+        **os.environ,
+        "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
+    }
+    paced = subprocess.run(
+        [*base, "--store", str(tmp_path / "paced"), "--concurrency", "3"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+    assert paced.returncode == 0, paced
+    assert "submission: paced" in paced.stdout
+    assert "concurrency 3" in paced.stdout
+
+    burst = subprocess.run(
+        [*base, "--store", str(tmp_path / "burst"), "--submit", "burst"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+    assert burst.returncode == 0, burst
+    assert "submission: burst" in burst.stdout
+    assert "stress only, not scored" in burst.stdout
+
+    invalid = subprocess.run(
+        [*base, "--store", str(tmp_path / "invalid"), "--concurrency", "0"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+    assert invalid.returncode == 2
+    assert "at least 1" in invalid.stderr
+
+
 # --------------------------------------------------------------------------
 # Shipped real-mode entry point on a fresh store (N1) and honest latency (N5)
 # --------------------------------------------------------------------------
@@ -1244,6 +1342,189 @@ def test_wait_for_batch_accepts_the_first_eligible_candidate() -> None:
     assert "accept-job-b" not in events
     assert outcome.accepted["add-function"][0] == "sha-a"
     assert set(outcome.terminal) == {"add-function", "review-block-a"}
+
+
+def _drive_with_pacer(
+    pacer: SubmitPacer, task_count: int = 5
+) -> tuple[list[str], list[int], list[int], set[str]]:
+    """Drive a stub two-slot engine and record the queue depth at each submit."""
+    tasks = TASKS[:task_count]
+    jobs: dict[str, str] = {}
+    states: dict[str, str] = {}
+    submitted: list[str] = []
+    depths: list[int] = []
+    submissions_before_tick: list[int] = []
+    clock = {"mono": 0.0}
+
+    def in_flight() -> int:
+        return sum(1 for state in states.values() if state != "SUCCEEDED")
+
+    def submit(task: BenchmarkTask) -> str:
+        task_id = task.task_id
+        depths.append(in_flight())
+        submitted.append(task_id)
+        job_id = f"job-{task_id}"
+        states[job_id] = "QUEUED"
+        return job_id
+
+    def tick() -> None:
+        submissions_before_tick.append(len(submitted))
+        # The stub engine finishes every running job, then starts queued work
+        # on its two worker slots.
+        for job_id, state in list(states.items()):
+            if state == "RUNNING":
+                states[job_id] = "SUCCEEDED"
+        running = sum(1 for state in states.values() if state == "RUNNING")
+        for job_id, state in list(states.items()):
+            if state == "QUEUED" and running < 2:
+                states[job_id] = "RUNNING"
+                running += 1
+
+    def monotonic() -> float:
+        clock["mono"] += 0.1
+        return clock["mono"]
+
+    outcome = wait_for_batch(
+        tasks=tasks,
+        jobs=jobs,
+        tick=tick,
+        job_state=lambda job_id: states.get(job_id),
+        accept_job=lambda job_id: f"sha-{job_id}",
+        notice_delivered=lambda _job_id, _state: True,
+        max_wait=100.0,
+        monotonic=monotonic,
+        sleep=lambda _seconds: None,
+        submit=submit,
+        pacer=pacer,
+    )
+    assert set(outcome.terminal) == set(submitted)
+    assert outcome.max_submit_depth == (max(depths) + 1 if depths else 0)
+    return submitted, depths, submissions_before_tick, set(jobs)
+
+
+def test_paced_submission_fills_free_slots_instead_of_a_queue() -> None:
+    """The shared driver submits into a free slot, never behind a queue.
+
+    Burst keeps the old all-at-once behaviour: every task is submitted before
+    the first tick, so the later rows accumulate queue wait.  Paced (the
+    default) holds the depth below the configured worker count, which is what
+    keeps submit-to-start bounded in the fake/rig benchmark.
+    """
+    concurrency = 2
+    assert SubmitPacer("paced", concurrency).may_submit(concurrency - 1)
+    assert not SubmitPacer("paced", concurrency).may_submit(concurrency)
+    assert SubmitPacer("burst", concurrency).may_submit(99)
+    with pytest.raises(ValueError):
+        SubmitPacer(concurrency=0)
+    with pytest.raises(ValueError):
+        SubmitPacer(concurrency=True)
+
+    order = [task.task_id for task in TASKS[:5]]
+    paced_tasks, paced_depths, paced_before_tick, paced_jobs = _drive_with_pacer(
+        SubmitPacer("paced", concurrency)
+    )
+    assert paced_tasks == order
+    assert paced_jobs == set(order)
+    assert max(paced_depths) < concurrency
+    # The first tick sees only the tasks that fit in free slots.
+    assert paced_before_tick[0] == concurrency
+
+    burst_tasks, burst_depths, burst_before_tick, _jobs = _drive_with_pacer(
+        SubmitPacer("burst", concurrency)
+    )
+    assert burst_tasks == order
+    assert burst_depths == list(range(5))
+    assert burst_before_tick[0] == len(order)
+
+
+def _accepted_task(*, start_after: float, accepted_after: float) -> TaskResult:
+    """One accepted row with known submit->start and submit->accept latencies."""
+    return TaskResult(
+        task_id="add-function",
+        kind="add a function",
+        expect="accepted",
+        final_state="SUCCEEDED",
+        accepted_commit="abcdef123456",
+        submitted_at=1000.0,
+        started_at=1000.0 + start_after,
+        terminal_at=1000.0 + accepted_after - 1.0,
+        accepted_at=1000.0 + accepted_after,
+        notice_at=1000.0 + accepted_after + 0.1,
+        owner_actions=1,
+        subscription="codex/gpt-6-luna",
+    )
+
+
+def test_report_scores_final_targets_only_for_a_paced_real_run() -> None:
+    """Targets score from submit under pacing; burst is a labelled stress figure."""
+    passing = (
+        _accepted_task(start_after=1.0, accepted_after=10.0),
+        _accepted_task(start_after=2.0, accepted_after=20.0),
+        _accepted_task(start_after=3.0, accepted_after=30.0),
+        _accepted_task(start_after=4.0, accepted_after=100.0),
+    )
+    report = BenchmarkReport(
+        mode="real",
+        results=passing,
+        started_at=1000.0,
+        finished_at=1200.0,
+        submission_mode="paced",
+        submit_concurrency=2,
+    )
+    assert report.targets_scored is True
+    assert report.targets_passed is True
+    assert report.passed is True
+    assert median_value([10.0, 20.0, 30.0, 100.0]) == 25.0
+    assert nearest_rank_percentile([10.0, 20.0, 30.0, 100.0], 95) == 100.0
+    table = report.table()
+    assert "submission: paced" in table
+    assert "target verdict: PASS" in table
+    # From-start is printed next to the from-submit figure (100s vs 96s).
+    for result in report.results:
+        assert result.time_to_accepted_from_start is not None
+    assert "96.0s" in table
+
+    queued = (
+        passing[0],
+        passing[1],
+        passing[2],
+        _accepted_task(start_after=50.0, accepted_after=100.0),
+    )
+    queued_report = BenchmarkReport(
+        mode="real",
+        results=queued,
+        started_at=1000.0,
+        finished_at=1200.0,
+        submission_mode="paced",
+        submit_concurrency=2,
+    )
+    assert queued_report.targets_passed is False
+    assert queued_report.passed is False
+    assert "target verdict: FAIL" in queued_report.table()
+
+    stress = BenchmarkReport(
+        mode="real",
+        results=queued,
+        started_at=1000.0,
+        finished_at=1200.0,
+        submission_mode="burst",
+        submit_concurrency=2,
+    )
+    stress_table = stress.table()
+    assert stress.targets_scored is False
+    assert stress.passed is True, "the stress section never fails the run"
+    assert "submission: burst" in stress_table
+    assert "stress section: not scored" in stress_table
+
+    fake = BenchmarkReport(
+        mode="fake",
+        results=passing,
+        started_at=1000.0,
+        finished_at=1200.0,
+        submission_mode="paced",
+    )
+    assert fake.targets_scored is False
+    assert "not scored" in fake.table()
 
 
 def test_benchmark_table_reports_candidate_and_acceptance_latency() -> None:

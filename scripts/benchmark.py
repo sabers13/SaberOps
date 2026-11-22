@@ -25,10 +25,13 @@ from saberops.benchmark import (  # noqa: E402
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_CODEX_MODEL,
     DEFAULT_OPENCODE_MODEL,
+    DEFAULT_SUBMIT_CONCURRENCY,
+    DEFAULT_SUBMIT_MODE,
     REAL_MODE_FLAG,
     REAL_SUBSCRIPTION_ORDER,
     BenchmarkTask,
     RealModeRefused,
+    SubmitPacer,
     fake_mode_environment,
     parse_per_cli_selector,
     real_batches,
@@ -37,6 +40,24 @@ from saberops.benchmark import (  # noqa: E402
     select_benchmark_tasks_by_cli,
     validate_real_mode,
 )
+
+
+def _positive_int(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"expected an integer, got {text!r}") from exc
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return value
+
+
+def _submission_pacer(args: argparse.Namespace) -> SubmitPacer:
+    """Validate the submission flags once, before any work starts."""
+    try:
+        return SubmitPacer(mode=args.submit, concurrency=args.concurrency)
+    except ValueError as exc:
+        raise RealModeRefused(str(exc)) from exc
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -102,6 +123,27 @@ def _parser() -> argparse.ArgumentParser:
         help="acknowledge that real mode starts real vendor CLIs and spends quota",
     )
     parser.add_argument(
+        "--submit",
+        choices=("paced", "burst"),
+        default=DEFAULT_SUBMIT_MODE,
+        help=(
+            "paced (default) submits the next task only when a worker slot is "
+            "free, so the targets measure an unqueued job; burst submits every "
+            "task at once and prints a labelled stress section that is not "
+            "scored"
+        ),
+    )
+    parser.add_argument(
+        "--concurrency",
+        type=_positive_int,
+        default=DEFAULT_SUBMIT_CONCURRENCY,
+        metavar="N",
+        help=(
+            "paced submission only: worker slots to fill, i.e. the host's "
+            f"concurrently dispatching workers (default {DEFAULT_SUBMIT_CONCURRENCY})"
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="print the real-mode plan without starting anything",
@@ -109,7 +151,7 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _run_fake() -> int:
+def _run_fake(pacer: SubmitPacer) -> int:
     from _pytest.monkeypatch import MonkeyPatch
 
     tests_dir = REPO_ROOT / "tests"
@@ -122,7 +164,12 @@ def _run_fake() -> int:
     monkeypatch = MonkeyPatch()
     try:
         rig = build_lifecycle_rig(scratch, monkeypatch)
-        report = benchmark_rig.run_fake_benchmark(rig, monkeypatch)
+        report = benchmark_rig.run_fake_benchmark(
+            rig,
+            monkeypatch,
+            submission_mode=pacer.mode,
+            submit_concurrency=pacer.concurrency,
+        )
     finally:
         monkeypatch.undo()
         shutil.rmtree(scratch, ignore_errors=True)
@@ -134,6 +181,7 @@ def _print_plan(
     store: Path,
     repo_root: Path,
     models: dict[str, str],
+    pacer: SubmitPacer,
     tasks: (
         tuple[BenchmarkTask, ...]
         | dict[str, tuple[BenchmarkTask, ...]]
@@ -143,6 +191,15 @@ def _print_plan(
     print("SaberOps phase 1 benchmark: real mode plan (nothing started)")
     print(f"  store:     {store}")
     print(f"  toy repos: {repo_root}")
+    print(
+        f"  submission: {pacer.mode}"
+        + (
+            f" (next task when a worker slot is free; concurrency "
+            f"{pacer.concurrency})"
+            if pacer.paced
+            else " (every task at once; stress only, not scored)"
+        )
+    )
     print("  batches (different-vendor reviewer):")
     for batch in real_batches(tasks):
         worker = f"{batch.subscription}/{real_model_for(batch.subscription, models)}"
@@ -161,7 +218,7 @@ def _print_plan(
     print("the remedy.")
 
 
-def _run_real(args: argparse.Namespace) -> int:
+def _run_real(args: argparse.Namespace, pacer: SubmitPacer) -> int:
     if args.store is None:
         raise RealModeRefused("real mode needs --store pointing at an isolated store")
     store = validate_real_mode(
@@ -203,7 +260,7 @@ def _run_real(args: argparse.Namespace) -> int:
             )
         selected = selected_sequence
     if args.dry_run:
-        _print_plan(store, repo_root, models, selected)
+        _print_plan(store, repo_root, models, pacer, selected)
         return 0
 
     from saberops.benchmark import apply_isolated_environment, run_real_benchmark
@@ -212,7 +269,12 @@ def _run_real(args: argparse.Namespace) -> int:
     # metered key behind in this process (N6).
     apply_isolated_environment(store)
     report = run_real_benchmark(
-        store=store, repo_root=repo_root, models=models, tasks=selected
+        store=store,
+        repo_root=repo_root,
+        models=models,
+        tasks=selected,
+        submission_mode=pacer.mode,
+        submit_concurrency=pacer.concurrency,
     )
     print(report.table())
     return 0 if report.passed else 1
@@ -221,9 +283,10 @@ def _run_real(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        pacer = _submission_pacer(args)
         if args.mode == "fake":
-            return _run_fake()
-        return _run_real(args)
+            return _run_fake(pacer)
+        return _run_real(args, pacer)
     except RealModeRefused as exc:
         print(f"benchmark: refused: {exc}", file=sys.stderr)
         return 2
