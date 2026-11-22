@@ -65,6 +65,7 @@ from saberops.dispatch import (
     build_skip_payload,
     evaluate_eligibility,
     format_no_eligible_summary,
+    is_red_line_reason,
     routing_context_for_role,
 )
 from saberops.dispatch import control_plane_decision as control_plane_decision
@@ -4606,9 +4607,14 @@ class Orchestrator:
                             ),
                             db=self.db,
                         )
-                    if (
-                        _probe_attempt == 0
-                        and decision_pre.exclusion_reason == "QUOTA_EVIDENCE_REQUIRED"
+                    if _probe_attempt == 0 and (
+                        decision_pre.exclusion_reason == "QUOTA_EVIDENCE_REQUIRED"
+                        or (
+                            is_red_line_reason(decision_pre.exclusion_reason)
+                            and bool(
+                                (decision_pre.capacity or {}).get("needs_probe")
+                            )
+                        )
                     ):
                         from saberops.capacity.probes import try_safe_quota_probe
                         from saberops.control_plane.plans import effective_quota_pools

@@ -583,8 +583,9 @@ def test_mode_set_away_warns_until_a_policy_exists(
 
     assert main(["mode", "set", "away", "--until", until]) == 0
     out = capsys.readouterr().out
-    assert "Away mode parks every job" in out
+    assert "Away dispatch of every job is refused" in out
     assert "orch away policy set" in out
+    assert "nothing starts" not in out
 
     assert main(["mode", "set", "away", "--until", until, "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -602,7 +603,7 @@ def test_mode_set_away_warns_until_a_policy_exists(
     capsys.readouterr()
     # No away mode, no away warning: the policy is only relevant while away.
     assert main(["mode", "set", "ask-me"]) == 0
-    assert "Away mode parks every job" not in capsys.readouterr().out
+    assert "Away dispatch of every job is refused" not in capsys.readouterr().out
 
 
 def test_saving_the_away_policy_resumes_the_parked_queue(

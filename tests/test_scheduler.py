@@ -664,11 +664,16 @@ def test_schedule_simulates_reservations_across_batch() -> None:
         policy=policy,
         quota_states=[q],
     )
-    assert len(decisions) == 3
-    assert isinstance(decisions[0], DispatchDecision)
+    # N7: the simulated charges that crossed the red line request a fresh safe
+    # probe before the third job is refused, so the denial parks as PROBE_PENDING
+    # instead of NO_CAPACITY.
+    assert len(decisions) == 4
+    assert isinstance(decisions[0], ProbeDecision)
+    assert decisions[0].harness == "codex"
     assert isinstance(decisions[1], DispatchDecision)
-    assert isinstance(decisions[2], WaitDecision)
-    assert decisions[2].reason == WaitingReason.NO_CAPACITY.value
+    assert isinstance(decisions[2], DispatchDecision)
+    assert isinstance(decisions[3], WaitDecision)
+    assert decisions[3].reason == WaitingReason.PROBE_PENDING.value
 
 
 def test_schedule_respects_running_counts() -> None:

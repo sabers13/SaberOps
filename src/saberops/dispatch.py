@@ -47,6 +47,75 @@ SKIP_TRAINING_POLICY = "training_policy_excludes_model"
 SKIP_QUOTA_BLOCKED = "quota_blocked"
 SKIP_PROMPT_TOO_LARGE = "prompt_exceeds_transport_capability"
 
+#: Typed admission reasons that mean the pool crossed its red line.  A red-line
+#: refusal is re-evaluated against a fresh safe probe when one is available
+#: (N7); these are the only reasons where synthetic post-observation charges
+#: can be the sole tipping term.
+RED_LINE_REASONS: frozenset[str] = frozenset(
+    {
+        "WEEKLY_QUOTA_RED_LINE",
+        "RED_LINE_5H",
+        "RED_LINE_DAILY",
+        "RED_LINE_WEEKLY",
+        "RED_LINE_MONTHLY",
+        "RED_LINE",
+    }
+)
+
+
+def is_red_line_reason(reason: str | None) -> bool:
+    """True when ``reason`` is a typed pool red-line refusal."""
+    return reason in RED_LINE_REASONS
+
+
+def _capacity_terms(admission: Any) -> dict[str, object] | None:
+    """Expose the charge-ledger terms behind an admission decision (N7)."""
+    pool_id = getattr(admission, "pool_id", None)
+    if pool_id is None and getattr(admission, "remaining_pct", None) is None:
+        return None
+    return {
+        "pool_id": pool_id,
+        "window_id": getattr(admission, "binding_window", None),
+        "observed_remaining_pct": getattr(
+            admission, "observed_remaining_pct", None
+        ),
+        "prior_charges_pct": getattr(admission, "prior_charges_pct", 0.0),
+        "remaining_after_charges_pct": getattr(
+            admission, "remaining_pct", None
+        ),
+        "projected_cost_pct": getattr(admission, "cost_estimate", None),
+        "reserve_pct": getattr(admission, "reserve_pct", None),
+        "red_line_pct": getattr(admission, "red_line_pct", None),
+        "needs_probe": bool(getattr(admission, "needs_probe", False)),
+        "probe_harness": getattr(admission, "probe_harness", None),
+    }
+
+
+def refresh_quota_evidence(
+    db: Any,
+    *,
+    provider: str,
+    probes: Mapping[str, Any] | None = None,
+    policy: ControlPlanePolicy | None = None,
+    now: datetime | None = None,
+) -> str:
+    """Run the safe zero-inference probe seam for ``provider`` (N7/D14).
+
+    Returns the probe outcome (``ran`` when fresh evidence was recorded).  The
+    caller re-reads quota states and re-decides; a probe that cannot run leaves
+    the original refusal standing.
+    """
+    from saberops.capacity.probes import try_safe_quota_probe
+    from saberops.control_plane.plans import effective_quota_pools
+
+    return try_safe_quota_probe(
+        db,
+        provider=provider,
+        now=now,
+        probes=dict(probes) if probes is not None else None,
+        pool_policies=effective_quota_pools(policy) if policy is not None else None,
+    )
+
 #: Skip reasons where readiness evidence participated in the decision.
 #: Callers use this to decide whether readiness state/reason/connection
 #: fields belong on the durable skip record.
@@ -446,8 +515,23 @@ def control_plane_decision(
             reserve_override=reserve_override,
             capability_profile_digest=dec.capability_profile_digest,
             control_plane_digest=dec.control_plane_digest,
+            capacity=_capacity_terms(admit_dec),
         )
-    return dec
+    return ControlPlaneDecision(
+        candidate=candidate,
+        eligible=True,
+        warnings=dec.warnings,
+        warning_reasons=dec.warning_reasons,
+        exclusion_reason=dec.exclusion_reason,
+        missing_capabilities=dec.missing_capabilities,
+        provider_policy=dec.provider_policy,
+        quota=dec.quota,
+        training_permitted=dec.training_permitted,
+        reserve_override=reserve_override,
+        capability_profile_digest=dec.capability_profile_digest,
+        control_plane_digest=dec.control_plane_digest,
+        capacity=_capacity_terms(admit_dec),
+    )
 
 
 def build_skip_payload(

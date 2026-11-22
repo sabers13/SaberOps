@@ -11,8 +11,10 @@ States:
                    < stall_confirmation.  Continue; attention only.
     AMBIGUOUS_BUSY — no recent output but descendant CPU/I/O activity found
                    (or evidence unreadable).  Continue; attention only.
-                   Never kill.  A productive AMBIGUOUS_BUSY period resets the
-                   stall-confirmation anchor.
+                   A productive AMBIGUOUS_BUSY period resets the
+                   stall-confirmation anchor.  When the tree stays busy but
+                   produces no output for the tree-activity cutoff, the attempt
+                   is stopped early so the repair/retry path can run (N9).
     STALLED      — whole-tree inactivity (no output, no CPU/I/O/topology
                    activity) sustained from the LAST meaningful activity for
                    the full stall_confirmation window, with evidence complete
@@ -49,6 +51,13 @@ class MonitorState(StrEnum):
 SOFT_INACTIVITY_SECONDS: float = 300.0
 STALL_CONFIRMATION_SECONDS: float = 1800.0
 MONITOR_SAMPLE_INTERVAL_SECONDS: float = 5.0
+#: A worker whose tree stays busy (CPU/I/O/topology) but produces no output is
+#: "busy" only in a shallow sense.  Cutting after 600 s — twice the soft
+#: inactivity threshold and half the 1200 s hard worker timeout — tolerates a
+#: long build or test run with no stdout while still returning the attempt to
+#: the repair/retry path with time to spare.  Any output at all resets the
+#: clock, so a working worker is never cut (N9).
+TREE_ACTIVITY_WITHOUT_OUTPUT_CUTOFF_SECONDS: float = 600.0
 
 
 # ── canonical whole-tree /proc primitives ────────────────────────────────────
@@ -298,11 +307,17 @@ class WorkerMonitor:
         soft_inactivity: float = SOFT_INACTIVITY_SECONDS,
         stall_confirmation: float = STALL_CONFIRMATION_SECONDS,
         sample_interval: float = MONITOR_SAMPLE_INTERVAL_SECONDS,
+        tree_activity_without_output_cutoff: float = (
+            TREE_ACTIVITY_WITHOUT_OUTPUT_CUTOFF_SECONDS
+        ),
     ) -> None:
         self._pgid = pgid
         self._soft_inactivity = soft_inactivity
         self._stall_confirmation = stall_confirmation
         self._sample_interval = sample_interval
+        self._tree_activity_without_output_cutoff = (
+            tree_activity_without_output_cutoff
+        )
 
         now = time.monotonic()
         self._last_stdout: float = now
@@ -356,6 +371,11 @@ class WorkerMonitor:
     def peak_rss_bytes(self) -> int:
         """Peak process-tree RSS observed across samples (for C1/C2)."""
         return self._peak_rss_bytes
+
+    @property
+    def tree_activity_without_output_cutoff(self) -> float:
+        """Seconds of busy-tree/no-output tolerated before an early cut."""
+        return self._tree_activity_without_output_cutoff
 
     def touch_stdout(self) -> None:
         """Record that stdout was emitted (called from streaming callbacks)."""
@@ -500,6 +520,30 @@ class WorkerMonitor:
             and not self._last_evidence.evidence_incomplete
         )
 
+    def should_terminate_for_idle_tree(
+        self, *, now: float | None = None
+    ) -> bool:
+        """Return True when the tree stays busy but output has stopped too long.
+
+        Only the explicit ``tree_activity_without_output`` state qualifies: the
+        process tree is demonstrably doing CPU/I/O work, so this is not a
+        whole-tree stall, but the attempt has produced no output for the full
+        cutoff.  Any output resets the clock, so a worker that is producing
+        output is never cut (N9).  Incomplete evidence never authorises a
+        destructive decision.
+        """
+        if self._state is not MonitorState.AMBIGUOUS_BUSY:
+            return False
+        if self._state_reason != "tree_activity_without_output":
+            return False
+        if self._last_evidence.evidence_incomplete:
+            return False
+        moment = time.monotonic() if now is None else now
+        return (
+            moment - self._last_output()
+            >= self._tree_activity_without_output_cutoff
+        )
+
     def mark_terminating(self) -> None:
         """Transition to TERMINATING (external decision reached)."""
         self._state = MonitorState.TERMINATING
@@ -588,6 +632,7 @@ __all__ = [
     "SOFT_INACTIVITY_SECONDS",
     "STALL_CONFIRMATION_SECONDS",
     "MONITOR_SAMPLE_INTERVAL_SECONDS",
+    "TREE_ACTIVITY_WITHOUT_OUTPUT_CUTOFF_SECONDS",
     "WorkerMonitor",
     "_group_has_members",
     "group_has_live_members",

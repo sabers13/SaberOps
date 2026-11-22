@@ -215,6 +215,21 @@ class TaskResult:
     reviewer: str = ""
     #: Number of substantive ``BLOCK`` verdicts the reviewer recorded.
     block_verdicts: int = 0
+    #: Number of reviews recorded for the run (any verdict).  A must-fail row
+    #: with neither a review nor a block was never measured; it is not a
+    #: reviewer failure (N10).
+    review_count: int = 0
+    #: False when the run never produced a candidate (refused before dispatch or
+    #: failed without a commit).  ``time_to_candidate`` is then unknown, not
+    #: submit-to-terminal-failure (N8).
+    candidate_produced: bool = True
+
+    @property
+    def measured(self) -> bool:
+        """False only for a must-fail row that no review ever examined."""
+        if self.expect != "review_blocked":
+            return True
+        return self.block_verdicts > 0 or self.review_count > 0
 
     @property
     def submit_to_start(self) -> float | None:
@@ -224,8 +239,12 @@ class TaskResult:
 
     @property
     def time_to_candidate(self) -> float | None:
-        """Submit -> the run reaching its terminal state (candidate ready)."""
-        if self.terminal_at is None:
+        """Submit -> the run reaching its terminal state, when it produced one.
+
+        ``None`` when no candidate exists: a refused or failed-before-candidate
+        run must not print its terminal latency as a candidate latency (N8).
+        """
+        if not self.candidate_produced or self.terminal_at is None:
             return None
         return max(0.0, self.terminal_at - self.submitted_at)
 
@@ -387,7 +406,15 @@ class BenchmarkReport:
 
     @property
     def passed(self) -> bool:
-        return all(result.passed for result in self.results) and all(
+        measured = [result for result in self.results if result.measured]
+        review_rows = [r for r in self.results if r.expect == "review_blocked"]
+        # A must-fail row that no review examined is "not measured", never a
+        # failure (N10).  When the catalogue contains must-fail rows, at least
+        # one must still be measured so a completely missing review path cannot
+        # masquerade as a pass.
+        if review_rows and not any(r.measured for r in review_rows):
+            return False
+        return all(result.passed for result in measured) and all(
             drill.passed for drill in self.drills
         )
 
@@ -419,6 +446,15 @@ class BenchmarkReport:
                 f"{_seconds(result.notice_delay):>7} "
                 f"{result.owner_actions:>5} {result.subscription:<38}"
                 + (f" {result.reviewer:<38}" if show_reviewer else "")
+            )
+        not_measured = [result for result in self.results if not result.measured]
+        if not_measured:
+            lines.extend(
+                [
+                    "",
+                    "not measured (no review and no block; excluded from the verdict): "
+                    + ", ".join(result.task_id for result in not_measured),
+                ]
             )
         if self.drills:
             lines.extend(["", "Failure and feature drills", ""])
@@ -719,16 +755,64 @@ class RealBatch:
     tasks: tuple[BenchmarkTask, ...]
 
 
-def real_batches() -> tuple[RealBatch, ...]:
-    """The three real-mode batches, each with a different-vendor reviewer."""
+def real_batches(
+    tasks: Sequence[BenchmarkTask] | None = None,
+) -> tuple[RealBatch, ...]:
+    """The three real-mode batches, each with a different-vendor reviewer.
+
+    ``tasks`` narrows every batch to the same catalogue subset (N11); the
+    default is the full ten-task catalogue.
+    """
+    selected = tuple(tasks) if tasks is not None else TASKS
     return tuple(
         RealBatch(
             subscription=subscription,
             reviewer_subscription=REVIEWER_SUBSCRIPTION[subscription],
-            tasks=TASKS,
+            tasks=selected,
         )
         for subscription in REAL_SUBSCRIPTION_ORDER
     )
+
+
+def select_benchmark_tasks(
+    task_ids: Sequence[str] | None = None,
+    *,
+    per_cli: int | None = None,
+) -> tuple[tuple[BenchmarkTask, ...], tuple[BenchmarkTask, ...]]:
+    """Return ``(selected, skipped)`` for a reduced real-mode catalogue (N11).
+
+    ``task_ids`` names exact catalogue ids; ``per_cli`` takes the first N tasks
+    in catalogue order.  Passing both is refused.  Unknown ids are refused by
+    name so a typo cannot silently shrink a confirmation run.
+    """
+    if task_ids is not None and per_cli is not None:
+        raise RealModeRefused("choose either --tasks or --per-cli, not both")
+    if task_ids is not None:
+        requested = [part.strip() for part in task_ids if part.strip()]
+        if not requested:
+            raise RealModeRefused("--tasks needs at least one task id")
+        unknown = sorted(set(requested) - set(TASKS_BY_ID))
+        if unknown:
+            raise RealModeRefused(
+                "unknown benchmark task id(s): "
+                + ", ".join(unknown)
+                + "; valid ids: "
+                + ", ".join(task.task_id for task in TASKS)
+            )
+        wanted = set(requested)
+        selected = tuple(task for task in TASKS if task.task_id in wanted)
+    elif per_cli is not None:
+        if per_cli < 1:
+            raise RealModeRefused("--per-cli must be at least 1")
+        if per_cli > len(TASKS):
+            raise RealModeRefused(
+                f"--per-cli {per_cli} exceeds the {len(TASKS)}-task catalogue"
+            )
+        selected = TASKS[:per_cli]
+    else:
+        selected = TASKS
+    skipped = tuple(task for task in TASKS if task not in selected)
+    return selected, skipped
 
 
 def real_model_for(subscription: str, models: Mapping[str, str]) -> str:
@@ -1267,14 +1351,16 @@ def run_real_benchmark(
     repo_root: Path,
     models: dict[str, str],
     max_wait: float = 3600.0,
+    tasks: Sequence[BenchmarkTask] | None = None,
 ) -> BenchmarkReport:
     """Drive the ten-task catalogue once per real CLI in an isolated store.
 
-    Each batch uses one worker subscription and a different-vendor reviewer
-    (D4).  The caller must have applied :func:`isolated_environment` to
-    ``os.environ`` first.  This function starts vendor CLIs, so it is only
-    reached after :func:`validate_real_mode` and the explicit acknowledgement
-    flag.
+    ``tasks`` selects a reduced catalogue for a bounded confirmation run (N11);
+    the default is the full catalogue.  Each batch uses one worker subscription
+    and a different-vendor reviewer (D4).  The caller must have applied
+    :func:`isolated_environment` to ``os.environ`` first.  This function starts
+    vendor CLIs, so it is only reached after :func:`validate_real_mode` and the
+    explicit acknowledgement flag.
     """
     from saberops.cli import main as cli_main
     from saberops.db import Database
@@ -1294,7 +1380,7 @@ def run_real_benchmark(
     os.environ["SABEROPS_DISABLE_AUTO_SCHEDULER"] = "1"
     db = Database()
 
-    batches = real_batches()
+    batches = real_batches(tasks)
     # The shipped entry point must be runnable from a fresh store: discovery,
     # routing, posture, quota and reviewer setup are part of the run (N1).
     prepare_real_store(
@@ -1308,7 +1394,7 @@ def run_real_benchmark(
     # Every batch starts from its own clean, identically seeded repositories so
     # a later task never inherits an earlier batch's accepted change.
     gate_command = "python -B -c 'import app'"
-    batches = real_batches()
+    batches = real_batches(tasks)
     repos_by_batch: dict[str, dict[str, Path]] = {}
     for batch in batches:
         batch_root = repo_root / batch.subscription
@@ -1406,6 +1492,11 @@ def run_real_benchmark(
                     if job.current_run_id is not None
                     else None
                 )
+                review_count = (
+                    len(db.get_reviews_for_run(job.current_run_id))
+                    if job.current_run_id is not None
+                    else 0
+                )
                 results.append(
                     TaskResult(
                         task_id=task.task_id,
@@ -1431,6 +1522,10 @@ def run_real_benchmark(
                             count_block_verdicts(db, job.current_run_id)
                             if job.current_run_id is not None
                             else 0
+                        ),
+                        review_count=review_count,
+                        candidate_produced=any(
+                            attempt.commit_sha for attempt in attempts
                         ),
                     )
                 )

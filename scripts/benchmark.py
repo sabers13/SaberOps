@@ -26,10 +26,12 @@ from saberops.benchmark import (  # noqa: E402
     DEFAULT_CODEX_MODEL,
     DEFAULT_OPENCODE_MODEL,
     REAL_MODE_FLAG,
+    BenchmarkTask,
     RealModeRefused,
     fake_mode_environment,
     real_batches,
     real_model_for,
+    select_benchmark_tasks,
     validate_real_mode,
 )
 
@@ -69,6 +71,24 @@ def _parser() -> argparse.ArgumentParser:
         default=DEFAULT_CLAUDE_MODEL,
         help=f"real mode Claude model (default {DEFAULT_CLAUDE_MODEL})",
     )
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument(
+        "--tasks",
+        metavar="ID[,ID...]",
+        help=(
+            "real mode only: run these catalogue task ids in every batch "
+            "(a documented reduced confirmation run); skipped rows are printed"
+        ),
+    )
+    selection.add_argument(
+        "--per-cli",
+        type=int,
+        metavar="N",
+        help=(
+            "real mode only: run the first N catalogue tasks in every batch; "
+            "skipped rows are printed"
+        ),
+    )
     parser.add_argument(
         REAL_MODE_FLAG,
         dest="real_acknowledged",
@@ -104,12 +124,17 @@ def _run_fake() -> int:
     return 0 if report.passed else 1
 
 
-def _print_plan(store: Path, repo_root: Path, models: dict[str, str]) -> None:
+def _print_plan(
+    store: Path,
+    repo_root: Path,
+    models: dict[str, str],
+    tasks: tuple[BenchmarkTask, ...] | None = None,
+) -> None:
     print("SaberOps phase 1 benchmark: real mode plan (nothing started)")
     print(f"  store:     {store}")
     print(f"  toy repos: {repo_root}")
-    print("  batches (ten tasks each, different-vendor reviewer):")
-    for batch in real_batches():
+    print("  batches (different-vendor reviewer):")
+    for batch in real_batches(tasks):
         worker = f"{batch.subscription}/{real_model_for(batch.subscription, models)}"
         reviewer = (
             f"{batch.reviewer_subscription}/"
@@ -138,8 +163,20 @@ def _run_real(args: argparse.Namespace) -> int:
         "opencode": args.opencode_model,
         "claude": args.claude_model,
     }
+    task_ids = (
+        [part for part in str(args.tasks).split(",") if part.strip()]
+        if args.tasks
+        else None
+    )
+    selected, skipped = select_benchmark_tasks(task_ids, per_cli=args.per_cli)
+    if skipped:
+        print(
+            f"benchmark: reduced catalogue: running {len(selected)} task(s) per "
+            f"CLI; skipping {len(skipped)}: "
+            + ", ".join(task.task_id for task in skipped)
+        )
     if args.dry_run:
-        _print_plan(store, repo_root, models)
+        _print_plan(store, repo_root, models, selected)
         return 0
 
     from saberops.benchmark import apply_isolated_environment, run_real_benchmark
@@ -147,7 +184,9 @@ def _run_real(args: argparse.Namespace) -> int:
     # Replace the ambient environment: an update alone would leave a stripped
     # metered key behind in this process (N6).
     apply_isolated_environment(store)
-    report = run_real_benchmark(store=store, repo_root=repo_root, models=models)
+    report = run_real_benchmark(
+        store=store, repo_root=repo_root, models=models, tasks=selected
+    )
     print(report.table())
     return 0 if report.passed else 1
 

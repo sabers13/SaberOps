@@ -127,6 +127,10 @@ class AdmissionDecision:
     wait_confidence: str | None = None  # "EXACT" | "PARSED" | "ESTIMATED" | "CONSERVATIVE"
     cost_estimate: float | None = None
     remaining_pct: float | None = None
+    #: The observation's remaining percent before post-observation charges.
+    observed_remaining_pct: float | None = None
+    #: Total synthetic reservation/settled charges counted since that observation.
+    prior_charges_pct: float = 0.0
     red_line_pct: float | None = None
     reserve_pct: float | None = None
     multiplier: float = 1.0
@@ -726,7 +730,9 @@ def admit(
         )
 
     # Check each drawn pool
-    window_scores: list[tuple[float, str, str, float, float, float, float, float]] = []
+    window_scores: list[
+        tuple[float, str, str, float, float, float, float, float, float, float]
+    ] = []
 
     for pool_id in drawn_pools:
         pool_pol = pool_policies.get(pool_id, QuotaPoolPolicy(pool_id=pool_id))
@@ -845,6 +851,7 @@ def admit(
 
             if remaining is None:
                 remaining = 100.0
+            observed_remaining = remaining
 
             # Subtract outstanding charges (reservations / settled) since observation (F2)
             prior_charges = 0.0
@@ -871,17 +878,31 @@ def admit(
             if pool_pol.mode != QuotaPoolMode.UNENFORCED and effective_rem < red_line:
                 reason = _red_line_reason(win.id)
                 eta_dt = parse_iso(reset_at_str) if reset_at_str else None
+                # A red line caused only by synthetic post-observation charges
+                # is not evidence that the vendor pool is low.  Offer the safe
+                # zero-inference probe seam so the dispatch boundary can
+                # refresh before it refuses (N7).  A genuinely low fresh pool
+                # has no charges and keeps the refusal unchanged.
+                probe_harness = _POOL_TO_HARNESS.get(pool_id)
+                can_probe = (
+                    prior_charges > 0.0
+                    and probe_harness in _KNOWN_PROBE_HARNESSES
+                )
                 return AdmissionDecision(
                     admitted=False,
                     candidate=candidate,
                     reason=reason,
                     pool_id=pool_id,
                     binding_window=win.id,
+                    needs_probe=can_probe,
+                    probe_harness=probe_harness if can_probe else None,
                     reset_at=reset_at_str,
                     eta=eta_dt,
                     wait_confidence="PARSED" if eta_dt else "CONSERVATIVE",
                     cost_estimate=projected_cost,
                     remaining_pct=remaining,
+                    observed_remaining_pct=observed_remaining,
+                    prior_charges_pct=prior_charges,
                     red_line_pct=red_line,
                     reserve_pct=res_val,
                     multiplier=multiplier,
@@ -902,6 +923,8 @@ def admit(
                 res_val,
                 projected_cost,
                 multiplier,
+                observed_remaining,
+                prior_charges,
             ))
 
     # Build draws for all drawn pools (F2)
@@ -947,6 +970,8 @@ def admit(
         bind_res,
         bind_cost,
         bind_mult,
+        bind_observed,
+        bind_charges,
     ) = min_entry
 
     return AdmissionDecision(
@@ -956,6 +981,8 @@ def admit(
         pool_id=binding_pool,
         binding_window=binding_window,
         remaining_pct=bind_rem,
+        observed_remaining_pct=bind_observed,
+        prior_charges_pct=bind_charges,
         red_line_pct=bind_red,
         reserve_pct=bind_res,
         cost_estimate=bind_cost,

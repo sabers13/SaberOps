@@ -25,7 +25,7 @@ from saberops.control_plane.bindings import (
     resolve_reviewer_candidate_binding,
 )
 from saberops.db import Database, current_iso_timestamp
-from saberops.dispatch import control_plane_decision
+from saberops.dispatch import control_plane_decision, is_red_line_reason
 from saberops.git import GitManager
 from saberops.models import (
     AttemptStatus,
@@ -997,13 +997,16 @@ class ReviewEngine:
             skip_reason, decision = _evaluate_reviewer_candidate(quota_states)
             if (
                 decision.reason == "QUOTA_EVIDENCE_REQUIRED"
-                and candidate.provider not in probed_providers
-            ):
+                or (
+                    is_red_line_reason(decision.reason)
+                    and bool((decision.capacity or {}).get("needs_probe"))
+                )
+            ) and candidate.provider not in probed_providers:
                 # Refresh the reviewer's own reading when the only blocker is
-                # stale evidence, exactly as the worker preflight does.  A
-                # probe that cannot run (e.g. an interactive-only harness) or
-                # fails leaves the refusal intact; the owner then sees a stale
-                # evidence reason rather than a mysterious review failure.
+                # stale evidence or synthetic charges that crossed a red line,
+                # exactly as the worker preflight does.  A probe that cannot run
+                # (e.g. an interactive-only harness) or fails leaves the
+                # refusal intact (N7/D14).
                 probed_providers.add(candidate.provider)
                 from saberops.capacity.probes import try_safe_quota_probe
                 from saberops.control_plane.plans import effective_quota_pools

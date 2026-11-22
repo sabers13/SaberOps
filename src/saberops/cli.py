@@ -6201,13 +6201,16 @@ def _away_policy_warning() -> tuple[str, str | None]:
         policy = away_module.load_away_policy()
     except (away_module.AwayError, OSError) as exc:
         return "unreadable", (
-            "Away mode parks every job: the away preflight policy cannot be read "
-            f"({exc}). Fix it with: {AWAY_POLICY_COMMAND}"
+            "Away dispatch of every job is refused: the away preflight policy "
+            f"cannot be read ({exc}). Fix it with: {AWAY_POLICY_COMMAND}"
         )
     if policy is None:
         return "not-set", (
-            "Away mode parks every job until an away preflight policy sets its "
-            "limits, so nothing starts while you are away. Add one now with: "
+            "Away dispatch of every job is refused until an away preflight "
+            "policy sets its limits. A bounded away window keeps the work gate "
+            "open (dispatch is allowed) and parks owner decisions such as "
+            "accept/retry/repair; the preflight policy governs whether away "
+            "dispatch itself may start work. Add one now with: "
             f"{AWAY_POLICY_COMMAND}"
         )
     return "set", None

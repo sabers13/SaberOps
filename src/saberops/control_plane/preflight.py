@@ -87,13 +87,17 @@ class ControlPlaneDecision:
     reserve_override: bool
     capability_profile_digest: str
     control_plane_digest: str
+    #: Charge-ledger terms behind a capacity decision (prior synthetic charges,
+    #: observed remaining, projected cost, reserve).  ``None`` when the decision
+    #: stopped before the capacity ledger or the ledger was unconfigured.
+    capacity: dict[str, object] | None = None
 
     @property
     def reason(self) -> str | None:
         return self.exclusion_reason
 
     def as_payload(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "provider": self.candidate.provider,
             "model": self.candidate.model,
             "eligible": self.eligible,
@@ -115,6 +119,9 @@ class ControlPlaneDecision:
             "capability_profile_digest": self.capability_profile_digest,
             "control_plane_digest": self.control_plane_digest,
         }
+        if self.capacity is not None:
+            payload["capacity"] = self.capacity
+        return payload
 
 
 def evaluate_control_plane(

@@ -61,6 +61,7 @@ from saberops.benchmark import (
     real_mode_presence,
     real_model_for,
     real_worker_candidates,
+    select_benchmark_tasks,
     unclassified_metered_credentials,
     validate_real_mode,
     wait_for_batch,
@@ -1017,6 +1018,168 @@ def test_benchmark_table_reports_candidate_and_acceptance_latency() -> None:
     assert "to accepted" in table
     assert "40.0s" in table
     assert "41.0s" in table
+
+
+def test_benchmark_table_withholds_candidate_latency_without_a_candidate() -> None:
+    """N8: submit-to-terminal is not printed as time to candidate."""
+    from saberops.benchmark import BenchmarkReport
+
+    result = TaskResult(
+        task_id="review-block-b",
+        kind="must fail review",
+        expect="review_blocked",
+        final_state="FAILED",
+        accepted_commit=None,
+        submitted_at=100.0,
+        started_at=None,
+        terminal_at=293.9,
+        accepted_at=None,
+        notice_at=294.0,
+        owner_actions=0,
+        subscription="codex/gpt-6-luna",
+        block_verdicts=0,
+        review_count=0,
+        candidate_produced=False,
+    )
+    assert result.time_to_candidate is None
+    table = BenchmarkReport(
+        mode="real", results=(result,), started_at=100.0, finished_at=300.0
+    ).table()
+    assert "to candidate" in table
+    assert "193.9s" not in table
+    assert "not measured" in table
+
+
+def test_must_fail_row_without_review_is_not_measured_not_failed() -> None:
+    """N10: no review and no block is an unmeasured row, never a failure."""
+    from saberops.benchmark import BenchmarkReport
+
+    unmeasured = TaskResult(
+        task_id="review-block-b",
+        kind="must fail review",
+        expect="review_blocked",
+        final_state="FAILED",
+        accepted_commit=None,
+        submitted_at=100.0,
+        started_at=None,
+        terminal_at=190.0,
+        accepted_at=None,
+        notice_at=191.0,
+        owner_actions=0,
+        subscription="codex/gpt-6-luna",
+        block_verdicts=0,
+        review_count=0,
+        candidate_produced=False,
+    )
+    measured = TaskResult(
+        task_id="review-block-a",
+        kind="must fail review",
+        expect="review_blocked",
+        final_state="SUCCEEDED",
+        accepted_commit=None,
+        submitted_at=100.0,
+        started_at=101.0,
+        terminal_at=200.0,
+        accepted_at=None,
+        notice_at=201.0,
+        owner_actions=0,
+        subscription="codex/gpt-6-luna",
+        block_verdicts=1,
+        review_count=2,
+    )
+    assert unmeasured.measured is False
+    assert measured.measured is True
+    report = BenchmarkReport(
+        mode="real",
+        results=(unmeasured, measured),
+        started_at=100.0,
+        finished_at=300.0,
+    )
+    assert report.passed is True
+    assert "not measured" in report.table()
+
+    # A review that happened but returned no BLOCK is still a measured failure:
+    # the fix must not make blocking easier to fake.
+    reviewed_no_block = TaskResult(
+        task_id="review-block-b",
+        kind="must fail review",
+        expect="review_blocked",
+        final_state="SUCCEEDED",
+        accepted_commit="abcdef123456",
+        submitted_at=100.0,
+        started_at=101.0,
+        terminal_at=190.0,
+        accepted_at=191.0,
+        notice_at=192.0,
+        owner_actions=1,
+        subscription="codex/gpt-6-luna",
+        block_verdicts=0,
+        review_count=1,
+    )
+    assert reviewed_no_block.measured is True
+    assert reviewed_no_block.passed is False
+    assert (
+        BenchmarkReport(
+            mode="real",
+            results=(reviewed_no_block,),
+            started_at=100.0,
+            finished_at=300.0,
+        ).passed
+        is False
+    )
+
+
+def test_reduced_catalogue_selection_is_documented_and_ordered() -> None:
+    """N11: --tasks/--per-cli narrow the catalogue and name skipped rows."""
+    selected, skipped = select_benchmark_tasks(
+        ["docs", "add-function"]
+    )
+    assert [task.task_id for task in selected] == ["add-function", "docs"]
+    assert "review-block-b" in {task.task_id for task in skipped}
+
+    first_two, rest = select_benchmark_tasks(per_cli=2)
+    assert first_two == TASKS[:2]
+    assert rest == TASKS[2:]
+
+    with pytest.raises(RealModeRefused, match="unknown benchmark task"):
+        select_benchmark_tasks(["not-a-task"])
+    with pytest.raises(RealModeRefused, match="not both"):
+        select_benchmark_tasks(["docs"], per_cli=1)
+    with pytest.raises(RealModeRefused, match="at least 1"):
+        select_benchmark_tasks(per_cli=0)
+
+    batches = real_batches(selected)
+    assert all(batch.tasks == selected for batch in batches)
+
+
+def test_benchmark_script_dry_run_prints_skipped_rows(tmp_path: Path) -> None:
+    """N11: a reduced confirmation run is a documented, visible option."""
+    script = Path(__file__).resolve().parents[1] / "scripts" / "benchmark.py"
+    store = tmp_path / "store"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--mode",
+            "real",
+            "--yes-real-cli",
+            "--dry-run",
+            "--tasks",
+            "docs,review-block-b",
+            "--store",
+            str(store),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
+    )
+    assert result.returncode == 0, result
+    assert "reduced catalogue" in result.stdout
+    assert "skipping 8" in result.stdout
+    assert "tasks: docs, review-block-b" in result.stdout
+    assert "tasks: add-function" not in result.stdout
+    assert not store.exists()
 
 
 # --------------------------------------------------------------------------

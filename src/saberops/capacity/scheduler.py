@@ -442,11 +442,36 @@ def schedule(
 
             owner_evidence: list[AdmissionDecision] = []
             job_probe_needed = False
+            red_line_reasons = {
+                "WEEKLY_QUOTA_RED_LINE",
+                "RED_LINE_5H",
+                "RED_LINE_DAILY",
+                "RED_LINE_WEEKLY",
+                "RED_LINE_MONTHLY",
+                "RED_LINE",
+            }
             for g_dec in all_group_decisions:
                 for d in g_dec:
-                    if d.needs_probe and d.probe_harness and d.pool_id:
+                    if not (d.needs_probe and d.probe_harness and d.pool_id):
+                        continue
+                    if d.reason == "QUOTA_EVIDENCE_REQUIRED":
                         if d.probe_harness not in AUTO_SAFE_HARNESSES:
                             owner_evidence.append(d)
+                            continue
+                        job_probe_needed = True
+                        if d.probe_harness not in probes_needed:
+                            probes_needed[d.probe_harness] = ProbeDecision(
+                                pool_id=d.pool_id,
+                                harness=d.probe_harness,
+                            )
+                    elif d.reason in red_line_reasons:
+                        # A red line tipped by synthetic post-observation
+                        # charges is re-checked with a fresh safe probe before
+                        # it refuses (N7).  A genuinely low pool reads low and
+                        # keeps the refusal on the next tick; an unsafe harness
+                        # (Claude's interactive reader) keeps today's
+                        # conservative wait with no probe demand.
+                        if d.probe_harness not in AUTO_SAFE_HARNESSES:
                             continue
                         job_probe_needed = True
                         if d.probe_harness not in probes_needed:

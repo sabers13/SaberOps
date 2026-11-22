@@ -292,6 +292,11 @@ def run_fake_benchmark(
                     if job.current_run_id is not None
                     else 0
                 ),
+                review_count=(
+                    len(db.get_reviews_for_run(job.current_run_id))
+                    if job.current_run_id is not None
+                    else 0
+                ),
             )
         )
 

@@ -1839,6 +1839,50 @@ def run_process(
                                 )
                             exit_code = proc.returncode if proc.returncode is not None else -1
                             break
+                        elif (
+                            mon_state is _MS.AMBIGUOUS_BUSY
+                            and _monitor.should_terminate_for_idle_tree()
+                        ):
+                            # The tree is demonstrably active but the attempt
+                            # has produced no output for the whole cutoff.  Cut
+                            # it before the hard timeout so the repair/retry
+                            # path runs instead of burning the full budget (N9).
+                            monitor_stall_terminated = True
+                            if _monitor is not None:
+                                _monitor.mark_terminating()
+                                _emit_monitor_transition(
+                                    _monitor.state, getattr(_monitor, "reason", "")
+                                )
+                            ok, reason = _terminate_group_and_reap(
+                                proc, termination_grace_seconds
+                            )
+                            extinction_confirmed = ok
+                            if _monitor is not None and ok:
+                                _monitor.mark_terminal()
+                                _emit_monitor_transition(
+                                    _monitor.state, getattr(_monitor, "reason", "")
+                                )
+                            if not ok:
+                                termination_incomplete = True
+                                termination_note = (
+                                    f"\n[Execution error: worker process group "
+                                    f"{proc.pid} extinction could not be confirmed "
+                                    f"after tree activity without output ({reason})]"
+                                )
+                            else:
+                                cutoff = getattr(
+                                    _monitor,
+                                    "tree_activity_without_output_cutoff",
+                                    0,
+                                )
+                                termination_note = (
+                                    "\n[Execution error: worker process tree stayed "
+                                    "active without producing output for "
+                                    f"{cutoff:.0f}s; stopped early so the "
+                                    "repair/retry path can run]"
+                                )
+                            exit_code = proc.returncode if proc.returncode is not None else -1
+                            break
                     except Exception:
                         pass  # Monitor errors must never abort execution
 
