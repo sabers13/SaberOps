@@ -233,3 +233,49 @@ def test_no_probe_keeps_conservative_refusal(tmp_path: Path) -> None:
     assert still_refused.exclusion_reason == "RED_LINE_5H"
     assert still_refused.capacity is not None
     assert still_refused.capacity["prior_charges_pct"] == pytest.approx(80.0)
+
+
+def test_tipped_red_line_probe_payload_is_durable_evidence(tmp_path: Path) -> None:
+    """N7-observability: the pre-probe charge terms survive the refresh."""
+    from saberops.dispatch import capacity_probe_event_payload
+
+    db = Database(tmp_path / "n7.db")
+    policy = _policy()
+    _seed_tipped_pool(db)
+    refused = _decide(db, policy)
+
+    payload = capacity_probe_event_payload(refused, "ran")
+
+    assert payload["provider"] == "codex"
+    assert payload["model"] == "gpt-5"
+    assert payload["reason"] == "RED_LINE_5H"
+    assert payload["probe_outcome"] == "ran"
+    capacity = payload["capacity"]
+    assert isinstance(capacity, dict)
+    assert capacity["prior_charges_pct"] == pytest.approx(80.0)
+    assert capacity["remaining_after_charges_pct"] == pytest.approx(20.0)
+    assert capacity["projected_cost_pct"] == pytest.approx(8.0)
+    assert capacity["red_line_pct"] == pytest.approx(15.0)
+    assert payload["quota"]["pool_id"] == "chatgpt-plus"
+
+
+def test_stale_evidence_probe_payload_names_the_exclusion() -> None:
+    """Item 5: a stale-evidence probe is named instead of staying invisible."""
+    from saberops.dispatch import capacity_probe_event_payload
+
+    class _Decision:
+        exclusion_reason = "QUOTA_EVIDENCE_REQUIRED"
+        capacity = {"needs_probe": True}
+
+        def as_payload(self) -> dict[str, Any]:
+            return {
+                "provider": "codex",
+                "model": "gpt-5",
+                "reason": self.exclusion_reason,
+                "capacity": self.capacity,
+            }
+
+    payload = capacity_probe_event_payload(_Decision(), "no-executable")
+    assert payload["evidence_state"] == "stale"
+    assert payload["probe_outcome"] == "no-executable"
+    assert payload["reason"] == "QUOTA_EVIDENCE_REQUIRED"

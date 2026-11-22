@@ -728,3 +728,82 @@ def test_h3_1_e_same_tier_repair_inherits_failed_candidate(
         if d.stage in (DispatchStage.REPAIR, DispatchStage.RETRY)
     ]
     assert repair and all(d.role is DispatchRole.BUILD for d in repair)
+
+
+# ---------------------------------------------------------------------------
+# N17 — THE ENGINE'S IDLE-TREE CUT IS DURABLE ON THE ATTEMPT
+# ---------------------------------------------------------------------------
+
+
+def _idle_tree_cut(provider: str, model: str) -> Any:
+    note = (
+        "worker process tree stayed active without producing output for 600s; "
+        "stopped early so the repair/retry path can run"
+    )
+
+    def _action(request: WorkerRequest) -> WorkerResult:
+        return WorkerResult(
+            provider=provider,
+            model=model,
+            status=AttemptStatus.FAILED,
+            summary=note,
+            stdout="",
+            stderr="[Errno 104] Connection reset by peer",
+            has_changes=False,
+            error=note,
+            outcome=DispatchOutcome.PROVIDER_OR_RUNTIME_FAILURE,
+            termination_reason="idle_tree_cutoff",
+            termination_note=note,
+        )
+
+    return _action
+
+
+def test_idle_tree_cut_reason_and_note_are_durable_on_the_attempt(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """N17: an engine cut must not read like a network failure in evidence."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    log: list[str] = []
+    worker = ScriptedWorker(
+        "h3", {"m1": _idle_tree_cut("h3", "m1")}, log
+    )
+    monkeypatch.setattr(
+        "saberops.orchestrator.resolve_candidate_chain",
+        _role_keyed_chain(
+            [WorkerCandidate("h3", "m1")],
+            [WorkerCandidate("h3", "t2a")],
+        ),
+    )
+    db = Database(tmp_path / "orch.db")
+    orch = Orchestrator(
+        db=db,
+        registry=_registry_with_reviewer_ladder(worker),
+        worktree_base=tmp_path / "wt",
+    )
+    config = resolve_run_config(
+        task="hello",
+        target_repo=repo,
+        gate_command=f'{sys.executable} -c "raise SystemExit(0)"',
+        publish_candidate=False,
+        max_attempts=1,
+    )
+    result = orch.run(config=config, is_peak=False)
+
+    assert result.status == RunStatus.FAILED
+    durable = db.get_attempts_for_run(result.run_id)
+    assert durable
+    assert durable[0].interruption_reason == "idle_tree_cutoff"
+    assert "stayed active without producing output" in (durable[0].worker_error or "")
+    events = db.get_events(result.run_id)
+    failed = _events_by_type(events, "worker_failed")
+    assert failed and failed[0].payload is not None
+    assert failed[0].payload["termination_reason"] == "idle_tree_cutoff"
+    assert "stayed active without producing output" in (
+        failed[0].payload["termination_note"] or ""
+    )
+    completed = _events_by_type(events, "worker_completed")
+    assert completed and completed[0].payload is not None
+    assert completed[0].payload["status"] == "FAILED"
+    assert completed[0].payload["termination_reason"] == "idle_tree_cutoff"

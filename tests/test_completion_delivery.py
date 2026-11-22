@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 from lifecycle_rig import build_lifecycle_rig
@@ -417,3 +418,110 @@ def test_failed_notify_send_still_counts_as_an_attempt(
         db_path = tmp_path / "owner.db"
 
     assert _notice_delivered(_Db(), "job-2", "FAILED") is True
+
+
+def test_direct_run_terminal_notice_is_durable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """N16: a job-less ``orch run`` gets the same once-per-key notice path."""
+    from saberops.db import Database
+    from saberops.notifications import (
+        notice_attempted,
+        notify_run_terminal,
+        run_notification_ledger,
+    )
+
+    db = Database(tmp_path / "owner.db")
+    log = _notice_stub(tmp_path, monkeypatch)
+
+    outcome = notify_run_terminal(
+        db,
+        run_id="run_direct_n16",
+        status="FAILED",
+        summary="All 2 attempt(s) failed to pass gate 'make gate'.",
+    )
+    assert outcome == "delivered"
+    text = log.read_text()
+    assert "SaberOps run failed" in text
+    assert "run_direct_n16" in text
+    assert "failed to pass gate" in text
+    assert notice_attempted(
+        run_notification_ledger(db), "run:run_direct_n16:FAILED"
+    )
+
+    # A repeated terminal read never duplicates the notice.
+    assert (
+        notify_run_terminal(
+            db, run_id="run_direct_n16", status="FAILED", summary=None
+        )
+        == "duplicate"
+    )
+    assert log.read_text() == text
+
+
+def test_direct_orch_run_adoption_writes_the_terminal_notice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """N16: a job-less direct run's terminal state is delivered durably."""
+    from types import SimpleNamespace
+
+    from saberops.cli import main
+    from saberops.db import Database
+    from saberops.models import Run, RunResult, RunStatus, Tier
+
+    db_path = tmp_path / "project.db"
+    db = Database(db_path)
+    run_id = "run_direct_cli_n16"
+    db.create_run(
+        Run(
+            id=run_id,
+            task="direct run",
+            target_repo=str(tmp_path),
+            base_commit="0" * 40,
+            tier=Tier.T1,
+            training_allowed=True,
+            gate_command="true",
+            status=RunStatus.PENDING,
+            created_at="2026-11-22T00:00:00+00:00",
+            config_json="{}",
+        )
+    )
+    config = SimpleNamespace(
+        target_repo=str(tmp_path),
+        task="direct run",
+        gate_command="true",
+        routing_mode="auto",
+        initial_tier=Tier.T1,
+        review_policy_mode=SimpleNamespace(value="ALWAYS_REQUIRED"),
+        gate_scratch_mode=SimpleNamespace(value="AUTO"),
+        accept_target_branch="main",
+        publish_candidate=False,
+        provider_override=None,
+        model_override=None,
+    )
+    monkeypatch.setattr(
+        "saberops.cli.reconstruct_run_config", lambda _data: config
+    )
+
+    def fake_run_sync(self: Any, **kwargs: Any) -> RunResult:
+        return RunResult(
+            run_id=run_id,
+            passed=False,
+            status=RunStatus.FAILED,
+            summary="All 1 attempt(s) failed to pass gate 'true'.",
+            target_repo=str(tmp_path),
+            base_commit="0" * 40,
+        )
+
+    monkeypatch.setattr(
+        "saberops.service.OrchestratorService.run_sync", fake_run_sync
+    )
+    log = _notice_stub(tmp_path, monkeypatch)
+
+    code = main(["run", "--db", str(db_path), "--run-id", run_id])
+
+    assert code == 1
+    text = log.read_text()
+    assert "SaberOps run failed" in text
+    assert run_id in text
+    assert "failed to pass gate" in text

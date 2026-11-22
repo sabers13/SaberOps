@@ -490,6 +490,8 @@ class ClaudeCodeAdapter(WorkerAdapter):
                     "Claude plan quota exhausted "
                     f"(retry after {reset_note}) [{exhaustion.rule} {exhaustion.confidence}]"
                 )
+        if process.termination_reason and interruption_reason is None:
+            error = process.termination_note or error
         return WorkerResult(
             provider=self.provider_name, model=request.model, status=status,
             summary=error or output.strip()[:300] or "Claude Code completed",
@@ -506,6 +508,8 @@ class ClaudeCodeAdapter(WorkerAdapter):
             duration_seconds=auth.duration_seconds + process.duration_seconds,
             prompt_bytes=prompt_bytes, prompt_transport_used="stdin",
             actual_model=native.actual_model,
+            termination_reason=process.termination_reason,
+            termination_note=process.termination_note,
             usage=(
                 [recovered.usage]
                 if recovered is not None and recovered.usage is not None

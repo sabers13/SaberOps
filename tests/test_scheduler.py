@@ -870,3 +870,55 @@ def test_schedule_global_ceiling_absent_is_unbounded() -> None:
 
 
 
+
+
+def test_stale_candidate_skip_is_named_on_the_dispatch_decision() -> None:
+    """Item 5: using the next candidate must not hide a stale exclusion."""
+    c_stale = _cand("codex", "gpt-5.6-sol")
+    c_fresh = _cand("opencode", "opencode-go/deepseek-v4-flash")
+    snapshot = _make_snapshot(((c_stale, c_fresh),))
+    codex_pool = _make_pool_plan(
+        "chatgpt-plus", [("codex", 1.0)], overage_possible=True
+    )
+    opencode_pool = _make_pool_plan("opencode-go", [("opencode", 1.0)])
+    policy = _make_policy(
+        {"chatgpt-plus": codex_pool, "opencode-go": opencode_pool}
+    )
+    reset_at = (_NOW + timedelta(hours=2)).isoformat()
+    stale = _make_quota_state(
+        provider="codex",
+        pool="chatgpt-plus",
+        remaining_percent=80.0,
+        reset_at=reset_at,
+    )
+    fresh = _make_quota_state(
+        provider="opencode",
+        pool="opencode-go",
+        remaining_percent=80.0,
+        reset_at=reset_at,
+        freshness="FRESH",
+    )
+
+    decisions = schedule(
+        now=_NOW,
+        queued=[_job("j1")],
+        routing_snapshot=snapshot,
+        policy=policy,
+        quota_states=[stale, fresh],
+    )
+
+    dispatched = [d for d in decisions if isinstance(d, DispatchDecision)]
+    assert len(dispatched) == 1
+    assert dispatched[0].candidate == c_fresh
+    assert dispatched[0].skipped_candidates == (
+        {
+            "provider": "codex",
+            "model": "gpt-5.6-sol",
+            "reason": "QUOTA_EVIDENCE_REQUIRED",
+            "pool_id": "chatgpt-plus",
+            "binding_window": "5h",
+            "evidence_state": "stale",
+            "needs_probe": True,
+            "probe_harness": "codex",
+        },
+    )

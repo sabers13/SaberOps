@@ -246,6 +246,10 @@ class AntigravityAdapter(WorkerAdapter):
                 quota_model_scope = exhaustion.model_scope
                 quota_reset_confidence = exhaustion.reset_confidence
 
+        if res.termination_reason and interruption_reason is None:
+            error = res.termination_note or error
+            summary = res.termination_note or summary
+
         return WorkerResult(
             provider=self.provider_name,
             model=request.model,
@@ -269,4 +273,6 @@ class AntigravityAdapter(WorkerAdapter):
             quota_reset_confidence=quota_reset_confidence,
             prompt_bytes=prompt_bytes,
             prompt_transport_used="stdin" if use_stdin else "argv",
+            termination_reason=res.termination_reason,
+            termination_note=res.termination_note,
         )

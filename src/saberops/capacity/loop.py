@@ -1529,6 +1529,22 @@ def scheduler_tick(
                 memory_lease.release()
                 continue
 
+            # Item 5: name every probeable stale-quota exclusion that was
+            # evaluated for this job, even when a different route dispatched.
+            for skipped in dec.skipped_candidates:
+                try:
+                    store.append_event(
+                        db,
+                        dec.job.job_id,
+                        "candidate_quota_evidence_excluded",
+                        payload=skipped,
+                        now=moment,
+                    )
+                except (OSError, sqlite3.Error, ValueError):
+                    logging.getLogger(__name__).exception(
+                        "job candidate-exclusion evidence failed"
+                    )
+
             # Step B: Re-verify lease before reservation
             if not check_lease(db, lease, now=_current_moment()):
                 memory_lease.release()

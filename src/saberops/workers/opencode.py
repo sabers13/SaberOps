@@ -396,6 +396,10 @@ class OpenCodeAdapter(WorkerAdapter):
             error = f"Worker exited with code {res.exit_code}"
             summary = (res.stderr.strip() or res.stdout.strip())[:300]
 
+        if res.termination_reason:
+            error = res.termination_note or error
+            summary = res.termination_note or summary
+
         return WorkerResult(
             provider=self.provider_name,
             model=request.model,
@@ -418,4 +422,6 @@ class OpenCodeAdapter(WorkerAdapter):
             cli_version=cli_version,
             requested_variant=requested_variant,
             reported_variant=reported_variant_val,
+            termination_reason=res.termination_reason,
+            termination_note=res.termination_note,
         )

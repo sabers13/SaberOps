@@ -25,7 +25,11 @@ from saberops.control_plane.bindings import (
     resolve_reviewer_candidate_binding,
 )
 from saberops.db import Database, current_iso_timestamp
-from saberops.dispatch import control_plane_decision, is_red_line_reason
+from saberops.dispatch import (
+    capacity_probe_event_payload,
+    control_plane_decision,
+    is_red_line_reason,
+)
 from saberops.git import GitManager
 from saberops.models import (
     AttemptStatus,
@@ -1016,6 +1020,11 @@ class ReviewEngine:
                     provider=candidate.provider,
                     probes=getattr(self, "quota_probes", None),
                     pool_policies=effective_quota_pools(control_plane_policy),
+                )
+                self.db.record_event(
+                    run_id,
+                    "capacity_red_line_probe",
+                    payload=capacity_probe_event_payload(decision, probe_outcome),
                 )
                 if probe_outcome == "ran":
                     try:

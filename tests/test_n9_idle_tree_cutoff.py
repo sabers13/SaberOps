@@ -9,6 +9,7 @@ sustained period so the repair/retry path runs; any output resets the clock.
 
 from __future__ import annotations
 
+import sys
 from types import SimpleNamespace
 from typing import Any
 
@@ -21,6 +22,7 @@ from saberops.monitor import (
     WorkerMonitor,
     _ProcEntry,
 )
+from saberops.process import run_process
 
 
 def _snapshot(pgid: int, *, tick: int, incomplete: bool = False) -> Any:
@@ -122,3 +124,48 @@ def test_incomplete_evidence_never_cuts(
     assert monitor.sample() is MonitorState.AMBIGUOUS_BUSY
     assert monitor.reason == "evidence_incomplete"
     assert monitor.should_terminate_for_idle_tree() is False
+
+
+class _AlwaysCutMonitor:
+    """A monitor that reports the N9 cutoff on its very first sample."""
+
+    state = MonitorState.AMBIGUOUS_BUSY
+    reason = "tree_activity_without_output"
+    tree_activity_without_output_cutoff = 600.0
+
+    def sample(self) -> MonitorState:
+        return MonitorState.AMBIGUOUS_BUSY
+
+    def should_terminate(self) -> bool:
+        return False
+
+    def should_terminate_for_idle_tree(self) -> bool:
+        return True
+
+    def mark_terminating(self) -> None:
+        self.state = MonitorState.TERMINATING
+
+    def mark_terminal(self) -> None:
+        self.state = MonitorState.TERMINAL
+
+    def touch_stdout(self) -> None:
+        pass
+
+    def touch_stderr(self) -> None:
+        pass
+
+
+def test_process_result_carries_the_idle_tree_cut_reason_and_note() -> None:
+    """N17: the deliberate cut must be typed, not only a stderr suffix."""
+    result = run_process(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        worker_monitor=_AlwaysCutMonitor(),
+        on_stdout=lambda _line: None,
+        timeout=60,
+    )
+
+    assert result.termination_reason == "idle_tree_cutoff"
+    assert result.termination_note is not None
+    assert "stayed active without producing output" in result.termination_note
+    assert "stopped early so the repair/retry path can run" in result.termination_note
+    assert "stayed active without producing output" in result.stderr

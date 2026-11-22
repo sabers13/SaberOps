@@ -59,6 +59,10 @@ class DispatchDecision:
     multiplier: float = 1.0
     drawn_pools: tuple[str, ...] = ()
     draws: tuple[PoolDraw, ...] = ()
+    # Probeable stale-quota exclusions evaluated before this dispatch (N13 /
+    # item 5).  Persisted as a job event so an owner can see that a candidate
+    # was skipped for expired evidence even when another route dispatched.
+    skipped_candidates: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -272,6 +276,7 @@ def schedule(
         all_group_decisions: list[list[AdmissionDecision]] = []
         job_dispatched = False
         vendor_blocked: dict[str, str] = {}
+        stale_skips: list[dict[str, Any]] = []
 
         for g_idx, group in enumerate(groups):
             # Evaluate admission for every candidate in this group
@@ -319,6 +324,23 @@ def schedule(
                     )
                 )
             all_group_decisions.append(decisions_for_group)
+            for skipped in decisions_for_group:
+                if (
+                    not skipped.admitted
+                    and skipped.reason == "QUOTA_EVIDENCE_REQUIRED"
+                ):
+                    stale_skips.append(
+                        {
+                            "provider": skipped.candidate.provider,
+                            "model": skipped.candidate.model,
+                            "reason": skipped.reason,
+                            "pool_id": skipped.pool_id,
+                            "binding_window": skipped.binding_window,
+                            "evidence_state": "stale",
+                            "needs_probe": skipped.needs_probe,
+                            "probe_harness": skipped.probe_harness,
+                        }
+                    )
             admitted_in_group = [d for d in decisions_for_group if d.admitted]
             if scout_preferred and admitted_in_group:
                 cheap_admitted = [
@@ -395,6 +417,7 @@ def schedule(
                         multiplier=best.multiplier,
                         drawn_pools=best.drawn_pools,
                         draws=best.draws,
+                        skipped_candidates=tuple(stale_skips),
                     )
                 )
                 job_dispatched = True
@@ -551,6 +574,8 @@ def schedule(
                     ),
                     "vendor_unverified": dict(sorted(vendor_blocked.items())),
                 }
+            if stale_skips:
+                details["excluded_candidates"] = list(stale_skips)
             decisions.append(
                 WaitDecision(
                     job=job,

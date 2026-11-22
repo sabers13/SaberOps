@@ -63,7 +63,9 @@ from saberops.db import Database, current_iso_timestamp
 from saberops.dispatch import (
     build_candidate_skip,
     build_skip_payload,
+    capacity_probe_event_payload,
     evaluate_eligibility,
+    format_mixed_exhaustion_summary,
     format_no_eligible_summary,
     is_red_line_reason,
     routing_context_for_role,
@@ -1808,6 +1810,7 @@ class Orchestrator:
         routing_snapshot: Any | None,
         required_capabilities: tuple[str, ...] = (),
         control_plane_digest: str | None = None,
+        run_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Emit one deterministic eligibility record per considered route."""
         from saberops.dispatch import (
@@ -1848,6 +1851,22 @@ class Orchestrator:
                 entry["pool_id"] = decision.quota.pool_id
             if decision.quota.reset_at:
                 entry["reset_at"] = decision.quota.reset_at
+            if (
+                entry.get("evidence_state") == "stale"
+                and run_id is not None
+            ):
+                # Item 5: an expired-evidence skip is owner-visible even when
+                # another route is chosen for this run.
+                self.db.record_event(
+                    run_id,
+                    "candidate_quota_evidence_excluded",
+                    payload={
+                        **entry,
+                        "needs_probe": bool(
+                            (decision.capacity or {}).get("needs_probe")
+                        ),
+                    },
+                )
             evidence.append(entry)
         return evidence
 
@@ -3115,6 +3134,7 @@ class Orchestrator:
                         routing_snapshot=routing_snapshot,
                         required_capabilities=frozen_control_plane.required_capabilities,
                         control_plane_digest=frozen_control_plane.digest,
+                        run_id=run_id,
                     ),
                     "effective_candidates": [
                         {"provider": c.provider, "model": c.model} for c in candidates
@@ -3635,6 +3655,7 @@ class Orchestrator:
                                     frozen_control_plane.required_capabilities
                                 ),
                                 control_plane_digest=frozen_control_plane.digest,
+                                run_id=run_id,
                             ),
                             "effective_candidates": [
                                 {"provider": c.provider, "model": c.model} for c in candidates
@@ -4625,6 +4646,13 @@ class Orchestrator:
                             probes=getattr(self, "quota_probes", None),
                             pool_policies=effective_quota_pools(control_plane_policy),
                         )
+                        self.db.record_event(
+                            run_id,
+                            "capacity_red_line_probe",
+                            payload=capacity_probe_event_payload(
+                                decision_pre, probe_outcome
+                            ),
+                        )
                         if probe_outcome == "ran":
                             try:
                                 from saberops.capacity.snapshot import effective_quota_states
@@ -5480,6 +5508,8 @@ class Orchestrator:
                         "tier": current_tier.value,
                         "package_id": tier_decision.package_id,
                         "attempt": attempt_number,
+                        "termination_reason": worker_res.termination_reason,
+                        "termination_note": worker_res.termination_note,
                     },
                 )
 
@@ -6076,6 +6106,7 @@ class Orchestrator:
                                                 control_plane_digest=(
                                                     frozen_control_plane.digest
                                                 ),
+                                                run_id=run_id,
                                             )
                                         ),
                                         "effective_candidates": [
@@ -9015,13 +9046,23 @@ class Orchestrator:
                     attempt.worker_stderr = worker_res.stderr
                     attempt.worker_error = worker_res.error
                     attempt.completed_at = now
+                    if worker_res.termination_reason:
+                        # Engine-initiated early stop (N9 idle-tree cutoff).
+                        # Persist the typed reason on the attempt so the durable
+                        # record says why it ended, not just the provider's
+                        # "connection reset" symptom.
+                        attempt.interruption_reason = worker_res.termination_reason
+                        attempt.worker_error = (
+                            worker_res.termination_note or worker_res.error
+                        )
                     self.db.update_attempt(
                         attempt_id=attempt_id,
                         status=worker_res.status,
                         worker_stdout=worker_res.stdout,
                         worker_stderr=worker_res.stderr,
-                        worker_error=worker_res.error,
+                        worker_error=attempt.worker_error,
                         completed_at=now,
+                        interruption_reason=attempt.interruption_reason,
                     )
                     # Capture changed paths even for abnormal termination
                     changed_paths_timeout: list[str] = []
@@ -9043,6 +9084,8 @@ class Orchestrator:
                             "worktree_path": str(wt_path),
                             "transcript_path": str(get_transcript_path(self.db, run_id)),
                             "role": effective_role.value,
+                            "termination_reason": worker_res.termination_reason,
+                            "termination_note": worker_res.termination_note,
                         },
                     )
                     if changed_paths_timeout:
@@ -9224,13 +9267,11 @@ class Orchestrator:
                         },
                     )
                     chain_exhaustion_recorded = True
-                exhaustion_summary = format_no_eligible_summary(
-                    skipped_candidate_details,
+                summary = format_mixed_exhaustion_summary(
+                    gate_command,
+                    chain_attempt_count,
+                    list(skipped_candidate_details),
                     routing_context=selected_routing_context,
-                )
-                summary = (
-                    f"All {chain_attempt_count} attempt(s) failed to pass gate "
-                    f"'{gate_command}'. {exhaustion_summary}"
                 )
             else:
                 summary = (

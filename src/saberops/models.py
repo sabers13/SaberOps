@@ -1295,6 +1295,13 @@ class WorkerResult:
     outcome: DispatchOutcome | None = None
     usage: list[ProviderUsage] = field(default_factory=list)
     interruption_reason: WorkerInterruptionReason | None = None
+    # Engine-initiated early stop (not a continuation reason).  Today the N9
+    # idle-tree cutoff sets ``"idle_tree_cutoff"`` plus the exact owner note so
+    # the durable attempt names why it ended instead of surfacing a network
+    # error.  Unlike ``interruption_reason`` this never authorizes a
+    # checkpoint/continuation; the ordinary retry path still applies.
+    termination_reason: str | None = None
+    termination_note: str | None = None
     # Canonical UTC ISO-8601 reset clock for a QUOTA_EXHAUSTED
     # interruption, populated by the classifying adapter from the
     # provider signal (structured reset, else conservative prose

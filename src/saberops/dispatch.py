@@ -224,6 +224,50 @@ def format_no_eligible_summary(
         return f"No eligible candidate{context_suffix}:\n{lines}"
     return f"No eligible candidate:\n{lines}"
 
+
+def capacity_probe_event_payload(
+    decision: Any, probe_outcome: str
+) -> dict[str, Any]:
+    """Durable evidence for a zero-inference probe of a refused candidate.
+
+    The post-probe decision alone cannot answer "which term tipped it?" because
+    the successful probe resets ``prior_charges_pct`` to zero.  This payload
+    keeps the pre-probe reason, the full capacity block, and the probe outcome
+    together (N7-observability), and also names a stale-evidence exclusion.
+    """
+    payload = dict(decision.as_payload())
+    payload["probe_outcome"] = probe_outcome
+    payload["evidence_state"] = (
+        "stale" if decision.exclusion_reason == "QUOTA_EVIDENCE_REQUIRED" else "fresh"
+    )
+    return payload
+
+
+def format_mixed_exhaustion_summary(
+    gate_command: str,
+    attempt_count: int,
+    skips: list[dict[str, Any]],
+    *,
+    routing_context: str = "",
+) -> str:
+    """Name the real terminal cause when attempts ran *and* candidates skipped.
+
+    The launched attempts failed the gate; the skipped candidates are a
+    secondary fact.  Reusing the zero-launch ``No eligible candidate`` wording
+    here made a two-gate-failure run read as ``provider_unavailable`` (N16).
+    """
+    summary = (
+        f"All {attempt_count} attempt(s) failed to pass gate '{gate_command}'."
+    )
+    if skips:
+        context_suffix = f" for {routing_context}" if routing_context else ""
+        lines = "\n".join(format_skipped_candidate_line(skip) for skip in skips)
+        summary += (
+            f" {len(skips)} further candidate(s) were skipped as ineligible"
+            f"{context_suffix}:\n{lines}"
+        )
+    return summary
+
 #: Fixed sanitized reason used when the readiness authority itself cannot
 #: be constructed or read.  Never an exception repr, path, or secret:
 #: the single vocabulary token is the whole diagnostic.

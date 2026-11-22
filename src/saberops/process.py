@@ -58,6 +58,15 @@ class ProcessResult:
     # than read a partial stream as a complete one.  Declared last so the
     # positional field order of the established fields does not move.
     output_incomplete: bool = False
+    # Typed reason when the engine deliberately stopped the process tree before
+    # a natural exit.  Today the only such cut is the N9 idle-tree cutoff; an
+    # adapter or orchestrator records it on the attempt so the durable record
+    # does not read like a network failure.  ``None`` means no engine cut.
+    termination_reason: str | None = None
+    # The exact owner-facing note for the cut above (the same text appended to
+    # stderr).  Carried separately because the native-session path loses the
+    # process stderr when its HTTP turn fails after the cut.
+    termination_note: str | None = None
 
     @property
     def passed(self) -> bool:
@@ -1543,6 +1552,7 @@ def run_process(
     tracker = _ActivityTracker()
     termination_incomplete = False
     termination_note: str | None = None
+    termination_cut_reason: str | None = None
 
     # Bounded monitor-state projection: emit ONLY on MonitorState change,
     # never per sample.  The baseline is the monitor's construction state.
@@ -1881,6 +1891,7 @@ def run_process(
                                     f"{cutoff:.0f}s; stopped early so the "
                                     "repair/retry path can run]"
                                 )
+                                termination_cut_reason = "idle_tree_cutoff"
                             exit_code = proc.returncode if proc.returncode is not None else -1
                             break
                     except Exception:
@@ -2009,4 +2020,6 @@ def run_process(
         launch_failed=launch_failed,
         control_interrupted=control_interrupted,
         output_incomplete=output_incomplete,
+        termination_reason=termination_cut_reason,
+        termination_note=(termination_note.strip() if termination_note else None),
     )

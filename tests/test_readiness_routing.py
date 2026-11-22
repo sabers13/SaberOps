@@ -1536,8 +1536,10 @@ def test_r1b1_mixed_attempted_plus_skipped_exhaustion_is_truthful(
     assert "1 attempt(s) failed to pass gate" in result.summary
     assert _CAND_B in result.summary
     assert "readiness UNKNOWN (INSUFFICIENT_EVIDENCE)" in result.summary
-    # The launched model is not described as ineligible.
-    assert "No eligible candidate" in result.summary
+    # The launched model is not described as ineligible; the skipped
+    # candidate is named as the secondary fact.
+    assert "No eligible candidate" not in result.summary
+    assert "1 further candidate(s) were skipped as ineligible" in result.summary
 
     run_failed = [e for e in events if e.event_type == "run_failed"][-1]
     run_failed_payload = _payload(run_failed)
@@ -1833,7 +1835,8 @@ def test_r1b2_package_transition_resets_skip_evidence_and_routing_context(
     # walk. Package 2 launched flash once and failed its gate, so the
     # summary names exactly one failed attempt -- never a claim that
     # package 1's PASSED attempt failed its gate.
-    assert "No eligible candidate for BUILD" in result.summary
+    assert "No eligible candidate for BUILD" not in result.summary
+    assert "further candidate(s) were skipped as ineligible for BUILD" in result.summary
     assert "failed to pass gate" in result.summary
     assert "All 1 attempt(s)" in result.summary
     assert "All 2 attempt(s)" not in result.summary
@@ -1961,9 +1964,10 @@ def test_r1b3_mixed_current_chain_after_prior_success_is_truthful(
     assert "All 1 attempt(s) failed to pass gate" in result.summary
     assert "All 2 attempt(s)" not in result.summary
     # Package-1 success is never described as failed/ineligible.
-    assert "No eligible candidate for BUILD" in result.summary
+    assert "No eligible candidate for BUILD" not in result.summary
+    assert "further candidate(s) were skipped as ineligible for BUILD" in result.summary
     assert pkg2_skip in result.summary
-    assert pkg1_success not in result.summary.split("No eligible candidate")[-1]
+    assert pkg1_success not in result.summary.split("further candidate(s) were skipped")[-1]
 
     no_elig = [e for e in events if e.event_type == "no_eligible_candidate"]
     assert no_elig
@@ -2513,7 +2517,8 @@ def test_r1b4_package_recovery_excludes_prior_package_attempts(
 
     events = db2.get_events(run_id, limit=10000)
     # Current-chain attempt count is one: package 2 launched flash once.
-    assert "No eligible candidate for BUILD" in result.summary
+    assert "No eligible candidate for BUILD" not in result.summary
+    assert "further candidate(s) were skipped as ineligible for BUILD" in result.summary
     assert "failed to pass gate" in result.summary
     assert "All 1 attempt(s)" in result.summary
     assert "All 2 attempt(s)" not in result.summary
@@ -3204,7 +3209,8 @@ def test_r1b5_recovery_does_not_create_second_plan(
     assert len([e for e in post_events if e.event_type == "plan_step_added"]) == 2
     # Recovery still continued package 2 from durable state and terminalized.
     assert result.status == RunStatus.FAILED
-    assert "No eligible candidate for BUILD" in result.summary
+    assert "No eligible candidate for BUILD" not in result.summary
+    assert "further candidate(s) were skipped as ineligible for BUILD" in result.summary
 
 
 def test_r1b5_recovery_adopts_durable_plan(
@@ -3303,7 +3309,8 @@ def test_r1b5_recovery_adopts_durable_plan(
     assert post_attempts[0].status == AttemptStatus.SUCCESS
     assert post_attempts[-1].status == AttemptStatus.FAILED
     assert result.status == RunStatus.FAILED
-    assert "No eligible candidate for BUILD" in result.summary
+    assert "No eligible candidate for BUILD" not in result.summary
+    assert "further candidate(s) were skipped as ineligible for BUILD" in result.summary
     run_failed = _payload(
         [e for e in post_events if e.event_type == "run_failed"][-1]
     )
@@ -3383,7 +3390,8 @@ def test_r1b5_fresh_run_plans_once(
     # Normal planning persisted exactly one plan with the expected steps and
     # packages, and the run proceeded through its normal lifecycle.
     assert result.status == RunStatus.FAILED
-    assert "No eligible candidate for BUILD" in result.summary
+    assert "No eligible candidate for BUILD" not in result.summary
+    assert "further candidate(s) were skipped as ineligible for BUILD" in result.summary
     assert len(db.list_run_plans(result.run_id)) == 1
     events = db.get_events(result.run_id, limit=10000)
     assert len([e for e in events if e.event_type == "plan_created"]) == 1
@@ -3842,3 +3850,19 @@ def test_r1b4_same_chain_continuation_keeps_prior_attempts(
     assert run_failed["chain_attempts_count"] == 3
 
     _ = orchestrator_module
+
+
+def test_mixed_exhaustion_summary_names_the_gate_failure_cause() -> None:
+    """N16: skipped candidates are secondary, never the named cause."""
+    from saberops.dispatch import format_mixed_exhaustion_summary
+
+    summary = format_mixed_exhaustion_summary(
+        "make gate",
+        2,
+        [{"provider": "opencode", "model": "m", "reason": "provider_unavailable"}],
+        routing_context="BUILD",
+    )
+    assert "All 2 attempt(s) failed to pass gate 'make gate'." in summary
+    assert "No eligible candidate" not in summary
+    assert "1 further candidate(s) were skipped as ineligible for BUILD" in summary
+    assert "provider_unavailable" in summary

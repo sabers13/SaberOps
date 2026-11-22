@@ -55,6 +55,7 @@ from saberops.benchmark import (
     create_toy_repository,
     isolated_environment,
     metered_credential_keys,
+    parse_per_cli_selector,
     prepare_real_store,
     real_batches,
     real_family_requirements,
@@ -62,6 +63,7 @@ from saberops.benchmark import (
     real_model_for,
     real_worker_candidates,
     select_benchmark_tasks,
+    select_benchmark_tasks_by_cli,
     unclassified_metered_credentials,
     validate_real_mode,
     wait_for_batch,
@@ -1297,3 +1299,65 @@ def test_scheduler_killed_inside_the_dispatch_window_recovers(
     assert third is not None and third.ran
     final = get_job(db, job_id)
     assert final is not None and final.state is JobState.SUCCEEDED
+
+
+def test_per_cli_selector_varies_the_reduced_catalogue_per_batch() -> None:
+    """N13: each CLI can get its own count while plain forms keep working."""
+    assert parse_per_cli_selector("2") == 2
+    spec = parse_per_cli_selector("opencode=10,codex=2,claude=2")
+    assert spec == {"opencode": 10, "codex": 2, "claude": 2}
+
+    selected, skipped = select_benchmark_tasks_by_cli(spec)
+    assert len(selected["opencode"]) == 10
+    assert len(selected["codex"]) == 2
+    assert len(selected["claude"]) == 2
+    assert skipped["codex"] == TASKS[2:]
+    assert skipped["opencode"] == ()
+
+    batches = real_batches(selected)
+    by_subscription = {batch.subscription: batch.tasks for batch in batches}
+    assert by_subscription["opencode"] == TASKS
+    assert by_subscription["codex"] == TASKS[:2]
+    assert by_subscription["claude"] == TASKS[:2]
+
+    with pytest.raises(RealModeRefused, match="unknown CLI"):
+        parse_per_cli_selector("gemini=2")
+    with pytest.raises(RealModeRefused, match="more than once"):
+        parse_per_cli_selector("codex=2,codex=3")
+    with pytest.raises(RealModeRefused, match="at least 1"):
+        select_benchmark_tasks_by_cli({"codex": 0})
+
+
+def test_benchmark_script_prints_a_count_for_each_batch(tmp_path: Path) -> None:
+    """N13: the reduced-run print says which batch each count applies to."""
+    script = Path(__file__).resolve().parents[1] / "scripts" / "benchmark.py"
+    store = tmp_path / "store"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--mode",
+            "real",
+            "--yes-real-cli",
+            "--dry-run",
+            "--per-cli",
+            "opencode=10,codex=2,claude=2",
+            "--store",
+            str(store),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
+    )
+    assert result.returncode == 0, result
+    assert "reduced catalogue [opencode batch]: running 10 task(s); skipping 0: -" in (
+        result.stdout
+    )
+    assert "reduced catalogue [codex batch]: running 2 task(s); skipping 8" in (
+        result.stdout
+    )
+    assert "reduced catalogue [claude batch]: running 2 task(s); skipping 8" in (
+        result.stdout
+    )
+    assert not store.exists()

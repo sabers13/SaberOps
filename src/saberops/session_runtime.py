@@ -545,17 +545,27 @@ class AgentSessionRuntime:
             with self.turn_lock:
                 return self._turn(request, started)
         except (OSError, ValueError, KeyError, SessionRuntimeError) as exc:
+            process = self.process_result
+            termination_reason = (
+                process.termination_reason if process is not None else None
+            )
+            termination_note = (
+                process.termination_note if process is not None else None
+            )
+            detail = termination_note or str(exc)
             return WorkerResult(
                 provider="opencode",
                 model=request.model,
                 status=AttemptStatus.FAILED,
-                summary="Provider session failed",
+                summary=termination_note or "Provider session failed",
                 stdout="",
-                stderr=str(exc),
-                error=str(exc),
+                stderr=detail,
+                error=detail,
                 has_changes=False,
                 outcome=DispatchOutcome.PROVIDER_OR_RUNTIME_FAILURE,
                 duration_seconds=time.monotonic() - started,
+                termination_reason=termination_reason,
+                termination_note=termination_note,
             )
 
     def _turn(self, request: WorkerRequest, started: float) -> WorkerResult:

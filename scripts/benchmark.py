@@ -26,12 +26,15 @@ from saberops.benchmark import (  # noqa: E402
     DEFAULT_CODEX_MODEL,
     DEFAULT_OPENCODE_MODEL,
     REAL_MODE_FLAG,
+    REAL_SUBSCRIPTION_ORDER,
     BenchmarkTask,
     RealModeRefused,
     fake_mode_environment,
+    parse_per_cli_selector,
     real_batches,
     real_model_for,
     select_benchmark_tasks,
+    select_benchmark_tasks_by_cli,
     validate_real_mode,
 )
 
@@ -82,11 +85,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     selection.add_argument(
         "--per-cli",
-        type=int,
-        metavar="N",
+        type=str,
+        metavar="N|CLI=N[,CLI=N...]",
         help=(
-            "real mode only: run the first N catalogue tasks in every batch; "
-            "skipped rows are printed"
+            "real mode only: run the first N catalogue tasks in every batch, or "
+            "set a count per subscription (e.g. opencode=10,codex=2,claude=2); "
+            "skipped rows are printed per batch"
         ),
     )
     parser.add_argument(
@@ -128,7 +132,11 @@ def _print_plan(
     store: Path,
     repo_root: Path,
     models: dict[str, str],
-    tasks: tuple[BenchmarkTask, ...] | None = None,
+    tasks: (
+        tuple[BenchmarkTask, ...]
+        | dict[str, tuple[BenchmarkTask, ...]]
+        | None
+    ) = None,
 ) -> None:
     print("SaberOps phase 1 benchmark: real mode plan (nothing started)")
     print(f"  store:     {store}")
@@ -168,13 +176,30 @@ def _run_real(args: argparse.Namespace) -> int:
         if args.tasks
         else None
     )
-    selected, skipped = select_benchmark_tasks(task_ids, per_cli=args.per_cli)
-    if skipped:
-        print(
-            f"benchmark: reduced catalogue: running {len(selected)} task(s) per "
-            f"CLI; skipping {len(skipped)}: "
-            + ", ".join(task.task_id for task in skipped)
+    per_cli = parse_per_cli_selector(args.per_cli) if args.per_cli else None
+    selected: tuple[BenchmarkTask, ...] | dict[str, tuple[BenchmarkTask, ...]]
+    if isinstance(per_cli, dict):
+        selected_by_cli, skipped_by_cli = select_benchmark_tasks_by_cli(per_cli)
+        for subscription in REAL_SUBSCRIPTION_ORDER:
+            skipped = skipped_by_cli[subscription]
+            print(
+                f"benchmark: reduced catalogue [{subscription} batch]: running "
+                f"{len(selected_by_cli[subscription])} task(s); skipping "
+                f"{len(skipped)}: "
+                + (", ".join(task.task_id for task in skipped) if skipped else "-")
+            )
+        selected = selected_by_cli
+    else:
+        selected_sequence, skipped = select_benchmark_tasks(
+            task_ids, per_cli=per_cli if isinstance(per_cli, int) else None
         )
+        if skipped:
+            print(
+                f"benchmark: reduced catalogue: running {len(selected_sequence)} "
+                f"task(s) per CLI; skipping {len(skipped)}: "
+                + ", ".join(task.task_id for task in skipped)
+            )
+        selected = selected_sequence
     if args.dry_run:
         _print_plan(store, repo_root, models, selected)
         return 0

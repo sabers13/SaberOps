@@ -220,6 +220,8 @@ class DirectAPIAdapter(WorkerAdapter):
         error = (
             None if status is AttemptStatus.SUCCESS else (output or "Direct API execution failed")
         )
+        if result.termination_reason and status is not AttemptStatus.SUCCESS:
+            error = result.termination_note or error
         return WorkerResult(
             provider=self.provider_name,
             model=request.model,
@@ -240,4 +242,6 @@ class DirectAPIAdapter(WorkerAdapter):
             else DispatchOutcome.TIMEOUT
             if result.timed_out
             else DispatchOutcome.PROVIDER_OR_RUNTIME_FAILURE,
+            termination_reason=result.termination_reason,
+            termination_note=result.termination_note,
         )

@@ -152,6 +152,45 @@ def notice_attempted(ledger: Path, key: str) -> bool:
     return row is not None
 
 
+def run_notification_ledger(db: Any) -> Path:
+    """The owner-store ledger a direct run's terminal notice is recorded in."""
+    owner_db = getattr(db, "owner_db", db)
+    path = Path(owner_db.db_path)
+    return path.with_name(path.name + ".notifications.sqlite3")
+
+
+def notify_run_terminal(
+    db: Any, *, run_id: str, status: str, summary: str | None = None
+) -> str:
+    """Deliver one durable terminal notice for a job-less direct run (N16).
+
+    Scheduler-dispatched runs are already covered by :func:`deliver_pending`'s
+    job scan, so a run that any job owns is skipped here to avoid a duplicate
+    notice.  A direct ``orch run`` has no job row; the execution owner records
+    this attempt itself so a detached run's failure is visible without an
+    attached ``orch watch``.
+    """
+    from saberops.jobs.store import list_jobs_tolerant
+
+    try:
+        jobs, _ = list_jobs_tolerant(db, limit=100_000, quarantine=False)
+    except (OSError, sqlite3.Error, ValueError):
+        jobs = []
+    for job in jobs:
+        if job.current_run_id == run_id or run_id in job.run_ids:
+            return "job-owned"
+    label = "finished" if status.upper() == "SUCCEEDED" else "failed"
+    body = run_id
+    if summary:
+        body = f"{run_id}\n{summary[:500]}"
+    return notify_once(
+        run_notification_ledger(db),
+        f"run:{run_id}:{status.upper()}",
+        f"SaberOps run {label}",
+        body,
+    )
+
+
 def deliver_pending(db: Any) -> None:
     """Scan durable job and question records; repeated ticks are idempotent.
 

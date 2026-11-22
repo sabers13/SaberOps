@@ -3251,6 +3251,20 @@ def handle_run(args: argparse.Namespace) -> int:
                 generation=owner.generation,
                 reason="execution_finished",
             )
+            # N16: a direct run has no job row, so the scheduler's job scan can
+            # never deliver its terminal notice.  Record the same durable
+            # once-per-key attempt here; job-owned runs are skipped inside.
+            try:
+                from saberops.notifications import notify_run_terminal
+
+                notify_run_terminal(
+                    db,
+                    run_id=result.run_id,
+                    status=result.status.value,
+                    summary=result.summary,
+                )
+            except Exception:  # noqa: BLE001 - a notice never changes the run outcome
+                pass
             print("─" * 60)
             print(f"Run ID      : {result.run_id}")
             print(f"Status      : {result.status.value}")

@@ -756,22 +756,105 @@ class RealBatch:
 
 
 def real_batches(
-    tasks: Sequence[BenchmarkTask] | None = None,
+    tasks: Sequence[BenchmarkTask] | Mapping[str, Sequence[BenchmarkTask]] | None = None,
 ) -> tuple[RealBatch, ...]:
     """The three real-mode batches, each with a different-vendor reviewer.
 
-    ``tasks`` narrows every batch to the same catalogue subset (N11); the
-    default is the full ten-task catalogue.
+    ``tasks`` narrows every batch to the same catalogue subset (N11) when it is
+    a sequence.  A mapping narrows each batch independently (N13), keyed by the
+    worker subscription; a subscription absent from the mapping keeps the full
+    catalogue.  The default is the full ten-task catalogue.
     """
-    selected = tuple(tasks) if tasks is not None else TASKS
+    if isinstance(tasks, Mapping):
+        per_batch = {
+            subscription: tuple(
+                tasks.get(subscription, TASKS)
+            )
+            for subscription in REAL_SUBSCRIPTION_ORDER
+        }
+    else:
+        selected = tuple(tasks) if tasks is not None else TASKS
+        per_batch = dict.fromkeys(REAL_SUBSCRIPTION_ORDER, selected)
     return tuple(
         RealBatch(
             subscription=subscription,
             reviewer_subscription=REVIEWER_SUBSCRIPTION[subscription],
-            tasks=selected,
+            tasks=per_batch[subscription],
         )
         for subscription in REAL_SUBSCRIPTION_ORDER
     )
+
+
+def parse_per_cli_selector(raw: str) -> int | dict[str, int]:
+    """Parse ``--per-cli`` as a plain count or a per-subscription mapping.
+
+    Plain forms keep their established meaning: ``--per-cli 2`` selects the
+    first two catalogue tasks for every batch.  ``--per-cli
+    opencode=10,codex=2,claude=2`` (N13) selects independently per batch.
+    """
+    text = raw.strip()
+    if not text:
+        raise RealModeRefused("--per-cli needs a count or CLI=count list")
+    if "=" not in text:
+        try:
+            return int(text)
+        except ValueError as exc:
+            raise RealModeRefused(
+                f"--per-cli must be an integer or CLI=count list, got {raw!r}"
+            ) from exc
+    spec: dict[str, int] = {}
+    for part in text.split(","):
+        name, separator, count_text = part.strip().partition("=")
+        if not separator or not name.strip() or not count_text.strip():
+            raise RealModeRefused(
+                f"--per-cli entry {part!r} must look like CLI=N"
+            )
+        subscription = name.strip().lower()
+        if subscription not in REAL_SUBSCRIPTION_ORDER:
+            raise RealModeRefused(
+                f"--per-cli names unknown CLI {subscription!r}; valid CLIs: "
+                + ", ".join(REAL_SUBSCRIPTION_ORDER)
+            )
+        if subscription in spec:
+            raise RealModeRefused(
+                f"--per-cli names CLI {subscription!r} more than once"
+            )
+        try:
+            spec[subscription] = int(count_text.strip())
+        except ValueError as exc:
+            raise RealModeRefused(
+                f"--per-cli count for {subscription!r} must be an integer"
+            ) from exc
+    return spec
+
+
+def _validate_per_cli_count(per_cli: int, label: str) -> None:
+    if per_cli < 1:
+        raise RealModeRefused(f"{label} must be at least 1")
+    if per_cli > len(TASKS):
+        raise RealModeRefused(
+            f"{label} {per_cli} exceeds the {len(TASKS)}-task catalogue"
+        )
+
+
+def select_benchmark_tasks_by_cli(
+    spec: Mapping[str, int],
+) -> tuple[dict[str, tuple[BenchmarkTask, ...]], dict[str, tuple[BenchmarkTask, ...]]]:
+    """Return per-batch ``(selected, skipped)`` for a per-CLI selector (N13)."""
+    if not spec:
+        raise RealModeRefused("--per-cli needs at least one CLI=count entry")
+    selected: dict[str, tuple[BenchmarkTask, ...]] = {}
+    skipped: dict[str, tuple[BenchmarkTask, ...]] = {}
+    for subscription in REAL_SUBSCRIPTION_ORDER:
+        count = spec.get(subscription)
+        if count is None:
+            selected[subscription] = TASKS
+            skipped[subscription] = ()
+            continue
+        _validate_per_cli_count(count, f"--per-cli {subscription}")
+        selected[subscription] = TASKS[:count]
+        skipped[subscription] = TASKS[count:]
+    return selected, skipped
 
 
 def select_benchmark_tasks(
@@ -802,12 +885,7 @@ def select_benchmark_tasks(
         wanted = set(requested)
         selected = tuple(task for task in TASKS if task.task_id in wanted)
     elif per_cli is not None:
-        if per_cli < 1:
-            raise RealModeRefused("--per-cli must be at least 1")
-        if per_cli > len(TASKS):
-            raise RealModeRefused(
-                f"--per-cli {per_cli} exceeds the {len(TASKS)}-task catalogue"
-            )
+        _validate_per_cli_count(per_cli, "--per-cli")
         selected = TASKS[:per_cli]
     else:
         selected = TASKS
@@ -1351,12 +1429,13 @@ def run_real_benchmark(
     repo_root: Path,
     models: dict[str, str],
     max_wait: float = 3600.0,
-    tasks: Sequence[BenchmarkTask] | None = None,
+    tasks: Sequence[BenchmarkTask] | Mapping[str, Sequence[BenchmarkTask]] | None = None,
 ) -> BenchmarkReport:
     """Drive the ten-task catalogue once per real CLI in an isolated store.
 
     ``tasks`` selects a reduced catalogue for a bounded confirmation run (N11);
-    the default is the full catalogue.  Each batch uses one worker subscription
+    a mapping selects a different subset per subscription (N13).  The default
+    is the full catalogue.  Each batch uses one worker subscription
     and a different-vendor reviewer (D4).  The caller must have applied
     :func:`isolated_environment` to ``os.environ`` first.  This function starts
     vendor CLIs, so it is only reached after :func:`validate_real_mode` and the

@@ -273,6 +273,9 @@ class ClineAdapter(WorkerAdapter):
                     f"(retry after {reset_note}) [{exhaustion.rule} {exhaustion.confidence}]"
                 )
                 summary = error
+        if res.termination_reason and interruption_reason is None:
+            error = res.termination_note or error
+            summary = res.termination_note or summary
         return WorkerResult(
             provider=self.provider_name,
             model=request.model,
@@ -295,6 +298,8 @@ class ClineAdapter(WorkerAdapter):
             quota_window=quota_window,
             quota_model_scope=quota_model_scope,
             quota_reset_confidence=quota_reset_confidence,
+            termination_reason=res.termination_reason,
+            termination_note=res.termination_note,
         )
 
     def _classify(
