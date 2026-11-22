@@ -18,7 +18,11 @@ from pathlib import Path
 import pytest
 from lifecycle_rig import RigEnvironment, build_lifecycle_rig
 
-from saberops.benchmark import TASKS_BY_ID, create_toy_repository
+from saberops.benchmark import (
+    TASKS_BY_ID,
+    benchmark_gate_command,
+    create_toy_repository,
+)
 from saberops.control_plane import (
     freeze_control_plane_policy,
     load_control_plane_policy,
@@ -37,8 +41,10 @@ from saberops.models import (
     Tier,
 )
 from saberops.paths import owner_state_dir
+from saberops.process import run_process
 from saberops.provenance import RunProvenance, mint_run_provenance
 from saberops.review import ReviewEngine
+from saberops.review_evidence import build_review_evidence
 from saberops.workers.registry import AdapterRegistry
 
 _FIX_EVIDENCE = (
@@ -300,3 +306,83 @@ def test_real_claude_batch_violations_still_block_with_evidence(
     )[1].split("\n--- ", 1)[0]
     assert "raise ValueError" not in app_evidence
     assert 'return f"hello {name}"' in app_evidence
+
+
+def test_engine_evidence_carries_the_real_gate_test_output(tmp_path: Path) -> None:
+    """D2 replay: the trusted block shows the pytest output the reviewers wanted."""
+    import shlex
+
+    repo, base = create_toy_repository(
+        tmp_path / "repo-gate", "toy-gate", task_id="fix-failing-test"
+    )
+    worktree = tmp_path / "wt-gate"
+    _git(repo, "worktree", "add", "-b", "orch/gate/a1", str(worktree), base)
+    test_file = worktree / "test_app.py"
+    test_file.write_text(
+        test_file.read_text(encoding="utf-8").replace('"hi Ada"', '"hello Ada"'),
+        encoding="utf-8",
+    )
+    _git(worktree, "add", ".")
+    _git(worktree, "commit", "-m", "fix the failing test")
+
+    gate_command = benchmark_gate_command("fix-failing-test")
+    gate = run_process(shlex.split(gate_command), cwd=worktree, timeout=60.0)
+    assert gate.exit_code == 0, gate.stderr
+
+    evidence = build_review_evidence(
+        worktree=worktree,
+        base_commit=base,
+        task=_task_text("fix-failing-test"),
+        clauses=("The failing test passes.",),
+        gate_command=gate_command,
+        gate_exit_code=gate.exit_code,
+        gate_stdout=gate.stdout,
+        gate_stderr=gate.stderr,
+    )
+    assert "Gate command output (engine-run; exact command below)" in evidence
+    assert f"$ {gate_command}" in evidence
+    assert "2 passed" in evidence
+
+
+def test_engine_evidence_carries_the_cli_gate_output(tmp_path: Path) -> None:
+    """D2 replay for cli-flag: the trusted block shows the CLI invocation."""
+    import shlex
+
+    repo, base = create_toy_repository(
+        tmp_path / "repo-cli-gate", "toy-cli-gate", task_id="cli-flag"
+    )
+    worktree = tmp_path / "wt-cli-gate"
+    _git(repo, "worktree", "add", "-b", "orch/cli/a1", str(worktree), base)
+    cli_file = worktree / "cli.py"
+    cli_file.write_text(
+        cli_file.read_text(encoding="utf-8")
+        .replace(
+            'parser.add_argument("name", nargs="?", default="world")',
+            'parser.add_argument("name", nargs="?", default="world")\n'
+            '    parser.add_argument("--name", dest="cli_name")',
+        )
+        .replace(
+            "print(greet(args.name))",
+            'print(greet(args.cli_name if args.cli_name is not None else args.name))',
+        ),
+        encoding="utf-8",
+    )
+    _git(worktree, "add", ".")
+    _git(worktree, "commit", "-m", "add --name")
+
+    gate_command = benchmark_gate_command("cli-flag")
+    gate = run_process(shlex.split(gate_command), cwd=worktree, timeout=60.0)
+    assert gate.exit_code == 0, gate.stderr
+
+    evidence = build_review_evidence(
+        worktree=worktree,
+        base_commit=base,
+        task=_task_text("cli-flag"),
+        clauses=("The CLI accepts --name and prints the supplied name.",),
+        gate_command=gate_command,
+        gate_exit_code=gate.exit_code,
+        gate_stdout=gate.stdout,
+        gate_stderr=gate.stderr,
+    )
+    assert "2 passed" in evidence
+    assert "hello Ada" in evidence

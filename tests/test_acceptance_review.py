@@ -6,6 +6,7 @@ from saberops.acceptance_review import (
     clause_coverage,
     extract_acceptance_clauses,
     render_acceptance_protocol,
+    render_clause_format_reask,
 )
 
 _BLOCK_B_TASK = (
@@ -107,3 +108,50 @@ def test_coverage_treats_contradictory_answers_as_failure() -> None:
     )
     assert not coverage.usable
     assert coverage.failed == (1,)
+
+
+def test_coverage_accepts_a_status_token_anywhere_after_the_marker() -> None:
+    """D1: the recorded Claude rename answer kept the status on the line."""
+    coverage = clause_coverage(
+        "CLAUSE 1: PASS — the diff renames every reference and git grep is empty\n",
+        ("one",),
+    )
+    assert coverage.usable
+
+    trailing = clause_coverage(
+        "CLAUSE 1: The failing test now asserts hello Ada. PASS — test_app.py\n",
+        ("one",),
+    )
+    assert trailing.usable
+
+
+def test_coverage_does_not_read_lowercase_prose_as_a_status() -> None:
+    """D1: 'The failing test passes.' is prose, not an answer; re-ask handles it."""
+    coverage = clause_coverage(
+        "CLAUSE 1: The failing test passes. — greet returns hello Ada\n",
+        ("one",),
+    )
+    assert coverage.missing == (1,)
+    assert coverage.failed == ()
+    assert coverage.format_retry_eligible
+
+
+def test_coverage_fails_closed_on_a_line_holding_both_tokens() -> None:
+    coverage = clause_coverage(
+        "CLAUSE 1: PASS but this would FAIL on an empty name — hunk\n",
+        ("one",),
+    )
+    assert not coverage.usable
+    assert coverage.failed == (1,)
+    assert not coverage.format_retry_eligible
+
+
+def test_format_reask_prompt_keeps_the_clause_list_and_exact_line_form() -> None:
+    prompt = render_clause_format_reask(
+        ("The failing test passes.",), "VERDICT: PASS\n\nIt is correct."
+    )
+    assert "Clause format re-ask" in prompt
+    assert "CLAUSE 1: The failing test passes." in prompt
+    assert "CLAUSE <n>: PASS|FAIL" in prompt
+    assert "Return only the clause lines" in prompt
+    assert "It is correct." in prompt

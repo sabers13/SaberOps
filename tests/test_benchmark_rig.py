@@ -52,8 +52,10 @@ from saberops.benchmark import (
     RealModeRefused,
     TaskResult,
     apply_isolated_environment,
+    benchmark_gate_command,
     configure_real_reviewer,
     create_toy_repository,
+    format_real_mode_preflight,
     isolated_environment,
     metered_credential_keys,
     parse_per_cli_selector,
@@ -1068,15 +1070,92 @@ def test_per_cli_selector_accepts_task_ids_per_batch() -> None:
         parse_per_cli_selector("codex=rename,codex=review-block-a")
 
 
-def test_benchmark_gate_uses_the_running_interpreter() -> None:
-    """N3/§12.5: the gate must not depend on a ``python`` alias existing."""
+def test_benchmark_gate_uses_the_running_interpreter_and_runs_pytest() -> None:
+    """N3/§12.5 + D2: no ``python`` alias, and the gate executes the tests."""
     import shlex
 
-    from saberops.benchmark import benchmark_gate_command
-
-    command = benchmark_gate_command()
-    assert shlex.split(command) == [sys.executable, "-B", "-c", "import app"]
+    command = benchmark_gate_command("fix-failing-test")
+    assert shlex.split(command) == [sys.executable, "-B", "-m", "pytest", "-q"]
     assert not command.startswith("python ")
+
+
+def test_cli_flag_gate_also_invokes_the_built_cli() -> None:
+    """D2: the CLI acceptance is exercised, not just pytest."""
+    import shlex
+
+    argv = shlex.split(benchmark_gate_command("cli-flag"))
+    assert argv[:3] == [sys.executable, "-B", "-c"]
+    script = argv[3]
+    assert "'-m','pytest','-q'" in script
+    assert "cli.main(['--name','Ada'])" in script
+
+
+def test_benchmark_gate_output_proves_the_fix_and_cli_acceptance(
+    tmp_path: Path,
+) -> None:
+    """D2 replay: the exact gate now emits the output the reviewers demanded."""
+    import shlex
+
+    from saberops.process import run_process
+
+    fix_repo, _ = create_toy_repository(
+        tmp_path / "gate-fix", "toy-fix", task_id="fix-failing-test"
+    )
+    test_file = fix_repo / "test_app.py"
+    test_file.write_text(
+        test_file.read_text(encoding="utf-8").replace('"hi Ada"', '"hello Ada"'),
+        encoding="utf-8",
+    )
+    fixed = run_process(
+        shlex.split(benchmark_gate_command("fix-failing-test")),
+        cwd=fix_repo,
+        timeout=60.0,
+    )
+    assert fixed.exit_code == 0, fixed.stderr
+    assert "2 passed" in fixed.stdout
+
+    cli_repo, _ = create_toy_repository(
+        tmp_path / "gate-cli", "toy-cli", task_id="cli-flag"
+    )
+    cli_file = cli_repo / "cli.py"
+    cli_file.write_text(
+        cli_file.read_text(encoding="utf-8")
+        .replace(
+            'parser.add_argument("name", nargs="?", default="world")',
+            'parser.add_argument("name", nargs="?", default="world")\n'
+            '    parser.add_argument("--name", dest="cli_name")',
+        )
+        .replace(
+            "print(greet(args.name))",
+            'print(greet(args.cli_name if args.cli_name is not None else args.name))',
+        ),
+        encoding="utf-8",
+    )
+    cli_gate = run_process(
+        shlex.split(benchmark_gate_command("cli-flag")),
+        cwd=cli_repo,
+        timeout=60.0,
+    )
+    assert cli_gate.exit_code == 0, cli_gate.stderr
+    assert "2 passed" in cli_gate.stdout
+    assert "hello Ada" in cli_gate.stdout
+
+
+def test_scheduler_finding_prints_as_information_in_benchmark_mode() -> None:
+    """D5: real mode ticks in-process; it must not print [FAIL] scheduler."""
+    from saberops.preflight import Finding
+
+    lines = format_real_mode_preflight(
+        [
+            Finding("FAIL", "scheduler: not running", "orch scheduler start"),
+            Finding("PASS", "git: clean"),
+        ]
+    )
+    joined = "\n".join(lines)
+    assert lines[0] == "real-mode preflight:"
+    assert "[INFO] scheduler: in-process tick (not required)" in joined
+    assert "[FAIL] scheduler" not in joined
+    assert "[PASS] git: clean" in joined
 
 
 def test_wait_for_batch_accepts_the_first_eligible_candidate() -> None:

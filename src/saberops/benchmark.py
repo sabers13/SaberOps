@@ -679,7 +679,7 @@ def probe_must_fail_acceptance(repo: Path, candidate_sha: str) -> bool | None:
     return None
 
 
-def benchmark_gate_command() -> str:
+def benchmark_gate_command(task_id: str | None = None) -> str:
     """Return the toy repository gate, built from the running interpreter.
 
     The rig used the literal ``python``, which does not exist on a host that
@@ -688,8 +688,47 @@ def benchmark_gate_command() -> str:
     §12.5).  ``sys.executable`` is the interpreter already running the rig, so
     the same command works wherever the benchmark itself runs.  It is quoted
     because the path can contain spaces.
+
+    The gate must also *exercise the acceptance* (D2): the old ``import app``
+    proved only that the module parsed, so a reviewer could not verify "the
+    failing test passes" or "the CLI accepts ``--name``" from trusted output.
+    Every toy task runs the seeded pytest suite; the CLI task additionally
+    invokes the built CLI.  Both are bounded by the existing gate timeout
+    (``DEFAULT_GATE_TIMEOUT`` = 300s) and the evidence block's character limit.
     """
-    return f"{shlex.quote(sys.executable)} -B -c 'import app'"
+    interpreter = shlex.quote(sys.executable)
+    if task_id == "cli-flag":
+        checker = (
+            "import subprocess,sys;"
+            "r=subprocess.run([sys.executable,'-B','-m','pytest','-q']);"
+            "r.check_returncode();"
+            "import cli;"
+            "raise SystemExit(cli.main(['--name','Ada']))"
+        )
+        return f"{interpreter} -B -c {shlex.quote(checker)}"
+    return f"{interpreter} -B -m pytest -q"
+
+
+def format_real_mode_preflight(findings: Iterable[Any]) -> list[str]:
+    """Render preflight findings, naming the in-process scheduler honestly.
+
+    Real mode ticks the scheduler in-process and deliberately excludes the
+    detached-scheduler finding from the abort condition.  Printing it as a
+    red ``[FAIL]`` in an otherwise green run reads like a failed preflight
+    (D5), so it is reported as information instead.
+    """
+    lines = ["real-mode preflight:"]
+    for finding in findings:
+        if (
+            finding.severity == "FAIL"
+            and str(finding.message).startswith("scheduler:")
+        ):
+            lines.append("  [INFO] scheduler: in-process tick (not required)")
+            continue
+        lines.append(f"  [{finding.severity}] {finding.message}")
+        if finding.remedy:
+            lines.append(f"        fix: {finding.remedy}")
+    return lines
 
 
 #: The deterministic violating candidate a must-fail row reviews.  It removes
@@ -713,6 +752,7 @@ class SeededCandidate:
     run_id: str
     candidate_sha: str
     worktree: Path
+    branch: str
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -811,7 +851,30 @@ def seed_must_fail_candidate(
             base_sha=base_sha,
         )
     )
-    return SeededCandidate(run_id=run_id, candidate_sha=candidate_sha, worktree=worktree)
+    return SeededCandidate(
+        run_id=run_id,
+        candidate_sha=candidate_sha,
+        worktree=worktree,
+        branch=branch,
+    )
+
+
+def remove_seeded_candidate(repo: Path, seeded: SeededCandidate) -> None:
+    """Unregister and delete a seeded must-fail worktree and its branch (D4).
+
+    The store is disposable, but a long-lived real store would otherwise
+    accumulate ``wt-review-block-*`` worktrees.  Cleanup is best-effort: a row's
+    measurement is already recorded and must not fail because a temp worktree
+    was already gone.
+    """
+    for argv in (
+        ["git", "-C", str(repo), "worktree", "remove", "--force", str(seeded.worktree)],
+        ["git", "-C", str(repo), "branch", "-D", seeded.branch],
+    ):
+        try:
+            subprocess.run(argv, capture_output=True, text=True, check=False)
+        except OSError:
+            pass
 
 
 def review_seeded_candidate(
@@ -914,6 +977,8 @@ def run_seeded_must_fail_row(
     except Exception as exc:  # noqa: BLE001 - one row never aborts the table
         review_failed = True
         detail = str(exc)
+    finally:
+        remove_seeded_candidate(repo, seeded)
     blocks = count_block_verdicts(db, seeded.run_id)
     review_count = len(db.get_reviews_for_run(seeded.run_id))
     probe = probe_must_fail_acceptance(repo, seeded.candidate_sha)
@@ -1948,26 +2013,30 @@ def run_real_benchmark(
     # a later task never inherits an earlier batch's accepted change.  The gate
     # is built from the running interpreter: a host with only ``python3`` must
     # not fail every task as a gate infrastructure error (report §12.5).
-    gate_command = benchmark_gate_command()
     batches = real_batches(tasks)
     repos_by_batch: dict[str, dict[str, Path]] = {}
     base_shas_by_batch: dict[str, dict[str, str]] = {}
+    gate_commands_by_batch: dict[str, dict[str, str]] = {}
     for batch in batches:
         batch_root = repo_root / batch.subscription
         repos: dict[str, Path] = {}
         base_shas: dict[str, str] = {}
+        gate_commands: dict[str, str] = {}
         for task in batch.tasks:
             repo, sha = create_toy_repository(
                 batch_root, f"toy-{task.task_id}", task_id=task.task_id
             )
             set_project_review_policy(repo, ReviewPolicyMode.ALWAYS_REQUIRED)
+            task_gate = benchmark_gate_command(task.task_id)
             assert (
-                cli_main(["project", "set-gate", "--repo", str(repo), gate_command]) == 0
+                cli_main(["project", "set-gate", "--repo", str(repo), task_gate]) == 0
             )
             repos[task.task_id] = repo
             base_shas[task.task_id] = sha
+            gate_commands[task.task_id] = task_gate
         repos_by_batch[batch.subscription] = repos
         base_shas_by_batch[batch.subscription] = base_shas
+        gate_commands_by_batch[batch.subscription] = gate_commands
 
     first = batches[0]
     findings = collect_preflight(
@@ -1981,12 +2050,7 @@ def run_real_benchmark(
         for finding in findings
         if finding.severity == "FAIL" and not finding.message.startswith("scheduler:")
     ]
-    lines = ["real-mode preflight:"]
-    for finding in findings:
-        lines.append(f"  [{finding.severity}] {finding.message}")
-        if finding.remedy:
-            lines.append(f"        fix: {finding.remedy}")
-    print("\n".join(lines))
+    print("\n".join(format_real_mode_preflight(findings)))
     if failures:
         raise RealModeRefused(
             "real-mode preflight is not green; see the findings above"
@@ -2120,7 +2184,9 @@ def run_real_benchmark(
                         else batch.subscription
                     ),
                     model=real_model_for(batch.subscription, models),
-                    gate_command=gate_command,
+                    gate_command=gate_commands_by_batch[batch.subscription][
+                        task.task_id
+                    ],
                     reviewer=reviewer,
                 )
             )

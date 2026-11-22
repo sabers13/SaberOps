@@ -13,6 +13,7 @@ from saberops.acceptance_review import (
     clause_coverage,
     extract_acceptance_clauses,
     render_acceptance_protocol,
+    render_clause_format_reask,
 )
 from saberops.authority import load_authority_settings
 from saberops.config import DEFAULT_REVIEW_LIMIT, RunConfig, reconstruct_run_config
@@ -1482,43 +1483,205 @@ class ReviewEngine:
                     if part
                 )
 
-            if acceptance_clauses and verdict in (
-                ReviewVerdict.PASS,
-                ReviewVerdict.PASS_WITH_BACKLOG,
+            coverage = (
+                clause_coverage(raw, acceptance_clauses)
+                if acceptance_clauses
+                else None
+            )
+            format_retry_association_id: str | None = None
+            if (
+                acceptance_clauses
+                and coverage is not None
+                and coverage.format_retry_eligible
+                and verdict in (ReviewVerdict.PASS, ReviewVerdict.PASS_WITH_BACKLOG)
             ):
-                coverage = clause_coverage(raw, acceptance_clauses)
-                if not coverage.usable:
-                    reviewer_verdict = verdict
-                    verdict = (
-                        ReviewVerdict.FINAL_BLOCK if is_final else ReviewVerdict.BLOCK
-                    )
-                    summary = (
-                        "Acceptance clause check failed: " + coverage.describe()
-                    )
-                    details = "\n\n".join(
-                        part
-                        for part in (
-                            details,
-                            "Acceptance clause gate (deterministic): the reviewer "
-                            f"returned {reviewer_verdict.value}, but "
-                            f"{coverage.describe()}. A PASS is usable only when every "
-                            "clause has an explicit PASS answer with evidence, so this "
-                            "verdict fails closed.",
+                # D1: the reviewer said PASS but wrote prose the deterministic
+                # gate cannot read (e.g. "CLAUSE 1: The failing test passes.").
+                # Ask the same reviewer once for the exact line format.  A FAIL
+                # token or a contradiction never reaches this branch, and a
+                # second unusable answer still blocks below.
+                first_coverage = coverage
+                retry_prompt = render_clause_format_reask(
+                    acceptance_clauses, raw
+                )
+                retry_prompt_bytes = len(retry_prompt.encode("utf-8"))
+                format_retry_association_id = f"{review_association_id}_fmt"
+                retry_res: WorkerResult | None = None
+                retry_evidence: DispatchEvidence | None = None
+                try:
+                    with tempfile.TemporaryDirectory(
+                        prefix=f"orch_revfmt_{run_id}_"
+                    ) as rev_dir_str:
+                        rev_dir = Path(rev_dir_str)
+                        retry_req = WorkerRequest(
+                            task=retry_prompt,
+                            worktree_path=rev_dir,
+                            model=reviewer.model,
+                            timeout_seconds=timeout,
+                            read_only=True,
+                            env=(
+                                dict(reviewer_resolved.overlay)
+                                if reviewer_resolved is not None
+                                else None
+                            ),
                         )
-                        if part
+                        retry_evidence = new_dispatch_evidence(
+                            run_id=run_id,
+                            association_id=format_retry_association_id,
+                            review_id=None,
+                            stage=DispatchStage.REVIEW,
+                            role=DispatchRole.CHECK,
+                            tier=review_tier,
+                            dispatch_reason=DispatchReason.INDEPENDENT_REVIEW,
+                            requested_provider=reviewer.provider,
+                            requested_model=reviewer.model,
+                            task=retry_req.task,
+                            context_mode="REVIEW",
+                            raw_parent_included=True,
+                            prompt_transport=adapter.prompt_transport_for(
+                                retry_prompt_bytes
+                            ),
+                            authority_mode=load_authority_settings().mode.value,
+                            routing_snapshot_digest=routing_digest,
+                            control_plane_digest=frozen_control_plane.digest,
+                            binding_id=review_binding_id,
+                            profile_id=review_profile_id,
+                            quota_pool_id=review_pool_id,
+                        )
+                        self.db.create_dispatch_evidence(retry_evidence)
+                        review_dispatches.append(retry_evidence)
+                        from saberops.agent_sessions import observe_invocation
+
+                        with fixed_snapshot(wt_path) as snapshot:
+                            if snapshot.commit != final_attempt.commit_sha:
+                                raise ValueError(
+                                    "Review candidate revision changed before clause "
+                                    "format re-ask"
+                                )
+                            retry_res = observe_invocation(
+                                adapter.run,
+                                replace(retry_req, worktree_path=snapshot.path),
+                                root=Path(self.db.db_path).resolve().parent
+                                / "agent-sessions",
+                                owner=run_id,
+                                role="reviewer",
+                                provider=reviewer.provider,
+                                association=format_retry_association_id,
+                            )
+                            if source_tree(snapshot.path) != snapshot.tree:
+                                retry_res.status = AttemptStatus.FAILED
+                                retry_res.error = (
+                                    "Reviewer mutated the verification snapshot"
+                                )
+                                retry_res.stdout = ""
+                except Exception as exc:
+                    retry_res = WorkerResult(
+                        provider=reviewer.provider,
+                        model=reviewer.model,
+                        status=AttemptStatus.FAILED,
+                        summary="Clause format re-ask failed",
+                        stdout="",
+                        stderr=str(exc),
+                        error=str(exc),
+                        outcome=DispatchOutcome.PROVIDER_OR_RUNTIME_FAILURE,
                     )
-                    self.db.record_event(
-                        run_id,
-                        "review_acceptance_clause_block",
-                        payload={
-                            "review_id": review_association_id,
-                            "reviewer_verdict": reviewer_verdict.value,
-                            "clause_count": len(acceptance_clauses),
-                            "missing_clauses": list(coverage.missing),
-                            "failed_clauses": list(coverage.failed),
-                            "is_final": is_final,
-                        },
+                    if retry_evidence is not None:
+                        update_dispatch_from_result(retry_evidence, retry_res)
+                        self.db.update_dispatch_evidence(retry_evidence)
+                else:
+                    if retry_evidence is not None:
+                        update_dispatch_from_result(retry_evidence, retry_res)
+                        retry_evidence.candidate_sha = final_attempt.commit_sha
+                        self.db.update_dispatch_evidence(retry_evidence)
+                retry_raw = ""
+                if retry_res is not None:
+                    retry_raw = (retry_res.stdout or "") + "\n" + (
+                        retry_res.stderr or ""
                     )
+                    persist_worker_usage(
+                        self.db,
+                        run_id=run_id,
+                        association_id=format_retry_association_id,
+                        attempt_id=None,
+                        review_id=None,
+                        stage=DispatchStage.REVIEW,
+                        tier=review_tier,
+                        provider=reviewer.provider,
+                        model=reviewer.model,
+                        prompt_bytes=retry_prompt_bytes,
+                        transport=adapter.prompt_transport_for(
+                            retry_prompt_bytes
+                        ),
+                        result=retry_res,
+                    )
+                    raw = raw + "\n\n" + retry_raw
+                coverage = clause_coverage(raw, acceptance_clauses)
+                self.db.record_event(
+                    run_id,
+                    "review_clause_format_retry",
+                    payload={
+                        "review_id": review_association_id,
+                        "retry_review_id": format_retry_association_id,
+                        "provider": reviewer.provider,
+                        "model": reviewer.model,
+                        "reviewer_verdict": verdict.value,
+                        "first_missing": list(first_coverage.missing),
+                        "first_failed": list(first_coverage.failed),
+                        "retry_missing": list(coverage.missing),
+                        "retry_failed": list(coverage.failed),
+                        "retry_usable": coverage.usable,
+                        "is_final": is_final,
+                    },
+                )
+                details = "\n\n".join(
+                    part
+                    for part in (
+                        details,
+                        "Clause format re-ask (deterministic): the first answer "
+                        f"returned {verdict.value}, but {first_coverage.describe()}. "
+                        "The same reviewer was asked once for the exact "
+                        "one-line answer form; after that re-ask, "
+                        f"{coverage.describe()}.",
+                    )
+                    if part
+                )
+
+            if (
+                acceptance_clauses
+                and coverage is not None
+                and not coverage.usable
+                and verdict in (ReviewVerdict.PASS, ReviewVerdict.PASS_WITH_BACKLOG)
+            ):
+                reviewer_verdict = verdict
+                verdict = (
+                    ReviewVerdict.FINAL_BLOCK if is_final else ReviewVerdict.BLOCK
+                )
+                summary = "Acceptance clause check failed: " + coverage.describe()
+                details = "\n\n".join(
+                    part
+                    for part in (
+                        details,
+                        "Acceptance clause gate (deterministic): the reviewer "
+                        f"returned {reviewer_verdict.value}, but "
+                        f"{coverage.describe()}. A PASS is usable only when every "
+                        "clause has an explicit PASS answer with evidence, so this "
+                        "verdict fails closed.",
+                    )
+                    if part
+                )
+                self.db.record_event(
+                    run_id,
+                    "review_acceptance_clause_block",
+                    payload={
+                        "review_id": review_association_id,
+                        "reviewer_verdict": reviewer_verdict.value,
+                        "clause_count": len(acceptance_clauses),
+                        "missing_clauses": list(coverage.missing),
+                        "failed_clauses": list(coverage.failed),
+                        "format_retry": format_retry_association_id is not None,
+                        "is_final": is_final,
+                    },
+                )
 
             if (
                 acceptance_clauses
@@ -1590,11 +1753,16 @@ class ReviewEngine:
                         for finding in structured_findings
                     ]
                 )
-            self.db.link_model_calls_to_review(
-                run_id,
+            review_associations = (
                 [review_dispatch_evidence.association_id]
                 if review_dispatch_evidence is not None
-                else [],
+                else []
+            )
+            if format_retry_association_id is not None:
+                review_associations.append(format_retry_association_id)
+            self.db.link_model_calls_to_review(
+                run_id,
+                review_associations,
                 review_id,
             )
             self.db.record_event(

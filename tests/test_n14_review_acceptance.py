@@ -149,6 +149,172 @@ def _seed_violating_candidate(rig: RigEnvironment, task: str) -> tuple[str, str,
     return run_id, candidate_sha, worktree
 
 
+#: D1 shape 1, recorded from the Codex ``fix-failing-test`` first review
+#: (``rev_b615a89850``): an overall PASS with no clause line at all.
+_RECORDED_PASS_NO_CLAUSE = (
+    "VERDICT: PASS\n\n"
+    "**Feedback:**\n"
+    "The candidate diff correctly fixes the failing test. The test assertion was "
+    "changed from `assert greet(\"Ada\") == \"hi Ada\"` to "
+    "`assert greet(\"Ada\") == \"hello Ada\"`, which now matches the actual output "
+    "of the `greet()` function defined in app.py. The run is small and correct.\n"
+)
+
+#: D1 shape 2, the same task's re-review (``rev_c67221efdb``): a clause line in
+#: prose that the old parser could not read.
+_RECORDED_PROSE_CLAUSE = (
+    "VERDICT: PASS\n\n"
+    "**Clause Analysis:**\n"
+    "CLAUSE 1: The failing test passes. — The greet() function returns "
+    "`f\"hello {name}\"`, so calling greet(\"Ada\") produces \"hello Ada\". "
+    "The assertion matches that output exactly.\n"
+)
+
+#: The accepted rename answer from ``run_c9c24c9614fc`` (round 2).
+_RECORDED_EXACT_CLAUSE = (
+    "VERDICT: PASS\n\n"
+    "CLAUSE 1: PASS — git grep finds no remaining reference to greet in the "
+    "candidate tree.\n"
+)
+
+
+def _prompts(prompt_log: Path) -> list[str]:
+    return [
+        json.loads(line)["prompt"]
+        for line in prompt_log.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def _seed_wording_candidate(
+    rig: RigEnvironment,
+    task: str = "Fix the test.\n\nAcceptance:\nThe failing test passes.",
+) -> str:
+    run_id, _candidate_sha, _worktree = _seed_violating_candidate(rig, task)
+    return run_id
+
+
+def test_prose_clause_line_gets_one_format_reask_then_passes(
+    rig: RigEnvironment, tmp_path: Path
+) -> None:
+    """D1: a missing/unparseable clause answer triggers one same-reviewer re-ask."""
+    prompt_log = tmp_path / "wording-prompts.jsonl"
+    run_id = _seed_wording_candidate(rig)
+    rig.set_reviewer_verdict(
+        "PASS",
+        review_texts=[_RECORDED_PASS_NO_CLAUSE, _RECORDED_EXACT_CLAUSE],
+        prompt_log=prompt_log,
+    )
+
+    db = rig.db()
+    reviewer_cand = reviewer_candidate_for_dispatch(
+        load_owner_bindings(),
+        adapter_registry=AdapterRegistry.default(),
+    )
+    assert reviewer_cand is not None
+    engine = ReviewEngine(
+        db=db,
+        readiness_service=ReadinessService.for_owner_state(owner_state_dir()),
+    )
+    result = engine.review_run(run_id, reviewer_override=reviewer_cand, timeout=20.0)
+
+    assert result.verdict is ReviewVerdict.PASS, result.summary
+    retries = [
+        event
+        for event in db.get_events(run_id, limit=1000)
+        if event.event_type == "review_clause_format_retry"
+    ]
+    assert len(retries) == 1
+    payload = retries[0].payload or {}
+    assert payload["first_missing"] == [1]
+    assert payload["first_failed"] == []
+    assert payload["retry_missing"] == []
+    assert payload["retry_usable"] is True
+
+    prompts = _prompts(prompt_log)
+    assert len(prompts) == 2
+    assert "Clause format re-ask" in prompts[1]
+    assert "CLAUSE 1: The failing test passes." in prompts[1]
+
+
+def test_second_missing_answer_still_blocks_after_one_reask(
+    rig: RigEnvironment, tmp_path: Path
+) -> None:
+    """D1: the re-ask is bounded; the same prose twice remains a block."""
+    prompt_log = tmp_path / "wording-twice.jsonl"
+    run_id = _seed_wording_candidate(rig)
+    rig.set_reviewer_verdict(
+        "PASS",
+        review_texts=[_RECORDED_PROSE_CLAUSE, _RECORDED_PROSE_CLAUSE],
+        prompt_log=prompt_log,
+    )
+
+    db = rig.db()
+    reviewer_cand = reviewer_candidate_for_dispatch(
+        load_owner_bindings(),
+        adapter_registry=AdapterRegistry.default(),
+    )
+    assert reviewer_cand is not None
+    engine = ReviewEngine(
+        db=db,
+        readiness_service=ReadinessService.for_owner_state(owner_state_dir()),
+    )
+    result = engine.review_run(run_id, reviewer_override=reviewer_cand, timeout=20.0)
+
+    assert result.verdict is ReviewVerdict.BLOCK
+    assert "missing answers for clause 1" in result.summary
+    retries = [
+        event
+        for event in db.get_events(run_id, limit=1000)
+        if event.event_type == "review_clause_format_retry"
+    ]
+    assert len(retries) == 1
+    blocks = [
+        event
+        for event in db.get_events(run_id, limit=1000)
+        if event.event_type == "review_acceptance_clause_block"
+    ]
+    assert len(blocks) == 1
+    assert (blocks[0].payload or {})["format_retry"] is True
+    assert len(_prompts(prompt_log)) == 2
+
+
+def test_explicit_fail_token_is_not_reasked(
+    rig: RigEnvironment, tmp_path: Path
+) -> None:
+    """D1: a FAIL token or contradiction blocks immediately, with no re-ask."""
+    prompt_log = tmp_path / "wording-fail.jsonl"
+    run_id = _seed_wording_candidate(rig)
+    rig.set_reviewer_verdict(
+        "PASS",
+        review_text=(
+            "VERDICT: PASS\n\n"
+            "CLAUSE 1: The failing test passes. FAIL — the assertion was deleted.\n"
+        ),
+        prompt_log=prompt_log,
+    )
+
+    db = rig.db()
+    reviewer_cand = reviewer_candidate_for_dispatch(
+        load_owner_bindings(),
+        adapter_registry=AdapterRegistry.default(),
+    )
+    assert reviewer_cand is not None
+    engine = ReviewEngine(
+        db=db,
+        readiness_service=ReadinessService.for_owner_state(owner_state_dir()),
+    )
+    result = engine.review_run(run_id, reviewer_override=reviewer_cand, timeout=20.0)
+
+    assert result.verdict is ReviewVerdict.BLOCK
+    assert "failed or contradictory answers for clause 1" in result.summary
+    event_types = {
+        event.event_type for event in db.get_events(run_id, limit=1000)
+    }
+    assert "review_clause_format_retry" not in event_types
+    assert len(_prompts(prompt_log)) == 1
+
+
 def test_recorded_review_block_b_pass_now_fails_closed(
     rig: RigEnvironment, tmp_path: Path
 ) -> None:
@@ -190,8 +356,12 @@ def test_recorded_review_block_b_pass_now_fails_closed(
         if line.strip()
     ]
     assert prompts, "the reviewer prompt was not recorded"
-    prompt = prompts[-1]
+    # The recorded no-clause PASS now earns exactly one format re-ask, so the
+    # authoritative protocol rides the first prompt and the re-ask the second.
+    assert len(prompts) == 2
+    prompt = prompts[0]
     assert "Acceptance clauses (authoritative" in prompt
     assert "CLAUSE 1: greet('') raises ValueError and test_app.py still proves it." in prompt
     assert "CLAUSE <n>: PASS|FAIL" in prompt
     assert "the only valid verdict is VERDICT: BLOCK" in prompt
+    assert "Clause format re-ask" in prompts[1]

@@ -35,14 +35,21 @@ _STOP_HEADINGS: tuple[str, ...] = (
 
 _BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
 
-#: One explicit per-clause answer.  Markdown bullets and bold markers around
-#: the label or status are tolerated; ``<n>`` is deliberately not matched, so
-#: the rendered instruction never counts as an answer.
+#: One explicit per-clause answer line.  Markdown bullets and bold markers
+#: around the label are tolerated; ``<n>`` is deliberately not matched, so the
+#: rendered instruction never counts as an answer.  The status token is parsed
+#: from anywhere on the line after the marker (D1): a reviewer that writes
+#: ``CLAUSE 1: The failing test passes. PASS — …`` still answered the clause.
 _ANSWER_RE = re.compile(
     r"^\s*(?:[-*+]\s+)?(?:\*{1,2}|_{1,2})?CLAUSE\s+(\d+)"
-    r"(?:\*{1,2}|_{1,2})?\s*:\s*(?:\*{1,2}|_{1,2})?(PASS|FAIL)\b",
+    r"(?:\*{1,2}|_{1,2})?\s*:\s*(?P<rest>.*)$",
     re.IGNORECASE,
 )
+
+#: An explicit answer token.  Tokens are uppercase by protocol; a lowercase
+#: English "pass"/"fail" in evidence prose is not an answer.  Both tokens on
+#: one line are contradictory and fail closed.
+_STATUS_RE = re.compile(r"\b(PASS|FAIL)\b")
 
 
 def extract_acceptance_clauses(task: str) -> tuple[str, ...]:
@@ -113,6 +120,40 @@ def render_acceptance_protocol(clauses: tuple[str, ...]) -> str:
     )
 
 
+def render_clause_format_reask(
+    clauses: tuple[str, ...], previous_output: str, *, max_previous_chars: int = 4000
+) -> str:
+    """Render the one bounded format re-ask for an unusable clause answer.
+
+    The reviewer already returned an overall PASS, but the deterministic gate
+    could not read one answer.  This prompt asks only for the exact line form;
+    it never restates the verdict or the evidence, and the engine still applies
+    the unchanged fail-closed coverage check to the answer.
+    """
+    numbered = "\n".join(
+        f"CLAUSE {number}: {clause}" for number, clause in enumerate(clauses, start=1)
+    )
+    previous = previous_output.strip()
+    if len(previous) > max_previous_chars:
+        previous = previous[:max_previous_chars] + "\n... [truncated by the engine]"
+    return (
+        "Clause format re-ask (one attempt; deterministic gate).\n\n"
+        "Your previous answer returned an overall PASS, but the engine could "
+        "not read a usable PASS/FAIL answer for every clause. That answer is "
+        "kept as the review verdict; only the per-clause lines are missing.\n\n"
+        "Previous answer:\n---\n"
+        f"{previous}\n---\n\n"
+        "Acceptance clauses (authoritative; extracted from the task):\n"
+        f"{numbered}\n\n"
+        "Answer every clause again, one line per clause, using the same number "
+        "and this exact form:\n"
+        "  CLAUSE <n>: PASS|FAIL — evidence from the candidate diff or the "
+        "engine-verified evidence\n"
+        "- A clause you cannot verify from the provided material is FAIL.\n"
+        "- Return only the clause lines. Do not repeat the full review.\n"
+    )
+
+
 @dataclass(frozen=True)
 class ClauseCoverage:
     """Deterministic result of checking a reviewer's clause answers."""
@@ -123,6 +164,11 @@ class ClauseCoverage:
     @property
     def usable(self) -> bool:
         return not self.missing and not self.failed
+
+    @property
+    def format_retry_eligible(self) -> bool:
+        """True only for a missing/unparseable answer, never a FAIL/conflict."""
+        return bool(self.missing) and not self.failed
 
     def describe(self) -> str:
         parts: list[str] = []
@@ -151,8 +197,17 @@ def clause_coverage(output_text: str, clauses: tuple[str, ...]) -> ClauseCoverag
         if match is None:
             continue
         number = int(match.group(1))
-        status = match.group(2).upper()
-        evidence = line[match.end() :].strip().lstrip("—-:*_ ").strip()
+        rest = match.group("rest")
+        statuses = set(_STATUS_RE.findall(rest))
+        if not statuses:
+            continue
+        if len(statuses) > 1:
+            # A line that says both PASS and FAIL is contradictory.
+            answers.setdefault(number, set()).add("CONTRADICTION")
+            continue
+        status = statuses.pop()
+        evidence = _STATUS_RE.sub(" ", rest)
+        evidence = evidence.strip().lstrip("—-:*_ ").strip()
         if status == "PASS" and not evidence:
             # A verdict without evidence is not an answered clause.
             answers.setdefault(number, set()).add("NO_EVIDENCE")

@@ -34,7 +34,10 @@ without the engine saying which outcome governed.
    every touched file, the in-repository modules those files import, the
    recorded gate/test output, and - for a repository-wide clause - the engine's
    own `git grep` result against the candidate tree. The block is bounded and
-   is never assembled from worker or reviewer prose.
+   is never assembled from worker or reviewer prose. **Amended by
+   [ADR-0057](0057-clause-format-retry-and-gate-execution.md):** the benchmark
+   gate now runs the seeded pytest suite (and the CLI for `cli-flag`), and the
+   block names the exact gate command it ran.
 2. **The protocol distinguishes evidence classes.** A reviewer verifies clauses
    against the diff and the engine-verified evidence. The diff shows what
    changed; engine-produced file content, gate/test output and searches are

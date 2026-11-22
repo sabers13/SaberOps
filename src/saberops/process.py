@@ -1951,11 +1951,29 @@ def run_process(
             # stream wrappers referenced so GC can never attempt a blocking
             # close behind run_process's back.  Drain threads are daemons
             # and were waited for above.
-            if any(t.is_alive() for t in threads):
+            drain_threads_alive = any(t.is_alive() for t in threads)
+            if drain_threads_alive:
                 _ORPHANED_PIPE_STREAMS.append((proc.stdout, proc.stderr))
             for stream in (proc.stdout, proc.stderr):
                 if stream is None:
                     continue
+                if not drain_threads_alive:
+                    # Every drain thread has finished, so a normal close cannot
+                    # block.  Closing through the wrapper marks it closed and
+                    # makes its finalizer a no-op; closing the raw fd alone left
+                    # the wrapper to close an already-closed descriptor and
+                    # Python 3.14 printed 12 "Bad file descriptor" tracebacks at
+                    # worker finalization (D3).
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
+                    continue
+                # A drain thread may still be blocked in readline while an
+                # orphaned descendant holds the write end.  Close the raw
+                # descriptor instead so cleanup cannot block; the wrapper is
+                # kept referenced so a later GC does not block on the buffer
+                # lock.
                 try:
                     os.close(stream.fileno())
                 except Exception:

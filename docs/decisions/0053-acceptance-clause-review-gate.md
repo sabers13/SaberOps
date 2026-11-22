@@ -38,7 +38,11 @@ attempt and ended `CONVERGENCE_STALLED`, losing a finished task.
    `PASS` answer. Missing answers, an explicit `FAIL`, or contradictory
    answers for one clause map the verdict to `BLOCK` (or `FINAL_BLOCK` on the
    final review) and record `review_acceptance_clause_block`. This is computed
-   from the reviewer's output, never inferred from prose.
+   from the reviewer's output, never inferred from prose. **Amended by
+   [ADR-0057](0057-clause-format-retry-and-gate-execution.md):** a status token
+   is read anywhere on the clause line, and a missing/unparseable answer on an
+   overall PASS earns one bounded same-reviewer format re-ask before the
+   block.
 3. **Tasks without an acceptance section keep the historical contract.** No
    clauses, no new requirement.
 4. **The benchmark rig checks the must-fail rows deterministically.** For

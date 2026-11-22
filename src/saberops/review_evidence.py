@@ -193,7 +193,8 @@ def build_review_evidence(
         if gate_err:
             gate_body += "\n[stderr]\n" + _bounded(gate_err, _GATE_CHARS)
         sections.append(
-            f"Gate and test output (engine-run):\n$ {gate_command}\nexit {exit_text}\n{gate_body}"
+            "Gate command output (engine-run; exact command below):\n"
+            f"$ {gate_command}\nexit {exit_text}\n{gate_body}"
         )
 
     terms = _repository_wide_terms(task, clauses)

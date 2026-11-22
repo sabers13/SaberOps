@@ -236,6 +236,7 @@ class RigEnvironment:
         *,
         verdicts: list[str] | None = None,
         review_text: str | None = None,
+        review_texts: list[str] | None = None,
         prompt_log: Path | None = None,
         required_prompt_substrings: list[str] | None = None,
     ) -> None:
@@ -254,6 +255,8 @@ class RigEnvironment:
             payload["verdicts"] = list(verdicts)
         if review_text is not None:
             payload["review_text"] = review_text
+        if review_texts is not None:
+            payload["review_texts"] = list(review_texts)
         if prompt_log is not None:
             payload["prompt_log"] = str(prompt_log)
         if required_prompt_substrings is not None:

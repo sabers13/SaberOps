@@ -12,6 +12,7 @@ one.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -119,6 +120,61 @@ def test_seeded_review_block_passes_and_names_the_candidate(tmp_path: Path) -> N
     assert "must-fail probes" in table
     assert "acceptance_violation=violated" in table
     assert f"blocked_candidate={seen['sha']}" in table
+
+
+def test_seeded_worktree_and_branch_are_removed_after_the_row(
+    tmp_path: Path,
+) -> None:
+    """D4: a long-lived store must not accumulate seeded worktrees."""
+    repo, base_sha, db, task = _setup(tmp_path)
+    seen: dict[str, str] = {}
+
+    def block(seeded: SeededCandidate) -> None:
+        seen["worktree"] = str(seeded.worktree)
+        seen["branch"] = seeded.branch
+        db.create_review(
+            ReviewResult(
+                id="rev_seeded_cleanup",
+                run_id=seeded.run_id,
+                provider="codex",
+                model="gpt-6-luna",
+                verdict=ReviewVerdict.BLOCK,
+                summary="CLAUSE 1: FAIL",
+                details="the empty-name guard is gone",
+                created_at=current_iso_timestamp(),
+            )
+        )
+
+    row = run_seeded_must_fail_row(
+        db=db,
+        readiness=None,
+        repo=repo,
+        base_sha=base_sha,
+        task=task,
+        batch="opencode",
+        provider="opencode",
+        model="opencode-go/deepseek-v4.1-flash",
+        gate_command=benchmark_gate_command(),
+        reviewer="codex/gpt-6-luna",
+        review=block,
+    )
+    assert row.passed is True
+    assert not Path(seen["worktree"]).exists()
+
+    worktrees = subprocess.run(
+        ["git", "-C", str(repo), "worktree", "list"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert seen["worktree"] not in worktrees
+    branches = subprocess.run(
+        ["git", "-C", str(repo), "branch", "--list", seen["branch"]],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert branches.strip() == ""
 
 
 def test_seeded_review_pass_fails_the_row(tmp_path: Path) -> None:

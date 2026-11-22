@@ -67,7 +67,8 @@ def test_unchanged_imported_module_content_reaches_the_reviewer(tmp_path: Path) 
     assert "--- app.py (candidate HEAD content) ---" in evidence
     assert 'return f"hello {name}"' in evidence
     assert "--- test_app.py (candidate HEAD content) ---" in evidence
-    assert "gate and test output" in evidence.lower()
+    assert "Gate command output (engine-run; exact command below)" in evidence
+    assert "$ python -B -c 'import app'" in evidence
     assert "exit 0" in evidence
 
 
