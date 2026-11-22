@@ -54,6 +54,13 @@ def test_rendered_protocol_quotes_every_clause_and_requires_answers() -> None:
     assert "only when every clause answer is PASS" in rendered
 
 
+def test_rendered_protocol_names_engine_evidence_and_the_stricter_outcome() -> None:
+    rendered = render_acceptance_protocol(("one",))
+    assert "engine-verified evidence" in rendered.lower()
+    assert "the stricter outcome wins" in rendered
+    assert "A clause you cannot verify from the provided material is FAIL." in rendered
+
+
 def test_coverage_accepts_only_complete_pass_answers() -> None:
     clauses = ("one", "two")
     coverage = clause_coverage(

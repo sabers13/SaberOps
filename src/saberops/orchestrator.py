@@ -324,42 +324,6 @@ def _telemetry_total(records: list[dict[str, object]], key: str) -> int:
     return total
 
 
-def _repair_report_claims_finding_satisfied(report: str | None) -> bool:
-    """True when a no-diff repair says the blocking finding is already met.
-
-    A repair that exits successfully without changing the candidate is only
-    meaningful when its report asserts the finding needs no edit (already
-    satisfied, no remaining references, and so on).  A silent or unrelated
-    no-diff repair keeps the historical fail-closed stall.
-    """
-    normalized = " ".join((report or "").lower().split())
-    if not normalized:
-        return False
-    phrases = (
-        "no code change was required",
-        "no code changes were required",
-        "no code change required",
-        "no code changes required",
-        "no change was required",
-        "no changes were required",
-        "no change required",
-        "no changes required",
-        "no source change",
-        "no further changes",
-        "nothing to change",
-        "already satisfied",
-        "already addressed",
-        "already implemented",
-        "already fixed",
-        "already meets",
-        "no remaining",
-        "no references remain",
-        "no longer references",
-        "search confirms",
-    )
-    return any(phrase in normalized for phrase in phrases)
-
-
 def _render_repair_task(
     original_task: str,
     attempt_idx: int,
@@ -6442,8 +6406,21 @@ class Orchestrator:
                                 repair_requirements: str,
                                 package_local: Any = current_package,
                                 base_sha_local: str = lineage_base_sha,
-                            ) -> tuple[Attempt | None, str | None, Path | None, bool]:
-                                """Execute repair worktree cycle with continuation support."""
+                            ) -> tuple[
+                                Attempt | None,
+                                str | None,
+                                Path | None,
+                                bool,
+                                DispatchOutcome | None,
+                            ]:
+                                """Execute repair worktree cycle with continuation support.
+
+                                The fifth value is the structured no-diff outcome.
+                                A successful repair that produced no change is
+                                ``ALREADY_SATISFIED``; the review loop triggers its
+                                one bounded re-review from that field, never from
+                                the worker's report prose (ADR-0055).
+                                """
                                 nonlocal attempt_number, active_attempt_id, branch_name
                                 nonlocal review_publish_attempt_id
 
@@ -6702,7 +6679,7 @@ class Orchestrator:
                                                 "explicit repair model is ineligible: "
                                                 f"{last_reason or 'unknown'}"
                                             )
-                                        return None, None, None, False
+                                        return None, None, None, False, None
                                     repair_candidate, cur_adapter = selected_repair
                                     repair_resolved = selected_repair_resolved
                                     cand_provider = repair_candidate.provider
@@ -6744,7 +6721,7 @@ class Orchestrator:
                                             "worktree_creation_failed",
                                             payload={"error": str(exc), "attempt": attempt_number},
                                         )
-                                        return None, None, None, False
+                                        return None, None, None, False, None
 
                                     self.db.record_event(
                                         run_id,
@@ -7258,7 +7235,7 @@ class Orchestrator:
                                         )
                                         attempts.append(rep_attempt)
                                         active_attempt_id = None
-                                        return rep_attempt, None, None, False
+                                        return rep_attempt, None, None, False, None
 
                                     repair_prompt_bytes = (
                                         w_res.prompt_bytes
@@ -7585,7 +7562,7 @@ class Orchestrator:
                                         )
                                         attempts.append(rep_attempt)
                                         active_attempt_id = None
-                                        return rep_attempt, None, None, False
+                                        return rep_attempt, None, None, False, None
 
                                     break
                                 has_changes_local = GitManager.has_diff_against_base(
@@ -7616,10 +7593,34 @@ class Orchestrator:
                                             "role": DispatchRole.BUILD.value,
                                         },
                                     )
+                                    # A successful repair that changed nothing is
+                                    # structurally ALREADY_SATISFIED: the worker
+                                    # asserts the inherited candidate needs no edit.
+                                    # The review loop triggers its one bounded
+                                    # re-review from this structured outcome, never
+                                    # from the report's wording (ADR-0055).
+                                    self.db.record_event(
+                                        run_id,
+                                        "repair_no_diff_classified",
+                                        attempt_id=local_attempt_id,
+                                        payload={
+                                            "outcome": DispatchOutcome.ALREADY_SATISFIED.value,
+                                            "no_changes": True,
+                                            "candidate_sha": from_sha_local,
+                                            "role": DispatchRole.BUILD.value,
+                                            "stage": DispatchStage.REPAIR.value,
+                                        },
+                                    )
                                     attempts.append(rep_attempt)
                                     active_attempt_id = None
                                     # Signal no-diff for stall detection
-                                    return rep_attempt, None, None, True
+                                    return (
+                                        rep_attempt,
+                                        None,
+                                        None,
+                                        True,
+                                        DispatchOutcome.ALREADY_SATISFIED,
+                                    )
                                 to_sha_local = GitManager.commit_changes(
                                     worktree_path=local_wt_path,
                                     message=(
@@ -7769,7 +7770,7 @@ class Orchestrator:
                                     )
                                     attempts.append(rep_attempt)
                                     active_attempt_id = None
-                                    return rep_attempt, to_sha_local, local_wt_path, False
+                                    return rep_attempt, to_sha_local, local_wt_path, False, None
                                 now2 = current_iso_timestamp()
                                 rep_attempt.status = AttemptStatus.SUCCESS
                                 rep_attempt.worker_stdout = w_res.stdout
@@ -7831,7 +7832,7 @@ class Orchestrator:
                                 active_attempt_id = None
                                 # Update summary for outer scope  # noqa: B023
                                 nonlocal_summary[0] = summary_local  # noqa: B023
-                                return rep_attempt, to_sha_local, local_wt_path, False
+                                return rep_attempt, to_sha_local, local_wt_path, False, None
 
                             nonlocal_summary: list[str] = [summary]
                             if config.review_mode == "bounded":
@@ -7865,14 +7866,16 @@ class Orchestrator:
                                                 config.review_enabled, config.review_disabled,
                                             ),
                                         )
-                                        rep, to_sha_p, wt_p, is_no_diff = _do_repair(
-                                            from_sha_pre,
-                                            final_repair_task,
-                                            len(outstanding),
-                                            "\n".join(
-                                                f"{item.summary}\n{item.details}"
-                                                for item in outstanding
-                                            ),
+                                        rep, to_sha_p, wt_p, is_no_diff, no_diff_outcome = (
+                                            _do_repair(
+                                                from_sha_pre,
+                                                final_repair_task,
+                                                len(outstanding),
+                                                "\n".join(
+                                                    f"{item.summary}\n{item.details}"
+                                                    for item in outstanding
+                                                ),
+                                            )
                                         )
                                         if rep is None:
                                             self.db.update_review_loop_state(
@@ -7890,9 +7893,8 @@ class Orchestrator:
                                             )
                                             if (
                                                 not no_diff_rereview_used
-                                                and _repair_report_claims_finding_satisfied(
-                                                    pre_report
-                                                )
+                                                and no_diff_outcome
+                                                is DispatchOutcome.ALREADY_SATISFIED
                                             ):
                                                 no_diff_rereview_used = True
                                                 pending_review_evidence = pre_report
@@ -7901,7 +7903,10 @@ class Orchestrator:
                                                     "repair_no_diff_rereview",
                                                     attempt_id=rep.id,
                                                     payload={
-                                                        "reason": "repair_no_diff_claims_satisfied",
+                                                        "reason": (
+                                                            "repair_no_diff_already_satisfied"
+                                                        ),
+                                                        "outcome": no_diff_outcome.value,
                                                         "role": DispatchRole.BUILD.value,
                                                         "candidate_sha": current_commit_sha,
                                                         "repair_report_excerpt": pre_report[:2000],
@@ -8023,7 +8028,13 @@ class Orchestrator:
                                                 config.review_enabled, config.review_disabled,
                                             ),
                                         )
-                                        rep2, to_sha2, wt2, is_no_diff2 = _do_repair(
+                                        (
+                                            rep2,
+                                            to_sha2,
+                                            wt2,
+                                            is_no_diff2,
+                                            no_diff_outcome2,
+                                        ) = _do_repair(
                                             from_sha2,
                                             single_task,
                                             1,
@@ -8045,9 +8056,8 @@ class Orchestrator:
                                             )
                                             if (
                                                 not no_diff_rereview_used
-                                                and _repair_report_claims_finding_satisfied(
-                                                    repair_report
-                                                )
+                                                and no_diff_outcome2
+                                                is DispatchOutcome.ALREADY_SATISFIED
                                             ):
                                                 no_diff_rereview_used = True
                                                 pending_review_evidence = repair_report
@@ -8056,7 +8066,10 @@ class Orchestrator:
                                                     "repair_no_diff_rereview",
                                                     attempt_id=rep2.id,
                                                     payload={
-                                                        "reason": "repair_no_diff_claims_satisfied",
+                                                        "reason": (
+                                                            "repair_no_diff_already_satisfied"
+                                                        ),
+                                                        "outcome": no_diff_outcome2.value,
                                                         "role": DispatchRole.BUILD.value,
                                                         "candidate_sha": current_commit_sha,
                                                         "repair_report_excerpt": (
@@ -8310,7 +8323,13 @@ class Orchestrator:
                                             config.review_enabled, config.review_disabled,
                                         ),
                                     )
-                                    rep_m, to_sha_m, wt_m, is_no_diff_m = _do_repair(
+                                    (
+                                        rep_m,
+                                        to_sha_m,
+                                        wt_m,
+                                        is_no_diff_m,
+                                        no_diff_outcome_m,
+                                    ) = _do_repair(
                                         from_sha_m,
                                         single_task_m,
                                         1,
@@ -8332,9 +8351,8 @@ class Orchestrator:
                                         )
                                         if (
                                             not no_diff_rereview_used_m
-                                            and _repair_report_claims_finding_satisfied(
-                                                repair_report_m
-                                            )
+                                            and no_diff_outcome_m
+                                            is DispatchOutcome.ALREADY_SATISFIED
                                         ):
                                             no_diff_rereview_used_m = True
                                             pending_review_evidence_m = repair_report_m
@@ -8343,7 +8361,10 @@ class Orchestrator:
                                                 "repair_no_diff_rereview",
                                                 attempt_id=rep_m.id,
                                                 payload={
-                                                    "reason": "repair_no_diff_claims_satisfied",
+                                                    "reason": (
+                                                        "repair_no_diff_already_satisfied"
+                                                    ),
+                                                    "outcome": no_diff_outcome_m.value,
                                                     "role": DispatchRole.BUILD.value,
                                                     "candidate_sha": current_commit_sha,
                                                     "repair_report_excerpt": repair_report_m[:2000],

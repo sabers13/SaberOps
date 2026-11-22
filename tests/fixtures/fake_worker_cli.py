@@ -1028,6 +1028,24 @@ def _handle_claude(
         body = literal_text
     else:
         body = _review_text(review_verdict, prompt_text)
+    # Test-only replay of an evidence-gap reviewer: a PASS is emitted only when
+    # the prompt actually contains the evidence the recorded reviewer demanded.
+    # Missing evidence reproduces its BLOCK with the same reason.
+    required = control.get("required_prompt_substrings")
+    if (
+        isinstance(required, list)
+        and required
+        and review_verdict == "PASS"
+        and not forced_block
+    ):
+        missing = [str(item) for item in required if str(item) not in prompt_text]
+        if missing:
+            review_verdict = "BLOCK"
+            body = (
+                "VERDICT: BLOCK\n"
+                "CLAUSE 1: FAIL — the prompt does not contain the evidence this "
+                "clause needs: " + "; ".join(missing) + "\n"
+            )
     model = _get_arg_value(args, "--model") or "claude-sonnet-4-6"
     print(json.dumps({"type": "system", "subtype": "init", "model": model}))
     print(

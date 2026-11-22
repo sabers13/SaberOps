@@ -237,12 +237,16 @@ class RigEnvironment:
         verdicts: list[str] | None = None,
         review_text: str | None = None,
         prompt_log: Path | None = None,
+        required_prompt_substrings: list[str] | None = None,
     ) -> None:
         """Persist fake reviewer behaviour inside the isolated state dir.
 
         ``verdicts`` scripts one verdict per actual review invocation;
-        ``review_text`` replays a recorded reviewer answer verbatim.  Both are
-        test-only controls and never reach production code.
+        ``review_text`` replays a recorded reviewer answer verbatim.
+        ``required_prompt_substrings`` replays an evidence-gap reviewer: a
+        scripted PASS becomes a CLAUSE-FAIL BLOCK unless every substring is
+        present in the prompt.  All are test-only controls and never reach
+        production code.
         """
         self.reviewer_control_path.parent.mkdir(parents=True, exist_ok=True)
         payload: dict[str, object] = {"verdict": verdict}
@@ -252,6 +256,8 @@ class RigEnvironment:
             payload["review_text"] = review_text
         if prompt_log is not None:
             payload["prompt_log"] = str(prompt_log)
+        if required_prompt_substrings is not None:
+            payload["required_prompt_substrings"] = list(required_prompt_substrings)
         self.reviewer_control_path.write_text(
             json.dumps(payload),
             encoding="utf-8",

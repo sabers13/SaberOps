@@ -60,6 +60,7 @@ from saberops.observability import new_dispatch_evidence, update_dispatch_from_r
 from saberops.observability.phase_telemetry import measure_phase
 from saberops.process import run_process
 from saberops.provenance import ProvenanceError, assert_run_repository
+from saberops.review_evidence import build_review_evidence
 from saberops.review_policy import (
     FINDING_LABELS,
     FINDINGS_PROMPT,
@@ -559,9 +560,9 @@ class ReviewEngine:
         FINAL CONVERGENCE notice is injected and a ``final_review_started``
         event is recorded.
 
-        ``extra_evidence`` carries bounded, non-authoritative material for this
-        exact review round (for example a repair report that claims the prior
-        finding is already satisfied).  It is evidence to verify, never proof.
+        ``extra_evidence`` carries the repair worker's bounded report for this
+        exact review round (a claim, never proof).  Engine-verified evidence is
+        built separately from the candidate tree and embedded as trusted data.
         """
         if is_final:
             payload: dict[str, object] = {}
@@ -757,6 +758,42 @@ class ReviewEngine:
         if acceptance_clauses:
             acceptance_block = "\n\n" + render_acceptance_protocol(acceptance_clauses)
 
+        engine_evidence_context = ""
+        if acceptance_clauses or (extra_evidence and extra_evidence.strip()):
+            last_check = checks[-1] if checks else None
+            try:
+                engine_evidence = build_review_evidence(
+                    worktree=wt_path,
+                    base_commit=run.base_commit,
+                    task=run.task,
+                    clauses=acceptance_clauses,
+                    gate_command=last_check.gate_command if last_check else None,
+                    gate_exit_code=last_check.exit_code if last_check else None,
+                    gate_stdout=last_check.stdout if last_check else "",
+                    gate_stderr=last_check.stderr if last_check else "",
+                )
+            except Exception as exc:
+                self.db.record_event(
+                    run_id,
+                    "review_engine_evidence_failed",
+                    payload={
+                        "error": str(exc)[:500],
+                        "candidate_sha": final_attempt.commit_sha,
+                    },
+                )
+                engine_evidence = ""
+            if engine_evidence:
+                self.db.record_event(
+                    run_id,
+                    "review_engine_evidence_included",
+                    payload={
+                        "chars": len(engine_evidence),
+                        "candidate_sha": final_attempt.commit_sha,
+                        "clause_count": len(acceptance_clauses),
+                    },
+                )
+                engine_evidence_context = "\n\n" + engine_evidence
+
         extra_evidence_context = ""
         if extra_evidence and extra_evidence.strip():
             self.db.record_event(
@@ -768,8 +805,9 @@ class ReviewEngine:
                 },
             )
             extra_evidence_context = (
-                "\n\nRepair-round evidence (a claim to verify against the diff, "
-                "not proof):\n"
+                "\n\nRepair-round note (the repair worker's own report; a claim, not "
+                "engine verification. The engine-verified evidence above is "
+                "authoritative):\n"
                 "A repair round was dispatched for this candidate and produced no "
                 "code change. It reported:\n"
                 f"{_bounded_tail(extra_evidence.strip())}"
@@ -808,6 +846,7 @@ class ReviewEngine:
             f"Base commit: {run.base_commit}\n"
             f"Candidate commit: {final_attempt.commit_sha or 'HEAD'}\n"
             f"Gate verification: {gate_info}"
+            f"{engine_evidence_context}"
             f"{prior_review_context}"
             f"{extra_evidence_context}"
             f"{final_notice_block}\n\n"
@@ -1480,6 +1519,41 @@ class ReviewEngine:
                             "is_final": is_final,
                         },
                     )
+
+            if (
+                acceptance_clauses
+                and verdict in (ReviewVerdict.BLOCK, ReviewVerdict.FINAL_BLOCK)
+                and clause_coverage(raw, acceptance_clauses).usable
+            ):
+                # The reviewer answered every clause PASS and still returned a
+                # blocking verdict.  The stricter outcome wins (ADR-0055): the
+                # block stands, and the conflict is surfaced instead of being
+                # silently inferred from the clause answers.
+                self.db.record_event(
+                    run_id,
+                    "review_clause_verdict_conflict",
+                    payload={
+                        "review_id": review_association_id,
+                        "verdict": verdict.value,
+                        "clause_count": len(acceptance_clauses),
+                        "is_final": is_final,
+                    },
+                )
+                summary = (
+                    f"{summary} (clause/verdict conflict: every acceptance clause "
+                    f"PASS, overall verdict {verdict.value})"
+                )
+                details = "\n\n".join(
+                    part
+                    for part in (
+                        details,
+                        "Clause/verdict conflict (deterministic): every acceptance "
+                        f"clause was answered PASS, but the overall verdict is "
+                        f"{verdict.value}. The overall verdict wins: the candidate "
+                        "stays blocked and this conflict is recorded.",
+                    )
+                    if part
+                )
 
             review_id = review_association_id
             review = ReviewResult(
