@@ -92,12 +92,19 @@ class StructuredFinding:
 
 
 class ParsedStructuredReview(NamedTuple):
-    """Result of a strict structured-review parse; unpacks as a tuple."""
+    """Result of a strict structured-review parse; unpacks as a tuple.
+
+    ``unstructured`` holds reviewer findings that could not become structured
+    records (currently: a missing required field).  They are preserved verbatim
+    as text for the durable review detail instead of inventing a safe-looking
+    field value such as a repair scope, which would widen what repair may do.
+    """
 
     verdict: ReviewPolicyVerdict
     summary: str
     findings: tuple[StructuredFinding, ...]
     policy_version: str
+    unstructured: tuple[str, ...] = ()
 
 
 _CLASSIFICATION_ALIASES: dict[str, FindingClassification] = {
@@ -145,21 +152,23 @@ def _require_str(item: dict[str, Any], key: str, label: str) -> str:
     return value
 
 
+_REQUIRED_FINDING_FIELDS: tuple[str, ...] = (
+    "id",
+    "classification",
+    "title",
+    "severity",
+    "invariant_or_requirement",
+    "failure_scenario",
+    "evidence",
+    "minimum_correction",
+    "repair_scope",
+)
+
+
 def _parse_finding(item: object, index: int) -> StructuredFinding:
     if not isinstance(item, dict):
         raise ReviewProtocolError(f"finding #{index} must be a JSON object")
-    required = (
-        "id",
-        "classification",
-        "title",
-        "severity",
-        "invariant_or_requirement",
-        "failure_scenario",
-        "evidence",
-        "minimum_correction",
-        "repair_scope",
-    )
-    for key in required:
+    for key in _REQUIRED_FINDING_FIELDS:
         if key not in item:
             raise ReviewProtocolError(f"finding #{index} missing required field: {key}")
     raw_id = item["id"]
@@ -192,6 +201,25 @@ def _parse_finding(item: object, index: int) -> StructuredFinding:
     )
 
 
+def _unique_finding_id(raw_id: str, seen_ids: set[str]) -> str:
+    """Deterministically renumber a duplicate finding id on ingest."""
+    suffix = 2
+    candidate = f"{raw_id}-{suffix}"
+    while candidate in seen_ids:
+        suffix += 1
+        candidate = f"{raw_id}-{suffix}"
+    return candidate
+
+
+def _unstructured_finding_note(item: object, index: int, reason: str) -> str:
+    """Render a finding that cannot be structured, verbatim, with its reason."""
+    try:
+        rendered = json.dumps(item, ensure_ascii=False, sort_keys=True)
+    except (TypeError, ValueError):
+        rendered = repr(item)
+    return f"finding #{index} recorded as unstructured text ({reason}): {rendered}"
+
+
 _JSON_FINDINGS_FENCE = re.compile(
     r"```(?:json|JSON)[ \t]*\r?\n(?P<body>.*?)\r?\n?[ \t]*```",
     re.DOTALL,
@@ -215,8 +243,13 @@ def parse_review_findings(
     ```json block holding ``{"findings": [...]}`` (``summary`` optional).
     The last such block is used. Every finding must parse and pass
     :func:`validate_finding_evidence`; otherwise :class:`ReviewProtocolError`
-    is raised and nothing is trusted. Any ``verdict`` field is ignored rather
-    than compared: the disposition is always computed from the findings.
+    is raised and nothing is trusted. Two ingest repairs keep otherwise usable
+    output: a duplicate finding id is renumbered (``B1``, ``B1-2``), and a
+    finding missing a required field is preserved as unstructured text with
+    the validation reason instead of guessing the missing value (guessing a
+    ``repair_scope`` could widen what repair may do). Any ``verdict`` field is
+    ignored rather than compared: the disposition is always computed from the
+    structured findings.
     """
     blocks = list(_JSON_FINDINGS_FENCE.finditer(raw_text))
     if not blocks:
@@ -231,11 +264,30 @@ def parse_review_findings(
     if not isinstance(summary, str):
         raise ReviewProtocolError("field 'summary' must be a string")
     findings: list[StructuredFinding] = []
+    unstructured: list[str] = []
     seen_ids: set[str] = set()
     for index, item in enumerate(data["findings"]):
+        missing = (
+            [key for key in _REQUIRED_FINDING_FIELDS if key not in item]
+            if isinstance(item, dict)
+            else []
+        )
+        if missing:
+            # Never invent a missing value: a defaulted repair_scope could
+            # widen what repair is allowed to do.  Preserve the reviewer's
+            # finding verbatim as unstructured text with the validation reason.
+            unstructured.append(
+                _unstructured_finding_note(
+                    item, index, "missing required field: " + ", ".join(missing)
+                )
+            )
+            continue
         finding = _parse_finding(item, index)
         if finding.id in seen_ids:
-            raise ReviewProtocolError(f"duplicate finding id: {finding.id}")
+            # A reviewer may reuse an id (e.g. two findings both labelled B1).
+            # Renumber deterministically on ingest so the durable record keeps
+            # both findings instead of discarding the whole block.
+            finding = replace(finding, id=_unique_finding_id(finding.id, seen_ids))
         seen_ids.add(finding.id)
         findings.append(finding)
     evidence_failures = [
@@ -248,7 +300,13 @@ def parse_review_findings(
             f"finding evidence validation failed: {'; '.join(evidence_failures)}"
         )
     disposition = compute_disposition(findings, is_final_round=is_final_round)
-    return ParsedStructuredReview(disposition, summary, tuple(findings), REVIEW_POLICY_VERSION)
+    return ParsedStructuredReview(
+        disposition,
+        summary,
+        tuple(findings),
+        REVIEW_POLICY_VERSION,
+        tuple(unstructured),
+    )
 
 
 #: Instructions appended to every production review prompt.

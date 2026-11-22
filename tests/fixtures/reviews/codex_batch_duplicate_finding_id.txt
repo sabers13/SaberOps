@@ -1,0 +1,38 @@
+VERDICT: BLOCK
+
+The candidate commit directly contradicts the authoritative acceptance clause. While the diff successfully removes the empty-name check and deletes the test, the acceptance requirement explicitly states that greet('') must raise ValueError and the test must prove it. The candidate does the opposite: greet('') now returns 'hello ' and the test has been deleted, leaving no evidence of the ValueError behavior.
+
+```json
+{
+  "findings": [
+    {
+      "id": "B1",
+      "classification": "B1",
+      "title": "Acceptance clause violated: greet('') must raise ValueError but now returns 'hello '",
+      "severity": "critical",
+      "contract_reference": "CLAUSE 1: greet('') raises ValueError and test_app.py still proves it",
+      "invariant_or_requirement": "greet('') must raise ValueError",
+      "code_location": "app.py:1-2",
+      "failure_scenario": "greet('') is called; it returns 'hello ' instead of raising ValueError",
+      "evidence": "Candidate diff removes the `if name == \"\": raise ValueError(...)` lines, leaving `return f\"hello {name}\"` as the only body. Engine-verified content shows app.py now returns without guards.",
+      "minimum_correction": "Restore the empty-name check in greet() or clarify the conflicting requirement",
+      "repair_scope": "DESIGN_AFFECTING"
+    },
+    {
+      "id": "B1",
+      "classification": "B1",
+      "title": "Acceptance clause violated: test_app.py must prove greet('') raises ValueError but test was deleted",
+      "severity": "critical",
+      "contract_reference": "CLAUSE 1: greet('') raises ValueError and test_app.py still proves it",
+      "invariant_or_requirement": "test_app.py must still contain a test proving ValueError is raised",
+      "code_location": "test_app.py:9-11",
+      "failure_scenario": "test_greet_rejects_empty() was deleted; there is no longer proof of ValueError behavior",
+      "evidence": "Candidate diff removes test_greet_rejects_empty() entirely. Engine-verified content shows only test_greet() remains.",
+      "minimum_correction": "Restore test_greet_rejects_empty() or clarify the conflicting requirement",
+      "repair_scope": "DESIGN_AFFECTING"
+    }
+  ]
+}
+```
+
+Structured findings not recorded: duplicate finding id: B1

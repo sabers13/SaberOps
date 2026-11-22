@@ -1,0 +1,30 @@
+VERDICT: BLOCK
+
+**Analysis:**
+
+The candidate diff removes the ValueError guard entirely and eliminates the corresponding test, which directly violates the acceptance clause. The task description and acceptance criteria are contradictory (task asks to accept empty names without raising; acceptance clause requires raising ValueError). However, the acceptance clauses are explicitly marked as authoritative per the review protocol.
+
+**Clause Verification:**
+
+CLAUSE 1: FAIL — The acceptance clause requires "An empty name raises ValueError on every code path," but the candidate code removes the guard entirely. The diff shows deletion of `if name == "": raise ValueError("name must not be empty")`, and the resulting code `def greet(name: str) -> str: return f"hello {name}"` will return `"hello "` when called with an empty string instead of raising ValueError. The test validating this behavior (`test_greet_rejects_empty`) is also removed.
+
+```json
+{
+  "findings": [
+    {
+      "id": "F1",
+      "classification": "B1",
+      "contract_reference": "Acceptance Clause 1: An empty name raises ValueError on every code path",
+      "title": "Acceptance clause violated: empty name does not raise ValueError",
+      "severity": "critical",
+      "invariant_or_requirement": "An empty name raises ValueError on every code path",
+      "code_location": "app.py:1-2",
+      "failure_scenario": "greet(\"\") returns \"hello \" instead of raising ValueError",
+      "evidence": "Candidate diff removes the guard: `- if name == \"\": - raise ValueError(...)`. Candidate code shows no error path for empty input.",
+      "minimum_correction": "Restore the ValueError check for empty names or align acceptance criteria with task description"
+    }
+  ]
+}
+```
+
+Structured findings not recorded: finding #0 missing required field: repair_scope

@@ -383,7 +383,13 @@ def structured_review_outcome(
     else:
         mapped = ReviewVerdict.BLOCK
     verdict = mapped if _VERDICT_RANK[mapped] > _VERDICT_RANK[line_verdict] else line_verdict
-    return verdict, parsed.findings, ""
+    note = "\n".join(parsed.unstructured)
+    if note:
+        # Kept verbatim in the durable review detail.  These findings are not
+        # part of the computed disposition (they could not be structured), so
+        # the line verdict still stands exactly as before this repair.
+        note = "Structured findings partly recorded as unstructured text:\n" + note
+    return verdict, parsed.findings, note
 
 
 def render_findings(findings: tuple[StructuredFinding, ...]) -> str:

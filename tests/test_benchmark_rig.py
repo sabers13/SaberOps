@@ -56,6 +56,7 @@ from saberops.benchmark import (
     configure_real_reviewer,
     create_toy_repository,
     format_real_mode_preflight,
+    gate_interpreter_pytest_error,
     isolated_environment,
     metered_credential_keys,
     parse_per_cli_selector,
@@ -66,6 +67,7 @@ from saberops.benchmark import (
     real_mode_presence,
     real_model_for,
     real_worker_candidates,
+    run_real_benchmark,
     select_benchmark_tasks,
     select_benchmark_tasks_by_cli,
     unclassified_metered_credentials,
@@ -1088,6 +1090,47 @@ def test_cli_flag_gate_also_invokes_the_built_cli() -> None:
     script = argv[3]
     assert "'-m','pytest','-q'" in script
     assert "cli.main(['--name','Ada'])" in script
+
+
+def test_gate_interpreter_pytest_check_passes_in_the_dev_environment() -> None:
+    """D9: the documented dev recipe installs pytest for the toy gates."""
+    assert gate_interpreter_pytest_error() is None
+
+
+def test_gate_interpreter_pytest_check_names_the_dev_extra(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D9: a runtime-only install fails once, with the install remedy."""
+
+    def _missing(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="ModuleNotFoundError: No module named 'pytest'"
+        )
+
+    monkeypatch.setattr("saberops.benchmark.subprocess.run", _missing)
+    message = gate_interpreter_pytest_error()
+    assert message is not None
+    assert sys.executable in message
+    assert "cannot import pytest" in message
+    assert "pip install '.[dev]'" in message
+
+
+def test_real_benchmark_refuses_before_seeding_without_pytest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D9: fail before the first toy repository instead of every gate."""
+    monkeypatch.setattr(
+        "saberops.benchmark.gate_interpreter_pytest_error",
+        lambda: "the benchmark gate interpreter cannot import pytest",
+    )
+    store = tmp_path / "store"
+    with pytest.raises(RealModeRefused, match="cannot import pytest"):
+        run_real_benchmark(
+            store=store,
+            repo_root=tmp_path / "repos",
+            models={},
+        )
+    assert not store.exists()
 
 
 def test_benchmark_gate_output_proves_the_fix_and_cli_acceptance(

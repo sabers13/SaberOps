@@ -709,6 +709,38 @@ def benchmark_gate_command(task_id: str | None = None) -> str:
     return f"{interpreter} -B -m pytest -q"
 
 
+def gate_interpreter_pytest_error() -> str | None:
+    """Return why the gate interpreter cannot run the benchmark gates.
+
+    Every toy gate runs ``sys.executable -B -m pytest -q`` (plus a pytest run
+    inside the CLI gate).  A runtime-only install (``pip install .`` without the
+    dev extra) has no pytest, so real mode would otherwise seed every repository
+    and fail every task as a gate infrastructure error.  Checking once, before
+    the first repository exists, turns that into one clear message.
+    """
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-B", "-c", "import pytest"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return (
+            f"cannot check the benchmark gate interpreter {sys.executable}: {exc}"
+        )
+    if completed.returncode == 0:
+        return None
+    detail = (completed.stderr or completed.stdout).strip().splitlines()
+    reason = detail[-1] if detail else f"exit code {completed.returncode}"
+    return (
+        f"the benchmark gate interpreter {sys.executable} cannot import pytest "
+        f"({reason}); real-mode gates run pytest, so install the dev extra: "
+        "pip install '.[dev]'"
+    )
+
+
 def format_real_mode_preflight(findings: Iterable[Any]) -> list[str]:
     """Render preflight findings, naming the in-process scheduler honestly.
 
@@ -1989,6 +2021,10 @@ def run_real_benchmark(
     from saberops.paths import owner_state_dir
     from saberops.preflight import collect_preflight
     from saberops.project_settings import set_project_review_policy
+
+    pytest_error = gate_interpreter_pytest_error()
+    if pytest_error is not None:
+        raise RealModeRefused(pytest_error)
 
     started = time.time()
     store.mkdir(parents=True, exist_ok=True)

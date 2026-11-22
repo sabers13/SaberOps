@@ -133,6 +133,73 @@ def test_invalid_findings_keep_the_line_verdict_and_say_why(text: str) -> None:
     assert note.startswith("Structured findings not recorded:")
 
 
+def test_duplicate_finding_ids_are_renumbered_and_both_kept() -> None:
+    verdict, findings, note = structured_review_outcome(
+        output("BLOCK", [finding("B1", title="First"), finding("B1", title="Second")]),
+        ReviewVerdict.BLOCK,
+    )
+    assert verdict is ReviewVerdict.BLOCK
+    assert [f.id for f in findings] == ["F1", "F1-2"]
+    assert [f.title for f in findings] == ["First", "Second"]
+    assert note == ""
+
+
+def test_finding_missing_required_field_is_kept_as_unstructured_text() -> None:
+    missing = finding("B1", title="Guard was removed")
+    del missing["repair_scope"]
+    verdict, findings, note = structured_review_outcome(
+        output("BLOCK", [finding("B2", title="Real finding"), missing]),
+        ReviewVerdict.BLOCK,
+    )
+    # The valid finding stays structured; the incomplete one is never guessed
+    # a repair scope, and its raw text plus the reason survive in the detail.
+    assert verdict is ReviewVerdict.BLOCK
+    assert [f.title for f in findings] == ["Real finding"]
+    assert "missing required field: repair_scope" in note
+    assert "Guard was removed" in note
+    assert "LOCAL_MECHANICAL" not in note
+
+
+def test_missing_required_field_does_not_relax_a_block_verdict() -> None:
+    missing = finding("B1", title="Only finding")
+    del missing["repair_scope"]
+    verdict, findings, note = structured_review_outcome(
+        output("BLOCK", [missing]), ReviewVerdict.BLOCK
+    )
+    assert verdict is ReviewVerdict.BLOCK
+    assert findings == ()
+    assert note.startswith("Structured findings partly recorded as unstructured text:")
+    assert "missing required field: repair_scope" in note
+
+
+#: Exact finding blocks recovered from two recorded Codex-batch must-fail
+#: reviews in the confirm-4 run (orchestrator.db reviews rev_b08da9ab9a and
+#: rev_3279a3f832).  Replayed verbatim so the ingest repair is measured against
+#: real reviewer output, not a hand-cleaned sample.
+_REVIEW_FIXTURES = Path(__file__).parent / "fixtures" / "reviews"
+
+
+def _fixture_review(name: str) -> str:
+    return (_REVIEW_FIXTURES / name).read_text(encoding="utf-8")
+
+
+def test_replayed_codex_reviews_keep_block_and_ingest_what_they_can() -> None:
+    verdict, findings, note = structured_review_outcome(
+        _fixture_review("codex_batch_duplicate_finding_id.txt"), ReviewVerdict.BLOCK
+    )
+    assert verdict is ReviewVerdict.BLOCK
+    assert [f.id for f in findings] == ["B1", "B1-2"]
+    assert note == ""
+
+    verdict, findings, note = structured_review_outcome(
+        _fixture_review("codex_batch_missing_repair_scope.txt"), ReviewVerdict.BLOCK
+    )
+    assert verdict is ReviewVerdict.BLOCK
+    assert findings == ()
+    assert "missing required field: repair_scope" in note
+    assert "empty name does not raise ValueError" in note
+
+
 def test_rendered_findings_reach_repair_context() -> None:
     _, findings, _ = structured_review_outcome(output("BLOCK", [finding("B2")]),
                                                ReviewVerdict.BLOCK)

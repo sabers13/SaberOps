@@ -1263,12 +1263,43 @@ _DRAIN_COMPLETION_SECONDS: float = 60.0
 # be blocked in readline on a pipe a surviving descendant holds open.
 _DRAIN_CLEANUP_SECONDS: float = 5.0
 
-# Stream wrappers deliberately kept referenced when a surviving orphan
-# descendant holds a pipe end and a drain thread remains blocked in readline.
-# Letting them be garbage-collected would run BufferedReader.close() on the
-# lock the blocked drain thread holds, hanging run_process's return.  This is
-# a rare, bounded leak on the unconfirmed-termination failure path only.
+# Stream wrappers deliberately kept referenced only when an unexpected wrapper
+# shape leaves no raw FileIO to close and a drain thread remains blocked in
+# readline.  Letting them be garbage-collected would run BufferedReader.close()
+# on the lock the blocked drain thread holds, hanging run_process's return.
+# This is a rare, bounded leak on the unconfirmed-termination failure path
+# only; the normal orphan path closes the raw FileIO through the wrapper once.
 _ORPHANED_PIPE_STREAMS: list[Any] = []
+
+
+def _close_pipe_stream_after_unconfirmed_drain(stream: IO[str]) -> None:
+    """Close one pipe stream whose drain thread may still hold its lock.
+
+    A blocked ``readline`` means a normal ``stream.close()`` would wait on the
+    buffer lock.  Close the raw ``FileIO`` layer directly instead: that takes
+    no buffer lock and marks the object closed, so every wrapper finalizer that
+    later walks down to it is an idempotent no-op.  Closing only the numeric
+    descriptor (``os.close``) left the surviving wrapper to close an
+    already-closed descriptor at interpreter shutdown and printed two "Bad
+    file descriptor" tracebacks into the worker transcript (D3-remainder).
+    """
+    raw = getattr(getattr(stream, "buffer", None), "raw", None)
+    if raw is not None:
+        try:
+            raw.close()
+        except Exception:
+            pass
+        return
+    # Unknown wrapper shape: never let GC attempt a blocking close behind the
+    # drain thread's back, and close the numeric descriptor directly.
+    _ORPHANED_PIPE_STREAMS.append(stream)
+    try:
+        os.close(stream.fileno())
+    except Exception:
+        try:
+            stream.close()
+        except Exception:
+            pass
 
 
 def run_process(
@@ -1947,13 +1978,10 @@ def run_process(
             # Close owned pipe handles without blocking: a surviving orphan
             # descendant may hold the write end, and BufferedReader.close()
             # would block on the buffer lock held by a drain thread blocked
-            # in readline.  Close the raw descriptor instead, and keep the
-            # stream wrappers referenced so GC can never attempt a blocking
-            # close behind run_process's back.  Drain threads are daemons
-            # and were waited for above.
+            # in readline.  Drain threads are daemons and were waited for
+            # above; when one is still alive the raw FileIO layer is closed
+            # through the wrapper instead (see the helper).
             drain_threads_alive = any(t.is_alive() for t in threads)
-            if drain_threads_alive:
-                _ORPHANED_PIPE_STREAMS.append((proc.stdout, proc.stderr))
             for stream in (proc.stdout, proc.stderr):
                 if stream is None:
                     continue
@@ -1970,17 +1998,9 @@ def run_process(
                         pass
                     continue
                 # A drain thread may still be blocked in readline while an
-                # orphaned descendant holds the write end.  Close the raw
-                # descriptor instead so cleanup cannot block; the wrapper is
-                # kept referenced so a later GC does not block on the buffer
-                # lock.
-                try:
-                    os.close(stream.fileno())
-                except Exception:
-                    try:
-                        stream.close()
-                    except Exception:
-                        pass
+                # orphaned descendant holds the write end, so a normal close
+                # could block on the buffer lock it holds.
+                _close_pipe_stream_after_unconfirmed_drain(stream)
 
         stdout = "".join(stdout_chunks)
         stderr = "".join(stderr_chunks)
