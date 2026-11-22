@@ -86,11 +86,13 @@ def _parser() -> argparse.ArgumentParser:
     selection.add_argument(
         "--per-cli",
         type=str,
-        metavar="N|CLI=N[,CLI=N...]",
+        metavar="N|CLI=N|CLI=TASK[,TASK...]",
         help=(
-            "real mode only: run the first N catalogue tasks in every batch, or "
-            "set a count per subscription (e.g. opencode=10,codex=2,claude=2); "
-            "skipped rows are printed per batch"
+            "real mode only: run the first N catalogue tasks in every batch, "
+            "set a count per subscription (e.g. opencode=10,codex=2,claude=2), "
+            "or name task ids per subscription (e.g. "
+            "codex=rename,review-block-a,opencode=10); skipped rows are printed "
+            "per batch"
         ),
     )
     parser.add_argument(

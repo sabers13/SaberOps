@@ -1006,6 +1006,79 @@ def test_must_fail_probe_is_deterministic_and_gates_the_row(tmp_path: Path) -> N
     assert blocked_on_violation.passed is True
 
 
+def test_probe_without_a_violation_is_not_measured() -> None:
+    """N14-rig: a compliant candidate means there was nothing to catch.
+
+    A reviewer block on a candidate whose acceptance still holds cannot fail
+    the suite (the worker chose acceptance); the row is excluded, not failed.
+    Before the fix the same row was measured and failed the whole benchmark.
+    """
+    from saberops.benchmark import BenchmarkReport
+
+    compliant_block = replace(
+        _review_blocked_result(block_verdicts=1),
+        review_count=1,
+        acceptance_violation=False,
+    )
+    assert compliant_block.measured is False
+    assert compliant_block.passed is False
+
+    measured_pass = replace(
+        _review_blocked_result(block_verdicts=1),
+        review_count=1,
+        acceptance_violation=True,
+    )
+    assert measured_pass.measured is True
+    assert measured_pass.passed is True
+    report = BenchmarkReport(
+        mode="real",
+        results=(compliant_block, measured_pass),
+        started_at=0.0,
+        finished_at=1.0,
+    )
+    assert report.passed is True
+    assert "not measured" in report.table()
+
+
+def test_per_cli_selector_accepts_task_ids_per_batch() -> None:
+    """N13 residual: each CLI may name task ids, not only a prefix count."""
+    spec = parse_per_cli_selector(
+        "codex=rename,review-block-a,opencode=10,claude=review-block-b"
+    )
+    assert spec == {
+        "codex": ("rename", "review-block-a"),
+        "opencode": 10,
+        "claude": ("review-block-b",),
+    }
+    selected, skipped = select_benchmark_tasks_by_cli(spec)
+    assert [task.task_id for task in selected["codex"]] == [
+        "rename",
+        "review-block-a",
+    ]
+    assert [task.task_id for task in selected["claude"]] == ["review-block-b"]
+    assert len(selected["opencode"]) == 10
+    assert len(skipped["codex"]) == 8
+    assert "review-block-a" not in {task.task_id for task in skipped["codex"]}
+
+    with pytest.raises(RealModeRefused, match="unknown benchmark task"):
+        select_benchmark_tasks_by_cli({"codex": ("not-a-task",)})
+    with pytest.raises(RealModeRefused, match="cannot be mixed"):
+        parse_per_cli_selector("codex=2,review-block-a")
+    with pytest.raises(RealModeRefused, match="more than once"):
+        parse_per_cli_selector("codex=rename,codex=review-block-a")
+
+
+def test_benchmark_gate_uses_the_running_interpreter() -> None:
+    """N3/§12.5: the gate must not depend on a ``python`` alias existing."""
+    import shlex
+
+    from saberops.benchmark import benchmark_gate_command
+
+    command = benchmark_gate_command()
+    assert shlex.split(command) == [sys.executable, "-B", "-c", "import app"]
+    assert not command.startswith("python ")
+
+
 def test_wait_for_batch_accepts_the_first_eligible_candidate() -> None:
     """N5: acceptance happens on arrival, not after the batch's slowest task."""
     tasks = (TASKS_BY_ID["add-function"], TASKS_BY_ID["review-block-a"])
@@ -1384,6 +1457,40 @@ def test_per_cli_selector_varies_the_reduced_catalogue_per_batch() -> None:
         parse_per_cli_selector("codex=2,codex=3")
     with pytest.raises(RealModeRefused, match="at least 1"):
         select_benchmark_tasks_by_cli({"codex": 0})
+
+
+def test_benchmark_script_accepts_task_ids_per_cli(tmp_path: Path) -> None:
+    """N13 residual: a batch can name its task ids and still prints the split."""
+    script = Path(__file__).resolve().parents[1] / "scripts" / "benchmark.py"
+    store = tmp_path / "store"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--mode",
+            "real",
+            "--yes-real-cli",
+            "--dry-run",
+            "--per-cli",
+            "codex=rename,review-block-a,opencode=10,claude=2",
+            "--store",
+            str(store),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
+    )
+    assert result.returncode == 0, result
+    assert (
+        "reduced catalogue [codex batch]: running 2 task(s); skipping 8"
+        in result.stdout
+    )
+    assert "tasks: rename, review-block-a" in result.stdout
+    assert "reduced catalogue [opencode batch]: running 10 task(s); skipping 0: -" in (
+        result.stdout
+    )
+    assert not store.exists()
 
 
 def test_benchmark_script_prints_a_count_for_each_batch(tmp_path: Path) -> None:

@@ -14,12 +14,13 @@ lifecycle rig.
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 import sys
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -230,12 +231,28 @@ class TaskResult:
     #: None when the probe could not run.  A reviewer ``BLOCK`` only measures
     #: reviewer behaviour when there is something to block (N14).
     acceptance_violation: bool | None = None
+    #: The exact candidate commit a must-fail reviewer assessed.  Real mode now
+    #: seeds this candidate itself, so the owner can see what was blocked and
+    #: reproduce the probe (N14-rig observability).
+    blocked_candidate_sha: str | None = None
+    #: True when the review dispatch itself errored.  A partial review cycle
+    #: must not let a must-fail row pass on an earlier verdict.
+    review_failed: bool = False
 
     @property
     def measured(self) -> bool:
-        """False only for a must-fail row that no review ever examined."""
+        """False for a must-fail row with nothing to measure.
+
+        A row is unmeasured when no review ever examined it (N10) or when the
+        deterministic probe found no violation to catch: a block on a compliant
+        candidate is not evidence of a working must-fail guard, and a seeded
+        candidate that does not violate acceptance says the rig is wrong, not
+        that the reviewer failed.  Neither is a failure.
+        """
         if self.expect != "review_blocked":
             return True
+        if self.acceptance_violation is False:
+            return False
         return self.block_verdicts > 0 or self.review_count > 0
 
     @property
@@ -280,10 +297,12 @@ class TaskResult:
         # N14: a block on a candidate that still satisfies acceptance is not
         # evidence of a working must-fail guard.  When the deterministic probe
         # says acceptance still holds (False), the row cannot pass; None means
-        # the probe did not run and keeps the historical behaviour.
+        # the probe did not run and keeps the historical behaviour.  A review
+        # dispatch that errored is never a measured pass.
         return (
             self.block_verdicts > 0
             and self.acceptance_violation is not False
+            and not self.review_failed
         )
 
 
@@ -467,10 +486,23 @@ class BenchmarkReport:
             lines.extend(
                 [
                     "",
-                    "not measured (no review and no block; excluded from the verdict): "
+                    "not measured (no review/block, or no acceptance violation to "
+                    "catch; excluded from the verdict): "
                     + ", ".join(result.task_id for result in not_measured),
                 ]
             )
+        must_fail = [result for result in self.results if result.expect == "review_blocked"]
+        if must_fail:
+            # Observability for N14-rig: the row rule is deterministic, so the
+            # owner must be able to see the probe result and the exact candidate
+            # that was reviewed, not only the aggregate verdict.
+            lines.extend(["", "must-fail probes (deterministic candidate-tree check):"])
+            for result in must_fail:
+                lines.append(
+                    f"  {result.task_id} [{result.batch or result.subscription}]: "
+                    f"acceptance_violation={_probe(result.acceptance_violation)} "
+                    f"blocked_candidate={result.blocked_candidate_sha or '-'}"
+                )
         if self.drills:
             lines.extend(["", "Failure and feature drills", ""])
             drill_header = (
@@ -518,6 +550,13 @@ class BenchmarkReport:
 
 def _seconds(value: float | None) -> str:
     return "-" if value is None else f"{value:.1f}s"
+
+
+def _probe(value: bool | None) -> str:
+    """Print the deterministic must-fail probe as a three-valued result."""
+    if value is None:
+        return "not run"
+    return "violated" if value else "holds"
 
 
 def _tokens(value: int | None) -> str:
@@ -638,6 +677,274 @@ def probe_must_fail_acceptance(repo: Path, candidate_sha: str) -> bool | None:
     if "acceptance-holds" in probed.stdout:
         return False
     return None
+
+
+def benchmark_gate_command() -> str:
+    """Return the toy repository gate, built from the running interpreter.
+
+    The rig used the literal ``python``, which does not exist on a host that
+    ships only ``python3``: every task then failed the gate as
+    ``GATE INFRASTRUCTURE_FAILURE`` before any worker could start (report
+    §12.5).  ``sys.executable`` is the interpreter already running the rig, so
+    the same command works wherever the benchmark itself runs.  It is quoted
+    because the path can contain spaces.
+    """
+    return f"{shlex.quote(sys.executable)} -B -c 'import app'"
+
+
+#: The deterministic violating candidate a must-fail row reviews.  It removes
+#: the empty-name guard and the test that proves it, so it violates both
+#: catalogue acceptance clauses by construction.  Seeding it means the row
+#: measures the reviewer, never whether a worker chose to obey acceptance
+#: (N14-rig).
+_MUST_FAIL_VIOLATING_APP = 'def greet(name: str) -> str:\n    return f"hello {name}"\n'
+
+_MUST_FAIL_VIOLATING_TEST = (
+    "from app import greet\n\n\n"
+    "def test_greet() -> None:\n"
+    '    assert greet("Ada") == "hello Ada"\n'
+)
+
+
+@dataclass(frozen=True)
+class SeededCandidate:
+    """The deterministic violating candidate a must-fail row reviews."""
+
+    run_id: str
+    candidate_sha: str
+    worktree: Path
+
+
+def _git(repo: Path, *args: str) -> str:
+    completed = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout.strip()
+
+
+def seed_must_fail_candidate(
+    *,
+    repo: Path,
+    base_sha: str,
+    task: BenchmarkTask,
+    db: Any,
+    provider: str,
+    model: str,
+    gate_command: str,
+) -> SeededCandidate:
+    """Commit a deterministic violation and the durable run/attempt to review.
+
+    The reviewer reads the candidate exactly the way an engine review does:
+    a RUNNING run, one successful attempt and an acceptance-bearing task text.
+    No worker is dispatched, so the row cannot depend on a model's choice to
+    follow or reject the contradictory goal.  The worktree is a real git
+    worktree of the toy repository, so the diff and probe read the same tree.
+    """
+    from saberops.control_plane import (
+        freeze_control_plane_policy,
+        load_control_plane_policy,
+    )
+    from saberops.db import current_iso_timestamp
+    from saberops.models import Attempt, AttemptStatus, Run, RunStatus, Tier
+    from saberops.provenance import mint_run_provenance
+
+    run_task = f"{task.goal}\n\nAcceptance:\n{task.acceptance}"
+    provenance = mint_run_provenance(repo, run_task)
+    run_id = provenance.run_id
+    branch = f"orch/{run_id}/a1"
+    worktree = repo.parent / f"wt-{task.task_id}"
+    _git(
+        repo,
+        "worktree",
+        "add",
+        "-b",
+        branch,
+        str(worktree),
+        base_sha,
+    )
+    (worktree / "app.py").write_text(_MUST_FAIL_VIOLATING_APP, encoding="utf-8")
+    (worktree / "test_app.py").write_text(
+        _MUST_FAIL_VIOLATING_TEST, encoding="utf-8"
+    )
+    _git(worktree, "add", ".")
+    _git(worktree, "commit", "-m", "must-fail probe: remove empty-name guard")
+    candidate_sha = _git(worktree, "rev-parse", "HEAD")
+
+    now = current_iso_timestamp()
+    frozen = freeze_control_plane_policy(load_control_plane_policy())
+    db.create_run(
+        Run(
+            id=run_id,
+            task=run_task,
+            target_repo=str(repo),
+            base_commit=base_sha,
+            tier=Tier.T1,
+            training_allowed=True,
+            gate_command=gate_command,
+            status=RunStatus.RUNNING,
+            created_at=now,
+            control_plane_snapshot_json=frozen.as_json(),
+            control_plane_snapshot_digest=frozen.digest,
+            project_id=provenance.project_id,
+            project_identity_json=provenance.identity.to_json(),
+            objective_id=provenance.objective_id,
+            config_json='{"review_enabled": true}',
+        )
+    )
+    db.create_attempt(
+        Attempt(
+            id=f"{run_id}_a1",
+            run_id=run_id,
+            attempt_number=1,
+            provider=provider,
+            model=model,
+            worktree_path=str(worktree),
+            branch_name=branch,
+            status=AttemptStatus.SUCCESS,
+            commit_sha=candidate_sha,
+            created_at=now,
+            project_id=provenance.project_id,
+            objective_id=provenance.objective_id,
+            base_sha=base_sha,
+        )
+    )
+    return SeededCandidate(run_id=run_id, candidate_sha=candidate_sha, worktree=worktree)
+
+
+def review_seeded_candidate(
+    *, db: Any, readiness: Any, seeded: SeededCandidate, timeout: float = 300.0
+) -> None:
+    """Drive only the reviewer over a seeded candidate.
+
+    The reviewer comes from the exact configured binding (the batch's
+    different-vendor reviewer), so this is the same review dispatch a worker
+    candidate would get -- minus the worker prompt.
+    """
+    from saberops.control_plane.binding_store import load_owner_bindings
+    from saberops.control_plane.reviewer_binding import reviewer_candidate_for_dispatch
+    from saberops.review import ReviewEngine
+    from saberops.workers.registry import AdapterRegistry
+
+    reviewer = reviewer_candidate_for_dispatch(
+        load_owner_bindings(), adapter_registry=AdapterRegistry.default()
+    )
+    if reviewer is None:
+        raise RealModeRefused(
+            "no reviewer binding is configured for the seeded must-fail review"
+        )
+    engine = ReviewEngine(db=db, readiness_service=readiness)
+    engine.review_run(seeded.run_id, reviewer_override=reviewer, timeout=timeout)
+    # A review-only run has no job to move it; record the same terminal state a
+    # completed review would leave behind so the store has no dangling RUNNING.
+    from saberops.db import current_iso_timestamp
+    from saberops.models import RunStatus
+
+    db.update_run(
+        seeded.run_id,
+        RunStatus.COMPLETED,
+        completed_at=current_iso_timestamp(),
+        result_summary="benchmark seeded must-fail review",
+    )
+
+
+def run_seeded_must_fail_row(
+    *,
+    db: Any,
+    readiness: Any,
+    repo: Path,
+    base_sha: str,
+    task: BenchmarkTask,
+    batch: str,
+    provider: str,
+    model: str,
+    gate_command: str,
+    reviewer: str,
+    review: Callable[[SeededCandidate], None] | None = None,
+) -> TaskResult:
+    """Measure one must-fail row by reviewing a seeded violation only.
+
+    No job and no worker prompt are involved: the candidate is deterministic,
+    so a ``PASS`` is a real reviewer miss and a ``BLOCK`` is a real catch.  The
+    probe is still evaluated over the exact seeded commit so the table can show
+    the row's ground truth.
+    """
+    submitted = time.time()
+    try:
+        seeded = seed_must_fail_candidate(
+            repo=repo,
+            base_sha=base_sha,
+            task=task,
+            db=db,
+            provider=provider,
+            model=model,
+            gate_command=gate_command,
+        )
+    except Exception as exc:  # noqa: BLE001 - one row never aborts the table
+        return TaskResult(
+            task_id=task.task_id,
+            kind=task.kind,
+            expect=task.expect,
+            final_state="FAILED",
+            accepted_commit=None,
+            submitted_at=submitted,
+            started_at=None,
+            terminal_at=time.time(),
+            accepted_at=None,
+            notice_at=None,
+            owner_actions=0,
+            subscription=f"{provider}/{model}",
+            detail=f"seeded candidate failed: {exc}",
+            batch=batch,
+            reviewer=reviewer,
+            candidate_produced=False,
+        )
+    review_started = time.time()
+    detail = ""
+    review_failed = False
+    try:
+        if review is None:
+            review_seeded_candidate(
+                db=db, readiness=readiness, seeded=seeded
+            )
+        else:
+            review(seeded)
+    except Exception as exc:  # noqa: BLE001 - one row never aborts the table
+        review_failed = True
+        detail = str(exc)
+    blocks = count_block_verdicts(db, seeded.run_id)
+    review_count = len(db.get_reviews_for_run(seeded.run_id))
+    probe = probe_must_fail_acceptance(repo, seeded.candidate_sha)
+    final_state = (
+        "FAILED" if review_failed else "BLOCKED" if blocks else "PASSED"
+    )
+    return TaskResult(
+        task_id=task.task_id,
+        kind=task.kind,
+        expect=task.expect,
+        final_state=final_state,
+        accepted_commit=None,
+        submitted_at=submitted,
+        started_at=review_started,
+        # The candidate existed the moment seeding finished; the review time is
+        # not a worker latency and must not be printed as one.
+        terminal_at=review_started,
+        accepted_at=None,
+        notice_at=None,
+        owner_actions=0,
+        subscription=f"{provider}/{model}",
+        detail=detail,
+        batch=batch,
+        reviewer=reviewer,
+        block_verdicts=blocks,
+        review_count=review_count,
+        candidate_produced=True,
+        acceptance_violation=probe,
+        blocked_candidate_sha=seeded.candidate_sha,
+        review_failed=review_failed,
+    )
 
 
 class RealModeRefused(RuntimeError):
@@ -889,12 +1196,19 @@ def real_batches(
     )
 
 
-def parse_per_cli_selector(raw: str) -> int | dict[str, int]:
-    """Parse ``--per-cli`` as a plain count or a per-subscription mapping.
+PerCliSpec = dict[str, int | tuple[str, ...]]
+
+
+def parse_per_cli_selector(raw: str) -> int | PerCliSpec:
+    """Parse ``--per-cli`` as a plain count or a per-subscription selection.
 
     Plain forms keep their established meaning: ``--per-cli 2`` selects the
     first two catalogue tasks for every batch.  ``--per-cli
-    opencode=10,codex=2,claude=2`` (N13) selects independently per batch.
+    opencode=10,codex=2,claude=2`` (N13) selects a count per batch, and a value
+    that is not an integer names catalogue task ids instead: ``--per-cli
+    codex=rename,review-block-a,opencode=10``.  A bare comma-separated token
+    after an id list continues that batch's list, which keeps the natural
+    "CLI=list,list" spelling usable without inventing a second separator.
     """
     text = raw.strip()
     if not text:
@@ -906,29 +1220,57 @@ def parse_per_cli_selector(raw: str) -> int | dict[str, int]:
             raise RealModeRefused(
                 f"--per-cli must be an integer or CLI=count list, got {raw!r}"
             ) from exc
-    spec: dict[str, int] = {}
+    spec: PerCliSpec = {}
+    pending: str | None = None
+    pending_ids: list[str] = []
+
+    def flush() -> None:
+        nonlocal pending, pending_ids
+        if pending is not None:
+            spec[pending] = tuple(pending_ids)
+            pending = None
+            pending_ids = []
+
     for part in text.split(","):
-        name, separator, count_text = part.strip().partition("=")
-        if not separator or not name.strip() or not count_text.strip():
+        piece = part.strip()
+        if not piece:
             raise RealModeRefused(
-                f"--per-cli entry {part!r} must look like CLI=N"
+                f"--per-cli entry {part!r} must look like CLI=N or CLI=task-id"
             )
-        subscription = name.strip().lower()
-        if subscription not in REAL_SUBSCRIPTION_ORDER:
-            raise RealModeRefused(
-                f"--per-cli names unknown CLI {subscription!r}; valid CLIs: "
-                + ", ".join(REAL_SUBSCRIPTION_ORDER)
+        if "=" in piece:
+            name, _separator, value = piece.partition("=")
+            subscription = name.strip().lower()
+            value = value.strip()
+            if not subscription or not value:
+                raise RealModeRefused(
+                    f"--per-cli entry {part!r} must look like CLI=N or CLI=task-id"
+                )
+            if subscription not in REAL_SUBSCRIPTION_ORDER:
+                raise RealModeRefused(
+                    f"--per-cli names unknown CLI {subscription!r}; valid CLIs: "
+                    + ", ".join(REAL_SUBSCRIPTION_ORDER)
+                )
+            if subscription in spec or subscription == pending:
+                raise RealModeRefused(
+                    f"--per-cli names CLI {subscription!r} more than once"
+                )
+            flush()
+            signed_integer = value.isdigit() or (
+                value.startswith("-") and value[1:].isdigit()
             )
-        if subscription in spec:
+            if signed_integer:
+                spec[subscription] = int(value)
+            else:
+                pending = subscription
+                pending_ids = [value]
+            continue
+        if pending is None:
             raise RealModeRefused(
-                f"--per-cli names CLI {subscription!r} more than once"
+                f"--per-cli entry {part!r} must follow a CLI=task-id list; "
+                "counts cannot be mixed with task ids for one CLI"
             )
-        try:
-            spec[subscription] = int(count_text.strip())
-        except ValueError as exc:
-            raise RealModeRefused(
-                f"--per-cli count for {subscription!r} must be an integer"
-            ) from exc
+        pending_ids.append(piece)
+    flush()
     return spec
 
 
@@ -941,23 +1283,51 @@ def _validate_per_cli_count(per_cli: int, label: str) -> None:
         )
 
 
+def _validate_per_cli_task_ids(task_ids: tuple[str, ...], label: str) -> None:
+    requested = [part.strip() for part in task_ids if part.strip()]
+    if not requested:
+        raise RealModeRefused(f"{label} needs at least one task id")
+    unknown = sorted(set(requested) - set(TASKS_BY_ID))
+    if unknown:
+        raise RealModeRefused(
+            f"{label} names unknown benchmark task id(s): "
+            + ", ".join(unknown)
+            + "; valid ids: "
+            + ", ".join(task.task_id for task in TASKS)
+        )
+
+
 def select_benchmark_tasks_by_cli(
-    spec: Mapping[str, int],
+    spec: Mapping[str, int | tuple[str, ...]],
 ) -> tuple[dict[str, tuple[BenchmarkTask, ...]], dict[str, tuple[BenchmarkTask, ...]]]:
-    """Return per-batch ``(selected, skipped)`` for a per-CLI selector (N13)."""
+    """Return per-batch ``(selected, skipped)`` for a per-CLI selector (N13).
+
+    A value may be a count (first N catalogue tasks) or an explicit id tuple,
+    so a confirmation run can ask for the same must-fail rows on every batch
+    without selecting unrelated tasks.
+    """
     if not spec:
         raise RealModeRefused("--per-cli needs at least one CLI=count entry")
     selected: dict[str, tuple[BenchmarkTask, ...]] = {}
     skipped: dict[str, tuple[BenchmarkTask, ...]] = {}
     for subscription in REAL_SUBSCRIPTION_ORDER:
-        count = spec.get(subscription)
-        if count is None:
+        choice = spec.get(subscription)
+        if choice is None:
             selected[subscription] = TASKS
             skipped[subscription] = ()
             continue
-        _validate_per_cli_count(count, f"--per-cli {subscription}")
-        selected[subscription] = TASKS[:count]
-        skipped[subscription] = TASKS[count:]
+        if isinstance(choice, int):
+            _validate_per_cli_count(choice, f"--per-cli {subscription}")
+            selected[subscription] = TASKS[:choice]
+        else:
+            _validate_per_cli_task_ids(choice, f"--per-cli {subscription}")
+            wanted = {part.strip() for part in choice if part.strip()}
+            selected[subscription] = tuple(
+                task for task in TASKS if task.task_id in wanted
+            )
+        skipped[subscription] = tuple(
+            task for task in TASKS if task not in selected[subscription]
+        )
     return selected, skipped
 
 
@@ -1575,15 +1945,19 @@ def run_real_benchmark(
     )
 
     # Every batch starts from its own clean, identically seeded repositories so
-    # a later task never inherits an earlier batch's accepted change.
-    gate_command = "python -B -c 'import app'"
+    # a later task never inherits an earlier batch's accepted change.  The gate
+    # is built from the running interpreter: a host with only ``python3`` must
+    # not fail every task as a gate infrastructure error (report §12.5).
+    gate_command = benchmark_gate_command()
     batches = real_batches(tasks)
     repos_by_batch: dict[str, dict[str, Path]] = {}
+    base_shas_by_batch: dict[str, dict[str, str]] = {}
     for batch in batches:
         batch_root = repo_root / batch.subscription
         repos: dict[str, Path] = {}
+        base_shas: dict[str, str] = {}
         for task in batch.tasks:
-            repo, _sha = create_toy_repository(
+            repo, sha = create_toy_repository(
                 batch_root, f"toy-{task.task_id}", task_id=task.task_id
             )
             set_project_review_policy(repo, ReviewPolicyMode.ALWAYS_REQUIRED)
@@ -1591,7 +1965,9 @@ def run_real_benchmark(
                 cli_main(["project", "set-gate", "--repo", str(repo), gate_command]) == 0
             )
             repos[task.task_id] = repo
+            base_shas[task.task_id] = sha
         repos_by_batch[batch.subscription] = repos
+        base_shas_by_batch[batch.subscription] = base_shas
 
     first = batches[0]
     findings = collect_preflight(
@@ -1617,8 +1993,9 @@ def run_real_benchmark(
         )
 
     readiness = ReadinessService.for_owner_state(owner_state_dir())
-    results: list[TaskResult] = []
+    result_by_key: dict[tuple[str, str], TaskResult] = {}
     all_jobs: list[str] = []
+    seeded_reviews: list[tuple[RealBatch, BenchmarkTask]] = []
     with real_mode_presence(db):
         for batch in batches:
             reviewer_model = real_model_for(batch.reviewer_subscription, models)
@@ -1626,9 +2003,15 @@ def run_real_benchmark(
             configure_real_reviewer(batch.reviewer_subscription, reviewer_model)
 
             repos = repos_by_batch[batch.subscription]
+            worker_tasks = tuple(
+                task for task in batch.tasks if task.expect == "accepted"
+            )
+            review_tasks = tuple(
+                task for task in batch.tasks if task.expect == "review_blocked"
+            )
             submitted_at: dict[str, float] = {}
             jobs: dict[str, str] = {}
-            for task in batch.tasks:
+            for task in worker_tasks:
                 requirements = JobRequirements(
                     model_family_exclude=real_family_requirements(batch.subscription)
                 )
@@ -1643,14 +2026,18 @@ def run_real_benchmark(
                 jobs[task.task_id] = submitted.job.job_id
                 all_jobs.append(submitted.job.job_id)
 
-            outcome = _drive_real_batch(
-                batch=batch,
-                db=db,
-                readiness=readiness,
-                jobs=jobs,
-                max_wait=max_wait,
+            outcome = (
+                _drive_real_batch(
+                    batch=replace(batch, tasks=worker_tasks),
+                    db=db,
+                    readiness=readiness,
+                    jobs=jobs,
+                    max_wait=max_wait,
+                )
+                if worker_tasks
+                else BatchOutcome(terminal={}, noticed={}, accepted={})
             )
-            for task in batch.tasks:
+            for task in worker_tasks:
                 job_id = jobs[task.task_id]
                 job = get_job(db, job_id)
                 assert job is not None
@@ -1680,65 +2067,72 @@ def run_real_benchmark(
                     if job.current_run_id is not None
                     else 0
                 )
-                acceptance_violation: bool | None = None
-                if task.expect == "review_blocked" and job.current_run_id is not None:
-                    # Probe the exact tree the reviewer blocked.  A later
-                    # repair may legitimately make the change compliant; the
-                    # row measures whether the reviewer blocked the violating
-                    # candidate, not the repaired tree.  The first
-                    # commit-bearing attempt is the fallback for stores without
-                    # linked review dispatch evidence.
-                    candidate_sha = first_blocked_candidate_sha(
-                        db, job.current_run_id
-                    ) or next(
-                        (
-                            attempt.commit_sha
-                            for attempt in attempts
-                            if attempt.commit_sha
-                        ),
-                        None,
-                    )
-                    if candidate_sha is not None:
-                        acceptance_violation = probe_must_fail_acceptance(
-                            repos[task.task_id], candidate_sha
-                        )
-                results.append(
-                    TaskResult(
-                        task_id=task.task_id,
-                        kind=task.kind,
-                        expect=task.expect,
-                        final_state=job.state.value,
-                        accepted_commit=accepted_commit,
-                        submitted_at=submitted_at[task.task_id],
-                        started_at=(
-                            _iso_epoch(attempts[0].created_at) if attempts else None
-                        ),
-                        terminal_at=_iso_epoch(
-                            run.completed_at if run is not None else None
-                        ),
-                        accepted_at=accepted_at,
-                        notice_at=outcome.noticed.get(task.task_id),
-                        owner_actions=owner_actions,
-                        subscription=subscription,
-                        detail=str(job.failure_reason or ""),
-                        batch=batch.subscription,
-                        reviewer=reviewer,
-                        block_verdicts=(
-                            count_block_verdicts(db, job.current_run_id)
-                            if job.current_run_id is not None
-                            else 0
-                        ),
-                        review_count=review_count,
-                        candidate_produced=any(
-                            attempt.commit_sha for attempt in attempts
-                        ),
-                        acceptance_violation=acceptance_violation,
-                    )
+                result_by_key[(batch.subscription, task.task_id)] = TaskResult(
+                    task_id=task.task_id,
+                    kind=task.kind,
+                    expect=task.expect,
+                    final_state=job.state.value,
+                    accepted_commit=accepted_commit,
+                    submitted_at=submitted_at[task.task_id],
+                    started_at=(
+                        _iso_epoch(attempts[0].created_at) if attempts else None
+                    ),
+                    terminal_at=_iso_epoch(
+                        run.completed_at if run is not None else None
+                    ),
+                    accepted_at=accepted_at,
+                    notice_at=outcome.noticed.get(task.task_id),
+                    owner_actions=owner_actions,
+                    subscription=subscription,
+                    detail=str(job.failure_reason or ""),
+                    batch=batch.subscription,
+                    reviewer=reviewer,
+                    block_verdicts=(
+                        count_block_verdicts(db, job.current_run_id)
+                        if job.current_run_id is not None
+                        else 0
+                    ),
+                    review_count=review_count,
+                    candidate_produced=any(
+                        attempt.commit_sha for attempt in attempts
+                    ),
                 )
+            for task in review_tasks:
+                # Deferred until every worker batch has finished: a review-only
+                # RUNNING run must never be visible to a later scheduler tick.
+                seeded_reviews.append((batch, task))
 
+        for batch, task in seeded_reviews:
+            reviewer_model = real_model_for(batch.reviewer_subscription, models)
+            reviewer = f"{batch.reviewer_subscription}/{reviewer_model}"
+            configure_real_reviewer(batch.reviewer_subscription, reviewer_model)
+            result_by_key[(batch.subscription, task.task_id)] = (
+                run_seeded_must_fail_row(
+                    db=db,
+                    readiness=readiness,
+                    repo=repos_by_batch[batch.subscription][task.task_id],
+                    base_sha=base_shas_by_batch[batch.subscription][task.task_id],
+                    task=task,
+                    batch=batch.subscription,
+                    provider=(
+                        "anthropic"
+                        if batch.subscription == "claude"
+                        else batch.subscription
+                    ),
+                    model=real_model_for(batch.subscription, models),
+                    gate_command=gate_command,
+                    reviewer=reviewer,
+                )
+            )
+
+    results = tuple(
+        result_by_key[(batch.subscription, task.task_id)]
+        for batch in batches
+        for task in batch.tasks
+    )
     return BenchmarkReport(
         mode="real",
-        results=tuple(results),
+        results=results,
         started_at=started,
         finished_at=time.time(),
         usage=aggregate_subscription_usage(db, all_jobs),

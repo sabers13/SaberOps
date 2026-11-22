@@ -44,7 +44,10 @@ attempt and ended `CONVERGENCE_STALLED`, losing a finished task.
 4. **The benchmark rig checks the must-fail rows deterministically.** For
    `review-block-a` / `review-block-b` the rig probes the candidate commit's
    `app.py`: a reviewer block on a candidate whose acceptance still holds is
-   not evidence of a working must-fail guard, so the row fails.
+   not evidence of a working must-fail guard, so the row fails. **Amended by
+   [ADR-0056](0056-benchmark-must-fail-seeded-review.md):** real mode now seeds
+   the violating candidate and drives only the reviewer, and a row with no
+   violation to catch is *not measured* instead of failing the benchmark.
 5. **A no-diff repair that claims the finding is satisfied gets one bounded
    re-review.** The inherited candidate is reviewed again with the repair
    report embedded as non-authoritative evidence. The re-review is allowed

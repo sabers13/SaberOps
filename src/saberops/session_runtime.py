@@ -175,6 +175,11 @@ class AgentSessionRuntime:
         self.terminal_status: str | None = None
         self.native_parts: dict[str, list[dict[str, str]]] = {}
         self.server_version: str | None = None
+        #: True once the process monitor has begun terminating the owned
+        #: server.  On the idle-tree cut the turn's HTTP call can fail before
+        #: ``launch_worker_process`` publishes its typed result, so the failure
+        #: path waits for that result instead of reporting a provider symptom.
+        self.monitor_terminating = False
 
     def api(self, method: str, path: str, body: object = None, *, timeout: float = 5) -> Any:
         if not self.endpoint:
@@ -281,7 +286,7 @@ class AgentSessionRuntime:
                     on_stdout=output,
                     on_stderr=output,
                     on_process_start=request.on_process_start,
-                    on_monitor_transition=request.on_monitor_transition,
+                    on_monitor_transition=self.monitor_transition,
                 )
             except BaseException as exc:
                 self.failure = exc
@@ -519,6 +524,41 @@ class AgentSessionRuntime:
             }
         ]
 
+    def monitor_transition(self, payload: dict[str, Any]) -> None:
+        """Keep the engine's termination signal and forward the durable hook.
+
+        The turn's HTTP call can fail while the owned server is being cut, so
+        the failure path needs its own view of "the engine is terminating this
+        process" rather than a provider error string.
+        """
+        state = str(payload.get("state") or "")
+        if state in {"TERMINATING", "TERMINAL"}:
+            self.monitor_terminating = True
+        request = self.request
+        callback = request.on_monitor_transition if request is not None else None
+        if callback is not None:
+            callback(payload)
+
+    def failure_process_result(self, timeout: float = 5.0) -> ProcessResult | None:
+        """Return the owned server's result even when a failure races a cut.
+
+        ``launch_worker_process`` publishes the typed ``termination_reason``
+        only when it returns.  An idle-tree cut kills the server while a turn's
+        HTTP call is in flight, so that call fails first with a provider
+        symptom (HTTP 503 / connection refused).  When the monitor has begun
+        terminating the process -- or the launch thread has already finished
+        -- wait briefly for the result so the durable attempt names the cut
+        (N17) instead of the symptom.
+        """
+        if self.process_result is not None:
+            return self.process_result
+        thread = self.thread
+        if thread is None:
+            return None
+        if self.monitor_terminating or not thread.is_alive():
+            thread.join(timeout)
+        return self.process_result
+
     def run_opencode(self, request: WorkerRequest, binary: str) -> WorkerResult:
         started = time.monotonic()
         provider, separator, identifier = request.model.partition("/")
@@ -545,7 +585,7 @@ class AgentSessionRuntime:
             with self.turn_lock:
                 return self._turn(request, started)
         except (OSError, ValueError, KeyError, SessionRuntimeError) as exc:
-            process = self.process_result
+            process = self.failure_process_result()
             termination_reason = (
                 process.termination_reason if process is not None else None
             )

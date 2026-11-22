@@ -66,6 +66,53 @@ def _ensure_delivery_table(conn: sqlite3.Connection) -> None:
     )
 
 
+#: How long a recorded non-delivery status suppresses another attempt.  A
+#: headless host has no desktop transport, and retrying ``notify-send`` on
+#: every scheduler tick turned one notice into thousands of process launches
+#: (report §12.6: 22,863 calls in 26 minutes).  The durable record stays the
+#: truth -- status and time are still written -- but a failed or unavailable
+#: key is not retried until its window has passed.  ``unavailable`` waits
+#: longer because a missing session bus is an environment fact, while a
+#: transient ``failed`` attempt deserves an earlier retry.
+DELIVERY_RETRY_SECONDS: dict[str, float] = {
+    "failed": 300.0,
+    "unavailable": 3600.0,
+}
+
+#: Lower-case markers that mean "there is no desktop transport here", not
+#: "this one notification failed".  The message is vendor text, so it is only
+#: used to classify the recorded status; it is never shown as authority.
+_NO_TRANSPORT_MARKERS: tuple[str, ...] = (
+    "dbus",
+    "session bus",
+    "autolaunch",
+    "could not connect to display",
+    "cannot open display",
+)
+
+
+def _retry_is_due(status: str, attempted_at: str) -> bool:
+    """True when a recorded attempt is outside its retry window."""
+    delay = DELIVERY_RETRY_SECONDS.get(status, 0.0)
+    if delay <= 0:
+        return True
+    try:
+        attempted = datetime.fromisoformat(attempted_at)
+    except (TypeError, ValueError):
+        return True
+    if attempted.tzinfo is None:
+        attempted = attempted.replace(tzinfo=UTC)
+    return (datetime.now(UTC) - attempted).total_seconds() >= delay
+
+
+def _classify_failure(detail: str) -> str:
+    """Map a ``notify-send`` failure to ``unavailable`` or ``failed``."""
+    lowered = detail.lower()
+    if any(marker in lowered for marker in _NO_TRANSPORT_MARKERS):
+        return "unavailable"
+    return "failed"
+
+
 def _record_attempt(
     conn: sqlite3.Connection, key: str, status: str, detail: str = ""
 ) -> None:
@@ -93,7 +140,10 @@ def notify_once(ledger: Path, key: str, title: str, body: str) -> str:
     ``unavailable``/``failed`` instead of leaving the key absent.  Callers that
     account for notice delivery (the real-mode benchmark) can therefore wait on
     the engine's own record instead of requiring a working desktop bus.  A
-    failed attempt is retried on the next tick until it succeeds.
+    recorded non-delivery is retried only after its backoff window
+    (:data:`DELIVERY_RETRY_SECONDS`), so a headless host does not launch a
+    doomed notifier on every tick; the durable status still records what
+    happened.
     """
     try:
         if not notifications_enabled():
@@ -110,27 +160,38 @@ def notify_once(ledger: Path, key: str, title: str, body: str) -> str:
         if conn.execute("SELECT 1 FROM sent WHERE event_key = ?", (key,)).fetchone():
             return "duplicate"
         if command is None:
-            previous = conn.execute(
-                "SELECT status FROM delivery WHERE event_key = ?", (key,)
-            ).fetchone()
-            if previous is not None and str(previous[0]) == "unavailable":
-                # A headless host would otherwise rewrite the same row on
-                # every scheduler tick; the first attempt is the durable fact.
-                return "unavailable"
             _record_attempt(conn, key, "unavailable", "notify-send is not installed")
             return "unavailable"
+        previous = conn.execute(
+            "SELECT status, attempted_at FROM delivery WHERE event_key = ?", (key,)
+        ).fetchone()
+        if previous is not None:
+            previous_status, attempted_at = str(previous[0]), str(previous[1])
+            if not _retry_is_due(previous_status, attempted_at):
+                return previous_status
         try:
-            subprocess.run(
+            completed = subprocess.run(
                 [command, title, body],
-                check=True,
+                check=False,
                 timeout=5,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
             )
         except (OSError, subprocess.SubprocessError) as exc:
             logger.warning("desktop notification failed: %s", exc)
             _record_attempt(conn, key, "failed", str(exc)[:500])
             return "failed"
+        if completed.returncode != 0:
+            detail = (
+                completed.stderr.strip()
+                or completed.stdout.strip()
+                or f"notify-send exited with status {completed.returncode}"
+            )[:500]
+            status = _classify_failure(detail)
+            if status == "failed":
+                logger.warning("desktop notification failed: %s", detail)
+            _record_attempt(conn, key, status, detail)
+            return status
         _record_attempt(conn, key, "delivered")
         # The desktop service cannot participate in SQLite transactions. A crash
         # after delivery but before this commit can produce a duplicate on restart.

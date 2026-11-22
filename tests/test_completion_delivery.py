@@ -398,6 +398,79 @@ def test_missing_notify_send_records_a_durable_attempt(
     assert _notice_delivered(_Db(), "job-1", "SUCCEEDED") is True
 
 
+def _counting_notifier(tmp_path: Path, body: str) -> Path:
+    """A ``notify-send`` stub that counts launches and then runs *body*."""
+    counter = tmp_path / "launcher-count"
+    command = tmp_path / "notify-send"
+    command.write_text(
+        '#!/bin/sh\nprintf "x" >> "' + str(counter) + '"\n' + body + "\n",
+        encoding="utf-8",
+    )
+    command.chmod(0o755)
+    return counter
+
+
+def test_failed_notice_backs_off_instead_of_retrying_every_tick(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Report §12.6: a headless host must not launch a doomed notifier per tick.
+
+    The durable attempt (D10) keeps its exact status and time; only the retry
+    cadence changes.  After the backoff window the same key is attempted again.
+    """
+    import sqlite3
+    from datetime import UTC, datetime, timedelta
+
+    from saberops.notifications import notify_once
+
+    monkeypatch.setenv("SABEROPS_DESKTOP_NOTIFICATIONS", "1")
+    counter = _counting_notifier(tmp_path, "exit 3")
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    ledger = tmp_path / "owner.db.notifications.sqlite3"
+    key = "job:job-backoff:FAILED"
+
+    assert notify_once(ledger, key, "Failed", "job") == "failed"
+    assert notify_once(ledger, key, "Failed", "job") == "failed"
+    assert counter.read_text() == "x", "the retry window must suppress a relaunch"
+
+    with sqlite3.connect(ledger) as conn:
+        conn.execute(
+            "UPDATE delivery SET attempted_at = ? WHERE event_key = ?",
+            ((datetime.now(UTC) - timedelta(seconds=301)).isoformat(), key),
+        )
+        conn.commit()
+    assert notify_once(ledger, key, "Failed", "job") == "failed"
+    assert counter.read_text() == "xx"
+
+
+def test_no_session_bus_is_unavailable_and_not_retried_every_tick(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing desktop transport is recorded as unavailable, not as a flake."""
+    import sqlite3
+
+    from saberops.notifications import notice_attempted, notify_once
+
+    monkeypatch.setenv("SABEROPS_DESKTOP_NOTIFICATIONS", "1")
+    counter = _counting_notifier(
+        tmp_path,
+        'echo "Cannot autolaunch D-Bus without X11 $DISPLAY" >&2\nexit 1',
+    )
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    ledger = tmp_path / "owner.db.notifications.sqlite3"
+    key = "job:job-headless:SUCCEEDED"
+
+    assert notify_once(ledger, key, "Done", "job") == "unavailable"
+    assert notify_once(ledger, key, "Done", "job") == "unavailable"
+    assert counter.read_text() == "x"
+    assert notice_attempted(ledger, key) is True
+    with sqlite3.connect(ledger) as conn:
+        status = conn.execute(
+            "SELECT status FROM delivery WHERE event_key = ?", (key,)
+        ).fetchone()
+    assert status is not None and status[0] == "unavailable"
+
+
 def test_failed_notify_send_still_counts_as_an_attempt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
