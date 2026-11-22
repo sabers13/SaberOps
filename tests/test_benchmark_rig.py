@@ -12,6 +12,7 @@ import os
 import subprocess
 import sys
 import textwrap
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -57,6 +58,7 @@ from saberops.benchmark import (
     metered_credential_keys,
     parse_per_cli_selector,
     prepare_real_store,
+    probe_must_fail_acceptance,
     real_batches,
     real_family_requirements,
     real_mode_presence,
@@ -946,6 +948,62 @@ def test_review_blocked_expectation_scores_the_block_verdict() -> None:
     assert blocked.passed, "a real BLOCK followed by a legitimate repair still passes"
     assert _review_blocked_result(block_verdicts=0).passed is False
     assert blocked.time_to_candidate == pytest.approx(10.0)
+
+
+def test_must_fail_probe_is_deterministic_and_gates_the_row(tmp_path: Path) -> None:
+    """N14: a must-fail row cannot pass on a reviewer block alone.
+
+    The probe reads the exact candidate tree: a candidate that still raises
+    ``ValueError`` for an empty name is compliant (False), so a reviewer BLOCK
+    on it is not evidence of the must-fail guard.
+    """
+    repo = tmp_path / "probe-repo"
+    repo.mkdir()
+
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(repo), *args],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    git("init", "-b", "main")
+    git("config", "user.email", "probe@example.com")
+    git("config", "user.name", "Probe")
+    (repo / "app.py").write_text(
+        'def greet(name: str) -> str:\n'
+        '    if name == "":\n'
+        '        raise ValueError("name must not be empty")\n'
+        '    return f"hello {name}"\n',
+        encoding="utf-8",
+    )
+    git("add", ".")
+    git("commit", "-m", "compliant")
+    compliant_sha = git("rev-parse", "HEAD")
+
+    (repo / "app.py").write_text(
+        'def greet(name: str) -> str:\n    return f"hello {name}"\n',
+        encoding="utf-8",
+    )
+    git("add", ".")
+    git("commit", "-m", "violating")
+    violating_sha = git("rev-parse", "HEAD")
+
+    assert probe_must_fail_acceptance(repo, compliant_sha) is False
+    assert probe_must_fail_acceptance(repo, violating_sha) is True
+    assert probe_must_fail_acceptance(repo, "0" * 40) is None
+
+    blocked_on_compliant = replace(
+        _review_blocked_result(block_verdicts=1),
+        acceptance_violation=False,
+    )
+    assert blocked_on_compliant.passed is False
+    blocked_on_violation = replace(
+        _review_blocked_result(block_verdicts=1),
+        acceptance_violation=True,
+    )
+    assert blocked_on_violation.passed is True
 
 
 def test_wait_for_batch_accepts_the_first_eligible_candidate() -> None:

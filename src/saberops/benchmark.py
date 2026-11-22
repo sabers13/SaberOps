@@ -14,6 +14,8 @@ lifecycle rig.
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -223,6 +225,11 @@ class TaskResult:
     #: failed without a commit).  ``time_to_candidate`` is then unknown, not
     #: submit-to-terminal-failure (N8).
     candidate_produced: bool = True
+    #: Deterministic must-fail probe: True when the candidate demonstrably
+    #: violates its acceptance clause, False when the acceptance still holds,
+    #: None when the probe could not run.  A reviewer ``BLOCK`` only measures
+    #: reviewer behaviour when there is something to block (N14).
+    acceptance_violation: bool | None = None
 
     @property
     def measured(self) -> bool:
@@ -269,7 +276,15 @@ class TaskResult:
         # BLOCK is a correct engine outcome, and a run may legitimately end
         # SUCCEEDED.  What the row asserts is that the reviewer really blocked
         # the change at least once (D5 residual / N3).
-        return self.block_verdicts > 0
+        #
+        # N14: a block on a candidate that still satisfies acceptance is not
+        # evidence of a working must-fail guard.  When the deterministic probe
+        # says acceptance still holds (False), the row cannot pass; None means
+        # the probe did not run and keeps the historical behaviour.
+        return (
+            self.block_verdicts > 0
+            and self.acceptance_violation is not False
+        )
 
 
 @dataclass(frozen=True)
@@ -534,6 +549,95 @@ def count_block_verdicts(db: Any, run_id: str) -> int:
         for review in db.get_reviews_for_run(run_id)
         if review.verdict is ReviewVerdict.BLOCK
     )
+
+
+def first_blocked_candidate_sha(db: Any, run_id: str) -> str | None:
+    """Return the candidate commit a substantive reviewer BLOCK assessed.
+
+    Review evidence records the exact candidate SHA.  This keeps the N14
+    deterministic probe on the tree the reviewer actually blocked, not on a
+    later repaired candidate that may legitimately satisfy acceptance.
+    """
+    from saberops.models import DispatchStage, ReviewVerdict
+
+    blocked_ids = {
+        review.id
+        for review in db.get_reviews_for_run(run_id)
+        if review.verdict is ReviewVerdict.BLOCK
+    }
+    if not blocked_ids:
+        return None
+    for evidence in db.get_dispatch_evidence_for_run(run_id):
+        if (
+            evidence.stage is DispatchStage.REVIEW
+            and evidence.review_id in blocked_ids
+            and evidence.candidate_sha
+        ):
+            return str(evidence.candidate_sha)
+    return None
+
+
+#: Must-fail acceptance probe: both catalogue rows require ``greet('')`` to
+#: raise ``ValueError``.  The probe runs the candidate's exact ``app.py`` in a
+#: throwaway directory and reports whether the clause still holds.
+_MUST_FAIL_ACCEPTANCE_PROBE = """\
+import app
+
+try:
+    app.greet("")
+except ValueError:
+    print("acceptance-holds")
+except Exception as exc:  # pragma: no cover - diagnostic only
+    print(f"probe-error: {exc!r}")
+else:
+    print("acceptance-violated")
+"""
+
+
+def probe_must_fail_acceptance(repo: Path, candidate_sha: str) -> bool | None:
+    """Return True iff the candidate demonstrably violates the must-fail clause.
+
+    Deterministic and model-free: it reads the exact candidate commit's
+    ``app.py`` rather than trusting a reviewer verdict.  ``None`` means the
+    probe could not be evaluated (missing file, bad SHA, timeout); the rig then
+    keeps its historical reviewer-based measurement instead of guessing.
+    """
+    import tempfile
+
+    try:
+        shown = subprocess.run(
+            ["git", "-C", str(repo), "show", f"{candidate_sha}:app.py"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if shown.returncode != 0 or not shown.stdout.strip():
+        return None
+    try:
+        with tempfile.TemporaryDirectory(prefix="orch_must_fail_") as tmp:
+            Path(tmp, "app.py").write_text(shown.stdout, encoding="utf-8")
+            probed = subprocess.run(
+                [sys.executable, "-B", "-c", _MUST_FAIL_ACCEPTANCE_PROBE],
+                cwd=tmp,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                env={
+                    "PATH": os.environ.get("PATH", ""),
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                    "PYTHONIOENCODING": "utf-8",
+                },
+                check=False,
+            )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if "acceptance-violated" in probed.stdout:
+        return True
+    if "acceptance-holds" in probed.stdout:
+        return False
+    return None
 
 
 class RealModeRefused(RuntimeError):
@@ -1576,6 +1680,28 @@ def run_real_benchmark(
                     if job.current_run_id is not None
                     else 0
                 )
+                acceptance_violation: bool | None = None
+                if task.expect == "review_blocked" and job.current_run_id is not None:
+                    # Probe the exact tree the reviewer blocked.  A later
+                    # repair may legitimately make the change compliant; the
+                    # row measures whether the reviewer blocked the violating
+                    # candidate, not the repaired tree.  The first
+                    # commit-bearing attempt is the fallback for stores without
+                    # linked review dispatch evidence.
+                    candidate_sha = first_blocked_candidate_sha(
+                        db, job.current_run_id
+                    ) or next(
+                        (
+                            attempt.commit_sha
+                            for attempt in attempts
+                            if attempt.commit_sha
+                        ),
+                        None,
+                    )
+                    if candidate_sha is not None:
+                        acceptance_violation = probe_must_fail_acceptance(
+                            repos[task.task_id], candidate_sha
+                        )
                 results.append(
                     TaskResult(
                         task_id=task.task_id,
@@ -1606,6 +1732,7 @@ def run_real_benchmark(
                         candidate_produced=any(
                             attempt.commit_sha for attempt in attempts
                         ),
+                        acceptance_violation=acceptance_violation,
                     )
                 )
 

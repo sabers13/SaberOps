@@ -9,6 +9,11 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Protocol
 
+from saberops.acceptance_review import (
+    clause_coverage,
+    extract_acceptance_clauses,
+    render_acceptance_protocol,
+)
 from saberops.authority import load_authority_settings
 from saberops.config import DEFAULT_REVIEW_LIMIT, RunConfig, reconstruct_run_config
 from saberops.control_plane import (
@@ -542,6 +547,7 @@ class ReviewEngine:
         is_final: bool = False,
         final_attempt: int | None = None,
         final_limit: int | None = None,
+        extra_evidence: str | None = None,
     ) -> ReviewResult:
         """Review a completed run using a diverse reviewer model.
 
@@ -552,6 +558,10 @@ class ReviewEngine:
         ``is_final`` marks the bounded final-convergence attempt. When true the
         FINAL CONVERGENCE notice is injected and a ``final_review_started``
         event is recorded.
+
+        ``extra_evidence`` carries bounded, non-authoritative material for this
+        exact review round (for example a repair report that claims the prior
+        finding is already satisfied).  It is evidence to verify, never proof.
         """
         if is_final:
             payload: dict[str, object] = {}
@@ -589,6 +599,7 @@ class ReviewEngine:
                     timeout=timeout,
                     review_limit=review_limit,
                     is_final=is_final,
+                    extra_evidence=extra_evidence,
                 )
             except Exception as exc:
                 self.db.record_event(
@@ -610,6 +621,7 @@ class ReviewEngine:
         timeout: float = 300.0,
         review_limit: int | None = None,
         is_final: bool = False,
+        extra_evidence: str | None = None,
     ) -> ReviewResult:
         run = self.db.get_run(run_id)
         if not run:
@@ -740,6 +752,29 @@ class ReviewEngine:
                     )
                 )
 
+        acceptance_clauses = extract_acceptance_clauses(run.task)
+        acceptance_block = ""
+        if acceptance_clauses:
+            acceptance_block = "\n\n" + render_acceptance_protocol(acceptance_clauses)
+
+        extra_evidence_context = ""
+        if extra_evidence and extra_evidence.strip():
+            self.db.record_event(
+                run_id,
+                "review_extra_evidence_included",
+                payload={
+                    "chars": len(extra_evidence),
+                    "candidate_sha": final_attempt.commit_sha,
+                },
+            )
+            extra_evidence_context = (
+                "\n\nRepair-round evidence (a claim to verify against the diff, "
+                "not proof):\n"
+                "A repair round was dispatched for this candidate and produced no "
+                "code change. It reported:\n"
+                f"{_bounded_tail(extra_evidence.strip())}"
+            )
+
         if is_final:
             final_notice_block = f"\n\n{FINAL_CONVERGENCE_NOTICE}\n"
             final_instructions = (
@@ -768,11 +803,13 @@ class ReviewEngine:
             "provided material - do not search the filesystem. Your response MUST begin with a line that "  # noqa: E501
             "is exactly VERDICT: PASS or VERDICT: BLOCK, followed by concise feedback.\n\n"  # noqa: E501
             "You are an independent, read-only code reviewer.\n"
-            f"Task:\n{run.task}\n\n"
+            f"Task:\n{run.task}"
+            f"{acceptance_block}\n\n"
             f"Base commit: {run.base_commit}\n"
             f"Candidate commit: {final_attempt.commit_sha or 'HEAD'}\n"
             f"Gate verification: {gate_info}"
             f"{prior_review_context}"
+            f"{extra_evidence_context}"
             f"{final_notice_block}\n\n"
             f"Candidate diff:\n```diff\n{diff_text}\n```\n\n"
             "Instructions:\n"
@@ -1405,6 +1442,44 @@ class ReviewEngine:
                     part for part in (details, render_findings(structured_findings), findings_note)
                     if part
                 )
+
+            if acceptance_clauses and verdict in (
+                ReviewVerdict.PASS,
+                ReviewVerdict.PASS_WITH_BACKLOG,
+            ):
+                coverage = clause_coverage(raw, acceptance_clauses)
+                if not coverage.usable:
+                    reviewer_verdict = verdict
+                    verdict = (
+                        ReviewVerdict.FINAL_BLOCK if is_final else ReviewVerdict.BLOCK
+                    )
+                    summary = (
+                        "Acceptance clause check failed: " + coverage.describe()
+                    )
+                    details = "\n\n".join(
+                        part
+                        for part in (
+                            details,
+                            "Acceptance clause gate (deterministic): the reviewer "
+                            f"returned {reviewer_verdict.value}, but "
+                            f"{coverage.describe()}. A PASS is usable only when every "
+                            "clause has an explicit PASS answer with evidence, so this "
+                            "verdict fails closed.",
+                        )
+                        if part
+                    )
+                    self.db.record_event(
+                        run_id,
+                        "review_acceptance_clause_block",
+                        payload={
+                            "review_id": review_association_id,
+                            "reviewer_verdict": reviewer_verdict.value,
+                            "clause_count": len(acceptance_clauses),
+                            "missing_clauses": list(coverage.missing),
+                            "failed_clauses": list(coverage.failed),
+                            "is_final": is_final,
+                        },
+                    )
 
             review_id = review_association_id
             review = ReviewResult(

@@ -192,12 +192,7 @@ def _resolve_worker_mode(
 
 
 def _resolve_reviewer_verdict(cli_verdict: str | None) -> str:
-    control_path = os.environ.get("ORCH_FAKE_REVIEWER_CONTROL_FILE")
-    if not control_path:
-        state_home = os.environ.get("XDG_STATE_HOME")
-        if state_home:
-            control_path = str(Path(state_home) / "saberops" / "fake-reviewer-mode.json")
-    cfg = _read_control_json(control_path)
+    cfg = _read_control_json(_reviewer_control_path())
     raw = (
         cli_verdict
         or os.environ.get("ORCH_FAKE_REVIEWER_VERDICT")
@@ -206,6 +201,71 @@ def _resolve_reviewer_verdict(cli_verdict: str | None) -> str:
     if raw in {"REJECT", "BLOCK"}:
         return "BLOCK"
     return "PASS"
+
+
+def _reviewer_control_path() -> str | None:
+    control_path = os.environ.get("ORCH_FAKE_REVIEWER_CONTROL_FILE")
+    if control_path:
+        return control_path
+    state_home = os.environ.get("XDG_STATE_HOME")
+    if state_home:
+        return str(Path(state_home) / "saberops" / "fake-reviewer-mode.json")
+    return None
+
+
+def _next_reviewer_index() -> int:
+    """Return this reviewer invocation's ordinal, persisted beside the control file."""
+    control = _reviewer_control_path()
+    if control is None:
+        return 0
+    path = Path(control).with_name("fake-reviewer-turns")
+    try:
+        index = int(path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        index = 0
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(index + 1), encoding="utf-8")
+    except OSError:
+        pass
+    return index
+
+
+def _repair_no_changes_requested(prompt_text: str) -> bool:
+    """Test control: a review-repair prompt that must make no code change."""
+    cfg = _read_control_json(_worker_control_path())
+    mode = str(cfg.get("repair_mode", "")).strip().lower()
+    return mode in {"no_changes", "no-change", "nochange"} and (
+        "review repair attempt" in prompt_text.lower()
+    )
+
+
+def _reviewer_prompt_log_append(prompt: str) -> None:
+    """Append one reviewer prompt to the test log named by the rig, if any.
+
+    Kept separate from the worker prompt log so existing worker-prompt
+    assertions never see review prompts.
+    """
+    control = _reviewer_control_path()
+    cfg = _read_control_json(control)
+    path_str = os.environ.get("ORCH_FAKE_REVIEWER_PROMPT_LOG") or str(
+        cfg.get("prompt_log") or ""
+    )
+    if not path_str:
+        return
+    path = Path(path_str)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as sink:
+            sink.write(
+                json.dumps(
+                    {"harness": "claude", "pid": os.getpid(), "prompt": prompt},
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+    except OSError:
+        pass
 
 
 def _codex_prompt_arg(args: list[str]) -> str:
@@ -465,7 +525,9 @@ def _handle_codex(
     sandbox = _get_arg_value(args, "--sandbox")
     control = _read_control_json(_worker_control_path())
     ignore_read_only = bool(control.get("ignore_read_only"))
-    if sandbox != "read-only" or ignore_read_only:
+    if (sandbox != "read-only" or ignore_read_only) and not _repair_no_changes_requested(
+        prompt_text
+    ):
         _commit_change(workdir, "codex", target_file, content)
     report_text = control.get("report_text")
     message_text = (
@@ -709,7 +771,8 @@ def _serve_opencode(
                     )
                     return
 
-                _commit_change(workdir, "opencode", target_file, content)
+                if not _repair_no_changes_requested(text):
+                    _commit_change(workdir, "opencode", target_file, content)
                 reported = _identity_from(turn_cfg, "opencode") or _reported_identity(
                     "opencode"
                 )
@@ -824,11 +887,13 @@ def _handle_opencode(
     stdin_text = ""
     if not sys.stdin.isatty():
         stdin_text = sys.stdin.read()
-    _prompt_log_append("opencode", _opencode_prompt_arg(args) or stdin_text)
+    prompt_text = _opencode_prompt_arg(args) or stdin_text
+    _prompt_log_append("opencode", prompt_text)
     _wait_for_control_file()
     if switched is not None:
         return switched
-    _commit_change(Path.cwd(), "opencode", target_file, content)
+    if not _repair_no_changes_requested(prompt_text):
+        _commit_change(Path.cwd(), "opencode", target_file, content)
     start_part: dict[str, Any] = {"type": "step-start"}
     identity = _reported_identity("opencode")
     if identity is not None:
@@ -842,7 +907,7 @@ def _handle_opencode(
     return 0
 
 
-def _review_text(verdict: str) -> str:
+def _review_text(verdict: str, prompt_text: str = "") -> str:
     if verdict == "BLOCK":
         findings_block = {
             "summary": "Fake reviewer rejected candidate.",
@@ -868,9 +933,17 @@ def _review_text(verdict: str) -> str:
             f"```json\n{json.dumps(findings_block)}\n```\n"
         )
     findings_block = {"summary": "Fake reviewer approved candidate.", "findings": []}
+    # A compliant PASS answers every acceptance clause the real review prompt
+    # declares (N14).  The instruction line uses ``CLAUSE <n>`` and is not
+    # matched by this digits-only pattern.
+    clause_lines = "".join(
+        f"CLAUSE {number}: PASS — reviewed the diff; the clause is satisfied.\n"
+        for number in re.findall(r"(?m)^CLAUSE (\d+): .+$", prompt_text)
+    )
     return (
         "VERDICT: PASS\n"
-        "Fake reviewer approved candidate.\n\n"
+        "Fake reviewer approved candidate.\n"
+        f"{clause_lines}\n"
         f"```json\n{json.dumps(findings_block)}\n```\n"
     )
 
@@ -928,13 +1001,34 @@ def _handle_claude(
     prompt_text = ""
     if not sys.stdin.isatty():
         prompt_text = sys.stdin.read()
+    _reviewer_prompt_log_append(prompt_text)
+
+    control = _read_control_json(_reviewer_control_path())
+    verdicts = control.get("verdicts")
+    text_sequence = control.get("review_texts")
+    literal_text = control.get("review_text")
+    scripted = (
+        (isinstance(verdicts, list) and bool(verdicts))
+        or (isinstance(text_sequence, list) and bool(text_sequence))
+        or (isinstance(literal_text, str) and bool(literal_text.strip()))
+    )
+    script_index = _next_reviewer_index() if scripted else 0
+    if isinstance(verdicts, list) and verdicts:
+        raw = str(verdicts[min(script_index, len(verdicts) - 1)]).strip().upper()
+        review_verdict = "BLOCK" if raw in {"REJECT", "BLOCK"} else "PASS"
     # A prompt-level instruction lets a multi-job test mix passing and failing
     # reviews in one batch (the control file is global to the rig).  The
     # control file still wins for every prompt that does not carry it.
-    if "FAKE-REVIEW: BLOCK" in prompt_text:
+    forced_block = "FAKE-REVIEW: BLOCK" in prompt_text
+    if forced_block:
         review_verdict = "BLOCK"
+    if not forced_block and isinstance(text_sequence, list) and text_sequence:
+        body = str(text_sequence[min(script_index, len(text_sequence) - 1)])
+    elif not forced_block and isinstance(literal_text, str) and literal_text.strip():
+        body = literal_text
+    else:
+        body = _review_text(review_verdict, prompt_text)
     model = _get_arg_value(args, "--model") or "claude-sonnet-4-6"
-    body = _review_text(review_verdict)
     print(json.dumps({"type": "system", "subtype": "init", "model": model}))
     print(
         json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": body}]}})

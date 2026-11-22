@@ -324,6 +324,42 @@ def _telemetry_total(records: list[dict[str, object]], key: str) -> int:
     return total
 
 
+def _repair_report_claims_finding_satisfied(report: str | None) -> bool:
+    """True when a no-diff repair says the blocking finding is already met.
+
+    A repair that exits successfully without changing the candidate is only
+    meaningful when its report asserts the finding needs no edit (already
+    satisfied, no remaining references, and so on).  A silent or unrelated
+    no-diff repair keeps the historical fail-closed stall.
+    """
+    normalized = " ".join((report or "").lower().split())
+    if not normalized:
+        return False
+    phrases = (
+        "no code change was required",
+        "no code changes were required",
+        "no code change required",
+        "no code changes required",
+        "no change was required",
+        "no changes were required",
+        "no change required",
+        "no changes required",
+        "no source change",
+        "no further changes",
+        "nothing to change",
+        "already satisfied",
+        "already addressed",
+        "already implemented",
+        "already fixed",
+        "already meets",
+        "no remaining",
+        "no references remain",
+        "no longer references",
+        "search confirms",
+    )
+    return any(phrase in normalized for phrase in phrases)
+
+
 def _render_repair_task(
     original_task: str,
     attempt_idx: int,
@@ -7800,13 +7836,19 @@ class Orchestrator:
                             nonlocal_summary: list[str] = [summary]
                             if config.review_mode == "bounded":
                                 outstanding: list[ReviewResult] = []
+                                pending_review_evidence: str | None = None
+                                no_diff_rereview_used = False
                                 while True:
                                     launched_so_far = self.db.count_launched_reviews(run_id)
                                     remaining_budget = max(0, config.review_limit - launched_so_far)
                                     next_attempt = len(reviews) + 1
                                     is_final = next_attempt == config.review_limit
                                     # Pre-final aggregated repair before final review
-                                    if is_final and outstanding:
+                                    if (
+                                        is_final
+                                        and outstanding
+                                        and pending_review_evidence is None
+                                    ):
                                         from_sha_pre = (
                                             current_commit_sha
                                             or GitManager.get_head_commit(current_wt_path)
@@ -7841,6 +7883,31 @@ class Orchestrator:
                                             )
                                             break
                                         if is_no_diff:
+                                            pre_report = (
+                                                rep.worker_stdout
+                                                or rep.worker_stderr
+                                                or ""
+                                            )
+                                            if (
+                                                not no_diff_rereview_used
+                                                and _repair_report_claims_finding_satisfied(
+                                                    pre_report
+                                                )
+                                            ):
+                                                no_diff_rereview_used = True
+                                                pending_review_evidence = pre_report
+                                                self.db.record_event(
+                                                    run_id,
+                                                    "repair_no_diff_rereview",
+                                                    attempt_id=rep.id,
+                                                    payload={
+                                                        "reason": "repair_no_diff_claims_satisfied",
+                                                        "role": DispatchRole.BUILD.value,
+                                                        "candidate_sha": current_commit_sha,
+                                                        "repair_report_excerpt": pre_report[:2000],
+                                                    },
+                                                )
+                                                continue
                                             self.db.update_review_loop_state(
                                                 run_id,
                                                 current_attempt=next_attempt,
@@ -7871,6 +7938,7 @@ class Orchestrator:
                                         is_final=is_final,
                                     )
                                     # Launch review (final or not)
+                                    is_evidence_rereview = pending_review_evidence is not None
                                     rev_res = review_engine.review_run(
                                         run_id,
                                         reviewer_override=reviewer_override,
@@ -7879,7 +7947,9 @@ class Orchestrator:
                                         is_final=is_final,
                                         final_attempt=next_attempt,
                                         final_limit=config.review_limit,
+                                        extra_evidence=pending_review_evidence,
                                     )
+                                    pending_review_evidence = None
                                     reviews.append(rev_res)
                                     # Gate final-only verdicts: on non-final reviews FINAL_BLOCK
                                     # and PASS_WITH_BACKLOG deterministically map to BLOCK.
@@ -7900,6 +7970,26 @@ class Orchestrator:
                                         )
                                         break
                                     if effective_verdict == ReviewVerdict.BLOCK:
+                                        if is_evidence_rereview:
+                                            # One bounded re-review was already
+                                            # granted for a no-diff repair that
+                                            # claimed the finding was satisfied.
+                                            # A second block is final: fail closed.
+                                            self.db.record_event(
+                                                run_id,
+                                                "convergence_stalled",
+                                                payload={
+                                                    "reason": "repair_no_diff_rereview_blocked",
+                                                    "candidate_sha": current_commit_sha,
+                                                },
+                                            )
+                                            self.db.update_review_loop_state(
+                                                run_id,
+                                                current_attempt=next_attempt,
+                                                is_final=is_final,
+                                                terminal_verdict=ReviewVerdict.CONVERGENCE_STALLED.value,
+                                            )
+                                            break
                                         if supervisor is not None and not supervisor.allows_repair:
                                             # Persisted owner authority
                                             # forbids autonomous repair
@@ -7948,6 +8038,33 @@ class Orchestrator:
                                             )
                                             break
                                         if is_no_diff2:
+                                            repair_report = (
+                                                rep2.worker_stdout
+                                                or rep2.worker_stderr
+                                                or ""
+                                            )
+                                            if (
+                                                not no_diff_rereview_used
+                                                and _repair_report_claims_finding_satisfied(
+                                                    repair_report
+                                                )
+                                            ):
+                                                no_diff_rereview_used = True
+                                                pending_review_evidence = repair_report
+                                                self.db.record_event(
+                                                    run_id,
+                                                    "repair_no_diff_rereview",
+                                                    attempt_id=rep2.id,
+                                                    payload={
+                                                        "reason": "repair_no_diff_claims_satisfied",
+                                                        "role": DispatchRole.BUILD.value,
+                                                        "candidate_sha": current_commit_sha,
+                                                        "repair_report_excerpt": (
+                                                            repair_report[:2000]
+                                                        ),
+                                                    },
+                                                )
+                                                continue
                                             self.db.update_review_loop_state(
                                                 run_id,
                                                 current_attempt=next_attempt,
@@ -7986,6 +8103,8 @@ class Orchestrator:
                                     seen_shas.add(current_commit_sha)
                                 prev_blocker_norm: str | None = None
                                 prev_output_norm: str | None = None
+                                pending_review_evidence_m: str | None = None
+                                no_diff_rereview_used_m = False
                                 while True:
                                     # Persist per-run review loop state durably before dispatch
                                     self.db.update_review_loop_state(
@@ -7994,12 +8113,17 @@ class Orchestrator:
                                         is_final=False,
                                     )
                                     # Unlimited budget for max
+                                    is_evidence_rereview_m = (
+                                        pending_review_evidence_m is not None
+                                    )
                                     rev_res = review_engine.review_run(
                                         run_id,
                                         reviewer_override=reviewer_override,
                                         timeout=config.review_timeout,
                                         review_limit=9999,
+                                        extra_evidence=pending_review_evidence_m,
                                     )
+                                    pending_review_evidence_m = None
                                     reviews.append(rev_res)
                                     # Gate final-only verdicts: max mode is always non-final, so
                                     # FINAL_BLOCK and PASS_WITH_BACKLOG map to BLOCK.
@@ -8009,6 +8133,52 @@ class Orchestrator:
                                         ReviewVerdict.PASS_WITH_BACKLOG,
                                     ):
                                         effective_verdict = ReviewVerdict.BLOCK
+                                    if (
+                                        is_evidence_rereview_m
+                                        and effective_verdict == ReviewVerdict.BLOCK
+                                    ):
+                                        # One bounded re-review was already
+                                        # granted for a no-diff repair; a
+                                        # second block is final.
+                                        self.db.record_event(
+                                            run_id,
+                                            "convergence_stalled",
+                                            payload={
+                                                "reason": "repair_no_diff_rereview_blocked",
+                                                "candidate_sha": current_commit_sha,
+                                            },
+                                        )
+                                        stalled = ReviewResult(
+                                            id=f"rev_{uuid.uuid4().hex[:10]}",
+                                            run_id=run_id,
+                                            provider="",
+                                            model="",
+                                            verdict=ReviewVerdict.CONVERGENCE_STALLED,
+                                            summary=(
+                                                "Convergence stalled: no-diff repair "
+                                                "re-review still blocked"
+                                            ),
+                                            details="Reason: repair_no_diff_rereview_blocked",
+                                            created_at=current_iso_timestamp(),
+                                        )
+                                        self.db.create_review(stalled)
+                                        self.db.record_event(
+                                            run_id,
+                                            "review_completed",
+                                            payload={
+                                                "review_id": stalled.id,
+                                                "verdict": stalled.verdict.value,
+                                                "summary": stalled.summary,
+                                            },
+                                        )
+                                        reviews.append(stalled)
+                                        self.db.update_review_loop_state(
+                                            run_id,
+                                            current_attempt=len(reviews),
+                                            is_final=False,
+                                            terminal_verdict=stalled.verdict.value,
+                                        )
+                                        break
                                     # Stall detection: identical reviewer output
                                     curr_output_norm = _normalize(rev_res.details) or _normalize(
                                         rev_res.summary
@@ -8155,6 +8325,31 @@ class Orchestrator:
                                         )
                                         break
                                     if is_no_diff_m:
+                                        repair_report_m = (
+                                            rep_m.worker_stdout
+                                            or rep_m.worker_stderr
+                                            or ""
+                                        )
+                                        if (
+                                            not no_diff_rereview_used_m
+                                            and _repair_report_claims_finding_satisfied(
+                                                repair_report_m
+                                            )
+                                        ):
+                                            no_diff_rereview_used_m = True
+                                            pending_review_evidence_m = repair_report_m
+                                            self.db.record_event(
+                                                run_id,
+                                                "repair_no_diff_rereview",
+                                                attempt_id=rep_m.id,
+                                                payload={
+                                                    "reason": "repair_no_diff_claims_satisfied",
+                                                    "role": DispatchRole.BUILD.value,
+                                                    "candidate_sha": current_commit_sha,
+                                                    "repair_report_excerpt": repair_report_m[:2000],
+                                                },
+                                            )
+                                            continue
                                         self.db.record_event(
                                             run_id,
                                             "convergence_stalled",

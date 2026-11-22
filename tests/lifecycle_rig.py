@@ -163,6 +163,7 @@ class RigEnvironment:
         report_provider: str | None = None,
         ignore_read_only: bool | None = None,
         report_text: str | None = None,
+        repair_mode: str | None = None,
     ) -> None:
         """Configure fake worker behaviour via control file and ``ORCH_FAKE_*`` env vars.
 
@@ -191,6 +192,8 @@ class RigEnvironment:
             payload["ignore_read_only"] = bool(ignore_read_only)
         if report_text is not None:
             payload["report_text"] = report_text
+        if repair_mode is not None:
+            payload["repair_mode"] = repair_mode
         if hang_seconds is not None:
             payload["hang_seconds"] = hang_seconds
         if exit_code is not None:
@@ -227,12 +230,34 @@ class RigEnvironment:
         else:
             self.monkeypatch.delenv("ORCH_FAKE_WORKER_CONTENT", raising=False)
 
-    def set_reviewer_verdict(self, verdict: Literal["PASS", "BLOCK"]) -> None:
-        """Persist fake reviewer verdict instruction inside isolated state dir."""
+    def set_reviewer_verdict(
+        self,
+        verdict: Literal["PASS", "BLOCK"],
+        *,
+        verdicts: list[str] | None = None,
+        review_text: str | None = None,
+        prompt_log: Path | None = None,
+    ) -> None:
+        """Persist fake reviewer behaviour inside the isolated state dir.
+
+        ``verdicts`` scripts one verdict per actual review invocation;
+        ``review_text`` replays a recorded reviewer answer verbatim.  Both are
+        test-only controls and never reach production code.
+        """
         self.reviewer_control_path.parent.mkdir(parents=True, exist_ok=True)
+        payload: dict[str, object] = {"verdict": verdict}
+        if verdicts is not None:
+            payload["verdicts"] = list(verdicts)
+        if review_text is not None:
+            payload["review_text"] = review_text
+        if prompt_log is not None:
+            payload["prompt_log"] = str(prompt_log)
         self.reviewer_control_path.write_text(
-            json.dumps({"verdict": verdict}),
+            json.dumps(payload),
             encoding="utf-8",
+        )
+        self.reviewer_control_path.with_name("fake-reviewer-turns").unlink(
+            missing_ok=True
         )
 
     def run_cli(self, *args: str) -> subprocess.CompletedProcess[str]:

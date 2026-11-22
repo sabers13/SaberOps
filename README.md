@@ -98,7 +98,9 @@ flowchart LR
 4. **Verify.** A gate defined by the *base* commit decides; a candidate that
    edits the gate, `conftest.py` or gate scripts is refused.
 5. **Review.** An independent, read-only reviewer from a different model family
-   assesses the candidate.
+   assesses the candidate. When the task states acceptance clauses, the
+   reviewer must answer each one and a `PASS` is accepted only when every
+   clause passes (see [ADR-0053](docs/decisions/0053-acceptance-clause-review-gate.md)).
 6. **Accept.** A verified candidate integrates fast-forward only, followed by a
    post-integration gate, under the configured [authority mode](#authority-modes).
 7. **Preempt and resume.** If a plan runs out mid-run, the work in progress is
