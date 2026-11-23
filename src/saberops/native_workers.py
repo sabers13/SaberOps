@@ -404,6 +404,9 @@ def _new_run(db: Database, job: Job, *, vendor: str, model: str) -> Run:
             provider_override=vendor,
             model_override=model,
             review_enabled=True,
+            # H20: a natively claimed job keeps the planner's consequential
+            # marker, so away and critical-only still park its candidate.
+            consequential=job.requirements.consequential,
         )
     )
     snapshot = load_effective_routing()

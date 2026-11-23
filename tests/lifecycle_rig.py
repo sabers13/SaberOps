@@ -547,12 +547,19 @@ class AcceptanceFixture:
         return review_b_id
 
 
-def build_acceptance_fixture(rig: RigEnvironment) -> AcceptanceFixture:
+def build_acceptance_fixture(
+    rig: RigEnvironment,
+    *,
+    candidate_files: tuple[tuple[str, str], ...] = (),
+    extra_config: dict[str, object] | None = None,
+) -> AcceptanceFixture:
     """Seed a completed run with reviewed candidate A and unreviewed replacement B.
 
     Target repository HEAD remains clean on ``main`` at ``base_sha``.  Candidate A
     and replacement candidate B are real descending commits on their own
-    candidate branches.
+    candidate branches.  ``candidate_files`` adds ``(path, content)`` entries to
+    candidate B's commit (the H20 consequential-candidate drills), and
+    ``extra_config`` merges keys into the frozen run configuration.
     """
     task = "Implement greeting update"
     provenance = mint_run_provenance(rig.repo, task)
@@ -568,8 +575,12 @@ def build_acceptance_fixture(rig: RigEnvironment) -> AcceptanceFixture:
     candidate_a_sha = _git(rig.repo, "rev-parse", "HEAD")
 
     _git(rig.repo, "checkout", "-b", branch_b, base_sha)
-    (rig.repo / "candidate_b.txt").write_text("candidate B\n", encoding="utf-8")
-    _git(rig.repo, "add", "candidate_b.txt")
+    candidate_b_files = (("candidate_b.txt", "candidate B\n"), *candidate_files)
+    for relative, content in candidate_b_files:
+        target = rig.repo / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    _git(rig.repo, "add", *[relative for relative, _content in candidate_b_files])
     _git(rig.repo, "commit", "-m", "candidate B")
     candidate_b_sha = _git(rig.repo, "rev-parse", "HEAD")
 
@@ -578,6 +589,9 @@ def build_acceptance_fixture(rig: RigEnvironment) -> AcceptanceFixture:
 
     now = current_iso_timestamp()
     db = rig.db()
+    frozen_config: dict[str, object] = {"review_enabled": True}
+    if extra_config:
+        frozen_config.update(extra_config)
     db.create_run(
         Run(
             id=run_id,
@@ -593,7 +607,7 @@ def build_acceptance_fixture(rig: RigEnvironment) -> AcceptanceFixture:
             project_id=provenance.project_id,
             project_identity_json=provenance.identity.to_json(),
             objective_id=provenance.objective_id,
-            config_json=json.dumps({"review_enabled": True}),
+            config_json=json.dumps(frozen_config),
         )
     )
 

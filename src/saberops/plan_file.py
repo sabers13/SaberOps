@@ -87,6 +87,7 @@ _MACHINE_KEYS = frozenset(
         "run",
         "kind",
         "review_focus",
+        "consequential",
     }
 )
 _FIELD_LABELS = {
@@ -137,6 +138,10 @@ class PlanLane:
     kind: str = "job"
     #: Optional focus for the independent reviewer; adds attention only.
     review_focus: str = ""
+    #: Planner-recorded H20 judgement: the lane's candidate is consequential,
+    #: so away and critical-only park it for the owner.  The engine's own
+    #: fixed floor applies either way.
+    consequential: bool = False
 
     def to_task(self) -> PlanTaskDef:
         """Convert the lane into the stored task shape."""
@@ -160,6 +165,7 @@ class PlanLane:
             kind=self.kind,
             wave=self.wave,
             review_focus=self.review_focus,
+            consequential=self.consequential,
         )
 
 
@@ -377,6 +383,9 @@ def _parse_lane(lane_id: str, title: str, chunk: list[str]) -> PlanLane:
     if run not in RUN_KINDS:
         raise PlanFileError(f"lane {lane_id}: run must be 'job' or 'owner'")
     review_focus = str(machine.get("review_focus", "") or "").strip()
+    consequential = machine.get("consequential", False)
+    if type(consequential) is not bool:
+        raise PlanFileError(f"lane {lane_id}: consequential must be true or false")
     kind = str(machine.get("kind", "job") or "job").strip().lower()
     if kind not in LANE_KINDS:
         raise PlanFileError(f"lane {lane_id}: kind must be 'job' or 'scout'")
@@ -420,6 +429,8 @@ def _parse_lane(lane_id: str, title: str, chunk: list[str]) -> PlanLane:
             job_only.append("priority")
         if include or exclude:
             job_only.append("model_family_include/model_family_exclude")
+        if consequential:
+            job_only.append("consequential")
         if job_only:
             raise PlanFileError(
                 f"lane {lane_id}: owner lanes may not declare job-only field(s) "
@@ -440,6 +451,7 @@ def _parse_lane(lane_id: str, title: str, chunk: list[str]) -> PlanLane:
         depends_on=depends_on,
         owns=tuple(owns),
         review_focus=review_focus,
+        consequential=consequential,
         size=size,
         difficulty=difficulty,
         effort=effort,
@@ -676,6 +688,8 @@ def render_plan_markdown(revision: PlanRevision) -> str:
                 machine["kind"] = task.kind
             if task.review_focus:
                 machine["review_focus"] = task.review_focus
+            if task.consequential:
+                machine["consequential"] = True
             lines.extend(
                 [
                     "```plan",

@@ -464,6 +464,9 @@ def _submit_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[st
             raise InvalidParamsError(
                 f"invalid requirements: difficulty must be one of {list(DIFFICULTIES)}"
             )
+        consequential = raw_requirements.get("consequential", False)
+        if type(consequential) is not bool:
+            raise InvalidParamsError("invalid requirements: consequential must be a boolean")
         try:
             requirements = JobRequirements(
                 role=coerce_job_role(str(raw_requirements.get("role", "BUILD"))),
@@ -488,6 +491,7 @@ def _submit_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[st
                     else None
                 ),
                 difficulty=coerce_difficulty(difficulty),
+                consequential=consequential,
             )
         except ValueError as exc:
             raise InvalidParamsError(f"invalid requirements: {exc}") from exc
@@ -2313,6 +2317,19 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
                         },
                         "size_hint": {"type": "string"},
                         "difficulty": {"type": "string", "enum": _DIFFICULTIES},
+                        "consequential": {
+                            "type": "boolean",
+                            "description": (
+                                "Set true when this work is consequential: a "
+                                "data migration, deleting files or data, auth "
+                                "and security, an irreversible operation, or "
+                                "effects outside the work copy. Away and "
+                                "critical-only then park the candidate for the "
+                                "owner instead of auto-accepting it. The "
+                                "engine also checks its own fixed floor; this "
+                                "flag can only add, never remove one."
+                            ),
+                        },
                     }
                 ),
             },

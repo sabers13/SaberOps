@@ -79,6 +79,12 @@ class RunConfig:
     #: means routine: the ordinary build chain.  It maps to a route and a tier
     #: inside the engine, never to a caller-chosen provider/model/tier.
     difficulty: Difficulty = Difficulty.ROUTINE
+    #: Planner-recorded judgement (H20): the candidate this run produces is
+    #: consequential (a data migration, deleting data, auth and security, an
+    #: irreversible operation, effects outside the work copy), so away and
+    #: critical-only park it for the owner instead of auto-accepting.  Missing
+    #: means ordinary.  The engine's own floor applies either way.
+    consequential: bool = False
     #: F19 job kind frozen at creation: ``"build"`` (a candidate) or
     #: ``"scout"`` (a read-only report, no gate/review/acceptance).
     kind: str = "build"
@@ -313,6 +319,7 @@ def resolve_run_config(
     routing_mode: str = "auto",
     kind: str = "build",
     difficulty: Difficulty | str | None = None,
+    consequential: bool = False,
     manual_tier: Tier | str | None = None,
     max_auto_tier: Tier | str | None = None,
     training_allowed: bool = True,
@@ -345,6 +352,8 @@ def resolve_run_config(
     """Normalize all public launch inputs into the one canonical policy object."""
     if type(gate_enabled) is not bool or type(review_disabled) is not bool:
         raise ValueError("Gate and review authorization must be boolean")
+    if type(consequential) is not bool:
+        raise ValueError("consequential must be a boolean")
     target = target_repo if target_repo is not None else repo_path
     if target is None:
         raise ValueError("target repository is required")
@@ -398,6 +407,7 @@ def resolve_run_config(
         routing_mode=raw_mode,  # type: ignore[arg-type]
         kind=raw_kind,
         difficulty=coerce_difficulty(difficulty),
+        consequential=consequential,
         manual_tier=manual if raw_mode == "manual" else None,
         max_auto_tier=ceiling,
         training_allowed=training_allowed,
@@ -467,6 +477,8 @@ def reconstruct_run_config(data: dict[str, Any]) -> RunConfig:
         # A legacy payload predates the planner's difficulty; missing means
         # routine, exactly as at submit time.
         difficulty=coerce_difficulty(data.get("difficulty")),
+        # A legacy payload predates H20's marker; missing means ordinary.
+        consequential=_validation_bool(data, "consequential", False),
         manual_tier=manual_tier if raw_mode == "manual" else None,
         max_auto_tier=max_auto_tier,
         training_allowed=bool(data.get("training_allowed", True)),

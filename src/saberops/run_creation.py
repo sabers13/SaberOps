@@ -99,6 +99,9 @@ class RunRequest:
     #: Planner-recorded judgement (H1): ``routine`` (default) or ``hard``.
     #: Never a provider, model, tier or route name.
     difficulty: str | None = None
+    #: Planner-recorded judgement (H20): the candidate this run produces is
+    #: consequential, so away and critical-only park it for the owner.
+    consequential: bool = False
     manual_tier: Tier | str | None = None
     max_auto_tier: Tier | str | None = None
     provider_override: str | None = None
@@ -299,6 +302,7 @@ def resolve_effective_run_config(request: RunRequest) -> RunConfig:
             routing_mode=request.routing_mode,
             kind=kind,
             difficulty=request.difficulty,
+            consequential=request.consequential,
             manual_tier=request.manual_tier,
             max_auto_tier=request.max_auto_tier,
             training_allowed=training_allowed,

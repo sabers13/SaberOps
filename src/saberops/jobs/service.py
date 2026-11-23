@@ -1682,6 +1682,9 @@ def job_dispatch_spec(job: Job) -> JobDispatchSpec:
         # never a switch.
         review_enabled=True,
         review_focus=job.requirements.review_focus,
+        # H20: the planner's consequential marker travels with the job so the
+        # auto-accept pass can park the candidate for the owner.
+        consequential=job.requirements.consequential,
     )
     return JobDispatchSpec(
         job_id=job.job_id,

@@ -29,6 +29,7 @@ that turns that answer into engine behaviour:
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime
@@ -40,6 +41,7 @@ from saberops.gate_receipt import find_valid_receipt
 from saberops.git import GitManager, GitRefRaceError
 from saberops.models import AttemptStatus, ReviewVerdict, RunStatus
 from saberops.owner_mode import ModeAction, OwnerMode, decide_owner_action
+from saberops.process import run_process
 from saberops.steering import undelivered_note_block_text, undelivered_notes_for_run
 
 if TYPE_CHECKING:
@@ -50,18 +52,25 @@ if TYPE_CHECKING:
 __all__ = [
     "ACCEPT_UNDONE_EVENT",
     "AUTO_ACCEPT_EVENT",
+    "AUTO_ACCEPT_PARKED_EVENT",
     "AutoAcceptCheck",
     "AutoAcceptDecision",
     "AutoAcceptOutcome",
     "AutoAcceptUndo",
+    "ConsequentialFloor",
     "auto_accept_candidate",
     "auto_accept_next_candidate",
+    "consequential_floor",
     "evaluate_auto_accept",
     "undo_auto_accept",
 ]
 
 #: Durable audit event recorded once per automatically accepted candidate.
 AUTO_ACCEPT_EVENT: Final[str] = "auto_accept_completed"
+
+#: Durable audit event recorded once per candidate the engine parks for the
+#: owner because it is consequential (H20).
+AUTO_ACCEPT_PARKED_EVENT: Final[str] = "auto_accept_parked"
 
 #: Durable audit event recorded by the one-command undo.
 ACCEPT_UNDONE_EVENT: Final[str] = "accept_undone"
@@ -75,6 +84,118 @@ _APPROVING_VERDICTS: Final[frozenset[ReviewVerdict]] = frozenset(
 _ACCEPTING_MODES: Final[frozenset[OwnerMode]] = frozenset(
     {OwnerMode.AWAY, OwnerMode.CRITICAL_ONLY}
 )
+
+#: Directory names that hold data migrations.  An applied migration is not
+#: undone by reverting the code, so the engine treats any change under one as
+#: consequential no matter what the planner recorded (H20).
+_MIGRATION_DIRECTORY_NAMES: Final[frozenset[str]] = frozenset(
+    {"migration", "migrations"}
+)
+
+#: Tool configuration that only exists to run migrations.
+_MIGRATION_FILE_NAMES: Final[frozenset[str]] = frozenset({"alembic.ini"})
+
+#: Deleting more files than this in one candidate is a mass deletion, which
+#: the fixed floor treats as consequential.  A routine refactor deletes a few.
+_DELETED_FILES_FLOOR: Final[int] = 20
+
+
+@dataclass(frozen=True)
+class ConsequentialFloor:
+    """The engine's fixed floor: what no planner or mode may call ordinary.
+
+    ``reasons`` is empty when nothing matched.  A caller (the auto-accept
+    decision) only ever adds to this: the planner's marker can make a
+    candidate consequential, never make a floor hit disappear.
+    """
+
+    reasons: tuple[str, ...] = ()
+
+    @property
+    def hit(self) -> bool:
+        return bool(self.reasons)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"hit": self.hit, "reasons": list(self.reasons)}
+
+
+def _is_migration_path(path: str) -> bool:
+    parts = [part for part in path.split("/") if part]
+    if any(part.lower() in _MIGRATION_DIRECTORY_NAMES for part in parts[:-1]):
+        return True
+    return bool(parts) and parts[-1].lower() in _MIGRATION_FILE_NAMES
+
+
+def _candidate_diff_entries(
+    repo_path: str | Path, base_sha: str, candidate_sha: str
+) -> list[tuple[str, tuple[str, ...]]] | None:
+    """Return ``(status, paths)`` for the committed candidate diff, or None."""
+    result = run_process(
+        ["git", "diff", "--name-status", "--find-renames", f"{base_sha}..{candidate_sha}"],
+        cwd=repo_path,
+        timeout=30.0,
+    )
+    if not result.passed:
+        return None
+    entries: list[tuple[str, tuple[str, ...]]] = []
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        status, *paths = line.split("\t")
+        entries.append((status.strip(), tuple(path for path in paths if path)))
+    return entries
+
+
+def consequential_floor(
+    repo_path: str | Path, base_sha: str, candidate_sha: str
+) -> ConsequentialFloor:
+    """Check the candidate diff against the engine's fixed consequential floor.
+
+    Two mechanical rules today: a change under a migration directory (or the
+    migration tool's configuration), and a mass deletion above
+    :data:`_DELETED_FILES_FLOOR`.  Auth, security and "effects outside the work
+    copy" stay the planner's judgment because no diff predicate can decide them
+    without guessing; the floor is what the engine can prove itself.
+
+    An unreadable diff is unverifiable, so it counts as a floor hit (fail
+    closed: park and ask the owner).
+    """
+    entries = _candidate_diff_entries(repo_path, base_sha, candidate_sha)
+    if entries is None:
+        return ConsequentialFloor(
+            ("the engine could not scan the candidate diff",)
+        )
+    migrations = sorted(
+        {
+            path
+            for status, paths in entries
+            if not status.startswith("D")
+            for path in paths
+            if _is_migration_path(path)
+        }
+    )
+    deleted = sum(1 for status, _paths in entries if status.startswith("D"))
+    reasons: list[str] = []
+    if migrations:
+        shown = ", ".join(migrations[:5])
+        more = f" (+{len(migrations) - 5} more)" if len(migrations) > 5 else ""
+        reasons.append(f"it changes a data migration ({shown}{more})")
+    if deleted > _DELETED_FILES_FLOOR:
+        reasons.append(
+            f"it deletes {deleted} files, above the floor of "
+            f"{_DELETED_FILES_FLOOR}"
+        )
+    return ConsequentialFloor(tuple(reasons))
+
+
+def _planner_marked_consequential(run: Run) -> bool:
+    """Read the planner's frozen marker; missing means ordinary."""
+    if not run.config_json:
+        return False
+    data = json.loads(run.config_json)
+    if not isinstance(data, dict):
+        raise ValueError("frozen run configuration must be an object")
+    return bool(data.get("consequential", False))
 
 
 @dataclass(frozen=True)
@@ -99,6 +220,12 @@ class AutoAcceptDecision:
     target_repo: str | None
     reason: str
     checks: tuple[AutoAcceptCheck, ...]
+    #: True when the candidate would otherwise auto-accept but the engine
+    #: parks it for the owner because it is consequential (H20).  Independent
+    #: work continues; the candidate stays unaccepted.
+    park_for_owner: bool = False
+    #: Why it is consequential; empty when it is not.
+    consequence: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         """Serialize for the CLI, logs and tests."""
@@ -111,6 +238,8 @@ class AutoAcceptDecision:
             "base_sha": self.base_sha,
             "target_repo": self.target_repo,
             "reason": self.reason,
+            "park_for_owner": self.park_for_owner,
+            "consequence": self.consequence,
             "checks": [
                 {"key": check.key, "passed": check.passed, "reason": check.reason}
                 for check in self.checks
@@ -190,6 +319,8 @@ def _refused(
     review_id: str | None = None,
     base_sha: str | None = None,
     target_repo: str | None = None,
+    park_for_owner: bool = False,
+    consequence: str = "",
 ) -> AutoAcceptDecision:
     failures = [check.reason for check in checks if not check.passed]
     reason = failures[0] if failures else "auto-accept is not allowed"
@@ -203,6 +334,8 @@ def _refused(
         target_repo=target_repo,
         reason=reason,
         checks=tuple(checks),
+        park_for_owner=park_for_owner,
+        consequence=consequence,
     )
 
 
@@ -487,6 +620,61 @@ def evaluate_auto_accept(
         )
     _check(checks, "checklist", True, "every acceptance check passes")
 
+    # H20: modes stop at what is actually consequential.  The candidate would
+    # auto-accept, but a data migration, a mass deletion or the planner's own
+    # marker parks it for the owner instead.  The planner can only add; the
+    # engine's floor is computed here from the diff and never read from the
+    # frozen configuration.  Independent work continues because the refusal
+    # only skips this candidate.
+    try:
+        planner_marked = _planner_marked_consequential(run)
+    except (TypeError, ValueError) as exc:
+        _check(
+            checks,
+            "consequential",
+            False,
+            f"the frozen run configuration is unreadable: {exc}",
+        )
+        return _refused(
+            run_id=run_id,
+            mode=mode_value,
+            checks=checks,
+            candidate_sha=candidate_sha,
+            review_id=review_id,
+            base_sha=run.base_commit,
+            target_repo=run.target_repo,
+        )
+    floor = (
+        consequential_floor(run.target_repo, run.base_commit, candidate_sha)
+        if run.base_commit
+        else ConsequentialFloor(("the run did not record a base commit",))
+    )
+    park_reasons = list(floor.reasons)
+    if planner_marked:
+        park_reasons.insert(0, "the planner marked it consequential")
+    consequence = "; ".join(park_reasons)
+    if not _check(
+        checks,
+        "consequential",
+        not park_reasons,
+        (
+            f"consequential candidate parked for the owner: {consequence}"
+            if park_reasons
+            else "the candidate is not consequential"
+        ),
+    ):
+        return _refused(
+            run_id=run_id,
+            mode=mode_value,
+            checks=checks,
+            candidate_sha=candidate_sha,
+            review_id=review_id,
+            base_sha=run.base_commit,
+            target_repo=run.target_repo,
+            park_for_owner=True,
+            consequence=consequence,
+        )
+
     return AutoAcceptDecision(
         run_id=run_id,
         allowed=True,
@@ -518,6 +706,78 @@ def _notify(db: Database, key: str, title: str, body: str) -> None:
         logging.getLogger(__name__).exception("auto-accept notice failed")
 
 
+def _park_consequential(
+    *,
+    db: Database,
+    decision: AutoAcceptDecision,
+    notifier: Any | None,
+) -> AutoAcceptOutcome:
+    """Record and announce one candidate the engine parks for the owner (H20).
+
+    The event is written once per candidate so a scheduler tick that sees the
+    same parked candidate again does not append duplicate evidence; the notice
+    ledger is idempotent on its own key.
+    """
+    candidate_sha = decision.candidate_sha or ""
+    event_id = _already_parked_event_id(db, decision.run_id, candidate_sha)
+    if event_id is None:
+        event_id = db.record_event(
+            decision.run_id,
+            AUTO_ACCEPT_PARKED_EVENT,
+            payload={
+                "candidate_sha": candidate_sha,
+                "base_sha": decision.base_sha,
+                "review_id": decision.review_id,
+                "mode": decision.mode,
+                "consequence": decision.consequence,
+                "reason": decision.reason,
+                "local_commit_only": True,
+                "pushed": False,
+                "accept_command": f"orch accept {decision.run_id}",
+            },
+        )
+    suffix = f" Acknowledge with `orch accept {decision.run_id}` or discard it."
+    body = (
+        f"SaberOps parked candidate {(candidate_sha or '?')[:8]} for run "
+        f"{decision.run_id} while the owner was {decision.mode}.\n"
+        f"It is green and reviewed, but it is consequential: "
+        f"{decision.consequence}.\n"
+        "It was not accepted; independent work continues." + suffix
+    )
+    title = "SaberOps parked a consequential candidate"
+    if notifier is not None:
+        notifier(
+            _notification_ledger(db),
+            f"auto-accept-parked:{decision.run_id}:{candidate_sha}",
+            title,
+            body,
+        )
+    else:
+        _notify(
+            db,
+            f"auto-accept-parked:{decision.run_id}:{candidate_sha}",
+            title,
+            body,
+        )
+    return AutoAcceptOutcome(
+        run_id=decision.run_id,
+        applied=False,
+        reason=decision.reason,
+        candidate_sha=decision.candidate_sha,
+        target_repo=decision.target_repo,
+        mode=decision.mode,
+        review_id=decision.review_id,
+        audit_event_id=event_id,
+    )
+
+
+def _already_parked_event_id(db: Database, run_id: str, candidate_sha: str) -> int | None:
+    for event in db.get_events_by_type(run_id, AUTO_ACCEPT_PARKED_EVENT):
+        if (event.payload or {}).get("candidate_sha") == candidate_sha:
+            return int(event.id)
+    return None
+
+
 def auto_accept_candidate(
     *,
     db: Database,
@@ -532,6 +792,10 @@ def auto_accept_candidate(
         db=db, run_id=run_id, now=now, engine=engine, gate_state=gate_state
     )
     if not decision.allowed:
+        if decision.park_for_owner:
+            return _park_consequential(
+                db=db, decision=decision, notifier=notifier
+            )
         return AutoAcceptOutcome(run_id=run_id, applied=False, reason=decision.reason)
     assert decision.candidate_sha is not None
     engine = engine or AcceptEngine(db=db)

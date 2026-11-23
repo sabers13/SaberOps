@@ -101,6 +101,7 @@ _TASK_V2_KEYS = _TASK_V1_KEYS | {
     "kind",
     "wave",
     "review_focus",
+    "consequential",
 }
 
 _VERSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
@@ -207,6 +208,10 @@ class PlanTaskDef:
     #: Optional planner focus handed to the independent reviewer.  It can only
     #: add attention; it never turns review off.
     review_focus: str = ""
+    #: Planner-recorded H20 judgement: this lane's candidate is consequential,
+    #: so away and critical-only park it for the owner instead of accepting it.
+    #: Missing means ordinary; the engine's own diff floor applies either way.
+    consequential: bool = False
 
     def __post_init__(self) -> None:
         """Canonicalize benign spelling so hashing and validation agree."""
@@ -281,6 +286,8 @@ class PlanTaskDef:
         # Written only when set so an older revision's content hash still verifies.
         if self.review_focus:
             legacy["review_focus"] = self.review_focus
+        if self.consequential:
+            legacy["consequential"] = True
         return legacy
 
     @classmethod
@@ -332,6 +339,9 @@ class PlanTaskDef:
             if not isinstance(value, str):
                 raise PlanValidationError(f"task {task_id!r}: {name} must be a string")
             detail[name] = value
+        consequential = data.get("consequential", False)
+        if type(consequential) is not bool:
+            raise PlanValidationError(f"task {task_id!r}: consequential must be a boolean")
         return cls(
             task_id=task_id,
             title=title,
@@ -359,6 +369,7 @@ class PlanTaskDef:
             kind=detail["kind"] or "job",
             wave=detail["wave"],
             review_focus=detail["review_focus"],
+            consequential=consequential,
         )
 
 

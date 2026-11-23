@@ -271,7 +271,13 @@ stays attended.
    `depends_on`, `caller_id` and `review_focus` select the base, scheduling,
    job kind, dependency, caller and reviewer attention. `review_focus` adds
    what the independent reviewer should look at (for example new
-   suppressions or broad handlers); it can never turn review off. A
+   suppressions or broad handlers); it can never turn review off.
+   `requirements` field `consequential` (send `true`) records that the candidate is
+   consequential (a data migration, deleting files or data, auth and
+   security, an irreversible operation, effects outside the work copy), so
+   away and critical-only park it for the owner instead of auto-accepting;
+   the engine also checks its own fixed floor from the diff, so the flag can
+   only add, never remove, a park. A
    dependant starts only after every job it names in `depends_on` has been
    accepted by the owner; a dependency that fails or is cancelled parks the
    dependant for good. A completed scout dependency satisfies its dependants.

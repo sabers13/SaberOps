@@ -323,6 +323,12 @@ class JobRequirements:
     #: Planner-authored focus for the independent reviewer.  It can only add
     #: attention; nothing can use it to turn review off.
     review_focus: str | None = None
+    #: Planner-recorded judgement (H20): this job's candidate is consequential
+    #: (a data migration, deleting data, auth and security, an irreversible
+    #: operation, effects outside the work copy), so away and critical-only
+    #: park it for the owner instead of auto-accepting.  Missing means
+    #: ordinary; the engine's own diff floor applies either way.
+    consequential: bool = False
 
     def __post_init__(self) -> None:
         from saberops.control_plane.capabilities import normalize_required_capabilities
@@ -365,6 +371,8 @@ class JobRequirements:
             else self.review_focus
         )
         object.__setattr__(self, "review_focus", focus or None)
+        if type(self.consequential) is not bool:
+            raise ValueError("consequential must be a boolean")
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -381,6 +389,8 @@ class JobRequirements:
         # existed still matches its idempotency key.
         if self.review_focus:
             payload["review_focus"] = self.review_focus
+        if self.consequential:
+            payload["consequential"] = True
         return payload
 
     @classmethod
@@ -396,6 +406,7 @@ class JobRequirements:
             # A row written before H1 has no difficulty; missing means routine.
             difficulty=coerce_difficulty(data.get("difficulty")),
             review_focus=data.get("review_focus"),
+            consequential=bool(data.get("consequential", False)),
         )
 
 

@@ -158,9 +158,13 @@ allows a start (it is not an owner judgment); a store migrated from the removed
 Closing the planning CLI pauses lane submission. In `away` or `critical-only`,
 a lane candidate that passed its gate and an independent review of that exact
 commit is auto-accepted as a local commit (never pushed) and `STATE.md` shows
-the undo command; in ask-me, or with
-a preset that does not grant auto-accept, `away` parks at the first candidate
-and the next owner action names that accept instead of looking stalled.
+the undo command. A candidate the planner marked consequential
+(`requirements.consequential`), or one the engine's own floor detects (a change
+under a migration directory, or deleting more than 20 files), is parked for the
+owner with a notice instead, and independent lanes continue. In ask-me, or with
+a store whose mode does not grant auto-accept, `away` parks at the first
+candidate and the next owner action names that accept instead of looking
+stalled.
 
 ### Scout jobs (F19)
 
