@@ -21,7 +21,6 @@ from saberops.control_plane import (
     PROVIDER_READINESS_UNKNOWN,
     PROVIDER_UNAVAILABLE,
     REQUIRED_CAPABILITY_UNSUPPORTED,
-    TRAINING_PERMISSION_DENIED,
     evaluate_control_plane,
 )
 from saberops.control_plane.capabilities import Capability
@@ -43,7 +42,6 @@ SKIP_PROVIDER_UNAVAILABLE = "provider_unavailable"
 SKIP_PROVIDER_EXECUTABLE_UNAVAILABLE = "provider_executable_unavailable"
 SKIP_PROVIDER_READINESS_NOT_READY = "provider_readiness_not_ready"
 SKIP_PROVIDER_READINESS_UNKNOWN = "provider_readiness_unknown"
-SKIP_TRAINING_POLICY = "training_policy_excludes_model"
 SKIP_QUOTA_BLOCKED = "quota_blocked"
 SKIP_PROMPT_TOO_LARGE = "prompt_exceeds_transport_capability"
 
@@ -330,8 +328,6 @@ def skip_reason_for_decision(
         return SKIP_PROVIDER_READINESS_NOT_READY
     if decision.reason == PROVIDER_READINESS_UNKNOWN:
         return SKIP_PROVIDER_READINESS_UNKNOWN
-    if decision.reason == TRAINING_PERMISSION_DENIED:
-        return SKIP_TRAINING_POLICY
     if decision.reason == REQUIRED_CAPABILITY_UNSUPPORTED:
         return (
             SKIP_PROMPT_TOO_LARGE
@@ -407,9 +403,9 @@ def evaluate_eligibility(
 ) -> str | None:
     """Return the compatibility skip reason for the canonical quota decision.
 
-    ``training_required`` / ``routing_snapshot`` carry frozen
-    data-policy evidence through to the single canonical decision; when
-    omitted the candidate's own frozen classification decides.
+    ``training_allowed``, ``training_required`` and ``routing_snapshot`` are
+    retained for callers that still carry the retired data-policy evidence;
+    they no longer restrict admission.
     """
     decision = control_plane_decision(
         candidate=candidate,
@@ -513,7 +509,6 @@ def control_plane_decision(
                 missing_capabilities=dec.missing_capabilities,
                 provider_policy=dec.provider_policy,
                 quota=dec.quota,
-                training_permitted=dec.training_permitted,
                 reserve_override=reserve_override,
                 capability_profile_digest=dec.capability_profile_digest,
                 control_plane_digest=dec.control_plane_digest,
@@ -555,7 +550,6 @@ def control_plane_decision(
             missing_capabilities=dec.missing_capabilities,
             provider_policy=dec.provider_policy,
             quota=dec.quota,
-            training_permitted=dec.training_permitted,
             reserve_override=reserve_override,
             capability_profile_digest=dec.capability_profile_digest,
             control_plane_digest=dec.control_plane_digest,
@@ -570,7 +564,6 @@ def control_plane_decision(
         missing_capabilities=dec.missing_capabilities,
         provider_policy=dec.provider_policy,
         quota=dec.quota,
-        training_permitted=dec.training_permitted,
         reserve_override=reserve_override,
         capability_profile_digest=dec.capability_profile_digest,
         control_plane_digest=dec.control_plane_digest,

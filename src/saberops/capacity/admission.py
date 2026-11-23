@@ -31,7 +31,6 @@ from saberops.control_plane import (
     PROVIDER_READINESS_UNKNOWN,
     PROVIDER_UNAVAILABLE,
     REQUIRED_CAPABILITY_UNSUPPORTED,
-    TRAINING_PERMISSION_DENIED,
 )
 from saberops.control_plane.capabilities import (
     Capability,
@@ -72,7 +71,6 @@ from saberops.control_plane.quota_policy import (
 from saberops.jobs.models import JobRequirements, JobRole
 from saberops.models import ProviderReadiness, QuotaState, WorkerCandidate
 from saberops.routing import gemini_requires_antigravity
-from saberops.training_policy import is_training_permitted
 from saberops.workers.base import WorkerAdapter
 
 #: Admission reason: a Gemini-family model was routed away from Antigravity.
@@ -394,7 +392,7 @@ def admit(
     Enforces:
     1. Identity validity
     2. Requirements: role, capabilities, read_only, model_family include/exclude
-    3. Provider & training governance
+    3. Provider governance
     4. Readiness / adapter availability
     5. Governed instructions compatibility
     6. Billing posture (unattended A/C with non-expired TTL; B/D override; X/fail closed)
@@ -499,18 +497,6 @@ def admit(
             admitted=False,
             candidate=candidate,
             reason=PROVIDER_DISABLED,
-        )
-
-    if not is_training_permitted(
-        candidate,
-        training_allowed,
-        snapshot=routing_snapshot,
-        training_required=training_required,
-    ):
-        return AdmissionDecision(
-            admitted=False,
-            candidate=candidate,
-            reason=TRAINING_PERMISSION_DENIED,
         )
 
     # 4. Readiness / adapter availability

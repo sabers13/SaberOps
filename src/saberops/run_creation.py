@@ -40,9 +40,6 @@ from saberops.project_settings import (
     detect_authoritative_gate,
     load_project_settings,
 )
-from saberops.project_settings import (
-    resolve_effective_training_allowed as _settings_training_allowed,
-)
 
 GATE_REQUIRED_MESSAGE: str = (
     "This project has no gate configured. Set the project gate first "
@@ -156,26 +153,6 @@ def _resolve_gate_from_settings(
     raise RunCreationError(GATE_REQUIRED_MESSAGE)
 
 
-def _resolve_training_from_settings(
-    *,
-    repo_path: Path | str,
-    explicit_training_allowed: bool | None,
-    settings: ProjectSettings,
-) -> bool:
-    """Resolve training bit from one immutable project-settings snapshot."""
-    return True
-
-
-def resolve_effective_training_allowed(
-    *,
-    repo_path: Path | str,
-    explicit_training_allowed: bool | None,
-    settings: ProjectSettings | None = None,
-) -> bool:
-    """Return True; legacy training flags no longer restrict model admission."""
-    return True
-
-
 def resolve_effective_gate_scratch_mode(
     *,
     repo_path: Path | str,
@@ -279,11 +256,9 @@ def resolve_effective_run_config(request: RunRequest) -> RunConfig:
         explicit_gate=request.gate_command,
         settings=snapshot,
     )
-    training_allowed = _resolve_training_from_settings(
-        repo_path=request.repo_path,
-        explicit_training_allowed=request.training_allowed,
-        settings=snapshot,
-    )
+    # The stored training/data-use bit is historical evidence and never
+    # restricts admission (H11).
+    training_allowed = True
     gate_scratch_mode = resolve_effective_gate_scratch_mode(
         repo_path=request.repo_path, explicit_mode=request.gate_scratch_mode
     )
@@ -369,7 +344,7 @@ def effective_policy_summary(repo_path: Path | str) -> dict[str, object]:
         scratch_mode = load_project_gate_scratch_policy(repo_path)
     except Exception as exc:  # noqa: BLE001 - surface must render the failure
         return {"error": f"Project gate-scratch policy is invalid: {exc}"}
-    training_allowed = _settings_training_allowed(settings, repo_path=repo_path)
+    training_allowed = True
     data_policy = DataPolicy.ALLOWED
     gate_configured = settings.gate_command
     gate_detected = detect_authoritative_gate(repo_path) if gate_configured is None else None
@@ -412,5 +387,4 @@ __all__ = [
     "resolve_effective_gate_scratch_mode",
     "resolve_effective_run_config",
     "resolve_effective_target_branch",
-    "resolve_effective_training_allowed",
 ]

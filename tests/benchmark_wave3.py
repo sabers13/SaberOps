@@ -2,7 +2,7 @@
 
 Every drill runs in fake mode: the lifecycle rig's fake worker and reviewer, an
 isolated store and a toy repository.  No vendor CLI is started and no network is
-used.  Each drill returns a :class:`~saberops.benchmark.DrillResult` so it can be
+used.  Each drill returns a :class:`~benchmark_core.DrillResult` so it can be
 printed in the benchmark results table.
 
 The drills exercise the Wave 3 features the way the owner meets them -- mode
@@ -28,6 +28,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from benchmark_core import (
+    QUESTION_TASK,
+    DrillResult,
+    SubscriptionUsage,
+    aggregate_subscription_usage,
+)
 from benchmark_rig import (
     DRILL_VISIBLE_LIMIT_SECONDS,
     SETUP_TIMEOUT_SECONDS,
@@ -50,12 +56,6 @@ from saberops.auto_accept import (
     auto_accept_candidate,
     evaluate_auto_accept,
     undo_auto_accept,
-)
-from saberops.benchmark import (
-    QUESTION_TASK,
-    DrillResult,
-    SubscriptionUsage,
-    aggregate_subscription_usage,
 )
 from saberops.capacity.loop import run_scheduler_loop
 from saberops.cli import main as cli_main
@@ -2090,7 +2090,7 @@ def drills_report(
     usage: Sequence[SubscriptionUsage] = (),
 ) -> Any:
     """A results table containing only these drills (and optional usage)."""
-    from saberops.benchmark import BenchmarkReport
+    from benchmark_core import BenchmarkReport
 
     return BenchmarkReport(
         mode=mode,
@@ -2121,7 +2121,7 @@ def assert_catalogued_drills(drills: Sequence[DrillResult]) -> None:
     a renamed/changed group or slow marker fails the run until its catalogue
     entry and baseline row are updated.
     """
-    from saberops.benchmark import DRILLS_BY_NAME
+    from benchmark_core import DRILLS_BY_NAME
 
     for drill in drills:
         entry = DRILLS_BY_NAME.get(drill.name)

@@ -31,7 +31,7 @@ it.
 ## 2. Decision
 
 1. **The drill catalogue is the single list.** `DRILL_CATALOGUE` in
-   `saberops/benchmark.py` names every drill the fake-mode rig must keep: its
+   `scripts/benchmark_core.py` names every drill the fake-mode rig must keep: its
    exact `DrillResult.name`, its group (`B2` or the feature id), its phase 1
    lane, the phase 1 threshold in seconds, the pytest node id that runs it, and
    its slow marker. The threshold constants (`DRILL_LIMIT_SECONDS` = 120 s,

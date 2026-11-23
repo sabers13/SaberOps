@@ -4431,8 +4431,6 @@ class Orchestrator:
                             )
                         elif reason_pre == "provider_unavailable":
                             msg = f"explicit model is ineligible: provider {candidate.provider} unavailable"  # noqa: E501
-                        elif reason_pre == "training_policy_excludes_model":
-                            msg = f"explicit model is ineligible: training policy excludes model {candidate.model}"  # noqa: E501
                         elif reason_pre == "quota_blocked":
                             if decision_pre.exclusion_reason == "QUOTA_EVIDENCE_REQUIRED":
                                 msg = (

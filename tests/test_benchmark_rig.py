@@ -17,35 +17,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from benchmark_rig import (
-    BENCHMARK_TIMEOUT_SECONDS,
-    C2_RECOVERY_LIMIT_SECONDS,
-    DRILL_VISIBLE_LIMIT_SECONDS,
-    install_stub_notifier,
-    run_failure_drills,
-    run_fake_benchmark,
-    run_gate_protection_drill,
-    run_recovery_drill,
-)
-from benchmark_wave3 import (
-    assert_catalogued_drills,
-    assert_drill_groups,
-    drills_report,
-    run_advisor_drill,
-    run_autonomy_drills,
-    run_landing_queue_drill,
-    run_plan_drills,
-    run_presence_drills,
-    run_question_mode_drills,
-    run_scheduling_drills,
-    run_scout_proxy_drills,
-    run_vendor_drills,
-    run_walkthrough_drill,
-    usage_rows,
-)
-from lifecycle_rig import RigEnvironment, build_lifecycle_rig
-
-from saberops.benchmark import (
+from benchmark_core import (
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_CODEX_MODEL,
     DEFAULT_OPENCODE_MODEL,
@@ -85,6 +57,34 @@ from saberops.benchmark import (
     validate_real_mode,
     wait_for_batch,
 )
+from benchmark_rig import (
+    BENCHMARK_TIMEOUT_SECONDS,
+    C2_RECOVERY_LIMIT_SECONDS,
+    DRILL_VISIBLE_LIMIT_SECONDS,
+    install_stub_notifier,
+    run_failure_drills,
+    run_fake_benchmark,
+    run_gate_protection_drill,
+    run_recovery_drill,
+)
+from benchmark_wave3 import (
+    assert_catalogued_drills,
+    assert_drill_groups,
+    drills_report,
+    run_advisor_drill,
+    run_autonomy_drills,
+    run_landing_queue_drill,
+    run_plan_drills,
+    run_presence_drills,
+    run_question_mode_drills,
+    run_scheduling_drills,
+    run_scout_proxy_drills,
+    run_vendor_drills,
+    run_walkthrough_drill,
+    usage_rows,
+)
+from lifecycle_rig import RigEnvironment, build_lifecycle_rig
+
 from saberops.capacity.loop import run_scheduler_loop
 from saberops.capacity.store import ensure_tables as ensure_capacity_tables
 from saberops.db import current_iso_timestamp
@@ -110,6 +110,18 @@ def rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> RigEnvironment:
 # --------------------------------------------------------------------------
 # Fake mode: the ten fixed tasks
 # --------------------------------------------------------------------------
+
+
+def test_rig_core_ships_outside_the_installed_package() -> None:
+    """H11: the rig is not installed with the engine.
+
+    The shared rig core lives in ``scripts/benchmark_core.py``; an installed
+    wheel carries only engine code.  This fails if a ``saberops.benchmark``
+    module is reintroduced under ``src/``.
+    """
+    import importlib.util
+
+    assert importlib.util.find_spec("saberops.benchmark") is None
 
 
 def test_benchmark_catalogue_has_ten_fixed_tasks() -> None:
@@ -1134,7 +1146,7 @@ def test_probe_without_a_violation_is_not_measured() -> None:
     the suite (the worker chose acceptance); the row is excluded, not failed.
     Before the fix the same row was measured and failed the whole benchmark.
     """
-    from saberops.benchmark import BenchmarkReport
+    from benchmark_core import BenchmarkReport
 
     compliant_block = replace(
         _review_blocked_result(block_verdicts=1),
@@ -1224,7 +1236,7 @@ def test_gate_interpreter_pytest_check_names_the_dev_extra(
             args=[], returncode=1, stdout="", stderr="ModuleNotFoundError: No module named 'pytest'"
         )
 
-    monkeypatch.setattr("saberops.benchmark.subprocess.run", _missing)
+    monkeypatch.setattr("benchmark_core.subprocess.run", _missing)
     message = gate_interpreter_pytest_error()
     assert message is not None
     assert sys.executable in message
@@ -1237,7 +1249,7 @@ def test_real_benchmark_refuses_before_seeding_without_pytest(
 ) -> None:
     """D9: fail before the first toy repository instead of every gate."""
     monkeypatch.setattr(
-        "saberops.benchmark.gate_interpreter_pytest_error",
+        "benchmark_core.gate_interpreter_pytest_error",
         lambda: "the benchmark gate interpreter cannot import pytest",
     )
     store = tmp_path / "store"
@@ -1463,7 +1475,8 @@ def test_batch_pacer_uses_the_route_pool_limit() -> None:
     Go allow two, so the global default of two must not submit a second Claude
     task into a queued position.
     """
-    from saberops.benchmark import batch_submit_pacer
+    from benchmark_core import batch_submit_pacer
+
     from saberops.control_plane.plans import (
         PlanSet,
         PoolMember,
@@ -1530,7 +1543,7 @@ def test_paced_batch_never_queues_behind_a_one_slot_pool(
     the batch, which is the failure the confirming run exposed when Claude's
     one-slot pool was paced at the global two.
     """
-    from saberops.benchmark import (
+    from benchmark_core import (
         RealBatch,
         _drive_real_batch,
         _worker_submitter,
@@ -1538,6 +1551,7 @@ def test_paced_batch_never_queues_behind_a_one_slot_pool(
         batch_worker_candidate,
         create_toy_repository,
     )
+
     from saberops.cli import main as cli_main
     from saberops.control_plane.plans import load_packaged_plans_raw
     from saberops.control_plane.policy import (
@@ -1736,7 +1750,7 @@ def test_benchmark_table_reports_candidate_and_acceptance_latency() -> None:
             subscription="codex/gpt-6-luna",
         ),
     )
-    from saberops.benchmark import BenchmarkReport
+    from benchmark_core import BenchmarkReport
 
     table = BenchmarkReport(
         mode="real", results=results, started_at=100.0, finished_at=200.0
@@ -1749,7 +1763,7 @@ def test_benchmark_table_reports_candidate_and_acceptance_latency() -> None:
 
 def test_benchmark_table_withholds_candidate_latency_without_a_candidate() -> None:
     """N8: submit-to-terminal is not printed as time to candidate."""
-    from saberops.benchmark import BenchmarkReport
+    from benchmark_core import BenchmarkReport
 
     result = TaskResult(
         task_id="review-block-b",
@@ -1779,7 +1793,7 @@ def test_benchmark_table_withholds_candidate_latency_without_a_candidate() -> No
 
 def test_must_fail_row_without_review_is_not_measured_not_failed() -> None:
     """N10: no review and no block is an unmeasured row, never a failure."""
-    from saberops.benchmark import BenchmarkReport
+    from benchmark_core import BenchmarkReport
 
     unmeasured = TaskResult(
         task_id="review-block-b",

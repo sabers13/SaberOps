@@ -63,7 +63,7 @@ exactly one notice inside the bound; the combined recovery drill adds B3's
 ## How to extend the table
 
 1. Make the rig emit a `DrillResult` with a stable `name` and `group`.
-2. Add one row to `DRILL_ROWS` in `src/saberops/benchmark.py` (name, group,
+2. Add one row to `DRILL_ROWS` in `scripts/benchmark_core.py` (name, group,
    lane, phase 1 threshold, test function).
 3. Add one row to the table above, in the same position.
 4. Run the drill's test once to record the baseline seconds, then the full gate.

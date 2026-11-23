@@ -21,7 +21,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from saberops.benchmark import (  # noqa: E402
+from benchmark_core import (  # noqa: E402
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_CODEX_MODEL,
     DEFAULT_OPENCODE_MODEL,
@@ -263,7 +263,7 @@ def _run_real(args: argparse.Namespace, pacer: SubmitPacer) -> int:
         _print_plan(store, repo_root, models, pacer, selected)
         return 0
 
-    from saberops.benchmark import apply_isolated_environment, run_real_benchmark
+    from benchmark_core import apply_isolated_environment, run_real_benchmark
 
     # Replace the ambient environment: an update alone would leave a stripped
     # metered key behind in this process (N6).

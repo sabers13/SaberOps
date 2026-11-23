@@ -30,7 +30,6 @@ from saberops.routing_config import (
     reorder_chain_groups,
     snapshot_to_payload,
 )
-from saberops.training_policy import is_training_permitted
 
 A = "codex/gpt-5.6-terra"
 B = "opencode/opencode-go/muse-spark-1.2-contributor"
@@ -361,12 +360,19 @@ def test_routing_ignores_both_retired_flags(role: JobRole) -> None:
 
 @pytest.mark.parametrize("requirement", ["TRUE", "FALSE", "UNKNOWN"])
 def test_training_gate_is_retired_even_for_legacy_denied(requirement: str) -> None:
+    """A legacy denied flag cannot restrict admission (H11).
+
+    The retired filter module is gone; this guards the safety property that
+    no stored data-policy flag can reintroduce a candidate restriction.
+    """
+    import importlib
+
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("saberops.training_policy")
     candidate = WorkerCandidate(provider="codex", model="gpt-5.6-terra")
-    assert is_training_permitted(requirement, False)
     decision = evaluate_control_plane(
         candidate, training_allowed=False, training_required=requirement
     )
-    assert decision.training_permitted is True
     assert decision.reason != "TRAINING_PERMISSION_DENIED"
     assert is_peak_hours() is False
 

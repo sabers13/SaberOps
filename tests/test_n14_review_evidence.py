@@ -16,13 +16,13 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from lifecycle_rig import RigEnvironment, build_lifecycle_rig
-
-from saberops.benchmark import (
+from benchmark_core import (
     TASKS_BY_ID,
     benchmark_gate_command,
     create_toy_repository,
 )
+from lifecycle_rig import RigEnvironment, build_lifecycle_rig
+
 from saberops.control_plane import (
     freeze_control_plane_policy,
     load_control_plane_policy,

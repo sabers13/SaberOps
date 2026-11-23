@@ -16,8 +16,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-
-from saberops.benchmark import (
+from benchmark_core import (
     TASKS_BY_ID,
     BenchmarkReport,
     BenchmarkTask,
@@ -28,6 +27,7 @@ from saberops.benchmark import (
     run_seeded_must_fail_row,
     seed_must_fail_candidate,
 )
+
 from saberops.db import Database, current_iso_timestamp
 from saberops.jobs.store import list_jobs_tolerant
 from saberops.models import (

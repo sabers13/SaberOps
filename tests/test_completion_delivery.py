@@ -380,7 +380,8 @@ def test_missing_notify_send_records_a_durable_attempt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A headless host records the attempt instead of leaving the key absent."""
-    from saberops.benchmark import _notice_delivered
+    from benchmark_core import _notice_delivered
+
     from saberops.notifications import notice_attempted, notify_once
 
     monkeypatch.setenv("SABEROPS_DESKTOP_NOTIFICATIONS", "1")
@@ -474,7 +475,8 @@ def test_no_session_bus_is_unavailable_and_not_retried_every_tick(
 def test_failed_notify_send_still_counts_as_an_attempt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from saberops.benchmark import _notice_delivered
+    from benchmark_core import _notice_delivered
+
     from saberops.notifications import notice_attempted, notify_once
 
     monkeypatch.setenv("SABEROPS_DESKTOP_NOTIFICATIONS", "1")

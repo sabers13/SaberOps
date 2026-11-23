@@ -28,7 +28,7 @@ pattern but answered a different question than the target.
 
 ## 2. Decision
 
-1. **Paced submission is the default in both modes.** `saberops.benchmark`
+1. **Paced submission is the default in both modes.** `benchmark_core`
    gains a shared `SubmitPacer`; the real batch driver and the fake rig submit
    the next measured task only when fewer than the configured concurrency
    (default 2, the count the confirming runs dispatched) submitted tasks are

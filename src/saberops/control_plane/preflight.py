@@ -20,12 +20,10 @@ from saberops.control_plane.policy import (
 )
 from saberops.control_plane.quota_policy import QuotaDecision, quota_decision
 from saberops.models import ProviderReadiness, QuotaState, WorkerCandidate
-from saberops.training_policy import is_training_permitted
 
 PROVIDER_DISABLED = "PROVIDER_DISABLED"
 PROVIDER_ALLOWED_WITH_WARNING = "PROVIDER_ALLOWED_WITH_WARNING"
 REQUIRED_CAPABILITY_UNSUPPORTED = "REQUIRED_CAPABILITY_UNSUPPORTED"
-TRAINING_PERMISSION_DENIED = "TRAINING_PERMISSION_DENIED"
 PROVIDER_UNAVAILABLE = "PROVIDER_UNAVAILABLE"
 PROVIDER_EXECUTABLE_UNAVAILABLE = "PROVIDER_EXECUTABLE_UNAVAILABLE"
 PROVIDER_READINESS_NOT_READY = "PROVIDER_READINESS_NOT_READY"
@@ -83,7 +81,6 @@ class ControlPlaneDecision:
     missing_capabilities: tuple[str, ...]
     provider_policy: str
     quota: QuotaDecision
-    training_permitted: bool
     reserve_override: bool
     capability_profile_digest: str
     control_plane_digest: str
@@ -114,7 +111,6 @@ class ControlPlaneDecision:
                 "reason": self.quota.reason,
                 "reset_at": self.quota.reset_at,
             },
-            "training_permitted": self.training_permitted,
             "reserve_override": self.reserve_override,
             "capability_profile_digest": self.capability_profile_digest,
             "control_plane_digest": self.control_plane_digest,
@@ -144,22 +140,17 @@ def evaluate_control_plane(
     readiness_executable_available: bool = True,
     explicit_unknown_readiness: bool = False,
 ) -> ControlPlaneDecision:
-    """Evaluate governance, training, facts, quota, then adapter availability.
+    """Evaluate governance, facts, quota, then adapter availability.
+
+    ``training_allowed``, ``training_required`` and ``routing_snapshot`` are
+    retained for callers that still carry the retired data-policy evidence;
+    they no longer restrict admission.
 
     When ``binding_pool_id`` is supplied, the quota evaluation considers
     only observations whose canonical ``pool_id`` matches.  This is
     the seam through which a binding's ``quota_pool_id`` actually
     gates quota evaluation.  When ``None``, the legacy behaviour applies
     (every supplied state is considered).
-
-    ``training_required`` carries an already-resolved frozen requirement
-    (``TRUE``/``FALSE``/``UNKNOWN``) and ``routing_snapshot`` the Run's
-    frozen routing snapshot for owner-approved evidence lookup; both feed
-    the single canonical data-policy decision in
-    :mod:`saberops.training_policy` (never mutable live state).  When
-    neither is supplied the candidate's own frozen classification, then
-    the static v1 knowledge, decides; unknown ids fail closed under
-    Denied.
 
     When ``requires_governed_instructions`` is true, the dispatch must
     faithfully deliver the canonical project instruction contract (e.g.
@@ -192,17 +183,6 @@ def evaluate_control_plane(
         if max_bytes is not None and prompt_bytes > max_bytes:
             required.add(Capability.LARGE_PROMPT_STDIN.value)
     missing = tuple(sorted(required - {cap.value for cap in profile.capabilities}))
-    # Canonical data-policy decision shared with worker routing and
-    # reviewer dispatch: Allowed excludes nothing; Denied permits only
-    # FALSE while TRUE and UNKNOWN (fail closed) map to
-    # TRAINING_PERMISSION_DENIED below -- never a provider/worker failure
-    # or capability-escalation evidence.
-    training_permitted = is_training_permitted(
-        candidate,
-        training_allowed,
-        snapshot=routing_snapshot,
-        training_required=training_required,
-    )
     warnings: tuple[str, ...] = ()
     warning_reasons: tuple[str, ...] = ()
     if provider_policy.state == ProviderPolicyState.ALLOWED_WITH_WARNING:
@@ -212,8 +192,6 @@ def evaluate_control_plane(
     eligible = True
     if provider_policy.state == ProviderPolicyState.DISABLED:
         eligible, reason = False, PROVIDER_DISABLED
-    elif not training_permitted:
-        eligible, reason = False, TRAINING_PERMISSION_DENIED
     elif missing:
         eligible, reason = False, REQUIRED_CAPABILITY_UNSUPPORTED
     quota = quota_decision(
@@ -261,7 +239,6 @@ def evaluate_control_plane(
         missing_capabilities=missing,
         provider_policy=provider_policy.state,
         quota=quota,
-        training_permitted=training_permitted,
         reserve_override=reserve_override,
         capability_profile_digest=profile.digest,
         control_plane_digest=control_plane_digest or effective_policy.content_hash,

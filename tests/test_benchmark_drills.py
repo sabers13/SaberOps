@@ -10,7 +10,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from saberops.benchmark import (
+from benchmark_core import (
     DRILL_CATALOGUE,
     DRILL_LIMIT_SECONDS,
     DRILLS_BY_NAME,

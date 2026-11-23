@@ -391,7 +391,7 @@ def test_review_usage_belongs_to_the_reviewer_subscription(
     assert usage["reviews"][0]["review_id"] == "rev-review-1"
     assert usage["coverage_complete"] is True
 
-    from saberops.benchmark import aggregate_subscription_usage
+    from benchmark_core import aggregate_subscription_usage
 
     rows = aggregate_subscription_usage(db, [job_id])
     by_subscription = {row.subscription: row for row in rows}

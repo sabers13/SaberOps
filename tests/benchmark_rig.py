@@ -1,6 +1,6 @@
 """Fake-mode benchmark harness for the Phase 1 B2 rig.
 
-Runs the ten fixed tasks from :mod:`saberops.benchmark` through the lifecycle
+Runs the ten fixed tasks from :mod:`benchmark_core` through the lifecycle
 test rig's real job/scheduler/worker/gate/review/accept path using the fake
 worker and reviewer.  No vendor CLI and no network access.
 """
@@ -20,11 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from lifecycle_rig import RigEnvironment, create_toy_repo
-
-from saberops._gate_tools import gate_tools
-from saberops.accept import AcceptEngine
-from saberops.benchmark import (
+from benchmark_core import (
     DEFAULT_SUBMIT_CONCURRENCY,
     DEFAULT_SUBMIT_MODE,
     DRILL_LIMIT_SECONDS,
@@ -40,6 +36,10 @@ from saberops.benchmark import (
     aggregate_subscription_usage,
     count_block_verdicts,
 )
+from lifecycle_rig import RigEnvironment, create_toy_repo
+
+from saberops._gate_tools import gate_tools
+from saberops.accept import AcceptEngine
 from saberops.capacity.loop import run_scheduler_loop, scheduler_alive
 from saberops.cli import main as cli_main
 from saberops.control_plane.capabilities import Capability
@@ -59,7 +59,7 @@ from saberops.supervisor import RunSupervisor
 #: runs this under heavy CPU contention, so the stall bound keeps headroom while
 #: still failing a genuinely stuck engine well inside the lane timeout.
 BENCHMARK_TIMEOUT_SECONDS = 180.0
-#: The phase 1 thresholds live with the drill catalogue in ``saberops.benchmark``
+#: The phase 1 thresholds live with the drill catalogue in ``benchmark_core``
 #: so the results table and this harness cannot disagree.
 DRILL_VISIBLE_LIMIT_SECONDS = DRILL_LIMIT_SECONDS
 C2_RECOVERY_LIMIT_SECONDS = RECOVERY_DRILL_LIMIT_SECONDS

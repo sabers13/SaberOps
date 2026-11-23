@@ -497,38 +497,6 @@ def detect_authoritative_gate(repo_path: Path | str) -> str | None:
     return None
 
 
-def is_project_positively_public(repo_path: Path | str) -> bool:
-    """Return True only when the project is positively established as public.
-
-    The project-settings layer implements no automatic public inference: no remote-URL
-    heuristic, license-file probe, or hosting check can positively
-    establish public training consent, so this always returns False and
-    an unset data policy resolves conservatively to Denied.  The seam
-    exists so a future tranche can add a narrow, auditable public
-    proof without changing the safe-default call sites.
-    """
-    _ = repo_path
-    return False
-
-
-def resolve_effective_data_policy(
-    settings: ProjectSettings,
-    *,
-    repo_path: Path | str | None = None,
-) -> DataPolicy:
-    """Return Allowed; retained project policy records are historical metadata."""
-    return DataPolicy.ALLOWED  # Training-based model restrictions are retired.
-
-
-def resolve_effective_training_allowed(
-    settings: ProjectSettings,
-    *,
-    repo_path: Path | str | None = None,
-) -> bool:
-    """Map the effective data policy onto the frozen ``training_allowed`` bit."""
-    return resolve_effective_data_policy(settings, repo_path=repo_path) is DataPolicy.ALLOWED
-
-
 # ---------------------------------------------------------------------------
 # Composed canonical authorities (delegates -- never divergent copies)
 # ---------------------------------------------------------------------------
@@ -555,12 +523,9 @@ __all__ = [
     "clear_project_gate_command",
     "clear_project_scout_route",
     "detect_authoritative_gate",
-    "is_project_positively_public",
     "load_project_settings",
     "load_project_settings_for_state_dir",
     "project_settings_path",
-    "resolve_effective_data_policy",
-    "resolve_effective_training_allowed",
     "set_project_accept_target_branch",
     "set_project_data_policy",
     "set_project_gate_command",

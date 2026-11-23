@@ -19,7 +19,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from saberops.benchmark import fake_mode_environment
+from benchmark_core import fake_mode_environment
+
 from saberops.telemetry import extract_opencode_identity, parse_opencode_jsonl
 
 FIXTURES = Path(__file__).parent / "fixtures"

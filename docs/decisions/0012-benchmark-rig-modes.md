@@ -18,7 +18,7 @@ honest enough to run against real subscriptions once, with the owner present.
 ## 2. Decision
 
 One catalogue of ten measured tasks (plus a drill-only `routine-question` task)
-lives in `saberops/benchmark.py` and is shared by both modes. The table records, per task, the final state, the accepted
+lives in `scripts/benchmark_core.py` and is shared by both modes. The table records, per task, the final state, the accepted
 commit, submit-to-start, time to the accepted commit, completion-notice delay,
 owner actions and the subscription actually used.
 

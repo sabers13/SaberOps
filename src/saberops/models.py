@@ -1009,10 +1009,10 @@ class WorkerCandidate:
 
     ``training_required`` is the frozen data-policy classification
     (``"TRUE"``/``"FALSE"``/``"UNKNOWN"``) attached at chain resolution
-    from the Run's frozen routing snapshot.  ``None`` means unresolved:
-    the canonical :mod:`saberops.training_policy` decision falls back to
-    the frozen snapshot record, then the static v1 knowledge.  It is
-    never populated from mutable live discovery/catalog/routing state.
+    from the Run's frozen routing snapshot.  It is historical evidence
+    only: training-based admission is retired, so it never restricts a
+    candidate.  It is never populated from mutable live
+    discovery/catalog/routing state.
     """
 
     provider: str
