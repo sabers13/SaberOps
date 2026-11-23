@@ -72,6 +72,7 @@ first missing step with no stored cursor.
 | `plan_status` | no | `plan_id` or `repo` | `saberops.plan_state.project_plan_state` (the exact `STATE.md` projection) |
 | `cancel_job` | yes | `job_id`, `reason` | `saberops.jobs.service.cancel_job` |
 | `note_job` | yes | `job_id`, `text` | `saberops.jobs.service.note_job` |
+| `resume_job` | yes | `job_id`, `from` (`scratch`/`last_candidate`), `note`, `worker_binding` | `saberops.service.OrchestratorService.resume_job` (retry/continue paths) |
 | `capacity` | no | — | `saberops.jobs.service.capacity` |
 | `read_evidence` | no | `path` | guarded evidence reader |
 | `list_questions` | no | `status`, `run_id` | `saberops.questions.OwnerQuestionQueue.questions` |
@@ -222,6 +223,36 @@ attention; and, in `away` or `critical-only`, `plan:<id>:needs-decision:<lane>`
 when no lane can move and a candidate (or owner lane) waits for the owner. A
 lane start sends no notice; per-job terminal notices already cover it.
 
+## Resuming a failed job
+
+`resume_job` is the one recovery tool a planner needs. It takes a `job_id` and
+`from`:
+
+- `scratch` starts a fresh attempt of the job's frozen task and policy (the
+  former `orch retry` path).
+- `last_candidate` continues from the candidate the failed run saved and keeps
+  the work (the former `orch continue` path). A failed run with no saved
+  candidate refuses with that reason.
+
+An optional `note` is recorded as an ordinary steering note (ADR-0016) before
+the successor starts, so it is the section its first attempt renders. When the
+owner rejects a candidate with a correction, that text becomes the resume note.
+The optional `worker_binding` is the folded-in `orch try-worker` option: the
+exact blocked `UNKNOWN` worker named in the failure evidence, and it is valid
+only with `from: scratch`.
+
+The call links one successor back to the job (`FAILED -> RUNNING`, with the
+successor as its current run) so `get_job`, `wait_job` and the scheduler follow
+the new attempt. A repeated call while the job is running returns the successor
+it already has (`already_resumed: true`) and starts nothing. A job that is not
+failed refuses with a reason.
+
+`orch resume-job <job-or-run-id> [--from scratch|last_candidate] [--note TEXT]
+[--binding ID]` is the owner-facing form; it also accepts a run id from a plain
+`orch run`, including the job that owns it when there is one. `orch retry`,
+`orch continue` and `orch try-worker` remain as aliases for one release and say
+so on stderr.
+
 ## Steering a running job
 
 `note_job` (or `orch job note`) records one durable owner correction on a job
@@ -320,7 +351,7 @@ exclusive `flock` during each read-modify-write.
   `initialize` and released at EOF.
 * A second live client (a different, live `pid` holds the record) is read-only:
   calls to `submit_job`, `submit_plan`, `promote_scout`, `cancel_job`,
-  `note_job`, `answer_question`, `propose_config_change` and
+  `note_job`, `resume_job`, `answer_question`, `propose_config_change` and
   `propose_mode_change` are refused with JSON-RPC error `-32020`. Its read
   tools (`get_job`, `catch_up`, `list_jobs`, `capacity`, `read_evidence`,
   `list_questions`, `list_proposals`, `get_mode`, `get_pause`,

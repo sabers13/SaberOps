@@ -38,7 +38,7 @@ from saberops.gate_runner import (
     GateScratchPolicyError,
     load_project_gate_scratch_policy,
 )
-from saberops.jobs.models import JobRole, coerce_job_role
+from saberops.jobs.models import JobRole, JobState, coerce_job_role
 from saberops.model_access import ReadinessService
 from saberops.models import (
     OrchEvent,
@@ -71,12 +71,31 @@ class OwnerSelectionError(ValueError):
 
 
 class RunOperationError(ValueError):
-    """Fail-closed refusal of an owner run operation (retry/continue/try-worker)."""
+    """Fail-closed refusal of an owner run operation (resume/retry/continue)."""
 
     def __init__(self, reason: str, detail: str) -> None:
         super().__init__(f"{reason}: {detail}")
         self.reason = reason
         self.detail = detail
+
+
+#: The two ways to resume one failed job (H7).
+RESUME_FROM_SCRATCH = "scratch"
+RESUME_FROM_LAST_CANDIDATE = "last_candidate"
+RESUME_FROM_VALUES = (RESUME_FROM_SCRATCH, RESUME_FROM_LAST_CANDIDATE)
+
+
+def coerce_resume_from(value: str | None) -> str:
+    """Normalise the resume choice; anything else refuses with the two values."""
+    if value is None:
+        return RESUME_FROM_SCRATCH
+    cleaned = str(value).strip().lower().replace("-", "_")
+    if cleaned not in RESUME_FROM_VALUES:
+        raise RunOperationError(
+            "RESUME_FROM_INVALID",
+            f"from must be one of {list(RESUME_FROM_VALUES)}; got {value!r}",
+        )
+    return cleaned
 
 
 def replace_owner_policy(
@@ -1051,3 +1070,222 @@ class OrchestratorService:
             "provider": candidate.provider,
             "model": candidate.model,
         }
+
+    def resume_job(
+        self,
+        target_id: str,
+        *,
+        from_: str = RESUME_FROM_SCRATCH,
+        note: str | None = None,
+        worker_binding: str | None = None,
+    ) -> dict[str, Any]:
+        """Resume one failed job: from scratch or from its saved candidate.
+
+        The one owner/planner recovery verb (H7).  It maps onto the existing
+        retry and continue paths, links the successor run back to the job so
+        the job's state follows it, and refuses with a reason when neither
+        path applies.  ``worker_binding`` is the folded-in try-worker option
+        (one exact blocked UNKNOWN worker, fresh attempt only).
+
+        A repeat for the same job never starts a second successor: once the
+        job is RUNNING it returns the current successor instead.
+        """
+        from saberops.jobs.service import get_job as read_job
+        from saberops.jobs.service import note_job as record_note
+        from saberops.jobs.store import (
+            JobConflictError,
+            JobTransitionError,
+            find_job_for_run,
+            resume_transition,
+        )
+
+        target = (target_id or "").strip()
+        if not target:
+            raise RunOperationError("RESUME_TARGET_REQUIRED", "A job or run id is required.")
+        chosen = coerce_resume_from(from_)
+        binding = (worker_binding or "").strip() or None
+        if binding is not None and chosen != RESUME_FROM_SCRATCH:
+            raise RunOperationError(
+                "WORKER_BINDING_NEEDS_SCRATCH",
+                "An exact worker binding applies only to a fresh attempt (from scratch).",
+            )
+
+        # Starting a resumed attempt is starting work.  A transient closed gate
+        # (a fresh store that never had a session) keeps the existing owner
+        # retry behaviour; an explicit or sticky pause is never bypassed from
+        # chat: only the owner's `orch resume` clears it (ADR-0045).
+        from saberops.runtime_gate import evaluate_gate
+
+        gate = evaluate_gate(db=self.db)
+        if gate.closed and not gate.transient:
+            raise RunOperationError(
+                "RESUME_PAUSED",
+                f"Resume is paused: {gate.label}. Ask the owner to run `orch resume` "
+                "first; no tool clears a pause.",
+            )
+
+        job = read_job(self.db, target)
+        named_run = None
+        if job is None:
+            named_run = self.db.get_run(target)
+            if named_run is None:
+                raise RunOperationError(
+                    "RUN_NOT_FOUND",
+                    f"Run not found: {target} (and no job has that id).",
+                )
+            job = find_job_for_run(self.db, named_run.id)
+
+        if job is None:
+            # A run from a plain `orch run` has no job record; keep the run-level
+            # retry/continue behaviour without inventing job state.
+            assert named_run is not None
+            if note:
+                raise RunOperationError(
+                    "NOTE_NEEDS_JOB",
+                    "A resume note is stored on a job; this run has none. "
+                    "Use `orch run` with the note in the task instead.",
+                )
+            if binding is not None:
+                started = self.try_worker(named_run.id, binding)
+            elif chosen == RESUME_FROM_LAST_CANDIDATE:
+                started = self.continue_run(named_run.id)
+            else:
+                started = self.retry_run(named_run.id)
+            already = bool(started.get("already_continued", False))
+            return {
+                "operation": "resume_job",
+                "job_id": None,
+                "from": chosen,
+                "source_run_id": named_run.id,
+                "run_id": started["run_id"],
+                "already_resumed": already,
+                # Kept for the one-release `orch continue` alias.
+                "already_continued": already,
+            }
+
+        job_id = job.job_id
+        if job.state is JobState.RUNNING:
+            previous = (
+                named_run.id
+                if named_run is not None
+                else (job.run_ids[-2] if len(job.run_ids) > 1 else None)
+            )
+            if not note:
+                return self._resumed_payload(
+                    job, chosen, job.current_run_id, True, source_run_id=previous
+                )
+            try:
+                written = record_note(self.db, job_id, note)
+            except ValueError as exc:
+                raise RunOperationError("RESUME_NOTE_INVALID", str(exc)) from exc
+            return self._resumed_payload(
+                job,
+                chosen,
+                job.current_run_id,
+                True,
+                source_run_id=previous,
+                note_id=written.note_id,
+            )
+        if job.state is not JobState.FAILED:
+            raise RunOperationError(
+                "JOB_NOT_RESUMABLE",
+                f"job {job_id} is {job.state.value}; only a failed job can be resumed. "
+                "Wait for it, cancel it, or submit a new job.",
+            )
+
+        if (
+            named_run is not None
+            and job.current_run_id
+            and named_run.id != job.current_run_id
+        ):
+            raise RunOperationError(
+                "RESUME_NOT_CURRENT_RUN",
+                f"run {named_run.id} is not the job's current run "
+                f"({job.current_run_id}); resume the current one.",
+            )
+        source_run_id = (
+            named_run.id
+            if named_run is not None
+            else job.current_run_id or (job.run_ids[-1] if job.run_ids else None)
+        )
+        if not source_run_id:
+            raise RunOperationError(
+                "JOB_HAS_NO_RUN",
+                f"job {job_id} never dispatched a run, so there is nothing to resume; "
+                "cancel it and submit again.",
+            )
+
+        note_id: int | None = None
+        if note:
+            try:
+                note_id = record_note(
+                    self.db, job_id, note, allow_terminal=True
+                ).note_id
+            except ValueError as exc:
+                raise RunOperationError("RESUME_NOTE_INVALID", str(exc)) from exc
+
+        if binding is not None:
+            started = self.try_worker(source_run_id, binding)
+        elif chosen == RESUME_FROM_LAST_CANDIDATE:
+            started = self.continue_run(source_run_id)
+        else:
+            started = self.retry_run(source_run_id)
+        successor = str(started["run_id"])
+        try:
+            updated, linked = resume_transition(
+                self.db,
+                job_id,
+                successor,
+                source_run_id=source_run_id,
+                from_=chosen,
+                note_id=note_id,
+            )
+        except (JobConflictError, JobTransitionError) as exc:
+            raise RunOperationError(
+                "RESUME_NOT_LINKED",
+                f"successor run {successor} started but the job could not follow it: {exc}",
+            ) from exc
+        return self._resumed_payload(
+            updated,
+            chosen,
+            successor,
+            bool(started.get("already_continued", False)) or not linked,
+            source_run_id=source_run_id,
+            note_id=note_id,
+            worker_binding=binding,
+            provider=started.get("provider"),
+            model=started.get("model"),
+        )
+
+    @staticmethod
+    def _resumed_payload(
+        job: Any,
+        chosen: str,
+        successor: str | None,
+        already_resumed: bool,
+        *,
+        source_run_id: str | None,
+        note_id: int | None = None,
+        worker_binding: str | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "operation": "resume_job",
+            "job_id": job.job_id,
+            "from": chosen,
+            "source_run_id": source_run_id,
+            "run_id": successor,
+            "already_resumed": already_resumed,
+            "state": job.state.value,
+        }
+        if note_id is not None:
+            payload["note_id"] = note_id
+        if worker_binding is not None:
+            payload["worker_binding"] = worker_binding
+            payload["binding_id"] = worker_binding
+        if provider is not None:
+            payload["provider"] = provider
+        if model is not None:
+            payload["model"] = model
+        return payload

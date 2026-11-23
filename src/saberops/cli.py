@@ -2578,6 +2578,35 @@ def build_parser() -> argparse.ArgumentParser:
     )
     try_worker_parser.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
     try_worker_parser.add_argument("--json", action="store_true", help="JSON output")
+    resume_job_parser = subparsers.add_parser(
+        "resume-job",
+        help=(
+            "Resume one failed job from scratch or from its saved candidate: the one "
+            "recovery verb (retry, continue and try-worker are aliases for one release)."
+        ),
+    )
+    resume_job_parser.add_argument(
+        "target_id", type=str, help="Job id, or a run id (also resumes the job that owns it)."
+    )
+    resume_job_parser.add_argument(
+        "--from",
+        dest="resume_from",
+        type=str,
+        choices=("scratch", "last_candidate", "last-candidate"),
+        default=None,
+        help="scratch: fresh attempt of the frozen task; last_candidate: continue the saved candidate.",
+    )
+    resume_job_parser.add_argument(
+        "--note", type=str, default=None, help="Note for the next attempt (optional)."
+    )
+    resume_job_parser.add_argument(
+        "--binding",
+        type=str,
+        default=None,
+        help="Exact blocked UNKNOWN worker binding (the folded-in try-worker option).",
+    )
+    resume_job_parser.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
+    resume_job_parser.add_argument("--json", action="store_true", help="JSON output")
 
     # orch project gate-scratch show|set
     #
@@ -8301,33 +8330,82 @@ def handle_project_set_workflow(args: argparse.Namespace) -> int:
     return 0
 
 
+_RESUME_ALIASES: dict[str, tuple[str, str]] = {
+    # legacy verb -> (resume from, the one-verb replacement)
+    "retry": ("scratch", "orch resume-job <id> --from scratch"),
+    "continue": ("last_candidate", "orch resume-job <id> --from last_candidate"),
+    "try-worker": ("scratch", "orch resume-job <id> --from scratch --binding ID"),
+}
+
+
 def _handle_run_operation(
     args: argparse.Namespace, operation: str, binding_id: str | None = None
 ) -> int:
-    """Shared thin wrapper for `orch retry|refresh|continue|try-worker`."""
+    """Thin wrapper for the legacy verbs; each is an alias of ``orch resume-job``."""
     from saberops.service import RunOperationError
 
     db = db_for_run(args, args.run_id)
     service = OrchestratorService(db=db)
     try:
-        if operation == "retry":
-            result = service.retry_run(str(args.run_id))
-        elif operation == "refresh":
+        if operation == "refresh":
             result = service.refresh_run(str(args.run_id))
-        elif operation == "continue":
-            result = service.continue_run(str(args.run_id))
         else:
-            result = service.try_worker(str(args.run_id), str(binding_id or ""))
+            from_, replacement = _RESUME_ALIASES[operation]
+            print(
+                f"[!] 'orch {operation}' is a deprecated alias of '{replacement}'; "
+                "the alias is kept for one release.",
+                file=sys.stderr,
+            )
+            result = service.resume_job(
+                str(args.run_id),
+                from_=from_,
+                worker_binding=binding_id,
+            )
+            # The alias keeps its historical result vocabulary for one release.
+            result["operation"] = operation
+            if binding_id is not None:
+                result.setdefault("binding_id", binding_id)
     except RunOperationError as exc:
         print(f"[!] {exc}", file=sys.stderr)
         return 1
     if getattr(args, "json", False):
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
-    if result.get("already_continued"):
-        print(f"Run {args.run_id} already has a continuation: {result['run_id']}")
+    if result.get("already_continued") or result.get("already_resumed"):
+        print(f"Run {args.run_id} already has its successor: {result['run_id']}")
         return 0
     print(f"Started {operation}: {result['run_id']} (from {result['source_run_id']})")
+    print(f"    orch wait {result['run_id']} | orch status {result['run_id']}")
+    return 0
+
+
+def handle_resume_job(args: argparse.Namespace) -> int:
+    """Handle `orch resume-job <job-or-run-id> [--from ...] [--note ...]`."""
+    from saberops.service import RunOperationError
+
+    target = str(args.target_id)
+    db = db_for_run(args, target)
+    service = OrchestratorService(db=db)
+    try:
+        result = service.resume_job(
+            target,
+            from_=str(args.resume_from or "scratch"),
+            note=str(args.note) if args.note else None,
+            worker_binding=str(args.binding) if args.binding else None,
+        )
+    except RunOperationError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    if result.get("already_resumed"):
+        print(f"Already resumed: {result['run_id']} (from {result.get('from')}).")
+        return 0
+    print(
+        f"Resumed {result.get('job_id') or result['source_run_id']}: "
+        f"{result['run_id']} (from {result.get('from')})"
+    )
     print(f"    orch wait {result['run_id']} | orch status {result['run_id']}")
     return 0
 
@@ -8905,6 +8983,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         return handle_continue(args)
     elif args.command == "try-worker":
         return handle_try_worker(args)
+    elif args.command == "resume-job":
+        return handle_resume_job(args)
     elif args.command == "routing":
         if args.routing_command == "show":
             return handle_routing_show(args)

@@ -354,6 +354,20 @@ stays attended.
   before another attempt keeps the note pending. `catch_up` lists every note
   with whether it was delivered and to which attempt.
 
+## Resuming a failed job
+- When a job fails, call `resume_job` with its `job_id`. `from: "scratch"`
+  starts a fresh attempt of the same frozen task and policy; `from:
+  "last_candidate"` continues from the candidate the failed run saved, so the
+  work is kept. The call refuses with a reason when the job is not failed or
+  the chosen path has nothing to resume.
+- `note` travels into the next attempt exactly like `note_job`. When the owner
+  rejects a candidate with a correction, reject it and pass that text as the
+  resume note; the next attempt starts with it.
+- One call starts at most one successor. Calling again while the job is running
+  returns the successor it already has instead of starting another.
+- `worker_binding` is the folded-in try-worker option: the exact blocked
+  `UNKNOWN` worker binding named in the failure evidence, fresh attempt only.
+
 ## Catching up in a new session
 - When the owner says "catch me up" (or you have no history of a job), call
   `catch_up` with its `job_id`; use `list_jobs` first when they did not give one.

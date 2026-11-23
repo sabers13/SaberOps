@@ -446,6 +446,91 @@ def append_run_to_job(
     return _row_to_job(updated)
 
 
+def resume_transition(
+    db: Any,
+    job_id: str,
+    run_id: str,
+    *,
+    source_run_id: str | None = None,
+    from_: str = "scratch",
+    note_id: int | None = None,
+    now: datetime | None = None,
+) -> tuple[Job, bool]:
+    """FAILED -> RUNNING with one successor run (H7 resume).
+
+    The owner or planner resumes a failed job from scratch or from its saved
+    candidate; the successor is already created by the service layer, so this
+    transition only links it and clears the terminal job state.  It is
+    idempotent: a repeat that already points at ``run_id`` returns unchanged.
+    Any other state refuses without writing.
+    """
+    clean_run_id = run_id.strip() if isinstance(run_id, str) else ""
+    if not clean_run_id:
+        raise ValueError("run_id must be a non-empty string")
+    ensure_tables(db)
+    at = _utcnow_iso(now)
+    with _owner_conn(db) as conn:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError:
+            pass
+        row = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+        if row is None:
+            raise JobNotFoundError(f"unknown job: {job_id}")
+        state = str(row["state"])
+        current_run = row["current_run_id"]
+        if state == JobState.RUNNING.value and current_run == clean_run_id:
+            return _row_to_job(row), False
+        if state != JobState.FAILED.value:
+            raise JobTransitionError(
+                f"job {job_id}: state {state} does not allow this transition"
+            )
+        if source_run_id is not None and current_run != source_run_id:
+            raise JobConflictError(
+                f"job {job_id} moved to run {current_run!r} "
+                f"(expected {source_run_id!r})"
+            )
+        existing = list(json.loads(str(row["run_ids_json"] or "[]")))
+        if clean_run_id not in existing:
+            existing.append(clean_run_id)
+        cur = conn.execute(
+            "UPDATE jobs SET state = ?, waiting_reason = NULL, failure_reason = NULL,"
+            " current_run_id = ?, run_ids_json = ?, updated_at = ?"
+            " WHERE job_id = ? AND state = ?",
+            (
+                JobState.RUNNING.value,
+                clean_run_id,
+                json.dumps(existing, separators=(",", ":")),
+                at,
+                job_id,
+                JobState.FAILED.value,
+            ),
+        )
+        if (cur.rowcount or 0) == 0:
+            raise JobConflictError(f"job {job_id} moved concurrently (expected FAILED)")
+        try:
+            _append_event(
+                conn,
+                job_id=job_id,
+                at=at,
+                kind="resumed",
+                from_state=JobState.FAILED.value,
+                to_state=JobState.RUNNING.value,
+                payload={
+                    "run_id": clean_run_id,
+                    "source_run_id": source_run_id,
+                    "from": from_,
+                    "note_id": note_id,
+                },
+            )
+        except sqlite3.IntegrityError as exc:
+            raise JobConflictError(f"event sequence conflict for {job_id}: {exc}") from exc
+        conn.commit()
+        updated = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+        assert updated is not None
+        return _row_to_job(updated), True
+
+
 def list_jobs_raw(
     db: Any, *, state: JobState | None = None, limit: int = 50
 ) -> list[Job]:
@@ -1190,5 +1275,6 @@ __all__ = [
     "reconcile_transition",
     "requeue",
     "requeue_exact",
+    "resume_transition",
     "set_waiting",
 ]

@@ -439,7 +439,10 @@ def next_owner_action(db: Any, job: Job) -> str:
             )
         if run_id is None:
             return f"`orch job get {job.job_id}` (no run id recorded)"
-        return f"`orch status {run_id}`, then `orch retry {run_id}` or `orch continue {run_id}`"
+        return (
+            f"`orch status {run_id}`, then `orch resume-job {job.job_id} --from "
+            "scratch|last_candidate`"
+        )
     if job.state == JobState.CANCELLED:
         return "`orch job submit ...` to run it again (cancelled jobs stay cancelled)"
     return "none"

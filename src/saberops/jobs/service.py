@@ -499,14 +499,21 @@ def promote_scout(
     return result
 
 def note_job(
-    db: Any, job_id: str, body: str, *, now: datetime | None = None
+    db: Any,
+    job_id: str,
+    body: str,
+    *,
+    now: datetime | None = None,
+    allow_terminal: bool = False,
 ) -> SteeringNote:
     """Attach one durable owner note to a job (ADR-0016).
 
     The note is never injected into a running worker.  It stays pending until
     the job's next worker attempt starts, whose prompt is the next safe point,
     and delivery is recorded once on that attempt.  Notes for terminal jobs
-    are refused because no boundary remains to deliver them.
+    are refused because no boundary remains to deliver them; ``allow_terminal``
+    exists only for a resume that starts that next attempt in the same call
+    (H7).
     """
     job = store.get_job(db, job_id)
     if job is None:
@@ -519,7 +526,7 @@ def note_job(
             "a steering note is limited to "
             f"{store.MAX_STEERING_NOTE_CHARS} characters; got {len(text)}"
         )
-    if job.state in TERMINAL_JOB_STATES:
+    if job.state in TERMINAL_JOB_STATES and not allow_terminal:
         raise ValueError(
             f"job {job_id} is {job.state.value}; no worker attempt remains to deliver a note"
         )

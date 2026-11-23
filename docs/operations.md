@@ -71,27 +71,34 @@ MCP tool clears a pause. A plain `orch run` refuses to start while the gate is
 closed; `orch run --attended` is the terminal form that holds presence itself.
 See [ADR-0029](decisions/0029-no-work-without-a-planning-session.md).
 
-## Run operations (retry / continue / refresh / try-worker)
+## Run operations (resume-job / refresh)
 
-`orch retry RUN_ID` starts a fresh attempt of a run's frozen task and
-policy against the repository the run was created for (validated against
-its persisted project identity, never a current selection).
-`orch continue RUN_ID` continues a failed run from its immutable saved
-candidate; a run that already has a continuation returns the existing id
-without launching anything. `orch refresh RUN_ID` applies a stale
+`orch resume-job JOB_OR_RUN_ID [--from scratch|last_candidate] [--note TEXT]
+[--binding ID]` is the one recovery verb. `scratch` starts a fresh attempt of
+the frozen task and policy against the repository it was created for (validated
+against its persisted project identity, never a current selection);
+`last_candidate` continues from the run's immutable saved candidate and keeps
+the work. A job id resumes that job and links exactly one successor back to it,
+so its state follows the new attempt; a repeat returns the running successor
+instead of starting another. `--note` travels into the next attempt, so a
+rejection note reaches the resumed worker. `--binding` is the folded-in
+`try-worker` choice: one exact blocked `UNKNOWN` worker from the failure
+evidence, fresh attempt only. A run from a plain `orch run` still resumes by run
+id. `orch retry`, `orch continue` and `orch try-worker` remain as aliases for
+one release and print that they are deprecated.
+
+`orch refresh RUN_ID` applies a stale
 candidate's changes in a fresh isolated worktree based on the current
 target commit, runs the gate and the required independent review for the
 new SHA, and leaves the result for separate owner acceptance. It never
 moves the target branch; the original candidate and its evidence stay
-intact for repair if the refresh conflicts. `orch try-worker RUN_ID --binding ID`
-explicitly retries a failed run with one blocked `UNKNOWN` worker: the
-binding must name the exact skipped candidate from the run's termination
-evidence and still be present in the current routing chain with the same
-provider/model, and the frozen validation and acceptance policy are kept.
-Retry, continue and try-worker launch through the durable supervisor like
-`orch run`; refresh runs in the foreground and returns the new run id when
-its checks and review finish. The new run id is printed with `orch wait` /
-`orch status` hints.
+intact for repair if the refresh conflicts. `--binding` on `resume-job` names
+the exact skipped candidate from the run's termination evidence and must still
+be present in the current routing chain with the same provider/model; the
+frozen validation and acceptance policy are kept.
+Resume launches through the durable supervisor like `orch run`; refresh runs in
+the foreground and returns the new run id when its checks and review finish.
+The new run id is printed with `orch wait` / `orch status` hints.
 
 `orch list [--repo PATH] [--limit N]` lists recent runs. Without `--db` it
 reads the project's own store **and** the owner store for that project's runs,

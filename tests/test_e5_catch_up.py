@@ -453,7 +453,8 @@ def test_fresh_session_catches_up_and_changes_nothing(store: dict[str, Any]) -> 
     assert failed["review"]["assessed_current_candidate"] is True
     assert failed["failure"]["reason"] == "gate failed: exit 1"
     assert failed["failure"]["work_location"] == str(store["root"] / "worktree-b")
-    assert failed["next_action"]["action"] == "inspect_and_resubmit"
+    assert failed["next_action"]["action"] == "resume_job"
+    assert "resume-job" in failed["next_action"]["command"]
     assert failed["result"]["owner_action"] is None
     assert failed["evidence"]["run_page"] == "/runs/run-failed-check"
 

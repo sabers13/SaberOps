@@ -3,7 +3,7 @@
 The following tools are exposed::
 
     preflight start_walkthrough submit_job submit_plan get_job catch_up plan_status tail_job
-    wait_job list_jobs cancel_job note_job capacity read_evidence list_questions
+    wait_job list_jobs cancel_job note_job resume_job capacity read_evidence list_questions
     answer_question propose_config_change list_proposals get_mode propose_mode_change
 
 With ``ORCH_NATIVE_WORKERS`` enabled, four more tools exist for the hybrid
@@ -109,6 +109,7 @@ MUTATING_TOOLS: frozenset[str] = frozenset(
         "submit_plan",
         "promote_scout",
         "refresh_candidate",
+        "resume_job",
         "cancel_job",
         "note_job",
         "answer_question",
@@ -157,6 +158,7 @@ TOOL_NAMES: tuple[str, ...] = (
     "submit_plan",
     "promote_scout",
     "refresh_candidate",
+    "resume_job",
     "get_job",
     "catch_up",
     "plan_status",
@@ -628,6 +630,12 @@ def _job_guidance(job: Any, db: Any | None = None) -> str | None:
             "Away mode parked this task on its own branch. Answer the blocking "
             "owner question (or set the away preflight policy) and the job "
             "starts again; independent jobs were not stopped."
+        )
+    if getattr(job, "state", None) is not None and job.state.value == "FAILED":
+        return (
+            "The job failed. Resume it from chat with resume_job: from='scratch' "
+            "for a fresh attempt, or from='last_candidate' to continue from the "
+            "saved candidate. A note you pass reaches the next attempt."
         )
     if waiting == WaitingReason.QUOTA_EVIDENCE_REQUIRED:
         remedy = _latest_waiting_details(db, job).get("remedy")
@@ -1106,14 +1114,22 @@ def _catch_up_next_action(
     if job.state is JobState.FAILED:
         work = view.get("work_location") or "the preserved work location"
         return {
-            "action": "inspect_and_resubmit",
+            "action": "resume_job",
             "owner_only": False,
             "detail": (
                 f"The job failed ({view.get('reason') or job.failure_reason}). "
-                f"Inspect the preserved work at {work} and resubmit with a fresh "
-                "idempotency_key once the cause is fixed."
+                f"Inspect the preserved work at {work}, then call resume_job: "
+                "from='scratch' for a fresh attempt, or from='last_candidate' when "
+                "the run saved a candidate. Pass note=... to carry the rejection "
+                "or correction into the next attempt."
             ),
-            "command": None,
+            "command": f"orch resume-job {job.job_id} --from scratch",
+            "resume": {
+                "tool": "resume_job",
+                "job_id": job.job_id,
+                "from": ["scratch", "last_candidate"],
+                "cli": f"orch resume-job {job.job_id} --from scratch",
+            },
         }
     if job.state is JobState.RUNNING:
         reason = view.get("reason")
@@ -1697,6 +1713,42 @@ def _refresh_candidate(context: ServerContext, arguments: Mapping[str, Any]) -> 
     return {"v": SNAPSHOT_SCHEMA_VERSION, **result}
 
 
+def _resume_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    """Resume one failed job: from scratch or from its saved candidate (H7)."""
+    from saberops.service import OrchestratorService, RunOperationError
+
+    job_id = _require_text(arguments, "job_id", what="job_id")
+    db = context.database(read_only=False)
+    try:
+        result = OrchestratorService(db=db).resume_job(
+            job_id,
+            from_=str(arguments.get("from") or "scratch"),
+            note=(
+                str(arguments["note"])
+                if isinstance(arguments.get("note"), str)
+                else None
+            ),
+            worker_binding=(
+                str(arguments["worker_binding"])
+                if isinstance(arguments.get("worker_binding"), str)
+                else None
+            ),
+        )
+    except RunOperationError as exc:
+        raise ToolError(str(exc)) from exc
+    context.ledger.append(
+        "job_resumed",
+        {
+            "job_id": job_id,
+            "run_id": result.get("run_id"),
+            "source_run_id": result.get("source_run_id"),
+            "from": result.get("from"),
+        },
+        key=f"job-resumed:{job_id}:{result.get('run_id')}",
+    )
+    return {"v": SNAPSHOT_SCHEMA_VERSION, **result}
+
+
 def _list_proposals(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
     from saberops.config import ConfigError
 
@@ -2098,6 +2150,27 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
         "Refresh a stale run candidate with fresh checks and review; acceptance remains separate.",
         _schema({"run_id": {"type": "string", "minLength": 1}}, required=("run_id",)),
         _refresh_candidate,
+        mutating=True,
+    )
+    register(
+        "resume_job",
+        "Resume one failed job: from scratch (a fresh attempt of its frozen task) "
+        "or from last_candidate (continue from its saved candidate). Optional note "
+        "reaches the next attempt; an exact blocked worker binding is the folded-in "
+        "try-worker option. One successor per call; a running job returns its successor.",
+        _schema(
+            {
+                "job_id": {"type": "string", "minLength": 1},
+                "from": {
+                    "type": "string",
+                    "enum": ["scratch", "last_candidate"],
+                },
+                "note": {"type": "string", "minLength": 1, "maxLength": 4000},
+                "worker_binding": {"type": "string", "minLength": 1},
+            },
+            required=("job_id",),
+        ),
+        _resume_job,
         mutating=True,
     )
     register(
