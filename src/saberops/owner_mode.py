@@ -145,6 +145,16 @@ class ModePermissions:
 _PERMISSION_FIELDS: Final[tuple[str, ...]] = tuple(ModePermissions.__dataclass_fields__)
 
 
+def _permissions(bits: str) -> ModePermissions:
+    """Build one row from a bit string in :data:`_PERMISSION_FIELDS` order."""
+    return ModePermissions(
+        **{
+            field: bit == "1"
+            for field, bit in zip(_PERMISSION_FIELDS, bits, strict=True)
+        }
+    )
+
+
 #: What each mode is allowed to permit.  A persisted document can only narrow
 #: this table (see :func:`mode_permissions`); nothing can widen it.
 #:
@@ -152,46 +162,12 @@ _PERMISSION_FIELDS: Final[tuple[str, ...]] = tuple(ModePermissions.__dataclass_f
 #: beyond it.  ``critical-only`` and ``away`` converge and accept a gated,
 #: independently reviewed candidate as a local commit (ADR-0008); neither ever
 #: publishes, and candidate publication stays an explicit per-run choice.
+_ATTENDED_CEILING: Final[ModePermissions] = _permissions("10001100001")
+_UNATTENDED_CEILING: Final[ModePermissions] = _permissions("11111111001")
 MODE_CEILINGS: Final[dict[OwnerMode, ModePermissions]] = {
-    OwnerMode.ASK_ME: ModePermissions(
-        auto_start=True,
-        auto_retry=False,
-        auto_repair=False,
-        auto_escalate_when_policy_justifies=False,
-        auto_gate=True,
-        auto_review=True,
-        auto_accept=False,
-        auto_safe_cleanup=False,
-        auto_publish=False,
-        auto_publish_candidate=False,
-        routine_questions=True,
-    ),
-    OwnerMode.CRITICAL_ONLY: ModePermissions(
-        auto_start=True,
-        auto_retry=True,
-        auto_repair=True,
-        auto_escalate_when_policy_justifies=True,
-        auto_gate=True,
-        auto_review=True,
-        auto_accept=True,
-        auto_safe_cleanup=True,
-        auto_publish=False,
-        auto_publish_candidate=False,
-        routine_questions=True,
-    ),
-    OwnerMode.AWAY: ModePermissions(
-        auto_start=True,
-        auto_retry=True,
-        auto_repair=True,
-        auto_escalate_when_policy_justifies=True,
-        auto_gate=True,
-        auto_review=True,
-        auto_accept=True,
-        auto_safe_cleanup=True,
-        auto_publish=False,
-        auto_publish_candidate=False,
-        routine_questions=True,
-    ),
+    OwnerMode.ASK_ME: _ATTENDED_CEILING,
+    OwnerMode.CRITICAL_ONLY: _UNATTENDED_CEILING,
+    OwnerMode.AWAY: _UNATTENDED_CEILING,
 }
 
 #: Policy dimensions a live decision path reads today.  Everything else in
@@ -222,72 +198,14 @@ ADVISORY_POLICY_FIELDS: Final[frozenset[str]] = (
 #: The five removed authority presets, frozen exactly as they were on local
 #: ``main`` before ADR-0082.  This table is read *only* to migrate a store
 #: written before the fold; it never decides a live permission afterwards.
+#: Fields: start, retry, repair, escalate, gate, review, accept, cleanup,
+#: publish, candidate publication, routine questions.
 _LEGACY_PRESET_PERMISSIONS: Final[dict[str, ModePermissions]] = {
-    "ask_before_actions": ModePermissions(
-        auto_start=False,
-        auto_retry=False,
-        auto_repair=False,
-        auto_escalate_when_policy_justifies=False,
-        auto_gate=False,
-        auto_review=False,
-        auto_accept=False,
-        auto_safe_cleanup=False,
-        auto_publish=False,
-        auto_publish_candidate=False,
-        routine_questions=True,
-    ),
-    "supervised": ModePermissions(
-        auto_start=True,
-        auto_retry=False,
-        auto_repair=False,
-        auto_escalate_when_policy_justifies=False,
-        auto_gate=True,
-        auto_review=True,
-        auto_accept=False,
-        auto_safe_cleanup=False,
-        auto_publish=False,
-        auto_publish_candidate=False,
-        routine_questions=True,
-    ),
-    "autonomous": ModePermissions(
-        auto_start=True,
-        auto_retry=True,
-        auto_repair=True,
-        auto_escalate_when_policy_justifies=True,
-        auto_gate=True,
-        auto_review=True,
-        auto_accept=False,
-        auto_safe_cleanup=True,
-        auto_publish=False,
-        auto_publish_candidate=True,
-        routine_questions=False,
-    ),
-    "full_autonomy": ModePermissions(
-        auto_start=True,
-        auto_retry=True,
-        auto_repair=True,
-        auto_escalate_when_policy_justifies=True,
-        auto_gate=True,
-        auto_review=True,
-        auto_accept=True,
-        auto_safe_cleanup=True,
-        auto_publish=False,
-        auto_publish_candidate=True,
-        routine_questions=False,
-    ),
-    "full_autonomy_publish": ModePermissions(
-        auto_start=True,
-        auto_retry=True,
-        auto_repair=True,
-        auto_escalate_when_policy_justifies=True,
-        auto_gate=True,
-        auto_review=True,
-        auto_accept=True,
-        auto_safe_cleanup=True,
-        auto_publish=True,
-        auto_publish_candidate=True,
-        routine_questions=False,
-    ),
+    "ask_before_actions": _permissions("00000000001"),
+    "supervised": _permissions("10001100001"),
+    "autonomous": _permissions("11111101010"),
+    "full_autonomy": _permissions("11111111010"),
+    "full_autonomy_publish": _permissions("11111111110"),
 }
 
 #: The pre-1.1 packaged default preset (the authority document was optional).
@@ -442,23 +360,6 @@ class OwnerModeSettings:
         """Effective permissions for the declared mode (expiry not applied)."""
         return mode_permissions(self.mode, self.grant)
 
-    def as_dict(self) -> dict[str, Any]:
-        """Serialize the declared selection (not the expiry-adjusted mode)."""
-        return {
-            "version": SCHEMA_VERSION,
-            "mode": self.mode.value,
-            "label": self.label,
-            "until": self.until,
-            "set_at": self.set_at,
-            "set_by": self.set_by,
-            "max_jobs": self.max_jobs,
-            "host_access": self.host_access.value,
-            "permissions": self.permissions.as_dict(),
-            "source": self.source,
-            "source_path": self.source_path,
-            "config_path": str(get_owner_mode_path()),
-            "package_default_mode": PACKAGE_DEFAULT_OWNER_MODE.value,
-        }
 
 
 @dataclass(frozen=True)
@@ -605,7 +506,7 @@ def _validate_mode_fields(
 
 
 def _validate_document(
-    data: object, source_label: str
+    data: object, source_label: str, *, legacy: bool = False
 ) -> tuple[
     OwnerMode,
     str | None,
@@ -615,20 +516,14 @@ def _validate_document(
     HostAccessMode,
     ModePermissions | None,
 ]:
+    """Validate one mode document, failing closed on anything unexpected."""
     if not isinstance(data, dict):
         raise OwnerModeError(
             f"Owner mode config at {source_label}: top-level must be a JSON object"
         )
-    allowed_keys = {
-        "version",
-        "mode",
-        "until",
-        "set_at",
-        "set_by",
-        "max_jobs",
-        "host_access",
-        "permissions",
-    }
+    allowed_keys = {"version", "mode", "until", "set_at", "set_by", "max_jobs"}
+    if not legacy:
+        allowed_keys |= {"host_access", "permissions"}
     unknown = set(data.keys()) - allowed_keys
     if unknown:
         raise OwnerModeError(
@@ -636,14 +531,12 @@ def _validate_document(
         )
     if "version" not in data:
         raise OwnerModeError(f"Owner mode config at {source_label}: missing 'version'")
+    expected = _LEGACY_SCHEMA_VERSION if legacy else SCHEMA_VERSION
     version = data["version"]
-    if type(version) is not int or version not in (
-        _LEGACY_SCHEMA_VERSION,
-        SCHEMA_VERSION,
-    ):
+    if type(version) is not int or version != expected:
         raise OwnerModeError(
             f"Owner mode config at {source_label}: version must be integer "
-            f"{SCHEMA_VERSION}, got {version!r}"
+            f"{expected}, got {version!r}"
         )
     mode, until, set_at, set_by, max_jobs = _validate_mode_fields(data, source_label)
     host_access = _parse_host_access(
@@ -828,8 +721,8 @@ def load_owner_mode_settings() -> OwnerModeSettings:
         )
     # A v1 mode document (or any older/unversioned one): validate it as legacy,
     # then migrate it together with the removed authority document, if present.
-    mode, until, set_at, set_by, max_jobs = _validate_mode_fields_data(
-        data, str(path)
+    mode, until, set_at, set_by, max_jobs, _host, _perms = _validate_document(
+        data, str(path), legacy=True
     )
     legacy = _read_legacy_authority()
     preset, host_access = (
@@ -851,31 +744,6 @@ def load_owner_mode_settings() -> OwnerModeSettings:
     )
     _migrate(migrated, preset=preset, path=path)
     return migrated
-
-
-def _validate_mode_fields_data(
-    data: object, source_label: str
-) -> tuple[OwnerMode, str | None, str | None, str | None, int | None]:
-    """Validate a v1 document's version and fields (no v2 keys allowed)."""
-    if not isinstance(data, dict):
-        raise OwnerModeError(
-            f"Owner mode config at {source_label}: top-level must be a JSON object"
-        )
-    allowed_keys = {"version", "mode", "until", "set_at", "set_by", "max_jobs"}
-    unknown = set(data.keys()) - allowed_keys
-    if unknown:
-        raise OwnerModeError(
-            f"Owner mode config at {source_label}: unknown keys {sorted(unknown)}"
-        )
-    if "version" not in data:
-        raise OwnerModeError(f"Owner mode config at {source_label}: missing 'version'")
-    version = data["version"]
-    if type(version) is not int or version != _LEGACY_SCHEMA_VERSION:
-        raise OwnerModeError(
-            f"Owner mode config at {source_label}: version must be integer "
-            f"{_LEGACY_SCHEMA_VERSION}, got {version!r}"
-        )
-    return _validate_mode_fields(data, source_label)
 
 
 def set_owner_mode(
