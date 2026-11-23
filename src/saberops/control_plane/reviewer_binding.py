@@ -63,28 +63,13 @@ class ReviewerSelectionError(ValueError):
         self.detail = detail
 
 
-def select_reviewer_binding(
+def _resolve_one(
     owner: Any,
+    wanted: str,
     *,
-    adapter_registry: Any | None = None,
+    adapter_registry: Any | None,
 ) -> ReviewerSelection:
-    """Resolve the owner's exact Reviewer choice against the registry.
-
-    ``owner`` is the canonical :class:`OwnerBindings` document;
-    ``adapter_registry`` supplies the real adapters (``.get(provider)``)
-    used to prove the exact binding through the canonical
-    resolver.  Pure over its inputs: no provider contact, no CLI, no
-    live process beyond the adapter handles the caller hands in.
-    """
-    requested = owner.reviewer_binding_id
-    if requested is None or not str(requested).strip():
-        return ReviewerSelection(
-            status=ReviewerSelectionStatus.NOT_CONFIGURED,
-            binding=None,
-            requested_binding_id=None,
-            reason=REVIEWER_NOT_CONFIGURED,
-        )
-    wanted = str(requested).strip()
+    """Resolve one requested reviewer binding id against the registry."""
     binding = owner.registry.try_get(wanted)
     if binding is None:
         return ReviewerSelection(
@@ -127,6 +112,35 @@ def select_reviewer_binding(
     )
 
 
+def select_reviewer_binding(
+    owner: Any,
+    *,
+    adapter_registry: Any | None = None,
+) -> ReviewerSelection:
+    """Resolve the owner's exact Reviewer choice against the registry.
+
+    ``owner`` is the canonical :class:`OwnerBindings` document;
+    ``adapter_registry`` supplies the real adapters (``.get(provider)``)
+    used to prove the exact binding through the canonical
+    resolver.  Pure over its inputs: no provider contact, no CLI, no
+    live process beyond the adapter handles the caller hands in.
+
+    The one owner selection is the reviewer order
+    (:meth:`OwnerBindings.role_binding_ids`); its first resolvable choice is
+    the primary.  Refusal here reports the first choice only, so callers that
+    own a fallback order use :func:`reviewer_candidate_for_dispatch`.
+    """
+    order = owner.role_binding_ids("reviewer")
+    if not order:
+        return ReviewerSelection(
+            status=ReviewerSelectionStatus.NOT_CONFIGURED,
+            binding=None,
+            requested_binding_id=None,
+            reason=REVIEWER_NOT_CONFIGURED,
+        )
+    return _resolve_one(owner, order[0], adapter_registry=adapter_registry)
+
+
 def reviewer_candidate_for_dispatch(
     owner: Any,
     *,
@@ -142,36 +156,29 @@ def reviewer_candidate_for_dispatch(
     ``ReviewEngine.review_run(reviewer_override=...)`` seam.
     """
     if owner.reviewer_binding_ids is not None:
-        from dataclasses import replace
-
-        for binding_id in owner.reviewer_binding_ids:
-            selected = select_reviewer_binding(
-                replace(owner, reviewer_binding_id=binding_id), adapter_registry=adapter_registry
-            )
+        order = owner.reviewer_binding_ids
+        reasons: list[str] = []
+        for binding_id in order:
+            selected = _resolve_one(owner, binding_id, adapter_registry=adapter_registry)
             if selected.status is ReviewerSelectionStatus.RESOLVED and selected.binding is not None:
                 return WorkerCandidate(
                     provider=selected.binding.provider,
                     model=selected.binding.model,
                     binding_id=binding_id,
                 )
+            reasons.append(selected.reason or REVIEWER_UNRESOLVABLE)
+        if len(order) == 1:
+            # Keep the single selection's typed reason (missing, wrong role,
+            # unresolvable) instead of flattening it.
+            raise ReviewerSelectionError(
+                reasons[0],
+                f"configured reviewer {order[0]} cannot authorize review; "
+                "refusing rather than substituting another reviewer",
+            )
         raise ReviewerSelectionError(
             REVIEWER_UNRESOLVABLE, "No chosen reviewer can authorize review"
         )
-    selection = select_reviewer_binding(owner, adapter_registry=adapter_registry)
-    if selection.status is ReviewerSelectionStatus.NOT_CONFIGURED:
-        return None
-    if selection.status is not ReviewerSelectionStatus.RESOLVED or selection.binding is None:
-        raise ReviewerSelectionError(
-            selection.reason or REVIEWER_UNRESOLVABLE,
-            f"configured reviewer {selection.requested_binding_id or '(empty)'} "
-            "cannot authorize review; refusing rather than substituting another reviewer",
-        )
-    binding = selection.binding
-    return WorkerCandidate(
-        provider=binding.provider,
-        model=binding.model,
-        binding_id=binding.binding_id,
-    )
+    return None
 
 
 __all__ = [

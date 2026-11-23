@@ -575,7 +575,7 @@ class OrchestratorService:
             if binding.binding_role is BindingRole.CHECK
         ]
         return {
-            "selected_binding_id": owner.reviewer_binding_id,
+            "selected_binding_id": next(iter(owner.role_binding_ids("reviewer")), None),
             "selected_binding_ids": list(owner.role_binding_ids("reviewer")),
             "status": selection.status.value,
             "reason": selection.reason,
@@ -598,7 +598,7 @@ class OrchestratorService:
 
         owner = self._load_owner_for_selection(for_write=True)
         wanted = binding_id.strip()
-        candidate_owner = replace(owner, reviewer_binding_id=wanted or None)
+        candidate_owner = replace(owner, reviewer_binding_ids=(wanted,) if wanted else ())
         selection = select_reviewer_binding(candidate_owner, adapter_registry=self.registry)
         if selection.status is not ReviewerSelectionStatus.RESOLVED or selection.binding is None:
             if not wanted or selection.reason == "REVIEWER_BINDING_NOT_FOUND":

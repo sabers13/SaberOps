@@ -1034,6 +1034,49 @@ def resolve_execution_binding(
     )
 
 
+def _resolve_candidate_binding(
+    *,
+    role: BindingRole,
+    registry: Any | None,
+    candidate_binding_id: str | None,
+    provider: str | None,
+    model: str | None,
+    adapter: Any | None,
+    reasoning_effort: ReasoningEffort | None,
+) -> ResolvedExecutionBinding | None:
+    """The one exact-binding law every role-qualified candidate follows.
+
+    An empty/absent ``binding_id`` returns ``None`` so the caller keeps the
+    historical provider/model adapter path.  A non-empty id is authoritative:
+    it must name an exact registry binding of ``role`` whose provider/model
+    agree with the candidate, and it must resolve through
+    :func:`resolve_execution_binding` with the real adapter.  Every failure
+    raises :class:`BindingResolutionError` (fail closed, zero launch) and never
+    falls back to a same-provider/model first match or a sibling binding.
+    """
+    if not candidate_binding_id or not candidate_binding_id.strip():
+        return None
+    wanted = candidate_binding_id.strip()
+    if registry is None or not tuple(registry.list_bindings()):
+        raise BindingResolutionError("NO_REGISTRY")
+    binding = registry.try_get(wanted)
+    if binding is None:
+        raise BindingResolutionError("UNKNOWN_BINDING")
+    if getattr(binding, "binding_role", None) is not role:
+        raise BindingResolutionError("WRONG_ROLE")
+    if (
+        getattr(binding, "provider", None) != provider
+        or getattr(binding, "model", None) != model
+    ):
+        raise BindingResolutionError("PROVIDER_MODEL_MISMATCH")
+    return resolve_execution_binding(
+        registry=registry,
+        binding_id=wanted,
+        adapter=adapter,
+        reasoning_effort=reasoning_effort,
+    )
+
+
 def resolve_worker_candidate_binding(
     *,
     registry: Any | None,
@@ -1047,41 +1090,21 @@ def resolve_worker_candidate_binding(
 
     This is the shared ordinary-dispatch counterpart to the autonomous
     supervisor's exact-binding seam.  It preserves the law for
-    the owner-facing run path:
-
-    * a candidate with an empty/absent ``binding_id`` returns ``None`` --
-      the caller keeps the historical provider/model adapter path
-      (static routing candidates, explicit ``--provider``/``--model``
-      overrides, older configurations without owner bindings);
-    * a non-empty ``binding_id`` is authoritative.  It must name an exact
-      registry binding whose role is :class:`BindingRole.BUILD` and whose
-      ``provider``/``model`` agree with the candidate, and it must resolve
-      through :func:`resolve_execution_binding`.  Every failure raises
-      :class:`BindingResolutionError` (fail closed, zero launch) and never
-      falls back to a same-provider/model first match.
+    the owner-facing run path: a candidate with an empty/absent
+    ``binding_id`` keeps the historical provider/model adapter path; a
+    non-empty id must name an exact BUILD binding that agrees with the
+    candidate and resolves through the real adapter.
 
     The returned :class:`ResolvedExecutionBinding` is the single value the
     runtime both invokes (adapter + overlay + effort) and records as
     durable dispatch evidence.
     """
-    if not candidate_binding_id or not candidate_binding_id.strip():
-        return None
-    wanted = candidate_binding_id.strip()
-    if registry is None or not tuple(registry.list_bindings()):
-        raise BindingResolutionError("NO_REGISTRY")
-    binding = registry.try_get(wanted)
-    if binding is None:
-        raise BindingResolutionError("UNKNOWN_BINDING")
-    if getattr(binding, "binding_role", None) is not BindingRole.BUILD:
-        raise BindingResolutionError("WRONG_ROLE")
-    if (
-        getattr(binding, "provider", None) != provider
-        or getattr(binding, "model", None) != model
-    ):
-        raise BindingResolutionError("PROVIDER_MODEL_MISMATCH")
-    return resolve_execution_binding(
+    return _resolve_candidate_binding(
+        role=BindingRole.BUILD,
         registry=registry,
-        binding_id=wanted,
+        candidate_binding_id=candidate_binding_id,
+        provider=provider,
+        model=model,
         adapter=adapter,
         reasoning_effort=reasoning_effort,
     )
@@ -1098,44 +1121,17 @@ def resolve_reviewer_candidate_binding(
 ) -> ResolvedExecutionBinding | None:
     """Resolve one CHECK candidate's exact binding, or ``None`` when it has none.
 
-    The reviewer-side counterpart to
-    :func:`resolve_worker_candidate_binding`, whose BUILD-role contract
-    is deliberately left untouched.  The law is identical with the role
-    swapped:
-
-    * a candidate with an empty/absent ``binding_id`` returns ``None`` --
-      the caller keeps the historical provider/model adapter path
-      (legacy reviewer ladder candidates carry no binding);
-    * a non-empty ``binding_id`` is authoritative.  It must name an exact
-      registry binding whose role is :class:`BindingRole.CHECK` and whose
-      ``provider``/``model`` agree with the candidate, and it must resolve
-      through :func:`resolve_execution_binding` with the real adapter.
-      Every failure raises :class:`BindingResolutionError` (fail closed,
-      zero launch) and never falls back to a same-provider/model first
-      match or to a sibling binding carrying a different exact id.
-
-    The returned :class:`ResolvedExecutionBinding` is the single value the
-    runtime both invokes (adapter + overlay) and records as durable
-    dispatch evidence (binding / profile / quota-pool identity).
+    The reviewer-side entry point over the same exact-binding law with the
+    role swapped; the BUILD contract is deliberately left untouched.  A
+    non-empty id must name an exact CHECK binding, so a BUILD/PLAN binding
+    with identical provider/model text can never authorize review.
     """
-    if not candidate_binding_id or not candidate_binding_id.strip():
-        return None
-    wanted = candidate_binding_id.strip()
-    if registry is None or not tuple(registry.list_bindings()):
-        raise BindingResolutionError("NO_REGISTRY")
-    binding = registry.try_get(wanted)
-    if binding is None:
-        raise BindingResolutionError("UNKNOWN_BINDING")
-    if getattr(binding, "binding_role", None) is not BindingRole.CHECK:
-        raise BindingResolutionError("WRONG_ROLE")
-    if (
-        getattr(binding, "provider", None) != provider
-        or getattr(binding, "model", None) != model
-    ):
-        raise BindingResolutionError("PROVIDER_MODEL_MISMATCH")
-    return resolve_execution_binding(
+    return _resolve_candidate_binding(
+        role=BindingRole.CHECK,
         registry=registry,
-        binding_id=wanted,
+        candidate_binding_id=candidate_binding_id,
+        provider=provider,
+        model=model,
         adapter=adapter,
         reasoning_effort=reasoning_effort,
     )

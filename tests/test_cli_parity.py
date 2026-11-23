@@ -135,7 +135,7 @@ def test_reviewer_select_persists_exact_binding(
     code, out, _ = _cli("reviewer", "select", reviewer_id, capsys=capsys)
     assert code == 0
     assert reviewer_id in out
-    assert load_owner_bindings().reviewer_binding_id == reviewer_id
+    assert load_owner_bindings().reviewer_binding_ids == (reviewer_id,)
     code, out, _ = _cli("reviewer", "select", reviewer_id, "--json", capsys=capsys)
     assert code == 0
     assert json.loads(out)["selected_binding_id"] == reviewer_id
@@ -170,7 +170,7 @@ def test_reviewer_select_wrong_role_refused_without_mutation(
     assert code == 1
     assert "not qualified for the Reviewer slot" in err
     assert load_owner_bindings().to_dict() == before
-    assert load_owner_bindings().reviewer_binding_id != wanted
+    assert wanted not in load_owner_bindings().role_binding_ids("reviewer")
 
 
 def test_reviewer_select_unknown_refused_without_mutation(
@@ -235,7 +235,7 @@ def test_reviewer_clear_restores_legacy_ladder(
     code, out, _ = _cli("reviewer", "clear", "--json", capsys=capsys)
     assert code == 0
     assert json.loads(out)["cleared"] is True
-    assert load_owner_bindings().reviewer_binding_id is None
+    assert load_owner_bindings().reviewer_binding_ids == ()
 
 
 # ---------------------------------------------------------------------------

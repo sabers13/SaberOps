@@ -503,7 +503,7 @@ def test_ported_role_order_validation(isolated: Path) -> None:
     owner = OwnerBindings()
     updated = owner.with_role_order("reviewer", ("first", "second"))
     assert updated.role_binding_ids("reviewer") == ("first", "second")
-    assert updated.reviewer_binding_id == "first"
+    assert updated.reviewer_binding_ids == ("first", "second")
     with pytest.raises(ValueError):
         updated.role_binding_ids("orchestrator")
     with pytest.raises(BindingStoreError):
@@ -514,4 +514,4 @@ def test_ported_role_order_validation(isolated: Path) -> None:
         owner.with_role_order("no-such-role", ("x",))
     cleared = updated.with_role_order("reviewer", ())
     assert cleared.role_binding_ids("reviewer") == ()
-    assert cleared.reviewer_binding_id is None
+    assert cleared.reviewer_binding_ids == ()

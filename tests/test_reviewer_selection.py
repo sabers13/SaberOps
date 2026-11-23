@@ -197,7 +197,7 @@ def test_discovered_reviewer_binding_proves_through_canonical_resolver(
     _, reviewer_id, _ = _seed_three_role_bindings()
     owner = load_owner_bindings()
     selection = select_reviewer_binding(
-        replace(owner, reviewer_binding_id=reviewer_id),
+        replace(owner, reviewer_binding_ids=(reviewer_id,)),
         adapter_registry=AdapterRegistry.default(),
     )
     assert selection.status is ReviewerSelectionStatus.RESOLVED
@@ -217,7 +217,7 @@ def test_reviewer_selection_absent_in_legacy_documents(
         json.dumps({"schema_version": 1, "binding_registry": {}}), encoding="utf-8"
     )
     owner = load_owner_bindings(store_path)
-    assert owner.reviewer_binding_id is None
+    assert owner.reviewer_binding_ids is None
     selection = select_reviewer_binding(owner, adapter_registry=AdapterRegistry.default())
     assert selection.status is ReviewerSelectionStatus.NOT_CONFIGURED
 
@@ -226,9 +226,55 @@ def test_reviewer_selection_persists_across_reload(isolated_xdg: None) -> None:
     """A selected REVIEWER binding survives a store reload."""
     _, reviewer_id, _ = _seed_three_role_bindings()
     owner = load_owner_bindings()
-    save_owner_bindings(replace(owner, reviewer_binding_id=reviewer_id))
+    save_owner_bindings(replace(owner, reviewer_binding_ids=(reviewer_id,)))
     reloaded = load_owner_bindings()
-    assert reloaded.reviewer_binding_id == reviewer_id
+    assert reloaded.reviewer_binding_ids == (reviewer_id,)
+
+
+def test_legacy_reviewer_primary_migrates_into_the_order_with_one_notice(
+    isolated_xdg: None, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A pre-ADR-0086 store keeps its reviewer and is told once about the move."""
+    from saberops.control_plane.binding_store import LEGACY_REVIEWER_MIGRATION_NOTICE
+
+    store_path = tmp_path / "legacy-reviewer.json"
+    store_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "binding_registry": {},
+                "reviewer_binding_id": "binding-a",
+            }
+        ),
+        encoding="utf-8",
+    )
+    owner = load_owner_bindings(store_path)
+    assert owner.reviewer_binding_ids == ("binding-a",)
+    assert "reviewer_binding_id" not in owner.to_dict()
+    assert LEGACY_REVIEWER_MIGRATION_NOTICE in capsys.readouterr().err
+    # One notice per store per process, not one per read.
+    load_owner_bindings(store_path)
+    assert capsys.readouterr().err == ""
+
+
+def test_legacy_and_ordered_reviewer_fields_must_agree(tmp_path: Path) -> None:
+    """An ambiguous document (two disagreeing selections) still fails closed."""
+    from saberops.control_plane.binding_store import BindingStoreError
+
+    store_path = tmp_path / "ambiguous-reviewer.json"
+    store_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "binding_registry": {},
+                "reviewer_binding_id": "binding-a",
+                "reviewer_binding_ids": ["binding-b"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(BindingStoreError, match="reviewer primary does not match"):
+        load_owner_bindings(store_path)
 
 
 # --- candidate conversion -------------------------------------------------
@@ -239,7 +285,7 @@ def test_configured_reviewer_becomes_exact_worker_candidate(
 ) -> None:
     """The selection converts to a candidate with the exact binding id."""
     _, reviewer_id, _ = _seed_three_role_bindings()
-    owner = replace(load_owner_bindings(), reviewer_binding_id=reviewer_id)
+    owner = replace(load_owner_bindings(), reviewer_binding_ids=(reviewer_id,))
     candidate = reviewer_candidate_for_dispatch(
         owner, adapter_registry=AdapterRegistry.default()
     )
@@ -298,7 +344,7 @@ def test_service_review_run_uses_configured_reviewer(
     """SaberOpsService.review_run supplies the exact selected reviewer."""
     _, reviewer_id, _ = _seed_three_role_bindings()
     save_owner_bindings(
-        replace(load_owner_bindings(), reviewer_binding_id=reviewer_id)
+        replace(load_owner_bindings(), reviewer_binding_ids=(reviewer_id,))
     )
     captured = _spy_engine(monkeypatch)
     service = OrchestratorService(
@@ -347,7 +393,7 @@ def test_service_review_run_with_invalid_reviewer_fails_closed(
 ) -> None:
     """Missing/wrong-role selections refuse; engine never runs."""
     _seed_three_role_bindings()
-    save_owner_bindings(replace(load_owner_bindings(), reviewer_binding_id=selection))
+    save_owner_bindings(replace(load_owner_bindings(), reviewer_binding_ids=(selection,)))
     captured = _spy_engine(monkeypatch)
     service = OrchestratorService(
         db=Database(tmp_path / "svc.db"),
@@ -372,7 +418,7 @@ def test_service_review_run_with_no_adapter_reviewer_fails_closed(
     owner = upsert_owner_binding(
         OwnerBindings(), binding=ghost, profile=ghost_profile, pool=ghost_pool
     )
-    save_owner_bindings(replace(owner, reviewer_binding_id=ghost.binding_id))
+    save_owner_bindings(replace(owner, reviewer_binding_ids=(ghost.binding_id,)))
     captured = _spy_engine(monkeypatch)
     service = OrchestratorService(
         db=Database(tmp_path / "svc.db"),

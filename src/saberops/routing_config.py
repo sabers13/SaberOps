@@ -851,8 +851,8 @@ def _snapshot_from_v3(
     )
 
 
-def load_packaged_default() -> RoutingSnapshot:
-    """Load and validate the packaged default routing.json (schema 3)."""
+def _read_packaged_document() -> tuple[dict[str, Any], tuple[str, ...], tuple[str, ...]]:
+    """Read the packaged default document once, for every reader."""
     path = _packaged_default_path()
     try:
         raw = path.read_text(encoding="utf-8")
@@ -862,18 +862,66 @@ def load_packaged_default() -> RoutingSnapshot:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise RoutingConfigError(f"Packaged default routing.json invalid JSON: {exc}") from exc
-    retired = _retired_role_keys(data)
+    if not isinstance(data, dict):
+        raise RoutingConfigError("Packaged default routing.json top-level must be JSON object")
+    retired_roles = _retired_role_keys(data)
     data, notices = _strip_retired_routes(data)
-    canonical = canonical_routing_payload(data)
-    approved = _parse_approved_candidates(canonical, str(path))
-    validated = _validate_v3_structure(canonical, str(path), approved=approved)
+    return canonical_routing_payload(data), notices, retired_roles
+
+
+def load_packaged_default() -> RoutingSnapshot:
+    """Load and validate the packaged default routing.json (schema 3)."""
+    data, notices, retired_roles = _read_packaged_document()
+    label = str(_packaged_default_path())
+    approved = _parse_approved_candidates(data, label)
+    validated = _validate_v3_structure(data, label, approved=approved)
     return _snapshot_from_v3(
         validated,
         source="default",
         source_path=None,
         approved=approved,
-        migrated_roles=retired,
+        migrated_roles=retired_roles,
         notices=notices,
+    )
+
+
+def _read_effective_document(
+) -> tuple[dict[str, Any], Path | None, str, tuple[str, ...], int | None, tuple[str, ...]]:
+    """Read the effective routing document once, for every reader.
+
+    The user file wins when it exists; otherwise the packaged default is
+    read.  The returned document is canonical schema 3 with retired routes
+    stripped, plus its source path (``None`` for the packaged default), the
+    label the validators report, the migration notices and the schema the
+    stored document migrated from.
+    """
+    user_path = get_user_routing_path()
+    if not user_path.is_file():
+        data, notices, retired_roles = _read_packaged_document()
+        return data, None, str(_packaged_default_path()), notices, None, retired_roles
+    try:
+        raw = user_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RoutingConfigError(f"Routing config at {user_path}: cannot read: {exc}") from exc
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RoutingConfigError(f"Routing config at {user_path}: invalid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise RoutingConfigError(
+            f"Routing config at {user_path}: top-level must be JSON object"
+        )
+    raw_sv = data.get("schema_version")
+    migrated_from = raw_sv if type(raw_sv) is int and raw_sv in (1, 2) else None
+    retired_roles = _retired_role_keys(data)
+    data, notices = _strip_retired_routes(data)
+    return (
+        canonical_routing_payload(data),
+        user_path,
+        str(user_path),
+        notices,
+        migrated_from,
+        retired_roles,
     )
 
 
@@ -885,34 +933,20 @@ def load_effective_routing() -> RoutingSnapshot:
 
     Raises RoutingConfigError on invalid user file (fail-closed).
     """
-    user_path = get_user_routing_path()
-    if user_path.is_file():
-        try:
-            raw = user_path.read_text(encoding="utf-8")
-        except OSError as exc:
-            raise RoutingConfigError(f"Routing config at {user_path}: cannot read: {exc}") from exc
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise RoutingConfigError(f"Routing config at {user_path}: invalid JSON: {exc}") from exc
-        if not isinstance(data, dict):
-            raise RoutingConfigError(
-                f"Routing config at {user_path}: top-level must be JSON object"
-            )
-        raw_sv = data.get("schema_version")
-        migrated_from = raw_sv if type(raw_sv) is int and raw_sv in (1, 2) else None
-        retired = _retired_role_keys(data)
-        data, notices = _strip_retired_routes(data)
-        canonical = canonical_routing_payload(data)
-        approved = _parse_approved_candidates(canonical, str(user_path))
-        validated = _validate_v3_structure(canonical, str(user_path), approved=approved)
-        return _snapshot_from_v3(
-            validated, source="user", source_path=user_path, approved=approved,
-            migrated_from=migrated_from,
-            migrated_roles=retired if retired else None,
-            notices=notices,
-        )
-    return load_packaged_default()
+    data, source_path, label, notices, migrated_from, retired_roles = (
+        _read_effective_document()
+    )
+    approved = _parse_approved_candidates(data, label)
+    validated = _validate_v3_structure(data, label, approved=approved)
+    return _snapshot_from_v3(
+        validated,
+        source="user" if source_path is not None else "default",
+        source_path=source_path,
+        approved=approved,
+        migrated_from=migrated_from,
+        migrated_roles=retired_roles,
+        notices=notices,
+    )
 
 
 def snapshot_to_payload(snapshot: RoutingSnapshot, created_at: str) -> dict[str, Any]:
@@ -1520,35 +1554,7 @@ def load_effective_routing_payload() -> dict[str, Any]:
     that want to mutate routing start from exactly this value. The
     returned document is always the canonical schema-3 shape.
     """
-    user_path = get_user_routing_path()
-    if user_path.is_file():
-        try:
-            raw = user_path.read_text(encoding="utf-8")
-        except OSError as exc:
-            raise RoutingConfigError(f"Routing config at {user_path}: cannot read: {exc}") from exc
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise RoutingConfigError(f"Routing config at {user_path}: invalid JSON: {exc}") from exc
-        if not isinstance(data, dict):
-            raise RoutingConfigError(
-                f"Routing config at {user_path}: top-level must be JSON object"
-            )
-        data, _notices = _strip_retired_routes(data)
-        return canonical_routing_payload(data)
-    path = _packaged_default_path()
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except FileNotFoundError as exc:
-        raise RoutingConfigError(f"Packaged default routing.json not found at {path}") from exc
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise RoutingConfigError(f"Packaged default routing.json invalid JSON: {exc}") from exc
-    if not isinstance(data, dict):
-        raise RoutingConfigError("Packaged default routing.json top-level must be JSON object")
-    data, _notices = _strip_retired_routes(data)
-    return canonical_routing_payload(data)
+    return _read_effective_document()[0]
 
 
 def _require_role_payload(
@@ -1770,14 +1776,9 @@ def suggest_default_routes(*, provider: str | None = None) -> list[dict[str, str
     from datetime import date
 
     from saberops.access_ops import load_catalog_safely
-    from saberops.control_plane.plans import (
-        load_packaged_plans_raw,
-        overlay_plan_docs,
-        validate_plan_sections,
-    )
+    from saberops.control_plane.plans import load_effective_plan_set
     from saberops.control_plane.policy import (
         ProviderPolicyState,
-        _read_raw_doc,
         load_control_plane_policy,
     )
     from saberops.control_plane.posture import posture_decision
@@ -1786,8 +1787,7 @@ def suggest_default_routes(*, provider: str | None = None) -> list[dict[str, str
 
     catalog = load_catalog_safely()
     policy = load_control_plane_policy()
-    merged_plans, _ = overlay_plan_docs(load_packaged_plans_raw(), _read_raw_doc())
-    effective_plans = validate_plan_sections(merged_plans, "effective plans")
+    effective_plans, _sources = load_effective_plan_set()
     today = date.today()
     wanted_provider = provider.strip().lower() if provider and provider.strip() else None
 

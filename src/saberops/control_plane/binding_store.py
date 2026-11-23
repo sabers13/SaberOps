@@ -65,11 +65,21 @@ RETIRED_SELECTION_NOTICE = (
     "settings write drops the setting."
 )
 
+#: Pre-ADR-0086 stores kept the reviewer choice in ``reviewer_binding_id``
+#: beside the ordered chain.  The order is the one selection; a legacy primary
+#: is migrated into it on load and the owner is told once per process.
+LEGACY_REVIEWER_MIGRATION_NOTICE = (
+    "SaberOps: the saved reviewer selection was moved into the reviewer order "
+    "(ADR-0086); the next settings write drops the old field."
+)
+
 _notified_retired_selection: set[Path] = set()
+_notified_legacy_reviewer: set[Path] = set()
 
 __all__ = [
     "BINDING_STORE_SCHEMA_VERSION",
     "EFFORT_DISCOVERY_UNKNOWN",
+    "LEGACY_REVIEWER_MIGRATION_NOTICE",
     "ORCH_BINDING_STORE_ENV",
     "RETIRED_SELECTION_NOTICE",
     "BindingStoreError",
@@ -110,27 +120,38 @@ def get_binding_store_path() -> Path:
     return _canonical()
 
 
+def _legacy_reviewer_primary(payload: Mapping[str, Any]) -> str | None:
+    """Return the pre-ADR-0086 ``reviewer_binding_id`` primary, validated.
+
+    A non-string, non-null value is a corrupt owner document and fails closed;
+    an empty or whitespace-only string means "no selection".
+    """
+    raw = payload.get("reviewer_binding_id")
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise BindingStoreError("owner reviewer binding id must be a string or null")
+    return raw.strip() or None
+
+
 @dataclass(frozen=True)
 class OwnerBindings:
     """The canonical owner-level binding document.
 
     ``registry`` is the exact binding/profile/pool identity set;
-    ``reviewer_binding_id`` is the owner's optional exact Reviewer primary,
-    retained for compatibility. ``reviewer_binding_ids`` stores the
-    owner-chosen ordered fallback chain. None carry secret material.
+    ``reviewer_binding_ids`` is the owner's ordered Reviewer selection.
+    ``None`` means the owner never selected one (the legacy review ladder
+    applies); ``()`` is an explicit clear.  Neither carries secret material.
     """
 
     registry: BindingRegistry = field(default_factory=BindingRegistry)
-    reviewer_binding_id: str | None = None
     # None preserves the legacy unconfigured reviewer; () is explicitly empty.
     reviewer_binding_ids: tuple[str, ...] | None = None
 
     def role_binding_ids(self, role: str) -> tuple[str, ...]:
         if role != "reviewer":
             raise ValueError("unknown routing role")
-        if self.reviewer_binding_ids is not None:
-            return self.reviewer_binding_ids
-        return (self.reviewer_binding_id,) if self.reviewer_binding_id else ()
+        return self.reviewer_binding_ids or ()
 
     def with_role_order(self, role: str, order: Iterable[str]) -> OwnerBindings:
         ids = tuple(order)
@@ -140,16 +161,13 @@ class OwnerBindings:
             raise BindingStoreError("role order must contain unique nonempty binding ids")
         if role != "reviewer":
             raise BindingStoreError("unknown routing role")
-        return replace(
-            self, reviewer_binding_ids=ids, reviewer_binding_id=ids[0] if ids else None
-        )
+        return replace(self, reviewer_binding_ids=ids)
 
     def to_dict(self) -> dict[str, Any]:
         """Canonical non-secret rendering (sorted by the registry renderer)."""
         return {
             "schema_version": BINDING_STORE_SCHEMA_VERSION,
             "binding_registry": self.registry.to_dict(),
-            "reviewer_binding_id": self.reviewer_binding_id,
             "reviewer_binding_ids": None
             if self.reviewer_binding_ids is None
             else list(self.reviewer_binding_ids),
@@ -157,7 +175,13 @@ class OwnerBindings:
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any]) -> OwnerBindings:
-        """Reconstruct the owner document from its durable mapping."""
+        """Reconstruct the owner document from its durable mapping.
+
+        A pre-ADR-0086 document keeps its selection in ``reviewer_binding_id``;
+        absent an ordered chain, that primary is the one-element order.  When
+        both keys are present they must agree -- an ambiguous document fails
+        closed instead of letting one field silently override the other.
+        """
         if not isinstance(payload, Mapping):
             raise BindingStoreError("owner bindings must be a mapping")
         schema_version = payload.get("schema_version", BINDING_STORE_SCHEMA_VERSION)
@@ -172,14 +196,7 @@ class OwnerBindings:
             registry = BindingRegistry.from_mapping(registry_raw)
         except Exception as exc:  # noqa: BLE001 - normalize to one typed refusal
             raise BindingStoreError(f"owner bindings registry invalid: {exc}") from exc
-        reviewer_raw = payload.get("reviewer_binding_id")
-        if reviewer_raw is None:
-            reviewer_binding_id: str | None = None
-        elif isinstance(reviewer_raw, str):
-            cleaned = reviewer_raw.strip()
-            reviewer_binding_id = cleaned or None
-        else:
-            raise BindingStoreError("owner reviewer binding id must be a string or null")
+        legacy_primary = _legacy_reviewer_primary(payload)
         ids = payload.get("reviewer_binding_ids")
         if ids is not None and (
             not isinstance(ids, list)
@@ -187,11 +204,16 @@ class OwnerBindings:
             or len(set(ids)) != len(ids)
         ):
             raise BindingStoreError("invalid reviewer routing order")
-        if ids is not None and reviewer_binding_id != (ids[0] if ids else None):
+        if ids is None and legacy_primary is not None:
+            ids = [legacy_primary]
+        if (
+            ids is not None
+            and legacy_primary is not None
+            and legacy_primary != (ids[0] if ids else None)
+        ):
             raise BindingStoreError("reviewer primary does not match routing order")
         return cls(
             registry=registry,
-            reviewer_binding_id=reviewer_binding_id,
             reviewer_binding_ids=None if ids is None else tuple(ids),
         )
 
@@ -365,7 +387,9 @@ class OwnerBindingStore:
             payload = json.loads(self._path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
             raise BindingStoreError(f"owner bindings store unreadable: {exc}") from exc
-        self._notice_retired_selection(payload)
+        if isinstance(payload, Mapping):
+            self._notice_retired_selection(payload)
+            self._notice_legacy_reviewer_selection(payload)
         return OwnerBindings.from_mapping(payload)
 
     def _notice_retired_selection(self, payload: object) -> None:
@@ -377,6 +401,18 @@ class OwnerBindingStore:
             return
         _notified_retired_selection.add(key)
         print(RETIRED_SELECTION_NOTICE, file=sys.stderr)
+
+    def _notice_legacy_reviewer_selection(self, payload: Mapping[str, Any]) -> None:
+        """Tell the owner once that the old reviewer field joined the order list."""
+        if payload.get("reviewer_binding_ids") is not None:
+            return
+        if _legacy_reviewer_primary(payload) is None:
+            return
+        key = Path(os.path.abspath(self._path))
+        if key in _notified_legacy_reviewer:
+            return
+        _notified_legacy_reviewer.add(key)
+        print(LEGACY_REVIEWER_MIGRATION_NOTICE, file=sys.stderr)
 
     def save(self, owner: OwnerBindings) -> None:
         """Persist the owner document atomically; fail closed on write errors."""

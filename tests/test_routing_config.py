@@ -13,7 +13,7 @@ from saberops.control_plane.preflight import evaluate_control_plane
 from saberops.dispatch import routing_context_for_role
 from saberops.jobs.models import JobRole
 from saberops.models import Tier, WorkerCandidate
-from saberops.routing import is_peak_hours, resolve_candidate_chain
+from saberops.routing import resolve_candidate_chain
 from saberops.routing_config import (
     RETIRED_ROUTE_NOTICE,
     ROUTED_ROLES,
@@ -431,7 +431,6 @@ def test_training_gate_is_retired_even_for_legacy_denied(requirement: str) -> No
         candidate, training_allowed=False, training_required=requirement
     )
     assert decision.reason != "TRAINING_PERMISSION_DENIED"
-    assert is_peak_hours() is False
 
 
 def _approval() -> DynamicCandidate:

@@ -985,7 +985,7 @@ def test_ported_gate_setting_and_mandatory_review_are_independent(
             upsert_owner_binding(
                 OwnerBindings(), binding=reviewer, profile=profile, pool=pool
             ),
-            reviewer_binding_id=reviewer.binding_id,
+            reviewer_binding_ids=(reviewer.binding_id,),
         )
     )
     _patch_implementer_chain(monkeypatch)

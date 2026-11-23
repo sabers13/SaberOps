@@ -193,7 +193,7 @@ def reviewer_options(owner: OwnerBindings, registry: AdapterRegistry) -> list[Ro
     for binding in owner.registry.list_bindings():
         if binding.binding_role is not BindingRole.CHECK:
             continue
-        probe = replace(owner, reviewer_binding_id=binding.binding_id, reviewer_binding_ids=None)
+        probe = replace(owner, reviewer_binding_ids=(binding.binding_id,))
         selection = select_reviewer_binding(probe, adapter_registry=registry)
         if selection.binding is None or selection.binding.binding_id != binding.binding_id:
             continue

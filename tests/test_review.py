@@ -297,7 +297,7 @@ def test_ported_reviewer_selection_uses_injected_registry(
     # with an empty default this would raise NO_ADAPTER otherwise.
     result = service.set_reviewer_binding(reviewer.binding_id)
     assert result["selected_binding_id"] == reviewer.binding_id
-    assert load_owner_bindings().reviewer_binding_id == reviewer.binding_id
+    assert load_owner_bindings().role_binding_ids("reviewer") == (reviewer.binding_id,)
 
 
 def test_structured_findings_accept_absent_optional_fields() -> None:

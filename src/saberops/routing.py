@@ -2,21 +2,21 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any
 
 from saberops.models import WorkerCandidate
 
-# Canonical worker candidates
+# Review-ladder candidates
 #
-# Antigravity is attended-only (ADR-0001 Amendment 1, item 3): the
-# adapter class below is kept for explicit owner overrides, but the
-# automatic candidate below must never appear in an automatic chain.
+# The closed registry of models that may enter a build chain has exactly one
+# encoding: :data:`saberops.routing_config.ALLOWED_CANDIDATES`.  These
+# constants are the independent reviewer ladder's fixed policy (``review.py``),
+# not a second route registry.
+#
+# Antigravity is attended-only (ADR-0001 Amendment 1, item 3): the constant
+# below is kept for the attended-only regression test and explicit owner
+# overrides; it must never appear in an automatic chain.
 CANDIDATE_ANTIGRAVITY_FLASH = WorkerCandidate(provider="antigravity", model="gemini-3.7-flash")
-CANDIDATE_OPENCODE_MIMO_V2_5 = WorkerCandidate(provider="opencode", model="opencode-go/mimo-v2.5")
-CANDIDATE_OPENCODE_GO_DEEPSEEK_V4_FLASH = WorkerCandidate(
-    provider="opencode", model="opencode-go/deepseek-v4-flash"
-)
 CANDIDATE_OPENCODE_GO_DEEPSEEK_V4_PRO = WorkerCandidate(
     provider="opencode", model="opencode-go/deepseek-v4-pro"
 )
@@ -28,39 +28,6 @@ CANDIDATE_OPENCODE_OX_ALPHA = WorkerCandidate(
 )
 CANDIDATE_CODEX_TERRA = WorkerCandidate(provider="codex", model="gpt-5.6-terra")
 CANDIDATE_CODEX_SOL = WorkerCandidate(provider="codex", model="gpt-5.6-sol")
-CANDIDATE_CODEX_GPT_5_6_LUNA = WorkerCandidate(provider="codex", model="gpt-5.6-luna")
-
-# OpenCode Zen free worker candidates
-CANDIDATE_OPENCODE_BIG_PICKLE = WorkerCandidate(provider="opencode", model="opencode/big-pickle")
-CANDIDATE_OPENCODE_MIMO_V2_5_FREE = WorkerCandidate(
-    provider="opencode", model="opencode/mimo-v2.5-free"
-)
-CANDIDATE_OPENCODE_HY3_FREE = WorkerCandidate(provider="opencode", model="opencode/hy3-free")
-CANDIDATE_OPENCODE_NEMOTRON_3_ULTRA_FREE = WorkerCandidate(
-    provider="opencode", model="opencode/nemotron-3-ultra-free"
-)
-CANDIDATE_OPENCODE_NEMOTRON_3_5_LIGHTNING_FREE = WorkerCandidate(
-    provider="opencode", model="opencode/nemotron-3.5-lightning-free"
-)
-CANDIDATE_OPENCODE_MUSE_SPARK_FREE = WorkerCandidate(
-    provider="opencode", model="opencode/muse-spark-1.2-contributor-free"
-)
-
-# OpenCode Zen paid worker candidates
-CANDIDATE_OPENCODE_DEEPSEEK_V4_FLASH = WorkerCandidate(
-    provider="opencode", model="opencode/deepseek-v4-flash"
-)
-CANDIDATE_OPENCODE_MINIMAX_M3 = WorkerCandidate(provider="opencode", model="opencode/minimax-m3")
-CANDIDATE_OPENCODE_QWEN3_7_PLUS = WorkerCandidate(
-    provider="opencode", model="opencode/qwen3.7-plus"
-)
-CANDIDATE_OPENCODE_DEEPSEEK_V4_PRO = WorkerCandidate(
-    provider="opencode", model="opencode/deepseek-v4-pro"
-)
-
-# Tier candidate chains were removed in R-002 (routing schema 3): chains
-# now live per role in the routing configuration. The candidate constants
-# above stay: review.py imports several of them.
 
 #: Providers restricted to attended, explicit-owner use (ADR-0001
 #: Amendment 1).  Automatic routing chains must never yield them, even
@@ -76,16 +43,6 @@ ATTENDED_ONLY_REFUSAL = (
     "automatic routing cannot select provider 'antigravity'. Re-run with "
     "an explicit owner provider+model override to run it attended."
 )
-
-
-def is_peak_hours(now: datetime | None = None) -> bool:
-    """Retired compatibility helper; routing has no peak-hour mode."""
-    return False  # Retired compatibility helper: no scheduling exclusions.
-
-
-def is_muse_model(model_name: str) -> bool:
-    """Check if model name refers to a Muse model variant."""
-    return "muse" in model_name.lower()
 
 
 #: The owner's rule (2026-11-19): "live gemini out we need to run it from agy
@@ -171,16 +128,6 @@ def _normalize_role(role: Any) -> str:
     return coerce_job_role(role).value
 
 
-def _role_for_tier_alias(tier: Any | None) -> str:
-    """Legacy tier alias: every tier starts on the build route.
-
-    The old T3 chain is now the build route's ``strong_start`` setting; a
-    legacy caller that passes ``tier`` still selects ``BUILD`` and the caller
-    asks for the strong start explicitly through ``strong_start=True``.
-    """
-    return "BUILD"
-
-
 def resolve_candidate_chain(
     role: Any | None = None,
     *,
@@ -236,7 +183,9 @@ def resolve_candidate_chain(
     """
     if role is not None and tier is not None:
         raise ValueError("resolve_candidate_chain: pass 'role' or 'tier', not both")
-    selected_role = _normalize_role(role) if role is not None else _role_for_tier_alias(tier)
+    # A legacy ``tier`` alias also selects the build route; the caller asks for
+    # the strong start explicitly through ``strong_start``.
+    selected_role = _normalize_role(role) if role is not None else "BUILD"
     if model_override:
         candidate = parse_candidate_override(model_override, provider_override=provider_override)
         return [_with_frozen_evidence(candidate, snapshot)]
@@ -322,8 +271,3 @@ def _with_frozen_evidence(candidate: WorkerCandidate, snapshot: Any | None) -> W
             training_required=training_required,
         )
     return candidate
-
-
-def _with_binding_id(candidate: WorkerCandidate, snapshot: Any | None) -> WorkerCandidate:
-    """Backward-compatible alias for :func:`_with_frozen_evidence`."""
-    return _with_frozen_evidence(candidate, snapshot)

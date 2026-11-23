@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
@@ -286,10 +286,6 @@ def validate_iso_date(value: Any, path: str) -> str:
     return value
 
 
-def _validate_iso_date(value: Any, path: str) -> str:
-    return validate_iso_date(value, path)
-
-
 def validate_plan_sections(
     data: dict[str, Any], source: str, *, packaged: bool = False
 ) -> PlanSet:
@@ -334,7 +330,7 @@ def validate_plan_sections(
                     f"{base}.toggles_attested_on",
                     "packaged defaults must not attest toggles (owner attestation only)",
                 )
-            attested = _validate_iso_date(attested, f"{base}.toggles_attested_on")
+            attested = validate_iso_date(attested, f"{base}.toggles_attested_on")
         notes = raw.get("notes", "")
         if not isinstance(notes, str):
             raise _fail(f"{base}.notes", "notes must be a string")
@@ -419,7 +415,7 @@ def validate_plan_sections(
                     f"{base}.verified_on",
                     "packaged defaults must not verify postures (owner attestation only)",
                 )
-            verified = _validate_iso_date(verified, f"{base}.verified_on")
+            verified = validate_iso_date(verified, f"{base}.verified_on")
         account = raw.get("account")
         if account is not None:
             if not isinstance(account, str) or account not in accounts:
@@ -639,20 +635,17 @@ def effective_pool_plans(
     return pool_plans
 
 
-def effective_quota_pools(
+def _pool_policies_from_plans(
     policy: ControlPlanePolicy,
+    pool_plans: Mapping[str, PoolPlan],
     *,
-    activate_overage: bool = False,
+    activate_overage: bool,
 ) -> dict[str, QuotaPoolPolicy]:
-    """Resolve membership without changing the owner policy or frozen digests.
+    """Project resolved pool plans into the one quota-pool policy mapping.
 
-    Owner quota entries win by id. Packaged plans supply otherwise missing
-    pools; owner plan data travels with the supplied policy, never a live read.
-    Overage evidence enforcement activates when activate_overage is True.
+    Owner quota entries win by id on top of the plan-derived pools.  Overage
+    evidence enforcement activates when ``activate_overage`` is True.
     """
-    plans = validate_plan_sections(load_packaged_plans_raw(), "packaged plans", packaged=True)
-    pool_plans = dict(plans.pool_plans)
-    pool_plans.update(policy.plans.pool_plans)
     pools = {
         pool_id: QuotaPoolPolicy(
             pool_id=pool_id,
@@ -671,6 +664,24 @@ def effective_quota_pools(
         for pool_id, pool in policy.quota_pools.items()
     })
     return pools
+
+
+def effective_quota_pools(
+    policy: ControlPlanePolicy,
+    *,
+    activate_overage: bool = False,
+) -> dict[str, QuotaPoolPolicy]:
+    """Resolve membership without changing the owner policy or frozen digests.
+
+    Owner quota entries win by id. Packaged plans supply otherwise missing
+    pools; owner plan data travels with the supplied policy, never a live read.
+    Overage evidence enforcement activates when activate_overage is True.
+    """
+    return _pool_policies_from_plans(
+        policy,
+        effective_pool_plans(policy),
+        activate_overage=activate_overage,
+    )
 
 
 def resolve_binding_quota_pools(
@@ -693,8 +704,8 @@ def resolve_binding_quota_pools(
     constraints.  An ambiguous default (more than one packaged plan matches the
     candidate) is never guessed, and the binding identity supplies no evidence.
     """
-    pools = effective_quota_pools(policy, activate_overage=activate_overage)
     plans = effective_pool_plans(policy)
+    pools = _pool_policies_from_plans(policy, plans, activate_overage=activate_overage)
     if not binding_pool_id or not binding_pool_id.startswith("discovered-pool:"):
         return pools, plans
     if binding_pool_id in pools:

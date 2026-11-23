@@ -261,7 +261,7 @@ def test_review_run_persists_findings_and_run_page_shows_them(
         binding_role=BindingRole.CHECK,
     )
     owner = upsert_owner_binding(OwnerBindings(), binding=reviewer, profile=profile, pool=pool)
-    save_owner_bindings(replace(owner, reviewer_binding_id=reviewer.binding_id))
+    save_owner_bindings(replace(owner, reviewer_binding_ids=(reviewer.binding_id,)))
     prompts: list[str] = []
     db = Database(tmp_path / "orch.db")
     orch = Orchestrator(db=db, registry=AdapterRegistry([_Adapter(prompts)]),

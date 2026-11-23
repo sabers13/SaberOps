@@ -1529,8 +1529,8 @@ class Orchestrator:
         Every production semantic-review dispatch must receive
         the same exact configured Reviewer candidate the service seam
         supplies.  This delegates to the canonical reviewer authority
-        (:func:`reviewer_candidate_for_dispatch` over
-        ``OwnerBindings.reviewer_binding_id``) with this run's real
+        (:func:`reviewer_candidate_for_dispatch` over the owner's reviewer
+        order) with this run's real
         adapter registry -- no reviewer-selection policy lives here.
 
         Unconfigured (``None``) keeps the legacy reviewer ladder.
@@ -1555,7 +1555,9 @@ class Orchestrator:
                 run_id,
                 "reviewer_binding_unresolvable",
                 payload={
-                    "requested_binding_id": owner.reviewer_binding_id,
+                    "requested_binding_id": next(
+                        iter(owner.role_binding_ids("reviewer")), None
+                    ),
                     "reason": exc.reason,
                 },
             )

@@ -16,7 +16,10 @@ text. Only a role-qualified `CHECK` binding that exists in the canonical
 registry may be selected, and it must prove through the real adapter: a
 `BUILD` (formerly `WORKER`) or `PLAN` (formerly `ORCHESTRATOR`) binding
 submitted as a check binding is refused without mutation, as is an unknown id.
-Clearing the reviewer restores the legacy review ladder.
+Clearing the reviewer restores the legacy review ladder. The selection is one
+ordered list (ADR-0086): a store written before that change keeps its single
+selection as the first entry, with one notice, and the next settings write
+drops the old field.
 
 The **plan** role has no engine binding and no owner command (ADR-0064): the
 planner is the CLI session the owner sits in. A binding store written before

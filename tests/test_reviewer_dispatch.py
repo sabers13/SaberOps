@@ -207,7 +207,7 @@ def _seed_configured_reviewer() -> str:
     owner = upsert_owner_binding(
         OwnerBindings(), binding=reviewer, profile=profile, pool=pool
     )
-    save_owner_bindings(replace(owner, reviewer_binding_id=reviewer.binding_id))
+    save_owner_bindings(replace(owner, reviewer_binding_ids=(reviewer.binding_id,)))
     return reviewer.binding_id
 
 
@@ -368,7 +368,9 @@ def test_production_review_with_invalid_reviewer_fails_closed(
     save_owner_bindings(
         replace(
             owner,
-            reviewer_binding_id=f"discovered-binding:reviewer:{_R3E1_CONNECTION}:missing",
+            reviewer_binding_ids=(
+                f"discovered-binding:reviewer:{_R3E1_CONNECTION}:missing",
+            ),
         )
     )
     repo = _git_repo(tmp_path / "invalid" / "repo")
