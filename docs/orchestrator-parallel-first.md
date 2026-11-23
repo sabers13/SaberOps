@@ -79,8 +79,8 @@ per-host storage reservation budget; exclusive worktree scopes; real G1,
 independent-review, exclusive-G3 and owner-acceptance gates; exact-SHA
 provenance and lease fencing; and a UI that shows real ready/blocked/held
 reasons. This is implemented by existing steps (project/plan registration,
-durable settings, wave admission, session management, first-run UI, security,
-certification), **not** by the fact that this document exists. Do not label any
+durable settings, wave admission, session management, first-run UI, security),
+**not** by the fact that this document exists. Do not label any
 of it operational until those steps pass their gates, independent review and
 owner acceptance.
 

@@ -79,7 +79,7 @@ runtime enforcement is TARGET, not yet proven on main. Early pure *projections* 
 slot-admission projection) may land on unmerged branches; they compute nothing
 about live occupancy, hold no lease, dispatch nothing, and are never launch
 authority by themselves. The target behaviour is delivered by the existing
-project/plan, settings, wave-admission, session, UI, security and certification
+project/plan, settings, wave-admission, session, UI and security
 work, **not** by documentation. See
 [orchestrator-parallel-first.md](orchestrator-parallel-first.md) for the
 tracked Orchestrator policy and its current-versus-target section.

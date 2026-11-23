@@ -122,7 +122,6 @@ flowchart LR
 | **Unattended plans** | Frozen decision sheet, never-delegable list, three autonomous decision classes, circuit breaker, stall alarm and morning report. Unattended runs can never push | [unattended](docs/unattended-plans.md) |
 | **Storage lifecycle** | Owner-aware inventory, retention and guarded GC of worktrees, branches, checkpoint refs and evidence; dry-run first, never `--force` | [storage](docs/storage-lifecycle.md) |
 | **Central configuration** | Declarative workflow settings with an append-only, owner-approved decision ledger | [config](docs/config.md) |
-| **Certification** | `orch certify` evaluates Q4 dogfooding criteria and nine resilience scenarios | [certification](docs/end-certification.md) |
 
 ---
 
@@ -386,7 +385,7 @@ scripts/               gate wrappers and tooling
   [vendor CLI live check](docs/vendor-cli-live-check.md)
 - Execution: [wave optimization](docs/wave-plan-optimization.md) ·
   [parallel work](docs/parallel-work.md) · [gate](docs/gate.md) ·
-  [unattended plans](docs/unattended-plans.md) · [certification](docs/end-certification.md)
+  [unattended plans](docs/unattended-plans.md)
 - Orchestrator: [parallel-first policy](docs/orchestrator-parallel-first.md) ·
   [project modes](docs/project-modes.md) ·
   [questions](docs/questions.md)
