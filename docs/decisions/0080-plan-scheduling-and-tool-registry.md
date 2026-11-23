@@ -5,7 +5,7 @@
 - **Decider:** Saber (owner), phase 1.1 owner answer Q1/Q13 and "maximise the
   deletion" (2026-11-22)
 - **Related:** [ADR-0005](0005-mcp-first-engine-and-phase-2-board.md) (the
-  planning CLI is the orchestrator), [ADR-0016](0016-steering-notes.md)
+  planning CLI is the orchestrator), [ADR-0016](0016-steering-note-channel.md)
   (steering), [ADR-0060](0060-gate-protection-on-the-real-paths.md) (the check
   path this lane does not touch)
 
