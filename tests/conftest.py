@@ -10,6 +10,7 @@ file opt out with ``@pytest.mark.packaged_routing_default``.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -28,6 +29,42 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "no_attendance: do not hold a test attended terminal (presence tests)",
     )
+
+
+@pytest.fixture(autouse=True)
+def _isolated_owner_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[None]:
+    """No test may resolve the owner's real XDG store.
+
+    ADR-0082's owner-mode reader migrates a pre-1.1 document on the first read,
+    so a test that reached ``~/.config/saberops`` would *write* the owner's real
+    store.  That happened once (H22 postmortem, 2026-11-23): this host leaves
+    ``XDG_CONFIG_HOME`` unset, so the loader fell back to the real home.  Fill in
+    only the XDG bases a test has not set itself, then prove the owner config
+    path resolves inside this test's scratch tree; a test that would reach the
+    real home fails instead of writing it.
+    """
+    scratch = tmp_path.parent / f"{tmp_path.name}-owner-xdg"
+    for variable, name in (
+        ("XDG_CONFIG_HOME", "config"),
+        ("XDG_STATE_HOME", "state"),
+        ("XDG_CACHE_HOME", "cache"),
+        ("XDG_DATA_HOME", "data"),
+    ):
+        if os.environ.get(variable):
+            continue
+        directory = scratch / name
+        directory.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv(variable, str(directory))
+    from saberops.paths import saberops_config_dir
+
+    resolved = saberops_config_dir().resolve()
+    assert tmp_path.parent.resolve() in resolved.parents, (
+        "test resolved the owner's real config at "
+        f"{resolved}; point XDG_CONFIG_HOME at a test-scoped directory"
+    )
+    yield
 
 
 @pytest.fixture(autouse=True)

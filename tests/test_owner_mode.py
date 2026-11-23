@@ -136,6 +136,23 @@ def rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> RigEnvironment:
     return build_lifecycle_rig(tmp_path, monkeypatch)
 
 
+def test_conftest_guard_keeps_every_test_off_the_real_owner_store() -> None:
+    """H22 postmortem: the autouse guard must isolate the owner XDG bases.
+
+    This host leaves ``XDG_CONFIG_HOME`` unset, so the pre-1.1 fallback resolved
+    ``~/.config/saberops`` and the migration wrote the owner's real store.  The
+    guard in ``tests/conftest.py`` fills the XDG bases per test; this asserts it
+    stayed in force.
+    """
+    from saberops.paths import saberops_config_dir
+
+    assert os.environ.get("XDG_CONFIG_HOME"), "the autouse guard did not set XDG_CONFIG_HOME"
+    resolved = saberops_config_dir().resolve()
+    real = (Path.home() / ".config" / "saberops").resolve()
+    assert resolved != real
+    assert real not in resolved.parents
+
+
 # --------------------------------------------------------------------------- #
 # No widening: every legacy preset x mode pair
 # --------------------------------------------------------------------------- #
