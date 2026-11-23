@@ -15,6 +15,15 @@ import pytest
 from test_loop import _make_candidate, _make_job, _make_policy, _make_routes
 
 from saberops import away
+from saberops.away import (
+    AuthorityMode,
+    Decision,
+    DecisionDisposition,
+    DecisionScope,
+    NeverDelegableKind,
+    StandingDecision,
+    resolve_decision,
+)
 from saberops.capacity.ledger import record_owner_quota
 from saberops.capacity.loop import acquire_lease, scheduler_tick
 from saberops.capacity.store import ensure_tables as ensure_capacity_tables
@@ -31,15 +40,6 @@ from saberops.questions import (
     OwnerQuestionQueue,
     QuestionRequest,
     QuestionStatus,
-)
-from saberops.unattended import (
-    AuthorityMode,
-    Decision,
-    DecisionDisposition,
-    DecisionScope,
-    NeverDelegableKind,
-    StandingDecision,
-    resolve_decision,
 )
 
 pytestmark = pytest.mark.packaged_routing_default

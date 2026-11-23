@@ -6404,7 +6404,6 @@ def handle_away_show(args: argparse.Namespace) -> int:
 def handle_away_grant(args: argparse.Namespace) -> int:
     """Handle `orch away grant` (owner-only authoring)."""
     away = _away_stack()
-    from saberops.unattended import DecisionScope, StandingDecision
 
     if (args.key is None) == (args.question_key is None):
         print("[!] give exactly one of --key or --question-key", file=sys.stderr)
@@ -6428,9 +6427,9 @@ def handle_away_grant(args: argparse.Namespace) -> int:
             + hashlib.sha256(f"{project_id}|{args.task}|{decision_key}".encode())
             .hexdigest()[:12]
         )
-        decision = StandingDecision(
+        decision = away.StandingDecision(
             standing_decision_id=identifier,
-            scope=DecisionScope(
+            scope=away.DecisionScope(
                 project_id=project_id,
                 task_id=args.task,
                 paths=tuple(args.path),

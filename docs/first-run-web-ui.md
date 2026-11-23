@@ -92,7 +92,7 @@ now redirects on success to the page that owns it (`/setup`, `/routing`,
   decision kinds, and any durable standing decisions are shown with their live/
   expired windows. Standing decisions are read from
   `<state>/unattended-decisions.json` (override: `ORCH_UNATTENDED_STORE`) and
-  parsed into `saberops.unattended.StandingDecision`, so expiry is computed by
+  parsed into `saberops.away.StandingDecision`, so expiry is computed by
   the canonical `is_live`/`is_expired` logic.
 - **Storage & Git lifecycle.** For a repository path the page builds the
   read-only inventory (`saberops.storage_inventory`) and the deterministic GC

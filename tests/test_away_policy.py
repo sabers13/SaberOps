@@ -1,20 +1,21 @@
-"""Adversarial contract tests for the unattended plan policy (RD-1).
+"""Adversarial contract tests for the away policy (RD-1).
 
 Every test states what it protects with a ``Covers:`` docstring line. The whole
 file is hermetic: no provider, CLI, login, network, database, filesystem
-mutation, sleeping or engine launch. The module under test is pure, so every
-instant and counter is supplied by the test itself.
+mutation, sleeping or engine launch. The policy half under test is pure, so
+every instant and counter is supplied by the test itself.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import importlib
 from collections.abc import MutableMapping
 from typing import Any, cast
 
 import pytest
 
-from saberops.unattended import (
+from saberops.away import (
     CONSECUTIVE_FAILURE_LIMIT,
     MAX_ALARM_MESSAGE_LENGTH,
     NEVER_DELEGABLE_KINDS,
@@ -26,9 +27,10 @@ from saberops.unattended import (
     AlarmSeverity,
     AuthorityMode,
     AutonomousAuditEntry,
+    AutonomyClass,
+    AwayError,
     CandidateAcceptance,
     Decision,
-    DecisionClass,
     DecisionDisposition,
     DecisionResolution,
     DecisionScope,
@@ -47,7 +49,6 @@ from saberops.unattended import (
     StallObservation,
     StallSupervisionError,
     StandingDecision,
-    UnattendedError,
     build_audit_entries,
     build_morning_report,
     compute_plan_impact,
@@ -176,7 +177,7 @@ def test_every_kind_is_never_delegable(kind: NeverDelegableKind) -> None:
 
 def test_is_never_delegable_rejects_unknown_kind() -> None:
     """Covers: RD-1 requirement 2 fail closed on an unknown kind."""
-    with pytest.raises(UnattendedError):
+    with pytest.raises(AwayError):
         is_never_delegable("free_money")
 
 
@@ -253,20 +254,20 @@ def test_scope_paths_order_is_canonicalised_but_membership_is_exact() -> None:
 )
 def test_wildcard_and_non_canonical_scope_paths_are_refused(path: str) -> None:
     """Covers: RD-1 requirement 1 wildcards and non-canonical paths fail closed."""
-    with pytest.raises(UnattendedError):
+    with pytest.raises(AwayError):
         _scope(paths=(path,))
 
 
 @pytest.mark.parametrize("identifier", ["proj*", "proj?", "proj[1]", "a b", ""])
 def test_wildcard_and_malformed_identifiers_are_refused(identifier: str) -> None:
     """Covers: RD-1 requirement 1 identifiers cannot carry wildcards."""
-    with pytest.raises(UnattendedError):
+    with pytest.raises(AwayError):
         _scope(project=identifier)
 
 
 def test_matches_exactly_requires_a_scope() -> None:
     """Covers: RD-1 requirement 1 matching never guesses across types."""
-    with pytest.raises(UnattendedError):
+    with pytest.raises(AwayError):
         _scope().matches_exactly("src/a.py")
 
 
@@ -322,14 +323,14 @@ def test_ttl_turns_without_granted_turn_is_refused() -> None:
 
 def test_zero_ttl_turns_is_refused() -> None:
     """Covers: RD-1 requirement 1 a zero-turn permission is meaningless."""
-    with pytest.raises(UnattendedError):
+    with pytest.raises(AwayError):
         _standing(expires_at=None, granted_at_turn=1, ttl_turns=0)
 
 
 @pytest.mark.parametrize("instant", ["2026-10-18T06:00:00", "not-a-time", "2026-10-18"])
 def test_naive_or_malformed_instants_are_refused(instant: str) -> None:
     """Covers: RD-1 requirement 1 naively timed bounds are ambiguous and refused."""
-    with pytest.raises(UnattendedError):
+    with pytest.raises(AwayError):
         _standing(expires_at=instant)
 
 
@@ -350,7 +351,7 @@ def test_owner_words_are_recorded_verbatim() -> None:
 @pytest.mark.parametrize("words", ["", "   "])
 def test_empty_owner_words_are_refused(words: str) -> None:
     """Covers: RD-1 requirement 1 a standing decision must carry the owner's words."""
-    with pytest.raises(UnattendedError):
+    with pytest.raises(AwayError):
         _standing(owner_words=words)
 
 
@@ -388,7 +389,7 @@ def test_two_keys_for_one_scope_are_allowed() -> None:
 
 def test_run_id_is_validated() -> None:
     """Covers: RD-1 requirement 1 a sheet belongs to one identified run."""
-    with pytest.raises(UnattendedError):
+    with pytest.raises(AwayError):
         _sheet(run_id="run 7")
 
 
@@ -411,7 +412,7 @@ def test_never_delegable_parks_its_own_scope(kind: NeverDelegableKind) -> None:
         _sheet(), _decision(never_delegable=kind), now=NOW, current_turn=1
     )
     assert resolution.disposition is DecisionDisposition.PARK_BRANCH
-    assert resolution.autonomy_class is DecisionClass.CLASS_3_NEVER_DELEGABLE
+    assert resolution.autonomy_class is AutonomyClass.CLASS_3_NEVER_DELEGABLE
     assert resolution.parks_scope == _scope()
     assert resolution.push_allowed is False
 
@@ -467,7 +468,7 @@ def test_class_1_accepts_only_a_fully_green_candidate() -> None:
         _sheet(), _decision(acceptance=_acceptance()), now=NOW, current_turn=1
     )
     assert resolution.disposition is DecisionDisposition.AUTO_ACCEPT_LOCAL_COMMIT
-    assert resolution.autonomy_class is DecisionClass.CLASS_1_GATED_ACCEPT
+    assert resolution.autonomy_class is AutonomyClass.CLASS_1_GATED_ACCEPT
     assert resolution.audit_required is True
     assert resolution.push_allowed is False
     assert "local commit" in resolution.explanation[-2]
@@ -510,7 +511,7 @@ def test_class_1_resolution_never_allows_a_push() -> None:
         _sheet(), _decision(acceptance=_acceptance()), now=NOW, current_turn=1
     )
     assert resolution.push_allowed is False
-    with pytest.raises(UnattendedError):
+    with pytest.raises(AwayError):
         dataclasses.replace(resolution, push_allowed=True)
 
 
@@ -528,7 +529,7 @@ def test_class_2_takes_the_recommended_option() -> None:
     )
     resolution = resolve_decision(_sheet(), decision, now=NOW, current_turn=1)
     assert resolution.disposition is DecisionDisposition.TAKE_RECOMMENDED_OPTION
-    assert resolution.autonomy_class is DecisionClass.CLASS_2_RECOMMENDED
+    assert resolution.autonomy_class is AutonomyClass.CLASS_2_RECOMMENDED
     assert resolution.chosen_option == "skip wave 4 and its dependents"
     assert resolution.rejected_alternatives == ("extend the budget", "wait for the reset")
     assert resolution.audit_required is True
@@ -566,13 +567,13 @@ def test_class_2_is_not_taken_in_supervised_mode() -> None:
 
 def test_alternatives_without_a_recommendation_are_refused() -> None:
     """Covers: RD-1 requirement 3 rejected alternatives belong to a recommendation."""
-    with pytest.raises(UnattendedError):
+    with pytest.raises(AwayError):
         _decision(alternatives=("extend",))
 
 
 def test_rationale_without_a_recommendation_is_refused() -> None:
     """Covers: RD-1 requirement 3 a rationale belongs to a recommendation."""
-    with pytest.raises(UnattendedError):
+    with pytest.raises(AwayError):
         _decision(recommended_rationale="because")
 
 
@@ -585,7 +586,7 @@ def test_unhandled_decision_escalates_to_the_owner() -> None:
     """Covers: RD-1 requirement 3 every other unhandled decision reaches the owner."""
     resolution = resolve_decision(_sheet(), _decision(), now=NOW, current_turn=1)
     assert resolution.disposition is DecisionDisposition.ESCALATE_OWNER
-    assert resolution.autonomy_class is DecisionClass.CLASS_3_NEVER_DELEGABLE
+    assert resolution.autonomy_class is AutonomyClass.CLASS_3_NEVER_DELEGABLE
     assert resolution.parks_scope is None
     assert resolution.audit_required is False
 
@@ -594,7 +595,7 @@ def test_resolution_requires_the_right_input_types() -> None:
     """Covers: RD-1 requirement 3 resolution fails closed on malformed input."""
     with pytest.raises(DecisionSheetError):
         resolve_decision(cast("Any", "sheet"), _decision(), now=NOW, current_turn=1)
-    with pytest.raises(UnattendedError):
+    with pytest.raises(AwayError):
         resolve_decision(_sheet(), cast("Any", "decision"), now=NOW, current_turn=1)
 
 
@@ -649,8 +650,8 @@ def test_audit_entries_collect_only_class_1_and_class_2() -> None:
     )
     entries = build_audit_entries(resolutions)
     assert [entry.autonomy_class for entry in entries] == [
-        DecisionClass.CLASS_1_GATED_ACCEPT,
-        DecisionClass.CLASS_2_RECOMMENDED,
+        AutonomyClass.CLASS_1_GATED_ACCEPT,
+        AutonomyClass.CLASS_2_RECOMMENDED,
     ]
     assert entries[1].rejected_alternatives == ("extend",)
     assert entries[1].evidence_paths == ("evidence/g1.txt",)
@@ -671,9 +672,9 @@ def test_audit_entry_shape_is_exact() -> None:
 
 def test_audit_builder_rejects_malformed_input() -> None:
     """Covers: RD-1 requirement 3 the audit list fails closed, not silently."""
-    with pytest.raises(UnattendedError):
+    with pytest.raises(AwayError):
         build_audit_entries(cast("Any", "not-a-sequence"))
-    with pytest.raises(UnattendedError):
+    with pytest.raises(AwayError):
         build_audit_entries([cast("Any", "not-a-resolution")])
 
 
@@ -796,7 +797,7 @@ def test_a_run_without_an_alarm_channel_is_refused() -> None:
 
 def test_duplicate_alarm_channels_are_refused() -> None:
     """Covers: RD-1 requirement 4 alarm channels are a set, not a repeat list."""
-    with pytest.raises(UnattendedError):
+    with pytest.raises(AwayError):
         _observation(channels=(NotificationChannel.LOG, NotificationChannel.LOG))
 
 
@@ -809,7 +810,7 @@ def test_a_future_heartbeat_is_refused() -> None:
 @pytest.mark.parametrize("threshold", [0, -1])
 def test_a_non_positive_threshold_is_refused(threshold: int) -> None:
     """Covers: RD-1 requirement 4 every step has a real timeout."""
-    with pytest.raises(UnattendedError):
+    with pytest.raises(AwayError):
         _observation(stall_threshold_seconds=threshold)
 
 
@@ -878,9 +879,9 @@ def test_no_authorized_scope_refuses_the_start() -> None:
 
 def test_open_or_wildcard_scopes_cannot_even_be_constructed() -> None:
     """Covers: RD-1 requirement 4 an open scope is refused before the preflight."""
-    with pytest.raises(UnattendedError):
+    with pytest.raises(AwayError):
         _preflight(authorized_paths=("src/**",))
-    with pytest.raises(UnattendedError):
+    with pytest.raises(AwayError):
         _preflight(authorized_paths=("/",))
 
 
@@ -950,13 +951,13 @@ def test_preflight_ready_is_equivalent_to_having_no_blockers() -> None:
 
 def test_preflight_rejects_malformed_inputs() -> None:
     """Covers: RD-1 requirement 4 preflight facts are validated, never assumed."""
-    with pytest.raises(UnattendedError):
+    with pytest.raises(AwayError):
         _preflight(budget_spent_units=-1)
-    with pytest.raises(UnattendedError):
+    with pytest.raises(AwayError):
         _preflight(active_workers=-1)
-    with pytest.raises(UnattendedError):
+    with pytest.raises(AwayError):
         _preflight(notification_channels=(NotificationChannel.LOG, NotificationChannel.LOG))
-    with pytest.raises(UnattendedError):
+    with pytest.raises(AwayError):
         run_preflight(cast("Any", "not-a-request"))
 
 
@@ -1022,13 +1023,13 @@ def test_an_empty_plan_is_not_reported_as_stalled() -> None:
 
 def test_an_unknown_parked_scope_is_refused() -> None:
     """Covers: RD-1 requirement 2 the runner never holds a scope it cannot see."""
-    with pytest.raises(UnattendedError):
+    with pytest.raises(AwayError):
         compute_plan_impact(_tasks(), parked_scopes=(_scope(task="task-z"),))
 
 
 def test_an_unknown_dependency_is_refused() -> None:
     """Covers: RD-1 requirement 2 an unresolvable dependency fails closed."""
-    with pytest.raises(UnattendedError):
+    with pytest.raises(AwayError):
         compute_plan_impact(
             (PlanTaskState(scope=_scope(task="task-a"), depends_on=(_scope(task="task-z"),)),)
         )
@@ -1038,7 +1039,7 @@ def test_a_dependency_cycle_is_refused() -> None:
     """Covers: RD-1 requirement 2 a cyclic plan fails closed instead of looping."""
     first = _scope(task="task-a")
     second = _scope(task="task-b")
-    with pytest.raises(UnattendedError):
+    with pytest.raises(AwayError):
         compute_plan_impact(
             (
                 PlanTaskState(scope=first, depends_on=(second,)),
@@ -1049,19 +1050,19 @@ def test_a_dependency_cycle_is_refused() -> None:
 
 def test_a_task_cannot_depend_on_itself() -> None:
     """Covers: RD-1 requirement 2 a self-cycle fails closed at construction."""
-    with pytest.raises(UnattendedError):
+    with pytest.raises(AwayError):
         PlanTaskState(scope=_scope(task="task-a"), depends_on=(_scope(task="task-a"),))
 
 
 def test_duplicate_task_scopes_are_refused() -> None:
     """Covers: RD-1 requirement 2 the plan graph has one node per task."""
-    with pytest.raises(UnattendedError):
+    with pytest.raises(AwayError):
         compute_plan_impact((PlanTaskState(scope=_scope()), PlanTaskState(scope=_scope())))
 
 
 def test_mixed_project_graphs_are_refused() -> None:
     """Covers: RD-1 requirement 2 one impact model serves one project."""
-    with pytest.raises(UnattendedError):
+    with pytest.raises(AwayError):
         compute_plan_impact(
             (PlanTaskState(scope=_scope()), PlanTaskState(scope=_scope(project="proj-2")))
         )
@@ -1179,7 +1180,7 @@ def test_accepted_candidate_needs_its_decision_facts() -> None:
     resolution = resolve_decision(
         _sheet(), _decision(acceptance=_acceptance()), now=NOW, current_turn=1
     )
-    with pytest.raises(UnattendedError):
+    with pytest.raises(AwayError):
         build_morning_report(run_id="run-7", resolutions=(resolution,))
 
 
@@ -1191,15 +1192,35 @@ def test_parked_branch_needs_its_decision_facts() -> None:
         now=NOW,
         current_turn=1,
     )
-    with pytest.raises(UnattendedError):
+    with pytest.raises(AwayError):
         build_morning_report(run_id="run-7", resolutions=(resolution,))
 
 
 def test_report_rejects_malformed_sequences() -> None:
     """Covers: RD-1 requirement 4 the report fails closed on malformed input."""
-    with pytest.raises(UnattendedError):
+    with pytest.raises(AwayError):
         build_morning_report(run_id="run-7", resolutions=cast("Any", "not-a-sequence"))
-    with pytest.raises(UnattendedError):
+    with pytest.raises(AwayError):
         build_morning_report(run_id="run-7", resolutions=(), alarms=(cast("Any", "x"),))
-    with pytest.raises(UnattendedError):
+    with pytest.raises(AwayError):
         build_morning_report(run_id="run-7", resolutions=(), decisions=(cast("Any", "x"),))
+
+
+def test_one_away_module_holds_the_policy_and_its_store() -> None:
+    """Covers: H18 one away module; one vocabulary, one store, one error root."""
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("saberops.unattended")
+    away = importlib.import_module("saberops.away")
+    assert issubclass(away.DecisionSheetError, away.AwayError)
+    assert issubclass(away.PreflightError, away.AwayError)
+    assert issubclass(away.StallSupervisionError, away.AwayError)
+    assert callable(away.StandingDecisionStore)
+    assert tuple(kind.value for kind in away.NEVER_DELEGABLE_KINDS) == (
+        "test_gate",
+        "data_training_policy",
+        "roadmap_scope",
+        "budget_cap",
+        "credentials",
+        "destructive_operations",
+        "publishing",
+    )

@@ -78,7 +78,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from saberops.unattended import NEVER_DELEGABLE_KINDS
+from saberops.away import NEVER_DELEGABLE_KINDS
 
 __all__ = [
     "ASK_EVENT_VERB",

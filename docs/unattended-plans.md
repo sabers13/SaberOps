@@ -1,7 +1,7 @@
 # Unattended plan execution (RD-1, Step 017)
 
-This document describes `saberops.unattended`, the pure policy module that answers
-the questions an overnight run must answer without the owner awake:
+This document describes the away policy in `saberops.away`, the module that
+answers the questions an overnight run must answer without the owner awake:
 
 * may the run start at all (deterministic preflight);
 * who may decide a given decision (the frozen decision sheet, an autonomous
@@ -12,27 +12,29 @@ the questions an overnight run must answer without the owner awake:
 * what the owner reads in the morning (the morning report).
 
 It encodes the overnight-readiness policy and the roadmap's **RD-1**
-acceptance criteria. It is an **advice-and-record projection only**: the runtime
-still owns the plan, the scheduler, the notification
+acceptance criteria. The policy half is an **advice-and-record projection
+only**: the runtime still owns the plan, the scheduler, the notification
 transport, the owner-question queue, the audit store and the candidate's git
-operation. Nothing in this module reads or writes the filesystem, network,
-clock, environment, database or a model provider, and nothing here can move
-`main` or push.
+operation. The policy half reads no filesystem, network, clock, environment,
+database or model provider, and nothing in the module can move `main` or push.
+The durable half of the same module writes exactly the owner documents it owns:
+the standing-decision store, the away journal and the away policy, described
+under [Away mode wiring](#away-mode-wiring-f11) below.
 
 | Module surface | Responsibility |
 |---|---|
-| `unattended.DecisionScope` | the exact project/task/path scope a decision belongs to |
-| `unattended.StandingDecision` | one bounded, scoped, expiring owner answer |
-| `unattended.DecisionSheet` | the owner-frozen set of standing decisions for one run |
-| `unattended.NeverDelegableKind` / `NEVER_DELEGABLE_KINDS` | the immutable never-delegable list |
-| `unattended.resolve_decision` | the deterministic disposition for one decision |
-| `unattended.build_audit_entries` | the Orchestrator-alone audit list |
-| `unattended.run_preflight` | budget / wall-clock / scope / cap / channel readiness |
-| `unattended.RunProgress` | the 3-consecutive-failure circuit breaker |
-| `unattended.detect_stall` | the loud no-silent-stall alarm |
-| `unattended.compute_plan_impact` | what a park holds and what keeps running |
-| `unattended.build_morning_report` | the owner's morning summary |
-| `tests/test_unattended.py` | hermetic invariant and adversarial contract tests |
+| `away.DecisionScope` | the exact project/task/path scope a decision belongs to |
+| `away.StandingDecision` | one bounded, scoped, expiring owner answer |
+| `away.DecisionSheet` | the owner-frozen set of standing decisions for one run |
+| `away.NeverDelegableKind` / `NEVER_DELEGABLE_KINDS` | the immutable never-delegable list |
+| `away.resolve_decision` | the deterministic disposition for one decision |
+| `away.build_audit_entries` | the Orchestrator-alone audit list |
+| `away.run_preflight` | budget / wall-clock / scope / cap / channel readiness |
+| `away.RunProgress` | the 3-consecutive-failure circuit breaker |
+| `away.detect_stall` | the loud no-silent-stall alarm |
+| `away.compute_plan_impact` | what a park holds and what keeps running |
+| `away.build_morning_report` | the owner's morning summary |
+| `tests/test_away_policy.py` | hermetic invariant and adversarial contract tests |
 
 ## Scope boundary
 
@@ -292,7 +294,7 @@ The caller is the engine, never a model. A conforming caller:
 Recommended call shape:
 
 ```python
-from saberops.unattended import (
+from saberops.away import (
     AuthorityMode,
     DecisionSheet,
     build_morning_report,
@@ -317,10 +319,11 @@ elif resolution.disposition.value == "auto_accept_local_commit":
 
 ## Validation and failure modes
 
-All failures are explicit exceptions: `UnattendedError` for malformed or
-unbounded input, `DecisionSheetError` for an invalid sheet or answer,
-`PreflightError` for malformed preflight facts, and `StallSupervisionError` for
-supervision that would be silent or impossible.
+All failures are explicit exceptions under one root: `AwayError` for malformed
+or unbounded input and for a malformed durable away document,
+`DecisionSheetError` for an invalid sheet or answer, `PreflightError` for
+malformed preflight facts, and `StallSupervisionError` for supervision that
+would be silent or impossible.
 
 | Rejected input | Why |
 |---|---|
@@ -340,10 +343,12 @@ supervision that would be silent or impossible.
 
 ## Testing
 
-`tests/test_unattended.py` is hermetic: no providers, CLIs, login, network,
-database, filesystem mutation, sleeping or engine launch. Every test carries a
-`Covers: RD-1 …` docstring line naming the invariant it protects. The suite
-covers the never-delegable list and its immutability, exact-scope matching
+`tests/test_away_policy.py` is hermetic: no providers, CLIs, login, network,
+database, filesystem mutation, sleeping or engine launch. It exercises the
+policy half of `saberops.away`; the durable wiring drills (store, journal,
+return summary, dispatch gate) stay in `tests/test_f11_away.py`. Every test
+carries a `Covers: RD-1 …` docstring line naming the invariant it protects. The
+suite covers the never-delegable list and its immutability, exact-scope matching
 (including prefix and wildcard refusals), absolute and turn expiry, owner-word
 verbatim recording, sheet integrity, all three decision classes and their
 precedence, the authority modes, the audit list, the circuit breaker, the stall
@@ -353,11 +358,11 @@ morning report, determinism, immutability and the absence of input side effects.
 Run it from a worktree:
 
 ```bash
-.venv/bin/python -m pytest tests/test_unattended.py -q
+.venv/bin/python -m pytest tests/test_away_policy.py -q
 ```
 
 The lane gate additionally runs ruff and strict mypy across the repository
-(`bash scripts/lane-check.sh --base <base> --also tests/test_unattended.py`).
+(`bash scripts/lane-check.sh --base <base> --also tests/test_away_policy.py`).
 
 ## Deferred work
 

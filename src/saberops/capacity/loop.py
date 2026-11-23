@@ -1383,10 +1383,9 @@ def scheduler_tick(
     away_scopes: tuple[Any, ...] = ()
     if away_active:
         from saberops import away as away_module
-        from saberops.unattended import DecisionScope
 
         away_scopes = tuple(
-            DecisionScope(
+            away_module.DecisionScope(
                 project_id=away_module.project_scope_id(job.repo),
                 task_id=job.job_id,
             )
