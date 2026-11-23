@@ -2,8 +2,8 @@
 
 This module owns the structured review protocol: the finding classification
 taxonomy, strict JSON parsing with fail-closed errors, per-classification
-evidence validation, disposition computation, deterministic risk and
-design-readiness assessment, and the bounded review-round machine. It is a
+evidence validation, disposition computation, and deterministic risk and
+design-readiness assessment. It is a
 pure module: no I/O, no adapters, no clock, no randomness. Every decision is
 computed from structured inputs so contradictions between reviewer prose and
 enforced disposition are impossible by construction. It has no persistence,
@@ -114,9 +114,6 @@ _CLASSIFICATION_ALIASES: dict[str, FindingClassification] = {
 }
 _REPAIR_SCOPE_ALIASES: dict[str, RepairScope] = {
     token.upper(): member for member in RepairScope for token in (member.value, member.name)
-}
-_POLICY_VERDICT_ALIASES: dict[str, ReviewPolicyVerdict] = {
-    token.upper(): member for member in ReviewPolicyVerdict for token in (member.value, member.name)
 }
 
 
@@ -699,167 +696,3 @@ def assess_design_readiness(task_text: str, *, enabled: bool) -> DesignReadiness
         f"triggered_by_distinct_high_risk_categories ({', '.join(categories)})",
     )
 
-
-@dataclass(frozen=True)
-class ReviewRoundState:
-    """Persistable state of the bounded review-round machine.
-
-    ``substantive_round`` counts completed substantive reviews (0 before the
-    first). ``last_disposition`` stores the computed verdict value of the most
-    recent review. ``remaining_blockers_scopes`` holds repair_scope values of
-    outstanding blockers. The machine guarantees: after REVIEW #1 BLOCK
-    exactly one repair then REVIEW #2; after REVIEW #2 BLOCK only when every
-    remaining blocker is LOCAL_MECHANICAL may one FINAL REPAIR happen followed
-    by REVIEW #3; REVIEW #3 is terminal; a fourth substantive round is
-    structurally unreachable; any DESIGN_AFFECTING residual after round 2
-    forces DESIGN_RETURN with no further repair.
-    """
-
-    substantive_round: int
-    call_budget_used: int
-    last_disposition: str | None
-    remaining_blockers_scopes: tuple[str, ...]
-    final_repair_used: bool
-    terminal: bool
-
-
-_ROUND_STATE_FIELDS: tuple[str, ...] = (
-    "substantive_round",
-    "call_budget_used",
-    "last_disposition",
-    "remaining_blockers_scopes",
-    "final_repair_used",
-    "terminal",
-)
-
-
-def initial_review_round_state() -> ReviewRoundState:
-    """Return the state before any substantive review has run."""
-    return ReviewRoundState(
-        substantive_round=0,
-        call_budget_used=0,
-        last_disposition=None,
-        remaining_blockers_scopes=(),
-        final_repair_used=False,
-        terminal=False,
-    )
-
-
-def next_review_round(state: ReviewRoundState) -> ReviewRoundState:
-    """Advance to the next permitted substantive review round.
-
-    Raises :class:`ReviewProtocolError` when the transition is structurally
-    unreachable: terminal states, concluded dispositions, missing final
-    repair, design-affecting residuals after round 2, or any fourth round.
-    """
-    if state.terminal:
-        raise ReviewProtocolError("review round state is terminal; no further rounds exist")
-    if state.substantive_round >= 3:
-        raise ReviewProtocolError("fourth substantive review round is structurally unreachable")
-    if state.substantive_round == 0:
-        return replace(state, substantive_round=1)
-    if state.substantive_round == 1:
-        if state.last_disposition not in (None, ReviewPolicyVerdict.BLOCK.value):
-            raise ReviewProtocolError(
-                f"no further review after disposition {state.last_disposition}"
-            )
-        return replace(state, substantive_round=2)
-    # substantive_round == 2: REVIEW #3 requires exactly the one final repair
-    # of only local-mechanical blockers to have happened.
-    if state.last_disposition != ReviewPolicyVerdict.BLOCK.value:
-        raise ReviewProtocolError(
-            f"review #3 unreachable after disposition {state.last_disposition}"
-        )
-    if any(
-        scope != RepairScope.LOCAL_MECHANICAL.value for scope in state.remaining_blockers_scopes
-    ):
-        raise ReviewProtocolError(
-            "design-affecting residual after review #2 forces DESIGN_RETURN; "
-            "no further repair or review"
-        )
-    if not state.final_repair_used:
-        raise ReviewProtocolError(
-            "review #3 requires the single final repair of local-mechanical blockers first"
-        )
-    return replace(state, substantive_round=3)
-
-
-def final_repair_allowed(state: ReviewRoundState) -> bool:
-    """True iff the one FINAL REPAIR after REVIEW #2 is currently permitted.
-
-    Permitted only when review #2 just blocked, the final repair has not been
-    used, and EVERY remaining blocker scope is LOCAL_MECHANICAL. Any
-    DESIGN_AFFECTING residual forbids it (DESIGN_RETURN instead).
-    """
-    return bool(
-        state.substantive_round == 2
-        and state.last_disposition == ReviewPolicyVerdict.BLOCK.value
-        and not state.final_repair_used
-        and state.remaining_blockers_scopes
-        and all(
-            scope == RepairScope.LOCAL_MECHANICAL.value for scope in state.remaining_blockers_scopes
-        )
-    )
-
-
-def review_round_state_to_json(state: ReviewRoundState) -> str:
-    """Serialize the round state for durable persistence."""
-    return json.dumps(
-        {
-            "substantive_round": state.substantive_round,
-            "call_budget_used": state.call_budget_used,
-            "last_disposition": state.last_disposition,
-            "remaining_blockers_scopes": list(state.remaining_blockers_scopes),
-            "final_repair_used": state.final_repair_used,
-            "terminal": state.terminal,
-        }
-    )
-
-
-def review_round_state_from_json(raw: str) -> ReviewRoundState:
-    """Rebuild round state from JSON, failing closed on any deviation."""
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ReviewProtocolError(f"malformed review round state JSON: {exc}") from exc
-    if not isinstance(data, dict):
-        raise ReviewProtocolError("review round state must be a JSON object")
-    for key in _ROUND_STATE_FIELDS:
-        if key not in data:
-            raise ReviewProtocolError(f"review round state missing required field: {key}")
-    substantive_round = data["substantive_round"]
-    call_budget_used = data["call_budget_used"]
-    for name, value in (
-        ("substantive_round", substantive_round),
-        ("call_budget_used", call_budget_used),
-    ):
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            raise ReviewProtocolError(f"review round state field '{name}' must be a int >= 0")
-    last_disposition_raw = data["last_disposition"]
-    if last_disposition_raw is None:
-        last_disposition: str | None = None
-    else:
-        coerced = _POLICY_VERDICT_ALIASES.get(str(last_disposition_raw).strip().upper())
-        if coerced is None:
-            raise ReviewProtocolError(f"unknown last_disposition: {last_disposition_raw!r}")
-        last_disposition = coerced.value
-    raw_scopes = data["remaining_blockers_scopes"]
-    if not isinstance(raw_scopes, list):
-        raise ReviewProtocolError("field 'remaining_blockers_scopes' must be a list")
-    scopes: list[str] = []
-    for scope_raw in raw_scopes:
-        scope = _REPAIR_SCOPE_ALIASES.get(str(scope_raw).strip().upper())
-        if scope is None:
-            raise ReviewProtocolError(f"unknown remaining blocker scope: {scope_raw!r}")
-        scopes.append(scope.value)
-    for name in ("final_repair_used", "terminal"):
-        if not isinstance(data[name], bool):
-            raise ReviewProtocolError(f"review round state field '{name}' must be a boolean")
-    return ReviewRoundState(
-        substantive_round=substantive_round,
-        call_budget_used=call_budget_used,
-        last_disposition=last_disposition,
-        remaining_blockers_scopes=tuple(scopes),
-        final_repair_used=data["final_repair_used"],
-        terminal=data["terminal"],
-    )

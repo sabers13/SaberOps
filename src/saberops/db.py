@@ -3954,43 +3954,6 @@ class Database:
             },
         )
 
-    def mark_worker_stalled(
-        self,
-        run_id: str,
-        attempt_id: str | None = None,
-        *,
-        stalled: bool,
-        reason: str,
-    ) -> None:
-        """Record a soft-inactivity stall (or its recovery) durably.
-
-        A stall is attention evidence only: it never terminates the worker and
-        never changes routing.  ``stalled=False`` records that output resumed.
-        """
-        if not self._plan_schema_available:
-            return
-        now = current_iso_timestamp()
-        health = "stalled" if stalled else "healthy"
-        with self._get_connection() as conn:
-            conn.execute(
-                """
-                UPDATE supervision
-                SET health_state = ?,
-                    health_reason = ?,
-                    current_attempt_id = COALESCE(?, current_attempt_id),
-                    updated_at = ?
-                WHERE run_id = ?
-                """,
-                (health, reason, attempt_id, now, run_id),
-            )
-            conn.commit()
-        self.record_event(
-            run_id,
-            "worker_resumed" if not stalled else "worker_stalled",
-            attempt_id=attempt_id,
-            payload={"reason": reason},
-        )
-
     def update_supervision_health(
         self,
         run_id: str,
@@ -4976,36 +4939,6 @@ class Database:
                     trace.summary_json,
                     trace.failure_kind,
                     trace.failure_reason,
-                ),
-            )
-            conn.commit()
-
-    def update_attempt_trace(self, trace: AttemptTrace) -> None:
-        """Update the mutable columns of an AttemptTrace row."""
-        with self._get_connection() as conn:
-            conn.execute(
-                """
-                UPDATE attempt_traces SET
-                    trace_class = ?,
-                    source_kind = ?,
-                    updated_at = ?,
-                    completed_at = ?,
-                    tool_effects_count = ?,
-                    summary_json = ?,
-                    failure_kind = ?,
-                    failure_reason = ?
-                WHERE id = ?
-                """,
-                (
-                    trace.trace_class.value,
-                    trace.source_kind,
-                    trace.updated_at,
-                    trace.completed_at,
-                    trace.tool_effects_count,
-                    trace.summary_json,
-                    trace.failure_kind,
-                    trace.failure_reason,
-                    trace.id,
                 ),
             )
             conn.commit()

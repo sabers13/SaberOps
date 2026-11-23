@@ -999,32 +999,6 @@ def count_block_verdicts(db: Any, run_id: str) -> int:
     )
 
 
-def first_blocked_candidate_sha(db: Any, run_id: str) -> str | None:
-    """Return the candidate commit a substantive reviewer BLOCK assessed.
-
-    Review evidence records the exact candidate SHA.  This keeps the N14
-    deterministic probe on the tree the reviewer actually blocked, not on a
-    later repaired candidate that may legitimately satisfy acceptance.
-    """
-    from saberops.models import DispatchStage, ReviewVerdict
-
-    blocked_ids = {
-        review.id
-        for review in db.get_reviews_for_run(run_id)
-        if review.verdict is ReviewVerdict.BLOCK
-    }
-    if not blocked_ids:
-        return None
-    for evidence in db.get_dispatch_evidence_for_run(run_id):
-        if (
-            evidence.stage is DispatchStage.REVIEW
-            and evidence.review_id in blocked_ids
-            and evidence.candidate_sha
-        ):
-            return str(evidence.candidate_sha)
-    return None
-
-
 #: Must-fail acceptance probe: both catalogue rows require ``greet('')`` to
 #: raise ``ValueError``.  The probe runs the candidate's exact ``app.py`` in a
 #: throwaway directory and reports whether the clause still holds.

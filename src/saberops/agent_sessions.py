@@ -17,7 +17,6 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import replace
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -543,40 +542,6 @@ def read_sessions(root: Path, owner: str) -> list[dict[str, Any]]:
         except (OSError, ValueError, TypeError, sqlite3.Error):
             continue
     return sessions
-
-
-def legacy_session(
-    session_id: str,
-    role: str,
-    association: str,
-    provider: str,
-    model: str,
-    state: str,
-    output: str,
-    created: str | float | None = None,
-) -> dict[str, Any]:
-    try:
-        timestamp = (
-            datetime.fromisoformat(created).timestamp()
-            if isinstance(created, str)
-            else float(created or 0)
-        )
-    except ValueError:
-        timestamp = 0.0
-    return {
-        "id": session_id,
-        "role": role,
-        "association": association,
-        "provider": provider,
-        "model": model,
-        "state": state,
-        "output": output[-VIEW_MAX_BYTES:],
-        "response": "",
-        "created": timestamp,
-        "view_truncated": len(output) > VIEW_MAX_BYTES,
-        "source": "Recorded result · live transcript was not captured",
-        "native_cli_reason": "No verified native session attachment was recorded for this call.",
-    }
 
 
 def _terminated_line(text: str) -> str:
