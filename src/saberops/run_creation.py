@@ -10,7 +10,7 @@ Frozen per run (at minimum):
 
 * effective gate command
 * effective gate-scratch mode
-* effective review policy
+* the mandatory independent-review guarantee (or the owner's manual switch)
 * effective data/training policy
 * effective accept target branch
 
@@ -32,14 +32,13 @@ from saberops.config import (
 )
 from saberops.control_plane.capabilities import Capability
 from saberops.gate_runner import GateScratchMode, GateScratchPolicyError
-from saberops.models import ReviewPolicyMode, Tier
+from saberops.models import Tier
 from saberops.project_settings import (
     DataPolicy,
     ProjectSettings,
     ProjectSettingsError,
     detect_authoritative_gate,
     load_project_settings,
-    workflow_preset,
 )
 from saberops.project_settings import (
     resolve_effective_training_allowed as _settings_training_allowed,
@@ -92,7 +91,6 @@ class RunRequest:
     # Owner-policy dimensions: None = follow project settings.
     gate_command: str | None = None
     training_allowed: bool | None = None
-    review_policy: ReviewPolicyMode | str | None = None
     accept_target_branch: str | None = None
     gate_scratch_mode: GateScratchMode | str | None = None
     # Request-level run tuning (kept for compatibility; centralized here).
@@ -113,7 +111,10 @@ class RunRequest:
     worker_timeout: float | None = None
     gate_timeout: float | None = None
     review_enabled: bool | None = None
-    review: bool | None = None
+    #: The owner's one review switch.  Only ``orch run --no-review`` sets it;
+    #: no scheduler job, plan lane or MCP submission can.
+    review_disabled: bool = False
+    review_focus: str | None = None
     review_timeout: float | None = None
     review_mode: str = "bounded"
     review_limit: int = DEFAULT_REVIEW_LIMIT
@@ -173,46 +174,6 @@ def resolve_effective_training_allowed(
 ) -> bool:
     """Return True; legacy training flags no longer restrict model admission."""
     return True
-
-
-def resolve_effective_review_policy_mode(
-    *,
-    repo_path: Path | str,
-    explicit_run_mode: ReviewPolicyMode | str | None,
-) -> ReviewPolicyMode:
-    """Resolve the effective review policy via the tightening-only merge.
-
-    Delegates to the canonical
-    :func:`saberops.review_adaptive.resolve_effective_review_policy_mode`
-    over the canonical persisted project mode: this authority composes
-    the existing store, never a divergent copy.
-    """
-    from saberops.review_adaptive import (
-        ReviewPolicyError,
-        load_project_review_policy,
-    )
-    from saberops.review_adaptive import (
-        resolve_effective_review_policy_mode as canonical_merge,
-    )
-
-    try:
-        project_mode = load_project_review_policy(repo_path)
-    except ReviewPolicyError as exc:
-        raise RunCreationError(str(exc)) from exc
-    if explicit_run_mode is None:
-        explicit: ReviewPolicyMode | None = None
-    elif isinstance(explicit_run_mode, ReviewPolicyMode):
-        explicit = explicit_run_mode
-    else:
-        token = str(explicit_run_mode).strip().upper().replace("-", "_")
-        try:
-            explicit = ReviewPolicyMode(token)
-        except ValueError as exc:
-            known = ", ".join(m.value for m in ReviewPolicyMode)
-            raise RunCreationError(
-                f"review policy must be one of {known}; got {explicit_run_mode!r}"
-            ) from exc
-    return canonical_merge(project_mode=project_mode, explicit_run_mode=explicit)
 
 
 def resolve_effective_gate_scratch_mode(
@@ -323,9 +284,6 @@ def resolve_effective_run_config(request: RunRequest) -> RunConfig:
         explicit_training_allowed=request.training_allowed,
         settings=snapshot,
     )
-    review_policy_mode = resolve_effective_review_policy_mode(
-        repo_path=request.repo_path, explicit_run_mode=request.review_policy
-    )
     gate_scratch_mode = resolve_effective_gate_scratch_mode(
         repo_path=request.repo_path, explicit_mode=request.gate_scratch_mode
     )
@@ -334,16 +292,13 @@ def resolve_effective_run_config(request: RunRequest) -> RunConfig:
         explicit_branch=request.accept_target_branch,
         settings=snapshot,
     )
+    review_disabled = bool(request.review_disabled)
     review_enabled = request.review_enabled
     if review_enabled is None:
-        review_enabled = bool(request.review)
-    # The owner request and the effective policy are distinct audit facts.  A
-    # project ``ALWAYS_REQUIRED`` policy makes independent review apply even
-    # when the owner did not pass ``--review``; the frozen config must say so
-    # without mislabelling the requirement source as OWNER_EXPLICIT.
-    review_requested = review_enabled
-    review_policy_requires = review_policy_mode is ReviewPolicyMode.ALWAYS_REQUIRED
-    effective_review_enabled = review_enabled or review_policy_requires
+        review_enabled = True
+    # Review is mandatory for anything that can be accepted.  A scout never
+    # produces an acceptability candidate, and the owner's direct manual
+    # switch is the only other way the guarantee is absent.
     try:
         kind = _resolve_run_kind(request.kind)
     except ValueError as exc:
@@ -372,22 +327,16 @@ def resolve_effective_run_config(request: RunRequest) -> RunConfig:
             reserve_override=request.reserve_override,
             required_capabilities=required_capabilities,
             gate_enabled=snapshot.gate_enabled and kind != SCOUT_RUN_KIND,
-            review_disabled=snapshot.review_disabled or kind == SCOUT_RUN_KIND,
-            workflow_mode=workflow_preset(snapshot, review_policy_mode.value),
+            review_disabled=review_disabled or kind == SCOUT_RUN_KIND,
             gate_command=gate,
             max_attempts=1 if kind == SCOUT_RUN_KIND else request.max_attempts,
             worker_timeout=request.worker_timeout,
             gate_timeout=request.gate_timeout,
-            review_enabled=(
-                effective_review_enabled
-                if not snapshot.review_disabled and kind != SCOUT_RUN_KIND
-                else False
-            ),
-            review_requested=review_requested,
+            review_enabled=review_enabled and not review_disabled and kind != SCOUT_RUN_KIND,
+            review_focus=request.review_focus,
             review_timeout=request.review_timeout,
-            review_mode=snapshot.review_mode or request.review_mode,
-            review_limit=snapshot.review_limit or request.review_limit,
-            review_policy_mode=review_policy_mode,
+            review_mode=request.review_mode,
+            review_limit=request.review_limit,
             publish_candidate=(
                 False if kind == SCOUT_RUN_KIND else request.publish_candidate
             ),
@@ -411,28 +360,15 @@ def effective_policy_summary(repo_path: Path | str) -> dict[str, object]:
     ``"error"`` entry so the surface can refuse to render.
     """
     from saberops.gate_runner import load_project_gate_scratch_policy
-    from saberops.review_adaptive import load_project_review_policy
 
     try:
         settings = load_project_settings(repo_path)
     except ProjectSettingsError as exc:
         return {"error": str(exc)}
     try:
-        review_mode = load_project_review_policy(repo_path)
-    except Exception as exc:  # noqa: BLE001 - surface must render the failure
-        return {"error": f"Project review policy is invalid: {exc}"}
-    try:
         scratch_mode = load_project_gate_scratch_policy(repo_path)
     except Exception as exc:  # noqa: BLE001 - surface must render the failure
         return {"error": f"Project gate-scratch policy is invalid: {exc}"}
-    try:
-        from saberops.project import bind_project_state_dir, compute_project_identity
-        from saberops.review_adaptive import project_review_policy_path
-
-        _state_dir = bind_project_state_dir(compute_project_identity(repo_path))
-        review_explicit = project_review_policy_path(_state_dir).exists()
-    except Exception:  # noqa: BLE001 - display hint only; policy already resolved
-        review_explicit = False
     training_allowed = _settings_training_allowed(settings, repo_path=repo_path)
     data_policy = DataPolicy.ALLOWED
     gate_configured = settings.gate_command
@@ -449,10 +385,7 @@ def effective_policy_summary(repo_path: Path | str) -> dict[str, object]:
     )
     return {
         "gate_enabled": settings.gate_enabled,
-        "review_disabled": settings.review_disabled,
-        "review_mode": settings.review_mode or "bounded",
-        "review_limit": settings.review_limit or DEFAULT_REVIEW_LIMIT,
-        "workflow_preset": workflow_preset(settings, review_mode.value),
+        "review_mandatory": True,
         "gate_command": gate_configured,
         "gate_configured": gate_configured is not None,
         "gate_detected": gate_detected,
@@ -461,8 +394,6 @@ def effective_policy_summary(repo_path: Path | str) -> dict[str, object]:
         "data_policy_label": ("Allowed" if data_policy is DataPolicy.ALLOWED else "Denied"),
         "data_policy_explicit": settings.data_policy is not None,
         "training_allowed": training_allowed,
-        "review_policy_mode": review_mode.value,
-        "review_policy_explicit": review_explicit,
         "gate_scratch_mode": scratch_mode.value,
         "accept_target_branch": settings.accept_target_branch,
         "accept_target_branch_explicit": settings.accept_target_branch is not None,
@@ -479,7 +410,6 @@ __all__ = [
     "RunRequest",
     "effective_policy_summary",
     "resolve_effective_gate_scratch_mode",
-    "resolve_effective_review_policy_mode",
     "resolve_effective_run_config",
     "resolve_effective_target_branch",
     "resolve_effective_training_allowed",

@@ -100,6 +100,7 @@ _TASK_V2_KEYS = _TASK_V1_KEYS | {
     "run",
     "kind",
     "wave",
+    "review_focus",
 }
 
 _VERSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
@@ -203,6 +204,9 @@ class PlanTaskDef:
     #: dispatch, so they always stay ``job``.
     kind: str = "job"
     wave: str = ""
+    #: Optional planner focus handed to the independent reviewer.  It can only
+    #: add attention; it never turns review off.
+    review_focus: str = ""
 
     def __post_init__(self) -> None:
         """Canonicalize benign spelling so hashing and validation agree."""
@@ -229,6 +233,7 @@ class PlanTaskDef:
             "run",
             "kind",
             "wave",
+            "review_focus",
         ):
             value = getattr(self, name)
             if isinstance(value, str):
@@ -273,6 +278,9 @@ class PlanTaskDef:
         # before H1 keeps its original content hash.
         if self.difficulty:
             legacy["difficulty"] = self.difficulty
+        # Written only when set so an older revision's content hash still verifies.
+        if self.review_focus:
+            legacy["review_focus"] = self.review_focus
         return legacy
 
     @classmethod
@@ -318,6 +326,7 @@ class PlanTaskDef:
             "run",
             "kind",
             "wave",
+            "review_focus",
         ):
             value = data.get(name, "")
             if not isinstance(value, str):
@@ -349,6 +358,7 @@ class PlanTaskDef:
             run=detail["run"],
             kind=detail["kind"] or "job",
             wave=detail["wave"],
+            review_focus=detail["review_focus"],
         )
 
 

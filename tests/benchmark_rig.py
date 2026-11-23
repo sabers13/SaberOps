@@ -48,10 +48,8 @@ from saberops.jobs.models import JobRequirements, JobState
 from saberops.jobs.service import get_job, job_status_view, submit_job
 from saberops.mcp.tools import ServerContext, build_default_registry
 from saberops.model_access.readiness_service import ReadinessService
-from saberops.models import ReviewPolicyMode
 from saberops.ownership import Liveness, ProcessIdentity, probe_liveness
 from saberops.paths import owner_state_dir
-from saberops.project_settings import set_project_review_policy
 from saberops.supervisor import RunSupervisor
 
 #: The fake-mode table must stay comfortably inside the gate budget; the drills
@@ -161,7 +159,6 @@ def create_task_repos(rig: RigEnvironment) -> dict[str, Path]:
     repos: dict[str, Path] = {}
     for task in TASKS:
         repo, _sha = create_toy_repo(parent, f"toy-{task.task_id}")
-        set_project_review_policy(repo, ReviewPolicyMode.ALWAYS_REQUIRED)
         assert cli_main(["project", "set-gate", "--repo", str(repo), rig.gate_command]) == 0
         repos[task.task_id] = repo
     return repos

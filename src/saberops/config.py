@@ -17,7 +17,7 @@ from saberops.control_plane.capabilities import (
     normalize_required_capabilities,
 )
 from saberops.jobs.models import Difficulty, JobRole, coerce_difficulty, coerce_job_role
-from saberops.models import GateScratchMode, ReviewPolicyMode, Tier
+from saberops.models import GateScratchMode, Tier
 from saberops.owner_mode import ModeAction, decide_owner_action
 from saberops.tooling.contracts import validate_logical_ref
 
@@ -93,37 +93,28 @@ class RunConfig:
     reserve_override: bool = False
     required_capabilities: tuple[str, ...] = ()
     gate_enabled: bool = True
+    #: The owner's one review switch, set only by a direct manual ``orch run
+    #: --no-review``.  Scheduler jobs, plan lanes and planner submissions can
+    #: never populate it, so review stays mandatory for everything that can be
+    #: accepted.
     review_disabled: bool = False
-    workflow_mode: str = "custom"
     gate_command: str = "make gate"
     max_attempts: int = 2
     worker_timeout: float | None = None
     worker_timeout_explicit: bool = False
     worker_inactivity_timeout: float = WORKER_INACTIVITY_TIMEOUT
     gate_timeout: float = DEFAULT_GATE_TIMEOUT
-    #: Effective independent-review policy frozen at run creation.  ``True``
-    #: means the frozen owner request or project policy guarantees that an
-    #: independent review applies to a produced candidate; ``False`` means no
-    #: guarantee was in force at creation (risk-adaptive policy may still
-    #: require one for a high-risk candidate).  This is not the owner-request
-    #: audit bit -- see :attr:`owner_review_requested`.
+    #: Effective independent-review guarantee frozen at run creation.
+    #: ``True`` means every produced candidate is reviewed; ``False`` is only
+    #: the scout kind or the owner's explicit manual ``--no-review`` switch.
     review_enabled: bool = False
-    #: The owner's explicit per-run review request (``--review`` / Web
-    #: checkbox), or ``None`` for a legacy payload.  The audit source for
-    #: ``OWNER_EXPLICIT`` decisions uses :attr:`owner_review_requested`, never
-    #: the effective policy bit above.
-    review_requested: bool | None = None
+    #: Planner-authored focus for the independent reviewer (what to check,
+    #: for example new suppressions or broad handlers).  It can only add
+    #: attention, never turn review off.
+    review_focus: str = ""
     review_timeout: float = DEFAULT_REVIEW_TIMEOUT
     review_mode: ReviewMode = DEFAULT_REVIEW_MODE
     review_limit: int = DEFAULT_REVIEW_LIMIT
-    # Project-scoped risk-adaptive review policy mode, FROZEN at
-    # run creation.  ``RISK_ADAPTIVE`` is the canonical default; project
-    # configuration may tighten to ``ALWAYS_REQUIRED`` (which forces an
-    # independent semantic review even when the classifier would mark
-    # the delta LOW).  Never allow weakening the hard minimums: there is
-    # no ``NEVER_REQUIRED`` mode.  Later project policy changes affect
-    # FUTURE runs only.
-    review_policy_mode: ReviewPolicyMode = ReviewPolicyMode.RISK_ADAPTIVE
     # Frozen candidate-publication decision for this run: whether every
     # gate-passed candidate commit is published (non-force, exact-SHA) to the
     # target repository's ``origin`` as the Orch candidate branch for external
@@ -181,17 +172,6 @@ class RunConfig:
         # construction path (resolve, reconstruct, direct callers) compares
         # the same value.
         object.__setattr__(self, "difficulty", coerce_difficulty(self.difficulty))
-
-    @property
-    def owner_review_requested(self) -> bool:
-        """Return the owner's explicit review request for audit decisions.
-
-        Legacy payloads recorded only ``review_enabled``; for those the old
-        field keeps its historical owner-explicit meaning.
-        """
-        if self.review_requested is None:
-            return self.review_enabled
-        return self.review_requested
 
     @property
     def initial_tier(self) -> Tier:
@@ -300,28 +280,6 @@ def _reconstruct_gate_scratch_mode(data: dict[str, Any]) -> GateScratchMode:
         return GateScratchMode.DISK
 
 
-def _reconstruct_review_policy_mode(data: dict[str, Any]) -> ReviewPolicyMode:
-    """Resolve a persisted review-policy mode, defaulting conservatively.
-
-    Mirrors :func:`_reconstruct_gate_scratch_mode`.  Missing / empty /
-    non-string values fall back to the canonical ``RISK_ADAPTIVE``
-    default -- a legacy Run must never be re-classified into
-    ``ALWAYS_REQUIRED`` by reconstruction (that would silently tighten
-    the policy on legacy runs).  An unrecognized string is also
-    ``RISK_ADAPTIVE`` rather than silently weakened to a non-existent
-    mode.
-    """
-    raw = data.get("review_policy_mode")
-    if not raw:
-        return ReviewPolicyMode.RISK_ADAPTIVE
-    if not isinstance(raw, str):
-        return ReviewPolicyMode.RISK_ADAPTIVE
-    try:
-        return ReviewPolicyMode(raw.strip().upper())
-    except ValueError:
-        return ReviewPolicyMode.RISK_ADAPTIVE
-
-
 def freeze_owner_binding_registry_payload() -> dict[str, Any] | None:
     """Freeze the effective owner BindingRegistry as non-secret durable material.
 
@@ -366,21 +324,16 @@ def resolve_run_config(
     required_capabilities: tuple[str | Capability, ...] = (),
     gate_enabled: bool = True,
     review_disabled: bool = False,
-    workflow_mode: str = "custom",
     gate_command: str | None = None,
     max_attempts: int = 2,
     worker_timeout: float | None = None,
     gate_timeout: float | None = None,
     review_enabled: bool | None = None,
-    review_requested: bool | None = None,
     review: bool | None = None,
     review_timeout: float | None = None,
     review_mode: str = "bounded",
     review_limit: int = DEFAULT_REVIEW_LIMIT,
-    # Project-scoped risk-adaptive review policy mode, FROZEN at
-    # run creation.  ``None`` falls back to the canonical default; a
-    # malformed value raises.
-    review_policy_mode: ReviewPolicyMode | str | None = None,
+    review_focus: str | None = None,
     publish_candidate: bool | None = None,
     tool_refs: tuple[str, ...] = (),
     # ``tier`` keeps legacy callers source-compatible while normalizing them.
@@ -407,18 +360,6 @@ def resolve_run_config(
         raise ValueError("review_mode must be 'bounded' or 'max'")
     if review_limit < 1:
         raise ValueError("review_limit must be >= 1")
-    if review_policy_mode is None:
-        resolved_review_policy_mode = ReviewPolicyMode.RISK_ADAPTIVE
-    elif isinstance(review_policy_mode, ReviewPolicyMode):
-        resolved_review_policy_mode = review_policy_mode
-    else:
-        try:
-            resolved_review_policy_mode = ReviewPolicyMode(str(review_policy_mode).strip().upper())
-        except ValueError as exc:
-            known = ", ".join(mode.value for mode in ReviewPolicyMode)
-            raise ValueError(
-                f"review_policy_mode must be one of {known}; got {review_policy_mode!r}"
-            ) from exc
     legacy_tier = _as_tier(tier)
     manual = _as_tier(manual_tier, default=legacy_tier)
     if raw_mode not in ("auto", "manual"):
@@ -433,7 +374,15 @@ def resolve_run_config(
     if raw_mode == "manual":
         assert manual is not None
     explicit_worker = worker_timeout is not None
-    enabled = review_enabled if review_enabled is not None else bool(review)
+    # Review is mandatory for a build run; the frozen guarantee is derived
+    # from the owner switch and the run kind, never from an optional request
+    # bit.  ``review`` is a legacy alias kept for callers; it no longer
+    # disables anything.
+    enabled = (
+        review_enabled
+        if review_enabled is not None
+        else (not review_disabled and raw_kind != "scout")
+    )
     normalized_tool_refs = tuple(sorted({validate_logical_ref(ref) for ref in tool_refs}))
     if gate_scratch_mode is None:
         resolved_gate_scratch_mode = GateScratchMode.DISK
@@ -462,20 +411,18 @@ def resolve_run_config(
         required_capabilities=normalize_required_capabilities(required_capabilities),
         gate_enabled=gate_enabled,
         review_disabled=review_disabled,
-        workflow_mode=workflow_mode,
         gate_command=(gate_command or "make gate").strip() if gate_enabled else "",
         max_attempts=max_attempts,
         worker_timeout=(float(worker_timeout) if worker_timeout is not None else None),
         worker_timeout_explicit=explicit_worker,
         gate_timeout=float(gate_timeout) if gate_timeout is not None else DEFAULT_GATE_TIMEOUT,
         review_enabled=enabled,
-        review_requested=review_requested,
+        review_focus=(str(review_focus).strip() if review_focus else ""),
         review_timeout=(
             float(review_timeout) if review_timeout is not None else DEFAULT_REVIEW_TIMEOUT
         ),
         review_mode=raw_review_mode,  # type: ignore[arg-type]
         review_limit=review_limit,
-        review_policy_mode=resolved_review_policy_mode,
         # Freeze the candidate-publication decision at run creation: an
         # explicit owner override wins; otherwise the owner mode's stored
         # permissions decide.  Never re-derived later for an already-created run.
@@ -537,7 +484,6 @@ def reconstruct_run_config(data: dict[str, Any]) -> RunConfig:
         ),
         gate_enabled=_validation_bool(data, "gate_enabled", True),
         review_disabled=_validation_bool(data, "review_disabled", False),
-        workflow_mode=str(data.get("workflow_mode", "custom")),
         gate_command=str(data.get("gate_command", "make gate")),
         max_attempts=int(data.get("max_attempts", 2)),
         worker_timeout=(
@@ -549,21 +495,10 @@ def reconstruct_run_config(data: dict[str, Any]) -> RunConfig:
         ),
         gate_timeout=float(data.get("gate_timeout", DEFAULT_GATE_TIMEOUT)),
         review_enabled=bool(data.get("review_enabled", False)),
-        review_requested=(
-            data["review_requested"]
-            if isinstance(data.get("review_requested"), bool)
-            else None
-        ),
+        review_focus=str(data.get("review_focus") or "").strip(),
         review_timeout=float(data.get("review_timeout", DEFAULT_REVIEW_TIMEOUT)),
         review_mode=raw_review_mode,  # type: ignore[arg-type]
         review_limit=raw_review_limit,
-        # A missing / malformed ``review_policy_mode`` falls back
-        # to the canonical RISK_ADAPTIVE default -- a legacy persisted
-        # Run must never be re-classified as ``ALWAYS_REQUIRED`` by
-        # reconstruction.  Reconstruction is also never downgraded to a
-        # ``NEVER_REQUIRED`` mode (none exists), so a malformed value
-        # becomes RISK_ADAPTIVE instead of silently weakening the policy.
-        review_policy_mode=_reconstruct_review_policy_mode(data),
         # Legacy or partial payloads have no recorded decision: stay
         # conservative (no automatic remote mutation).
         publish_candidate=bool(data.get("publish_candidate", False)),

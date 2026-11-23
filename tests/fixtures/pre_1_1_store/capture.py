@@ -132,14 +132,22 @@ def main() -> int:
     payload = add_candidate_to_chain(payload, role="WORKER", candidate_id=CLINE_ROUTE)
     save_user_routing(payload)
 
-    # 4. Old review knobs: a chosen review mode and round limit.
-    OrchestratorService.set_project_workflow(
-        rig.repo,
-        "custom",
-        gate_enabled=True,
-        review="always-required",
-        mode="max",
-        limit=5,
+    # 4. Old review knobs: a chosen review mode and round limit.  H4 removes
+    #    the reader, so the pre-1.1 store shape is written directly here.
+    from saberops.project import bind_project_state_dir, compute_project_identity
+    from saberops.project_settings import project_settings_path
+
+    state_dir = bind_project_state_dir(compute_project_identity(rig.repo))
+    settings_path = project_settings_path(state_dir)
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    settings.update({"review_disabled": False, "review_mode": "max", "review_limit": 5})
+    settings_path.write_text(
+        json.dumps(settings, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    (state_dir / "review-policy.json").write_text(
+        json.dumps({"version": 1, "mode": "ALWAYS_REQUIRED"}, indent=2, sort_keys=True)
+        + "\n",
+        encoding="utf-8",
     )
 
     persisted = json.loads(

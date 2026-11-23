@@ -33,7 +33,6 @@ from saberops.models import (
     GateScratchMode,
     ProviderReadiness,
     QuotaState,
-    ReviewPolicyMode,
     RoutingState,
     RunStatus,
 )
@@ -87,7 +86,6 @@ from saberops.questions import (
     coerce_ask_role,
     question_view,
 )
-from saberops.review_adaptive import ReviewPolicyError
 from saberops.routing_config import (
     RoutingConfigError,
     get_user_routing_path,
@@ -152,40 +150,6 @@ class DoctorFinding:
     message: str
 
 
-def _cli_review_policy_mode(args: object) -> ReviewPolicyMode:
-    """Translate the CLI ``--review-policy`` choice into the canonical enum.
-
-    Centralised so every ``resolve_run_config`` call site uses one
-    deterministic mapping.  Unrecognized values (forward-compat) raise
-    so the call site never silently downgrades to RISK_ADAPTIVE.
-    """
-    raw = getattr(args, "review_policy", None)
-    if raw is None or not str(raw).strip():
-        return ReviewPolicyMode.RISK_ADAPTIVE
-    token = str(raw).strip().lower()
-    if token == "risk-adaptive":
-        return ReviewPolicyMode.RISK_ADAPTIVE
-    if token == "always-required":
-        return ReviewPolicyMode.ALWAYS_REQUIRED
-    raise ValueError(
-        f"unknown --review-policy value {raw!r}; expected 'risk-adaptive' or 'always-required'"
-    )
-
-
-def _cli_explicit_review_policy(args: argparse.Namespace) -> ReviewPolicyMode | None:
-    """Return the per-run review-policy override, or None to follow project.
-
-    The CLI default (``risk-adaptive``) is intentionally mapped to None:
-    the tightening-only merge treats an unset per-run value and an
-    explicit RISK_ADAPTIVE identically, so the project setting drives.
-    Only an explicit ``always-required`` tightens this run.
-    """
-    raw = str(getattr(args, "review_policy", "") or "").strip().lower()
-    if raw in ("", "risk-adaptive"):
-        return None
-    return _cli_review_policy_mode(args)
-
-
 def _resolve_cli_run_config(args: argparse.Namespace, repo: Path | str) -> RunConfig:
     """Resolve one frozen RunConfig through the shared project-settings authority.
 
@@ -203,7 +167,6 @@ def _resolve_cli_run_config(args: argparse.Namespace, repo: Path | str) -> RunCo
         repo_path=repo,
         gate_command=getattr(args, "gate", None),
         training_allowed=getattr(args, "training_allowed", None),
-        review_policy=_cli_explicit_review_policy(args),
         routing_mode="auto" if tier_raw == "auto" else "manual",
         manual_tier=None if tier_raw == "auto" else tier_raw,
         max_auto_tier=max_tier_raw,
@@ -215,10 +178,9 @@ def _resolve_cli_run_config(args: argparse.Namespace, repo: Path | str) -> RunCo
         max_attempts=args.max_attempts,
         worker_timeout=args.worker_timeout,
         gate_timeout=args.gate_timeout,
-        review=args.review,
+        review_disabled=bool(getattr(args, "no_review", False)),
+        review_focus=getattr(args, "review_focus", None),
         review_timeout=args.review_timeout,
-        review_mode=args.review_mode,
-        review_limit=args.review_limit,
         publish_candidate=getattr(args, "publish_candidate", None),
         tool_refs=tuple(args.tool_refs),
     )
@@ -865,33 +827,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum worker retry attempts (default: 2).",
     )
     run_parser.add_argument(
-        "--review",
+        "--no-review",
         action="store_true",
         default=False,
-        help="Run independent code review on successful candidate.",
-    )
-    run_parser.add_argument(
-        "--review-policy",
-        choices=["risk-adaptive", "always-required"],
-        default="risk-adaptive",
-        dest="review_policy",
         help=(
-            "Risk-adaptive review policy: 'risk-adaptive' (default; review "
-            "intensity follows the classifier), or 'always-required' (project "
-            "tightening override -- always launch an independent reviewer)."
+            "Owner switch for a direct manual run only: skip independent review "
+            "for this run. Scheduler jobs, plan lanes and MCP submissions are "
+            "always reviewed."
         ),
     )
     run_parser.add_argument(
-        "--review-mode",
-        choices=["bounded", "max"],
-        default="bounded",
-        help=("Review mode: 'bounded' (fixed limit) or 'max' (autonomous loop until convergence)."),
-    )
-    run_parser.add_argument(
-        "--review-limit",
-        type=int,
-        default=3,
-        help="Maximum review rounds when --review-mode bounded (default: 3).",
+        "--review-focus",
+        type=str,
+        default=None,
+        help=(
+            "Optional text the independent reviewer must pay attention to "
+            "(for example new suppressions or broad handlers). It never turns "
+            "review off."
+        ),
     )
     run_parser.add_argument(
         "--db",
@@ -2594,7 +2547,7 @@ def build_parser() -> argparse.ArgumentParser:
     # form.  The accepted CLI syntax is documented accordingly.
     project_parser = subparsers.add_parser(
         "project",
-        help="Project-scoped settings (gate, data policy, review policy, target branch, gate-scratch).",
+        help="Project-scoped settings (gate, data policy, target branch, gate-scratch).",
     )
     project_sub = project_parser.add_subparsers(dest="project_command", required=True)
 
@@ -2612,7 +2565,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     project_show = project_sub.add_parser(
         "show",
-        help="Show the effective project settings (gate, data policy, review policy, target branch, gate storage).",
+        help="Show the effective project settings (gate, data policy, target branch, gate storage).",
     )
     _add_repo_arg(project_show)
     _add_json_arg(project_show)
@@ -2699,18 +2652,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         choices=["allowed", "denied"],
         help="Owner decision for training/data use in future runs.",
-    )
-
-    project_set_review = project_sub.add_parser(
-        "set-review-policy",
-        help="Persist the project's review policy (risk-adaptive|always-required).",
-    )
-    _add_repo_arg(project_set_review)
-    project_set_review.add_argument(
-        "policy",
-        type=str,
-        choices=["risk-adaptive", "always-required"],
-        help="Tightening-only review policy for future runs.",
     )
 
     project_set_branch = project_sub.add_parser(
@@ -2831,41 +2772,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_repo_arg(project_advisor_off)
 
-    project_set_workflow = project_sub.add_parser(
-        "set-workflow",
-        help="Persist a workflow preset (quick|balanced|thorough|max) or custom settings.",
+    project_set_gate_state = project_sub.add_parser(
+        "set-gate-state",
+        help="Enable or disable the project's authoritative gate for future runs.",
     )
-    _add_repo_arg(project_set_workflow)
-    project_set_workflow.add_argument(
-        "preset",
+    _add_repo_arg(project_set_gate_state)
+    project_set_gate_state.add_argument(
+        "state",
         type=str,
-        choices=["quick", "balanced", "thorough", "max", "custom"],
-        help="Workflow preset, or 'custom' to persist the explicit flags.",
+        choices=["enabled", "disabled"],
+        help="Whether the authoritative gate runs for future runs.",
     )
-    project_set_workflow.add_argument(
-        "--gate-command",
-        type=str,
-        default=None,
-        help="Gate command to persist first (required for non-quick presets without a gate).",
-    )
-    gate_group = project_set_workflow.add_mutually_exclusive_group()
-    gate_group.add_argument(
-        "--gate-enabled", dest="gate_enabled", action="store_true", default=None
-    )
-    gate_group.add_argument(
-        "--gate-disabled", dest="gate_enabled", action="store_false", default=None
-    )
-    project_set_workflow.add_argument(
-        "--review",
-        type=str,
-        choices=["disabled", "risk-adaptive", "always-required"],
-        default=None,
-    )
-    project_set_workflow.add_argument(
-        "--mode", type=str, choices=["bounded", "max"], default=None
-    )
-    project_set_workflow.add_argument("--limit", type=int, default=None)
-    _add_json_arg(project_set_workflow)
+    _add_json_arg(project_set_gate_state)
     project_gate_scratch = project_sub.add_parser(
         "gate-scratch",
         help="Project gate temporary storage (DISK / RAM_PREFERRED / RAM_REQUIRED).",
@@ -3180,7 +3098,14 @@ def handle_run(args: argparse.Namespace) -> int:
             print(f"[*] Task              : {config.task}")
             print(f"[*] Gate command      : {config.gate_command}")
             print(f"[*] Routing           : {config.routing_mode} ({config.initial_tier.value})")
-            print(f"[*] Review policy     : {config.review_policy_mode.value}")
+            print(
+                "[*] Review            : "
+                + (
+                    "off (manual owner switch)"
+                    if getattr(config, "review_disabled", False)
+                    else "independent, always on"
+                )
+            )
             print(f"[*] Gate storage      : {config.gate_scratch_mode.value}")
             print(
                 f"[*] Target branch     : {config.accept_target_branch or '(unknown legacy)'}"
@@ -3296,7 +3221,10 @@ def handle_run(args: argparse.Namespace) -> int:
     print(f"[*] Task              : {config.task}")
     print(f"[*] Gate command      : {config.gate_command}")
     print(f"[*] Routing           : {config.routing_mode} ({config.initial_tier.value})")
-    print(f"[*] Review policy     : {config.review_policy_mode.value}")
+    print(
+        "[*] Review            : "
+        + ("off (manual owner switch)" if config.review_disabled else "independent, always on")
+    )
     print(f"[*] Gate storage      : {config.gate_scratch_mode.value}")
     print(f"[*] Target branch     : {config.accept_target_branch or '(unknown legacy)' }")
     print(f"[*] Candidate publish : {'enabled' if config.publish_candidate else 'disabled'}")
@@ -5531,8 +5459,7 @@ def handle_project_show(args: argparse.Namespace) -> int:
     print(f"  configured    : {'yes' if summary['gate_configured'] else 'no'}")
     print(f"Data policy     : {summary['data_policy_label']}")
     print(f"  explicit      : {'yes' if summary['data_policy_explicit'] else 'no (Denied default)'}")
-    print(f"Review policy   : {summary['review_policy_mode']}")
-    print(f"  explicit      : {'yes' if summary['review_policy_explicit'] else 'no'}")
+    print("Review          : independent, always on for accepted candidates")
     print(f"Gate storage    : {summary['gate_scratch_mode']}")
     print(f"Target branch   : {summary['accept_target_branch_effective'] or '(unknown)'}")
     print(
@@ -5703,29 +5630,6 @@ def handle_project_set_data_policy(args: argparse.Namespace) -> int:
         print(f"[!] {exc}", file=sys.stderr)
         return 1
     print(f"Project data policy set to '{str(args.policy).strip().upper()}' at {path}")
-    return 0
-
-
-def handle_project_set_review_policy(args: argparse.Namespace) -> int:
-    """Handle ``orch project set-review-policy`` via the canonical store."""
-    from saberops.project_settings import ProjectSettingsError, set_project_review_policy
-
-    try:
-        repo = _resolve_repo_for_project_settings(args)
-    except SystemExit:
-        return 2
-    raw = str(args.policy).strip().lower()
-    mode = (
-        ReviewPolicyMode.ALWAYS_REQUIRED
-        if raw == "always-required"
-        else ReviewPolicyMode.RISK_ADAPTIVE
-    )
-    try:
-        path = set_project_review_policy(repo, mode)
-    except (ProjectSettingsError, ReviewPolicyError) as exc:
-        print(f"[!] {exc}", file=sys.stderr)
-        return 1
-    print(f"Project review policy set to '{mode.value}' at {path}")
     return 0
 
 
@@ -8177,35 +8081,25 @@ def _handle_agent_definitions(args: argparse.Namespace, wanted: list[str]) -> in
     return 0 if all(r.ok for r in results) else 1
 
 
-def handle_project_set_workflow(args: argparse.Namespace) -> int:
-    """Handle `orch project set-workflow <preset> [--repo X]`."""
-    from saberops.service import RunOperationError
+def handle_project_set_gate_state(args: argparse.Namespace) -> int:
+    """Handle ``orch project set-gate-state <enabled|disabled>``."""
+    from saberops.project_settings import ProjectSettingsError, set_project_gate_enabled
 
     try:
         repo = _resolve_repo_for_project_settings(args)
     except SystemExit:
         return 2
+    enabled = str(args.state).strip().lower() == "enabled"
     try:
-        service = OrchestratorService()
-        result = service.set_project_workflow(
-            repo,
-            str(args.preset),
-            gate_enabled=True if args.gate_enabled is None else bool(args.gate_enabled),
-            review=str(args.review) if args.review is not None else "risk-adaptive",
-            mode=str(args.mode) if args.mode is not None else "bounded",
-            limit=int(args.limit) if args.limit is not None else 3,
-            gate_command=str(args.gate_command) if args.gate_command is not None else None,
-        )
-    except RunOperationError as exc:
+        path = set_project_gate_enabled(repo, enabled)
+    except ProjectSettingsError as exc:
         print(f"[!] {exc}", file=sys.stderr)
         return 1
+    summary = effective_policy_summary(repo)
     if getattr(args, "json", False):
-        print(json.dumps(result, indent=2, sort_keys=True))
+        print(json.dumps(summary, indent=2, sort_keys=True))
         return 0
-    print(f"Project workflow set to '{result['preset']}'")
-    print(f"  gate   : {'enabled' if result['gate_enabled'] else 'disabled'} "
-          f"({result['gate_effective'] or 'no gate'})")
-    print(f"  review : {'disabled' if result['review_disabled'] else result['review_mode'] + ' x' + str(result['review_limit'])}")
+    print(f"Project gate {'enabled' if enabled else 'disabled'} at {path}")
     return 0
 
 
@@ -8954,8 +8848,6 @@ def _dispatch(args: argparse.Namespace) -> int:
             return handle_project_clear_gate(args)
         elif args.project_command == "set-data-policy":
             return handle_project_set_data_policy(args)
-        elif args.project_command == "set-review-policy":
-            return handle_project_set_review_policy(args)
         elif args.project_command == "set-target-branch":
             return handle_project_set_target_branch(args)
         elif args.project_command == "clear-target-branch":
@@ -8978,8 +8870,8 @@ def _dispatch(args: argparse.Namespace) -> int:
                 return handle_project_advisor_set(args)
             elif args.project_advisor_command == "off":
                 return handle_project_advisor_off(args)
-        elif args.project_command == "set-workflow":
-            return handle_project_set_workflow(args)
+        elif args.project_command == "set-gate-state":
+            return handle_project_set_gate_state(args)
         elif args.project_command == "list":
             return handle_project_list(args)
         elif args.project_command == "register":

@@ -40,7 +40,16 @@ def streaming_process_kwargs(request: WorkerRequest) -> dict[str, Any]:
 
 
 class WorkerAdapter(ABC):
-    """Abstract base class for worker execution adapters."""
+    """Abstract base class for worker execution adapters.
+
+    ``WorkerRequest.read_only`` is the reviewer contract.  An adapter that
+    advertises a read-only mode enforces it in the child (for example a CLI
+    sandbox or tool allowlist).  The review engine additionally runs every
+    reviewer inside a fixed candidate snapshot and compares the source tree
+    afterwards, so an adapter without a read-only switch can never turn a
+    write into a passing review: the mutation is detected and the review is
+    recorded as a BLOCK.
+    """
 
     # Provider modules publish these primitive descriptors without importing
     # control-plane policy code.  The control plane turns them into its typed,

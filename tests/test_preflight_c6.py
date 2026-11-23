@@ -51,25 +51,12 @@ def test_configured_rig_reports_readiness(monkeypatch: pytest.MonkeyPatch, tmp_p
     from saberops.cli import main
 
     assert (
-        main(
-            [
-                "project",
-                "set-workflow",
-                "custom",
-                "--repo",
-                str(rig.repo),
-                "--gate-disabled",
-                "--review",
-                "disabled",
-            ]
-        )
-        == 0
+        main(["project", "set-gate-state", "disabled", "--repo", str(rig.repo)]) == 0
     )
     findings = collect_preflight(rig.repo)
     assert any(item.severity == "FAIL" and "gate is disabled" in item.message for item in findings)
-    assert any(
-        item.severity == "FAIL" and "review is disabled" in item.message for item in findings
-    )
+    # Review is mandatory: the project has no switch that could disable it.
+    assert not any("review is disabled" in item.message for item in findings)
 
 
 @pytest.mark.packaged_routing_default

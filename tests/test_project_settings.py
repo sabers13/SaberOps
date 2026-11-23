@@ -12,8 +12,9 @@ D. Web/CLI parity: same settings + equivalent request freeze identical
    policy portions.
 E. Immutability: an existing frozen Run keeps its values after project
    settings change; the next Run receives the new values.
-F. Review-policy and gate-scratch reads/writes use the canonical
-   existing persistence (no divergent copies).
+F. Review is mandatory for every run that can be accepted; only the
+   owner's direct manual switch removes it.  Gate-scratch reads/writes use
+   the canonical existing persistence (no divergent copies).
 G. Target branch: explicit branch frozen; absent branch resolves and
    freezes the current symbolic branch without altering acceptance.
 H. No silent ``make gate``: normal creation cannot obtain it merely
@@ -32,7 +33,7 @@ import pytest
 from saberops.cli import _resolve_cli_run_config, build_parser
 from saberops.config import RunConfig, reconstruct_run_config
 from saberops.gate_runner import load_project_gate_scratch_policy
-from saberops.models import GateScratchMode, ReviewPolicyMode
+from saberops.models import GateScratchMode
 from saberops.project import bind_project_state_dir, compute_project_identity
 from saberops.project_settings import (
     DataPolicy,
@@ -41,11 +42,6 @@ from saberops.project_settings import (
     set_project_accept_target_branch,
     set_project_data_policy,
     set_project_gate_command,
-)
-from saberops.review_adaptive import (
-    load_project_review_policy,
-    project_review_policy_path,
-    set_project_review_policy_for_state_dir,
 )
 from saberops.run_creation import (
     GATE_REQUIRED_MESSAGE,
@@ -177,14 +173,12 @@ def test_r2a_c_settings_survive_reload(isolated_xdg: Path) -> None:
     set_project_gate_command(repo, "pytest -q")
     set_project_data_policy(repo, "allowed")
     set_project_accept_target_branch(repo, "main")
-    set_project_review_policy_for_state_dir(_state_dir(repo), ReviewPolicyMode.ALWAYS_REQUIRED)
     set_project_gate_scratch_policy(repo, GateScratchMode.RAM_PREFERRED)
 
     reloaded = load_project_settings(repo)
     assert reloaded.gate_command == "pytest -q"
     assert reloaded.data_policy is DataPolicy.ALLOWED
     assert reloaded.accept_target_branch == "main"
-    assert load_project_review_policy(repo) is ReviewPolicyMode.ALWAYS_REQUIRED
     assert load_project_gate_scratch_policy(repo) is GateScratchMode.RAM_PREFERRED
 
 
@@ -197,7 +191,8 @@ def _policy_portion(config: RunConfig) -> tuple[object, ...]:
     return (
         config.gate_command,
         config.gate_scratch_mode,
-        config.review_policy_mode,
+        config.review_enabled,
+        config.review_disabled,
         config.training_allowed,
         config.accept_target_branch,
     )
@@ -210,29 +205,27 @@ def test_r2a_d_web_cli_parity(isolated_xdg: Path) -> None:
     set_project_gate_command(repo, "pytest -q")
     set_project_data_policy(repo, DataPolicy.DENIED)
     set_project_accept_target_branch(repo, "main")
-    set_project_review_policy_for_state_dir(_state_dir(repo), ReviewPolicyMode.ALWAYS_REQUIRED)
     set_project_gate_scratch_policy(repo, GateScratchMode.RAM_PREFERRED)
 
     # CLI equivalent request: explicit per-run gate override + explicit
-    # training-denied, project-driven review policy.
+    # training-denied.
     cli_config = _resolve_cli_run_config(
         _cli_args(repo, "--gate", "pytest -q -x", "--training-denied"), str(repo)
     )
-    # Web equivalent request: the same explicit gate box + Denied select,
-    # no per-run review-policy knob (None = follow project).
+    # Web equivalent request: the same explicit gate box + Denied select.
     web_config = resolve_effective_run_config(
         RunRequest(
             task="probe task",
             repo_path=repo,
             gate_command="pytest -q -x",
             training_allowed=False,
-            review_policy=None,
         )
     )
     assert _policy_portion(cli_config) == _policy_portion(web_config)
     assert web_config.gate_command == "pytest -q -x"
     assert web_config.training_allowed is True
-    assert web_config.review_policy_mode is ReviewPolicyMode.ALWAYS_REQUIRED
+    assert web_config.review_enabled is True
+    assert web_config.review_disabled is False
     assert web_config.gate_scratch_mode is GateScratchMode.RAM_PREFERRED
     assert web_config.accept_target_branch == "main"
 
@@ -288,57 +281,71 @@ def test_r2a_e_old_run_immutable(isolated_xdg: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# F. Canonical review-policy and gate-scratch authorities are composed.
+# F. Review is mandatory; the one owner switch is manual-run only.
 # ---------------------------------------------------------------------------
 
 
-def test_d7_always_required_freezes_effective_review_and_owner_request(
+def test_review_is_mandatory_for_every_run_that_can_be_accepted(
     isolated_xdg: Path,
 ) -> None:
-    """A reviewed run records effective review truthfully and keeps the source."""
-    from saberops.project_settings import set_project_review_policy
+    from saberops.project_settings import set_project_gate_command
 
-    repo = _make_repo(isolated_xdg, "d7-review")
+    repo = _make_repo(isolated_xdg, "f-review-mandatory")
     set_project_gate_command(repo, "pytest -q")
-    set_project_review_policy(repo, ReviewPolicyMode.ALWAYS_REQUIRED)
 
     config = resolve_effective_run_config(RunRequest(task="probe", repo_path=repo))
     assert config.review_enabled is True
-    assert config.owner_review_requested is False
+    assert config.review_disabled is False
 
     revived = reconstruct_run_config(json.loads(json.dumps(config.as_dict())))
     assert revived.review_enabled is True
-    assert revived.owner_review_requested is False
+    assert revived.review_disabled is False
 
-    explicit = resolve_effective_run_config(
-        RunRequest(task="probe", repo_path=repo, review=True)
+
+def test_owner_switch_is_frozen_and_carried(isolated_xdg: Path) -> None:
+    from saberops.project_settings import set_project_gate_command
+
+    repo = _make_repo(isolated_xdg, "f-review-switch")
+    set_project_gate_command(repo, "pytest -q")
+
+    config = resolve_effective_run_config(
+        RunRequest(task="probe", repo_path=repo, review_disabled=True)
     )
-    assert explicit.review_enabled is True
-    assert explicit.owner_review_requested is True
+    assert config.review_disabled is True
+    assert config.review_enabled is False
+    revived = reconstruct_run_config(json.loads(json.dumps(config.as_dict())))
+    assert revived.review_disabled is True
 
 
-def test_r2a_f_canonical_authorities(isolated_xdg: Path) -> None:
+def test_review_focus_is_frozen_and_carried(isolated_xdg: Path) -> None:
+    from saberops.project_settings import set_project_gate_command
+
+    repo = _make_repo(isolated_xdg, "f-review-focus")
+    set_project_gate_command(repo, "pytest -q")
+
+    config = resolve_effective_run_config(
+        RunRequest(task="probe", repo_path=repo, review_focus="  check new suppressions  ")
+    )
+    assert config.review_focus == "check new suppressions"
+    revived = reconstruct_run_config(json.loads(json.dumps(config.as_dict())))
+    assert revived.review_focus == "check new suppressions"
+
+
+def test_r2a_f_canonical_gate_scratch_authority(isolated_xdg: Path) -> None:
     from saberops.gate_runner import set_project_gate_scratch_policy
-    from saberops.project_settings import set_project_review_policy
 
     repo = _make_repo(isolated_xdg, "f-canonical")
     state_dir = _state_dir(repo)
-    set_project_review_policy(repo, ReviewPolicyMode.ALWAYS_REQUIRED)
     set_project_gate_scratch_policy(repo, GateScratchMode.RAM_REQUIRED)
     set_project_gate_command(repo, "pytest -q")
 
-    assert load_project_review_policy(repo) is ReviewPolicyMode.ALWAYS_REQUIRED
     assert load_project_gate_scratch_policy(repo) is GateScratchMode.RAM_REQUIRED
-    # Canonical files exist; the composed document holds only the new
-    # settings (never a copied review/scratch value).
-    assert project_review_policy_path(state_dir).is_file()
     assert (state_dir / "gate-runner-policy.json").is_file()
     raw = json.loads(project_settings_path(state_dir).read_text(encoding="utf-8"))
     assert set(raw) <= {
         "version", "gate_command", "data_policy", "accept_target_branch",
-        "gate_enabled", "review_disabled", "review_mode", "review_limit",
+        "gate_enabled",
     }
-    assert "mode" not in raw
 
 
 # ---------------------------------------------------------------------------
@@ -478,79 +485,8 @@ def test_r2a_i_single_project_settings_snapshot(
     assert config.accept_target_branch == "main"
 
 
-@pytest.mark.parametrize(
-    "preset,gate_enabled,review_disabled,mode,limit,policy",
-    [
-        ("quick", False, True, "bounded", 1, ReviewPolicyMode.RISK_ADAPTIVE),
-        ("balanced", True, False, "bounded", 3, ReviewPolicyMode.RISK_ADAPTIVE),
-        ("thorough", True, False, "bounded", 5, ReviewPolicyMode.ALWAYS_REQUIRED),
-        ("max", True, False, "max", 3, ReviewPolicyMode.ALWAYS_REQUIRED),
-    ],
-)
-def test_workflow_presets_freeze_and_preserve_project_settings(
-    isolated_xdg: Path, preset: str, gate_enabled: bool, review_disabled: bool,
-    mode: str, limit: int, policy: ReviewPolicyMode,
-) -> None:
-    from saberops.project_settings import set_project_workflow
-    from saberops.run_creation import effective_policy_summary
-
-    repo = _make_repo(isolated_xdg, preset)
-    set_project_gate_command(repo, "true")
-    set_project_accept_target_branch(repo, "main")
-    set_project_workflow(repo, preset=preset)
-    config = resolve_effective_run_config(RunRequest(task="probe", repo_path=repo))
-    assert config.gate_enabled is gate_enabled
-    assert config.review_disabled is review_disabled
-    assert config.review_mode == mode
-    assert config.review_limit == limit
-    assert config.review_policy_mode is policy
-    assert config.workflow_mode == preset
-    assert config.accept_target_branch == "main"
-    assert effective_policy_summary(repo)["workflow_preset"] == preset
-    frozen = config.as_dict()
-    set_project_gate_command(repo, "make gate-new")
-    assert load_project_settings(repo).review_limit == limit
-    set_project_workflow(repo, preset="balanced")
-    restored = reconstruct_run_config(frozen)
-    assert restored.gate_enabled is gate_enabled
-    assert restored.review_disabled is review_disabled
-    assert restored.review_mode == mode
-    assert restored.review_limit == limit
-
-
-def test_workflow_quick_allows_new_project_without_gate(isolated_xdg: Path) -> None:
-    from saberops.project_settings import set_project_workflow
-
-    repo = _make_repo(isolated_xdg, "without-gate")
-    with pytest.raises(RunCreationError, match="no gate configured"):
-        resolve_effective_run_config(RunRequest(task="probe", repo_path=repo))
-    set_project_workflow(repo, preset="quick")
-    config = resolve_effective_run_config(RunRequest(task="scaffold", repo_path=repo))
-    assert config.gate_command == ""
-    assert not config.review_enabled
-    assert config.review_disabled
-
-
-def test_workflow_custom_and_invalid_settings(isolated_xdg: Path) -> None:
-    from saberops.project_settings import ProjectSettingsError, set_project_workflow
-    from saberops.run_creation import effective_policy_summary
-
-    repo = _make_repo(isolated_xdg, "custom")
-    set_project_gate_command(repo, "true")
-    set_project_workflow(repo, gate_enabled=False, review="always-required", limit=7)
-    assert effective_policy_summary(repo)["workflow_preset"] == "custom"
-    config = resolve_effective_run_config(RunRequest(task="probe", repo_path=repo))
-    assert not config.gate_enabled
-    assert not config.review_disabled
-    assert config.review_limit == 7
-    before = load_project_settings(repo)
-    with pytest.raises(ProjectSettingsError):
-        set_project_workflow(repo, limit=0)
-    assert load_project_settings(repo) == before
-
-
-@pytest.mark.parametrize("field", ["gate_enabled", "review_disabled"])
-def test_workflow_malformed_frozen_authorization_refused(
+@pytest.mark.parametrize("field", ["gate_enabled"])
+def test_frozen_authorization_malformed_refused(
     isolated_xdg: Path, field: str,
 ) -> None:
     repo = _make_repo(isolated_xdg, "malformed-" + field)
@@ -565,73 +501,18 @@ def test_workflow_malformed_frozen_authorization_refused(
         reconstruct_run_config(payload)
 
 
-def test_workflow_presets_and_manual_controls(
-    isolated_xdg: Path, tmp_path: Path,
-) -> None:
-    from saberops.project_settings import ProjectSettingsError, set_project_workflow
+def test_gate_state_setting_round_trip(isolated_xdg: Path) -> None:
+    from saberops.project_settings import set_project_gate_enabled
 
-    repo = _make_repo(isolated_xdg, "web-workflow")
-    set_project_workflow(repo, preset="quick")
-    assert load_project_settings(repo).review_disabled
-    set_project_workflow(
-        repo, preset="custom", gate_enabled=True,
-        review="always-required", mode="bounded", limit=4,
-    )
-    settings = load_project_settings(repo)
-    assert settings.gate_enabled and not settings.review_disabled
-    assert settings.review_limit == 4
-    with pytest.raises(ProjectSettingsError):
-        set_project_workflow(repo, preset="custom", limit=0)
-    assert load_project_settings(repo) == settings
-
-
-def test_setup_workflow_pick_then_apply_advances_to_ready(
-    isolated_xdg: Path, tmp_path: Path,
-) -> None:
-    repo = _make_repo(isolated_xdg, "setup-workflow")
-    # Rendering/selecting persists nothing; the owner applies via the
-    # `orch project` CLI (set_project_workflow is its engine seam).
-    from saberops.project_settings import set_project_workflow
-
-    assert not load_project_settings(repo).review_disabled
-    set_project_workflow(repo, preset="quick")
-    assert load_project_settings(repo).review_disabled
-    assert not load_project_settings(repo).gate_enabled
-
-
-def test_setup_required_mode_requires_gate_before_saving(
-    isolated_xdg: Path, tmp_path: Path,
-) -> None:
-    from saberops.project_settings import set_project_workflow
-
-    repo = _make_repo(isolated_xdg, "setup-required")
-    before = load_project_settings(repo)
-    # The removed setup flow refused thorough mode without a gate command;
-    # the engine seam persists the review policy while the gate stays empty,
-    # so the owner must set it separately (`orch project set-gate`).
-    set_project_workflow(repo, preset="thorough")
-    assert load_project_settings(repo).gate_command is None
-    assert load_project_settings(repo).review_limit == 5
-    set_project_gate_command(repo, "make check")
-    set_project_workflow(repo, preset="thorough")
-    settings = load_project_settings(repo)
-    assert settings.gate_enabled and not settings.review_disabled
-    assert settings.gate_command == "make check"
-    assert settings.review_limit == 5
-    assert load_project_review_policy(repo) is ReviewPolicyMode.ALWAYS_REQUIRED
-    assert before.gate_command is None
-
-
-def test_setup_preset_preserves_existing_gate(
-    isolated_xdg: Path, tmp_path: Path,
-) -> None:
-    from saberops.project_settings import set_project_workflow
-
-    repo = _make_repo(isolated_xdg, "setup-existing")
-    set_project_gate_command(repo, "make verify")
-    set_project_workflow(repo, preset="max")
-    assert load_project_settings(repo).gate_command == "make verify"
-    assert load_project_settings(repo).review_mode == "max"
+    repo = _make_repo(isolated_xdg, "gate-state")
+    set_project_gate_command(repo, "true")
+    set_project_gate_enabled(repo, False)
+    assert load_project_settings(repo).gate_enabled is False
+    config = resolve_effective_run_config(RunRequest(task="probe", repo_path=repo))
+    assert config.gate_enabled is False
+    assert config.review_enabled is True
+    set_project_gate_enabled(repo, True)
+    assert load_project_settings(repo).gate_enabled is True
 
 
 def test_project_notes_are_project_local_and_replaceable(isolated_xdg: Path) -> None:
@@ -685,3 +566,40 @@ def test_project_notes_cli_round_trip(
 
     assert cli_main(["project", "notes", "clear", "--repo", str(repo)]) == 0
     assert load_project_notes(repo) is None
+
+
+def test_retired_review_settings_notice_once_and_ignored(
+    isolated_xdg: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A pre-1.1 store keeps working; its review knobs are ignored."""
+    repo = _make_repo(isolated_xdg, "retired-review")
+    state_dir = _state_dir(repo)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "review-policy.json").write_text(
+        json.dumps({"version": 1, "mode": "ALWAYS_REQUIRED"}), encoding="utf-8"
+    )
+    project_settings_path(state_dir).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "gate_command": "true",
+                "gate_enabled": True,
+                "review_disabled": True,
+                "review_mode": "max",
+                "review_limit": 9,
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings = load_project_settings(repo)
+    assert settings.gate_enabled is True
+    config = resolve_effective_run_config(
+        RunRequest(task="probe", repo_path=repo, accept_target_branch="main")
+    )
+    assert config.review_disabled is False
+    assert config.review_enabled is True
+    err = capsys.readouterr().err
+    assert "retired and ignored" in err
+    # A second read in the same process does not repeat the notice.
+    load_project_settings(repo)
+    assert "retired and ignored" not in capsys.readouterr().err

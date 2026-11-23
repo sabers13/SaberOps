@@ -42,7 +42,7 @@ import json
 import re
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -491,6 +491,11 @@ def _submit_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[st
             )
         except ValueError as exc:
             raise InvalidParamsError(f"invalid requirements: {exc}") from exc
+    raw_focus = arguments.get("review_focus")
+    if raw_focus is not None:
+        if not isinstance(raw_focus, str):
+            raise InvalidParamsError("review_focus must be text")
+        requirements = replace(requirements, review_focus=raw_focus.strip() or None)
     db = context.database(read_only=False)
     try:
         result = submit_job(
@@ -2287,6 +2292,14 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
                 "depends_on": {"type": "array", "items": {"type": "string", "minLength": 1}},
                 "idempotency_key": {"type": "string"},
                 "caller_id": {"type": "string"},
+                "review_focus": {
+                    "type": "string",
+                    "description": (
+                        "Optional focus for the independent reviewer (for "
+                        "example new suppressions or broad handlers). It can "
+                        "add attention, never turn review off."
+                    ),
+                },
                 "requirements": _schema(
                     {
                         "role": {"type": "string", "enum": _JOB_ROLES},

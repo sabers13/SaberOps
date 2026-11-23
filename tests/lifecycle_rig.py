@@ -39,7 +39,6 @@ from saberops.models import (
     DispatchReason,
     DispatchRole,
     DispatchStage,
-    ReviewPolicyMode,
     ReviewResult,
     ReviewVerdict,
     Run,
@@ -47,7 +46,6 @@ from saberops.models import (
     Tier,
 )
 from saberops.plans_ops import verify_posture
-from saberops.project_settings import set_project_review_policy
 from saberops.provenance import mint_run_provenance
 from saberops.routing_config import (
     add_candidate_to_chain,
@@ -458,7 +456,6 @@ def build_lifecycle_rig(
         )
 
     # 6. Configure project review policy and check command via public CLI.
-    set_project_review_policy(repo, ReviewPolicyMode.ALWAYS_REQUIRED)
     assert cli_main(["project", "set-gate", "--repo", str(repo), resolved_gate]) == 0
 
     reviewer_control_path = state_home / "saberops" / "fake-reviewer-mode.json"

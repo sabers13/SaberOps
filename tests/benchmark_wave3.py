@@ -90,7 +90,6 @@ from saberops.models import (
     DispatchReason,
     DispatchRole,
     DispatchStage,
-    ReviewPolicyMode,
     ReviewResult,
     ReviewVerdict,
     Run,
@@ -112,7 +111,6 @@ from saberops.paths import owner_state_dir
 from saberops.pause_work import resume_work
 from saberops.plan_runner import get_plan, project_plan, submit_plan_file
 from saberops.plan_state import plan_state_path, project_plan_state
-from saberops.project_settings import set_project_review_policy
 from saberops.questions import (
     AskRole,
     DecisionClass,
@@ -292,7 +290,6 @@ def _create_benchmark_repo(rig: RigEnvironment, name: str) -> Path:
     parent = rig.root / "wave3-repos"
     parent.mkdir(parents=True, exist_ok=True)
     repo, _sha = create_toy_repo(parent, name)
-    set_project_review_policy(repo, ReviewPolicyMode.ALWAYS_REQUIRED)
     assert cli_main(["project", "set-gate", "--repo", str(repo), rig.gate_command]) == 0
     return repo
 

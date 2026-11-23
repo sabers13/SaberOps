@@ -1675,6 +1675,12 @@ def job_dispatch_spec(job: Job) -> JobDispatchSpec:
         kind=job.kind.value.lower(),
         required_capabilities=tuple(sorted(caps)),
         difficulty=job.requirements.difficulty.value,
+        # Review is mandatory for every job that can be accepted.  The
+        # projected request states it explicitly so a scheduler dispatch can
+        # never resolve to an unreviewed candidate; the planner may add focus,
+        # never a switch.
+        review_enabled=True,
+        review_focus=job.requirements.review_focus,
     )
     return JobDispatchSpec(
         job_id=job.job_id,

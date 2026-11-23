@@ -42,16 +42,17 @@ bounded discovery immediately without ever failing the save.
 a supported account connection and an exact current catalog model; it
 never runs implicitly and never backs an automatic fallback.
 
-## Workflow presets
+## Gate state and mandatory review
 
-`orch project set-workflow quick|balanced|thorough|max|custom --repo X`
-persists the project's workflow preset: `quick` disables the gate and
-review, `balanced` / `thorough` / `max` freeze their canonical
-gate/review/mode/limit tuples. A non-quick preset on a project with no
-effective gate requires `--gate-command` (or `quick`, which needs none).
-`custom` persists the explicit `--gate-enabled|--gate-disabled`,
-`--review`, `--mode` and `--limit` flags. Runs freeze the effective
-policy at creation; changing the preset affects future runs only.
+`orch project set-gate-state enabled|disabled --repo X` persists whether the
+project's authoritative gate runs for future runs. There is no project setting
+that disables independent review: every candidate that can be accepted is
+reviewed. The one owner switch is `orch run --no-review`, and it applies only
+to that direct manual run. A stored `review-policy.json` or old review fields
+in `project-settings.json` are ignored with one notice.
+
+Runs freeze the effective policy at creation; changing the setting affects
+future runs only.
 
 ## Presence and the work gate
 

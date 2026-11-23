@@ -56,10 +56,11 @@ answered per source):
   ``dispatch_evidence.candidate_sha`` on ``stage == REVIEW`` rows, as
   above.  A review bound to candidate A never applies to a later
   candidate B: every review read is filtered by ``== current``.
-* Risk-adaptive review skip -- the frozen ``runs.review_risk_decision_json``
-  (``independent_review_required=False``) plus the corroborating
-  ``review_skipped_by_risk_adaptive_policy`` event.  A skip stays READY;
-  it is never REVIEWED.
+* Owner-disabled review -- the frozen ``runs.review_risk_decision_json``
+  (``independent_review_required=False`` with the ``OWNER_DISABLED``
+  source: the owner's manual ``orch run --no-review`` switch).  Such a
+  candidate stays READY; it is never REVIEWED.  A legacy classifier skip no
+  longer parses and therefore never counts as "review not required".
 * Acceptance -- the repository's single authoritative AcceptEngine
   record for the CURRENT candidate, verified by
   :func:`saberops.autonomous_runtime._verify_accept_engine_evidence`
@@ -100,8 +101,8 @@ survives later target-HEAD movement, so it outranks STALE; an obsolete
 candidate is STALE even when an old review exists (accept would refuse
 it under the unchanged target-HEAD/base comparison); review evidence is
 always filtered to the current candidate SHA so stale/in-progress old
-reviews cannot leak onto a newer candidate; a risk-adaptive skip cannot
-fabricate REVIEWED; a failed/unavailable review is never presented as a
+reviews cannot leak onto a newer candidate; the owner's manual review
+switch cannot fabricate REVIEWED; a failed/unavailable review is never presented as a
 successful review.
 """
 
@@ -310,7 +311,7 @@ def _short(sha: str) -> str:
 
 
 def _resolve_review_required(db: Database, run_id: str) -> bool | None:
-    """Return the frozen risk-adaptive answer, or None when unknown.
+    """Return the frozen review requirement, or None when unknown.
 
     Unknown covers legacy rows without a persisted decision and malformed
     persisted JSON (fail closed: the caller treats unknown as "no skip
@@ -551,8 +552,8 @@ def project_candidate_state(
         )
 
     # READY: gate-passed current candidate with no bound substantive or
-    # in-progress review.  A risk-adaptive skip stays READY ("review
-    # skipped" is never REVIEWED); a failed/unavailable review likewise
+    # in-progress review.  The owner's manual review switch stays READY
+    # ("review skipped" is never REVIEWED); a failed/unavailable review likewise
     # leaves the candidate READY rather than fabricating REVIEWED.
     review_required = _resolve_review_required(db, run_id)
     reason = "review_not_required" if review_required is False else "awaiting_review"

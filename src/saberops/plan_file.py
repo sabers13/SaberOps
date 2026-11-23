@@ -86,6 +86,7 @@ _MACHINE_KEYS = frozenset(
         "priority",
         "run",
         "kind",
+        "review_focus",
     }
 )
 _FIELD_LABELS = {
@@ -134,6 +135,8 @@ class PlanLane:
     #: ``job`` (default) or ``scout`` (F19): a scout lane's report becomes the
     #: starting context of the lanes that depend on it.
     kind: str = "job"
+    #: Optional focus for the independent reviewer; adds attention only.
+    review_focus: str = ""
 
     def to_task(self) -> PlanTaskDef:
         """Convert the lane into the stored task shape."""
@@ -156,6 +159,7 @@ class PlanLane:
             run=self.run,
             kind=self.kind,
             wave=self.wave,
+            review_focus=self.review_focus,
         )
 
 
@@ -372,6 +376,7 @@ def _parse_lane(lane_id: str, title: str, chunk: list[str]) -> PlanLane:
     run = str(machine.get("run", "job") or "job").strip().lower()
     if run not in RUN_KINDS:
         raise PlanFileError(f"lane {lane_id}: run must be 'job' or 'owner'")
+    review_focus = str(machine.get("review_focus", "") or "").strip()
     kind = str(machine.get("kind", "job") or "job").strip().lower()
     if kind not in LANE_KINDS:
         raise PlanFileError(f"lane {lane_id}: kind must be 'job' or 'scout'")
@@ -434,6 +439,7 @@ def _parse_lane(lane_id: str, title: str, chunk: list[str]) -> PlanLane:
         wave=wave,
         depends_on=depends_on,
         owns=tuple(owns),
+        review_focus=review_focus,
         size=size,
         difficulty=difficulty,
         effort=effort,
@@ -668,6 +674,8 @@ def render_plan_markdown(revision: PlanRevision) -> str:
                 machine["priority"] = task.priority
             if task.kind and task.kind != "job":
                 machine["kind"] = task.kind
+            if task.review_focus:
+                machine["review_focus"] = task.review_focus
             lines.extend(
                 [
                     "```plan",

@@ -2554,10 +2554,8 @@ def run_real_benchmark(
     from saberops.db import Database
     from saberops.jobs.service import get_job
     from saberops.model_access.readiness_service import ReadinessService
-    from saberops.models import ReviewPolicyMode
     from saberops.paths import owner_state_dir
     from saberops.preflight import collect_preflight
-    from saberops.project_settings import set_project_review_policy
 
     pytest_error = gate_interpreter_pytest_error()
     if pytest_error is not None:
@@ -2602,7 +2600,6 @@ def run_real_benchmark(
             repo, sha = create_toy_repository(
                 batch_root, f"toy-{task.task_id}", task_id=task.task_id
             )
-            set_project_review_policy(repo, ReviewPolicyMode.ALWAYS_REQUIRED)
             task_gate = benchmark_gate_command(task.task_id)
             assert (
                 cli_main(["project", "set-gate", "--repo", str(repo), task_gate]) == 0

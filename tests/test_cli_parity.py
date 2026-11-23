@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from saberops.cli import main
+from saberops.cli import build_parser, main
 from saberops.config import resolve_run_config
 from saberops.control_plane import (
     BindingRole,
@@ -455,101 +455,50 @@ def test_access_verify_model_requires_supported_connection_and_current_model(
 
 
 # ---------------------------------------------------------------------------
-# workflow presets
+# project gate state
 # ---------------------------------------------------------------------------
 
 
-def test_project_set_workflow_quick_needs_no_gate(
+def test_project_set_gate_state_round_trip(
     isolated: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    repo = _git_repo(isolated / "wf-quick")
+    repo = _git_repo(isolated / "gate-state")
     code, out, _ = _cli(
-        "project", "set-workflow", "quick", "--repo", str(repo), "--json", capsys=capsys
+        "project", "set-gate-state", "disabled", "--repo", str(repo), "--json",
+        capsys=capsys,
     )
     assert code == 0
     payload = json.loads(out)
-    assert payload["preset"] == "quick"
     assert payload["gate_enabled"] is False
-
-
-def test_project_set_workflow_non_quick_requires_gate(
-    isolated: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    repo = _git_repo(isolated / "wf-balanced")
-    (repo / "Makefile").unlink()
-    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
-    subprocess.run(["git", "commit", "-m", "drop gate"], cwd=repo, check=True, capture_output=True)
-    code, _, err = _cli(
-        "project", "set-workflow", "balanced", "--repo", str(repo), capsys=capsys
-    )
-    assert code == 1
-    assert "gate command" in err.lower()
     code, out, _ = _cli(
-        "project",
-        "set-workflow",
-        "balanced",
-        "--repo",
-        str(repo),
-        "--gate-command",
-        "true",
-        "--json",
+        "project", "set-gate-state", "enabled", "--repo", str(repo), "--json",
         capsys=capsys,
     )
     assert code == 0
-    payload = json.loads(out)
-    assert payload["preset"] == "balanced"
-    assert payload["gate_effective"] == "true"
+    assert json.loads(out)["gate_enabled"] is True
 
 
-def test_project_set_workflow_custom_flags_and_invalid_limit(
+def test_project_set_workflow_is_gone(
     isolated: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    repo = _git_repo(isolated / "wf-custom")
-    code, out, _ = _cli(
-        "project",
-        "set-workflow",
-        "custom",
-        "--repo",
-        str(repo),
-        "--gate-command",
-        "true",
-        "--gate-disabled",
-        "--review",
-        "always-required",
-        "--limit",
-        "7",
-        "--json",
-        capsys=capsys,
-    )
-    assert code == 0
-    payload = json.loads(out)
-    assert payload["preset"] == "custom"
-    assert payload["gate_enabled"] is False
-    assert payload["review_limit"] == 7
-    code, _, err = _cli(
-        "project",
-        "set-workflow",
-        "custom",
-        "--repo",
-        str(repo),
-        "--gate-command",
-        "true",
-        "--limit",
-        "0",
-        capsys=capsys,
-    )
-    assert code == 1
-    assert "positive whole number" in err
-
-
-def test_project_set_workflow_unknown_preset_refused(
-    isolated: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    repo = _git_repo(isolated / "wf-unknown")
-    # Outside the preset vocabulary argparse itself refuses (exit 2).
+    """The retired workflow-preset surface is gone from the CLI."""
+    repo = _git_repo(isolated / "wf-gone")
     with pytest.raises(SystemExit) as exc:
-        main(["project", "set-workflow", "turbo", "--repo", str(repo)])
+        main(["project", "set-workflow", "quick", "--repo", str(repo)])
     assert exc.value.code == 2
+
+
+def test_run_review_flags_are_gone(
+    isolated: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Review policy knobs are gone; review is always on."""
+    repo = _git_repo(isolated / "review-flags")
+    with pytest.raises(SystemExit) as exc:
+        main(["run", "--repo", str(repo), "--task", "t", "--review-policy", "always-required"])
+    assert exc.value.code == 2
+    parser = build_parser()
+    args = parser.parse_args(["run", "--repo", str(repo), "--task", "t", "--no-review"])
+    assert args.no_review is True
 
 
 # ---------------------------------------------------------------------------

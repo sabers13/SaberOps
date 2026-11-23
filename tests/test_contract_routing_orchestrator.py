@@ -282,6 +282,8 @@ def test_auto_run_labelled_t1_dispatches_worker_chain_head(
         target_repo=repo,
         gate_command=_passing_gate(),
         publish_candidate=False,
+        # Routing probe: the owner switch keeps this test off the review path.
+        review_disabled=True,
     )
     result = orch.run(config=config, is_peak=False)
     assert result.status == RunStatus.COMPLETED
@@ -612,6 +614,8 @@ def test_explicit_worker_timeout_overrides_role_default(
         gate_command=_passing_gate(),
         worker_timeout=42.0,
         publish_candidate=False,
+        # Timeout probe: the owner switch keeps this test off the review path.
+        review_disabled=True,
     )
     result = orch.run(config=config, is_peak=False)
     assert result.status == RunStatus.COMPLETED

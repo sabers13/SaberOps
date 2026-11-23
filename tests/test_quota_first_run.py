@@ -103,13 +103,22 @@ def test_pinned_run_auto_probes_safe_reader_and_proceeds_on_fresh_store(
         raising=False,
     )
 
-    result = service.run_sync(
+    from saberops.config import RunConfig
+
+    # This test is about the quota probe, not review: use the owner's one
+    # manual switch so no reviewer is required.
+    probe_config = RunConfig(
         task="Probe task",
-        repo_path=repo,
+        target_repo=str(repo),
         gate_command=f"{sys.executable} -c pass",
         provider_override="codex",
         model_override="gpt-5.3-codex",
-        review=False,
+        review_disabled=True,
+    )
+    result = service.run_sync(
+        task="Probe task",
+        repo_path=repo,
+        config=probe_config,
     )
     assert worker.called is True, result.summary
     assert result.passed is True

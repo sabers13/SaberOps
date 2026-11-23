@@ -568,6 +568,13 @@ for a command and validates it before saving. Quick needs no gate command.
 Manual configuration remains available through “Customize manually”. Earlier
 incomplete setup steps continue to affect the Ready status.
 
+**Amended by phase 1.1 H4 (ADR-0065):** independent review is mandatory for
+every candidate that can be accepted, so the review column of the preset table
+above is historical. The risk classifier, project review policy, review mode,
+review limit and the workflow presets are retired. `orch project set-gate-state`
+keeps the gate switch; `orch run --no-review` is the one owner review switch
+for a direct manual run. `submit_job` and plan lanes may add `review_focus`.
+
 
 ## Conversational orchestrator — 5 October 2026
 

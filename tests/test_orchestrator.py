@@ -718,11 +718,18 @@ def test_h3_1_e_same_tier_repair_inherits_failed_candidate(
     assert classified and classified[-1].payload is not None
     assert classified[-1].payload["outcome"] == DispatchOutcome.GATE_FAILURE.value
     assert classified[-1].payload["escalation_evidence"] is False
-    # The repair after the failed check ran on the build route: every dispatch
-    # is BUILD and the repair dispatch is recorded as such (ADR-0005 §3).
+    # The repair after the failed check ran on the build route: every
+    # implementation dispatch is BUILD and the repair dispatch is recorded as
+    # such (ADR-0005 §3).  The mandatory independent review adds one CHECK
+    # dispatch for the same candidate.
     dispatches = db.get_dispatch_evidence_for_run(result.run_id)
     assert dispatches
-    assert all(d.role is DispatchRole.BUILD for d in dispatches)
+    implementation = [
+        d for d in dispatches if d.stage is not DispatchStage.REVIEW
+    ]
+    assert implementation
+    assert all(d.role is DispatchRole.BUILD for d in implementation)
+    assert any(d.stage is DispatchStage.REVIEW for d in dispatches)
     repair = [
         d for d in dispatches
         if d.stage in (DispatchStage.REPAIR, DispatchStage.RETRY)

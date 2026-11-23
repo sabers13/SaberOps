@@ -835,7 +835,7 @@ def test_frozen_gate_contract_reaches_repairs_with_correct_prompt_metrics() -> N
     from saberops.orchestrator import _render_final_repair_task, _render_repair_task
     from saberops.validation_policy import verification_contract
 
-    contract = verification_contract("make gate", True, True, False)
+    contract = verification_contract("make gate", True, False)
     review = ReviewResult(
         id="review",
         run_id="run",
@@ -850,6 +850,6 @@ def test_frozen_gate_contract_reaches_repairs_with_correct_prompt_metrics() -> N
         _render_final_repair_task("Build app", 2, "abc", [review], run_verification_text=contract),
     ):
         assert "root must have a Makefile with a gate target" in rendered.prompt
-        assert "Independent SaberOps review is requested" in rendered.prompt
+        assert "Independent SaberOps review is mandatory" in rendered.prompt
         assert rendered.projected_prompt_bytes == len(rendered.prompt.encode())
         assert rendered.validation_policy_marker_count == 1

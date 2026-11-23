@@ -157,6 +157,9 @@ class CodexAdapter(WorkerAdapter):
         use_stdin = prompt_bytes > get_prompt_arg_limit()
         prompt_arg = "-" if use_stdin else request.task
 
+        # Reviewer contract: read-only means Codex's read-only sandbox; the
+        # candidate snapshot stays readable, writes are refused by the CLI
+        # (review.py also detects any mutation).
         sandbox_mode = "read-only" if request.read_only else "workspace-write"
         cmd = [
             self.codex_bin,

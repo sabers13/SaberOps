@@ -57,7 +57,15 @@ def opencode_provider_id(model: str) -> str | None:
 
 
 class OpenCodeAdapter(WorkerAdapter):
-    """Worker adapter dispatching tasks via OpenCode CLI."""
+    """Worker adapter dispatching tasks via OpenCode CLI.
+
+    Reviewer read-only contract: the installed OpenCode CLI exposes no
+    sandbox/permission switch this adapter can pass (its factual capability
+    set therefore omits ``read_only``).  A reviewer is still never allowed to
+    change a candidate: it runs inside the fixed verification snapshot in
+    :mod:`saberops.review`, and any write there is detected and recorded as a
+    BLOCK.  The reviewer prompt also states the snapshot is read-only.
+    """
 
     capability_transport = "DIRECT_CLI"
     factual_capabilities = frozenset(

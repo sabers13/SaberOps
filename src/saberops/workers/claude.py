@@ -377,7 +377,10 @@ class ClaudeCodeAdapter(WorkerAdapter):
         if request.native_resume_id:
             argv.extend(["--resume", request.native_resume_id])
         if request.read_only:
-            # No shell, write, edit, agent, or MCP tools in reviewer mode.
+            # Reviewer contract: plan permission mode with a Read/Glob/Grep
+            # tool allowlist -- no shell, write, edit, agent, or MCP tools.
+            # The candidate snapshot itself is readable so the reviewer can
+            # inspect callers and omitted files (review.py).
             argv.extend(["--permission-mode", "plan", "--tools", "Read,Glob,Grep"])
         else:
             argv.extend(["--permission-mode", "acceptEdits", "--allowedTools",

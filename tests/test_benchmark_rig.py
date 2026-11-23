@@ -1546,8 +1546,6 @@ def test_paced_batch_never_queues_behind_a_one_slot_pool(
         save_owner_control_plane,
     )
     from saberops.jobs import store as jobs_store
-    from saberops.models import ReviewPolicyMode
-    from saberops.project_settings import set_project_review_policy
 
     packaged = load_packaged_plans_raw()
     entry = dict(packaged["quota_pools"]["chatgpt-plus"])
@@ -1580,7 +1578,6 @@ def test_paced_batch_never_queues_behind_a_one_slot_pool(
         repo, _sha = create_toy_repository(
             parent, f"toy-{task.task_id}", task_id=task.task_id
         )
-        set_project_review_policy(repo, ReviewPolicyMode.ALWAYS_REQUIRED)
         assert (
             cli_main(["project", "set-gate", "--repo", str(repo), rig.gate_command])
             == 0

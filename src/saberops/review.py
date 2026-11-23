@@ -86,6 +86,57 @@ from saberops.workers.registry import AdapterRegistry
 
 # Machine-readable pre-dispatch skip reasons are imported from dispatch for single source.
 
+#: Bytes of candidate diff embedded in one reviewer prompt.  The complete
+#: changed-path manifest is always included; the diff body stops at a file
+#: boundary inside this budget and every omitted file is named so the reviewer
+#: reads it from the read-only candidate snapshot.
+REVIEW_DIFF_BUDGET_BYTES: int = 60_000
+#: Bound on the worker's own final report carried into the review prompt.
+REVIEW_WORKER_REPORT_CHARS: int = 4_000
+
+_DIFF_FILE_HEADER = re.compile(r"(?m)^diff --git ")
+_DIFF_FILE_PATH = re.compile(r"^diff --git a/(?P<path>.+?) b/(?P<target>.+)$")
+
+
+def _diff_chunk_path(chunk: str) -> str | None:
+    """Return the ``b/`` path of one ``diff --git`` chunk, if it has one."""
+    first_line = chunk.splitlines()[0] if chunk else ""
+    match = _DIFF_FILE_PATH.match(first_line)
+    return match.group("target") if match else None
+
+
+def _bounded_review_diff(
+    diff_text: str,
+) -> tuple[str, tuple[str, ...]]:
+    """Return the diff text that fits the prompt budget and omitted paths.
+
+    Splits on ``diff --git`` boundaries so an omission is always a whole file
+    (never half a hunk hidden from the reviewer).  Preamble text is kept.
+    """
+    starts = [match.start() for match in _DIFF_FILE_HEADER.finditer(diff_text)]
+    if not starts:
+        text = diff_text.strip()
+        return (text, ())
+    chunks: list[str] = []
+    if starts[0] > 0:
+        chunks.append(diff_text[: starts[0]])
+    for index, start in enumerate(starts):
+        end = starts[index + 1] if index + 1 < len(starts) else len(diff_text)
+        chunks.append(diff_text[start:end])
+    included: list[str] = []
+    omitted: list[str] = []
+    used = 0
+    for chunk in chunks:
+        path = _diff_chunk_path(chunk)
+        size = len(chunk.encode("utf-8"))
+        if path is not None and used + size > REVIEW_DIFF_BUDGET_BYTES:
+            omitted.append(path)
+            continue
+        included.append(chunk)
+        used += size
+    return ("".join(included).strip(), tuple(omitted))
+
+
 
 class _ReadinessAdmission(Protocol):
     """Neutral readiness input for one exact resolved connection.
@@ -235,6 +286,23 @@ def _review_limit_from_run(run: Run) -> int:
         except (ValueError, TypeError, json.JSONDecodeError):
             pass
     return DEFAULT_REVIEW_LIMIT
+
+
+def _review_focus_from_run(run: Run) -> str:
+    """Return the frozen planner review focus, or "" when none was given."""
+    if not run.config_json:
+        return ""
+    try:
+        data = json.loads(run.config_json)
+    except (TypeError, ValueError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    focus = data.get("review_focus")
+    if not isinstance(focus, str):
+        return ""
+    # Bounded so a very long planner note cannot crowd out the evidence.
+    return focus.strip()[:2_000]
 
 
 def _review_tier_decision(run: Run) -> TierDecision:
@@ -720,8 +788,46 @@ class ReviewEngine:
                 tier=review_tier,
             )
 
-        # Gather evidence
-        diff_text = GitManager.get_diff(wt_path, base_commit=run.base_commit)
+        # Gather evidence.  The candidate is already committed at
+        # ``final_attempt.commit_sha`` and the reviewer runs in a read-only
+        # snapshot of exactly that commit; a failed diff read is unavailable
+        # evidence and blocks the review instead of reviewing nothing.
+        base_for_diff = run.base_commit
+        candidate_sha = final_attempt.commit_sha or "HEAD"
+        # Diff the exact candidate commit, not the live working tree: the
+        # reviewer's snapshot is that commit and the manifest must describe it.
+        diff_res = run_process(
+            ["git", "diff", base_for_diff, candidate_sha], cwd=wt_path
+        )
+        if not diff_res.passed:
+            raise ValueError(
+                "review evidence unavailable: git diff "
+                f"{base_for_diff[:8]} failed: {diff_res.stderr.strip()[:500]}"
+            )
+        diff_text, omitted_diff_paths = _bounded_review_diff(diff_res.stdout)
+        name_res = run_process(
+            ["git", "diff", "--name-only", base_for_diff, candidate_sha], cwd=wt_path
+        )
+        if not name_res.passed:
+            raise ValueError(
+                "review evidence unavailable: git diff --name-only "
+                f"{candidate_sha[:8]} failed: {name_res.stderr.strip()[:500]}"
+            )
+        changed_paths = tuple(
+            line.strip() for line in name_res.stdout.splitlines() if line.strip()
+        )
+        if omitted_diff_paths:
+            self.db.record_event(
+                run_id,
+                "review_diff_truncated",
+                payload={
+                    "candidate_sha": candidate_sha,
+                    "budget_bytes": REVIEW_DIFF_BUDGET_BYTES,
+                    "omitted_count": len(omitted_diff_paths),
+                    "changed_count": len(changed_paths),
+                    "omitted_paths": list(omitted_diff_paths),
+                },
+            )
         checks = self.db.get_checks_for_attempt(final_attempt.id)
         gate_info = (
             f"Gate command: '{checks[-1].gate_command}' (exit code: {checks[-1].exit_code})"
@@ -793,6 +899,14 @@ class ReviewEngine:
                     "candidate_sha": final_attempt.commit_sha,
                 },
             )
+            if acceptance_clauses:
+                # A clause review requires engine-verified evidence
+                # (ADR-0055); without it the review must block, never pass
+                # or silently skip the evidence.
+                raise ValueError(
+                    "review evidence unavailable: engine-verified evidence "
+                    f"could not be built for a clause review: {exc}"
+                ) from exc
             engine_evidence = ""
         if engine_evidence:
             self.db.record_event(
@@ -825,6 +939,48 @@ class ReviewEngine:
                 f"{_bounded_tail(extra_evidence.strip())}"
             )
 
+        worker_report_context = ""
+        worker_report = (final_attempt.worker_stdout or "").strip()
+        if worker_report:
+            worker_report_context = (
+                "\n\nWorker's final report (the worker's own claim, not engine "
+                "verification; what it says it skipped, did not check, or sees as "
+                "a risk):\n"
+                f"{_bounded_tail(worker_report, REVIEW_WORKER_REPORT_CHARS)}"
+            )
+
+        review_focus_context = ""
+        review_focus = _review_focus_from_run(run)
+        if review_focus:
+            review_focus_context = (
+                "\n\nReview focus from the planner (additional attention; the full "
+                "review still applies and this cannot turn review off):\n"
+                f"{review_focus}"
+            )
+
+        manifest_lines = [
+            f"Changed paths (complete manifest; {len(changed_paths)} file(s)):"
+        ]
+        omitted_set = set(omitted_diff_paths)
+        for path in changed_paths:
+            marker = (
+                " (diff omitted below; read it from the snapshot)"
+                if path in omitted_set
+                else ""
+            )
+            manifest_lines.append(f"- {path}{marker}")
+        if not changed_paths:
+            manifest_lines.append("- (no changed paths recorded)")
+        manifest_block = "\n".join(manifest_lines)
+        if omitted_diff_paths:
+            diff_heading = (
+                f"Candidate diff (partial: {len(omitted_diff_paths)} file(s) omitted; "
+                "the manifest above is complete. Read every omitted file from the "
+                "read-only snapshot in your working directory before deciding):"
+            )
+        else:
+            diff_heading = "Candidate diff (complete):"
+
         if is_final:
             final_notice_block = f"\n\n{FINAL_CONVERGENCE_NOTICE}\n"
             final_instructions = (
@@ -848,21 +1004,27 @@ class ReviewEngine:
 
         final_instructions += "\n" + FINDINGS_PROMPT
         review_prompt = (
-            "IMPORTANT: You have NO filesystem access to the repository under review. The complete "  # noqa: E501
-            "candidate diff and task context are embedded in this prompt. Base your review SOLELY on the "  # noqa: E501
-            "provided material - do not search the filesystem. Your response MUST begin with a line that "  # noqa: E501
-            "is exactly VERDICT: PASS or VERDICT: BLOCK, followed by concise feedback.\n\n"  # noqa: E501
+            "IMPORTANT: The candidate is checked out in your current working "
+            "directory as a read-only snapshot of the exact commit under review. "
+            "You MAY read any file there (for example callers of changed code or "
+            "files omitted from the diff below). You cannot change it: the engine "
+            "detects any write and fails the review. Your response MUST begin with "
+            "a line that is exactly VERDICT: PASS or VERDICT: BLOCK, followed by "
+            "concise feedback.\n\n"
             "You are an independent, read-only code reviewer.\n"
             f"Task:\n{run.task}"
             f"{acceptance_block}\n\n"
             f"Base commit: {run.base_commit}\n"
-            f"Candidate commit: {final_attempt.commit_sha or 'HEAD'}\n"
+            f"Candidate commit: {candidate_sha}\n"
             f"Gate verification: {gate_info}"
             f"{engine_evidence_context}"
             f"{prior_review_context}"
             f"{extra_evidence_context}"
+            f"{worker_report_context}"
+            f"{review_focus_context}"
             f"{final_notice_block}\n\n"
-            f"Candidate diff:\n```diff\n{diff_text}\n```\n\n"
+            f"{manifest_block}\n\n"
+            f"{diff_heading}\n```diff\n{diff_text}\n```\n\n"
             "Instructions:\n"
             f"{final_instructions}"
         )

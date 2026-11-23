@@ -88,8 +88,11 @@ def test_explicit_override_dispatches_through_stub_binary(
         {"event": "result", "result": {"status": "SUCCESS", "response": "Done"}}
     )
 
+    calls: list[list[str]] = []
+
     def runner(args: list[str], **kwargs: Any) -> ProcessResult:
         assert kwargs["inherit_env"] is False
+        calls.append(args)
         return ProcessResult(args, 0, raw, "", 0.01)
 
     candidate = resolve_candidate_chain(
@@ -104,6 +107,8 @@ def test_explicit_override_dispatches_through_stub_binary(
     )
     assert result.status == AttemptStatus.SUCCESS
     assert result.provider == "antigravity"
+    # Reviewer contract: read-only dispatch runs Antigravity in plan mode.
+    assert calls[0][calls[0].index("--mode") + 1] == "plan"
 
 
 def test_registry_never_auto_includes_attended_only_or_removed() -> None:

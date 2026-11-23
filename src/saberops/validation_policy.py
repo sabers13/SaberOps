@@ -63,7 +63,7 @@ def with_validation_policy(task: str) -> str:
 
 
 def verification_contract(
-    gate_command: str, gate_enabled: bool, review_enabled: bool, review_disabled: bool
+    gate_command: str, gate_enabled: bool, review_disabled: bool
 ) -> str:
     """Describe the frozen engine policy, independently of model-authored guidance."""
     lines = ["[RUN VERIFICATION]"]
@@ -86,10 +86,8 @@ def verification_contract(
     else:
         lines.append("The authoritative gate is disabled by the frozen project policy.")
     if review_disabled:
-        lines.append("Independent engine review is disabled by the project policy.")
-    elif review_enabled:
-        lines.append("Independent SaberOps review is requested for this run.")
+        lines.append("Independent engine review is off for this manual run by the owner switch.")
     else:
-        lines.append("Independent SaberOps review follows the frozen review policy.")
+        lines.append("Independent SaberOps review is mandatory for every accepted candidate.")
     lines.append("A worker's own subagent review is not an independent SaberOps reviewer dispatch.")
     return "\n".join(lines)

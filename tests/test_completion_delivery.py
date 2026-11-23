@@ -565,7 +565,6 @@ def test_direct_orch_run_adoption_writes_the_terminal_notice(
         gate_command="true",
         routing_mode="auto",
         initial_tier=Tier.T1,
-        review_policy_mode=SimpleNamespace(value="ALWAYS_REQUIRED"),
         gate_scratch_mode=SimpleNamespace(value="AUTO"),
         accept_target_branch="main",
         publish_candidate=False,

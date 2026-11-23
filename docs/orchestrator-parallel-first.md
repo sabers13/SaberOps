@@ -181,8 +181,8 @@ concurrently.
   task-scoped review — no bypass. Mechanical conflict resolutions with no
   semantic change and hermetic bridge-test-only additions stay integration-only
   evidence. When in doubt whether glue is substantive, fail closed to the Worker
-  path. Never globally disable risk-adaptive review on ordinary Worker runs to
-  skip integration reviews.
+  path. Never disable the mandatory independent review on an ordinary Worker
+  run to skip integration reviews.
 - There is **one exclusive heavy integration gate (G3)** per wave, on the
   integration branch, with ancestry/SHA evidence.
 - The owner accepts and is the only role that moves the target branch.

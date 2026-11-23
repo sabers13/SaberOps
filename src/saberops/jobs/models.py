@@ -304,6 +304,9 @@ class JobRequirements:
     #: Planner-recorded judgement, never a route name (H1).  Missing means
     #: routine: the ordinary build chain.
     difficulty: Difficulty = Difficulty.ROUTINE
+    #: Planner-authored focus for the independent reviewer.  It can only add
+    #: attention; nothing can use it to turn review off.
+    review_focus: str | None = None
 
     def __post_init__(self) -> None:
         from saberops.control_plane.capabilities import normalize_required_capabilities
@@ -340,9 +343,15 @@ class JobRequirements:
             raise ValueError(f"size_hint must be one of {list(SIZE_HINTS)}; got {size!r}")
         if size is not None:
             object.__setattr__(self, "size_hint", str(size))
+        focus = (
+            self.review_focus.strip()
+            if isinstance(self.review_focus, str)
+            else self.review_focus
+        )
+        object.__setattr__(self, "review_focus", focus or None)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "role": self.role.value,
             "effort": self.effort.value if self.effort is not None else None,
             "required_capabilities": list(self.required_capabilities),
@@ -352,6 +361,11 @@ class JobRequirements:
             "size_hint": self.size_hint,
             "difficulty": self.difficulty.value,
         }
+        # Written only when set so a request digest stored before this field
+        # existed still matches its idempotency key.
+        if self.review_focus:
+            payload["review_focus"] = self.review_focus
+        return payload
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> JobRequirements:
@@ -365,6 +379,7 @@ class JobRequirements:
             size_hint=data.get("size_hint"),
             # A row written before H1 has no difficulty; missing means routine.
             difficulty=coerce_difficulty(data.get("difficulty")),
+            review_focus=data.get("review_focus"),
         )
 
 

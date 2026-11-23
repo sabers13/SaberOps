@@ -278,29 +278,6 @@ class RiskLevel(StrEnum):
     HIGH = "HIGH"
 
 
-class ReviewPolicyMode(StrEnum):
-    """Project-scoped risk-adaptive review policy.
-
-    Lives in :mod:`saberops.models` so the canonical enum is
-    importable from the module-owned authority surface (config,
-    accept, supervisor, CLI, web) without forcing every consumer to
-    depend on :mod:`saberops.review_adaptive`.  The runtime
-    policy decision and project-policy persistence remain in
-    :mod:`saberops.review_adaptive`; this enum is the
-    stable vocabulary those surfaces exchange.
-
-    * ``RISK_ADAPTIVE`` -- canonical default; review intensity follows
-      the deterministic classifier.
-    * ``ALWAYS_REQUIRED`` -- only tightening override; forces an
-      independent semantic reviewer even when the classifier would
-      classify the delta LOW.  No ``NEVER_REQUIRED`` mode exists: a
-      project may NOT silently weaken the hard minimums.
-    """
-
-    RISK_ADAPTIVE = "RISK_ADAPTIVE"
-    ALWAYS_REQUIRED = "ALWAYS_REQUIRED"
-
-
 class GateScratchMode(StrEnum):
     """Project-scoped authoritative gate scratch backend preference.
 
@@ -1147,8 +1124,9 @@ class CandidateState(StrEnum):
     or write-on-read event backs it.
 
     * ``READY`` -- a current gate-passed candidate exists; no substantive
-      review bound to it yet.  A risk-adaptive "review not required"
-      decision stays READY ("review skipped" is never REVIEWED).
+      review bound to it yet.  A candidate whose review is off under the
+      owner's frozen manual switch stays READY ("review skipped" is never
+      REVIEWED).
     * ``IN_REVIEW`` -- review started for the CURRENT candidate with no
       later substantive completion for that same candidate.
     * ``REVIEWED`` -- a substantive completed review is bound to the

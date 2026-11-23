@@ -1396,6 +1396,7 @@ def _lane_requirements(task: PlanTaskDef) -> JobRequirements:
         model_family_exclude=task.model_family_exclude,
         size_hint=size,
         difficulty=coerce_difficulty(task.difficulty or None),
+        review_focus=task.review_focus or None,
     )
 
 

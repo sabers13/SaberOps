@@ -300,14 +300,9 @@ def collect_preflight(repo: Path, db_path: Path | None = None) -> list[Finding]:
         identity = compute_project_identity(repo)
         settings = load_project_settings_for_state_dir(project_state_dir(identity))
         gate = settings.gate_command or detect_authoritative_gate(repo)
-        restore_workflow = (
-            f"orch project set-workflow custom --repo {quoted_repo} "
-            "--gate-enabled --review always-required"
-        )
+        restore_gate = f"orch project set-gate-state enabled --repo {quoted_repo}"
         if not settings.gate_enabled:
-            results.append(Finding("FAIL", "project gate is disabled", restore_workflow))
-        if settings.review_disabled:
-            results.append(Finding("FAIL", "project review is disabled", restore_workflow))
+            results.append(Finding("FAIL", "project gate is disabled", restore_gate))
         results.append(
             Finding(
                 "OK" if gate else "FAIL",

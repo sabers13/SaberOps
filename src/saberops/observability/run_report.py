@@ -375,67 +375,62 @@ def _review_section(
     reason: str = UNKNOWN
     decision_json = db.get_review_risk_decision_json(run_id)
     if decision_json is not None:
+        from saberops.review_adaptive import (
+            ReviewDecision,
+            ReviewPolicyError,
+            validate_review_decision_invariants,
+        )
+
         try:
-            parsed = json.loads(decision_json)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            parsed = None
-        if isinstance(parsed, dict):
-            raw_required = parsed.get("independent_review_required")
-            if isinstance(raw_required, bool):
-                required = raw_required
-                source = parsed.get("review_requirement_source")
-                requirement_source = source if isinstance(source, str) and source else UNKNOWN
-                raw_skip = parsed.get("review_skip_reason")
-                skip_reason = raw_skip if isinstance(raw_skip, str) else ""
-                classification = parsed.get("classification")
-                if isinstance(classification, dict):
-                    raw_reason = classification.get("reason")
-                    reason = raw_reason if isinstance(raw_reason, str) and raw_reason else UNKNOWN
-                    if required is False and not skip_reason:
-                        risk = classification.get("risk_level")
-                        risk_text = risk if isinstance(risk, str) and risk else UNKNOWN
-                        skip_reason = f"{risk_text} ({reason})" if reason != UNKNOWN else risk_text
-            else:
-                # Malformed persisted decision fails closed, mirroring the
-                # accept engine: an unreadable authority marker must never
-                # become a silent skip.
-                required = True
-                requirement_source = "malformed_persisted_decision_fail_closed"
-                gaps.append(
-                    "persisted review decision is malformed; "
-                    "treating review as required (fail closed)"
-                )
-        else:
+            decision = ReviewDecision.from_json(decision_json)
+            validate_review_decision_invariants(decision)
+        except ReviewPolicyError:
+            # Mirror the accept engine: an unreadable authority marker must
+            # never become a silent skip.
             required = True
             requirement_source = "malformed_persisted_decision_fail_closed"
             gaps.append(
                 "persisted review decision is malformed; "
                 "treating review as required (fail closed)"
             )
+        else:
+            required = decision.independent_review_required
+            requirement_source = decision.review_requirement_source.value
+            skip_reason = decision.review_skip_reason
+            reason = (
+                skip_reason
+                if skip_reason
+                else (
+                    "independent review is mandatory"
+                    if required
+                    else "owner-disabled for this run"
+                )
+            )
     else:
         raw_config = run.config_json
+        parsed_config: object = None
         if raw_config:
             try:
                 parsed_config = json.loads(raw_config)
             except (TypeError, ValueError, json.JSONDecodeError):
                 parsed_config = None
-            if isinstance(parsed_config, dict) and isinstance(
-                parsed_config.get("review_enabled"), bool
-            ):
-                required = bool(parsed_config["review_enabled"])
-                requirement_source = "legacy_review_enabled_config"
-                if required is False:
-                    skip_reason = "legacy review_enabled=false"
-                    reason = "legacy review_enabled=false"
+        if isinstance(parsed_config, dict) and isinstance(
+            parsed_config.get("review_disabled"), bool
+        ):
+            # The owner's one manual switch, the same field acceptance reads.
+            required = not bool(parsed_config["review_disabled"])
+            requirement_source = "frozen_owner_review_switch"
+            if required:
+                reason = "independent review is mandatory"
             else:
-                gaps.append(
-                    "no frozen review decision and no legacy review_enabled flag; "
-                    "review necessity UNKNOWN"
-                )
+                skip_reason = "owner-disabled"
+                reason = "owner-disabled for this run"
         else:
+            required = True
+            requirement_source = "no_decision_review_required_fail_closed"
+            reason = "no frozen review decision; treating review as required"
             gaps.append(
-                "no frozen review decision and no persisted run config; "
-                "review necessity UNKNOWN"
+                "no frozen review decision; treating review as required (fail closed)"
             )
     reviews = db.get_reviews_for_run(run_id)
     rounds = [

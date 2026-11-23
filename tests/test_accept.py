@@ -153,6 +153,7 @@ def _seed_run(
     *,
     status: RunStatus = RunStatus.COMPLETED,
     review_enabled: bool = True,
+    review_disabled: bool = False,
 ) -> None:
     Database(db_path).create_run(
         Run(
@@ -168,7 +169,9 @@ def _seed_run(
             completed_at=_CREATED,
             final_attempt_id=None,
             project_id=None,
-            config_json=json.dumps({"review_enabled": review_enabled}),
+            config_json=json.dumps(
+                {"review_enabled": review_enabled, "review_disabled": review_disabled}
+            ),
         )
     )
     Database(db_path).create_attempt(
@@ -485,7 +488,10 @@ def test_r0b1_review_not_required_permits_both(
     """F: review not required and absent -- projection and engine both permit."""
     repo, base, candidate = _make_repo(tmp_path, "repo-f")
     db_path = tmp_path / "web.db"
-    _seed_run(db_path, "run_r0b1_f", repo, base, candidate, review_enabled=False)
+    _seed_run(
+        db_path, "run_r0b1_f", repo, base, candidate,
+        review_enabled=False, review_disabled=True,
+    )
 
     eligibility = AcceptEngine(db=Database(db_path)).check_accept_eligibility("run_r0b1_f")
     assert eligibility.eligible
@@ -698,7 +704,10 @@ def test_r0b_review_not_required_does_not_block(
     """E: review-not-required is valid and does not falsely block."""
     repo, base, candidate = _make_repo(tmp_path, "repo-e")
     db_path = tmp_path / "web.db"
-    _seed_run(db_path, "run_r0b_e", repo, base, candidate, review_enabled=False)
+    _seed_run(
+        db_path, "run_r0b_e", repo, base, candidate,
+        review_enabled=False, review_disabled=True,
+    )
 
     checks = _checks_by_key(db_path, "run_r0b_e")
     assert checks["review"]["status"] == "pass"
@@ -895,24 +904,29 @@ def _patch_implementer_chain(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr("saberops.orchestrator.resolve_candidate_chain", _resolve)
 
-def test_ported_quick_workflow_skips_gate_and_review_through_acceptance(
+def test_ported_owner_switch_skips_gate_and_review_through_acceptance(
     isolated: Path, dispatch_posture: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Ported from test_quick_workflow_skips_gate_and_review_through_acceptance."""
+    """The one owner switch: gate off in settings, review off for this run."""
     from saberops.accept import AcceptEngine
     from saberops.gate_runner import GateRunner
     from saberops.orchestrator import Orchestrator
-    from saberops.project_settings import set_project_workflow
+    from saberops.project_settings import set_project_gate_enabled
     from saberops.run_creation import RunRequest, resolve_effective_run_config
 
     repo = _git_repo(tmp_path / "quick" / "repo")
-    set_project_workflow(repo, preset="quick")
+    set_project_gate_enabled(repo, False)
     config = resolve_effective_run_config(
-        RunRequest(task="Quick scaffold", repo_path=repo, publish_candidate=False)
+        RunRequest(
+            task="Quick scaffold",
+            repo_path=repo,
+            publish_candidate=False,
+            review_disabled=True,
+        )
     )
     assert not config.gate_enabled
     assert config.review_disabled
-    set_project_workflow(repo, preset="balanced")
+    set_project_gate_enabled(repo, True)
     calls: list[str] = []
     environments: list[dict[str, str]] = []
     _patch_implementer_chain(monkeypatch)
@@ -940,29 +954,26 @@ def test_ported_quick_workflow_skips_gate_and_review_through_acceptance(
     assert not accepted.gate_passed
 
 
-@pytest.mark.parametrize("gate_enabled,review_disabled", [(True, True), (False, False)])
-def test_ported_custom_workflow_gate_and_review_are_independent(
+@pytest.mark.parametrize("gate_enabled", [True, False])
+def test_ported_gate_setting_and_mandatory_review_are_independent(
     isolated: Path,
     dispatch_posture: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     gate_enabled: bool,
-    review_disabled: bool,
 ) -> None:
-    """Ported from test_custom_workflow_gate_and_review_are_independent."""
+    """The gate setting varies; review stays mandatory for every accepted run."""
     from saberops.accept import AcceptEngine
     from saberops.orchestrator import Orchestrator
-    from saberops.project_settings import set_project_gate_command, set_project_workflow
+    from saberops.project_settings import (
+        set_project_gate_command,
+        set_project_gate_enabled,
+    )
     from saberops.run_creation import RunRequest, resolve_effective_run_config
 
     repo = _git_repo(tmp_path / "repo")
     set_project_gate_command(repo, "true")
-    set_project_workflow(
-        repo,
-        gate_enabled=gate_enabled,
-        review="disabled" if review_disabled else "always-required",
-        limit=3,
-    )
+    set_project_gate_enabled(repo, gate_enabled)
     reviewer, profile, pool = materialize_discovered_binding(
         connection_id=_R3E1_CONNECTION,
         provider=_R3E1_PROVIDER,
@@ -991,7 +1002,7 @@ def test_ported_custom_workflow_gate_and_review_are_independent(
     )
     result = orch.run(config=config, is_peak=False)
     assert result.passed, result.summary
-    assert bool(db.get_reviews_for_run(result.run_id)) is not review_disabled
+    assert bool(db.get_reviews_for_run(result.run_id))
     checks = db.get_checks_for_run(result.run_id)
     assert checks and all(check.skipped is not gate_enabled for check in checks)
     accepted = AcceptEngine(db).accept_run(result.run_id)

@@ -160,15 +160,11 @@ def _dispatch(
 
 
 def _review_decision(*, required: bool, skip_reason: str = "", reason: str = "low risk") -> str:
-    return json.dumps(
-        {
-            "independent_review_required": required,
-            "review_requirement_source": "test",
-            "review_skip_reason": skip_reason,
-            "classification": {"reason": reason, "risk_level": "LOW"},
-        },
-        sort_keys=True,
-    )
+    from saberops.review_adaptive import mandatory_review_decision
+
+    return mandatory_review_decision(
+        decision_id="test", owner_disabled=not required
+    ).to_json()
 
 
 # --- running projection -----------------------------------------------------
@@ -489,16 +485,15 @@ def test_c16b1_all_unknown_usage_stays_unknown(tmp_path: Path) -> None:
 # --- review semantics -------------------------------------------------------
 
 
-def test_c16b1_risk_adaptive_review_skip(tmp_path: Path) -> None:
+def test_c16b1_owner_disabled_review_skip(tmp_path: Path) -> None:
     db = Database(tmp_path / "state.db")
     _run(db, status=RunStatus.COMPLETED, completed_at=_COMPLETED, final_attempt_id="att_1")
     _attempt(db, "run_c16b1", "att_1", 1, status=AttemptStatus.SUCCESS, commit_sha="cand")
-    db.update_review_risk_decision(
-        "run_c16b1", _review_decision(required=False, skip_reason="LOW (docs only)"))
+    db.update_review_risk_decision("run_c16b1", _review_decision(required=False))
 
     report = build_run_report(db, "run_c16b1")
     assert report["review"]["review_required"] is False
-    assert report["review"]["review_skip_reason"] == "LOW (docs only)"
+    assert report["review"]["review_skip_reason"] == "owner-disabled"
     assert report["review"]["rounds"] == 0
     assert report["review"]["verdicts"] == []
 

@@ -28,17 +28,11 @@ from saberops.models import (
     DispatchStage,
     ReviewResult,
     ReviewVerdict,
-    RiskLevel,
     Run,
     RunStatus,
     Tier,
 )
-from saberops.review_adaptive import (
-    ChangeClass,
-    ChangeClassification,
-    ReviewPolicyMode,
-    decide_review,
-)
+from saberops.review_adaptive import mandatory_review_decision
 
 _CREATED = "2026-09-24T10:00:00+00:00"
 
@@ -174,30 +168,23 @@ def _review(db: Database, run_id: str, review_id: str, verdict: ReviewVerdict) -
     )
 
 
-def _skip_decision_json(run_id: str) -> str:
-    classification = ChangeClassification(
-        change_class=ChangeClass.DOCS_ONLY,
-        risk_level=RiskLevel.LOW,
-        changed_paths=("README.md",),
-        crosses_ownership_boundary=False,
-        changes_hard_governance=False,
-        changes_security_boundary=False,
-        changes_acceptance_or_gate_authority=False,
-        changes_publication_authority=False,
-        changes_recovery_or_exactly_once=False,
-        deterministic_coverage_available=True,
-        signals=("docs_only",),
-        reason="docs only",
-    )
-    decision = decide_review(
-        classification=classification,
-        review_policy_mode=ReviewPolicyMode.RISK_ADAPTIVE,
-        owner_explicit_review=False,
-        is_autonomous=False,
-        decision_id=f"c13f-{run_id}",
-    )
-    assert decision.independent_review_required is False
-    return decision.to_json()
+def _owner_disabled_decision_json(run_id: str) -> str:
+    """The one recorded review-absence: the owner's manual switch."""
+    return mandatory_review_decision(
+        decision_id=f"c13f-{run_id}", owner_disabled=True
+    ).to_json()
+
+
+_LEGACY_SKIP_JSON = (
+    '{"classification":{"change_class":"DOCS_ONLY","risk_level":"LOW",'
+    '"reason":"docs only"},"decision_id":"legacy-skip",'
+    '"independent_review_required":false,"is_autonomous":false,'
+    '"is_high_t3":false,"owner_explicit_review":false,'
+    '"review_policy_mode":"RISK_ADAPTIVE",'
+    '"review_requirement_source":"CLASSIFIER_LOW_SKIPPED",'
+    '"review_skip_reason":"DOCS_ONLY delta with risk_level=LOW",'
+    '"schema_version":"review-adaptive/1"}'
+)
 
 
 def _accept(db: Database, run_id: str, sha: str | None) -> None:
@@ -225,13 +212,13 @@ def _accept_raw(db: Database, run_id: str, payload: dict[str, object]) -> None:
     db.record_event(run_id, "run_accepted", payload=payload)
 
 
-def test_a_gate_passed_review_not_required_ready(tmp_path: Path) -> None:
+def test_a_gate_passed_owner_disabled_review_ready(tmp_path: Path) -> None:
     db = _db(tmp_path)
     base = _sha("base-a")
     candidate = _sha("candidate-a")
     _seed_run(db, "run-a", base)
     _gate_pass(db, "run-a", "run-a-a1", 1, candidate, base)
-    db.update_review_risk_decision("run-a", _skip_decision_json("run-a"))
+    db.update_review_risk_decision("run-a", _owner_disabled_decision_json("run-a"))
     before = len(db.get_events("run-a", limit=10000))
     proj = project_candidate_state(
         db, "run-a", target_head_resolver=lambda _rid, _b: base
@@ -409,14 +396,15 @@ def test_h_foreign_or_malformed_accept_never_accepts(tmp_path: Path) -> None:
     assert proj.state is CandidateState.READY
 
 
-def test_i_risk_adaptive_skip_stays_ready_never_reviewed(tmp_path: Path) -> None:
+def test_i_legacy_risk_adaptive_skip_never_counts_as_review_not_required(
+    tmp_path: Path,
+) -> None:
     db = _db(tmp_path)
     base = _sha("base-i")
     candidate = _sha("candidate-i")
     _seed_run(db, "run-i", base)
     _gate_pass(db, "run-i", "run-i-a1", 1, candidate, base)
-    decision_json = _skip_decision_json("run-i")
-    db.update_review_risk_decision("run-i", decision_json)
+    db.update_review_risk_decision("run-i", _LEGACY_SKIP_JSON)
     db.record_event(
         "run-i",
         "review_skipped_by_risk_adaptive_policy",
@@ -427,7 +415,9 @@ def test_i_risk_adaptive_skip_stays_ready_never_reviewed(tmp_path: Path) -> None
     assert proj.candidate_sha == candidate
     assert proj.state is CandidateState.READY
     assert proj.verdict is None
-    assert proj.review_required is False
+    # A pre-1.1 classifier skip is no longer evidence of "review not
+    # required": the projection does not claim it.
+    assert proj.review_required is not False
 
 
 def test_j_no_trustworthy_candidate_is_none(tmp_path: Path) -> None:

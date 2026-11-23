@@ -214,9 +214,10 @@ the CLI (`orch mode set`) or the Questions page.
   refactors, anything that touches several files or must pass the project's checks.
 - Do it yourself, without SaberOps, for questions, reading code, tiny edits you
   can verify at a glance, and anything the owner asks you to do directly.
-- A docs-only change may skip independent review under the existing
-  risk-adapted review policy; that policy keeps review for anything touching
-  authority or production behaviour, and never changes acceptance.
+- Every candidate that can be accepted is independently reviewed, including a
+  docs-only change. Review focus can be added on `submit_job`; it cannot turn
+  review off. Only the owner's direct manual `orch run --no-review` switch
+  skips review, and it never changes acceptance rules.
 
 ## Which worker for which job
 Choose by what the work needs, not by what is closest to hand.
@@ -266,8 +267,10 @@ stays attended.
      "retries 3 times with backoff", "no change to the public API"),
    - `idempotency_key`: a stable key, so a retry never submits twice.
    Optional `base_ref`, `priority`, `kind`, `deadline`, `not_before`,
-   `depends_on`, and
-   `caller_id` select the base, scheduling, job kind, dependency and caller. A
+   `depends_on`, `caller_id` and `review_focus` select the base, scheduling,
+   job kind, dependency, caller and reviewer attention. `review_focus` adds
+   what the independent reviewer should look at (for example new
+   suppressions or broad handlers); it can never turn review off. A
    dependant starts only after every job it names in `depends_on` has been
    accepted by the owner; a dependency that fails or is cancelled parks the
    dependant for good. A completed scout dependency satisfies its dependants.

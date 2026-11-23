@@ -165,9 +165,11 @@ def test_pre_1_1_store_keeps_its_settings_and_runs_a_job(
         binding.binding_id for binding in bindings.registry.list_bindings()
     }
     settings = load_project_settings(store.repo)
-    assert settings.review_mode == "max"
-    assert settings.review_limit == 5
+    # H4 retires the review knobs: the store keeps its gate decision and the
+    # retired review fields are ignored (review is mandatory on the new code).
     assert settings.gate_enabled is True
+    assert not hasattr(settings, "review_mode")
+    assert not hasattr(settings, "review_limit")
     routing = load_effective_routing_payload()
     routes = [
         route

@@ -214,13 +214,13 @@ class AcceptEngine:
         Authority precedence:
 
         1. Frozen decision JSON on the run row (when present and
-           valid).  Malformed persisted decisions fall through to (2)
-           but conservatively require review -- the classifier will
-           produce ``required=True`` for any non-trivial change anyway.
-        2. Legacy ``review_enabled`` boolean in the persisted config
-           JSON.  Reconstructs via :func:`reconstruct_run_config` for
-           one canonical path; reconstruction never invents a skip.
+           valid).  Malformed persisted decisions conservatively
+           require review.
+        2. Otherwise the persisted config's frozen ``review_disabled``
+           owner switch -- the only recorded way review is absent.
 
+        Review is mandatory for every candidate that can be accepted, so
+        a run with no usable decision and no owner switch requires review.
         This is the canonical helper every accept-side decision must use
         -- the post-CAS verdict / gate / publication checks remain
         unchanged.
@@ -235,34 +235,24 @@ class AcceptEngine:
             from saberops.review_adaptive import (
                 ReviewDecision,
                 ReviewPolicyError,
-                validate_project_review_policy_invariants,
+                validate_review_decision_invariants,
             )
 
             try:
                 decision = ReviewDecision.from_json(decision_json)
-                validate_project_review_policy_invariants(decision)
+                validate_review_decision_invariants(decision)
                 if decision.review_requirement_source.value == "OWNER_DISABLED":
                     return True  # no matching frozen owner authorization
                 return bool(decision.independent_review_required)
             except ReviewPolicyError:
                 # Malformed persisted decision: conservative.
                 return True
-        # Legacy / partial / never-classified run: use the frozen
-        # ``review_enabled`` boolean from the persisted config.
-        #
-        # Invariant: a malformed legacy persisted config
-        # caused acceptance to hard-refuse with a RuntimeError
-        # ("Cannot accept run '<id>': persisted run configuration is
-        # invalid").  That fail-closed law is restored here: silently
-        # coercing corrupt persisted config to ``review_enabled=False``
-        # would make the accept engine treat an unreadable authority
-        # marker as if no review was required, which would silently
-        # weaken what the engine is about to execute.  Valid legacy
-        # configs (``review_enabled=True`` -> required,
-        # ``review_enabled=False`` -> not required) preserve their
-        # older behavior exactly.
+        # No decision row: the frozen config's owner switch is the only
+        # recorded reason review can be absent.  Anything malformed fails
+        # closed; a legacy run created before mandatory review can no longer
+        # be accepted unreviewed.
         if not run.config_json:
-            return False
+            return True
         try:
             parsed = json.loads(run.config_json)
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -276,16 +266,14 @@ class AcceptEngine:
                 f"is invalid: config must be a JSON object, got "
                 f"{type(parsed).__name__}"
             )
-        if "review_enabled" not in parsed:
-            return False
-        value = parsed["review_enabled"]
-        if not isinstance(value, bool):
+        value = parsed.get("review_disabled", False)
+        if type(value) is not bool:
             raise RuntimeError(
                 f"Cannot accept run '{run_id}': persisted run configuration "
-                f"is invalid: review_enabled must be a boolean, got "
+                f"is invalid: review_disabled must be a boolean, got "
                 f"{type(value).__name__}"
             )
-        return value
+        return not value
 
     def _validation_policy(self, run_id: str) -> tuple[bool, bool]:
         run = self.db.get_run(run_id)
@@ -1412,12 +1400,10 @@ class AcceptEngine:
             )
 
         # The persisted run configuration decides whether a review is required.
-        # Adaptive review delegates the answer to the canonical helper
-        # :meth:`_resolve_review_required_from_persisted_run` which
-        # consults the frozen risk-adaptive decision when present and
-        # falls back to the legacy ``review_enabled`` boolean otherwise.
-        # The helper fails closed on malformed persisted decisions and
-        # never silently invents a skip.  A required review must exist
+        # :meth:`_resolve_review_required_from_persisted_run` consults the
+        # frozen decision when present and otherwise the owner's manual
+        # switch.  The helper fails closed on malformed persisted decisions
+        # and never silently invents a skip.  A required review must exist
         # and be substantive; any present non-substantive verdict
         # remains a hard rejection for legacy safety.
         review_required = self._resolve_review_required_from_persisted_run(run_id)

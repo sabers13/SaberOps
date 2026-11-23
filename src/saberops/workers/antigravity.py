@@ -133,6 +133,8 @@ class AntigravityAdapter(WorkerAdapter):
             effort,
             "--add-dir",
             str(request.worktree_path),
+            # Reviewer contract: plan mode refuses edits; the candidate
+            # snapshot stays readable for callers/omitted-file inspection.
             "--mode",
             "plan" if request.read_only else "accept-edits",
             "--output-format",

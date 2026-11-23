@@ -5,15 +5,13 @@ The logical owner-controlled settings are:
 * gate command (new persisted document; no prior authority existed)
 * data policy / training use (new persisted document; unset is Denied)
 * accept target branch (new persisted document; unset resolves live)
-* review policy (COMPOSED from :mod:`saberops.review_adaptive` -- never copied)
 * gate storage / gate-scratch preference (COMPOSED from
   :mod:`saberops.gate_runner` -- never copied)
 
-This module owns exactly one new persisted document,
-``project-settings.json`` (schema version 1), holding only the three
-settings that had no canonical store.  Review policy and gate-scratch
-reads/writes delegate to their existing canonical persistence so this
-layer can never produce a divergent copy.
+Independent review is mandatory and has no project setting.  This module
+owns exactly one new persisted document, ``project-settings.json``
+(schema version 1); gate-scratch reads/writes delegate to their existing
+canonical persistence so this layer can never produce a divergent copy.
 
 Legacy/frozen Runs are immutable: this module never rewrites
 a Run's config or evidence; it only resolves policy for *new* runs.
@@ -24,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -90,9 +89,6 @@ class ProjectSettings:
     data_policy: DataPolicy | None = None
     accept_target_branch: str | None = None
     gate_enabled: bool = True
-    review_disabled: bool = False
-    review_mode: str | None = None
-    review_limit: int | None = None
     #: F27: ``cheap`` (default), ``build``, or one exact ``provider/model`` on
     #: the build route.  ``None`` means the documented cheap default.
     scout_route: str | None = None
@@ -106,11 +102,7 @@ class ProjectSettings:
             payload["data_policy"] = self.data_policy.value
         if self.accept_target_branch is not None:
             payload["accept_target_branch"] = self.accept_target_branch
-        payload.update(gate_enabled=self.gate_enabled, review_disabled=self.review_disabled)
-        if self.review_mode is not None:
-            payload["review_mode"] = self.review_mode
-        if self.review_limit is not None:
-            payload["review_limit"] = self.review_limit
+        payload.update(gate_enabled=self.gate_enabled)
         if self.scout_route is not None:
             payload["scout_route"] = self.scout_route
         return payload
@@ -179,22 +171,12 @@ def _parse_document(data: object, source: str) -> ProjectSettings:
     data_raw = data.get("data_policy")
     branch_raw = data.get("accept_target_branch")
     gate_enabled = data.get("gate_enabled", True)
-    review_disabled = data.get("review_disabled", False)
-    review_mode = data.get("review_mode")
-    review_limit = data.get("review_limit")
     scout_route = data.get("scout_route")
-    if (
-        type(gate_enabled) is not bool
-        or type(review_disabled) is not bool
-        or review_mode not in (None, "bounded", "max")
-        or (review_limit is not None and (type(review_limit) is not int or review_limit < 1))
-    ):
+    if type(gate_enabled) is not bool:
         raise ProjectSettingsError("Invalid project workflow policy")
+    _warn_retired_review_fields(data, source)
     return ProjectSettings(
         gate_enabled=gate_enabled,
-        review_disabled=review_disabled,
-        review_mode=review_mode,
-        review_limit=review_limit,
         scout_route=(
             _coerce_scout_route(scout_route, source) if scout_route is not None else None
         ),
@@ -242,9 +224,42 @@ def _resolve_state_dir(repo_path: Path | str) -> Path:
         ) from exc
 
 
+_RETIRED_REVIEW_KEYS: Final[tuple[str, ...]] = (
+    "review_disabled",
+    "review_mode",
+    "review_limit",
+)
+
+#: One notice per retired review setting per process (a store can be read on
+#: every scheduler tick).
+_warned_retired_review: set[str] = set()
+
+
+def _warn_retired_review_fields(data: Mapping[str, object], source: str) -> None:
+    """Print one migration notice when a store still carries review settings."""
+    if not any(key in data for key in _RETIRED_REVIEW_KEYS):
+        return
+    if source in _warned_retired_review:
+        return
+    _warned_retired_review.add(source)
+    print(
+        "[!] Independent review is always on; the project review settings in "
+        f"{source} are retired and ignored.",
+        file=sys.stderr,
+    )
+
+
 def load_project_settings_for_state_dir(state_dir: Path | str) -> ProjectSettings:
     """Return persisted owner decisions for ``state_dir`` (unset fields are None)."""
     loaded = _read_settings_file(project_settings_path(state_dir))
+    legacy_policy = Path(state_dir) / "review-policy.json"
+    if legacy_policy.exists() and str(state_dir) not in _warned_retired_review:
+        _warned_retired_review.add(str(state_dir))
+        print(
+            "[!] Independent review is always on; the project review policy "
+            f"at {legacy_policy} is retired and ignored.",
+            file=sys.stderr,
+        )
     return ProjectSettings() if loaded is None else loaded
 
 
@@ -519,19 +534,16 @@ def resolve_effective_training_allowed(
 # ---------------------------------------------------------------------------
 
 
-def set_project_review_policy(repo_path: Path | str, mode: object) -> Path:
-    """Persist the project's review policy via the canonical store.
-
-    Delegates to
-    :func:`saberops.review_adaptive.set_project_review_policy_for_state_dir`
-    so project-settings writes use the canonical existing persistence
-    rather than producing a divergent copy.
-    """
-    from saberops.project import bind_project_state_dir, compute_project_identity
-    from saberops.review_adaptive import set_project_review_policy_for_state_dir
-
-    state_dir = bind_project_state_dir(compute_project_identity(Path(repo_path).expanduser()))
-    return set_project_review_policy_for_state_dir(state_dir, mode)  # type: ignore[arg-type]
+def set_project_gate_enabled(repo_path: Path | str, enabled: bool) -> Path:
+    """Persist whether the project's authoritative gate runs for future runs."""
+    if type(enabled) is not bool:
+        raise ProjectSettingsError("gate_enabled must be a boolean")
+    state_dir = _resolve_state_dir(repo_path)
+    current = load_project_settings_for_state_dir(state_dir)
+    merged = replace(current, gate_enabled=enabled)
+    path = project_settings_path(state_dir)
+    _atomic_write_json(path, merged.as_dict())
+    return path
 
 
 __all__ = [
@@ -552,66 +564,7 @@ __all__ = [
     "set_project_accept_target_branch",
     "set_project_data_policy",
     "set_project_gate_command",
-    "set_project_review_policy",
+    "set_project_gate_enabled",
     "set_project_scout_route",
     "set_project_settings_for_state_dir",
 ]
-
-
-WORKFLOW_PRESETS: Final[dict[str, tuple[bool, str, str, int]]] = {
-    "quick": (False, "disabled", "bounded", 1),
-    "balanced": (True, "risk-adaptive", "bounded", 3),
-    "thorough": (True, "always-required", "bounded", 5),
-    "max": (True, "always-required", "max", 3),
-}
-
-
-def workflow_preset(settings: ProjectSettings, review_policy: str) -> str:
-    review = "disabled" if settings.review_disabled else review_policy.lower().replace("_", "-")
-    values = (
-        settings.gate_enabled,
-        review,
-        settings.review_mode or "bounded",
-        settings.review_limit or 3,
-    )
-    for name, preset in WORKFLOW_PRESETS.items():
-        if values[:3] == preset[:3] and (values[2] == "max" or values[3] == preset[3]):
-            return name
-    return "custom"
-
-
-def set_project_workflow(
-    repo_path: Path | str,
-    *,
-    preset: str = "custom",
-    gate_enabled: bool = True,
-    review: str = "risk-adaptive",
-    mode: str = "bounded",
-    limit: int = 3,
-) -> Path:
-    if preset != "custom":
-        if preset not in WORKFLOW_PRESETS:
-            raise ProjectSettingsError("Unknown workflow preset")
-        gate_enabled, review, mode, limit = WORKFLOW_PRESETS[preset]
-    if review not in ("disabled", "risk-adaptive", "always-required") or mode not in (
-        "bounded",
-        "max",
-    ):
-        raise ProjectSettingsError("Invalid review settings")
-    if type(limit) is not int or limit < 1 or type(gate_enabled) is not bool:
-        raise ProjectSettingsError("Review limit must be a positive whole number")
-    current = load_project_settings(repo_path)
-    # Review policy continues to use its canonical store, not a copied field.
-    set_project_review_policy(
-        repo_path, "ALWAYS_REQUIRED" if review == "always-required" else "RISK_ADAPTIVE"
-    )
-    updated = replace(
-        current,
-        gate_enabled=gate_enabled,
-        review_disabled=review == "disabled",
-        review_mode=mode,
-        review_limit=limit,
-    )
-    path = project_settings_path(_resolve_state_dir(repo_path))
-    _atomic_write_json(path, updated.as_dict())
-    return path

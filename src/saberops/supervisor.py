@@ -1661,23 +1661,14 @@ class RunSupervisor:
                 str(config.gate_timeout),
                 "--review-timeout",
                 str(config.review_timeout),
-                "--review-mode",
-                config.review_mode,
-                "--review-limit",
-                str(config.review_limit),
             ]
         )
         args.extend(
             [
-                "--review-policy",
-                # Project-scoped risk-adaptive review policy mode is
-                # frozen at Run creation; the supervisor-launched owner must
-                # forward the same value so a fresh CLI process does not
-                # silently re-derive it from (possibly changed) live policy.
-                config.review_policy_mode.value.lower().replace("_", "-"),
                 # The candidate-publication decision was frozen when the run was
                 # created; relay it so the detached owner never re-derives it from
-                # (possibly changed) live authority policy.
+                # (possibly changed) live authority policy.  Review is frozen on
+                # the persisted RunConfig and needs no forwarding.
                 "--publish-candidate" if config.publish_candidate else "--no-publish-candidate",
                 "--db",
                 db_path,
@@ -1702,8 +1693,6 @@ class RunSupervisor:
             args.extend(["--tool", tool_ref])
         if not config.training_allowed:
             args.append("--training-denied")
-        if config.owner_review_requested:
-            args.append("--review")
         # Only an explicit owner timeout is forwarded as a flag.
         # The effective timeout always survives detached execution because
         # the detached owner adopts the persisted RunConfig

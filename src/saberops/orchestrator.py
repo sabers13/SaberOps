@@ -1692,64 +1692,30 @@ class Orchestrator:
         *,
         run_id: str,
         config: RunConfig,
-        target_repo: Path | str,
-        base_commit: str,
-        candidate_sha: str | None,
-        is_autonomous: bool = False,
     ) -> Any:
-        """Compute and persist the frozen review-necessity decision.
+        """Compute and persist the frozen review requirement for a candidate.
 
-        Returns the decision whether or not the persistence write
-        succeeds: callers consult the returned value but the persisted
-        row is also the authoritative source Accept / supervisor
-        recovery consult on reconstruction.  A malformed persisted
-        decision is never re-derived into a fresh classifier answer:
-        it fails closed as review-required via the conservative legacy
-        seam (mirroring the Accept engine, which treats a malformed
-        persisted decision as review-required).
+        Review is mandatory: every candidate that can be accepted is
+        reviewed.  The only recorded exception is the owner's explicit
+        manual ``--no-review`` switch, frozen on ``config.review_disabled``.
 
-        The decision is computed against the **actual candidate change
-        set** (``git diff base..candidate``), not against speculative
-        task text -- this is what lets the LOW skip path be safely
-        deterministic.  Empty / missing diffs default to the legacy
-        conservative semantic (review required) so a candidate with no
-        observable change cannot be silently approved as LOW.
-
-        ``is_autonomous`` is the truth about the producing runtime
-        contract (not derived from ``config.review_enabled``); an
-        autonomous run produces ``review_requirement_source =
-        AUTONOMOUS_SAFETY`` regardless of any subsequent precedence
-        level, so the audit cannot lose the autonomous hard-minimum
-        signal.  ``actual_tier`` is the durable tier actually used to
-        produce this candidate (manual routing tier for ``routing_mode
-        == "manual"``, otherwise the run row's persisted ``tier`` which
-        ``update_run_tier`` keeps current through every escalation) so
-        auto-classified / escalated T3 work carries the T3
-        hard-minimum signal into adaptive review.
+        A persisted decision wins so retry / repair / supervisor restart never
+        re-derives the answer; a malformed one fails closed as
+        review-required instead of becoming a skip.
         """
         from saberops.review_adaptive import (
             ReviewDecision,
             ReviewPolicyError,
-            classify_change,
             conservative_legacy_decision,
-            decide_review,
-            validate_project_review_policy_invariants,
+            mandatory_review_decision,
+            validate_review_decision_invariants,
         )
 
-        # Reconstruct from persisted decision when present so the
-        # decision survives retry / repair / supervisor restart without
-        # re-derivation against possibly-evolved classifier state.
-        # A malformed persisted value fails closed as review-required:
-        # it MUST NOT fall through to a fresh classifier computation,
-        # which could reclassify corrupted authoritative state into a
-        # LOW skip.  The corrupt bytes are left untouched on the row
-        # (forensic evidence); the returned conservative decision
-        # requires review, matching the Accept engine's read path.
         persisted = self.db.get_review_risk_decision_json(run_id)
         if persisted is not None:
             try:
                 decision = ReviewDecision.from_json(persisted)
-                validate_project_review_policy_invariants(decision)
+                validate_review_decision_invariants(decision)
                 if (
                     decision.review_requirement_source.value == "OWNER_DISABLED"
                     and not config.review_disabled
@@ -1757,109 +1723,12 @@ class Orchestrator:
                     raise ReviewPolicyError("Missing frozen owner authorization to skip review")
                 return decision
             except ReviewPolicyError:
-                return conservative_legacy_decision(
-                    owner_explicit_review=bool(config.owner_review_requested),
-                    review_policy_mode=config.review_policy_mode,
-                )
+                return conservative_legacy_decision()
 
-        task_text = (config.task or "").strip()
-        changed_paths: tuple[str, ...] = ()
-        if candidate_sha and base_commit and candidate_sha != base_commit:
-            try:
-                from saberops.review_adaptive import diff_changed_paths
-
-                changed_paths = diff_changed_paths(target_repo, base_commit, candidate_sha)
-            except ReviewPolicyError:
-                # Cannot read the candidate diff: fail closed (review
-                # required).  The conservative decision path below
-                # emits the right answer.
-                changed_paths = ()
-
-        # Resolve the actual tier that produced this candidate.
-        actual_tier: Tier | None = None
-        # Tracks when the auto-routed branch could NOT durably resolve the
-        # tier this candidate was actually produced at.  The T3 hard
-        # minimum must never be silently erasable by a missing / unreadable
-        # run row: in any such case we fail closed into
-        # ``independent_review_required=True`` after the classifier call,
-        # below, with a truthful ``review_requirement_source`` so the audit
-        # does not falsely claim the tier was observed as T3.
-        auto_tier_unresolvable = False
-        if config.routing_mode == "manual":
-            actual_tier = config.manual_tier
-        else:
-            # Auto-routed runs: ``update_run_tier`` keeps the run row's
-            # ``tier`` column current through every escalation, so the
-            # persisted value at candidate-ready time IS the durable
-            # resolved tier.  Inability to read that row, an unexpected
-            # missing row, or an unreadable ``tier`` value all leave the
-            # candidate's actual tier unknown -- so the candidate may
-            # have been produced at T3 without the audit being able to
-            # see that signal.  ``auto_tier_unresolvable`` forces the
-            # post-classifier override to fail closed regardless of how
-            # the diff classifies on path patterns alone.
-            run_row: Run | None = None
-            try:
-                run_row = self.db.get_run(run_id)
-            except Exception:
-                run_row = None
-            if run_row is not None and getattr(run_row, "tier", None) is not None:
-                actual_tier = run_row.tier
-            else:
-                auto_tier_unresolvable = True
-
-        classification = classify_change(
-            task_text=task_text,
-            changed_paths=changed_paths,
-            tier=actual_tier,
-            autonomous=is_autonomous,
-        )
-        decision = decide_review(
-            classification=classification,
-            review_policy_mode=config.review_policy_mode,
-            owner_explicit_review=bool(config.owner_review_requested),
-            is_autonomous=is_autonomous,
+        decision = mandatory_review_decision(
             decision_id=f"c13f-{run_id}",
+            owner_disabled=config.review_disabled,
         )
-        if config.review_disabled:
-            from saberops.review_adaptive import ReviewRequirementSource
-
-            decision = _frozen_replace(
-                decision,
-                independent_review_required=False,
-                owner_explicit_review=False,
-                review_requirement_source=ReviewRequirementSource.OWNER_DISABLED,
-                review_skip_reason="owner-disabled",
-            )
-        if (
-            auto_tier_unresolvable
-            and not config.review_disabled
-            and not decision.independent_review_required
-        ):
-            # Auto-routed candidate with an unresolvable durable tier:
-            # the classifier may have produced a LOW skip because the
-            # observable diff looked LOW-eligible, but the actual tier
-            # could have been T3 (escalated at any point in the run
-            # loop) -- and a HIGH/T3 candidate requires review by the
-            # hard minimum.  Override the decision to fail closed with
-            # a truthful audit label that does not falsely claim T3 was
-            # observed: only the requirement flips, the classifier's
-            # actual classification is unchanged so ``changed_paths``,
-            # ``signals``, and ``reason`` stay truthful.  The persisted
-            # ``review_requirement_source`` carries the
-            # ``CLASSIFIER_AUTO_TIER_UNRESOLVABLE`` label so the audit
-            # can answer "why was review required for a LOW-looking
-            # auto delta?" without ambiguity.
-            from saberops.review_adaptive import ReviewRequirementSource
-
-            decision = _frozen_replace(
-                decision,
-                independent_review_required=True,
-                review_requirement_source=(
-                    ReviewRequirementSource.CLASSIFIER_AUTO_TIER_UNRESOLVABLE
-                ),
-                review_skip_reason="",
-            )
         self.db.update_review_risk_decision(run_id, decision.to_json())
         return decision
 
@@ -4262,7 +4131,7 @@ class Orchestrator:
                         tool_contract=frozen_tools,
                         run_verification_text=verification_contract(
                             config.gate_command, config.gate_enabled,
-                            config.review_enabled, config.review_disabled,
+                            config.review_disabled,
                         ),
                         project_scope_text=scope_section_for_run(
                             self.db,
@@ -6023,50 +5892,33 @@ class Orchestrator:
                         attempts.append(attempt)
                         active_attempt_id = None
 
-                        # Deterministic risk-adaptive review
-                        # classification.  Computed once at candidate-ready
+                        # Mandatory independent review.  The frozen
+                        # requirement is computed once at candidate-ready
                         # time, persisted on the run row, and consulted by
                         # Accept + supervisor recovery + handoff + retry.
-                        # When the decision says no independent review is
-                        # required, the existing review+repair loop is
-                        # skipped entirely -- this is the canonical seam
-                        # the doctrine authorizes.
+                        # Only the owner's manual ``--no-review`` switch (or
+                        # a scout, which is never accepted) can be absent.
                         decision = self._resolve_c13_f_review_decision(
                             run_id=run_id,
                             config=config,
-                            target_repo=repo,
-                            # Both paths expose the run's authoritative
-                            # base commit: for adoption, ``adopted_base_commit``
-                            # holds the existing run row's base; for new runs,
-                            # ``base_commit`` was captured from the live HEAD.
-                            base_commit=adopted_base_commit or base_commit,
-                            candidate_sha=commit_sha,
-                            is_autonomous=bool(autonomous is not None),
                         )
                         if not decision.independent_review_required:
                             self.db.record_event(
                                 run_id,
-                                "review_skipped_by_owner_policy"
-                                if config.review_disabled
-                                else "review_skipped_by_risk_adaptive_policy",
+                                "review_skipped_by_owner_policy",
                                 attempt_id=attempt_id,
                                 payload={
                                     "decision_id": decision.decision_id,
-                                    "change_class": decision.classification.change_class.value,
-                                    "risk_level": decision.classification.risk_level.value,
-                                    "review_policy_mode": decision.review_policy_mode.value,
                                     "skip_reason": decision.review_skip_reason,
                                     "review_requirement_source": (
                                         decision.review_requirement_source.value
                                     ),
-                                    "is_autonomous": decision.is_autonomous,
                                 },
                             )
                             # At this exact seam the runtime
                             # positively knows that an independent REVIEW
                             # phase does not apply to this candidate
-                            # (authoritative review-necessity decision:
-                            # ``independent_review_required == False``).
+                            # (the owner's frozen manual switch).
                             # The REVIEW phase is therefore recorded as
                             # NOT_APPLICABLE with truthful attribution --
                             # never inferred from elapsed time and never
@@ -6080,16 +5932,14 @@ class Orchestrator:
                                     run_id=run_id,
                                     phase=PhaseKind.REVIEW,
                                     source_kind="orchestrator._run_core",
-                                    boundary_kind="review_skipped_by_owner_policy"
-                                    if config.review_disabled
-                                    else "review_skipped_by_risk_adaptive_policy",
+                                    boundary_kind="review_skipped_by_owner_policy",
                                     attempt_id=attempt_id,
                                     package_id=(
                                         current_package.id if current_package is not None else None
                                     ),
                                     notes=(
                                         "Review did not apply to this candidate -- the "
-                                        "authoritative risk-adaptive decision resolved "
+                                        "owner's frozen manual switch resolved "
                                         "independent_review_required=False at "
                                         "the canonical review-skip seam "
                                         "(decision_id="
@@ -7225,7 +7075,7 @@ class Orchestrator:
                                             tool_contract=frozen_tools,
                                             run_verification_text=verification_contract(
                                                 config.gate_command, config.gate_enabled,
-                                                config.review_enabled, config.review_disabled,
+                                                config.review_disabled,
                                             ),
                                             project_scope_text=scope_section_for_run(
                                                 self.db,
@@ -7595,7 +7445,7 @@ class Orchestrator:
                                             tool_contract=frozen_tools,
                                             run_verification_text=verification_contract(
                                                 config.gate_command, config.gate_enabled,
-                                                config.review_enabled, config.review_disabled,
+                                                config.review_disabled,
                                             ),
                                         )
                                         rep, to_sha_p, wt_p, is_no_diff, no_diff_outcome = (
@@ -7753,7 +7603,7 @@ class Orchestrator:
                                             tool_contract=frozen_tools,
                                             run_verification_text=verification_contract(
                                                 config.gate_command, config.gate_enabled,
-                                                config.review_enabled, config.review_disabled,
+                                                config.review_disabled,
                                             ),
                                         )
                                         (
@@ -8047,7 +7897,7 @@ class Orchestrator:
                                         tool_contract=frozen_tools,
                                         run_verification_text=verification_contract(
                                             config.gate_command, config.gate_enabled,
-                                            config.review_enabled, config.review_disabled,
+                                            config.review_disabled,
                                         ),
                                     )
                                     (

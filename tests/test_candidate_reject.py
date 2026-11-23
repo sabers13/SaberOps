@@ -238,7 +238,9 @@ def _seed_eligible(
             status=RunStatus.COMPLETED,
             created_at=_CREATED,
             completed_at=_CREATED,
-            config_json=json.dumps({"review_enabled": False}),
+            config_json=json.dumps(
+                {"review_enabled": False, "review_disabled": True}
+            ),
         )
     )
     db.create_attempt(
