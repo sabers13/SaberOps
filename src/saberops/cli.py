@@ -100,17 +100,19 @@ from saberops.run_creation import (
 )
 from saberops.runtime import db_path_for_run, project_db_path_for_repo
 from saberops.service import OrchestratorService
-from saberops.storage_gc import (
+from saberops.storage_cleanup import (
+    ArtifactClass,
     GcPolicyError,
     GcPreview,
+    Inventory,
     apply_gc,
+    build_inventory,
+    database_audit_sink,
     default_gc_policy_path,
     load_gc_policy,
     preview_gc,
     retire_landed_worktrees,
 )
-from saberops.storage_inventory import ArtifactClass, Inventory, build_inventory
-from saberops.storage_maintenance import database_audit_sink
 from saberops.supervisor import RunSupervisor
 from saberops.tooling.context_cli import CONTEXT_REFS as _CONTEXT_REFS
 from saberops.tooling.context_cli import context_json, list_context_refs
@@ -7449,7 +7451,7 @@ def _scheduler_storage_callbacks(
     """
     try:
         from saberops.service import OrchestratorService
-        from saberops.storage_maintenance import MaintenanceTrigger, StorageMaintenance
+        from saberops.storage_cleanup import MaintenanceTrigger, StorageMaintenance
 
         service: StorageMaintenance = OrchestratorService(db=db).storage_maintenance(
             repo_root=Path.cwd().resolve()

@@ -647,7 +647,7 @@ def disk_floor_ok(
     ``max(min_gb, 10 %)`` floor so the engine gate path and the developer gate
     can never disagree about the effective reserve.
     """
-    from saberops.storage_maintenance import _nearest_existing, current_disk_floor_bytes
+    from saberops.storage_cleanup import _nearest_existing, current_disk_floor_bytes
 
     for path in paths:
         anchor = _nearest_existing(path)

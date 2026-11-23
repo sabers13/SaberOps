@@ -15,7 +15,7 @@ from pathlib import Path
 from saberops.db import Database
 from saberops.git import GitManager
 from saberops.models import Attempt, AttemptStatus, CheckResult, Run, RunStatus, Tier
-from saberops.storage_inventory import (
+from saberops.storage_cleanup import (
     ArtifactClass,
     OwnershipState,
     build_inventory,

@@ -8,14 +8,14 @@ from saberops.preflight import disk_findings
 def test_disk_findings_identify_target_and_scratch(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    from saberops import storage_maintenance
+    from saberops import storage_cleanup
 
     target = tmp_path / "target"
     scratch = tmp_path / "scratch"
     target.mkdir()
     scratch.mkdir()
     monkeypatch.setattr(
-        storage_maintenance,
+        storage_cleanup,
         "_statvfs",
         lambda p: (1 if p == target else 20_000_000_000, 100_000_000_000),
     )
@@ -24,7 +24,7 @@ def test_disk_findings_identify_target_and_scratch(
     assert str(target) in findings[0].message
     assert findings[1].severity == "OK"
     monkeypatch.setattr(
-        storage_maintenance,
+        storage_cleanup,
         "_statvfs",
         lambda p: (1 if p == scratch else 20_000_000_000, 100_000_000_000),
     )

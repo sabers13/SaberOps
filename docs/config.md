@@ -110,7 +110,8 @@ rejected on read, mirroring `WorkflowSettings.from_dict`.
 `WorkflowSettings` and `ConfigLedger` are defined here and fully unit-tested, but
 they have **no runtime consumer yet**: no `src/` or `scripts/` module reads them.
 The values they declare are still mirrored by the operative frozen constants in
-`saberops.storage_lifecycle` (retention windows and the failed-scratch cap) and by
+`saberops.storage_cleanup` (retention windows), by the gate tools' retained-scratch
+cap in `scripts/gate_tools.py`, and by
 `MAX_LIGHT_SLOTS` in `saberops.gate_runner` / `scripts/gate_tools.py`. That
 mirroring is unavoidable inside this step's Touches (those modules were not
 authorized) and is deliberate: a follow-up step can import the constants from one

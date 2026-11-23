@@ -18,7 +18,7 @@ import pytest
 from saberops.db import Database
 from saberops.git import GitManager
 from saberops.models import Attempt, AttemptStatus, CheckResult, Run, RunStatus, Tier
-from saberops.storage_maintenance import (
+from saberops.storage_cleanup import (
     DEFAULT_DISK_FLOOR_GB,
     DiskLowInfra,
     DiskState,
@@ -138,19 +138,19 @@ def test_assess_disk_states(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     total = 100 * _GB
 
     monkeypatch.setattr(
-        "saberops.storage_maintenance._statvfs", lambda _p: (5 * _GB, total)
+        "saberops.storage_cleanup._statvfs", lambda _p: (5 * _GB, total)
     )
     assert maintenance.assess_disk([tmp_path]).state is DiskState.LOW
 
     monkeypatch.setattr(
-        "saberops.storage_maintenance._statvfs", lambda _p: (50 * _GB, total)
+        "saberops.storage_cleanup._statvfs", lambda _p: (50 * _GB, total)
     )
     assert maintenance.assess_disk([tmp_path]).state is DiskState.OK
 
     def boom(_p: str) -> tuple[int, int]:
         raise OSError("nope")
 
-    monkeypatch.setattr("saberops.storage_maintenance._statvfs", boom)
+    monkeypatch.setattr("saberops.storage_cleanup._statvfs", boom)
     assert maintenance.assess_disk([tmp_path]).state is DiskState.UNKNOWN
 
 
@@ -214,7 +214,7 @@ def test_disk_low_runs_gc_then_rechecks(tmp_path: Path, monkeypatch: pytest.Monk
             return (1 * _GB, total)
         return (50 * _GB, total)
 
-    monkeypatch.setattr("saberops.storage_maintenance._statvfs", fake)
+    monkeypatch.setattr("saberops.storage_cleanup._statvfs", fake)
     maintenance = _maintenance(db, repo, policy_path=policy_file)
     result = maintenance.run(MaintenanceTrigger.DISK_LOW)
     assert result.disk_before.state is DiskState.LOW
@@ -230,7 +230,7 @@ def test_disk_low_still_low_is_a_typed_infra_park(
     db = Database(tmp_path / "orch.db")
     total = 10 * _GB
     monkeypatch.setattr(
-        "saberops.storage_maintenance._statvfs", lambda _p: (1 * _GB, total)
+        "saberops.storage_cleanup._statvfs", lambda _p: (1 * _GB, total)
     )
     maintenance = _maintenance(db, repo)
     result = maintenance.run(MaintenanceTrigger.DISK_LOW)
@@ -245,7 +245,7 @@ def test_preflight_launch_parks_on_low_and_unknown(
     db = Database(tmp_path / "orch.db")
     maintenance = _maintenance(db, tmp_path)
     monkeypatch.setattr(
-        "saberops.storage_maintenance._statvfs", lambda _p: (1 * _GB, 100 * _GB)
+        "saberops.storage_cleanup._statvfs", lambda _p: (1 * _GB, 100 * _GB)
     )
     with pytest.raises(DiskLowInfra) as excinfo:
         maintenance.preflight_launch()
@@ -254,7 +254,7 @@ def test_preflight_launch_parks_on_low_and_unknown(
     def boom(_p: str) -> tuple[int, int]:
         raise OSError("nope")
 
-    monkeypatch.setattr("saberops.storage_maintenance._statvfs", boom)
+    monkeypatch.setattr("saberops.storage_cleanup._statvfs", boom)
     with pytest.raises(DiskLowInfra):
         maintenance.preflight_launch()
 
@@ -480,14 +480,14 @@ def test_maintenance_exhausted_budget_skips_vacuum_and_sweep(tmp_path: Path) -> 
 
     import unittest.mock as _mock
 
-    from saberops.storage_gc import apply_gc as _real_apply_gc
+    from saberops.storage_cleanup import apply_gc as _real_apply_gc
 
     def _expensive_apply_gc(preview: object, selection: object, **kwargs: object) -> object:
         clock_now[0] = budget + 5.0
         return _real_apply_gc(preview, selection, **kwargs)  # type: ignore[arg-type]
 
     with _mock.patch(
-        "saberops.storage_maintenance.apply_gc", side_effect=_expensive_apply_gc
+        "saberops.storage_cleanup.apply_gc", side_effect=_expensive_apply_gc
     ):
         result = maintenance.run(MaintenanceTrigger.PERIODIC)
     assert calls == {"vacuum": 0, "sweep": 0}

@@ -10,6 +10,11 @@ admission.
 Nothing here runs automatically against unowned data. A missing standing owner
 policy means **inventory and report only**.
 
+The implementation is two modules: `saberops.storage_cleanup` (inventory,
+retention policy, guarded preview/apply, the opt-in landed sweep, the bounded
+maintenance pass and its audit sink) and the separate, still inactive,
+`saberops.storage_budget` reservation ledger.
+
 ## What is owned
 
 Ownership comes from real persisted provenance, never from a branch name, an
@@ -160,7 +165,7 @@ report-only) and never raises into the scheduler loop.
 ## Current floor versus adaptive admission
 
 The fixed free-space floor stays effective on every production path. It is
-implemented once in `saberops.storage_maintenance.current_disk_floor_bytes`
+implemented once in `saberops.storage_cleanup.current_disk_floor_bytes`
 (`max(min_gb, 10 %)`) and consumed by both the developer gate and the storage
 service, so the two can never disagree.
 

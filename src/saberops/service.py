@@ -399,7 +399,7 @@ class OrchestratorService:
         The single service-level seam the owner lifecycle and the scheduler use
         to obtain storage maintenance; the Web never constructs it directly.
         """
-        from saberops.storage_maintenance import StorageMaintenance
+        from saberops.storage_cleanup import StorageMaintenance
 
         return StorageMaintenance(self.db, repo_root=repo_root, policy_path=policy_path)
 

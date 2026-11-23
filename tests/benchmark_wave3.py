@@ -128,7 +128,7 @@ from saberops.runtime_gate import (
     set_pause,
 )
 from saberops.scout import latest_report
-from saberops.storage_gc import retire_landed_worktrees
+from saberops.storage_cleanup import retire_landed_worktrees
 from saberops.vendor_cli_fixtures import (
     HELP_COMMANDS,
     Fixture,

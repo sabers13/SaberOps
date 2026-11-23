@@ -19,27 +19,25 @@ import pytest
 from saberops.db import Database
 from saberops.git import GitManager
 from saberops.models import Attempt, AttemptStatus, CheckResult, Run, RunStatus, Tier
-from saberops.storage_gc import (
+from saberops.storage_cleanup import (
     LANDED_CLEANUP_RETENTION_DAYS,
+    ArtifactClass,
+    Consumer,
     GcAction,
     GcCandidate,
     GcPolicy,
     GcPolicyError,
     GcPreview,
+    Inventory,
+    InventoryItem,
+    OwnershipState,
     StorageAuditEvent,
     apply_gc,
+    build_inventory,
     load_gc_policy,
     preview_gc,
     retire_landed_worktrees,
     retire_run_worktrees,
-)
-from saberops.storage_inventory import (
-    ArtifactClass,
-    Consumer,
-    Inventory,
-    InventoryItem,
-    OwnershipState,
-    build_inventory,
 )
 
 _NOW = datetime(2026, 10, 17, 12, 0, tzinfo=UTC)
@@ -567,6 +565,203 @@ def test_unknown_owner_is_never_a_candidate(tmp_path: Path) -> None:
     assert preview.candidates == ()
 
 
+def _preview_refs(
+    repo: Path, *items: InventoryItem, **policy_overrides: object
+) -> tuple[str, ...]:
+    """Preview ``items`` under an approved policy confined to ``repo``."""
+    preview = preview_gc(
+        _inventory(repo, items),
+        policy=_approved(**policy_overrides),
+        owned_roots=(str(repo.resolve()),),
+        now=_NOW,
+    )
+    return tuple(sorted(candidate.reference for candidate in preview.candidates))
+
+
+def _worktree_item(repo: Path, **detail: str) -> InventoryItem:
+    values = {
+        "candidate_state": "ACCEPTED",
+        "attempt_terminal": "1",
+        "preempted": "0",
+        "run_status": "COMPLETED",
+    }
+    values.update(detail)
+    return _item(
+        ArtifactClass.ATTEMPT_WORKTREE,
+        str(repo / "worktrees" / "attempt-7"),
+        detail=values,
+    )
+
+
+def test_worktree_retention_requires_a_terminal_candidate(tmp_path: Path) -> None:
+    """Covers: worktree retention (pending/preempted/unknown kept)."""
+    repo = _repo(tmp_path)
+    path = str(repo / "worktrees" / "attempt-7")
+    assert _preview_refs(repo, _worktree_item(repo)) == (path,)
+    for detail in (
+        {"candidate_state": state} for state in ("READY", "IN_REVIEW", "REVIEWED", "unknown")
+    ):
+        assert _preview_refs(repo, _worktree_item(repo, **detail)) == ()
+    assert _preview_refs(repo, _worktree_item(repo, attempt_terminal="0")) == ()
+    assert _preview_refs(repo, _worktree_item(repo, candidate_state="CLEANED")) == ()
+    preempted = _worktree_item(repo, preempted="1", run_status="PREEMPTED")
+    assert _preview_refs(repo, preempted) == ()
+    preempted_terminal = _worktree_item(repo, preempted="1", run_status="COMPLETED")
+    assert _preview_refs(repo, preempted_terminal) == (path,)
+    live = _item(
+        ArtifactClass.ATTEMPT_WORKTREE,
+        path,
+        ownership=OwnershipState.OWNED_LIVE,
+        detail={"candidate_state": "ACCEPTED", "attempt_terminal": "1"},
+    )
+    assert _preview_refs(repo, live) == ()
+
+
+def test_checkpoint_retention_is_job_bound_and_time_bounded(tmp_path: Path) -> None:
+    """Covers: checkpoint refs kept until 7d after their own job is terminal."""
+    repo = _repo(tmp_path)
+    ref = "refs/saberops/checkpoints/job-9/3"
+    old = (_NOW - timedelta(days=8)).isoformat()
+    recent = (_NOW - timedelta(days=6)).isoformat()
+
+    def checkpoint(**detail: str) -> InventoryItem:
+        values = {"job_id": "job-9", "job_terminal": "1", "terminal_at": old}
+        values.update(detail)
+        return _item(ArtifactClass.CHECKPOINT_REF, ref, detail=values)
+
+    policy = {"allow_checkpoint_deletion": True}
+    assert _preview_refs(repo, checkpoint(), **policy) == (ref,)
+    assert _preview_refs(repo, checkpoint(terminal_at=recent), **policy) == ()
+    assert _preview_refs(repo, checkpoint(terminal_at=""), **policy) == ()
+    assert (
+        _preview_refs(repo, checkpoint(), allow_checkpoint_deletion=False) == ()
+    )
+    assert _preview_refs(repo, checkpoint(job_terminal="0"), **policy) == ()
+    assert _preview_refs(repo, checkpoint(job_id="job-other"), **policy) == ()
+    escaped = _item(
+        ArtifactClass.CHECKPOINT_REF,
+        "refs/saberops/checkpoints/../../escape/job-9/3",
+        detail={"job_id": "job-9", "job_terminal": "1", "terminal_at": old},
+    )
+    assert _preview_refs(repo, escaped, **policy) == ()
+
+
+def test_evidence_retention_windows(tmp_path: Path) -> None:
+    """Covers: evidence compress after 7d; delete 90d accepted / 30d other."""
+    repo = _repo(tmp_path)
+    path = str(repo / "evidence" / "run-1")
+
+    def evidence(**detail: str) -> InventoryItem:
+        values = {
+            "created_at": (_NOW - timedelta(days=31)).isoformat(),
+            "terminal_at": (_NOW - timedelta(days=31)).isoformat(),
+            "run_accepted": "0",
+            "compressed": "1",
+        }
+        values.update(detail)
+        return _item(ArtifactClass.EVIDENCE, path, detail=values)
+
+    deferred = {"allow_evidence_deletion": True, "evidence_anchor": "terminal"}
+
+    def refs(item: InventoryItem, **policy: object) -> tuple[str, ...]:
+        return _preview_refs(repo, item, **policy)
+
+    # Terminal evidence is deleted at 30 days (other) / 90 days (accepted).
+    assert refs(evidence(), **deferred) == (path,)
+    assert refs(evidence(run_accepted="1"), **deferred) == ()
+    accepted_old = evidence(
+        run_accepted="1", terminal_at=(_NOW - timedelta(days=91)).isoformat()
+    )
+    assert refs(accepted_old, **deferred) == (path,)
+    assert refs(evidence(terminal_at=(_NOW - timedelta(days=29)).isoformat()), **deferred) == ()
+    assert refs(evidence(terminal_at=(_NOW + timedelta(days=1)).isoformat()), **deferred) == ()
+    assert refs(evidence(terminal_at=""), **deferred) == ()
+    # Deletion stays held without a settled anchor...
+    assert refs(evidence()) == ()
+    # ...while compression is non-destructive and anchored at creation.
+    compress = {"allow_evidence_compression": True}
+    uncompressed = evidence(
+        compressed="0", terminal_at=(_NOW - timedelta(days=29)).isoformat()
+    )
+    assert refs(uncompressed, **compress) == (path,)
+    assert refs(evidence(compressed="0", created_at=(_NOW - timedelta(days=6)).isoformat())) == ()
+    assert refs(evidence(compressed="0"), allow_evidence_compression=False) == ()
+    live = _item(
+        ArtifactClass.EVIDENCE,
+        path,
+        ownership=OwnershipState.OWNED_LIVE,
+        detail={"created_at": (_NOW - timedelta(days=31)).isoformat(), "compressed": "0"},
+    )
+    assert refs(live, **compress) == ()
+
+
+def test_venv_follows_its_parent_worktree(tmp_path: Path) -> None:
+    """Covers: venvs die with their worktree, never alone."""
+    repo = _repo(tmp_path)
+    path = str(repo / "worktrees" / "attempt-7" / ".venv")
+
+    def venv(**detail: str) -> InventoryItem:
+        values = {"parent_worktree_live": "0", "parent_eligible": "1"}
+        values.update(detail)
+        return _item(ArtifactClass.WORKTREE_VENV, path, detail=values)
+
+    assert _preview_refs(repo, venv()) == (path,)
+    assert _preview_refs(repo, venv(parent_worktree_live="1")) == ()
+    assert _preview_refs(repo, venv(parent_eligible="0")) == ()
+
+
+def test_owner_db_vacuum_needs_policy(tmp_path: Path) -> None:
+    """Covers: the owner DB is only ever a VACUUM candidate, never a deletion."""
+    repo = _repo(tmp_path)
+    path = str(repo / "orch.db")
+    item = _item(ArtifactClass.OWNER_DB, path, owner="engine")
+    assert _preview_refs(repo, item) == ()
+    preview = preview_gc(
+        _inventory(repo, (item,)),
+        policy=_approved(allow_vacuum=True),
+        owned_roots=(str(repo.resolve()),),
+        now=_NOW,
+    )
+    assert [(c.action, c.reference) for c in preview.candidates] == [
+        (GcAction.VACUUM_DB, path)
+    ]
+
+
+def test_paths_outside_owned_roots_are_never_candidates(tmp_path: Path) -> None:
+    """Covers: outside-root, traversal and root-itself escapes fail closed."""
+    repo = _repo(tmp_path)
+    outside = _item(
+        ArtifactClass.ATTEMPT_WORKTREE,
+        "/etc/saberops-worktree",
+        detail={"candidate_state": "ACCEPTED", "attempt_terminal": "1"},
+    )
+    traversal = _item(
+        ArtifactClass.ATTEMPT_WORKTREE,
+        str(repo / ".." / "escape"),
+        detail={"candidate_state": "ACCEPTED", "attempt_terminal": "1"},
+    )
+    at_root = _item(
+        ArtifactClass.ATTEMPT_WORKTREE,
+        str(repo.resolve()),
+        detail={"candidate_state": "ACCEPTED", "attempt_terminal": "1"},
+    )
+    assert _preview_refs(repo, outside, traversal, at_root) == ()
+
+
+def test_scratch_needs_a_provably_dead_owner_inside_the_roots(tmp_path: Path) -> None:
+    """Covers: only dead-owned scratch under the owned roots is eligible."""
+    repo = _repo(tmp_path)
+    path = str(repo / "gate-scratch" / "run-1")
+    dead = _item(ArtifactClass.GATE_SCRATCH, path)
+    live = _item(ArtifactClass.GATE_SCRATCH, path, ownership=OwnershipState.OWNED_LIVE)
+    outside = _item(ArtifactClass.GATE_SCRATCH, "/dev/shm/saberops-gate-x")
+    policy = {"allow_scratch_deletion": True}
+    assert _preview_refs(repo, dead, **policy) == (path,)
+    assert _preview_refs(repo, live, **policy) == ()
+    assert _preview_refs(repo, outside, **policy) == ()
+    assert _preview_refs(repo, dead) == ()
+
+
 # --------------------------------------------------------------------------
 # legacy compatibility route
 # --------------------------------------------------------------------------
@@ -926,7 +1121,7 @@ def test_owned_cache_is_excluded_and_forged_apply_refused(tmp_path: Path) -> Non
     assert cache.exists()
     assert (cache / "probe.txt").exists()
     # Even a preview that illegally contains an OWNED_CACHE candidate refuses.
-    from saberops.storage_gc import GcPreview as _GcPreview
+    from saberops.storage_cleanup import GcPreview as _GcPreview
 
     poisoned = _GcPreview(
         generated_at=preview.generated_at,

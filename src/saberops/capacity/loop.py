@@ -1728,7 +1728,7 @@ def scheduler_tick(
 
 def _storage_maintenance_interval() -> timedelta:
     """Cadence between periodic storage maintenance passes (GS-1)."""
-    from saberops.storage_maintenance import MAINTENANCE_INTERVAL
+    from saberops.storage_cleanup import MAINTENANCE_INTERVAL
 
     return MAINTENANCE_INTERVAL
 
@@ -1784,7 +1784,7 @@ def run_scheduler_loop(
       modes.  When it reports a typed infra reason (disk low/unknown, storage
       infra) the loop parks with zero side effects.
     * Periodic maintenance runs at most once per
-      :data:`saberops.storage_maintenance.MAINTENANCE_INTERVAL`, before the tick;
+      :data:`saberops.storage_cleanup.MAINTENANCE_INTERVAL`, before the tick;
       a low reading parks the tick instead of dispatching.
     * ``launch_guard`` is consulted inside every tick before any dispatch, so an
       expensive launch is blocked even between maintenance passes.

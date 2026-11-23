@@ -33,7 +33,7 @@ BILLION = 1_000_000_000
 
 def disk_findings(target: Path, scratch: Path, state: Path | None = None) -> list[Finding]:
     """Show each filesystem independently using the engine's disk floor."""
-    from saberops.storage_maintenance import _nearest_existing, _statvfs, current_disk_floor_bytes
+    from saberops.storage_cleanup import _nearest_existing, _statvfs, current_disk_floor_bytes
 
     findings: list[Finding] = []
     paths = [("target/gate", target), ("scratch", scratch)]

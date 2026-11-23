@@ -574,7 +574,7 @@ DEFAULT_GATE_HEAVY_SLOTS: Final[int] = 1
 DEFAULT_MAX_LIGHT_SLOTS: Final[int] = 8
 
 #: Retention defaults.  They mirror the accepted storage-retention policy in
-#: :mod:`saberops.storage_lifecycle`; the ledger is where an owner override is
+#: :mod:`saberops.storage_cleanup`; the ledger is where an owner override is
 #: recorded so it is one audited decision instead of an implicit constant.
 DEFAULT_EVIDENCE_ACCEPTED_RETENTION_DAYS: Final[int] = 90
 DEFAULT_EVIDENCE_OTHER_RETENTION_DAYS: Final[int] = 30

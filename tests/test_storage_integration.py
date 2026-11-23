@@ -34,9 +34,15 @@ from saberops.storage_budget import (
     StorageEstimate,
     StorageLedger,
 )
-from saberops.storage_gc import GcPolicy, apply_gc, preview_gc
-from saberops.storage_inventory import ArtifactClass, build_inventory
-from saberops.storage_maintenance import StorageMaintenance, database_audit_sink
+from saberops.storage_cleanup import (
+    ArtifactClass,
+    GcPolicy,
+    StorageMaintenance,
+    apply_gc,
+    build_inventory,
+    database_audit_sink,
+    preview_gc,
+)
 
 _CREATED = "2026-09-24T10:00:00+00:00"
 _AUTHOR = {
@@ -327,13 +333,13 @@ def test_disk_low_maintenance_launches_no_workers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Covers: DISK_LOW parks the real scheduler with zero launches."""
-    from saberops.storage_maintenance import MaintenanceTrigger
+    from saberops.storage_cleanup import MaintenanceTrigger
 
     repo = _repo(tmp_path)
     db = Database(tmp_path / "orch.db")
     _seed_queued_job(db, repo)
     monkeypatch.setattr(
-        "saberops.storage_maintenance._statvfs", lambda _p: (1 << 30, 100 << 30)
+        "saberops.storage_cleanup._statvfs", lambda _p: (1 << 30, 100 << 30)
     )
     launched: list[str] = []
 
@@ -491,13 +497,13 @@ def test_scheduler_parks_before_any_tick_on_disk_low(
     """Covers: startup maintenance precedes the tick; zero launches."""
     from saberops.jobs.models import JobState
     from saberops.jobs.store import get_job
-    from saberops.storage_maintenance import MaintenanceTrigger, StorageMaintenance
+    from saberops.storage_cleanup import MaintenanceTrigger, StorageMaintenance
 
     repo = _repo(tmp_path)
     db = Database(tmp_path / "orch.db")
     job_id = _seed_queued_job(db, repo)
     monkeypatch.setattr(
-        "saberops.storage_maintenance._statvfs", lambda _p: (1 << 30, 100 << 30)
+        "saberops.storage_cleanup._statvfs", lambda _p: (1 << 30, 100 << 30)
     )
     launched: list[str] = []
 
@@ -569,13 +575,13 @@ def test_scheduler_proceeds_when_disk_is_healthy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Covers: a healthy floor does not block the tick."""
-    from saberops.storage_maintenance import MaintenanceTrigger, StorageMaintenance
+    from saberops.storage_cleanup import MaintenanceTrigger, StorageMaintenance
 
     repo = _repo(tmp_path)
     db = Database(tmp_path / "orch.db")
     _seed_queued_job(db, repo)
     monkeypatch.setattr(
-        "saberops.storage_maintenance._statvfs", lambda _p: (500 << 30, 1000 << 30)
+        "saberops.storage_cleanup._statvfs", lambda _p: (500 << 30, 1000 << 30)
     )
     ticked: list[int] = []
     from saberops.capacity.loop import TickResult

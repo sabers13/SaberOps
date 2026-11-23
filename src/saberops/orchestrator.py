@@ -201,8 +201,7 @@ from saberops.steering import (
     record_steering_delivery,
     steering_section_for_run,
 )
-from saberops.storage_gc import retire_run_worktrees
-from saberops.storage_maintenance import database_audit_sink
+from saberops.storage_cleanup import database_audit_sink, retire_run_worktrees
 from saberops.telemetry import persist_worker_usage
 from saberops.terminal import get_transcript_path
 from saberops.validation_policy import (

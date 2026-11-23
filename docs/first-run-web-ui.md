@@ -95,8 +95,8 @@ now redirects on success to the page that owns it (`/setup`, `/routing`,
   parsed into `saberops.away.StandingDecision`, so expiry is computed by
   the canonical `is_live`/`is_expired` logic.
 - **Storage & Git lifecycle.** For a repository path the page builds the
-  read-only inventory (`saberops.storage_inventory`) and the deterministic GC
-  preview (`saberops.storage_gc.preview_gc`): eligible targets with their exact
+  read-only inventory and the deterministic GC preview
+  (`saberops.storage_cleanup.preview_gc`): eligible targets with their exact
   reference and estimated bytes, and retained/blocked artifacts with their
   reasons. Applying is fail-closed — it requires an approved standing owner
   policy, the typed preview id, and a CSRF token — and every action is written
