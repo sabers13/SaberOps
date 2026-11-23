@@ -5,9 +5,9 @@ Schema 3 (the only writable schema): one ``BUILD`` role chain plus an optional
 object with exactly the key ``routes`` holding a non-empty list of candidate
 ids. A strong start is a setting on the build route (ADR-0005 §3), not a role:
 it is used for a manual high-tier run or an escalation that asks for a stronger
-model. PLAN (the external CLI session) and CHECK (the independent reviewer)
-keep their ordered lists where they live today (``orch orchestrator show`` /
-``orch reviewer show``).
+model. PLAN (the external CLI session) is not a binding at all (ADR-0064), and
+CHECK (the independent reviewer) keeps its ordered list where it lives today
+(``orch reviewer show``).
 
 A document written before ADR-0005 §3 that names a retired role loads through a
 reported migration to the build route and its ``strong_start`` setting.
@@ -414,9 +414,7 @@ def _validate_v3_structure(
     for key in roles_obj:
         if key in ("ORCHESTRATOR", "REVIEWER", "PLAN", "CHECK"):
             pointer = (
-                "orch orchestrator show"
-                if key in ("ORCHESTRATOR", "PLAN")
-                else "orch reviewer show"
+                "orch mcp status" if key in ("ORCHESTRATOR", "PLAN") else "orch reviewer show"
             )
             raise RoutingConfigError(
                 f"Routing config at {source_label}: role {key!r} is managed elsewhere; see '{pointer}'"  # noqa: E501
@@ -1049,7 +1047,7 @@ def payload_to_snapshot(payload: Any, run_id: str | None = None) -> RoutingSnaps
     for key in roles_obj:
         if key in ("ORCHESTRATOR", "REVIEWER", "PLAN", "CHECK"):
             pointer = (
-                "orch orchestrator show" if key in ("ORCHESTRATOR", "PLAN")
+                "orch mcp status" if key in ("ORCHESTRATOR", "PLAN")
                 else "orch reviewer show"
             )
             raise RoutingConfigError(

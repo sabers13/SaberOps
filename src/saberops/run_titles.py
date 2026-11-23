@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 
@@ -77,17 +76,3 @@ def unique_title(title: str, existing: list[str]) -> str:
         candidate = title[: MAX_TITLE_CHARS - len(suffix)].rstrip() + suffix
         number += 1
     return candidate
-
-
-def parse_named_guidance(output: str, repo: str = "") -> tuple[str, str]:
-    """Accept structured names while retaining legacy plain-text guidance."""
-    text = output.strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text)
-    try:
-        data = json.loads(text)
-    except ValueError:
-        return "", output
-    if not isinstance(data, dict) or not isinstance(data.get("guidance"), str):
-        return "", output
-    return clean_title(data.get("title"), repo), data["guidance"].strip()

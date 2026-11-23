@@ -9,8 +9,10 @@ upgrade check grows with the lane that caused it instead of being guessed now.
 
 from __future__ import annotations
 
+import io
 import time
 from collections.abc import Callable
+from contextlib import redirect_stderr
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,7 +21,10 @@ from pre_1_1_store import Pre11Store, restore_pre_1_1_store
 
 from saberops.accept import AcceptEngine
 from saberops.capacity.loop import run_scheduler_loop
-from saberops.control_plane.binding_store import load_owner_bindings
+from saberops.control_plane.binding_store import (
+    RETIRED_SELECTION_NOTICE,
+    load_owner_bindings,
+)
 from saberops.jobs.service import get_job, submit_job
 from saberops.model_access.readiness_service import ReadinessService
 from saberops.owner_mode import HostAccessMode, OwnerMode, load_owner_mode_settings
@@ -64,6 +69,16 @@ def _probe_authority_fold(store: Pre11Store) -> list[str]:
     return [AUTHORITY_FOLD_NOTICE] if AUTHORITY_FOLD_NOTICE in notice else []
 
 
+def _probe_orchestrator_retired(store: Pre11Store) -> list[str]:
+    """H3: the in-engine orchestrator selection is ignored, once."""
+    del store
+    printed = io.StringIO()
+    with redirect_stderr(printed):
+        load_owner_bindings()
+    text = printed.getvalue()
+    return [RETIRED_SELECTION_NOTICE] if RETIRED_SELECTION_NOTICE in text else []
+
+
 #: H22 (authority presets) adds its row; H3 (orchestrator binding), H4 (review
 #: knobs), H7 (recovery verbs), H9 (view names) and H17 (Cline route) follow.
 NOTICE_ROWS: tuple[NoticeRow, ...] = (
@@ -73,6 +88,13 @@ NOTICE_ROWS: tuple[NoticeRow, ...] = (
         surface="config/saberops/authority.json",
         expected=AUTHORITY_FOLD_NOTICE,
         probe=_probe_authority_fold,
+    ),
+    NoticeRow(
+        key="orchestrator-retired",
+        lane="H3",
+        surface="config/saberops/bindings.json",
+        expected=RETIRED_SELECTION_NOTICE,
+        probe=_probe_orchestrator_retired,
     ),
 )
 
@@ -135,9 +157,13 @@ def test_pre_1_1_store_keeps_its_settings_and_runs_a_job(
     assert mode_settings.permissions.auto_start is True
     assert mode_settings.permissions.auto_retry is False
     assert mode_settings.permissions.auto_accept is False
+    # H3 (ADR-0064) removed the in-engine orchestrator selection: the store
+    # still loads and keeps its exact binding, and the ignored selection is
+    # covered by the notice row collected above.
     bindings = load_owner_bindings()
-    assert bindings.policy is not None
-    assert bindings.policy.pinned_binding_id == store.orchestrator_binding_id
+    assert store.orchestrator_binding_id in {
+        binding.binding_id for binding in bindings.registry.list_bindings()
+    }
     settings = load_project_settings(store.repo)
     assert settings.review_mode == "max"
     assert settings.review_limit == 5

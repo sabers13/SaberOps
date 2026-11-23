@@ -37,7 +37,6 @@ from saberops.control_plane.effort import (
     EffortPolicy,
     resolve_effort,
 )
-from saberops.control_plane.orch_binding import OrchBindingPolicy
 from saberops.db import Database
 from saberops.execution_failover import FailoverAction, FailoverEngine
 from saberops.models import (
@@ -170,7 +169,6 @@ class AutonomousRuntimeContract:
     budgets: SupervisorBudgets = field(default_factory=SupervisorBudgets)
     effort_policy: EffortPolicy = DEFAULT_WORKER_EFFORT_POLICY
     requested_effort: ReasoningEffort | None = None
-    binding_policy: OrchBindingPolicy | None = None
 
     def as_dict(self) -> dict[str, Any]:
         """Render only reconstructable, non-secret configuration."""
@@ -186,9 +184,6 @@ class AutonomousRuntimeContract:
             "effort_policy": self.effort_policy.to_dict(),
             "requested_effort": (
                 None if self.requested_effort is None else self.requested_effort.value
-            ),
-            "binding_policy": (
-                None if self.binding_policy is None else self.binding_policy.to_dict()
             ),
         }
 
@@ -207,11 +202,8 @@ class AutonomousRuntimeContract:
             raise ValueError("autonomous runtime contract binding_registry must be a mapping")
         budgets_raw = payload.get("budgets", {})
         effort_raw = payload.get("effort_policy", {})
-        policy_raw = payload.get("binding_policy")
         if not isinstance(budgets_raw, Mapping) or not isinstance(effort_raw, Mapping):
             raise ValueError("autonomous runtime contract policy fields must be mappings")
-        if policy_raw is not None and not isinstance(policy_raw, Mapping):
-            raise ValueError("autonomous runtime contract binding_policy must be a mapping")
         requested_raw = payload.get("requested_effort")
         requested = None
         if requested_raw not in (None, ""):
@@ -229,11 +221,6 @@ class AutonomousRuntimeContract:
             budgets=SupervisorBudgets.from_mapping(budgets_raw),
             effort_policy=EffortPolicy.from_mapping(effort_raw),
             requested_effort=requested,
-            binding_policy=(
-                None
-                if policy_raw is None
-                else OrchBindingPolicy.from_mapping(policy_raw)
-            ),
         )
 
 
@@ -268,11 +255,8 @@ class AutonomousSupervisor:
     candidate ``binding_id`` reference carried by the routing chain
     (a :class:`WorkerCandidate` whose ``binding_id`` is non-empty
     resolves THAT binding exactly; empty falls back to the first
-    registry-declared WORKER-role match).  :class:`OrchBindingPolicy`
-    belongs to the Orchestrator-model slot and is **not** consulted
-    for worker dispatch -- changing an owner
-    :class:`OrchBindingPolicy` MUST NOT change which binding a worker
-    routing candidate resolves to.
+    registry-declared BUILD-role match).  There is no second, in-engine
+    planning binding (ADR-0064).
     """
 
     def __init__(
@@ -284,7 +268,6 @@ class AutonomousSupervisor:
         budgets: SupervisorBudgets | None = None,
         effort_policy: EffortPolicy | None = None,
         requested_effort: ReasoningEffort | None = None,
-        binding_policy: OrchBindingPolicy | None = None,
     ) -> None:
         self.db = db
         self.registry = registry
@@ -292,12 +275,6 @@ class AutonomousSupervisor:
         self.budgets = budgets or SupervisorBudgets()
         self.effort_policy = effort_policy or DEFAULT_WORKER_EFFORT_POLICY
         self.requested_effort = requested_effort
-        # ``binding_policy`` is preserved on the supervisor instance so
-        # existing orchestration code that reads the attribute keeps
-        # working, but it is **never** consulted by worker binding
-        # selection.  Worker dispatch uses the canonical
-        # BindingRegistry + WorkerCandidate.binding_id.
-        self.binding_policy = binding_policy
         self._failover = FailoverEngine(db=db)
 
     # -- authority (persisted owner state; no caller override exists) --------
@@ -353,13 +330,9 @@ class AutonomousSupervisor:
         """Return every WORKER-role binding in registry declaration order.
 
         Worker dispatch only consumes bindings whose
-        :class:`BindingRole` is :class:`BindingRole.BUILD`.  An
-        ORCHESTRATOR-role binding is **not** eligible for worker
-        execution; reusing one as worker dispatch authority would be a
-        role violation.  The :class:`OrchBindingPolicy` (an
-        Orchestrator-model concept) is deliberately ignored here --
-        changing it MUST NOT change which binding a worker-routing
-        candidate resolves to.
+        :class:`BindingRole` is :class:`BindingRole.BUILD`.  Any other
+        role is **not** eligible for worker execution; reusing one as
+        worker dispatch authority would be a role violation.
         """
         configured = self._registry_bindings()
         return tuple(
@@ -371,19 +344,10 @@ class AutonomousSupervisor:
     def _policy_bindings(self) -> tuple[Any, ...]:
         """Return the WORKER-role eligible bindings (historical alias).
 
-        Separation: the historical :class:`OrchBindingPolicy`
-        parameter is the Orchestrator-model policy, NOT a worker-binding
-        selection policy.  Worker binding selection now consumes the
-        canonical WORKER-role :class:`BindingRegistry` declarations
-        directly; the optional persisted :attr:`binding_policy` is read
-        only by the orchestrator-model selection surface and is
-        deliberately not consulted here.
-
         This helper remains under its historical name for callers that
         still iterate eligible bindings (e.g. failover exploration).
-        The result is the WORKER-role subset of the registry in
-        declaration order -- identical to the prior ``AUTO`` behavior
-        for worker dispatch, with the additional role filter.
+        The result is the BUILD-role subset of the registry in
+        declaration order.
         """
         return self._worker_eligible_bindings()
 
@@ -404,12 +368,9 @@ class AutonomousSupervisor:
            A missing binding id, a wrong role, or a mismatched
            provider/model causes ``None`` -- fail closed, never a
            substitution by ``provider``/``model``.
-        2. Otherwise the first WORKER-role registry declaration whose
+        2. Otherwise the first BUILD-role registry declaration whose
            ``provider``/``model`` matches is returned (the historical
            static-chain behavior preserved for non-approval candidates).
-
-        The owner's persisted :class:`OrchBindingPolicy` is **not**
-        consulted here -- worker dispatch is not its authority.
         """
         if not provider or not model:
             return None

@@ -11,7 +11,7 @@ whose complete identity (``binding_id`` / ``provider`` / ``model`` /
 ``backend`` / ``profile_id`` / ``quota_pool_id``) survives a real
 :func:`~saberops.control_plane.bindings.resolve_execution_binding`
 call.  This module owns the owner-level durable document that holds exactly
-those bindings plus the owner's :class:`OrchBindingPolicy`.
+those bindings plus the owner's Reviewer selection.
 
 Authority boundaries preserved here:
 
@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -46,8 +47,7 @@ from saberops.control_plane.bindings import (
     QuotaPool,
 )
 from saberops.control_plane.capabilities import Capability, ProviderTransport
-from saberops.control_plane.orch_binding import OrchBindingPolicy
-from saberops.models import OrchBindingMode, ReasoningEffort
+from saberops.models import ReasoningEffort
 
 #: Reason code surfaced when discovery cannot determine a binding's reasoning
 #: effort tier evidence.  This is *not* a permission to fabricate any
@@ -56,10 +56,22 @@ from saberops.models import OrchBindingMode, ReasoningEffort
 #: capability source proves otherwise.
 EFFORT_DISCOVERY_UNKNOWN = "EFFORT_DISCOVERY_UNKNOWN"
 
+#: Phase 1.1 (ADR-0064) removed the in-engine Orchestrator model.  A store
+#: written before that release still carries ``orch_binding_policy``; the
+#: engine ignores it and tells the owner once per process.
+RETIRED_SELECTION_NOTICE = (
+    "SaberOps: the saved orchestrator model binding is no longer used and was "
+    "ignored (ADR-0064). The agent you plan from is the planner; the next "
+    "settings write drops the setting."
+)
+
+_notified_retired_selection: set[Path] = set()
+
 __all__ = [
     "BINDING_STORE_SCHEMA_VERSION",
     "EFFORT_DISCOVERY_UNKNOWN",
     "ORCH_BINDING_STORE_ENV",
+    "RETIRED_SELECTION_NOTICE",
     "BindingStoreError",
     "OwnerBindings",
     "OwnerBindingStore",
@@ -102,32 +114,23 @@ def get_binding_store_path() -> Path:
 class OwnerBindings:
     """The canonical owner-level binding document.
 
-    ``registry`` is the exact binding/profile/pool identity set; ``policy``
-    is the owner's Orchestrator binding choice expressed over those exact
-    binding ids; ``reviewer_binding_id`` is the owner's optional exact
-    Reviewer primary, retained for compatibility. ``reviewer_binding_ids``
-    stores the owner-chosen ordered fallback chain; the Orchestrator chain
-    is stored in ``policy.preferred_binding_ids``. None carry secret material.
+    ``registry`` is the exact binding/profile/pool identity set;
+    ``reviewer_binding_id`` is the owner's optional exact Reviewer primary,
+    retained for compatibility. ``reviewer_binding_ids`` stores the
+    owner-chosen ordered fallback chain. None carry secret material.
     """
 
     registry: BindingRegistry = field(default_factory=BindingRegistry)
-    policy: OrchBindingPolicy | None = None
     reviewer_binding_id: str | None = None
     # None preserves the legacy unconfigured reviewer; () is explicitly empty.
     reviewer_binding_ids: tuple[str, ...] | None = None
 
     def role_binding_ids(self, role: str) -> tuple[str, ...]:
-        if role == "reviewer":
-            if self.reviewer_binding_ids is not None:
-                return self.reviewer_binding_ids
-            return (self.reviewer_binding_id,) if self.reviewer_binding_id else ()
-        if role != "orchestrator":
+        if role != "reviewer":
             raise ValueError("unknown routing role")
-        if self.policy is None:
-            return ()
-        if self.policy.mode is OrchBindingMode.PINNED:
-            return (self.policy.pinned_binding_id,) if self.policy.pinned_binding_id else ()
-        return self.policy.preferred_binding_ids
+        if self.reviewer_binding_ids is not None:
+            return self.reviewer_binding_ids
+        return (self.reviewer_binding_id,) if self.reviewer_binding_id else ()
 
     def with_role_order(self, role: str, order: Iterable[str]) -> OwnerBindings:
         ids = tuple(order)
@@ -135,27 +138,17 @@ class OwnerBindings:
             ids
         ):
             raise BindingStoreError("role order must contain unique nonempty binding ids")
-        if role == "reviewer":
-            return replace(
-                self, reviewer_binding_ids=ids, reviewer_binding_id=ids[0] if ids else None
-            )
-        if role != "orchestrator":
+        if role != "reviewer":
             raise BindingStoreError("unknown routing role")
-        policy = (
-            OrchBindingPolicy(
-                mode=OrchBindingMode.PREFERRED_WITH_FALLBACK, preferred_binding_ids=ids
-            )
-            if ids
-            else None
+        return replace(
+            self, reviewer_binding_ids=ids, reviewer_binding_id=ids[0] if ids else None
         )
-        return replace(self, policy=policy)
 
     def to_dict(self) -> dict[str, Any]:
         """Canonical non-secret rendering (sorted by the registry renderer)."""
         return {
             "schema_version": BINDING_STORE_SCHEMA_VERSION,
             "binding_registry": self.registry.to_dict(),
-            "orch_binding_policy": (None if self.policy is None else self.policy.to_dict()),
             "reviewer_binding_id": self.reviewer_binding_id,
             "reviewer_binding_ids": None
             if self.reviewer_binding_ids is None
@@ -179,16 +172,6 @@ class OwnerBindings:
             registry = BindingRegistry.from_mapping(registry_raw)
         except Exception as exc:  # noqa: BLE001 - normalize to one typed refusal
             raise BindingStoreError(f"owner bindings registry invalid: {exc}") from exc
-        policy_raw = payload.get("orch_binding_policy")
-        if policy_raw is None:
-            policy = None
-        elif isinstance(policy_raw, Mapping):
-            try:
-                policy = OrchBindingPolicy.from_mapping(policy_raw)
-            except ValueError as exc:
-                raise BindingStoreError(f"owner orch binding policy invalid: {exc}") from exc
-        else:
-            raise BindingStoreError("owner orch binding policy must be a mapping or null")
         reviewer_raw = payload.get("reviewer_binding_id")
         if reviewer_raw is None:
             reviewer_binding_id: str | None = None
@@ -208,7 +191,6 @@ class OwnerBindings:
             raise BindingStoreError("reviewer primary does not match routing order")
         return cls(
             registry=registry,
-            policy=policy,
             reviewer_binding_id=reviewer_binding_id,
             reviewer_binding_ids=None if ids is None else tuple(ids),
         )
@@ -284,23 +266,20 @@ def materialize_discovered_binding(
 
     ``binding_role`` defaults to :class:`BindingRole.BUILD`: discovery is
     a worker-routing pathway.  Callers needing a role-compatible binding
-    for the ORCHESTRATOR slot must request it explicitly (reusing an
-    ORCHESTRATOR binding as proof of worker execution would be a role
-    violation; reusing a WORKER binding as Orchestrator selection would
-    likewise be a role violation).
+    for another slot request it explicitly (reusing one role's binding as
+    proof of another role's execution would be a role violation).
 
     The identity scope is ``role``-qualified only at the binding layer so
     the same ``(connection, provider, model)`` triple may register
     distinct exact bindings for distinct semantic roles when it is
     genuinely needed (a discovered model that may legitimately serve
-    both worker and orchestrator roles).
+    both worker and reviewer roles).
 
     Identity follows the real resource:
 
     * ``profile_id`` is namespaced by **connection** (the account).  A
-      WORKER-role and an ORCHESTRATOR-role binding on the same
-      connection share the profile_id -- semantic role does not split
-      the real account.
+      BUILD-role and a CHECK-role binding on the same connection share the
+      profile_id -- semantic role does not split the real account.
     * ``quota_pool_id`` is namespaced by **connection** (the
       user-owned account / backend reference), not by provider.
       Provider identity is not quota-resource identity: two distinct
@@ -386,7 +365,18 @@ class OwnerBindingStore:
             payload = json.loads(self._path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
             raise BindingStoreError(f"owner bindings store unreadable: {exc}") from exc
+        self._notice_retired_selection(payload)
         return OwnerBindings.from_mapping(payload)
+
+    def _notice_retired_selection(self, payload: object) -> None:
+        """Tell the owner once that a pre-1.1 Orchestrator selection is ignored."""
+        if not isinstance(payload, Mapping) or not payload.get("orch_binding_policy"):
+            return
+        key = Path(os.path.abspath(self._path))
+        if key in _notified_retired_selection:
+            return
+        _notified_retired_selection.add(key)
+        print(RETIRED_SELECTION_NOTICE, file=sys.stderr)
 
     def save(self, owner: OwnerBindings) -> None:
         """Persist the owner document atomically; fail closed on write errors."""

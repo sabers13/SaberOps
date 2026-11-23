@@ -341,7 +341,6 @@ def test_related_top_level_families_share_one_domain() -> None:
         ("src/saberops/routing.py", "src/saberops/routing_config.py"),
         ("src/saberops/routing_config.py", "src/saberops/routing_decision.py"),
         ("src/saberops/authority.py", "src/saberops/authority_sync.py"),
-        ("src/saberops/orchestrator.py", "src/saberops/orchestrator_consumer.py"),
     ):
         classification = _classify(paths)
         assert classification.crosses_ownership_boundary is False, paths

@@ -3,8 +3,7 @@
 Every check here is hermetic: deterministic fake adapters stand in for
 provider CLIs, so no real provider or model is contacted and no credentials
 are required.  The suite covers the capabilities SaberOps v0.3.0 advertises:
-model identity preservation, exact binding and role separation, the bounded
-Orchestrator-model consumer, provider-default effort behaviour, routing
+model identity preservation, exact binding and role separation, routing
 through exact worker identity, and the deterministic lifecycle result.
 """
 
@@ -21,15 +20,8 @@ from typing import Any
 import pytest
 
 from saberops.cli import build_parser
-from saberops.context_projection import build_initial_projection
 from saberops.control_plane import (
-    BindingKind,
     BindingRole,
-    ExecutionBinding,
-    ExecutionProfile,
-    OrchBindingPolicy,
-    OwnerBindings,
-    QuotaPool,
     build_binding_registry,
     materialize_discovered_binding,
 )
@@ -43,17 +35,10 @@ from saberops.model_access import (
 )
 from saberops.models import (
     AttemptStatus,
-    OrchBindingMode,
-    ReasoningEffort,
     RunStatus,
     Tier,
     WorkerRequest,
     WorkerResult,
-)
-from saberops.orchestrator_consumer import (
-    OrchestratorModelConsumer,
-    OrchestratorModelInvocationError,
-    OrchestratorModelRequest,
 )
 from saberops.process import run_process
 from saberops.routing_config import format_candidate_id
@@ -114,52 +99,6 @@ class _FakeAdapter(WorkerAdapter):
             changed_paths=[],
             has_changes=False,
         )
-
-
-def _binding(
-    *,
-    binding_id: str,
-    provider: str,
-    model: str,
-    profile_id: str,
-    quota_pool_id: str,
-    role: BindingRole = BindingRole.PLAN,
-    efforts: frozenset[ReasoningEffort] = frozenset(),
-) -> ExecutionBinding:
-    return ExecutionBinding(
-        binding_id=binding_id,
-        provider=provider,
-        model=model,
-        backend=BindingKind.DIRECT_CLI,
-        profile_id=profile_id,
-        quota_pool_id=quota_pool_id,
-        binding_role=role,
-        reasoning_effort_capabilities=efforts,
-    )
-
-
-def _profile(profile_id: str, provider: str) -> ExecutionProfile:
-    return ExecutionProfile(profile_id=profile_id, provider=provider)
-
-
-def _pool(pool_id: str, provider: str) -> QuotaPool:
-    return QuotaPool(pool_id=pool_id, provider=provider)
-
-
-def _owner(
-    *,
-    binding: ExecutionBinding,
-    profile: ExecutionProfile,
-    pool: QuotaPool,
-) -> OwnerBindings:
-    return OwnerBindings(
-        registry=build_binding_registry(
-            bindings=(binding,), profiles=(profile,), pools=(pool,)
-        ),
-        policy=OrchBindingPolicy(
-            mode=OrchBindingMode.PINNED, pinned_binding_id=binding.binding_id
-        ),
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -283,154 +222,6 @@ def test_exact_worker_binding_resolves_to_selected_identity() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Bounded Orchestrator-model consumer
-# ---------------------------------------------------------------------------
-
-
-def test_orchestrator_consumer_uses_exact_pinned_binding() -> None:
-    adapter = _FakeAdapter(provider="opencode", output_text="focus on tests")
-    registry = AdapterRegistry([adapter])
-    binding = _binding(
-        binding_id="orch-exact",
-        provider="opencode",
-        model="opencode/gemini-3.5-flash-lite",
-        profile_id="p-orch",
-        quota_pool_id="pool-orch",
-    )
-    consumer = OrchestratorModelConsumer(
-        db=None,
-        registry=registry,
-        owner_bindings=_owner(
-            binding=binding,
-            profile=_profile("p-orch", "opencode"),
-            pool=_pool("pool-orch", "opencode"),
-        ),
-    )
-    result = consumer.invoke(
-        OrchestratorModelRequest(user_prompt="hi", timeout_seconds=5.0)
-    )
-    assert result.status == "SUCCESS"
-    assert adapter.call_count == 1
-    assert adapter.observed_models == ["opencode/gemini-3.5-flash-lite"]
-    assert result.binding_id == "orch-exact"
-    assert result.model == "opencode/gemini-3.5-flash-lite"
-
-
-def test_worker_role_binding_is_refused_by_orchestrator_consumer() -> None:
-    adapter = _FakeAdapter(provider="opencode")
-    registry = AdapterRegistry([adapter])
-    worker = _binding(
-        binding_id="worker-only",
-        provider="opencode",
-        model="opencode/gemini-3.5-flash-lite",
-        profile_id="p-worker",
-        quota_pool_id="pool-worker",
-        role=BindingRole.BUILD,
-    )
-    consumer = OrchestratorModelConsumer(
-        db=None,
-        registry=registry,
-        owner_bindings=_owner(
-            binding=worker,
-            profile=_profile("p-worker", "opencode"),
-            pool=_pool("pool-worker", "opencode"),
-        ),
-    )
-    with pytest.raises(OrchestratorModelInvocationError):
-        consumer.invoke(OrchestratorModelRequest(user_prompt="hi", timeout_seconds=5.0))
-    assert adapter.call_count == 0
-
-
-# ---------------------------------------------------------------------------
-# Provider-default effort behaviour
-# ---------------------------------------------------------------------------
-
-
-def test_provider_default_effort_when_capabilities_unknown() -> None:
-    """Empty capabilities + no explicit tier -> provider default, no fabrication."""
-    adapter = _FakeAdapter(provider="opencode")
-    registry = AdapterRegistry([adapter])
-    binding = _binding(
-        binding_id="orch-default",
-        provider="opencode",
-        model="opencode/gemini-3.5-flash-lite",
-        profile_id="p-default",
-        quota_pool_id="pool-default",
-        efforts=frozenset(),
-    )
-    consumer = OrchestratorModelConsumer(
-        db=None,
-        registry=registry,
-        owner_bindings=_owner(
-            binding=binding,
-            profile=_profile("p-default", "opencode"),
-            pool=_pool("pool-default", "opencode"),
-        ),
-    )
-    result = consumer.invoke(
-        OrchestratorModelRequest(user_prompt="hi", timeout_seconds=5.0)
-    )
-    assert result.status == "SUCCESS"
-    assert result.reasoning_effort is None
-    assert adapter.observed_efforts == [None]
-    assert binding.reasoning_effort_capabilities == frozenset()
-
-
-def test_explicit_unsupported_effort_fails_closed() -> None:
-    adapter = _FakeAdapter(provider="opencode")
-    registry = AdapterRegistry([adapter])
-    binding = _binding(
-        binding_id="orch-default",
-        provider="opencode",
-        model="opencode/gemini-3.5-flash-lite",
-        profile_id="p-default",
-        quota_pool_id="pool-default",
-        efforts=frozenset(),
-    )
-    consumer = OrchestratorModelConsumer(
-        db=None,
-        registry=registry,
-        owner_bindings=_owner(
-            binding=binding,
-            profile=_profile("p-default", "opencode"),
-            pool=_pool("pool-default", "opencode"),
-        ),
-    )
-    with pytest.raises(OrchestratorModelInvocationError):
-        consumer.invoke(
-            OrchestratorModelRequest(
-                user_prompt="hi",
-                reasoning_effort=ReasoningEffort.HIGH,
-                timeout_seconds=5.0,
-            )
-        )
-    assert adapter.call_count == 0
-
-
-# ---------------------------------------------------------------------------
-# Guidance reaches the first worker
-# ---------------------------------------------------------------------------
-
-
-def test_bounded_guidance_reaches_first_worker_context() -> None:
-    with_guidance = build_initial_projection(
-        original_task="implement X",
-        role="BULK",
-        orchestrator_guidance="focus on bounded validation",
-    )
-    titles = tuple(title for title, _ in with_guidance.extra_sections)
-    assert "ORCHESTRATOR GUIDANCE" in titles
-
-    without_guidance = build_initial_projection(
-        original_task="implement X",
-        role="BULK",
-        orchestrator_guidance=None,
-    )
-    titles_without = tuple(title for title, _ in without_guidance.extra_sections)
-    assert "ORCHESTRATOR GUIDANCE" not in titles_without
-
-
-# ---------------------------------------------------------------------------
 # Deterministic lifecycle result
 # ---------------------------------------------------------------------------
 
@@ -551,59 +342,3 @@ def test_worker_success_and_passing_gate_reaches_completed_state(
     )
     assert result.passed is True
     assert result.status == RunStatus.COMPLETED
-
-
-@pytest.mark.parametrize("first_status", [AttemptStatus.FAILED, AttemptStatus.TIMEOUT])
-def test_orchestrator_chosen_chain_falls_back_only_on_failure(first_status: AttemptStatus) -> None:
-    from dataclasses import replace
-
-    class Scripted(_FakeAdapter):
-        def run(self, request: WorkerRequest) -> WorkerResult:
-            result = super().run(request)
-            assert request.read_only is True
-            if self.call_count == 1:
-                return replace(result, status=first_status, error="provider unavailable")
-            return result
-
-    adapter = Scripted(provider="opencode")
-    bindings = tuple(_binding(
-        binding_id=bid, provider="opencode", model="opencode/gemini-3.5-flash-lite",
-        profile_id=f"profile-{bid}", quota_pool_id=f"pool-{bid}",
-    ) for bid in ("first", "second", "unpicked"))
-    owner = OwnerBindings(registry=build_binding_registry(
-        bindings=bindings,
-        profiles=tuple(_profile(f"profile-{b.binding_id}", "opencode") for b in bindings),
-        pools=tuple(_pool(f"pool-{b.binding_id}", "opencode") for b in bindings),
-    )).with_role_order("orchestrator", ("first", "second"))
-    consumer = OrchestratorModelConsumer(db=None, registry=AdapterRegistry([adapter]),
-                                        owner_bindings=owner)
-    result = consumer.invoke(OrchestratorModelRequest(user_prompt="test", timeout_seconds=5))
-    assert result.status == "SUCCESS"
-    assert result.binding_id == "second"
-    assert [env["ORCH_EXECUTION_BINDING_ID"] for env in adapter.observed_envs] == [
-        "first", "second",
-    ]
-    assert result.profile_id == "profile-second"
-
-
-def test_orchestrator_chain_never_enrolls_an_unpicked_binding() -> None:
-    from dataclasses import replace
-
-    class AlwaysFails(_FakeAdapter):
-        def run(self, request: WorkerRequest) -> WorkerResult:
-            return replace(super().run(request), status=AttemptStatus.FAILED)
-
-    adapter = AlwaysFails(provider="opencode")
-    bindings = tuple(_binding(
-        binding_id=bid, provider="opencode", model="opencode/gemini-3.5-flash-lite",
-        profile_id="profile", quota_pool_id="pool",
-    ) for bid in ("chosen", "unpicked"))
-    owner = OwnerBindings(registry=build_binding_registry(
-        bindings=bindings, profiles=(_profile("profile", "opencode"),),
-        pools=(_pool("pool", "opencode"),),
-    )).with_role_order("orchestrator", ("missing", "chosen"))
-    result = OrchestratorModelConsumer(db=None, registry=AdapterRegistry([adapter]),
-        owner_bindings=owner).invoke(OrchestratorModelRequest(user_prompt="test"))
-    assert result.status == "FAILED"
-    assert adapter.call_count == 1
-    assert result.binding_id == "chosen"

@@ -332,27 +332,14 @@ GATE_SCRATCH_MODE_ORDER: tuple[GateScratchMode, ...] = (
 )
 
 
-class OrchBindingMode(StrEnum):
-    """How an owner-selected Orchestrator binding is resolved.
-
-    PINNED              — exact owner-selected binding only; no silent
-                          substitution; typed failure otherwise.
-    PREFERRED_WITH_FALLBACK — owner-ordered list; try in order; quota hard
-                          policy still applies to every candidate.
-    AUTO                — let existing routing policy choose among eligible
-                          Orchestrator bindings.
-    """
-
-    PINNED = "PINNED"
-    PREFERRED_WITH_FALLBACK = "PREFERRED_WITH_FALLBACK"
-    AUTO = "AUTO"
-
-
 class BindingRole(StrEnum):
     """Semantic slot a binding is qualified to serve (ADR-0005 §3).
 
-    The three slots are ``PLAN`` (the in-engine planning/guidance binding),
-    ``BUILD`` (worker dispatch) and ``CHECK`` (independent review).
+    ``BUILD`` is the worker slot and ``CHECK`` is independent review.  ``PLAN``
+    is retired vocabulary (ADR-0064): the planner is the CLI session the owner
+    sits in, so no code selects or creates a ``PLAN`` binding.  It stays
+    readable only so a store written before phase 1.1 still loads.
+
     Distinct from :class:`DispatchRole`: ``BindingRole`` describes WHAT
     KIND of binding this is (the slot it fills in the autonomous
     runtime), while ``DispatchRole`` describes WHAT KIND OF WORK one

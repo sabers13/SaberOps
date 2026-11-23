@@ -3,11 +3,9 @@
 Proves, against isolated XDG roots (never the real owner state):
 
 1. a provider connection/catalog exists (access store + model catalog);
-2. a discovered WORKER model is added to a routing chain;
-3. an ORCHESTRATOR model is pinned;
-4. stores/services are reconstructed from disk (simulated restart);
-5. both selections are still present and resolve to the same exact
-   identities (same binding ids, same connection/model).
+2. discovered BUILD models are added to a routing chain;
+3. stores/services are reconstructed from disk (simulated restart);
+4. the chain and the exact binding identities are still present and resolve.
 """
 
 from __future__ import annotations
@@ -21,15 +19,12 @@ import pytest
 
 from saberops.control_plane import (
     BindingRole,
-    OrchBindingPolicy,
-    OrchSelectionStatus,
     OwnerBindings,
     OwnerBindingStore,
     capability_profile_for,
     get_binding_store_path,
     materialize_discovered_binding,
     save_owner_bindings,
-    select_orch_binding,
     upsert_owner_binding,
 )
 from saberops.control_plane.binding_store import BindingStoreError
@@ -42,7 +37,6 @@ from saberops.model_access import (
     default_account_connections,
     discover_connection_models,
 )
-from saberops.models import OrchBindingMode
 from saberops.project import owner_state_dir
 from saberops.routing_config import (
     DynamicCandidate,
@@ -56,7 +50,7 @@ from saberops.routing_config import (
 from saberops.workers.registry import AdapterRegistry
 
 _WORKER_MODEL = "b2-persist-worker-model"
-_ORCH_MODEL = "b2-persist-orch-model"
+_SECOND_MODEL = "b2-persist-second-model"
 _CONNECTION_ID = "opencode-account"
 _PROVIDER = "opencode"
 
@@ -93,15 +87,15 @@ def isolated_xdg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ORCH_BINDING_STORE", raising=False)
 
 
-def _materialize_both_roles(
+def _materialize_worker_role(
     owner: OwnerBindings,
     *,
     connection_id: str,
     provider: str,
     model_id: str,
     registry: AdapterRegistry,
-) -> tuple[OwnerBindings, str, str]:
-    """Materialize WORKER + ORCHESTRATOR bindings sharing one pool/profile."""
+) -> tuple[OwnerBindings, str]:
+    """Materialize one BUILD-role binding through the real discovery seam."""
     adapter = registry.get(provider)
     assert adapter is not None
     profile = capability_profile_for(adapter)
@@ -113,35 +107,15 @@ def _materialize_both_roles(
         harness_capabilities=profile.capabilities,
         binding_role=BindingRole.BUILD,
     )
-    orch, _orch_profile, _orch_pool = materialize_discovered_binding(
-        connection_id=connection_id,
-        provider=provider,
-        model=model_id,
-        provider_transport=profile.transport,
-        harness_capabilities=profile.capabilities,
-        binding_role=BindingRole.PLAN,
-    )
-    # Same real account / quota resource across roles: no pool duplication.
-    assert worker.profile_id == orch.profile_id
-    assert worker.quota_pool_id == orch.quota_pool_id
-    assert worker.binding_id != orch.binding_id
     candidate = upsert_owner_binding(
         owner, binding=worker, profile=execution_profile, pool=pool
-    )
-    candidate = upsert_owner_binding(
-        candidate, binding=orch, profile=execution_profile, pool=pool
     )
     resolve_execution_binding(
         registry=candidate.registry,
         binding_id=worker.binding_id,
         adapter=adapter,
     )
-    resolve_execution_binding(
-        registry=candidate.registry,
-        binding_id=orch.binding_id,
-        adapter=adapter,
-    )
-    return candidate, worker.binding_id, orch.binding_id
+    return candidate, worker.binding_id
 
 
 def test_c16b2_owner_workflow_persists_across_restart(
@@ -162,7 +136,7 @@ def test_c16b2_owner_workflow_persists_across_restart(
     discovered_at = datetime.now(UTC).isoformat()
     result = discover_connection_models(
         connection,
-        list_models=lambda: [_WORKER_MODEL, _ORCH_MODEL],
+        list_models=lambda: [_WORKER_MODEL, _SECOND_MODEL],
         discovered_at=discovered_at,
     )
     assert result.ok
@@ -179,20 +153,20 @@ def test_c16b2_owner_workflow_persists_across_restart(
         is not None
     )
 
-    # -- discovery path materializes both roles sharing one pool -----------
+    # -- the discovery path materializes one exact BUILD binding per model --
     owner = OwnerBindingStore(get_binding_store_path()).load()
-    owner, worker_binding_id, _ = _materialize_both_roles(
+    owner, worker_binding_id = _materialize_worker_role(
         owner,
         connection_id=_CONNECTION_ID,
         provider=_PROVIDER,
         model_id=_WORKER_MODEL,
         registry=registry,
     )
-    owner, _, orch_binding_id = _materialize_both_roles(
+    owner, _ = _materialize_worker_role(
         owner,
         connection_id=_CONNECTION_ID,
         provider=_PROVIDER,
-        model_id=_ORCH_MODEL,
+        model_id=_SECOND_MODEL,
         registry=registry,
     )
     save_owner_bindings(owner)
@@ -221,15 +195,15 @@ def test_c16b2_owner_workflow_persists_across_restart(
     assert candidate_id in [f"{c.provider}/{c.model}" for c in snapshot.chain_for_role("WORKER")]
 
     # -- reorder keeps membership, changes order ----------------------------
-    second_candidate = format_candidate_id(_PROVIDER, _ORCH_MODEL)
+    second_candidate = format_candidate_id(_PROVIDER, _SECOND_MODEL)
     second_approval = DynamicCandidate(
         candidate_id=second_candidate,
         provider=_PROVIDER,
-        model=_ORCH_MODEL,
+        model=_SECOND_MODEL,
         connection_id=_CONNECTION_ID,
         backend=connection.backend,
         binding_id=(
-            f"discovered-binding:worker:{_CONNECTION_ID}:{_ORCH_MODEL}"
+            f"discovered-binding:worker:{_CONNECTION_ID}:{_SECOND_MODEL}"
         ),
         discovery_status="TRUE",
         execution_support="SUPPORTED",
@@ -263,15 +237,7 @@ def test_c16b2_owner_workflow_persists_across_restart(
     assert isinstance(reordered, list)
     assert reordered.index(second_candidate) < reordered.index(candidate_id)
 
-    # -- 3. ORCHESTRATOR model pinned ---------------------------------------
-    policy = OrchBindingPolicy(
-        mode=OrchBindingMode.PINNED, pinned_binding_id=orch_binding_id
-    )
-    selection = select_orch_binding(policy, owner.registry)
-    assert selection.status is OrchSelectionStatus.RESOLVED
-    save_owner_bindings(OwnerBindings(registry=owner.registry, policy=policy))
-
-    # -- 4. reconstruct every store/service from disk (restart) -------------
+    # -- 3. reconstruct every store/service from disk (restart) -------------
     del access_store, catalog_store, owner, catalog, result
 
     reloaded_access = AccessStore(
@@ -283,7 +249,7 @@ def test_c16b2_owner_workflow_persists_across_restart(
     reloaded_owner = OwnerBindingStore(get_binding_store_path()).load()
     reloaded_snapshot = load_effective_routing()
 
-    # -- 5. both selections present and resolve to the same identities ------
+    # -- 4. the chain and the exact binding identity are still present -------
     assert reloaded_access.try_get(_CONNECTION_ID) is not None
     entry = reloaded_catalog.try_get(
         connection_id=_CONNECTION_ID,
@@ -296,43 +262,25 @@ def test_c16b2_owner_workflow_persists_across_restart(
     chain_ids = [f"{c.provider}/{c.model}" for c in reloaded_snapshot.chain_for_role("WORKER")]
     assert candidate_id in chain_ids
 
-    assert reloaded_owner.policy is not None
-    assert reloaded_owner.policy.mode is OrchBindingMode.PINNED
-    assert reloaded_owner.policy.pinned_binding_id == orch_binding_id
-
     reloaded_registry = AdapterRegistry.default()
     worker_binding = reloaded_owner.registry.try_get(worker_binding_id)
-    orch_binding = reloaded_owner.registry.try_get(orch_binding_id)
     assert worker_binding is not None
-    assert orch_binding is not None
     assert worker_binding.binding_role is BindingRole.BUILD
-    assert orch_binding.binding_role is BindingRole.PLAN
-    assert worker_binding.provider == orch_binding.provider == _PROVIDER
-    # Same connection-scoped quota pool for both models on this account.
-    assert worker_binding.quota_pool_id == orch_binding.quota_pool_id
+    assert worker_binding.provider == _PROVIDER
     assert worker_binding_id == (
         f"discovered-binding:worker:{_CONNECTION_ID}:{_WORKER_MODEL}"
-    )
-    assert orch_binding_id == (
-        f"discovered-binding:orchestrator:{_CONNECTION_ID}:{_ORCH_MODEL}"
     )
     resolve_execution_binding(
         registry=reloaded_owner.registry,
         binding_id=worker_binding_id,
         adapter=reloaded_registry.get(_PROVIDER),
     )
-    resolved_selection = select_orch_binding(
-        reloaded_owner.policy, reloaded_owner.registry
-    )
-    assert resolved_selection.status is OrchSelectionStatus.RESOLVED
-    assert resolved_selection.binding is not None
-    assert resolved_selection.binding.binding_id == orch_binding_id
 
 
 def _seed_two_routing_candidates() -> tuple[str, str]:
     first = format_candidate_id(_PROVIDER, _WORKER_MODEL)
-    second = format_candidate_id(_PROVIDER, _ORCH_MODEL)
-    for candidate_id, model in ((first, _WORKER_MODEL), (second, _ORCH_MODEL)):
+    second = format_candidate_id(_PROVIDER, _SECOND_MODEL)
+    for candidate_id, model in ((first, _WORKER_MODEL), (second, _SECOND_MODEL)):
         approval = DynamicCandidate(
             candidate_id=candidate_id,
             provider=_PROVIDER,
@@ -556,7 +504,8 @@ def test_ported_role_order_validation(isolated: Path) -> None:
     updated = owner.with_role_order("reviewer", ("first", "second"))
     assert updated.role_binding_ids("reviewer") == ("first", "second")
     assert updated.reviewer_binding_id == "first"
-    assert updated.role_binding_ids("orchestrator") == ()
+    with pytest.raises(ValueError):
+        updated.role_binding_ids("orchestrator")
     with pytest.raises(BindingStoreError):
         owner.with_role_order("reviewer", ("dup", "dup"))
     with pytest.raises(BindingStoreError):

@@ -16,14 +16,8 @@ from saberops.accept import AcceptEngine, AcceptResult
 from saberops.config import RunConfig, resolve_run_config
 from saberops.control_plane.binding_store import (
     BindingStoreError,
-    OwnerBindings,
     load_owner_bindings,
     save_owner_bindings,
-)
-from saberops.control_plane.orch_binding import (
-    OrchBindingPolicy,
-    OrchSelectionStatus,
-    select_orch_binding,
 )
 from saberops.control_plane.reviewer_binding import (
     ReviewerSelectionError,
@@ -96,19 +90,6 @@ def coerce_resume_from(value: str | None) -> str:
             f"from must be one of {list(RESUME_FROM_VALUES)}; got {value!r}",
         )
     return cleaned
-
-
-def replace_owner_policy(
-    owner: OwnerBindings, policy: OrchBindingPolicy | None
-) -> OwnerBindings:
-    """Return ``owner`` with its orchestrator binding policy replaced.
-
-    Frozen-dataclass update so the service layer never mutates the
-    loaded document in place.
-    """
-    from dataclasses import replace
-
-    return replace(owner, policy=policy)
 
 
 class OrchestratorService:
@@ -560,11 +541,10 @@ class OrchestratorService:
         return state
 
     # ------------------------------------------------------------------
-    # Owner binding selection (reviewer / orchestrator).
+    # Owner binding selection (reviewer).
     #
-    # Single service-layer authority for the ``orch reviewer`` and
-    # ``orch orchestrator`` commands, mirroring the removed
-    # ``/reviewer/select`` and ``/orchestrator/select`` routes exactly:
+    # Single service-layer authority for the ``orch reviewer`` command,
+    # mirroring the removed ``/reviewer/select`` route exactly:
     # the persisted choice is a binding id (never free-floating
     # provider/model text); only a role-qualified binding that exists
     # in the canonical registry and resolves through the real binding
@@ -661,107 +641,6 @@ class OrchestratorService:
         """Remove the owner's reviewer selection (legacy ladder applies)."""
         owner = self._load_owner_for_selection(for_write=True)
         save_owner_bindings(owner.with_role_order("reviewer", ()))
-        return {"cleared": True}
-
-    def get_orchestrator_status(self) -> dict[str, Any]:
-        """Return the owner's orchestrator policy and its resolution."""
-        from saberops.control_plane.bindings import BindingRole
-
-        owner = self._load_owner_for_selection(for_write=False)
-        eligible = [
-            binding.to_dict()
-            for binding in owner.registry.list_bindings()
-            if binding.binding_role is BindingRole.PLAN
-        ]
-        if owner.policy is None:
-            return {
-                "policy": None,
-                "status": "NOT_CONFIGURED",
-                "reason": "ORCH_BINDING_AUTO_NONE",
-                "resolved_binding": None,
-                "eligible": eligible,
-            }
-        selection = select_orch_binding(owner.policy, owner.registry)
-        return {
-            "policy": owner.policy.to_dict(),
-            "status": selection.status.value,
-            "reason": selection.reason,
-            "resolved_binding": (
-                None if selection.binding is None else selection.binding.to_dict()
-            ),
-            "eligible": eligible,
-        }
-
-    def set_orchestrator_binding(
-        self, binding_id: str | None = None, *, mode: str = "pinned"
-    ) -> dict[str, Any]:
-        """Persist an orchestrator binding policy over exact binding identity.
-
-        ``PINNED`` is the primary mode (exact owner-selected eligible
-        binding, no silent substitution); ``AUTO`` resolves through the
-        existing selection authority.  A selection that cannot resolve
-        is refused; nothing is persisted on refusal.
-        """
-        from saberops.models import OrchBindingMode
-
-        owner = self._load_owner_for_selection(for_write=True)
-        try:
-            parsed_mode = OrchBindingMode(mode.strip().upper())
-        except ValueError as exc:
-            raise OwnerSelectionError(
-                "UNKNOWN_MODE", f"Unknown Orchestrator mode: {mode!r}"
-            ) from exc
-        if parsed_mode is OrchBindingMode.PREFERRED_WITH_FALLBACK:
-            raise OwnerSelectionError(
-                "MODE_UNAVAILABLE",
-                "PREFERRED_WITH_FALLBACK is not available in this view.",
-            )
-        if parsed_mode is OrchBindingMode.PINNED:
-            from saberops.control_plane.bindings import BindingRole
-
-            wanted = (binding_id or "").strip()
-            binding = owner.registry.try_get(wanted)
-            if binding is None:
-                raise OwnerSelectionError(
-                    "UNKNOWN_BINDING",
-                    f"No such canonical binding: {wanted or '(empty)'}",
-                )
-            if binding.binding_role is not BindingRole.PLAN:
-                raise OwnerSelectionError(
-                    "WRONG_ROLE",
-                    "Binding is not qualified for the Orchestrator slot: "
-                    f"role is {binding.binding_role.value!r}",
-                )
-            policy = OrchBindingPolicy(
-                mode=OrchBindingMode.PINNED, pinned_binding_id=wanted
-            )
-        else:
-            policy = OrchBindingPolicy(mode=OrchBindingMode.AUTO)
-        selection = select_orch_binding(policy, owner.registry)
-        if selection.status is not OrchSelectionStatus.RESOLVED:
-            raise OwnerSelectionError(
-                "ORCHESTRATOR_UNRESOLVABLE",
-                "Orchestrator selection refused: "
-                f"{selection.reason or 'no eligible binding'}",
-            )
-        new_owner = replace_owner_policy(owner, policy)
-        save_owner_bindings(new_owner)
-        resolved = selection.binding
-        return {
-            "mode": policy.mode.value,
-            "selected_binding_id": (
-                policy.pinned_binding_id
-                if policy.mode is OrchBindingMode.PINNED
-                else (resolved.binding_id if resolved is not None else None)
-            ),
-            "provider": resolved.provider if resolved is not None else None,
-            "model": resolved.model if resolved is not None else None,
-        }
-
-    def clear_orchestrator_binding(self) -> dict[str, Any]:
-        """Remove the owner's orchestrator policy (no pinned selection)."""
-        owner = self._load_owner_for_selection(for_write=True)
-        save_owner_bindings(replace_owner_policy(owner, None))
         return {"cleared": True}
 
     # ------------------------------------------------------------------

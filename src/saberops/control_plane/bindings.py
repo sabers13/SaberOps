@@ -263,15 +263,10 @@ class ExecutionBinding:
         """True iff the binding actually supports at least one effort tier.
 
         Bindings without any controllable effort must never be silently
-        treated as supporting a tier; orchestrator effort resolution
-        uses this signal to surface typed unsupported-effort decisions.
+        treated as supporting a tier; effort resolution uses this signal to
+        surface typed unsupported-effort decisions.
         """
         return bool(self.reasoning_effort_capabilities)
-
-    @property
-    def is_orchestrator_capable(self) -> bool:
-        """True iff the binding is qualified to fill the Orchestrator role."""
-        return self.binding_role is BindingRole.PLAN
 
     def verification_state(
         self,

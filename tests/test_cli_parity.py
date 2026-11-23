@@ -191,7 +191,6 @@ def test_reviewer_select_leaves_other_roles_unchanged(
     before = load_owner_bindings()
     assert _cli("reviewer", "select", reviewer_id, capsys=capsys)[0] == 0
     after = load_owner_bindings()
-    assert after.policy == before.policy
     assert after.registry.to_dict() == before.registry.to_dict()
 
 
@@ -237,121 +236,6 @@ def test_reviewer_clear_restores_legacy_ladder(
     assert code == 0
     assert json.loads(out)["cleared"] is True
     assert load_owner_bindings().reviewer_binding_id is None
-
-
-# ---------------------------------------------------------------------------
-# orchestrator
-# ---------------------------------------------------------------------------
-
-
-def test_orchestrator_show_unconfigured(
-    isolated: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    code, out, _ = _cli("orchestrator", "show", "--json", capsys=capsys)
-    assert code == 0
-    payload = json.loads(out)
-    assert payload["policy"] is None
-    assert payload["status"] == "NOT_CONFIGURED"
-    assert payload["eligible"] == []
-
-
-def test_orchestrator_select_pinned_persists_exact_binding(
-    isolated: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    _, _, orch_id = _seed_three_role_bindings()
-    code, out, _ = _cli("orchestrator", "select", "--binding", orch_id, capsys=capsys)
-    assert code == 0
-    assert orch_id in out
-    code, out, _ = _cli("orchestrator", "show", "--json", capsys=capsys)
-    assert code == 0
-    status = json.loads(out)
-    assert status["policy"]["mode"] == "PINNED"
-    assert status["status"] == "RESOLVED"
-    assert status["resolved_binding"]["binding_id"] == orch_id
-
-
-@pytest.mark.parametrize("slot", ["worker", "reviewer"])
-def test_orchestrator_select_wrong_role_refused_without_mutation(
-    isolated: Path, capsys: pytest.CaptureFixture[str], slot: str
-) -> None:
-    worker_id, reviewer_id, _ = _seed_three_role_bindings()
-    wanted = worker_id if slot == "worker" else reviewer_id
-    before = load_owner_bindings().to_dict()
-    code, _, err = _cli("orchestrator", "select", "--binding", wanted, capsys=capsys)
-    assert code == 1
-    assert "not qualified for the Orchestrator slot" in err
-    assert load_owner_bindings().to_dict() == before
-
-
-def test_orchestrator_select_unknown_refused_without_mutation(
-    isolated: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    _seed_three_role_bindings()
-    before = load_owner_bindings().to_dict()
-    code, _, err = _cli("orchestrator", "select", "--binding", "no-such", capsys=capsys)
-    assert code == 1
-    assert "No such canonical binding" in err
-    assert load_owner_bindings().to_dict() == before
-
-
-def test_orchestrator_select_auto_resolves(
-    isolated: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    _, _, orch_id = _seed_three_role_bindings()
-    code, out, _ = _cli("orchestrator", "select", "--auto", "--json", capsys=capsys)
-    assert code == 0
-    payload = json.loads(out)
-    assert payload["mode"] == "AUTO"
-    assert payload["selected_binding_id"] == orch_id
-
-
-def test_orchestrator_select_disabled_profile_refused_without_mutation(
-    isolated: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    # PINNED proves policy-resolvability (role + enabled profile + quota),
-    # never live executability: a disabled profile fails closed here while
-    # a missing adapter is refused later at dispatch.  This mirrors the
-    # removed /orchestrator/select route exactly.
-    from dataclasses import replace as _replace
-
-    from saberops.control_plane import OwnerBindings as _OwnerBindings
-    from saberops.control_plane import materialize_discovered_binding as _materialize
-    from saberops.control_plane import save_owner_bindings as _save
-    from saberops.control_plane import upsert_owner_binding as _upsert
-    from saberops.control_plane.bindings import BindingRole as _BindingRole
-
-    orch, profile, pool = _materialize(
-        connection_id="off-conn",
-        provider="opencode",
-        model="off-model",
-        binding_role=_BindingRole.PLAN,
-    )
-    _save(
-        _upsert(
-            _OwnerBindings(),
-            binding=orch,
-            profile=_replace(profile, enabled=False),
-            pool=pool,
-        )
-    )
-    before = load_owner_bindings().to_dict()
-    code, _, err = _cli(
-        "orchestrator", "select", "--binding", orch.binding_id, capsys=capsys
-    )
-    assert code == 1
-    assert "refused" in err.lower()
-    assert load_owner_bindings().to_dict() == before
-
-
-def test_orchestrator_clear_removes_policy(
-    isolated: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    _, _, orch_id = _seed_three_role_bindings()
-    assert _cli("orchestrator", "select", "--binding", orch_id, capsys=capsys)[0] == 0
-    code, out, _ = _cli("orchestrator", "clear", "--json", capsys=capsys)
-    assert code == 0
-    assert json.loads(out)["cleared"] is True
-    assert load_owner_bindings().policy is None
 
 
 # ---------------------------------------------------------------------------
@@ -926,7 +810,7 @@ def test_routing_show_text_and_json(
     assert "Schema: 3" in out
     assert "BUILD:" in out
     assert "strong_start (build route's stronger-model setting):" in out
-    assert "PLAN: see 'orch orchestrator show'" in out
+    assert "PLAN: your connected agent plans the work (see 'orch mcp status')" in out
     assert "CHECK: see 'orch reviewer show'" in out
     code, out, _ = _cli("routing", "show", "--json", capsys=capsys)
     assert code == 0
@@ -939,7 +823,7 @@ def test_routing_show_text_and_json(
     ]
     assert payload["migrated_roles"] == ["WORKER", "SURGEON", "INTEGRATOR"]
     assert payload["managed_elsewhere"] == {
-        "PLAN": "orch orchestrator show",
+        "PLAN": "orch mcp status",
         "CHECK": "orch reviewer show",
     }
 
@@ -1036,7 +920,7 @@ def test_routing_editors_and_legacy_refusal(
         "routing", "add", "orchestrator", "codex/gpt-5.6-terra", capsys=capsys
     )
     assert code == 1
-    assert "orch orchestrator show" in err
+    assert "orch mcp status" in err
     code, _, err = _cli("routing", "add", "worker", "nope/unknown-model", capsys=capsys)
     assert code == 1
     # A retired role name edits the build route; removing the last route leaves

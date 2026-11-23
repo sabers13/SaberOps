@@ -1874,37 +1874,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     reviewer_clear.add_argument("--json", action="store_true", help="JSON output")
 
-    # orch orchestrator show|select|clear
-    orch_parser = subparsers.add_parser(
-        "orchestrator",
-        help="Manage the owner-selected orchestrator binding (show/select/clear).",
-    )
-    orch_sub = orch_parser.add_subparsers(dest="orchestrator_command", required=True)
-    orch_show = orch_sub.add_parser(
-        "show", help="Show the orchestrator policy and the eligible bindings."
-    )
-    orch_show.add_argument("--json", action="store_true", help="JSON output")
-    orch_select = orch_sub.add_parser(
-        "select", help="Persist an orchestrator binding policy over exact binding identity."
-    )
-    orch_mode = orch_select.add_mutually_exclusive_group(required=True)
-    orch_mode.add_argument(
-        "--binding",
-        type=str,
-        default=None,
-        help="Exact PLAN-role binding id (PINNED mode).",
-    )
-    orch_mode.add_argument(
-        "--auto",
-        action="store_true",
-        help="Resolve through the existing routing authority (AUTO mode).",
-    )
-    orch_select.add_argument("--json", action="store_true", help="JSON output")
-    orch_clear = orch_sub.add_parser(
-        "clear", help="Remove the orchestrator policy (no pinned selection)."
-    )
-    orch_clear.add_argument("--json", action="store_true", help="JSON output")
-
     # orch access list|show|add|test|discover|verify-model
     access_parser = subparsers.add_parser(
         "access",
@@ -5162,7 +5131,7 @@ def handle_routing_show(args: argparse.Namespace) -> int:
             },
             "migrated_roles": list(snap.migrated_roles),
             "managed_elsewhere": {
-                "PLAN": "orch orchestrator show",
+                "PLAN": "orch mcp status",
                 "CHECK": "orch reviewer show",
             },
         }
@@ -5188,7 +5157,7 @@ def handle_routing_show(args: argparse.Namespace) -> int:
     print("strong_start (build route's stronger-model setting):")
     for number, group in enumerate(snap.strong_start, start=1):
         print(f"  {number}.", [f"{c.provider}/{c.model}" for c in group])
-    print("PLAN: see 'orch orchestrator show'")
+    print("PLAN: your connected agent plans the work (see 'orch mcp status')")
     print("CHECK: see 'orch reviewer show'")
     return 0
 
@@ -5228,7 +5197,7 @@ def _routing_role_or_refuse(role_raw: str) -> str | None:
     cleaned = str(role_raw).strip().upper()
     if cleaned in ("ORCHESTRATOR", "REVIEWER", "PLAN", "CHECK"):
         pointer = (
-            "orch orchestrator show" if cleaned in ("ORCHESTRATOR", "PLAN")
+            "orch mcp status" if cleaned in ("ORCHESTRATOR", "PLAN")
             else "orch reviewer show"
         )
         print(f"[!] Role {cleaned!r} is managed elsewhere; see '{pointer}'", file=sys.stderr)
@@ -6679,71 +6648,6 @@ def handle_reviewer_clear(args: argparse.Namespace) -> int:
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
     print("Reviewer selection cleared (legacy review ladder applies).")
-    return 0
-
-
-def handle_orchestrator_show(args: argparse.Namespace) -> int:
-    """Handle `orch orchestrator show`."""
-    from saberops.service import OwnerSelectionError
-
-    service = OrchestratorService()
-    try:
-        status = service.get_orchestrator_status()
-    except OwnerSelectionError as exc:
-        print(f"[!] {exc}", file=sys.stderr)
-        return 1
-    if getattr(args, "json", False):
-        print(json.dumps(status, indent=2, sort_keys=True))
-        return 0
-    policy = status["policy"]
-    print(f"Orchestrator policy: {policy['mode'] if policy else '(none)'}")
-    print(f"Status             : {status['status']}")
-    if status["reason"]:
-        print(f"Reason             : {status['reason']}")
-    resolved = status["resolved_binding"]
-    if resolved is not None:
-        print(f"Resolved           : {resolved['binding_id']} [{resolved['provider']}/{resolved['model']}]")
-    _render_bindings_human("Eligible PLAN bindings", status["eligible"])
-    return 0
-
-
-def handle_orchestrator_select(args: argparse.Namespace) -> int:
-    """Handle `orch orchestrator select --binding ID | --auto`."""
-    from saberops.service import OwnerSelectionError
-
-    service = OrchestratorService()
-    try:
-        if bool(getattr(args, "auto", False)):
-            result = service.set_orchestrator_binding(mode="auto")
-        else:
-            result = service.set_orchestrator_binding(str(args.binding), mode="pinned")
-    except (OwnerSelectionError, ValueError) as exc:
-        print(f"[!] Orchestrator selection refused: {exc}", file=sys.stderr)
-        return 1
-    if getattr(args, "json", False):
-        print(json.dumps(result, indent=2, sort_keys=True))
-        return 0
-    print(
-        f"Orchestrator selection saved: mode={result['mode']} "
-        f"binding={result['selected_binding_id']}"
-    )
-    return 0
-
-
-def handle_orchestrator_clear(args: argparse.Namespace) -> int:
-    """Handle `orch orchestrator clear`."""
-    from saberops.service import OwnerSelectionError
-
-    service = OrchestratorService()
-    try:
-        result = service.clear_orchestrator_binding()
-    except (OwnerSelectionError, ValueError) as exc:
-        print(f"[!] Orchestrator policy not cleared: {exc}", file=sys.stderr)
-        return 1
-    if getattr(args, "json", False):
-        print(json.dumps(result, indent=2, sort_keys=True))
-        return 0
-    print("Orchestrator policy cleared (no pinned selection).")
     return 0
 
 
@@ -8856,13 +8760,6 @@ def _dispatch(args: argparse.Namespace) -> int:
             return handle_reviewer_select(args)
         elif args.reviewer_command == "clear":
             return handle_reviewer_clear(args)
-    elif args.command == "orchestrator":
-        if args.orchestrator_command == "show":
-            return handle_orchestrator_show(args)
-        elif args.orchestrator_command == "select":
-            return handle_orchestrator_select(args)
-        elif args.orchestrator_command == "clear":
-            return handle_orchestrator_clear(args)
     elif args.command == "access":
         if args.access_command == "list":
             return handle_access_list(args)

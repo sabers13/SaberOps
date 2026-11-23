@@ -46,10 +46,6 @@ validation and owner approval path.
 - `saberops.planning.represent_independent_ready_work` and `ready_dependents`
   are the persisted *within-run* plan/package dependency authority; they perform
   dependency-state transitions against the run database.
-- `saberops.orchestrator_consumer.fetch_initial_orchestrator_guidance` is a
-  bounded (roughly 600-character) *initial-objective advisor* for the first
-  worker. It is **not** a planner and must not be treated as scheduling
-  enforcement.
 - Early pure slices may exist on unmerged branches (for example a 3x5
   project-child slot-admission projection, and a cross-phase ready-frontier
   readiness projection such as `saberops.ready_frontier`). These are pure

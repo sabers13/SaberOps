@@ -53,7 +53,6 @@ from saberops.control_plane.bindings import (
     resolve_execution_binding,
     resolve_worker_candidate_binding,
 )
-from saberops.control_plane.orch_binding import OrchBindingPolicy
 from saberops.control_plane.reviewer_binding import (
     ReviewerSelectionError,
     reviewer_candidate_for_dispatch,
@@ -889,57 +888,6 @@ def _role_for_orchestrator_dispatch(
     return role_for_stage(stage)
 
 
-class _InitialOrchestratorGuidanceCache:
-    """Bounded first-dispatch Orchestrator guidance cache.
-
-    The bounded Orchestrator model participates in ONE
-    semantic role in a normal run -- initial objective interpretation
-    / execution guidance.  The cache is consulted exactly once, on
-    the first dispatch of the run.  Subsequent calls return the
-    cached result without re-invoking the consumer (deterministic
-    bound: ``maximum Orchestrator semantic calls per normal run = 1``).
-    """
-
-    __slots__ = ("_consumed", "_reason", "_text")
-
-    def __init__(self) -> None:
-        self._consumed = False
-        self._text: str | None = None
-        self._reason: str | None = None
-
-    def get_or_fetch(
-        self,
-        *,
-        service: Any,
-        original_task: str,
-        run_id: str,
-        correlation_id: str | None = None,
-    ) -> tuple[str, str | None]:
-        """Return ``(text, reason)`` for the bounded initial guidance.
-
-        On the first call the cache invokes the bounded consumer via
-        :func:`fetch_initial_orchestrator_guidance`.  On subsequent
-        calls it returns the cached result so the consumer is invoked
-        at most once per run.
-        """
-        if self._consumed:
-            return self._text or "", self._reason
-        from saberops.orchestrator_consumer import (
-            fetch_initial_orchestrator_guidance,
-        )
-
-        text, reason = fetch_initial_orchestrator_guidance(
-            service=service,
-            original_task=original_task,
-            run_id=run_id,
-            correlation_id=correlation_id,
-        )
-        self._text = text
-        self._reason = reason
-        self._consumed = True
-        return text, reason
-
-
 def _classify_gate_outcome(
     gate_res: ProcessResult,
     *,
@@ -1058,69 +1006,6 @@ def _gate_disposition_payload(disposition: GateDisposition) -> dict[str, object]
         "candidate_sha": disposition.candidate_sha,
         "source_tree_hash": disposition.source_tree_hash,
     }
-
-
-def load_owner_runtime_bindings(
-    binding_registry: Any | None,
-    binding_policy: OrchBindingPolicy | None,
-) -> tuple[Any | None, OrchBindingPolicy | None]:
-    """Fill genuinely absent autonomous binding inputs from owner state.
-
-    A caller-supplied registry/policy always wins (tests, recovery).  Owner
-    state is consulted only when an input is absent; empty owner state leaves
-    the fail-closed NO_ELIGIBLE_BINDING path untouched, and a corrupt owner
-    document is treated as absent rather than as a launch authorisation.  The
-    owner policy is adopted only alongside its own owner registry so a policy
-    can never reference bindings the effective registry lacks.
-
-    Separation note: this helper still couples ``binding_policy`` to the
-    same call, but the policy it returns is the **Orchestrator-model**
-    policy -- not a worker-binding selection policy.  Worker-binding
-    selection lives in :class:`AutonomousSupervisor` and consults the
-    canonical :class:`BindingRegistry` plus per-candidate ``binding_id``
-    references; ``binding_policy`` does not enter that path.
-    """
-    if binding_registry is not None and binding_policy is not None:
-        return binding_registry, binding_policy
-    try:
-        owner_bindings = load_owner_bindings()
-    except Exception:  # noqa: BLE001 - corrupt owner state must not launch
-        return binding_registry, binding_policy
-    registry = binding_registry
-    policy = binding_policy
-    if registry is None and tuple(owner_bindings.registry.list_bindings()):
-        registry = owner_bindings.registry
-        if policy is None and owner_bindings.policy is not None:
-            policy = owner_bindings.policy
-    return registry, policy
-
-
-def _adopt_owner_binding_registry(binding_registry: Any | None) -> Any | None:
-    """Fill an absent autonomous binding registry from owner state.
-
-    This is the binding-aware counterpart to
-    :func:`load_owner_runtime_bindings`: it adopts only the registry,
-    never an :class:`OrchBindingPolicy`.  The orchestrator lifecycle
-    consumes the registry for worker dispatch and the
-    ``binding_policy`` is separately persisted in the frozen runtime
-    contract purely so a fresh restart can recover the owner's
-    Orchestrator-model choice.  Worker dispatch is **not** governed
-    by the ``binding_policy`` -- changing it MUST NOT change which
-    binding a worker-routing candidate resolves to.
-
-    A caller-supplied registry always wins (tests, recovery); empty
-    owner state is left alone so the fail-closed NO_ELIGIBLE_BINDING
-    path still fires.
-    """
-    if binding_registry is not None:
-        return binding_registry
-    try:
-        owner_bindings = load_owner_bindings()
-    except Exception:  # noqa: BLE001 - corrupt owner state must not launch
-        return binding_registry
-    if tuple(owner_bindings.registry.list_bindings()):
-        return owner_bindings.registry
-    return binding_registry
 
 
 def _reconstruct_frozen_worker_binding_registry(payload: Any | None) -> Any | None:
@@ -2146,11 +2031,6 @@ class Orchestrator:
                     budgets=contract.budgets,
                     effort_policy=contract.effort_policy,
                     requested_effort=contract.requested_effort,
-                    # Contract.binding_policy is the persisted
-                    # Orchestrator-model policy and is intentionally
-                    # NOT consulted by worker-binding selection on
-                    # restart; the supervisor reads it for read-only
-                    # diagnostics only.
                 )
         return self._run_core(
             task=None,
@@ -2926,12 +2806,6 @@ class Orchestrator:
             attempt_number = 0
             stage_attempts = 0
             package_dispatch_ordinal = 0
-            # The bounded Orchestrator model has exactly ONE
-            # semantic role in a normal run -- initial objective
-            # interpretation / execution guidance.  It is invoked at
-            # most once per run; the cache is consumed by the first
-            # dispatch projection.
-            initial_orchestrator_guidance = _InitialOrchestratorGuidanceCache()
             # Explicit escalation-evidence flag: True only when an actually
             # dispatched attempt produced an explicit typed capability
             # failure (DispatchOutcome.CAPABILITY_FAILURE) at the CURRENT
@@ -4323,27 +4197,12 @@ class Orchestrator:
                             if step.status == PlanStepStatus.COMPLETED
                         ]
                         pkg_role = _role_for_orchestrator_dispatch(local_stage)
-                        # Bounded initial-orchestrator-guidance
-                        # is consumed exactly once per run.  It is
-                        # passed here as an advisory ``extra_sections``
-                        # entry on the FIRST package dispatch.  Worker
-                        # routing / binding identity remain unchanged.
-                        _pkg_guidance_text, _pkg_guidance_reason = (
-                            initial_orchestrator_guidance.get_or_fetch(
-                                service=self,
-                                original_task=task,
-                                run_id=run_id,
-                            )
-                        )
                         dispatch_projection = build_package_initial_projection(
                             original_task=task,
                             package=current_package,
                             completed_summaries=tuple(completed_steps),
                             inherited_base_sha=lineage_base_sha,
                             role=pkg_role.value,
-                            orchestrator_guidance=(
-                                _pkg_guidance_text or None
-                            ),
                         )
                 elif next_attempt_num > 1 and attempts:
                     # Unslciced retry (no current package).
@@ -4361,26 +4220,10 @@ class Orchestrator:
                 else:
                     # Unslciced initial dispatch.
                     initial_role = _role_for_orchestrator_dispatch(local_stage)
-                    # Bounded initial-orchestrator-guidance
-                    # is consumed exactly once per run.  It is
-                    # passed here as an advisory ``extra_sections``
-                    # entry on the FIRST unsliced initial dispatch.
-                    # Worker routing / binding identity remain
-                    # unchanged.
-                    _init_guidance_text, _init_guidance_reason = (
-                        initial_orchestrator_guidance.get_or_fetch(
-                            service=self,
-                            original_task=task,
-                            run_id=run_id,
-                        )
-                    )
                     dispatch_projection = build_initial_projection(
                         original_task=task,
                         role=initial_role.value,
                         package_id=current_package.id if current_package is not None else None,
-                        orchestrator_guidance=(
-                            _init_guidance_text or None
-                        ),
                     )
 
                 assert dispatch_projection is not None

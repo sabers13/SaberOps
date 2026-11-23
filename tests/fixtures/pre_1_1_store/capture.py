@@ -109,7 +109,6 @@ def main() -> int:
 
     from saberops.authority import set_authority_mode  # type: ignore[import-not-found]  # noqa: PLC0415
 
-    from saberops.control_plane.binding_store import load_owner_bindings  # noqa: PLC0415
     from saberops.db import Database  # noqa: PLC0415
     from saberops.routing_config import (  # noqa: PLC0415
         add_candidate_to_chain,
@@ -119,8 +118,9 @@ def main() -> int:
     from saberops.service import OrchestratorService  # noqa: PLC0415
 
     # 1. The owner's selected orchestrator binding: PINNED over the exact PLAN
-    #    binding identity the store discovered.
-    OrchestratorService(db=Database()).set_orchestrator_binding(
+    #    binding identity the store discovered.  H3 (ADR-0064) removed this
+    #    owner command; the call stays as the record of the pre-1.1 capture.
+    OrchestratorService(db=Database()).set_orchestrator_binding(  # type: ignore[attr-defined]
         ORCHESTRATOR_BINDING, mode="pinned"
     )
 
@@ -142,9 +142,10 @@ def main() -> int:
         limit=5,
     )
 
-    bindings = load_owner_bindings()
-    assert bindings.policy is not None, "the orchestrator binding was not persisted"
-    assert bindings.policy.pinned_binding_id == ORCHESTRATOR_BINDING
+    persisted = json.loads(
+        (rig.config_home / "saberops" / "bindings.json").read_text(encoding="utf-8")
+    )
+    assert persisted["orch_binding_policy"]["pinned_binding_id"] == ORCHESTRATOR_BINDING
 
     config_dir = rig.config_home / "saberops"
     state_dir = rig.state_home / "saberops"

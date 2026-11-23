@@ -1097,25 +1097,23 @@ def _materialize_discovered_binding(
     the same account / profile and connection-scoped quota-pool
     resource:
 
-    * WORKER-role binding: eligible for the worker-routing ladder.
-    * REVIEWER-role binding: eligible for the owner-selected reviewer slot.
-    * ORCHESTRATOR-role binding: eligible for the Orchestrator slot.
+    * BUILD-role binding: eligible for the worker-routing ladder.
+    * CHECK-role binding: eligible for the owner-selected reviewer slot.
 
-    All three share the same ``profile_id`` (the real connection /
-    account) and ``quota_pool_id`` (the real connection-scoped
-    scarcity resource); only their ``binding_id`` carries the semantic
-    role so /routing/add, /reviewer/select, and /orchestrator/select
-    each see their own exact binding and quota policy remains authoritative
-    over the real quota pool.  Two distinct account connections to the
-    same provider register distinct ``profile_id`` and distinct
-    ``quota_pool_id`` -- provider identity is not quota-resource
-    identity, and semantic role never duplicates either resource.
+    Both share the same ``profile_id`` (the real connection / account)
+    and ``quota_pool_id`` (the real connection-scoped scarcity resource);
+    only their ``binding_id`` carries the semantic role so /routing/add
+    and /reviewer/select each see their own exact binding and quota
+    policy remains authoritative over the real quota pool.  Two distinct
+    account connections to the same provider register distinct
+    ``profile_id`` and distinct ``quota_pool_id`` -- provider identity is
+    not quota-resource identity, and semantic role never duplicates
+    either resource.
 
-    The exact bindings are persisted only when the WORKER and REVIEWER
-    bindings prove through the real resolver with the real
-    adapter, so a provider/model name can never become executable
-    without an exact binding that actually resolves.  Returns
-    ``(owner, worker_binding)`` or ``None``.
+    The exact bindings are persisted only when both prove through the
+    real resolver with the real adapter, so a provider/model name can
+    never become executable without an exact binding that actually
+    resolves.  Returns ``(owner, worker_binding)`` or ``None``.
     """
     adapter = registry.get(connection.provider)
     if adapter is None:
@@ -1146,24 +1144,12 @@ def _materialize_discovered_binding(
         binding_role=BindingRole.CHECK,
         backend=BindingKind.DIRECT_API if api else BindingKind.DIRECT_CLI,
     )
-    orch_binding, _orch_profile, _orch_pool = materialize_discovered_binding(
-        connection_id=connection.connection_id,
-        provider=connection.provider,
-        model=model_id,
-        provider_transport=profile.transport,
-        harness_capabilities=profile.capabilities,
-        binding_role=BindingRole.PLAN,
-        backend=BindingKind.DIRECT_API if api else BindingKind.DIRECT_CLI,
-    )
     owner = owner if owner is not None else _load_owner_bindings_safely()
     candidate = upsert_owner_binding(
         owner, binding=worker_binding, profile=execution_profile, pool=pool
     )
     candidate = upsert_owner_binding(
         candidate, binding=reviewer_binding, profile=execution_profile, pool=pool
-    )
-    candidate = upsert_owner_binding(
-        candidate, binding=orch_binding, profile=execution_profile, pool=pool
     )
     try:
         resolve_execution_binding(
@@ -1174,11 +1160,6 @@ def _materialize_discovered_binding(
         resolve_execution_binding(
             registry=candidate.registry,
             binding_id=reviewer_binding.binding_id,
-            adapter=adapter,
-        )
-        resolve_execution_binding(
-            registry=candidate.registry,
-            binding_id=orch_binding.binding_id,
             adapter=adapter,
         )
     except BindingResolutionError:
@@ -1872,7 +1853,6 @@ def _role_binding_view() -> dict[str, Any]:
     roles: dict[str, list[dict[str, Any]]] = {
         "worker": [],
         "reviewer": [],
-        "orchestrator": [],
     }
     try:
         for binding in owner.registry.list_bindings():
@@ -1891,16 +1871,13 @@ def _role_binding_view() -> dict[str, Any]:
             )
     except Exception:
         pass
-    selected: dict[str, list[str]] = {"reviewer": [], "orchestrator": []}
-    for role in ("reviewer", "orchestrator"):
-        try:
-            selected[role] = list(owner.role_binding_ids(role))
-        except Exception:
-            selected[role] = []
+    try:
+        selected_reviewer = list(owner.role_binding_ids("reviewer"))
+    except Exception:
+        selected_reviewer = []
     return {
         "roles": roles,
-        "selected_reviewer": selected["reviewer"],
-        "selected_orchestrator": selected["orchestrator"],
+        "selected_reviewer": selected_reviewer,
     }
 
 

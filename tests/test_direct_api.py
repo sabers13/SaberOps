@@ -223,8 +223,8 @@ def test_discovery_materializes_api_roles_and_routing_without_selecting(
     result = _discover_connection(api["connection"], AdapterRegistry.default())
     assert result.models and result.models[0].is_execution_supported
     owner = _load_owner_bindings_safely()
-    assert owner.policy is None and not owner.reviewer_binding_id
-    for role in ("worker", "reviewer", "orchestrator"):
+    assert not owner.reviewer_binding_id
+    for role in ("worker", "reviewer"):
         resolved = resolve_execution_binding(
             registry=owner.registry,
             binding_id=f"discovered-binding:{role}:local-api:test-model",
@@ -320,33 +320,6 @@ def test_model_cannot_read_credential_from_command_environment(api: dict[str, An
     assert result.status is AttemptStatus.SUCCESS
     tool_result = json.loads(api["calls"][1][2]["messages"][-1]["content"])
     assert tool_result["stdout"].strip() == "{}"
-
-
-def test_orchestrator_assign_selects_exact_api_binding_without_inference(
-    api: dict[str, Any],
-) -> None:
-    """Assigning the orchestrator slot keeps the exact API binding.
-
-    L-A step 5 removed the chat model picker; the orchestrator-slot
-    assignment it exercised now runs through the owner-bindings engine
-    seam directly.
-    """
-    from saberops.control_plane.binding_store import save_owner_bindings
-    from saberops.model_access import apply_discovery_result
-    from saberops.web import _load_owner_bindings_safely, _model_catalog_store
-
-    result = _discover_connection(api["connection"], AdapterRegistry.default())
-    assert result.ok
-    store = _model_catalog_store()
-    store.save(apply_discovery_result(store.load(), result))
-    identity = "discovered-binding:orchestrator:local-api:test-model"
-    owner = _load_owner_bindings_safely()
-    binding = owner.registry.try_get(identity)
-    assert binding is not None and binding.binding_role.value == "PLAN"
-    order = owner.role_binding_ids("orchestrator")
-    save_owner_bindings(owner.with_role_order("orchestrator", (*order, identity)))
-    assert identity in _load_owner_bindings_safely().role_binding_ids("orchestrator")
-    assert all(call[2] is None for call in api["calls"])
 
 
 def test_api_images_are_sent_as_visual_content(api: dict[str, Any]) -> None:

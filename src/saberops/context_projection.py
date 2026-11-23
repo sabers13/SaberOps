@@ -685,7 +685,6 @@ def build_initial_projection(
     role: str = "BULK",
     invariants: tuple[str, ...] = (),
     package_id: str | None = None,
-    orchestrator_guidance: str | None = None,
 ) -> ContextProjection:
     """Build a :class:`ContextProjection` for the initial unsliced dispatch.
 
@@ -693,24 +692,7 @@ def build_initial_projection(
     the ``[ORIGINAL TASK]`` section.  The ``responsibility`` line uses a
     compact static placeholder so the same source text never appears
     twice in the rendered body.
-
-    ``orchestrator_guidance`` is an optional bounded advisory section
-    supplied by the bounded
-    :class:`~saberops.orchestrator_consumer.OrchestratorModelConsumer`
-    -- when present, it is added as a single ``extra_sections`` entry so
-    the first worker sees the bounded semantic guidance the persisted
-    Orchestrator binding produced.  When ``None`` (no policy, refusal,
-    or disabled) the section is omitted entirely; the projection's
-    other invariants / acceptance / focus remain authoritative.
     """
-    guidance_sections: tuple[tuple[str, str], ...] = ()
-    if orchestrator_guidance:
-        cleaned = orchestrator_guidance.strip()
-        if cleaned:
-            guidance_sections = ((
-                "ORCHESTRATOR GUIDANCE",
-                cleaned,
-            ),)
     return ContextProjection(
         mode=DispatchContextMode.INITIAL,
         role=role,
@@ -728,7 +710,6 @@ def build_initial_projection(
         focused_verification=(
             "Run focused tests and nearby regressions; return the candidate to Orch."
         ),
-        extra_sections=guidance_sections,
     )
 
 
@@ -739,7 +720,6 @@ def build_package_initial_projection(
     completed_summaries: tuple[str, ...] = (),
     inherited_base_sha: str,
     role: str | None = None,
-    orchestrator_guidance: str | None = None,
 ) -> ContextProjection:
     """Build a single :class:`ContextProjection` for an INITIAL sliced
     package dispatch.
@@ -747,16 +727,6 @@ def build_package_initial_projection(
     This is the ONLY worker contract for an initial package
     dispatch.  It does NOT concatenate with an INITIAL projection.  The
     raw full original task is NEVER model-visible in PACKAGE mode.
-
-    ``orchestrator_guidance`` is an optional bounded advisory section
-    supplied by the bounded
-    :class:`~saberops.orchestrator_consumer.OrchestratorModelConsumer`;
-    when present, it is added as a single ``extra_sections`` entry so
-    the first worker sees the bounded semantic guidance the persisted
-    Orchestrator binding produced.  When ``None`` (no policy, refusal,
-    or disabled) the section is omitted entirely; the projection
-    ``PREREQUISITES`` block and other package invariants remain
-    authoritative.
     """
     pkg_goal = getattr(package, "goal", "") or ""
     pkg_criteria = tuple(str(item) for item in getattr(package, "acceptance_criteria", ()) or ())
@@ -777,12 +747,6 @@ def build_package_initial_projection(
     prereqs_section: tuple[tuple[str, str], ...] = (
         ("PREREQUISITES", "\n".join(str(item) for item in pkg_prereq_summaries) or "(none yet)"),
     )
-    if orchestrator_guidance:
-        cleaned = orchestrator_guidance.strip()
-        if cleaned:
-            prereqs_section = prereqs_section + (
-                ("ORCHESTRATOR GUIDANCE", cleaned),
-            )
     return ContextProjection(
         mode=DispatchContextMode.PACKAGE,
         role=(role or DispatchRole.BUILD.value),

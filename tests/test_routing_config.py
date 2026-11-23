@@ -199,7 +199,7 @@ def test_schema3_validation_failures_and_passes() -> None:
         canonical_routing_payload(bad)
     bad = copy.deepcopy(base)
     bad["roles"]["ORCHESTRATOR"] = []
-    with pytest.raises(RoutingConfigError, match="orch orchestrator show"):
+    with pytest.raises(RoutingConfigError, match="orch mcp status"):
         canonical_routing_payload(bad)
     bad = copy.deepcopy(base)
     bad["roles"]["REVIEWER"] = []

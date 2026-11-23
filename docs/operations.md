@@ -8,21 +8,20 @@ configuration lives in the `orch` CLI. Every command below supports
 goes to stdout and refusals to stderr with a nonzero exit. Nothing is
 persisted on a refusal.
 
-## Owner binding selection (check / plan)
+## Owner binding selection (check)
 
-`orch reviewer show|select|clear` manages the owner's exact **check** binding;
-`orch orchestrator show|select|clear` manages the **plan** binding policy. The
-persisted choice is always a binding id, never free-floating provider/model
-text. Only a role-qualified binding that exists in the canonical registry may
-be selected: a `BUILD` (formerly `WORKER`) or `PLAN` (formerly `ORCHESTRATOR`)
-binding submitted as a check binding (and vice versa) is refused without
-mutation, as is an unknown id. Reviewer selection additionally
-proves the exact binding through the real adapter; orchestrator `PINNED`
-proves policy-resolvability (role, enabled profile, quota) while live
-executability is confirmed at dispatch, which fails closed. Orchestrator
-`--auto` resolves through the existing routing authority; an
-unresolvable policy is refused and nothing is saved. Clearing the
-reviewer restores the legacy review ladder.
+`orch reviewer show|select|clear` manages the owner's exact **check** binding.
+The persisted choice is always a binding id, never free-floating provider/model
+text. Only a role-qualified `CHECK` binding that exists in the canonical
+registry may be selected, and it must prove through the real adapter: a
+`BUILD` (formerly `WORKER`) or `PLAN` (formerly `ORCHESTRATOR`) binding
+submitted as a check binding is refused without mutation, as is an unknown id.
+Clearing the reviewer restores the legacy review ladder.
+
+The **plan** role has no engine binding and no owner command (ADR-0064): the
+planner is the CLI session the owner sits in. A binding store written before
+phase 1.1 that still pins an orchestrator binding keeps working; the selection
+is ignored with one notice and the next settings write drops it.
 
 ## Model-access connections
 
@@ -123,8 +122,8 @@ cost. The classifier still labels the run tier (a risk/telemetry label), but
 it no longer selects routes. Provider readiness, quota, capabilities, exact
 bindings and owner model enrollment still apply. Schema 3 routing files hold `roles.BUILD` plus a top-level `strong_start`, each a
 list of `{"routes": [...]}` groups. The check binding keeps its ordered list in
-`orch reviewer show`, and the plan role is the connected agent: see `orch
-orchestrator show` (`orch routing show` points there too).
+`orch reviewer show`, and the plan role is the connected agent with no engine
+binding: see `orch mcp status` (`orch routing show` points there too).
 
 ### Scout route (F27)
 

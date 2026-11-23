@@ -5,13 +5,8 @@ were removed with the console."""
 
 from __future__ import annotations
 
-import json
 import sqlite3
-from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
-
-import pytest
 
 from saberops.db import Database
 from saberops.models import (
@@ -19,7 +14,7 @@ from saberops.models import (
     RunStatus,
     Tier,
 )
-from saberops.run_titles import clean_title, fallback_title, parse_named_guidance
+from saberops.run_titles import clean_title, fallback_title
 
 
 def _nav_run(repo: str, identity: str = "run_navigation") -> Run:
@@ -74,7 +69,6 @@ def test_ported_name_bounds_and_transcript_fallback() -> None:
     label = clean_title("my-project /repos/my-project <b>Fix login\n" + "problem " * 20, repo)
     assert len(label) <= 80 and len(label.split()) <= 10
     assert "my-project" not in label and "/repos" not in label and "<" not in label
-    assert parse_named_guidance("Legacy advisory") == ("", "Legacy advisory")
 
 
 def test_ported_duplicate_names_reserved_atomically(tmp_path: Path) -> None:
@@ -111,108 +105,3 @@ def test_ported_legacy_run_labels_upgrade(tmp_path: Path) -> None:
         "Build Incident Desk issue tracker",
         "Build Incident Desk issue tracker · 2",
     }
-
-
-@pytest.mark.parametrize(
-    "output,expected",
-    [
-        (json.dumps({"title": "project Fix login", "guidance": "Keep checks."}), "Fix login"),
-        ("Legacy advisory", None),
-        ('{"title": "Fix login", "guidance": false}', None),
-    ],
-)
-def test_ported_startup_names_fetch_once(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, output: str, expected: str | None
-) -> None:
-    """Ported from test_startup_names_with_one_existing_call (fetch-once half)."""
-    from saberops.orchestrator import _InitialOrchestratorGuidanceCache
-    from saberops.orchestrator_consumer import (
-        OrchestratorModelConsumer,
-        OrchestratorModelRequest,
-        OrchestratorModelResult,
-    )
-
-    db = Database(tmp_path / "runs.db")
-    original = _nav_run("/repos/project")
-    db.create_run(original)
-    db.create_run(
-        replace(original, id="earlier_run", display_title="Build previous account settings")
-    )
-    requests: list[OrchestratorModelRequest] = []
-
-    def invoke(
-        self: OrchestratorModelConsumer, request: OrchestratorModelRequest
-    ) -> OrchestratorModelResult:
-        requests.append(request)
-        return OrchestratorModelResult(
-            status="SUCCESS",
-            binding_id="b",
-            profile_id="p",
-            quota_pool_id="q",
-            provider="stub",
-            model="stub",
-            backend="stub",
-            reasoning_effort=None,
-            output_text=output,
-            summary="",
-            error=None,
-            prompt_bytes=0,
-            duration_seconds=0,
-            correlation_id=None,
-            evidence_run_id=original.id,
-            evidence_event_id=0,
-        )
-
-    monkeypatch.setattr(OrchestratorModelConsumer, "invoke", invoke)
-    cache = _InitialOrchestratorGuidanceCache()
-    service = SimpleNamespace(db=db)
-    guidance = cache.get_or_fetch(
-        service=service, original_task=original.task, run_id=original.id
-    )
-    assert (
-        cache.get_or_fetch(service=service, original_task=original.task, run_id=original.id)
-        == guidance
-    )
-    assert len(requests) == 1 and "title and guidance" in requests[0].system_prompt
-    saved = db.get_run(original.id)
-    assert saved and saved.display_title == (
-        expected or fallback_title(original.task, original.target_repo)
-    )
-    assert (
-        sum(e.event_type == "orchestrator_guidance_result" for e in db.get_events(original.id))
-        == 1
-    )
-
-
-def test_ported_unavailable_orchestrator_keeps_fallback(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Ported from test_unavailable_orchestrator_keeps_fallback."""
-    from saberops.orchestrator import _InitialOrchestratorGuidanceCache
-    from saberops.orchestrator_consumer import (
-        OrchestratorModelConsumer,
-        OrchestratorModelInvocationError,
-        OrchestratorModelRequest,
-        OrchestratorModelResult,
-    )
-
-    db = Database(tmp_path / "runs.db")
-    original = _nav_run("/repos/project")
-    db.create_run(original)
-
-    def refuse(
-        self: OrchestratorModelConsumer, request: OrchestratorModelRequest
-    ) -> OrchestratorModelResult:
-        raise OrchestratorModelInvocationError("ORCH_MODEL_NO_POLICY", message="Unavailable")
-
-    monkeypatch.setattr(OrchestratorModelConsumer, "invoke", refuse)
-    cache = _InitialOrchestratorGuidanceCache()
-    text, reason = cache.get_or_fetch(
-        service=SimpleNamespace(db=db), original_task=original.task, run_id=original.id
-    )
-    assert not text and reason
-    saved = db.get_run(original.id)
-    assert saved and saved.task == original.task
-    assert (
-        fallback_title(saved.task, saved.target_repo) == "Build Incident Desk issue tracker"
-    )

@@ -30,8 +30,7 @@ integration branch, and one combined gate plus review on the assembled
 candidate. `saberops.planning.represent_independent_ready_work` and
 `ready_dependents` are the persisted *within-run* plan/package dependency
 authority: they perform dependency-state transitions against the run database.
-The bounded `fetch_initial_orchestrator_guidance` call is a short initial-goal
-advisor for the first worker, not a planner. Step 015 adds the plan-data
+Step 015 adds the plan-data
 layer beside it (`saberops.project.ProjectRegistry`,
 `saberops.project_scope.plan_store`, chained `schedule_chained_waves` and
 `build_plan_run_report` in `saberops.ready_frontier`, via
