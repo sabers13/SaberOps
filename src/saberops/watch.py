@@ -31,7 +31,7 @@ Lifecycle rules
   our default name but no marker belongs to someone else: the watcher
   picks a free suffixed name instead, and an explicitly requested foreign
   name is refused rather than touched.
-* Without a usable tmux binary the command falls back to ``orch monitor``.
+* Without a usable tmux binary the command falls back to ``orch report --follow``.
 """
 
 from __future__ import annotations
@@ -849,10 +849,10 @@ def run_monitor_fallback(
     interval: float,
     timeout: float,
 ) -> int:
-    """No tmux: hand the single selected run to the existing ``orch monitor``."""
+    """No tmux: hand the single selected run to ``orch report --follow``."""
     import argparse
 
-    from saberops.cli import handle_monitor
+    from saberops.cli import handle_report
 
     db = _open_or_none(db_path)
     if db is None:
@@ -869,7 +869,7 @@ def run_monitor_fallback(
             render_summary(
                 db,
                 jobs,
-                session="(no tmux: orch monitor fallback)",
+                session="(no tmux: orch report fallback)",
                 repo=repo,
             )
         )
@@ -881,7 +881,7 @@ def run_monitor_fallback(
             return 0
         print(
             "\ntmux is not installed; pass `--job ID` to follow one of the "
-            "running jobs with `orch monitor`.",
+            "running jobs with `orch report --follow`.",
             file=sys.stderr,
         )
         return 0
@@ -889,7 +889,7 @@ def run_monitor_fallback(
     assert run_id is not None
     print(
         f"tmux is not installed; following {running[0].job_id} with "
-        f"`orch monitor {run_id}` instead.",
+        f"`orch report {run_id} --follow` instead.",
         file=sys.stderr,
     )
     ns = argparse.Namespace(
@@ -898,8 +898,11 @@ def run_monitor_fallback(
         interval=interval,
         once=once,
         timeout=timeout,
+        follow=True,
+        json=False,
+        context=None,
     )
-    return handle_monitor(ns)
+    return handle_report(ns)
 
 
 def _repo_path(raw: str | None) -> Path | None:
@@ -998,7 +1001,7 @@ def handle_watch(args: Any) -> int:
     tmux = Tmux()
     if not tmux.available():
         print(
-            "watch: tmux is not installed; falling back to `orch monitor`.",
+            "watch: tmux is not installed; falling back to `orch report --follow`.",
             file=sys.stderr,
         )
         # F24: the fallback is still an attended terminal view; hold presence

@@ -41,7 +41,7 @@ a read-only view rather than an interactive one.
 - **Observation only.** `saberops.watch` exposes no `send-keys`, `pipe-pane`
   or `respawn` operation. Every loop reopens the store with `read_only=True`.
 - **Fallback.** Without a usable tmux binary the command prints the summary
-  and hands one selected running job's current run to `orch monitor`.
+  and hands one selected running job's current run to `orch report RUN_ID --follow`.
 - **Pause state.** The summary reads the owner pause record when one exists
   (`Database.get_owner_pause()`), and says "not paused (no pause record)" while
   F17 has not landed. F17's implementation supplies the record; the summary

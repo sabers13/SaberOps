@@ -378,7 +378,7 @@ def test_without_tmux_the_summary_names_what_to_follow_and_monitor_takes_over(
     )
     captured = capsys.readouterr()
     assert "following" in captured.err
-    assert "`orch monitor run_f23_fallback`" in captured.err
+    assert "`orch report run_f23_fallback --follow`" in captured.err
     assert "Run run_f23_fallback" in captured.out
     assert code in (0, 2)
 

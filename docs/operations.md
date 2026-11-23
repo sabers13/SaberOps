@@ -490,7 +490,7 @@ option `@saberops_watch=1`; a default name that belongs to another session is
 skipped with a numeric suffix, and an explicit `--session` name that already
 exists without the marker is refused rather than touched. Use `--once` to
 print the summary without opening tmux. Without a usable tmux binary the
-command falls back to `orch monitor` for one selected running job.
+command falls back to `orch report RUN_ID --follow` for one selected running job.
 
 `orch wait RUN_ID` still blocks until a persisted state change; `watch` is a
 separate command, not an alias.

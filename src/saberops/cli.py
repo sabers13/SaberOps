@@ -31,12 +31,12 @@ from saberops.models import (
     TERMINAL_RUN_STATUSES,
     AttemptStatus,
     GateScratchMode,
+    Handoff,
     ProviderReadiness,
     QuotaState,
     RoutingState,
     RunStatus,
 )
-from saberops.observability import build_run_observability_snapshot, canonical_snapshot_json
 from saberops.observability.run_report import (
     build_run_report,
     canonical_report_json,
@@ -112,6 +112,7 @@ from saberops.storage_gc import (
 from saberops.storage_inventory import ArtifactClass, Inventory, build_inventory
 from saberops.storage_maintenance import database_audit_sink
 from saberops.supervisor import RunSupervisor
+from saberops.tooling.context_cli import CONTEXT_REFS as _CONTEXT_REFS
 from saberops.tooling.context_cli import context_json, list_context_refs
 from saberops.tooling.contracts import FrozenToolContract, ToolManifestError
 from saberops.tooling.invocation import ToolInvoker
@@ -703,7 +704,7 @@ def build_parser() -> argparse.ArgumentParser:
     scope_affected.add_argument("--json", action="store_true", help="Emit JSON.")
 
     context_parser = subparsers.add_parser(
-        "orch-context", help="Read one bounded durable run-evidence reference."
+        "orch-context", help="Deprecated alias of `orch report <run-id> --context [REF]`."
     )
     context_parser.add_argument("run_id", type=str)
     context_parser.add_argument("ref", nargs="?", default=None)
@@ -1083,7 +1084,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to SQLite database.",
     )
 
-    plan_parser = subparsers.add_parser("plan", help="Show persisted execution plan as JSON.")
+    plan_parser = subparsers.add_parser(
+        "plan", help="Deprecated alias of `orch status <run-id>`; shows the run plan as JSON."
+    )
     plan_parser.add_argument("run_id", type=str)
     plan_parser.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
     plan_store_parser = subparsers.add_parser(
@@ -1248,7 +1251,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     plan_file_auto_refresh.add_argument("--json", action="store_true", help="JSON output")
     handoff_parser = subparsers.add_parser(
-        "handoff", help="Show latest immutable handoff or resume capsule."
+        "handoff", help="Deprecated alias of `orch status <run-id>`; shows the latest handoff."
     )
     handoff_parser.add_argument("run_id", type=str)
     handoff_parser.add_argument(
@@ -1323,7 +1326,7 @@ def build_parser() -> argparse.ArgumentParser:
     # orch events <run-id>
     events_parser = subparsers.add_parser(
         "events",
-        help="Show diagnostic event log for a specific run in chronological order.",
+        help="Deprecated alias of `orch status <run-id>`; shows the run's latest events.",
     )
     events_parser.add_argument("run_id", type=str, help="Run identifier (e.g. run_abc123).")
     events_parser.add_argument(
@@ -1342,7 +1345,7 @@ def build_parser() -> argparse.ArgumentParser:
     # orch observability <run-id>
     observability_parser = subparsers.add_parser(
         "observability",
-        help="Show deterministic, read-only reconstructability evidence for a run.",
+        help="Deprecated alias of `orch report <run-id> --json`.",
     )
     observability_parser.add_argument("run_id", type=str)
     observability_parser.add_argument(
@@ -1352,10 +1355,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--db", type=str, default=None, help="Path to SQLite database."
     )
 
-    # orch report <run-id> [--json]
+    # orch report <run-id> [--json] [--context [REF]] [--follow]
     report_parser = subparsers.add_parser(
         "report",
-        help="Show the read-only run report (same evidence as observability).",
+        help="Show the full read-only run evidence (absorbs observability, orch-context, monitor).",
     )
     report_parser.add_argument("run_id", type=str, help="Run identifier (e.g. run_abc123).")
     report_parser.add_argument(
@@ -1364,13 +1367,46 @@ def build_parser() -> argparse.ArgumentParser:
         help="Emit canonical deterministic JSON instead of human-readable text.",
     )
     report_parser.add_argument(
+        "--context",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="REF",
+        help=(
+            "Emit one bounded durable evidence ref "
+            f"({', '.join(_CONTEXT_REFS)}); bare --context lists the refs."
+        ),
+    )
+    report_parser.add_argument(
+        "--follow",
+        action="store_true",
+        help="Follow a run live, re-rendering the report until it reaches a terminal state.",
+    )
+    report_parser.add_argument(
+        "--once",
+        action="store_true",
+        help="With --follow: render a single frame and exit.",
+    )
+    report_parser.add_argument(
+        "--interval",
+        type=float,
+        default=2.0,
+        help="With --follow: refresh interval in seconds (default: 2.0).",
+    )
+    report_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=0.0,
+        help="With --follow: maximum follow time in seconds (default: 0 = no limit).",
+    )
+    report_parser.add_argument(
         "--db", type=str, default=None, help="Path to SQLite database."
     )
 
     # orch monitor <run-id>
     monitor_parser = subparsers.add_parser(
         "monitor",
-        help="Follow a run live using the run-report projection (read-only).",
+        help="Deprecated alias of `orch report <run-id> --follow`.",
     )
     monitor_parser.add_argument("run_id", type=str, help="Run identifier (e.g. run_abc123).")
     monitor_parser.add_argument(
@@ -3573,19 +3609,23 @@ def _format_output_tail(
     ]
 
 
-def handle_plan(args: argparse.Namespace) -> int:
-    """Handle ``orch plan`` using only persisted normalized rows."""
-    if not getattr(args, "run_id", None):
-        print("[!] orch plan requires a run_id (or the show|validate subcommand)", file=sys.stderr)
-        return 2
-    db = db_for_run(args, args.run_id)
-    plan = db.get_run_plan(args.run_id)
+def _print_view_alias_notice(name: str, replacement: str) -> None:
+    """One notice per call: the old view name survives for one release."""
+    print(
+        f"[!] 'orch {name}' is a deprecated alias of '{replacement}'; "
+        "the alias is kept for one release.",
+        file=sys.stderr,
+    )
+
+
+def _run_plan_payload(db: Database, run_id: str) -> dict[str, Any]:
+    """Persisted run plan as the JSON payload ``orch plan <run-id>`` emitted."""
+    plan = db.get_run_plan(run_id)
     if plan is None:
-        print(json.dumps({"run_id": args.run_id, "plan": None, "legacy": True}))
-        return 0
-    packages = {package.id: package for package in db.get_work_packages(args.run_id)}
+        return {"run_id": run_id, "plan": None, "legacy": True}
+    packages = {package.id: package for package in db.get_work_packages(run_id)}
     steps = []
-    for step in db.get_plan_steps(args.run_id):
+    for step in db.get_plan_steps(run_id):
         package = packages.get(step.work_package_id or "")
         steps.append(
             {
@@ -3607,16 +3647,21 @@ def handle_plan(args: argparse.Namespace) -> int:
                 else None,
             }
         )
-    print(
-        json.dumps(
-            {
-                "run_id": args.run_id,
-                "plan": {"id": plan.id, "status": plan.status.value, "version": plan.version},
-                "steps": steps,
-            },
-            sort_keys=True,
-        )
-    )
+    return {
+        "run_id": run_id,
+        "plan": {"id": plan.id, "status": plan.status.value, "version": plan.version},
+        "steps": steps,
+    }
+
+
+def handle_plan(args: argparse.Namespace) -> int:
+    """Deprecated alias: ``orch status`` shows the run plan."""
+    _print_view_alias_notice("plan", "orch status <run-id>")
+    if not getattr(args, "run_id", None):
+        print("[!] orch plan requires a run_id (or the show|validate subcommand)", file=sys.stderr)
+        return 2
+    payload = _run_plan_payload(db_for_run(args, args.run_id), args.run_id)
+    print(json.dumps(payload, sort_keys=True))
     return 0
 
 
@@ -4114,10 +4159,16 @@ def handle_plan_file_auto_refresh(args: argparse.Namespace) -> int:
     return 0
 
 
+def _latest_handoff(db: Database, run_id: str, capsule: bool) -> tuple[str, Handoff | None]:
+    """Return ``(kind, latest handoff)`` for the full or capsule surface."""
+    kind = "handoff_resume_capsule" if capsule else "handoff_full"
+    return kind, db.get_latest_handoff(run_id, kind)
+
+
 def handle_handoff(args: argparse.Namespace) -> int:
-    """Handle immutable handoff inspection."""
-    kind = "handoff_resume_capsule" if args.capsule else "handoff_full"
-    handoff = db_for_run(args, args.run_id).get_latest_handoff(args.run_id, kind)
+    """Deprecated alias: ``orch status`` shows the latest handoff."""
+    _print_view_alias_notice("handoff", "orch status <run-id>")
+    kind, handoff = _latest_handoff(db_for_run(args, args.run_id), args.run_id, args.capsule)
     if handoff is None:
         print(json.dumps({"run_id": args.run_id, "kind": kind, "handoff": None}))
         return 0
@@ -4408,6 +4459,38 @@ def handle_status(args: argparse.Namespace) -> int:
                 for line in details_tail:
                     print(f"      {line}")
 
+    # The plan, handoff and event views emptied into status; ``report`` holds
+    # the full evidence and ``--context`` prints any single durable ref.
+    plan_payload = _run_plan_payload(service.db, run.id)
+    print("\nPlan:")
+    if plan_payload.get("legacy"):
+        print("  (none persisted: no in-run plan rows for this run)")
+    else:
+        plan = plan_payload["plan"]
+        print(f"  {plan['id']}  status {plan['status']}  version {plan['version']}")
+        for step in plan_payload["steps"]:
+            print(f"  {step['ordering']}. [{step['kind']}] {step['title']} - {step['status']}")
+
+    kind, handoff = _latest_handoff(service.db, run.id, capsule=False)
+    print("\nHandoff:")
+    if handoff is None:
+        print("  (none recorded)")
+    else:
+        print(f"  {kind}  created {handoff.created_at}")
+        for line in (handoff.content or "").splitlines():
+            print(f"  {line}")
+
+    events = _event_tail(service.db.db_path, run.id, limit=20)
+    print(f"\nRecent events (last {len(events)}; `orch report --context` for bounded refs):")
+    if not events:
+        print("  (none recorded)")
+    for row in events:
+        attempt = row["attempt_id"] if row["attempt_id"] else "-"
+        print(f"  #{row['id']} {row['created_at']} {row['event_type']} (attempt {attempt})")
+        payload_text = " ".join(_format_event_payload(row["payload_json"], 400).split())
+        if payload_text and payload_text != "{}":
+            print(f"      {payload_text[:400]}")
+
     return 0
 
 
@@ -4434,36 +4517,13 @@ def _format_event_payload(payload_raw: str | None, max_string_len: int = 8000) -
         return payload_raw[-max_string_len:] if len(payload_raw) > max_string_len else payload_raw
 
 
-def handle_events(args: argparse.Namespace) -> int:
-    """Handle `orch events <run-id>` command. Strictly read-only."""
-    db_arg = getattr(args, "db", None)
-    if db_arg:
-        db_path = Path(db_arg)
-    else:
-        # A project-scoped run ID raises here rather than silently reading the
-        # preserved global store.
-        db_path = db_path_for_run(args.run_id) or get_default_db_path()
-    resolved = db_path.resolve()
-
-    if not resolved.exists():
-        print(f"Error: Database not found at {resolved}", file=sys.stderr)
-        return 1
-
-    try:
-        conn = sqlite3.connect(f"{resolved.as_uri()}?mode=ro", uri=True, timeout=5.0)
-    except sqlite3.Error as exc:
-        print(f"Error: Could not open database at {resolved}: {exc}", file=sys.stderr)
-        return 1
-
+def _event_tail(db_path: Path | str, run_id: str, limit: int) -> list[Any]:
+    """Return the newest ``limit`` events for a run in chronological order."""
+    resolved = Path(db_path).resolve()
+    conn = sqlite3.connect(f"{resolved.as_uri()}?mode=ro", uri=True, timeout=5.0)
     try:
         conn.row_factory = sqlite3.Row
-        run_row = conn.execute("SELECT id FROM runs WHERE id = ?", (args.run_id,)).fetchone()
-        if run_row is None:
-            print(f"Error: Run '{args.run_id}' not found in {resolved}", file=sys.stderr)
-            return 1
-
-        limit = max(1, args.limit) if args.limit is not None and args.limit > 0 else 200
-        rows = conn.execute(
+        return conn.execute(
             """
             SELECT id, attempt_id, event_type, payload_json, created_at
             FROM (
@@ -4475,53 +4535,47 @@ def handle_events(args: argparse.Namespace) -> int:
             )
             ORDER BY id ASC
             """,
-            (args.run_id, limit),
+            (run_id, max(1, limit)),
         ).fetchall()
-
-        if not rows:
-            print(f"No events found for run '{args.run_id}'.")
-            return 0
-
-        for i, row in enumerate(rows):
-            if i > 0:
-                print()
-            event_id = row["id"]
-            created_at = row["created_at"]
-            attempt_id = row["attempt_id"] if row["attempt_id"] else "-"
-            event_type = row["event_type"]
-            payload_str = _format_event_payload(row["payload_json"])
-
-            print(f"Event ID   : {event_id}")
-            print(f"Created At : {created_at}")
-            print(f"Attempt ID : {attempt_id}")
-            print(f"Event Type : {event_type}")
-            print(f"Payload    :\n{payload_str}")
-
-        return 0
-    except sqlite3.Error as exc:
-        print(f"Error: Database query failed: {exc}", file=sys.stderr)
-        return 1
     finally:
         conn.close()
 
 
-def handle_observability(args: argparse.Namespace) -> int:
-    """Handle the strictly read-only observability snapshot command."""
-    explicit = _explicit_db(args)
-    path = Path(explicit) if explicit else (db_path_for_run(args.run_id) or get_default_db_path())
-    resolved = path.resolve()
-    if not resolved.is_file():
-        print(f"Error: Database not found at {resolved}", file=sys.stderr)
+def handle_events(args: argparse.Namespace) -> int:
+    """Deprecated alias: ``orch status`` shows the run's recent events."""
+    _print_view_alias_notice("events", "orch status <run-id>")
+    db = _open_read_only_report_db(args)
+    if db is None:
         return 1
+    if db.get_run(args.run_id) is None:
+        print(f"Error: Run '{args.run_id}' not found in {db.db_path}", file=sys.stderr)
+        return 1
+    limit = args.limit if args.limit is not None and args.limit > 0 else 200
     try:
-        db = Database(resolved, read_only=True)
-        snapshot = build_run_observability_snapshot(db, args.run_id)
-    except (OSError, sqlite3.Error, ValueError) as exc:
-        print(f"Error: Could not read observability for '{args.run_id}': {exc}", file=sys.stderr)
+        rows = _event_tail(db.db_path, args.run_id, limit)
+    except sqlite3.Error as exc:
+        print(f"Error: Database query failed: {exc}", file=sys.stderr)
         return 1
-    # Canonical JSON is always used so repeated reads have byte-identical output.
-    sys.stdout.buffer.write(canonical_snapshot_json(snapshot) + b"\n")
+    if not rows:
+        print(f"No events found for run '{args.run_id}'.")
+        return 0
+    for i, row in enumerate(rows):
+        if i > 0:
+            print()
+        attempt_id = row["attempt_id"] if row["attempt_id"] else "-"
+        print(f"Event ID   : {row['id']}")
+        print(f"Created At : {row['created_at']}")
+        print(f"Attempt ID : {attempt_id}")
+        print(f"Event Type : {row['event_type']}")
+        print(f"Payload    :\n{_format_event_payload(row['payload_json'])}")
     return 0
+
+
+def handle_observability(args: argparse.Namespace) -> int:
+    """Deprecated alias: ``orch report --json`` prints the same evidence."""
+    _print_view_alias_notice("observability", "orch report <run-id> --json")
+    args.json = True
+    return handle_report(args)
 
 
 def _open_read_only_report_db(args: argparse.Namespace) -> Database | None:
@@ -4541,10 +4595,28 @@ def _open_read_only_report_db(args: argparse.Namespace) -> Database | None:
 
 
 def handle_report(args: argparse.Namespace) -> int:
-    """Handle the strictly read-only canonical run report command."""
+    """Handle the strictly read-only canonical run evidence command.
+
+    One view over one run: the canonical report (``report``), one bounded
+    durable evidence ref or the ref list (``--context``), and the live
+    follow frames (``--follow``) that replaced ``orch monitor``.
+    """
+    if getattr(args, "follow", False):
+        return _follow_report(args)
     db = _open_read_only_report_db(args)
     if db is None:
         return 1
+    context = getattr(args, "context", None)
+    if context is not None:
+        try:
+            if context:
+                print(context_json(db, args.run_id, context))
+            else:
+                print(json.dumps(list_context_refs(db, args.run_id), separators=(",", ":")))
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            print(f"[!] Context operation failed: {exc}", file=sys.stderr)
+            return 1
+        return 0
     try:
         report = build_run_report(db, args.run_id)
     except (OSError, sqlite3.Error, ValueError) as exc:
@@ -4557,8 +4629,8 @@ def handle_report(args: argparse.Namespace) -> int:
     return 0
 
 
-def handle_monitor(args: argparse.Namespace) -> int:
-    """Follow a run live with the canonical projection (read-only polling).
+def _follow_report(args: argparse.Namespace) -> int:
+    """Follow one run live with the canonical projection (read-only polling).
 
     Each refresh re-opens the store read-only and rebuilds the same
     canonical report that ``orch report`` emits, so the live view and
@@ -4580,14 +4652,14 @@ def handle_monitor(args: argparse.Namespace) -> int:
                 report = build_run_report(db, args.run_id)
             except (OSError, sqlite3.Error, ValueError) as exc:
                 print(
-                    f"Error: Could not read monitor for '{args.run_id}': {exc}",
+                    f"Error: Could not read report for '{args.run_id}': {exc}",
                     file=sys.stderr,
                 )
                 return 1
             print(render_monitor_frame(report))
             print("", flush=True)
             # Readout-only: a PREEMPTED run is terminal
-            # for the run, so the monitor must stop here.  The canonical
+            # for the run, so the follow view must stop here.  The canonical
             # set is authoritative; is_terminal_report() still enumerates
             # the pre-D8 statuses (see the Step 001 report for the narrow
             # unification proposal), so PREEMPTED is recognized from the
@@ -4607,7 +4679,7 @@ def handle_monitor(args: argparse.Namespace) -> int:
                 return 0
             if deadline is not None and time.monotonic() >= deadline:
                 print(
-                    f"Monitor timeout after {timeout:.0f}s; run '{args.run_id}' "
+                    f"Follow timeout after {timeout:.0f}s; run '{args.run_id}' "
                     "is still active.",
                     file=sys.stderr,
                 )
@@ -4617,8 +4689,15 @@ def handle_monitor(args: argparse.Namespace) -> int:
                 sleep_for = max(0.0, min(interval, deadline - time.monotonic()))
             time.sleep(sleep_for)
     except KeyboardInterrupt:
-        print("Monitor interrupted; run is untouched.", file=sys.stderr)
+        print("Follow interrupted; run is untouched.", file=sys.stderr)
         return 130
+
+
+def handle_monitor(args: argparse.Namespace) -> int:
+    """Deprecated alias: ``orch report --follow`` renders the same frames."""
+    _print_view_alias_notice("monitor", "orch report <run-id> --follow")
+    args.follow = True
+    return handle_report(args)
 
 
 def _owner_store_runs(repo_arg: Path | str, limit: int) -> tuple[Any, list[Any]] | None:
@@ -8523,17 +8602,10 @@ def handle_tools(args: argparse.Namespace) -> int:
 
 
 def handle_orch_context(args: argparse.Namespace) -> int:
-    """Handle read-only bounded durable evidence retrieval."""
-    try:
-        db = Database(args.db, read_only=True)
-        if args.ref is None:
-            print(json.dumps(list_context_refs(db, args.run_id), separators=(",", ":")))
-        else:
-            print(context_json(db, args.run_id, args.ref))
-        return 0
-    except (OSError, ValueError, sqlite3.Error) as exc:
-        print(f"[!] Context operation failed: {exc}", file=sys.stderr)
-        return 1
+    """Deprecated alias: ``orch report --context`` prints the same evidence."""
+    _print_view_alias_notice("orch-context", "orch report <run-id> --context [REF]")
+    args.context = args.ref or ""
+    return handle_report(args)
 
 
 def _dispatch(args: argparse.Namespace) -> int:

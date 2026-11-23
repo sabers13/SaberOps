@@ -7,7 +7,7 @@ from typing import Any
 
 from saberops.db import Database
 
-_REFS = ("continuation", "checkpoint", "handoff", "gate", "review", "failure")
+CONTEXT_REFS = ("continuation", "checkpoint", "handoff", "gate", "review", "failure")
 
 # These are protocol limits, rather than limits derived from stored row size.
 # The capsule limit matches the supervisor resume-capsule ceiling.
@@ -134,11 +134,11 @@ def list_context_refs(db: Database, run_id: str) -> tuple[str, ...]:
     """Return only bounded, named evidence refs; never filesystem paths."""
     if db.get_run(run_id) is None:
         raise ValueError(f"unknown run: {run_id}")
-    return _REFS
+    return CONTEXT_REFS
 
 
 def get_context_ref(db: Database, run_id: str, ref: str) -> dict[str, Any]:
-    if ref not in _REFS:
+    if ref not in CONTEXT_REFS:
         raise ValueError(f"unsupported context ref: {ref}")
     run = db.get_run(run_id)
     if run is None:
