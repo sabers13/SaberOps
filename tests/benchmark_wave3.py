@@ -2139,10 +2139,30 @@ def assert_drill_groups(drills: Sequence[DrillResult], expected: Sequence[str]) 
         assert drill.passed is True, drill
         assert drill.seconds <= DRILL_VISIBLE_LIMIT_SECONDS, drill
         assert drill.reason, drill
+    assert_catalogued_drills(drills)
+
+
+def assert_catalogued_drills(drills: Sequence[DrillResult]) -> None:
+    """Every emitted drill is in the H35 catalogue with the same facts.
+
+    This is what makes the checked-in results table trustworthy: a new drill or
+    a renamed/changed group or slow marker fails the run until its catalogue
+    entry and baseline row are updated.
+    """
+    from saberops.benchmark import DRILLS_BY_NAME
+
+    for drill in drills:
+        entry = DRILLS_BY_NAME.get(drill.name)
+        assert entry is not None, f"drill {drill.name!r} is not in DRILL_CATALOGUE"
+        assert entry.group == drill.group, (entry, drill)
+        assert entry.slow is drill.slow, (entry, drill)
+        assert drill.passed is True, drill
+        assert drill.seconds <= entry.limit_seconds, (entry, drill)
 
 
 __all__ = [
     "SCOUT_REPORT",
+    "assert_catalogued_drills",
     "assert_drill_groups",
     "drills_report",
     "run_advisor_drill",

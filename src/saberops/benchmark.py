@@ -79,6 +79,12 @@ TARGET_ACCEPT_MEDIAN_SECONDS = 90.0
 TARGET_ACCEPT_P95_SECONDS = 240.0
 TARGET_SUBMIT_TO_START_P95_SECONDS = 10.0
 
+#: Phase 1's visible-state thresholds for drills.  An injected failure must
+#: become visible and a feature drill must finish inside these bounds.
+DRILL_LIMIT_SECONDS = 120.0
+#: The combined recovery drill has C2's stricter 60-second limit.
+RECOVERY_DRILL_LIMIT_SECONDS = 60.0
+
 
 @dataclass(frozen=True)
 class SubmitPacer:
@@ -490,6 +496,102 @@ class DrillResult:
     group: str = ""
     #: Slow drills are skipped by the per-change gate and run by the full gate.
     slow: bool = True
+
+
+@dataclass(frozen=True)
+class BenchmarkDrill:
+    """One drill the fake-mode rig must keep running (lane H35).
+
+    The catalogue is the single list of drills the results table is expected to
+    contain: a drill test asserts that every :class:`DrillResult` it produces is
+    registered here, and the checked-in baseline (``docs/benchmark-drill-baseline.md``)
+    has exactly one row per entry.  Adding a drill is one row plus its baseline
+    row; removing one needs the owner decision that dropped its feature.
+    """
+
+    #: Exact :attr:`DrillResult.name` the rig emits.
+    name: str
+    #: Feature or lane group the drill covers, matching :attr:`DrillResult.group`.
+    group: str
+    #: Phase 1 lane that introduced the drill: ``B2`` or ``B2b``.
+    lane: str
+    #: Phase 1 threshold the drill must finish inside, in seconds.
+    limit_seconds: float
+    #: The test function that runs it, as a pytest node id.
+    test: str
+    slow: bool = True
+
+
+#: ``(name, group, lane, limit_seconds, test function)`` for every phase 1 B2
+#: and B2b drill, in table order.  H35 wave 0 records their pre-1.1 baseline;
+#: later phase 1.1 lanes add one row here and one row in the baseline document.
+DRILL_ROWS: tuple[tuple[str, str, str, float, str], ...] = (
+    ("kill worker", "B2", "B2", DRILL_LIMIT_SECONDS,
+     "test_failure_drills_reach_visible_state"),
+    ("kill scheduler", "B2", "B2", DRILL_LIMIT_SECONDS,
+     "test_failure_drills_reach_visible_state"),
+    ("quota exhausted", "B2", "B2", DRILL_LIMIT_SECONDS,
+     "test_failure_drills_reach_visible_state"),
+    ("bad route", "B2", "B2", DRILL_LIMIT_SECONDS,
+     "test_failure_drills_reach_visible_state"),
+    ("duplicate submission", "B2", "B2", DRILL_LIMIT_SECONDS,
+     "test_failure_drills_reach_visible_state"),
+    ("combined recovery", "B2/B3", "B2", RECOVERY_DRILL_LIMIT_SECONDS,
+     "test_combined_recovery_drill"),
+    ("critical-only questions", "F10", "B2b", DRILL_LIMIT_SECONDS,
+     "test_wave3_question_mode_drills"),
+    ("away mode", "F11", "B2b", DRILL_LIMIT_SECONDS,
+     "test_wave3_question_mode_drills"),
+    ("plan dependencies", "F8", "B2b", DRILL_LIMIT_SECONDS,
+     "test_wave3_plan_drills"),
+    ("plan file edit", "F9", "B2b", DRILL_LIMIT_SECONDS,
+     "test_wave3_plan_drills"),
+    ("landing queue", "F12", "B2b", DRILL_LIMIT_SECONDS,
+     "test_wave3_plan_drills"),
+    ("quota failover", "F4", "B2b", DRILL_LIMIT_SECONDS,
+     "test_wave3_scheduling_drills"),
+    ("steering note", "F13", "B2b", DRILL_LIMIT_SECONDS,
+     "test_wave3_scheduling_drills"),
+    ("one automatic nudge", "F14", "B2b", DRILL_LIMIT_SECONDS,
+     "test_wave3_scheduling_drills"),
+    ("usage per subscription", "F2", "B2b", DRILL_LIMIT_SECONDS,
+     "test_wave3_scheduling_drills"),
+    ("CLI update guard", "F5", "B2b", DRILL_LIMIT_SECONDS,
+     "test_wave3_vendor_and_cleanup_drills"),
+    ("vendor self-healing", "F18", "B2b", DRILL_LIMIT_SECONDS,
+     "test_wave3_vendor_and_cleanup_drills"),
+    ("worktree cleanup", "F6", "B2b", DRILL_LIMIT_SECONDS,
+     "test_wave3_vendor_and_cleanup_drills"),
+    ("owner modes", "F1", "B2b", DRILL_LIMIT_SECONDS,
+     "test_wave3_autonomy_drills"),
+    ("auto-accept", "F15", "B2b", DRILL_LIMIT_SECONDS,
+     "test_wave3_autonomy_drills"),
+    ("imported native attempt", "F16", "B2b", DRILL_LIMIT_SECONDS,
+     "test_wave3_autonomy_drills"),
+    ("pause and confirm", "F17/F24", "B2b", DRILL_LIMIT_SECONDS,
+     "test_wave3_presence_drills"),
+    ("park running work", "F17/F24", "B2b", DRILL_LIMIT_SECONDS,
+     "test_wave3_presence_drills"),
+    ("scout report", "F19/F27", "B2b", DRILL_LIMIT_SECONDS,
+     "test_wave3_scout_and_proxy_drills"),
+    ("proxy family routing", "F20/F21", "B2b", DRILL_LIMIT_SECONDS,
+     "test_wave3_scout_and_proxy_drills"),
+    ("walkthrough", "F25", "B2b", DRILL_LIMIT_SECONDS,
+     "test_wave3_walkthrough_drill"),
+    ("advisor checkpoints", "F26", "B2b", DRILL_LIMIT_SECONDS,
+     "test_wave3_advisor_drill"),
+)
+
+#: Every phase 1 B2 and B2b drill, in table order.
+DRILL_CATALOGUE: tuple[BenchmarkDrill, ...] = tuple(
+    BenchmarkDrill(name, group, lane, limit, f"tests/test_benchmark_rig.py::{test}")
+    for name, group, lane, limit, test in DRILL_ROWS
+)
+
+#: Catalogue lookup by :attr:`DrillResult.name`.
+DRILLS_BY_NAME: dict[str, BenchmarkDrill] = {
+    entry.name: entry for entry in DRILL_CATALOGUE
+}
 
 
 @dataclass(frozen=True)

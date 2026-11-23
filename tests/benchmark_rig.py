@@ -27,7 +27,9 @@ from saberops.accept import AcceptEngine
 from saberops.benchmark import (
     DEFAULT_SUBMIT_CONCURRENCY,
     DEFAULT_SUBMIT_MODE,
+    DRILL_LIMIT_SECONDS,
     FAKE_REVIEW_BLOCK_SENTINEL,
+    RECOVERY_DRILL_LIMIT_SECONDS,
     TASKS,
     BenchmarkReport,
     BenchmarkTask,
@@ -59,8 +61,10 @@ from saberops.supervisor import RunSupervisor
 #: runs this under heavy CPU contention, so the stall bound keeps headroom while
 #: still failing a genuinely stuck engine well inside the lane timeout.
 BENCHMARK_TIMEOUT_SECONDS = 180.0
-DRILL_VISIBLE_LIMIT_SECONDS = 120.0
-C2_RECOVERY_LIMIT_SECONDS = 60.0
+#: The phase 1 thresholds live with the drill catalogue in ``saberops.benchmark``
+#: so the results table and this harness cannot disagree.
+DRILL_VISIBLE_LIMIT_SECONDS = DRILL_LIMIT_SECONDS
+C2_RECOVERY_LIMIT_SECONDS = RECOVERY_DRILL_LIMIT_SECONDS
 SETUP_TIMEOUT_SECONDS = 180.0
 
 
@@ -437,6 +441,7 @@ def _drill_result(
         reason=str(reason),
         notices=notices,
         detail=detail or str(view.get("work_location") or ""),
+        group="B2",
     )
 
 
@@ -918,6 +923,7 @@ def run_recovery_drill(
                 f"terminal events {terminal_events_after}, notices {notices_after}, "
                 f"work location {snapshot['failure']['work_location']}"
             ),
+            group="B2/B3",
         )
     finally:
         _stop_scheduler(scheduler)

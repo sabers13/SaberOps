@@ -28,6 +28,7 @@ from benchmark_rig import (
     run_recovery_drill,
 )
 from benchmark_wave3 import (
+    assert_catalogued_drills,
     assert_drill_groups,
     drills_report,
     run_advisor_drill,
@@ -256,6 +257,7 @@ def test_failure_drills_reach_visible_state(
     assert "NO_ROUTE_FOR_REQUIREMENTS" in by_name["bad route"].reason
     assert by_name["kill scheduler"].final_state == "SUCCEEDED"
     assert by_name["duplicate submission"].final_state == "SUCCEEDED"
+    assert_catalogued_drills(drills)
     print("failure drills:")
     for drill in drills:
         print(
@@ -283,6 +285,11 @@ def test_combined_recovery_drill(
     assert drill.notices == 1
     assert drill.final_state == "FAILED"
     assert "terminal events 1" in drill.detail
+    assert_catalogued_drills([drill])
+    print(
+        f"  {'combined recovery':<20} {drill.final_state:<10} "
+        f"{drill.seconds:>6.1f}s notices={drill.notices} {drill.reason}"
+    )
 
 
 # --------------------------------------------------------------------------
