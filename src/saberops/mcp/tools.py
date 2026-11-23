@@ -11,6 +11,9 @@ native-worker path (ADR-0030): ``native_claim``, ``native_heartbeat``,
 ``native_controls`` and ``record_native_attempt``.  With the flag unset they are
 not registered at all.
 
+With an advisor route set for the session's project (ADR-0034), ``ask_advisor``
+is registered as well; without a route it is absent, so "off" means no tool.
+
 Everything else is either not modelled or on the **never-exposed** list, which
 this module pins as data (:data:`FORBIDDEN_OPERATIONS`) and the registry
 refuses before any handler runs:
@@ -226,6 +229,9 @@ class ServerContext:
     db_path: Path | None = None
     questions_store: Path | None = None
     config_ledger_path: Path | None = None
+    #: Project directory this session serves, when known.  ``ask_advisor`` is
+    #: offered only when this project has an advisor route (off means no tool).
+    repo: Path | None = None
     evidence: EvidenceRoots = field(default_factory=EvidenceRoots.discover)
     ledger: EventLedger = field(default_factory=EventLedger)
     lease: OrchestratorLease = field(default_factory=OrchestratorLease)
@@ -1783,6 +1789,76 @@ def _get_pause(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str
     return {"v": SNAPSHOT_SCHEMA_VERSION, **gate_view(db=db)}
 
 
+def _ask_advisor(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    """Ask the project's configured advisor one bounded question (ADR-0034).
+
+    The tool exists only while the session's project has an advisor route; an
+    off route, a paused store or a spent per-job budget is a typed refusal.
+    """
+    from saberops.advisor import AdvisorRefused, ask_advisor
+    from saberops.jobs.service import get_job
+    from saberops.workers.registry import AdapterRegistry
+
+    job_id = _require_text(arguments, "job_id", what="job_id")
+    question = _require_text(arguments, "question", what="question")
+    db = context.database(read_only=False)
+    if db is None:  # pragma: no cover - a writable context always has a database
+        raise ToolError("owner database is unavailable")
+    job = get_job(db, job_id)
+    if job is None:
+        raise NotFoundError(f"unknown job: {job_id}", data={"job_id": job_id})
+    run_ids = [run_id for run_id in getattr(job, "run_ids", ()) if run_id]
+    run_id = job.current_run_id or (run_ids[-1] if run_ids else None)
+    if not run_id:
+        raise ToolError(
+            f"job {job_id} has no run yet; the advisor can only answer about a "
+            "started run",
+            data={"job_id": job_id},
+        )
+    run = db.get_run(run_id)
+    if run is None:
+        raise NotFoundError(f"unknown run for job: {run_id}", data={"run_id": run_id})
+    attempts = db.get_attempts_for_run(run_id)
+    attempt = attempts[-1] if attempts else None
+    try:
+        advice = ask_advisor(
+            db,
+            repo=job.repo,
+            run_id=run_id,
+            registry=AdapterRegistry.default(),
+            attempt_id=attempt.id if attempt is not None else None,
+            task=run.task,
+            question=question,
+            attempts=attempts,
+            base_sha=(
+                (attempt.base_sha if attempt is not None else None) or run.base_commit
+            ),
+            prior_worktree=attempt.worktree_path if attempt is not None else None,
+        )
+    except AdvisorRefused as exc:
+        raise ToolError(f"{exc.code}: {exc}", data={"code": exc.code}) from exc
+    context.ledger.append(
+        "advisor_advice",
+        {
+            "job_id": job_id,
+            "run_id": run_id,
+            "call_id": advice.call_id,
+            "provider": advice.provider,
+            "model": advice.model,
+        },
+        key=f"advisor:{run_id}:{advice.call_id}",
+    )
+    return {
+        "v": SNAPSHOT_SCHEMA_VERSION,
+        "job_id": job_id,
+        "run_id": run_id,
+        "call_id": advice.call_id,
+        "provider": advice.provider,
+        "model": advice.model,
+        "advice": advice.advice,
+    }
+
+
 def _propose_mode_change(
     context: ServerContext, arguments: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -2393,6 +2469,28 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
         _get_pause,
         mutating=False,
     )
+    from saberops.advisor import advisor_route_or_none
+
+    # F26 (ADR-0034): the advisor is optional and off by default.  "Off"
+    # removes the tool entirely for this project session rather than offering
+    # a call that can only refuse.
+    if context.repo is not None and advisor_route_or_none(context.repo) is not None:
+        register(
+            "ask_advisor",
+            "Ask the project's configured advisor one short question about a job's "
+            "current run; it reads a disposable worktree and returns advice only. "
+            "Off unless the owner set an advisor route; bounded per job.",
+            _schema(
+                {
+                    "job_id": {"type": "string", "minLength": 1},
+                    "question": {"type": "string", "minLength": 1, "maxLength": 2000},
+                },
+                required=("job_id", "question"),
+            ),
+            _ask_advisor,
+            mutating=False,
+        )
+
     from saberops.native_workers import NATIVE_TOOL_NAMES, native_enabled
 
     if native_enabled():
@@ -2469,6 +2567,8 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
 
     registered = set(registry.names())
     expected = set(TOOL_NAMES) | (set(NATIVE_TOOL_NAMES) if native_enabled() else set())
+    if "ask_advisor" in registered:
+        expected.add("ask_advisor")
     if registered != expected:
         raise ToolError(
             "registry does not expose exactly the D7 tool set: "

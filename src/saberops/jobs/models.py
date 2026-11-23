@@ -372,7 +372,8 @@ class SteeringNote:
     delivered_run_id: str | None = None
     delivered_attempt_id: str | None = None
     #: Who wrote the note: ``owner`` (or the planner on the owner's behalf) or
-    #: ``advisor`` (F26 checkpoint advice).  Delivery semantics are identical.
+    #: ``advisor`` (advice recorded before the on-demand advisor moved off the
+    #: note channel).  Delivery semantics are identical.
     source: str = "owner"
 
     @property

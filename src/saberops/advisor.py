@@ -1,21 +1,21 @@
-"""Advisor checkpoints: a stronger model on call, never coding (F26).
+"""On-demand advisor: a stronger model on call, never coding (ADR-0034).
 
 The owner's workflow (2026-11-19): a strong model reads the attempt and advises
-only at key moments, while a cheaper model does the building.  This module is
-the engine side of that workflow:
+only when the worker or the planner asks, while a cheaper model does the
+building.  This module is the engine side of that workflow:
 
 * a per-project **advisor route** (off by default): one plan-subscription
   provider/model plus a per-job call budget (default 3);
 * the advisor runs **read-only** in a disposable detached worktree of the
   run's base, never in the run's own worktree, and is asked for bounded text;
-* three checkpoints: before the first worker attempt plans, after the same
-  failure twice in a row, and before the result goes to independent review;
-* its advice is recorded on the run and delivered to the worker through the
-  ordinary steering-note channel (ADR-0016), so it reaches a worker only at an
-  attempt boundary;
-* calls are bounded by the budget, counted in per-job usage, refused while the
-  work gate is closed (F17), and skipped with a visible reason when the route
-  is unavailable;
+* the worker asks from its own worktree with ``orch advisor ask`` (the prompt
+  names the exact command while the route is on); the planner asks over MCP
+  with ``ask_advisor``;
+* its advice is returned to the caller and recorded on the run, so it reaches
+  a worker at the moment it is needed rather than at the next attempt boundary;
+* calls are bounded by the per-job budget, counted in per-job usage, refused
+  while the work gate is closed (F17), and refused with a visible reason when
+  the route is unavailable;
 * the advisor is not the independent reviewer and never produces a candidate
   or a commit.
 
@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import json
 import logging
+import shlex
+import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import lru_cache
@@ -38,22 +40,23 @@ from typing import Any, Final
 from saberops.models import Attempt, AttemptStatus, DispatchStage, Tier, WorkerRequest
 
 __all__ = [
-    "ADVISOR_CALL_EVENT",
     "ADVISOR_ADVICE_EVENT",
+    "ADVISOR_CALL_EVENT",
+    "ADVISOR_CHECKPOINT_ON_DEMAND",
     "ADVISOR_SKIPPED_EVENT",
     "ADVISOR_UNAVAILABLE_EVENT",
-    "CHECKPOINT_BEFORE_PLAN",
-    "CHECKPOINT_BEFORE_REVIEW",
-    "CHECKPOINT_REPEAT_FAILURE",
     "DEFAULT_ADVISOR_CALL_BUDGET",
     "MAX_ADVICE_CHARS",
     "AdvisorAdvice",
     "AdvisorConfigError",
+    "AdvisorRefused",
     "AdvisorRoute",
-    "advisor_before_attempt",
-    "advisor_before_review",
+    "advisor_command",
+    "advisor_prompt_section",
+    "advisor_route_or_none",
     "advisor_route_path",
     "advisor_view_for_job",
+    "ask_advisor",
     "clear_advisor_route",
     "load_advisor_route",
     "set_advisor_route",
@@ -61,9 +64,7 @@ __all__ = [
 
 _LOG = logging.getLogger(__name__)
 
-CHECKPOINT_BEFORE_PLAN: Final[str] = "before_plan"
-CHECKPOINT_REPEAT_FAILURE: Final[str] = "repeat_failure"
-CHECKPOINT_BEFORE_REVIEW: Final[str] = "before_review"
+ADVISOR_CHECKPOINT_ON_DEMAND: Final[str] = "on_demand"
 
 ADVISOR_CALL_EVENT: Final[str] = "advisor_call_started"
 ADVISOR_ADVICE_EVENT: Final[str] = "advisor_advice"
@@ -76,6 +77,7 @@ DEFAULT_ADVISOR_CALL_BUDGET: Final[int] = 3
 MAX_ADVISOR_CALL_BUDGET: Final[int] = 20
 MAX_ADVICE_CHARS: Final[int] = 1200
 DEFAULT_ADVISOR_TIMEOUT_SECONDS: Final[float] = 120.0
+_MAX_QUESTION_CHARS: Final[int] = 2000
 _MAX_RECENT_OUTPUT_CHARS: Final[int] = 2000
 _MAX_FAILING_CHECK_CHARS: Final[int] = 1500
 _MAX_DIFF_CHARS: Final[int] = 3000
@@ -91,6 +93,20 @@ PLAN_ROUTE_PROVIDERS: Final[frozenset[str]] = frozenset(
 
 class AdvisorConfigError(RuntimeError):
     """Raised for an unreadable or invalid advisor route document."""
+
+
+class AdvisorRefused(RuntimeError):
+    """One refused on-demand advisor call, with a stable reason code.
+
+    ``code`` lets the CLI and MCP report the same refusal vocabulary:
+    ``ADVISOR_OFF``, ``ADVISOR_PAUSED``, ``ADVISOR_BUDGET_EXHAUSTED`` or
+    ``ADVISOR_UNAVAILABLE``.  A refusal never stops the run.
+    """
+
+    def __init__(self, code: str, message: str, *, detail: str | None = None):
+        super().__init__(message)
+        self.code = code
+        self.detail = detail
 
 
 @dataclass(frozen=True)
@@ -116,15 +132,13 @@ class AdvisorRoute:
 
 @dataclass(frozen=True)
 class AdvisorAdvice:
-    """One bounded piece of advice produced at a checkpoint."""
+    """One bounded piece of on-demand advice."""
 
-    checkpoint: str
     advice: str
     provider: str
     model: str
     call_id: str
-    signature: str | None = None
-    note: Any | None = None
+    checkpoint: str = ADVISOR_CHECKPOINT_ON_DEMAND
 
 
 def _project_state_dir(repo: Path | str, *, create: bool) -> Path:
@@ -202,6 +216,21 @@ def load_advisor_route(repo: Path | str) -> AdvisorRoute | None:
     return _coerce_route(payload, str(path))
 
 
+def advisor_route_or_none(repo: Path | str) -> AdvisorRoute | None:
+    """Load the route, treating any read failure as off (for views/tools).
+
+    This is the lenient reader used to decide whether the worker prompt gets an
+    advisor section and whether the MCP tool exists.  A broken or unreadable
+    route must never break a dispatch, so it means "off" here; the owner-facing
+    ``orch project advisor show`` still reports the exact error.
+    """
+    try:
+        return load_advisor_route(repo)
+    except Exception as exc:  # noqa: BLE001 - reads never break dispatch or a session
+        _LOG.warning("advisor route is unreadable; treating it as off: %s", exc)
+        return None
+
+
 def _atomic_write(path: Path, payload: dict[str, Any]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.{id(payload)}.tmp")
@@ -249,6 +278,26 @@ def clear_advisor_route(repo: Path | str) -> Path:
     return path
 
 
+def advisor_command() -> str:
+    """The exact command a headless worker runs from its own worktree."""
+    executable = sys.executable or "orch"
+    return f"{shlex.quote(executable)} -m saberops.cli advisor ask --question"
+
+
+def advisor_prompt_section(route: AdvisorRoute | None) -> str:
+    """The worker-prompt instruction, or ``""`` when the advisor is off."""
+    if route is None:
+        return ""
+    return (
+        "[ADVISOR]\n"
+        f"A stronger model is available for advice, up to {route.call_budget} times "
+        "per job. Ask it from this worktree (it only reads and advises: it cannot "
+        "edit files, change the task, run the gate or accept anything):\n"
+        f'  {advisor_command()} "your question"\n'
+        "The advice is printed and recorded on this run."
+    )
+
+
 def _events(db: Any, run_id: str, event_type: str) -> list[Any]:
     try:
         return list(db.get_events_by_type(run_id, event_type))
@@ -256,66 +305,28 @@ def _events(db: Any, run_id: str, event_type: str) -> list[Any]:
         return []
 
 
-def _event_checkpoint(event: Any) -> str | None:
-    payload = getattr(event, "payload", None)
-    if not isinstance(payload, dict):
-        return None
-    value = payload.get("checkpoint")
-    return str(value) if isinstance(value, str) else None
+def _job_run_ids(db: Any, run_id: str) -> list[str]:
+    """Every run of the job that owns ``run_id`` (the budget is per job)."""
+    run_ids = [run_id]
+    try:
+        from saberops.jobs.store import find_job_for_run
 
-
-def _event_signature(event: Any) -> str | None:
-    payload = getattr(event, "payload", None)
-    if not isinstance(payload, dict):
-        return None
-    value = payload.get("signature")
-    return str(value) if isinstance(value, str) else None
+        job = find_job_for_run(db, run_id)
+    except Exception:  # noqa: BLE001 - a missing job table means a standalone run
+        job = None
+    if job is None:
+        return run_ids
+    for candidate in (getattr(job, "run_ids", ()) or ()):
+        if candidate and candidate not in run_ids:
+            run_ids.append(candidate)
+    current = getattr(job, "current_run_id", None)
+    if current and current not in run_ids:
+        run_ids.append(current)
+    return run_ids
 
 
 def _call_count(db: Any, run_id: str) -> int:
-    return len(_events(db, run_id, ADVISOR_CALL_EVENT))
-
-
-def _checkpoint_already_fired(
-    db: Any, run_id: str, checkpoint: str, *, signature: str | None = None
-) -> bool:
-    for event_type in (
-        ADVISOR_CALL_EVENT,
-        ADVISOR_ADVICE_EVENT,
-        ADVISOR_UNAVAILABLE_EVENT,
-        ADVISOR_SKIPPED_EVENT,
-    ):
-        for event in _events(db, run_id, event_type):
-            if _event_checkpoint(event) != checkpoint:
-                continue
-            if signature is None or _event_signature(event) == signature:
-                return True
-    return False
-
-
-def _failure_signature(attempt: Attempt) -> str | None:
-    """Stable, low-cardinality identity for one failed attempt.
-
-    Only engine-owned fields are used, so the signature never depends on
-    timestamps or file order: two attempts with the same terminal status, the
-    same interrupting reason and the same bounded error text are the *same
-    failure twice in a row*.
-    """
-    if attempt.status is not AttemptStatus.FAILED:
-        return None
-    detail = " ".join((attempt.worker_error or "").split())[:200]
-    return f"{attempt.status.value}|{attempt.interruption_reason or ''}|{detail}"
-
-
-def _repeated_failure(attempts: Sequence[Attempt]) -> str | None:
-    if len(attempts) < 2:
-        return None
-    latest = _failure_signature(attempts[-1])
-    if latest is None:
-        return None
-    if _failure_signature(attempts[-2]) != latest:
-        return None
-    return latest
+    return sum(len(_events(db, rid, ADVISOR_CALL_EVENT)) for rid in _job_run_ids(db, run_id))
 
 
 def _gate_answer(db: Any) -> tuple[bool, str | None]:
@@ -380,7 +391,7 @@ def _plan_lines(plan_steps: Sequence[Any]) -> list[str]:
 
 def _render_prompt(
     *,
-    checkpoint: str,
+    question: str,
     task: str,
     plan_steps: Sequence[Any],
     attempts: Sequence[Attempt],
@@ -413,11 +424,11 @@ def _render_prompt(
             )
         )
     lines = [
-        f"[ADVISOR CHECKPOINT: {checkpoint}]",
+        "[ADVISOR REQUEST]",
         "You are a senior technical advisor for a coding worker. You do not",
         "write code and you never modify files: your answer is advisory text",
-        "only. Read the attempt record below and give the worker concrete,",
-        "bounded advice for its next turn.",
+        "only. Read the request and the attempt record below and give the",
+        "worker concrete, bounded advice.",
         "",
         "Rules:",
         "- At most 25 short lines of plain text.",
@@ -425,6 +436,9 @@ def _render_prompt(
         "  or the concrete next step that unblocks the failing check.",
         "- Do not restate the task and do not ask questions.",
         "- If the approach is sound, write exactly: No changes needed.",
+        "",
+        "Question:",
+        _bounded(question, _MAX_QUESTION_CHARS),
         "",
         "Task:",
         _bounded(task, 4000),
@@ -468,7 +482,7 @@ def _remove_scratch(repo: Path | str, scratch: Path) -> None:
         _LOG.warning("could not remove advisor scratch worktree %s: %s", scratch, exc)
 
 
-def _record_usage(db: Any, *, run_id: str, attempt_id: str, call_id: str,
+def _record_usage(db: Any, *, run_id: str, attempt_id: str | None, call_id: str,
                   route: AdvisorRoute, prompt_bytes: int, result: Any) -> None:
     from saberops.telemetry import persist_worker_usage
 
@@ -501,65 +515,112 @@ def _record_event(db: Any, run_id: str, event_type: str,
         _LOG.warning("could not record %s: %s", event_type, exc)
 
 
-def _advise(
+def _refusal_payload(route: AdvisorRoute, reason: str, **extra: Any) -> dict[str, Any]:
+    return {
+        "checkpoint": ADVISOR_CHECKPOINT_ON_DEMAND,
+        "reason": reason,
+        "provider": route.provider,
+        "model": route.model,
+        **extra,
+    }
+
+
+def ask_advisor(
     db: Any,
     *,
     repo: Path | str,
     run_id: str,
     registry: Any,
-    route: AdvisorRoute,
-    checkpoint: str,
-    attempt_id: str,
+    attempt_id: str | None,
     task: str,
-    plan_steps: Sequence[Any],
-    attempts: Sequence[Attempt],
+    question: str,
+    plan_steps: Sequence[Any] = (),
+    attempts: Sequence[Attempt] = (),
     base_sha: str,
-    prior_worktree: Path | str | None,
-    signature: str | None,
-    timeout_seconds: float,
-) -> AdvisorAdvice | None:
+    prior_worktree: Path | str | None = None,
+    timeout_seconds: float = DEFAULT_ADVISOR_TIMEOUT_SECONDS,
+) -> AdvisorAdvice:
+    """Ask the configured advisor once; refuse with a reason when it cannot run.
+
+    The run continues whatever the answer: :class:`AdvisorRefused` is evidence,
+    never a failure of the work.  Off, paused, spent budget and an unavailable
+    route are all refused before a process starts.
+    """
+    route = advisor_route_or_none(repo)
+    if route is None:
+        raise AdvisorRefused(
+            "ADVISOR_OFF",
+            "the advisor is off for this project; the owner enables it with "
+            "`orch project advisor set <provider> <model>`",
+        )
+
     open_gate, gate_reason = _gate_answer(db)
     if not open_gate:
-        body = {
-            "checkpoint": checkpoint,
-            "reason": "paused",
-            "detail": gate_reason,
-            "provider": route.provider,
-            "model": route.model,
-        }
-        if signature is not None:
-            body["signature"] = signature
-        _record_event(db, run_id, ADVISOR_SKIPPED_EVENT, attempt_id=attempt_id, payload=body)
-        return None
+        _record_event(
+            db,
+            run_id,
+            ADVISOR_SKIPPED_EVENT,
+            attempt_id=attempt_id,
+            payload=_refusal_payload(
+                route, "paused", detail=gate_reason, question=_bounded(question, 1000)
+            ),
+        )
+        raise AdvisorRefused(
+            "ADVISOR_PAUSED",
+            f"work is paused ({gate_reason or 'gate closed'}); the advisor is "
+            "refused until work resumes",
+            detail=gate_reason,
+        )
+
+    used = _call_count(db, run_id)
+    if used >= route.call_budget:
+        _record_event(
+            db,
+            run_id,
+            ADVISOR_SKIPPED_EVENT,
+            attempt_id=attempt_id,
+            payload=_refusal_payload(
+                route,
+                "budget exhausted",
+                call_index=used,
+                call_budget=route.call_budget,
+                question=_bounded(question, 1000),
+            ),
+        )
+        raise AdvisorRefused(
+            "ADVISOR_BUDGET_EXHAUSTED",
+            f"advisor budget exhausted: {used} of {route.call_budget} calls "
+            "already used for this job",
+        )
 
     unavailable = _route_unavailable_reason(registry, route)
     if unavailable is not None:
-        body = {
-            "checkpoint": checkpoint,
-            "reason": unavailable,
+        _record_event(
+            db,
+            run_id,
+            ADVISOR_UNAVAILABLE_EVENT,
+            attempt_id=attempt_id,
+            payload=_refusal_payload(route, unavailable),
+        )
+        raise AdvisorRefused("ADVISOR_UNAVAILABLE", unavailable)
+
+    call_seq = used + 1
+    call_id = f"advisor_{call_seq}"
+    _record_event(
+        db,
+        run_id,
+        ADVISOR_CALL_EVENT,
+        attempt_id=attempt_id,
+        payload={
+            "checkpoint": ADVISOR_CHECKPOINT_ON_DEMAND,
+            "call_id": call_id,
             "provider": route.provider,
             "model": route.model,
-        }
-        if signature is not None:
-            body["signature"] = signature
-        _record_event(
-            db, run_id, ADVISOR_UNAVAILABLE_EVENT, attempt_id=attempt_id, payload=body
-        )
-        return None
-
-    call_seq = _call_count(db, run_id) + 1
-    call_id = f"advisor_{call_seq}"
-    start_payload: dict[str, Any] = {
-        "checkpoint": checkpoint,
-        "call_id": call_id,
-        "provider": route.provider,
-        "model": route.model,
-        "call_index": call_seq,
-        "call_budget": route.call_budget,
-    }
-    if signature is not None:
-        start_payload["signature"] = signature
-    _record_event(db, run_id, ADVISOR_CALL_EVENT, attempt_id=attempt_id, payload=start_payload)
+            "call_index": call_seq,
+            "call_budget": route.call_budget,
+            "question": _bounded(question, _MAX_QUESTION_CHARS),
+        },
+    )
 
     diff_text = ""
     if prior_worktree is not None:
@@ -577,7 +638,7 @@ def _advise(
     except Exception:  # noqa: BLE001
         checks = []
     prompt = _render_prompt(
-        checkpoint=checkpoint,
+        question=question,
         task=task,
         plan_steps=plan_steps,
         attempts=attempts,
@@ -587,7 +648,10 @@ def _advise(
 
     adapter = registry.get(route.provider)
     if adapter is None:  # pragma: no cover - checked above
-        return None
+        raise AdvisorRefused(
+            "ADVISOR_UNAVAILABLE",
+            "no worker adapter is registered for the advisor provider",
+        )
     result: Any = None
     scratch: Path | None = None
     try:
@@ -602,19 +666,15 @@ def _advise(
             )
         )
     except Exception as exc:  # noqa: BLE001 - advice is best effort
+        reason = f"advisor call failed: {exc.__class__.__name__}"
         _record_event(
             db,
             run_id,
             ADVISOR_UNAVAILABLE_EVENT,
             attempt_id=attempt_id,
-            payload={
-                "checkpoint": checkpoint,
-                "reason": f"advisor call failed: {exc.__class__.__name__}",
-                "provider": route.provider,
-                "model": route.model,
-            },
+            payload=_refusal_payload(route, reason),
         )
-        return None
+        raise AdvisorRefused("ADVISOR_UNAVAILABLE", reason) from exc
     finally:
         if scratch is not None:
             _remove_scratch(repo, scratch)
@@ -630,20 +690,19 @@ def _advise(
     )
     status = getattr(result, "status", None)
     if status is not AttemptStatus.SUCCESS:
+        reason = f"advisor call returned {getattr(status, 'value', status)}"
         _record_event(
             db,
             run_id,
             ADVISOR_UNAVAILABLE_EVENT,
             attempt_id=attempt_id,
-            payload={
-                "checkpoint": checkpoint,
-                "reason": f"advisor call returned {getattr(status, 'value', status)}",
-                "provider": route.provider,
-                "model": route.model,
-                "detail": _bounded(getattr(result, "error", None), 300),
-            },
+            payload=_refusal_payload(
+                route,
+                reason,
+                detail=_bounded(getattr(result, "error", None), 300),
+            ),
         )
-        return None
+        raise AdvisorRefused("ADVISOR_UNAVAILABLE", reason)
 
     text = _bounded(
         (getattr(result, "stdout", "") or "").strip()
@@ -656,173 +715,29 @@ def _advise(
             run_id,
             ADVISOR_UNAVAILABLE_EVENT,
             attempt_id=attempt_id,
-            payload={
-                "checkpoint": checkpoint,
-                "reason": "advisor returned no advice text",
-                "provider": route.provider,
-                "model": route.model,
-            },
+            payload=_refusal_payload(route, "advisor returned no advice text"),
         )
-        return None
+        raise AdvisorRefused("ADVISOR_UNAVAILABLE", "advisor returned no advice text")
 
-    note = _record_note(
-        db,
-        run_id=run_id,
-        checkpoint=checkpoint,
-        advice=text,
-        provider=route.provider,
-        model=route.model,
-    )
-    advice_payload: dict[str, Any] = {
-        "checkpoint": checkpoint,
-        "call_id": call_id,
-        "provider": route.provider,
-        "model": route.model,
-        "advice": text,
-        "note_id": getattr(note, "note_id", None),
-    }
-    if signature is not None:
-        advice_payload["signature"] = signature
     _record_event(
-        db, run_id, ADVISOR_ADVICE_EVENT, attempt_id=attempt_id, payload=advice_payload
+        db,
+        run_id,
+        ADVISOR_ADVICE_EVENT,
+        attempt_id=attempt_id,
+        payload={
+            "checkpoint": ADVISOR_CHECKPOINT_ON_DEMAND,
+            "call_id": call_id,
+            "provider": route.provider,
+            "model": route.model,
+            "question": _bounded(question, _MAX_QUESTION_CHARS),
+            "advice": text,
+        },
     )
     return AdvisorAdvice(
-        checkpoint=checkpoint,
         advice=text,
         provider=route.provider,
         model=route.model,
         call_id=call_id,
-        signature=signature,
-        note=note,
-    )
-
-
-def _record_note(
-    db: Any,
-    *,
-    run_id: str,
-    checkpoint: str,
-    advice: str,
-    provider: str,
-    model: str,
-) -> Any | None:
-    """Record the advice as a durable steering note on the owning job."""
-    try:
-        from saberops.jobs.store import insert_steering_note
-        from saberops.preemption import find_job_for_run
-
-        job = find_job_for_run(db, run_id)
-        if job is None:
-            return None
-        body = f"ADVISOR ({checkpoint}, {provider}/{model}): {advice}"
-        return insert_steering_note(db, job.job_id, body, source="advisor")
-    except Exception as exc:  # noqa: BLE001 - the advice event still records it
-        _LOG.warning("could not record advisor steering note: %s", exc)
-        return None
-
-
-def _route_for_run(db: Any, repo: Path | str) -> AdvisorRoute | None:
-    try:
-        return load_advisor_route(repo)
-    except AdvisorConfigError as exc:
-        _LOG.warning("advisor route is invalid: %s", exc)
-        return None
-
-
-def advisor_before_attempt(
-    db: Any,
-    *,
-    repo: Path | str,
-    run_id: str,
-    registry: Any,
-    attempt_id: str,
-    attempts: Sequence[Attempt],
-    plan_steps: Sequence[Any],
-    base_sha: str,
-    task: str,
-    prior_worktree: Path | str | None = None,
-    timeout_seconds: float = DEFAULT_ADVISOR_TIMEOUT_SECONDS,
-) -> AdvisorAdvice | None:
-    """Run at most one checkpoint before a worker attempt starts.
-
-    The first attempt of a run gets ``before_plan``; a retry whose two most
-    recent attempts failed identically gets ``repeat_failure`` exactly once per
-    failure signature.  Routine retries produce nothing.
-    """
-    route = _route_for_run(db, repo)
-    if route is None:
-        return None
-    if _call_count(db, run_id) >= route.call_budget:
-        return None
-    checkpoint: str | None = None
-    signature: str | None = None
-    if not _checkpoint_already_fired(db, run_id, CHECKPOINT_BEFORE_PLAN):
-        if not attempts:
-            checkpoint = CHECKPOINT_BEFORE_PLAN
-    if checkpoint is None:
-        repeated = _repeated_failure(attempts)
-        if repeated is not None and not _checkpoint_already_fired(
-            db, run_id, CHECKPOINT_REPEAT_FAILURE, signature=repeated
-        ):
-            checkpoint = CHECKPOINT_REPEAT_FAILURE
-            signature = repeated
-    if checkpoint is None:
-        return None
-    return _advise(
-        db,
-        repo=repo,
-        run_id=run_id,
-        registry=registry,
-        route=route,
-        checkpoint=checkpoint,
-        attempt_id=attempt_id,
-        task=task,
-        plan_steps=plan_steps,
-        attempts=attempts,
-        base_sha=base_sha,
-        prior_worktree=prior_worktree,
-        signature=signature,
-        timeout_seconds=timeout_seconds,
-    )
-
-
-def advisor_before_review(
-    db: Any,
-    *,
-    repo: Path | str,
-    run_id: str,
-    registry: Any,
-    attempt_id: str,
-    attempts: Sequence[Attempt],
-    plan_steps: Sequence[Any],
-    base_sha: str,
-    task: str,
-    worktree_path: Path | str | None = None,
-    timeout_seconds: float = DEFAULT_ADVISOR_TIMEOUT_SECONDS,
-) -> AdvisorAdvice | None:
-    """Run the single ``before_review`` checkpoint for this run."""
-    route = _route_for_run(db, repo)
-    if route is None:
-        return None
-    if _call_count(db, run_id) >= route.call_budget:
-        return None
-    if _checkpoint_already_fired(db, run_id, CHECKPOINT_BEFORE_REVIEW):
-        return None
-    return _advise(
-        db,
-        repo=repo,
-        run_id=run_id,
-        registry=registry,
-        route=route,
-        checkpoint=CHECKPOINT_BEFORE_REVIEW,
-        attempt_id=attempt_id,
-        task=task,
-        plan_steps=plan_steps,
-        attempts=attempts,
-        base_sha=base_sha,
-        prior_worktree=worktree_path,
-        signature=None,
-        timeout_seconds=timeout_seconds,
     )
 
 
@@ -840,14 +755,6 @@ def advisor_view_for_job(db: Any, job: Any) -> dict[str, Any]:
             route = load_advisor_route(repo)
         except AdvisorConfigError as exc:
             route_error = str(exc)
-    notes_by_id: dict[int, Any] = {}
-    try:
-        from saberops.jobs.store import list_steering_notes
-
-        for note in list_steering_notes(db, job.job_id):
-            notes_by_id[int(note.note_id)] = note
-    except Exception:  # noqa: BLE001 - a view never breaks
-        notes_by_id = {}
 
     run_ids: list[str] = list(getattr(job, "run_ids", ()) or ())
     current = getattr(job, "current_run_id", None)
@@ -869,11 +776,6 @@ def advisor_view_for_job(db: Any, job: Any) -> dict[str, Any]:
             payload = dict(event.payload or {})
             payload["recorded_at"] = event.created_at
             payload["attempt_id"] = event.attempt_id
-            delivered_note = notes_by_id.get(int(payload.get("note_id") or 0))
-            payload["delivered"] = bool(getattr(delivered_note, "delivered", False))
-            payload["delivered_attempt_id"] = getattr(
-                delivered_note, "delivered_attempt_id", None
-            )
             advice.append(payload)
         for event in _events(db, run_id, ADVISOR_SKIPPED_EVENT):
             payload = dict(event.payload or {})

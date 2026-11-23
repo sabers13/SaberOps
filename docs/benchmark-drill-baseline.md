@@ -53,7 +53,7 @@ removed it (ADR-0061).
 | scout report | B2b | F19/F27 | yes | 120 | 8.6 |
 | proxy family routing | B2b | F20/F21 | yes | 120 | 33.7 |
 | walkthrough | B2b | F25 | yes | 120 | 4.8 |
-| advisor checkpoints | B2b | F26 | yes | 120 | 32.5 |
+| advisor on demand | B2b | F26 | yes | 120 | 32.5 |
 <!-- drill-baseline:end -->
 
 Every B2 drill is a fake-mode injected failure that must become visible with

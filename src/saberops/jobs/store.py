@@ -162,9 +162,9 @@ def ensure_tables(db: Any) -> None:
 def _ensure_steering_source_column(conn: sqlite3.Connection) -> None:
     """Add ``source`` to a steering-notes table created before F26.
 
-    Existing rows are owner notes, which is exactly the column default.  The
-    advisor (F26) records its advice through the same durable channel, so a
-    note must say who wrote it without changing delivery semantics.
+    Existing rows are owner notes, which is exactly the column default.  A
+    note must say who wrote it without changing delivery semantics; advisor
+    advice recorded before phase 1.1 keeps its ``advisor`` label.
     """
     columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(job_steering_notes)")}
     if "source" not in columns:

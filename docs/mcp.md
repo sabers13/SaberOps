@@ -73,6 +73,7 @@ first missing step with no stored cursor.
 | `cancel_job` | yes | `job_id`, `reason` | `saberops.jobs.service.cancel_job` |
 | `note_job` | yes | `job_id`, `text` | `saberops.jobs.service.note_job` |
 | `resume_job` | yes | `job_id`, `from` (`scratch`/`last_candidate`), `note`, `worker_binding` | `saberops.service.OrchestratorService.resume_job` (retry/continue paths) |
+| `ask_advisor` | no | `job_id`, `question` | `saberops.advisor.ask_advisor` (only listed when this project has an advisor route; see below) |
 | `capacity` | no | — | `saberops.jobs.service.capacity` |
 | `read_evidence` | no | `path` | guarded evidence reader |
 | `list_questions` | no | `status`, `run_id` | `saberops.questions.OwnerQuestionQueue.questions` |
@@ -262,13 +263,19 @@ continuation — and the attempt, run and time are recorded on the note. A job
 that finishes before another attempt keeps the note pending. `catch_up` and
 `orch job notes` list every note with its delivery state.
 
-An optional advisor (ADR-0034) records its checkpoint advice through the same
-channel with `source: "advisor"`; the prompt and the note views label it as
-advice rather than owner authority. Set it per project with
+An optional advisor (ADR-0034) answers on demand rather than at fixed
+checkpoints. Set it per project with
 `orch project advisor set <provider> <model> [--calls N]` and turn it off with
-`orch project advisor off`; it is off by default. Its route, call budget, calls
-and advice appear in the `advisor` block of `get_job`, `tail_job` and
-`catch_up`, and its calls are counted in per-job usage.
+`orch project advisor off`; it is off by default. While it is on, a headless
+worker runs `orch advisor ask --question "..."` from its own worktree, and the
+planner (or a native worker) calls the `ask_advisor` MCP tool with the job and
+its question. The tool is **only registered while the session's project has a
+route**; off means no tool. The advisor reads a disposable worktree, returns
+bounded advice, and is bounded by the per-job budget (default 3). A call is
+refused with a reason when the route is off, the work gate is paused, or the
+budget is spent. Its route, call budget, calls and advice appear in the
+`advisor` block of `get_job`, `tail_job` and `catch_up`, and its calls are
+counted in per-job usage.
 
 `answer_question` accepts only `authority: "PLAN"` (legacy `ORCHESTRATOR` is
 accepted and mapped). Owner authority is not exercisable over MCP:

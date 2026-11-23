@@ -20,7 +20,6 @@ import os
 import shlex
 import stat
 import subprocess
-import sys
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
@@ -2004,17 +2003,20 @@ def _with_walkthrough_answers(command: str) -> str:
 def run_advisor_drill(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> DrillResult:
-    """Each advisor checkpoint fires once and its advice reaches the worker."""
+    """A worker asks on demand: three calls advise, the fourth is refused."""
     from lifecycle_rig import build_lifecycle_rig
 
     started = time.monotonic()
-    gate = _counted_gate(tmp_path, failures=2)
-    rig = build_lifecycle_rig(tmp_path, monkeypatch, gate_command=gate)
+    rig = build_lifecycle_rig(tmp_path, monkeypatch)
     db = rig.db()
     advice = "ADVICE-MARKER-b2b: verify the retry helper before adding a new one."
-    prompt_log = rig.root / "advisor-prompts.jsonl"
-    rig.set_worker_mode("commit", report_text=advice, prompt_log=prompt_log)
-    rig.set_reviewer_verdict("BLOCK")
+    advisor_log = rig.root / "advisor-calls.jsonl"
+    rig.set_worker_mode(
+        "commit",
+        report_text=advice,
+        advisor_questions=["q1", "q2", "q3", "q4"],
+        advisor_log=advisor_log,
+    )
     set_advisor_route(rig.repo, provider="codex", model="gpt-5.6-sol", call_budget=3)
 
     original = __import__("saberops.jobs.service", fromlist=["job_dispatch_spec"])
@@ -2026,8 +2028,8 @@ def run_advisor_drill(
             spec,
             request=replace(
                 spec.request,
-                max_attempts=3,
-                review_limit=2,
+                max_attempts=1,
+                review_limit=1,
                 worker_timeout=20.0,
                 gate_timeout=20.0,
                 review_enabled=True,
@@ -2036,7 +2038,7 @@ def run_advisor_drill(
         )
 
     monkeypatch.setattr(original, "job_dispatch_spec", tuned)
-    submitted = submit_job(db, repo=rig.repo, goal="Add the advisor test line")
+    submitted = submit_job(db, repo=rig.repo, goal="Ask the advisor on demand")
     tick = run_scheduler_loop(
         db, once=True, readiness_service=ReadinessService.for_owner_state(owner_state_dir())
     )
@@ -2049,61 +2051,42 @@ def run_advisor_drill(
     from saberops.advisor import (
         ADVISOR_ADVICE_EVENT,
         ADVISOR_CALL_EVENT,
-        CHECKPOINT_BEFORE_PLAN,
-        CHECKPOINT_BEFORE_REVIEW,
-        CHECKPOINT_REPEAT_FAILURE,
+        ADVISOR_SKIPPED_EVENT,
     )
 
-    checkpoints = [
-        str((event.payload or {}).get("checkpoint"))
-        for event in db.get_events_by_type(run.id, ADVISOR_CALL_EVENT)
+    calls = [
+        json.loads(line)
+        for line in advisor_log.read_text(encoding="utf-8").splitlines()
+        if line.strip()
     ]
-    assert checkpoints == [
-        CHECKPOINT_BEFORE_PLAN,
-        CHECKPOINT_REPEAT_FAILURE,
-        CHECKPOINT_BEFORE_REVIEW,
-    ], checkpoints
+    assert [entry["returncode"] for entry in calls] == [0, 0, 0, 3], calls
+    assert all(entry["stdout"] == advice for entry in calls[:3])
+    assert "budget exhausted" in calls[3]["stderr"]
+    call_events = db.get_events_by_type(run.id, ADVISOR_CALL_EVENT)
+    assert len(call_events) == 3
+    assert all(
+        (event.payload or {}).get("checkpoint") == "on_demand" for event in call_events
+    )
     advice_events = db.get_events_by_type(run.id, ADVISOR_ADVICE_EVENT)
     assert len(advice_events) == 3
     assert all((event.payload or {}).get("advice") == advice for event in advice_events)
-    prompts = [
-        json.loads(line)["prompt"]
-        for line in prompt_log.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-    assert any("ADVISOR (before_plan" in prompt for prompt in prompts)
-    assert any("ADVISOR (repeat_failure" in prompt for prompt in prompts)
-    advisor_notes = [note for note in steering_notes(db, job.job_id) if note.source == "advisor"]
-    assert len(advisor_notes) == 3
-    assert all(note.delivered for note in advisor_notes)
+    skipped = db.get_events_by_type(run.id, ADVISOR_SKIPPED_EVENT)
+    assert len(skipped) == 1
+    assert (skipped[0].payload or {})["reason"] == "budget exhausted"
     caught = build_default_registry(
-        ServerContext(db_path=Path(db.db_path))
+        ServerContext(db_path=Path(db.db_path), repo=rig.repo)
     ).call("catch_up", {"job_id": job.job_id})
     assert caught["advisor"]["calls"] == 3
     assert len(caught["advisor"]["advice"]) == 3
     return _feature_drill(
-        "advisor checkpoints",
+        "advisor on demand",
         "F26",
         started=started,
         passed=True,
         final_state="ADVISED",
-        reason="before_plan, repeat_failure and before_review each advised once",
-        detail="3 delivered advisor notes; catch_up shows the same 3 calls",
+        reason="three on-demand calls advised; the fourth was refused on budget",
+        detail="advice recorded on the run; catch_up shows the same 3 calls",
     )
-
-
-def _counted_gate(tmp_path: Path, *, failures: int) -> str:
-    counter = tmp_path / "advisor-gate-count"
-    script = tmp_path / "advisor_gate.py"
-    script.write_text(
-        "import pathlib, sys\n"
-        f"counter = pathlib.Path({str(counter)!r})\n"
-        "seen = int(counter.read_text()) if counter.exists() else 0\n"
-        "counter.write_text(str(seen + 1))\n"
-        f"sys.exit(0 if seen >= {failures} else 1)\n",
-        encoding="utf-8",
-    )
-    return f"{sys.executable} {script}"
 
 
 # --------------------------------------------------------------------------

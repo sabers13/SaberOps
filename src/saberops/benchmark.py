@@ -578,7 +578,7 @@ DRILL_ROWS: tuple[tuple[str, str, str, float, str], ...] = (
      "test_wave3_scout_and_proxy_drills"),
     ("walkthrough", "F25", "B2b", DRILL_LIMIT_SECONDS,
      "test_wave3_walkthrough_drill"),
-    ("advisor checkpoints", "F26", "B2b", DRILL_LIMIT_SECONDS,
+    ("advisor on demand", "F26", "B2b", DRILL_LIMIT_SECONDS,
      "test_wave3_advisor_drill"),
 )
 

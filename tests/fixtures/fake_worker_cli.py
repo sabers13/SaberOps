@@ -477,6 +477,58 @@ def _run_failure_switch(
     return None
 
 
+def _ask_configured_advisor(prompt_text: str) -> None:
+    """Run the worker-facing advisor command when the test asks it to.
+
+    ``advisor_questions`` in the control file makes the fake worker ask from
+    its own worktree exactly as a headless worker would; ``advisor_log``
+    receives one JSON line per call so a test can assert the printed advice
+    and each refusal reason.  The advisor's own prompt starts with
+    ``[ADVISOR REQUEST]`` and never re-enters this path.
+    """
+    if prompt_text.lstrip().startswith("[ADVISOR REQUEST]"):
+        return
+    control = _read_control_json(_worker_control_path())
+    questions = control.get("advisor_questions")
+    if not isinstance(questions, list) or not questions:
+        return
+    log_path = str(control.get("advisor_log") or "")
+    lines: list[str] = []
+    for raw in questions:
+        question = str(raw)
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "saberops.cli",
+                "advisor",
+                "ask",
+                "--question",
+                question,
+            ],
+            cwd=Path.cwd(),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        lines.append(
+            json.dumps(
+                {
+                    "question": question,
+                    "returncode": proc.returncode,
+                    "stdout": proc.stdout.strip(),
+                    "stderr": proc.stderr.strip(),
+                },
+                sort_keys=True,
+            )
+        )
+    if log_path:
+        target = Path(log_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("a", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+
+
 def _handle_codex(
     args: list[str],
     *,
@@ -522,6 +574,7 @@ def _handle_codex(
     if switched is not None:
         return switched
 
+    _ask_configured_advisor(prompt_text)
     sandbox = _get_arg_value(args, "--sandbox")
     control = _read_control_json(_worker_control_path())
     ignore_read_only = bool(control.get("ignore_read_only"))

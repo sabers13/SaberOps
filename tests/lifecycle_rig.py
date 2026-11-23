@@ -164,6 +164,8 @@ class RigEnvironment:
         ignore_read_only: bool | None = None,
         report_text: str | None = None,
         repair_mode: str | None = None,
+        advisor_questions: list[str] | None = None,
+        advisor_log: Path | None = None,
     ) -> None:
         """Configure fake worker behaviour via control file and ``ORCH_FAKE_*`` env vars.
 
@@ -194,6 +196,10 @@ class RigEnvironment:
             payload["report_text"] = report_text
         if repair_mode is not None:
             payload["repair_mode"] = repair_mode
+        if advisor_questions is not None:
+            payload["advisor_questions"] = list(advisor_questions)
+        if advisor_log is not None:
+            payload["advisor_log"] = str(advisor_log)
         if hang_seconds is not None:
             payload["hang_seconds"] = hang_seconds
         if exit_code is not None:

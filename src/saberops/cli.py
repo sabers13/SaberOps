@@ -2988,6 +2988,46 @@ def build_parser() -> argparse.ArgumentParser:
     )
     mcp_parser.add_argument("--json", action="store_true", help="JSON output (tools).")
 
+    # orch advisor ask --question ... (worker-facing on-demand advisor, ADR-0034).
+    advisor_parser = subparsers.add_parser(
+        "advisor",
+        help="Ask the project's on-demand advisor from a worker worktree (F26).",
+        description=(
+            "Worker-facing advisor call. The engine passes ORCH_RUN_ID, "
+            "ORCH_ATTEMPT_ID and ORCH_DB_PATH to each worker; run this from the "
+            "attempt worktree, off by default until the owner sets an advisor route."
+        ),
+    )
+    advisor_sub = advisor_parser.add_subparsers(dest="advisor_command", required=True)
+    advisor_ask = advisor_sub.add_parser(
+        "ask",
+        help="Ask one bounded question and print the advice.",
+    )
+    advisor_ask.add_argument(
+        "--question",
+        type=str,
+        required=True,
+        help="The question for the advisor (bounded; the engine records it).",
+    )
+    advisor_ask.add_argument(
+        "--run-id",
+        dest="advisor_run_id",
+        type=str,
+        default=None,
+        help="Run id (default: ORCH_RUN_ID from the worker environment).",
+    )
+    advisor_ask.add_argument(
+        "--attempt-id",
+        dest="advisor_attempt_id",
+        type=str,
+        default=None,
+        help="Attempt id (default: ORCH_ATTEMPT_ID from the worker environment).",
+    )
+    advisor_ask.add_argument(
+        "--db", type=str, default=None, help="Owner database path (default: ORCH_DB_PATH)."
+    )
+    advisor_ask.add_argument("--json", action="store_true", help="JSON output.")
+
     # orch connect [agent ...] (register SaberOps as an MCP server in agent CLIs).
     connect_parser = subparsers.add_parser(
         "connect",
@@ -6110,6 +6150,101 @@ def handle_project_advisor_off(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_advisor(args: argparse.Namespace) -> int:
+    """Handle ``orch advisor ask`` (F26, on-demand advisor, ADR-0034)."""
+    from saberops.advisor import AdvisorRefused, ask_advisor
+    from saberops.db import Database, get_default_db_path
+    from saberops.workers.registry import AdapterRegistry
+
+    if str(getattr(args, "advisor_command", "") or "") != "ask":
+        print("[!] unknown advisor command", file=sys.stderr)
+        return 2
+    question = str(getattr(args, "question", "") or "").strip()
+    run_id = (
+        str(getattr(args, "advisor_run_id", "") or "").strip()
+        or os.environ.get("ORCH_RUN_ID", "").strip()
+    )
+    attempt_id = (
+        str(getattr(args, "advisor_attempt_id", "") or "").strip()
+        or os.environ.get("ORCH_ATTEMPT_ID", "").strip()
+        or None
+    )
+    db_path = (
+        str(getattr(args, "db", "") or "").strip()
+        or os.environ.get("ORCH_DB_PATH", "").strip()
+    )
+    if not question:
+        print("[!] --question is required", file=sys.stderr)
+        return 2
+    if not run_id:
+        print(
+            "[!] no run id: run this from the worker worktree (ORCH_RUN_ID) "
+            "or pass --run-id",
+            file=sys.stderr,
+        )
+        return 2
+    db = Database(Path(db_path)) if db_path else Database(get_default_db_path())
+    run = db.get_run(run_id)
+    if run is None:
+        print(f"[!] unknown run: {run_id}", file=sys.stderr)
+        return 2
+    attempts = db.get_attempts_for_run(run_id)
+    attempt = db.get_attempt(attempt_id) if attempt_id else None
+    if attempt is None and attempts:
+        attempt = attempts[-1]
+    if attempt is None or not attempt.worktree_path:
+        print(
+            "[!] this run has no worker attempt worktree; the advisor is refused",
+            file=sys.stderr,
+        )
+        return 2
+    worktree = Path(attempt.worktree_path).resolve()
+    try:
+        inside_worktree = Path.cwd().resolve().is_relative_to(worktree)
+    except (OSError, ValueError):
+        inside_worktree = False
+    if not inside_worktree:
+        print(
+            f"[!] ask from the worker's own worktree ({worktree}); the advisor "
+            "only answers a worker about its own run",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        advice = ask_advisor(
+            db,
+            repo=run.target_repo,
+            run_id=run_id,
+            registry=AdapterRegistry.default(),
+            attempt_id=attempt.id,
+            task=run.task,
+            question=question,
+            attempts=attempts,
+            base_sha=attempt.base_sha or run.base_commit,
+            prior_worktree=worktree,
+        )
+    except AdvisorRefused as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 3 if exc.code == "ADVISOR_BUDGET_EXHAUSTED" else 2
+    if getattr(args, "json", False):
+        print(
+            json.dumps(
+                {
+                    "run_id": run_id,
+                    "call_id": advice.call_id,
+                    "provider": advice.provider,
+                    "model": advice.model,
+                    "advice": advice.advice,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    print(advice.advice)
+    return 0
+
+
 def handle_authority_show(args: argparse.Namespace) -> int:
     """Handle `orch authority show`."""
     try:
@@ -9068,6 +9203,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             print(f"Desktop notifications: {'on' if payload['enabled'] else 'off'} "
                   f"(effective: {'on' if payload['effective'] else 'off'})")
         return 0
+    elif args.command == "advisor":
+        return handle_advisor(args)
     elif args.command == "project":
         if args.project_command == "gate-scratch":
             if args.project_gate_scratch_command == "show":

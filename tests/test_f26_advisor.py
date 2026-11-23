@@ -1,15 +1,15 @@
-"""F26 (ADR-0034): advisor checkpoints, a stronger model on call, never coding.
+"""F26 (ADR-0034): on-demand advisor, a stronger model on call, never coding.
 
 These tests use the real-process lifecycle rig and its fake CLI shims.  The
 advisor route is a fake plan-subscription provider; no real vendor CLI or
-network call is made.
+network call is made.  The fake worker asks from its own worktree through
+``orch advisor ask`` exactly as a headless worker does.
 """
 
 from __future__ import annotations
 
 import json
 import subprocess
-import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -22,31 +22,29 @@ from saberops.advisor import (
     ADVISOR_CALL_EVENT,
     ADVISOR_SKIPPED_EVENT,
     ADVISOR_UNAVAILABLE_EVENT,
-    CHECKPOINT_BEFORE_PLAN,
-    CHECKPOINT_BEFORE_REVIEW,
-    CHECKPOINT_REPEAT_FAILURE,
-    advisor_before_attempt,
+    AdvisorRefused,
     advisor_view_for_job,
+    ask_advisor,
     load_advisor_route,
     set_advisor_route,
 )
 from saberops.capacity.loop import run_scheduler_loop
-from saberops.db import Database, current_iso_timestamp
+from saberops.db import current_iso_timestamp
 from saberops.git import GitManager
 from saberops.jobs import service as job_service
 from saberops.jobs.models import Job
 from saberops.jobs.service import (
     JobDispatchSpec,
     get_job,
-    steering_notes,
     submit_job,
 )
+from saberops.mcp.errors import ToolError
 from saberops.mcp.evidence import EvidenceRoots
 from saberops.mcp.lease import OrchestratorLease
 from saberops.mcp.ledger import EventLedger
 from saberops.mcp.tools import ServerContext, build_default_registry
 from saberops.model_access.readiness_service import ReadinessService
-from saberops.models import DispatchStage, Run, RunStatus, Tier
+from saberops.models import Attempt, AttemptStatus, DispatchStage, Run, RunStatus, Tier
 from saberops.paths import owner_state_dir
 from saberops.runtime_gate import set_pause
 from saberops.workers.registry import AdapterRegistry
@@ -55,26 +53,12 @@ pytestmark = pytest.mark.packaged_routing_default
 
 ADVICE = "ADVICE-MARKER-f26: verify the retry helper before adding a new one."
 ADVISOR_MODEL = "gpt-5.6-sol"
+QUESTION = "Should the retry helper be reused?"
 
 
 @pytest.fixture()
 def rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> RigEnvironment:
     return build_lifecycle_rig(tmp_path, monkeypatch)
-
-
-def _counted_gate(tmp_path: Path, *, failures: int) -> str:
-    """A gate command that fails ``failures`` times, then passes."""
-    counter = tmp_path / "gate-count"
-    script = tmp_path / "gate_script.py"
-    script.write_text(
-        "import pathlib, sys\n"
-        f"counter = pathlib.Path({str(counter)!r})\n"
-        "seen = int(counter.read_text()) if counter.exists() else 0\n"
-        "counter.write_text(str(seen + 1))\n"
-        f"sys.exit(0 if seen >= {failures} else 1)\n",
-        encoding="utf-8",
-    )
-    return f"{sys.executable} {script}"
 
 
 def _run_job(
@@ -84,12 +68,7 @@ def _run_job(
     max_attempts: int = 3,
     review_limit: int = 3,
 ) -> tuple[str, str]:
-    """Submit one job and let the scheduler dispatch it with tuned limits.
-
-    A job-dispatched run owns a durable job row, which is what the steering
-    channel (F13) delivers advisor notes through.  The tuning is applied to the
-    frozen dispatch request exactly the way C2 does it.
-    """
+    """Submit one job and let the scheduler dispatch it with tuned limits."""
     original = job_service.job_dispatch_spec
 
     def tuned(job: Job) -> JobDispatchSpec:
@@ -119,13 +98,6 @@ def _run_job(
     return job.job_id, job.current_run_id
 
 
-def _event_checkpoints(db: Database, run_id: str) -> list[str]:
-    return [
-        str((event.payload or {}).get("checkpoint"))
-        for event in db.get_events_by_type(run_id, ADVISOR_CALL_EVENT)
-    ]
-
-
 def _prompts(path: Path) -> list[str]:
     return [
         json.loads(line)["prompt"]
@@ -134,30 +106,28 @@ def _prompts(path: Path) -> list[str]:
     ]
 
 
-def _worker_prompts(path: Path) -> list[str]:
+def _advisor_calls(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
     return [
-        prompt for prompt in _prompts(path) if not prompt.startswith("[ADVISOR CHECKPOINT")
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
     ]
 
 
-def _advisor_prompts(path: Path) -> list[str]:
-    return [
-        prompt for prompt in _prompts(path) if prompt.startswith("[ADVISOR CHECKPOINT")
-    ]
-
-
-def _catch_up_payload(rig: RigEnvironment, job_id: str) -> dict[str, Any]:
+def _registry_for(rig: RigEnvironment) -> Any:
     state_dir = rig.state_home / "saberops"
     context = ServerContext(
         db_path=rig.db().db_path,
+        repo=rig.repo,
         questions_store=state_dir / "questions.json",
         config_ledger_path=state_dir / "config.jsonl",
         evidence=EvidenceRoots(roots=(rig.root,)),
         ledger=EventLedger(state_dir / "events.jsonl"),
         lease=OrchestratorLease(state_dir / "lease.json"),
     )
-    registry = build_default_registry(context)
-    return registry.call("catch_up", {"job_id": job_id})
+    return build_default_registry(context)
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -167,49 +137,51 @@ def _git(repo: Path, *args: str) -> str:
     return proc.stdout.strip()
 
 
-def test_each_checkpoint_fires_once_and_advice_reaches_the_worker(
+def test_worker_asks_and_gets_advice_within_the_budget(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """before_plan, repeat_failure and before_review each fire once."""
-    gate = _counted_gate(tmp_path, failures=2)
-    rig = build_lifecycle_rig(tmp_path, monkeypatch, gate_command=gate)
+    """The worker asks from its worktree; three calls advise, the fourth refuses."""
+    rig = build_lifecycle_rig(tmp_path, monkeypatch)
     db = rig.db()
-    prompt_log = rig.root / "advisor-prompts.jsonl"
-    rig.set_worker_mode("commit", report_text=ADVICE, prompt_log=prompt_log)
-    rig.set_reviewer_verdict("BLOCK")
+    prompt_log = rig.root / "worker-prompts.jsonl"
+    advisor_log = rig.root / "advisor-calls.jsonl"
+    rig.set_worker_mode(
+        "commit",
+        report_text=ADVICE,
+        prompt_log=prompt_log,
+        advisor_questions=["q1", "q2", "q3", "q4"],
+        advisor_log=advisor_log,
+    )
     set_advisor_route(rig.repo, provider="codex", model=ADVISOR_MODEL, call_budget=3)
 
-    job_id, run_id = _run_job(
-        rig, goal="Add the advisor test line", max_attempts=3, review_limit=2
-    )
+    job_id, run_id = _run_job(rig, goal="Ask the advisor", max_attempts=1, review_limit=1)
     run = db.get_run(run_id)
-    assert run is not None
-    assert run.status in {RunStatus.COMPLETED, RunStatus.FAILED}
+    assert run is not None and run.status is RunStatus.COMPLETED
 
-    assert _event_checkpoints(db, run_id) == [
-        CHECKPOINT_BEFORE_PLAN,
-        CHECKPOINT_REPEAT_FAILURE,
-        CHECKPOINT_BEFORE_REVIEW,
-    ]
+    # The prompt names the command while the route is on.
+    assert any("[ADVISOR]" in prompt for prompt in _prompts(prompt_log))
+
+    # Calls one to three print the advice; the fourth is refused with a reason.
+    calls = _advisor_calls(advisor_log)
+    assert [entry["returncode"] for entry in calls] == [0, 0, 0, 3]
+    assert all(entry["stdout"] == ADVICE for entry in calls[:3])
+    assert "budget exhausted" in calls[3]["stderr"]
+    assert "3 of 3" in calls[3]["stderr"]
+
+    # Every call and every piece of advice is recorded on the run itself.
+    recorded = db.get_events_by_type(run_id, ADVISOR_CALL_EVENT)
+    assert len(recorded) == 3
+    assert all((event.payload or {})["checkpoint"] == "on_demand" for event in recorded)
     advice_events = db.get_events_by_type(run_id, ADVISOR_ADVICE_EVENT)
     assert len(advice_events) == 3
-    assert all((event.payload or {}).get("advice") == ADVICE for event in advice_events)
+    assert all((event.payload or {})["advice"] == ADVICE for event in advice_events)
+    assert all((event.payload or {})["question"] for event in advice_events)
     assert all(event.attempt_id for event in advice_events)
+    skipped = db.get_events_by_type(run_id, ADVISOR_SKIPPED_EVENT)
+    assert len(skipped) == 1
+    assert (skipped[0].payload or {})["reason"] == "budget exhausted"
 
-    # Every advice reached a worker at an attempt boundary, never mid-tool.
-    worker_prompts = _worker_prompts(prompt_log)
-    assert len(worker_prompts) >= 4, "expected three attempts plus one review repair"
-    assert "ADVISOR (before_plan" in worker_prompts[0]
-    assert "ADVISOR (repeat_failure" in worker_prompts[2]
-    assert any("ADVISOR (before_review" in prompt for prompt in worker_prompts[3:])
-
-    # Advice is recorded as advisor-sourced steering notes and delivered once.
-    advisor_notes = [note for note in steering_notes(db, job_id) if note.source == "advisor"]
-    assert len(advisor_notes) == 3
-    assert all(note.delivered for note in advisor_notes)
-    assert len({note.delivered_attempt_id for note in advisor_notes}) == 3
-
-    # Advisor calls are plan-limited usage events (F2), separate from worker calls.
+    # Advisor calls are plan-limited usage rows (F2), separate from workers.
     usage = [
         row
         for row in db.get_model_call_usage(run_id)
@@ -218,30 +190,40 @@ def test_each_checkpoint_fires_once_and_advice_reaches_the_worker(
     assert len(usage) == 3
     assert all(row.provider == "codex" and row.model == ADVISOR_MODEL for row in usage)
 
-    # catch_up shows the same advice from durable records.
-    caught_up = _catch_up_payload(rig, job_id)
-    advisor = caught_up["advisor"]
-    assert advisor["enabled"] is True
-    assert advisor["calls"] == 3
-    assert len(advisor["advice"]) == 3
-    assert all(entry["delivered"] is True for entry in advisor["advice"])
-    # The return summary carries the same projection, never a second record.
-    assert caught_up["return_summary"]["advisor"]["calls"] == 3
+    # The one projection reads the same durable records.
+    job = get_job(db, job_id)
+    assert job is not None
+    view = advisor_view_for_job(db, job)
+    assert view["enabled"] is True
+    assert view["calls"] == 3
+    assert len(view["advice"]) == 3
+    assert view["call_budget"] == 3
 
 
-def test_advisor_off_by_default_changes_nothing(
+def test_off_means_no_tool_and_no_call(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """No route means no advisor call, no note and no extra usage row."""
+    """Without a route there is no MCP tool, and the worker command refuses."""
     rig = build_lifecycle_rig(tmp_path, monkeypatch)
     db = rig.db()
-    prompt_log = rig.root / "off-prompts.jsonl"
-    rig.set_worker_mode("commit", prompt_log=prompt_log)
+    advisor_log = rig.root / "off-advisor.jsonl"
+    rig.set_worker_mode(
+        "commit",
+        advisor_questions=["is the advisor there?"],
+        advisor_log=advisor_log,
+    )
     assert load_advisor_route(rig.repo) is None
+
+    # "Off means no tool": the project session cannot even list it.
+    assert "ask_advisor" not in _registry_for(rig).names()
 
     job_id, run_id = _run_job(rig, goal="Ship without an advisor", max_attempts=1)
     run = db.get_run(run_id)
     assert run is not None and run.status is RunStatus.COMPLETED
+    calls = _advisor_calls(advisor_log)
+    assert len(calls) == 1
+    assert calls[0]["returncode"] == 2
+    assert "advisor is off" in calls[0]["stderr"]
 
     for event_type in (
         ADVISOR_CALL_EVENT,
@@ -253,57 +235,48 @@ def test_advisor_off_by_default_changes_nothing(
     assert [
         row for row in db.get_model_call_usage(run_id) if row.stage is DispatchStage.ADVISOR
     ] == []
-    for prompt in _worker_prompts(prompt_log):
-        assert "ADVISOR" not in prompt
-    assert _advisor_prompts(prompt_log) == []
-    assert [note for note in steering_notes(db, job_id) if note.source == "advisor"] == []
-
-    job = get_job(db, job_id)
-    assert job is not None
-    assert advisor_view_for_job(db, job)["enabled"] is False
 
 
-def test_budget_caps_calls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A call budget of one allows exactly one advisor checkpoint call."""
-    gate = _counted_gate(tmp_path, failures=99)
-    rig = build_lifecycle_rig(tmp_path, monkeypatch, gate_command=gate)
-    db = rig.db()
-    rig.set_worker_mode("commit", report_text=ADVICE)
-    set_advisor_route(rig.repo, provider="codex", model=ADVISOR_MODEL, call_budget=1)
-
-    _job_id, run_id = _run_job(rig, goal="Always failing gate", max_attempts=3)
-    assert _event_checkpoints(db, run_id) == [CHECKPOINT_BEFORE_PLAN]
-    assert len(db.get_events_by_type(run_id, ADVISOR_ADVICE_EVENT)) == 1
-
-
-def test_repeated_identical_failure_advises_once(
+def test_planner_asks_over_mcp_and_the_run_records_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Three identical gate failures produce one repeat_failure call, not one per retry."""
-    gate = _counted_gate(tmp_path, failures=99)
-    rig = build_lifecycle_rig(tmp_path, monkeypatch, gate_command=gate)
+    """The planner's MCP call returns advice and appends the same evidence."""
+    rig = build_lifecycle_rig(tmp_path, monkeypatch)
     db = rig.db()
     rig.set_worker_mode("commit", report_text=ADVICE)
-    # A budget larger than the number of meaningful checkpoints so a per-retry
-    # call would be visible instead of hidden by the cap.
-    set_advisor_route(rig.repo, provider="codex", model=ADVISOR_MODEL, call_budget=5)
+    set_advisor_route(rig.repo, provider="codex", model=ADVISOR_MODEL, call_budget=3)
 
-    _job_id, run_id = _run_job(rig, goal="Identical failures", max_attempts=4)
-    checkpoints = _event_checkpoints(db, run_id)
-    assert checkpoints == [CHECKPOINT_BEFORE_PLAN, CHECKPOINT_REPEAT_FAILURE]
-    assert checkpoints.count(CHECKPOINT_REPEAT_FAILURE) == 1
-    assert len(db.get_events_by_type(run_id, ADVISOR_CALL_EVENT)) == 2
+    job_id, run_id = _run_job(rig, goal="Plan an advice question", max_attempts=1)
+    run = db.get_run(run_id)
+    assert run is not None and run.status is RunStatus.COMPLETED
+
+    registry = _registry_for(rig)
+    assert "ask_advisor" in registry.names()
+    result = registry.call(
+        "ask_advisor", {"job_id": job_id, "question": QUESTION}
+    )
+    assert result["advice"] == ADVICE
+    assert result["provider"] == "codex"
+    advice = db.get_events_by_type(run_id, ADVISOR_ADVICE_EVENT)
+    assert len(advice) == 1
+    assert (advice[0].payload or {})["question"] == QUESTION
+
+    # The per-job budget is shared with the worker path.
+    registry.call("ask_advisor", {"job_id": job_id, "question": "second"})
+    registry.call("ask_advisor", {"job_id": job_id, "question": "third"})
+    with pytest.raises(ToolError) as refused:
+        registry.call("ask_advisor", {"job_id": job_id, "question": "fourth"})
+    assert "ADVISOR_BUDGET_EXHAUSTED" in str(refused.value)
 
 
-def test_paused_store_calls_no_advisor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_paused_store_refuses_the_advisor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A closed work gate refuses the advisor before any process starts."""
     rig = build_lifecycle_rig(tmp_path, monkeypatch)
     db = rig.db()
-    prompt_log = rig.root / "paused-prompts.jsonl"
-    rig.set_worker_mode("commit", report_text=ADVICE, prompt_log=prompt_log)
     set_advisor_route(rig.repo, provider="codex", model=ADVISOR_MODEL, call_budget=3)
     set_pause("owner_pause", "test pause")
-
     db.create_run(
         Run(
             id="run_paused_advisor",
@@ -317,59 +290,72 @@ def test_paused_store_calls_no_advisor(tmp_path: Path, monkeypatch: pytest.Monke
             created_at=current_iso_timestamp(),
         )
     )
-    advice = advisor_before_attempt(
-        db,
-        repo=rig.repo,
-        run_id="run_paused_advisor",
-        registry=AdapterRegistry.default(),
-        attempt_id="run_paused_advisor_a1",
-        attempts=[],
-        plan_steps=[],
-        base_sha=rig.base_sha,
-        task="paused task",
+    db.create_attempt(
+        Attempt(
+            id="run_paused_advisor_a1",
+            run_id="run_paused_advisor",
+            attempt_number=1,
+            provider="codex",
+            model=ADVISOR_MODEL,
+            worktree_path=str(rig.repo),
+            branch_name="advisor-paused",
+            status=AttemptStatus.RUNNING,
+            created_at=current_iso_timestamp(),
+            base_sha=rig.base_sha,
+        )
     )
-    assert advice is None
+    with pytest.raises(AdvisorRefused) as refused:
+        ask_advisor(
+            db,
+            repo=rig.repo,
+            run_id="run_paused_advisor",
+            registry=AdapterRegistry.default(),
+            attempt_id="run_paused_advisor_a1",
+            task="paused task",
+            question=QUESTION,
+            base_sha=rig.base_sha,
+        )
+    assert refused.value.code == "ADVISOR_PAUSED"
     assert db.get_events_by_type("run_paused_advisor", ADVISOR_CALL_EVENT) == []
     assert db.get_events_by_type("run_paused_advisor", ADVISOR_ADVICE_EVENT) == []
     skipped = db.get_events_by_type("run_paused_advisor", ADVISOR_SKIPPED_EVENT)
     assert len(skipped) == 1
     assert (skipped[0].payload or {})["reason"] == "paused"
-    assert not prompt_log.exists() or prompt_log.read_text(encoding="utf-8") == ""
 
 
-def test_unavailable_route_continues_without_advice(
+def test_unavailable_route_is_refused_and_the_job_continues(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An unavailable advisor route is recorded, and the job still completes."""
+    """An unavailable route is recorded, refused, and the job still completes."""
     rig = build_lifecycle_rig(tmp_path, monkeypatch)
     db = rig.db()
-    rig.set_worker_mode("commit", report_text=ADVICE)
+    advisor_log = rig.root / "unavailable-advisor.jsonl"
+    rig.set_worker_mode(
+        "commit",
+        advisor_questions=[QUESTION],
+        advisor_log=advisor_log,
+    )
     # ``gemini`` has no plan-subscription adapter, so the advisor is refused.
     set_advisor_route(rig.repo, provider="gemini", model="strong-model", call_budget=3)
 
-    job_id, run_id = _run_job(
-        rig, goal="Run without advisor availability", max_attempts=1
-    )
+    job_id, run_id = _run_job(rig, goal="Run without advisor availability", max_attempts=1)
     run = db.get_run(run_id)
     assert run is not None and run.status is RunStatus.COMPLETED
+    calls = _advisor_calls(advisor_log)
+    assert calls[0]["returncode"] == 2
+    assert "plan subscription" in calls[0]["stderr"]
     assert db.get_events_by_type(run_id, ADVISOR_CALL_EVENT) == []
     assert db.get_events_by_type(run_id, ADVISOR_ADVICE_EVENT) == []
     unavailable = db.get_events_by_type(run_id, ADVISOR_UNAVAILABLE_EVENT)
-    # One visible refusal at each checkpoint the run reached, and no advice.
-    assert {
-        str((event.payload or {}).get("checkpoint")) for event in unavailable
-    } == {CHECKPOINT_BEFORE_PLAN, CHECKPOINT_BEFORE_REVIEW}
-    assert all(
-        "plan subscription" in str((event.payload or {})["reason"])
-        for event in unavailable
-    )
+    assert len(unavailable) == 1
+    assert "plan subscription" in str((unavailable[0].payload or {})["reason"])
 
     job = get_job(db, job_id)
     assert job is not None
     view = advisor_view_for_job(db, job)
     assert view["enabled"] is True
     assert view["calls"] == 0
-    assert len(view["unavailable"]) == len(unavailable)
+    assert len(view["unavailable"]) == 1
 
 
 def test_advisor_never_produces_a_commit(
@@ -378,13 +364,21 @@ def test_advisor_never_produces_a_commit(
     """Even a fake advisor that ignores read-only leaves no commit behind."""
     rig = build_lifecycle_rig(tmp_path, monkeypatch)
     db = rig.db()
-    rig.set_worker_mode("commit", report_text=ADVICE, ignore_read_only=True)
+    advisor_log = rig.root / "readonly-advisor.jsonl"
+    rig.set_worker_mode(
+        "commit",
+        report_text=ADVICE,
+        ignore_read_only=True,
+        advisor_questions=[QUESTION],
+        advisor_log=advisor_log,
+    )
     set_advisor_route(rig.repo, provider="codex", model=ADVISOR_MODEL, call_budget=3)
 
     _job_id, run_id = _run_job(rig, goal="Advisor must not commit", max_attempts=1)
     run = db.get_run(run_id)
     assert run is not None and run.status is RunStatus.COMPLETED
-    assert len(db.get_events_by_type(run_id, ADVISOR_ADVICE_EVENT)) == 2
+    assert len(db.get_events_by_type(run_id, ADVISOR_ADVICE_EVENT)) == 1
+    assert _advisor_calls(advisor_log)[0]["returncode"] == 0
 
     # The candidate holds exactly the worker's one commit: no advisor commit.
     attempts = db.get_attempts_for_run(run_id)
@@ -456,7 +450,13 @@ def test_api_key_billing_route_is_refused(
 
     rig = build_lifecycle_rig(tmp_path, monkeypatch)
     db = rig.db()
-    rig.set_worker_mode("commit", report_text=ADVICE)
+    advisor_log = rig.root / "api-billing-advisor.jsonl"
+    rig.set_worker_mode(
+        "commit",
+        report_text=ADVICE,
+        advisor_questions=[QUESTION],
+        advisor_log=advisor_log,
+    )
     set_advisor_route(rig.repo, provider="codex", model=ADVISOR_MODEL, call_budget=3)
     # Preserve the rig's postures/quota evidence and add only the API-billing
     # allow-list, the exact owner decision the advisor must refuse.
@@ -472,3 +472,6 @@ def test_api_key_billing_route_is_refused(
     assert all(
         "API key" in str((event.payload or {})["reason"]) for event in unavailable
     )
+    calls = _advisor_calls(advisor_log)
+    assert calls[0]["returncode"] == 2
+    assert "API key" in calls[0]["stderr"]

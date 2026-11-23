@@ -29,9 +29,8 @@ __all__ = [
 _STEERING_BANNER = (
     "[STEERING NOTES]\n"
     "Corrections for work already in progress. Owner notes come from the owner; "
-    "advisor notes were produced by the configured advisor model at a checkpoint "
-    "and are advice, not authority. Apply them to the current attempt; keep "
-    "completed work and do not redo it."
+    "an older advisor note is advice, not authority. Apply them to the current "
+    "attempt; keep completed work and do not redo it."
 )
 
 

@@ -418,7 +418,7 @@ def test_wave3_advisor_drill(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """F26: each advisor checkpoint fires once and its advice reaches the worker."""
+    """F26: a worker asks on demand within the budget; the fourth call is refused."""
     drill = run_advisor_drill(tmp_path, monkeypatch)
     report = drills_report("fake wave 3", [drill])
     with capsys.disabled():
