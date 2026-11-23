@@ -77,20 +77,21 @@ def _tick(db: Database) -> object:
     return run_scheduler_loop(db, once=True, readiness_service=readiness)
 
 
-def _run_scout(
+def _run_job(
     rig: RigEnvironment,
     *,
+    kind: JobKind = JobKind.SCOUT,
     size_hint: str | None = None,
     effort: Effort | None = None,
 ) -> tuple[str, str, str, str]:
-    """Submit and finish one scout; return (job_id, run_id, provider, model)."""
+    """Submit and finish one job; return (job_id, run_id, provider, model)."""
     rig.set_worker_mode("commit", report_text=REPORT_TEXT)
     db = rig.db()
     submitted = submit_job(
         db,
         repo=rig.repo,
         goal="Check whether the helper is reusable",
-        kind=JobKind.SCOUT,
+        kind=kind,
         requirements=JobRequirements(size_hint=size_hint, effort=effort),
     )
     assert submitted.created is True
@@ -136,7 +137,7 @@ def _queued_scout(
 
 def test_default_scout_uses_the_cheapest_codex_model(rig: RigEnvironment) -> None:
     _add_routes(CHEAP_CODEX)
-    job_id, _, provider, model = _run_scout(rig)
+    job_id, _, provider, model = _run_job(rig)
 
     assert (provider, model) == ("codex", "gpt-5.6-luna")
     db = rig.db()
@@ -147,11 +148,68 @@ def test_default_scout_uses_the_cheapest_codex_model(rig: RigEnvironment) -> Non
     assert usage["subscriptions"][0]["subscription"] == "codex"
 
 
+def test_scout_without_stated_effort_records_low(rig: RigEnvironment) -> None:
+    """Covers: H8 (a scout's unstated effort is the cheap default ``low``)."""
+    _add_routes(CHEAP_CODEX)
+    db = rig.db()
+    submitted = submit_job(
+        db,
+        repo=rig.repo,
+        goal="Check whether the helper is reusable",
+        kind=JobKind.SCOUT,
+    )
+    assert submitted.job.requirements.effort is Effort.low
+    assert submitted.job.requirements.read_only is True
+
+
+def test_low_effort_build_job_prefers_the_cheapest_model(rig: RigEnvironment) -> None:
+    """Covers: H8 (``effort: low`` prefers the cheap model on any job)."""
+    _add_routes(CHEAP_CODEX)
+
+    _, _, provider, model = _run_job(rig, kind=JobKind.BUILD, effort=Effort.low)
+
+    # The rig's build chain keeps its ordinary head (codex/gpt-5.6-terra) and
+    # the cheap model of each subscription as fallbacks.
+    assert is_cheap_scout_model(provider, model)
+    assert (provider, model) != ("codex", "gpt-5.6-terra")
+
+
+def test_medium_effort_build_job_keeps_the_ordinary_build_route(
+    rig: RigEnvironment,
+) -> None:
+    """A job that does not state ``low`` never takes the cheap preference."""
+    _add_routes(CHEAP_CODEX)
+
+    _, _, _, model = _run_job(rig, kind=JobKind.BUILD, effort=Effort.medium)
+
+    assert model == "gpt-5.6-terra"
+
+
+def test_high_effort_scout_keeps_the_ordinary_build_route(rig: RigEnvironment) -> None:
+    """Covers: H8 (a scout with ``effort: high`` does not run cheap)."""
+    _add_routes(CHEAP_CODEX)
+
+    _, _, _, model = _run_job(rig, effort=Effort.high)
+
+    assert model == "gpt-5.6-terra"
+
+
+def test_medium_effort_scout_keeps_the_ordinary_build_route(
+    rig: RigEnvironment,
+) -> None:
+    """Only ``low`` opts in: an explicit higher effort is a planner judgment."""
+    _add_routes(CHEAP_CODEX)
+
+    _, _, _, model = _run_job(rig, effort=Effort.medium)
+
+    assert model == "gpt-5.6-terra"
+
+
 def test_explicit_project_scout_route_wins(rig: RigEnvironment) -> None:
     _add_routes(CHEAP_CODEX, EXPLICIT_CODEX)
     set_project_scout_route(rig.repo, EXPLICIT_CODEX)
 
-    _, _, provider, model = _run_scout(rig)
+    _, _, provider, model = _run_job(rig)
 
     assert (provider, model) == ("codex", "gpt-5.6-sol")
 
@@ -160,7 +218,7 @@ def test_build_route_override_disables_the_cheap_default(rig: RigEnvironment) ->
     _add_routes(CHEAP_CODEX)
     set_project_scout_route(rig.repo, "build")
 
-    _, _, _, model = _run_scout(rig)
+    _, _, _, model = _run_job(rig)
 
     assert model == "gpt-5.6-terra"
 
@@ -168,7 +226,7 @@ def test_build_route_override_disables_the_cheap_default(rig: RigEnvironment) ->
 def test_large_scout_keeps_the_ordinary_build_route(rig: RigEnvironment) -> None:
     _add_routes(CHEAP_CODEX)
 
-    _, _, _, model = _run_scout(rig, size_hint="L")
+    _, _, _, model = _run_job(rig, size_hint="L")
 
     assert model == "gpt-5.6-terra"
 
@@ -239,6 +297,20 @@ def test_project_cli_sets_and_clears_the_scout_route(rig: RigEnvironment) -> Non
     assert load_project_settings(rig.repo).scout_route is None
 
 
+def test_direct_scout_run_states_low_effort(rig: RigEnvironment) -> None:
+    """Covers: H8 (a direct scout run defaults to ``effort: low``)."""
+    from saberops.run_creation import RunRequest, resolve_effective_run_config
+
+    scout = resolve_effective_run_config(
+        RunRequest(task="Survey the helper", repo_path=rig.repo, kind="scout")
+    )
+    assert scout.effort == "low"
+    build = resolve_effective_run_config(
+        RunRequest(task="Change the helper", repo_path=rig.repo)
+    )
+    assert build.effort is None
+
+
 def test_cheap_family_matching_and_scout_order_are_deterministic() -> None:
     assert is_cheap_scout_model("codex", "gpt-6-luna")
     assert is_cheap_scout_model("codex", "gpt-5.6-luna")
@@ -260,11 +332,18 @@ def test_cheap_family_matching_and_scout_order_are_deterministic() -> None:
         WorkerCandidate(provider="opencode", model="opencode-go/deepseek-v4-flash"),
         WorkerCandidate(provider="codex", model="gpt-5.6-luna"),
     ]
-    ordered = order_candidates_for_scout(chain, route="cheap")
+    ordered = order_candidates_for_scout(
+        chain, route="cheap", requirements=JobRequirements(effort=Effort.low)
+    )
     assert [(c.provider, c.model) for c in ordered] == [
         ("opencode", "opencode-go/deepseek-v4-flash"),
         ("codex", "gpt-5.6-luna"),
         ("opencode", "opencode-go/deepseek-v4-pro"),
         ("codex", "gpt-5.6-terra"),
     ]
+    # H8: a run that does not state ``low`` keeps the ordinary build route; a
+    # direct run's frozen effort string stands in for the requirement.
+    assert order_candidates_for_scout(chain, route="cheap") == chain
+    assert order_candidates_for_scout(chain, route="cheap", effort="low") == ordered
+    assert order_candidates_for_scout(chain, route="cheap", effort="high") == chain
     assert order_candidates_for_scout(chain, route="build") == chain

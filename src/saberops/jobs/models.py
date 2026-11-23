@@ -276,6 +276,22 @@ def read_only_requirements(requirements: JobRequirements) -> JobRequirements:
     return replace(requirements, read_only=True, required_capabilities=capabilities)
 
 
+def scout_requirements(requirements: JobRequirements) -> JobRequirements:
+    """Return a scout's kind-derived requirements: read-only and ``effort: low``.
+
+    A scout is read-only, and an unstated effort becomes ``low`` so the cheap
+    model default is the same ``effort: low`` rule every job uses (H8,
+    ADR-0035) instead of a scout-only route.  The role stays BUILD: a scout is
+    a kind on the build route, never a second role.
+    """
+    resolved = read_only_requirements(requirements)
+    if resolved.effort is None:
+        from dataclasses import replace as _replace
+
+        resolved = _replace(resolved, effort=Effort.low)
+    return resolved
+
+
 def _clean_family_list(values: tuple[str, ...] | list[str], *, field: str) -> tuple[str, ...]:
     cleaned: list[str] = []
     for raw in values:
@@ -527,10 +543,11 @@ class Job:
         kind = coerce_job_kind(self.kind)
         object.__setattr__(self, "kind", kind)
         if kind is JobKind.SCOUT:
-            # A scout can never write, whatever the caller asked for: the
-            # read-only requirement is part of the job, not a preference.
+            # A scout can never write, whatever the caller asked for, and an
+            # unstated effort is the cheap default: both are properties of the
+            # job kind, not caller preferences (H8, ADR-0035).
             object.__setattr__(
-                self, "requirements", read_only_requirements(self.requirements)
+                self, "requirements", scout_requirements(self.requirements)
             )
         if isinstance(self.state, JobState):
             state = self.state
@@ -644,6 +661,7 @@ __all__ = [
     "LEGACY_ROLE_ALIASES",
     "coerce_job_kind",
     "read_only_requirements",
+    "scout_requirements",
     "coerce_job_role",
     "DISPATCHABLE_ROLES",
     "FAILURE_REASONS",

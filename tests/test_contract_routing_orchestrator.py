@@ -300,6 +300,53 @@ def test_auto_run_labelled_t1_dispatches_worker_chain_head(
     assert resolved[0].payload["strong_start"] is False
 
 
+def test_low_effort_build_run_prefers_the_cheapest_candidate(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """Covers: H8 (``effort: low`` prefers the cheap model on any run)."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    log: list[str] = []
+    calls: list[str] = []
+    worker = ScriptedWorker(
+        "h3",
+        {
+            "m2": _success_with_file("h3", "m2", "build.txt", "build\n"),
+            "m1": _success_with_file("h3", "m1", "cheap.txt", "cheap\n"),
+        },
+        log,
+    )
+    # The owner's route names the ordinary model first; the cheap candidate is
+    # a fallback.  Only the family matcher is stand-in here (H8 wiring test);
+    # the real ``codex``/``anthropic``/``opencode-go`` families are covered in
+    # tests/test_f27_cheap_scout.py.
+    worker_chain = [WorkerCandidate("h3", "m2"), WorkerCandidate("h3", "m1")]
+    monkeypatch.setattr(
+        "saberops.orchestrator.resolve_candidate_chain",
+        _role_keyed_chain(worker_chain, [], calls),
+    )
+    import saberops.scout_routing
+
+    monkeypatch.setattr(
+        saberops.scout_routing,
+        "is_cheap_scout_model",
+        lambda provider, model: model == "m1",
+    )
+    db = Database(tmp_path / "orch.db")
+    orch = Orchestrator(db=db, registry=AdapterRegistry([worker]), worktree_base=tmp_path / "wt")
+    config = resolve_run_config(
+        task="survey the helper",
+        target_repo=repo,
+        gate_command=_passing_gate(),
+        review_disabled=True,
+        publish_candidate=False,
+        effort="low",
+    )
+    result = orch.run(config=config, is_peak=False)
+    assert result.status is RunStatus.COMPLETED
+    assert log == ["m1"], log
+
+
 def test_capability_failure_escalates_build_to_strong_start_once(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:

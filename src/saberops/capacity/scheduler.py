@@ -28,6 +28,7 @@ from saberops.jobs.models import (
     NO_ROUTE_FOR_REQUIREMENTS,
     DependencyBlocker,
     Difficulty,
+    Effort,
     Job,
     JobKind,
     JobRole,
@@ -272,8 +273,12 @@ def schedule(
         pacing_meta = routing_snapshot.prefer_wait_minutes_for(
             role, strong_start=strong_start
         )
-        scout_preferred: frozenset[tuple[str, str]] | None = None
-        if job.kind is JobKind.SCOUT:
+        cheap_preferred: frozenset[tuple[str, str]] | None = None
+        # H8: ``effort: low`` prefers the cheapest plan model of each
+        # subscription on any job.  A scout is normalised to ``low`` when it is
+        # created, so this one rule is also the scout default; the scout route
+        # setting still narrows or disables it for scouts only.
+        if job.kind is JobKind.SCOUT or job.requirements.effort is Effort.low:
             from saberops.scout_routing import scout_candidate_view
 
             view = scout_candidate_view(
@@ -284,7 +289,7 @@ def schedule(
             )
             groups = view.groups
             pacing_meta = view.pacing
-            scout_preferred = view.preferred
+            cheap_preferred = view.preferred
         size_bucket = job.requirements.size_hint or SizeBucket.M
         all_group_decisions: list[list[AdmissionDecision]] = []
         job_dispatched = False
@@ -355,11 +360,11 @@ def schedule(
                         }
                     )
             admitted_in_group = [d for d in decisions_for_group if d.admitted]
-            if scout_preferred and admitted_in_group:
+            if cheap_preferred and admitted_in_group:
                 cheap_admitted = [
                     d
                     for d in admitted_in_group
-                    if (d.candidate.provider, d.candidate.model) in scout_preferred
+                    if (d.candidate.provider, d.candidate.model) in cheap_preferred
                 ]
                 if cheap_admitted:
                     admitted_in_group = cheap_admitted

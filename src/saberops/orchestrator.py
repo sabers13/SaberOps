@@ -84,7 +84,7 @@ from saberops.job_evidence import (
     record_attempt_result,
     record_request,
 )
-from saberops.jobs.models import JobRole
+from saberops.jobs.models import Effort, JobRole
 from saberops.models import (
     Attempt,
     AttemptStatus,
@@ -2718,12 +2718,11 @@ class Orchestrator:
                 db=self.db,
                 strong_start=strong_start_active,
             )
-            # F27: a direct scout run prefers the cheapest plan model of each
-            # subscription on the build route.  Scheduler-dispatched scout jobs
-            # arrive pinned to the route the scheduler already chose, so this
-            # never overrides an explicit owner/scheduler choice.
+            # H8: ``effort: low`` prefers the cheapest plan model of each
+            # subscription on any job; a direct scout run states low effort at
+            # creation, so the scout default is this same rule.
             if (
-                config.kind == SCOUT_RUN_KIND
+                str(config.effort or "").strip().lower() == Effort.low.value
                 and config.model_override is None
                 and config.provider_override is None
                 and not strong_start_active

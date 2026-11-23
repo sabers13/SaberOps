@@ -1,7 +1,9 @@
 # ADR-0035: Scout jobs prefer each subscription's cheapest plan model
 
-- **Status:** Accepted. Implemented in Phase 1 lane F27 (Wave 3).
-- **Date:** 2026-11-20
+- **Status:** Accepted. Implemented in Phase 1 lane F27 (Wave 3); amended by
+  Phase 1.1 lane H8 (2026-11-23) so the cheap default is the ordinary
+  `effort: low` rule rather than a scout-only route.
+- **Date:** 2026-11-20 (amended 2026-11-23)
 - **Decider:** Saber (owner), Phase 1 plan lane F27
 - **Related:** [ADR-0026](0026-scout-jobs.md) (scout kind),
   [ADR-0024](0024-model-family-tokens.md) (family tokens),
@@ -41,10 +43,11 @@ workflow that builds with one model and hands search and audit to a cheap one.
    the existing per-project settings document, exposed as
    `orch project set-scout-route` / `clear-scout-route`, and shown by
    `orch project show`.
-4. **Per-job override.**  A scout that asks for `size_hint: "L"` or
-   `effort: high|xhigh` keeps the ordinary build route.  This is the job-level
-   escape hatch for a large or deep investigation; ordinary scout defaults stay
-   cheap.
+4. **Per-job effort.**  `effort: low` on any job prefers each subscription's
+   cheapest plan model, and a scout with no stated effort is normalised to
+   `effort: low` when it is created (H8).  `size_hint: "L"` or
+   `effort: high|xhigh` keeps the ordinary build route; that is the job-level
+   escape hatch for a large or deep investigation.
 5. **Read-only and admission authority are unchanged.**  A scout still adds
    the `read_only` requirement before feasibility, so only providers whose CLI
    enforces read-only can serve it.  Quota admission, the memory budget, the
@@ -67,3 +70,34 @@ workflow that builds with one model and hands search and audit to a cheap one.
   falls back to the cheap default instead of parking the job forever.
 - A project that wants the strong model for every scout sets `build`; a single
   large investigation sets `size_hint: "L"` on that job only.
+- A build job that states `effort: low` gets the same cheap preference as a
+  scout.  A job that states any other effort (or none, for a build job) keeps
+  the owner's ordinary route order.
+
+## 4. Amendment by H8 (2026-11-23): the cheap default is `effort: low`
+
+H8's verification found that the F27 reordering was keyed on the job kind, not
+on the requirement the planner already states.  That duplicated `effort: low`:
+the same ordering produces the same result from either input.  The amendment
+keeps the ordering functions (`scout_candidate_view`,
+`order_candidates_for_scout`, the family matcher and `scout_route`'s
+narrowing/build override) and changes what turns the cheap preference on:
+
+1. A scout with no stated effort records `effort: low` at job creation and at
+   direct-run creation, beside its read-only requirement (`scout_requirements`
+   in `jobs/models.py`, `resolve_effective_run_config` in `run_creation.py`).
+2. `effort: low` on any job — scheduler dispatch or a direct `orch run` —
+   prefers each subscription's cheapest plan model.  A missing effort for a
+   build job and every higher effort keep the ordinary build route.
+3. The scout-specific kind gates on the scheduler and direct-run paths are
+   removed; only the scout `scout_route` setting (project override and
+   `build`/explicit selection) still applies to scouts alone.
+
+What the verification showed the ordering still adds beyond `effort: low`, and
+so kept: the `scout_route` overrides, the `size_hint: "L"` / high-effort escape
+hatch, and the group-level order that keeps a subscription with a cheap model
+ahead of one without while every candidate stays a fallback.  Recorded cost
+change: a scout that explicitly states `effort: medium` now runs the ordinary
+build route (F27 only excluded `high|xhigh`/`L`).  No effort-stating scout ever
+spends more than the model the owner's route names, and billing consent,
+admission and read-only enforcement are untouched.

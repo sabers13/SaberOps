@@ -38,7 +38,7 @@ from saberops.jobs.models import (
     SteeringNote,
     WaitingReason,
     coerce_job_kind,
-    read_only_requirements,
+    scout_requirements,
 )
 from saberops.jobs.store import (
     IdempotencyConflictError,
@@ -309,10 +309,11 @@ def submit_job(
         raise ValueError("requirements must be a JobRequirements")
     job_kind = coerce_job_kind(kind)
     if job_kind is JobKind.SCOUT:
-        # F19: read-only is enforced by the job kind, not requested by the
-        # caller, and the requirement must be in force *before* feasibility so
-        # a scout can never be routed to a provider without read-only support.
-        req = read_only_requirements(req)
+        # F19/H8: read-only is enforced by the job kind, not requested by the
+        # caller, and an unstated effort is the cheap default.  Both are in
+        # force *before* feasibility and request identity so the stored job,
+        # its digest and its dispatch agree.
+        req = scout_requirements(req)
     prio = _coerce_priority(priority)
     repo_abs = _resolve_repo(repo)
     ref_given = (base_ref or "").strip() or "HEAD"

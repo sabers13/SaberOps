@@ -1,4 +1,4 @@
-"""F27: cheap-model default for scout jobs.
+"""Cheap-model default for scout jobs (F27, folded into effort by H8).
 
 A scout job (F19) is read-only and usually a search, grep or audit question, so
 the cheapest plan model of an available subscription is the right default.  The
@@ -7,13 +7,15 @@ candidate.  It only chooses the order among the candidates the owner already
 allows, keeping every non-cheap candidate as a fallback when the cheap one
 cannot be admitted.
 
-The default is overridable in two places:
+H8 folded the scout-specific cheap default into the ordinary effort rule:
+``effort: low`` on any job prefers each subscription's cheapest plan model, and
+a scout with no stated effort is normalised to ``low`` when the job is created.
+A heavy job (``high``/``xhigh`` effort, or a size ``L`` investigation) keeps
+the ordinary build route.
 
-* per project, with the ``scout_route`` project setting: ``cheap`` (default),
-  ``build`` (the ordinary build route, no cheap preference), or one exact
-  ``provider/model`` already present on the build route;
-* per job, with ``requirements.effort`` / ``requirements.size_hint``: a large
-  (``L``) or high-effort scout keeps the ordinary build route.
+The scout route is still overridable per project, with the ``scout_route``
+setting: ``cheap`` (default), ``build`` (the ordinary build route, no cheap
+preference), or one exact ``provider/model`` already present on the build route.
 
 Matching is by model family, not a frozen catalog, so a renamed cheap model
 (``gpt-5.6-luna`` today, ``gpt-6-luna`` in a newer catalog) still matches.
@@ -76,6 +78,24 @@ def is_heavy_scout(requirements: JobRequirements | None) -> bool:
         return True
     effort = getattr(requirements, "effort", None)
     return isinstance(effort, Effort) and effort in _HEAVY_EFFORTS
+
+
+def cheap_default_applies(
+    requirements: JobRequirements | None, *, effort: str | None = None
+) -> bool:
+    """True when the job states the cheap default, ``effort: low`` (H8).
+
+    The same rule serves every job, not just scouts: a scout with no stated
+    effort is normalised to ``low`` when it is created, so its cheapest-model
+    default is this predicate.  A direct run has no job record, so its frozen
+    ``effort`` string stands in for the requirement.  A heavy job keeps the
+    ordinary build route, and a missing effort never opts in.
+    """
+    if is_heavy_scout(requirements):
+        return False
+    if requirements is not None:
+        return requirements.effort is Effort.low
+    return str(effort or "").strip().lower() == Effort.low.value
 
 
 def route_candidate_key(route: str | None) -> CandidateKey | None:
@@ -159,12 +179,14 @@ def scout_candidate_view(
     route: str | None,
     requirements: JobRequirements | None,
 ) -> ScoutCandidateView:
-    """Order the owner's build-route candidates for one scout job.
+    """Order the owner's build-route candidates for one ``effort: low`` job.
 
     The owner's groups stay the fallback authority: a group with a cheap
     candidate is tried before a group with none, and every candidate remains
     available.  An explicit ``provider/model`` route narrows the view to that
     candidate (falling back to the cheap default if it is no longer routed).
+    A job that does not state ``effort: low``, or a heavy one, keeps the
+    ordinary build route (H8).
     """
     original = tuple(tuple(group) for group in groups)
     original_pacing = tuple(int(value) for value in pacing)
@@ -190,6 +212,8 @@ def scout_candidate_view(
         if narrowed:
             return ScoutCandidateView(tuple(narrowed), tuple(narrowed_pacing))
 
+    if not cheap_default_applies(requirements):
+        return ScoutCandidateView(original, original_pacing)
     cheap = cheap_candidate_keys(original)
     if not cheap:
         return ScoutCandidateView(original, original_pacing)
@@ -215,21 +239,17 @@ def order_candidates_for_scout(
     requirements: JobRequirements | None = None,
     effort: str | None = None,
 ) -> list[WorkerCandidate]:
-    """Reorder a flattened chain for a direct scout run (cheap first).
+    """Reorder a flattened chain for a direct ``effort: low`` run (cheap first).
 
     Every candidate is retained: a cheap model that cannot be admitted falls
     through to the next one.  ``effort`` carries the frozen run config's value
-    for a direct ``kind=scout`` run that has no job requirements record.
+    for a direct run that has no job requirements record; a run whose effort is
+    not ``low`` keeps the ordinary build route (H8).
     """
     if is_heavy_scout(requirements):
         return list(candidates)
     cleaned_route = str(route or SCOUT_ROUTE_CHEAP).strip()
     if cleaned_route.lower() == SCOUT_ROUTE_BUILD:
-        return list(candidates)
-    if requirements is None and str(effort or "").strip().lower() in {
-        Effort.high.value,
-        Effort.xhigh.value,
-    }:
         return list(candidates)
 
     explicit = route_candidate_key(cleaned_route)
@@ -237,8 +257,10 @@ def order_candidates_for_scout(
         (c.provider, c.model) == explicit for c in candidates
     ):
         preferred = frozenset({explicit})
-    else:
+    elif cheap_default_applies(requirements, effort=effort):
         preferred = cheap_candidate_keys((tuple(candidates),))
+    else:
+        return list(candidates)
     if not preferred:
         return list(candidates)
     return list(_stable_partition(candidates, preferred))
@@ -269,6 +291,7 @@ __all__ = [
     "SCOUT_ROUTE_CHEAP",
     "ScoutCandidateView",
     "cheap_candidate_keys",
+    "cheap_default_applies",
     "is_cheap_scout_model",
     "is_heavy_scout",
     "load_scout_route",

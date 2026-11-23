@@ -32,6 +32,7 @@ from saberops.config import (
 )
 from saberops.control_plane.capabilities import Capability
 from saberops.gate_runner import GateScratchMode, GateScratchPolicyError
+from saberops.jobs.models import Effort
 from saberops.models import Tier
 from saberops.project_settings import (
     DataPolicy,
@@ -279,14 +280,19 @@ def resolve_effective_run_config(request: RunRequest) -> RunConfig:
     except ValueError as exc:
         raise RunCreationError(str(exc)) from exc
     required_capabilities = tuple(request.required_capabilities)
+    effort = request.effort
     if kind == SCOUT_RUN_KIND:
         # A scout is read-only by construction, on the build route: the
         # capability requirement is what makes admission pick a provider whose
         # CLI can enforce it.  Gate, review and publication do not apply to a
         # report, so they are frozen off instead of left to project policy.
+        # An unstated effort is the cheap default (H8, ADR-0035): a scout is
+        # ``effort: low`` exactly like a job of the same kind.
         required_capabilities = tuple(
             sorted({*required_capabilities, Capability.READ_ONLY.value})
         )
+        if not effort:
+            effort = Effort.low.value
     try:
         config = resolve_run_config(
             task=task,
@@ -317,7 +323,7 @@ def resolve_effective_run_config(request: RunRequest) -> RunConfig:
             ),
             tool_refs=request.tool_refs,
             tier=request.tier,
-            effort=request.effort,
+            effort=effort,
             gate_scratch_mode=gate_scratch_mode,
             accept_target_branch=target_branch,
         )
