@@ -32,7 +32,6 @@ from lifecycle_rig import (
 )
 
 from saberops.accept import AcceptEngine
-from saberops.authority import set_authority_mode
 from saberops.auto_accept import (
     AUTO_ACCEPT_EVENT,
     auto_accept_candidate,
@@ -176,7 +175,6 @@ def test_away_mode_never_auto_accepts_past_an_undelivered_note(
     fixture.record_passing_review_for_b()
     _completed_job_for_run(rig, fixture.run_id, note=MARKER)
     db = rig.db()
-    set_authority_mode("full_autonomy")
     set_owner_mode("away", until=FUTURE)
 
     from saberops.auto_accept import evaluate_auto_accept
