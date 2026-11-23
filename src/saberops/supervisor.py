@@ -190,12 +190,12 @@ class RunSupervisor:
         session.  Duplicate execution is prevented by the durable ownership
         claim taken before the process is created.
         """
-        from saberops.continuation import ContinuationExists, validate_continuation
         from saberops.control_plane import (
             freeze_control_plane_policy,
             load_control_plane_policy,
         )
         from saberops.owner_mode import load_owner_mode_settings
+        from saberops.resume import ContinuationExists, validate_continuation
         from saberops.routing_config import (
             load_effective_routing,
             payload_to_snapshot,
@@ -293,11 +293,16 @@ class RunSupervisor:
         except ContinuationExists as exc:
             return StartRunResult(run_id=exc.child_id)
         if source:
+            from saberops.resume import stage_continuation
+
             self.db.record_event(run_id, "continuation_created", payload=config.continuation)
             self.db.record_event(source[0].id, "run_continued", payload={
                 "child_run_id": run_id, "candidate_sha": source[1].commit_sha,
                 "attempt_id": source[1].id,
             })
+            # The one resume record: the saved candidate becomes the
+            # successor's checkpoint, and its first attempt starts there.
+            stage_continuation(self.db, source[0], source[1], run_id)
         from saberops.mcp.lease import planner_identity
 
         self.db.record_event(

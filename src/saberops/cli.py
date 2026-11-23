@@ -4145,10 +4145,14 @@ def handle_plan_file_auto_refresh(args: argparse.Namespace) -> int:
     return 0
 
 
-def _latest_handoff(db: Database, run_id: str, capsule: bool) -> tuple[str, Handoff | None]:
-    """Return ``(kind, latest handoff)`` for the full or capsule surface."""
-    kind = "handoff_resume_capsule" if capsule else "handoff_full"
-    return kind, db.get_latest_handoff(run_id, kind)
+def _latest_handoff(db: Database, run_id: str, capsule: bool = True) -> tuple[str, Handoff | None]:
+    """Return ``(kind, latest resume capsule)``.
+
+    ``--capsule`` is accepted for one release; the capsule is the one handoff.
+    """
+    from saberops.handoff import CAPSULE_KIND
+
+    return CAPSULE_KIND, db.get_latest_handoff(run_id, CAPSULE_KIND)
 
 
 def handle_handoff(args: argparse.Namespace) -> int:
@@ -4475,7 +4479,7 @@ def handle_status(args: argparse.Namespace) -> int:
         for step in plan_payload["steps"]:
             print(f"  {step['ordering']}. [{step['kind']}] {step['title']} - {step['status']}")
 
-    kind, handoff = _latest_handoff(service.db, run.id, capsule=False)
+    kind, handoff = _latest_handoff(service.db, run.id)
     print("\nHandoff:")
     if handoff is None:
         print("  (none recorded)")

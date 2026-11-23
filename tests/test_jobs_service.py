@@ -578,7 +578,7 @@ def test_reconcile_preempted_run_completes_requeue(tmp_path: Path) -> None:
     """Covers: reconciler finishes a crashed preemption (service)."""
     from saberops import preemption
     from saberops.git import GitManager
-    from saberops.handoff import create_handoffs
+    from saberops.handoff import create_resume_capsule
     from saberops.models import Run
     from saberops.ownership import ProcessIdentity
 
@@ -624,7 +624,7 @@ def test_reconcile_preempted_run_completes_requeue(tmp_path: Path) -> None:
     )
     assert preemption.record_preparation_decision(db, decision)
     ref = GitManager.anchor_checkpoint_ref(repo, job_id, 0, base)
-    _, capsule = create_handoffs(db, "run_p1")
+    capsule = create_resume_capsule(db, "run_p1")
     db.record_event(
         "run_p1",
         "preemption_committed",

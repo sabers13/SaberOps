@@ -705,7 +705,7 @@ class OrchestratorService:
         When the run already has a continuation, its id is returned
         without launching anything (idempotent, as the removed route).
         """
-        from saberops.continuation import ContinuationError, prepare_continuation
+        from saberops.resume import ContinuationError, prepare_continuation
 
         run = self.db.get_run(run_id)
         if run is None:

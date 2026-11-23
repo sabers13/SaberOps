@@ -14,7 +14,6 @@ from typing import Any
 import pytest
 
 from saberops.config import RunConfig, reconstruct_run_config
-from saberops.continuation import ContinuationError, prepare_continuation, validate_continuation
 from saberops.db import Database
 from saberops.git import GitManager
 from saberops.models import (
@@ -28,6 +27,7 @@ from saberops.models import (
 )
 from saberops.orchestrator import Orchestrator
 from saberops.ownership import ProcessIdentity
+from saberops.resume import ContinuationError, prepare_continuation, validate_continuation
 from saberops.review import ReviewEngine
 from saberops.session_journal import SessionJournal
 from saberops.supervisor import RunSupervisor
@@ -177,6 +177,10 @@ def test_continue_repairs_saved_candidate_and_verifies_full_delta(
     supervisor, launches = launch_without_process(db, registry, monkeypatch)
     child_id = supervisor.start_supervised_run(config).run_id
     assert launches == [child_id]
+    staged = db.get_latest_worker_checkpoint(child_id)
+    assert staged is not None
+    assert staged.checkpoint_sha == original.commit_sha
+    assert staged.source_attempt_id == original.id
     child = db.get_run(child_id)
     assert child and child.config_json
     assert child.base_commit == parent.base_commit

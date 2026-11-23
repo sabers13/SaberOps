@@ -1724,9 +1724,9 @@ def test_scheduler_tick_reconciles_preempted_run_and_releases_reservation(
     )
     assert preemption.record_preparation_decision(owner_db, decision)
     GitManager.anchor_checkpoint_ref(repo_dir, "job_prem", 0, base_sha)
-    from saberops.handoff import create_handoffs
+    from saberops.handoff import create_resume_capsule
 
-    _, capsule = create_handoffs(owner_db, "run_old")
+    capsule = create_resume_capsule(owner_db, "run_old")
     owner_db.record_event(
         "run_old",
         "preemption_committed",

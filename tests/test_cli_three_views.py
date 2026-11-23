@@ -72,7 +72,7 @@ def _seed(db: Database) -> None:
         Handoff(
             id="handoff_h9",
             run_id="run_h9",
-            kind="handoff_full",
+            kind="handoff_resume_capsule",
             version=1,
             content=_HANDOFF_TEXT,
             created_at=_CREATED,

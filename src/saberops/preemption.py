@@ -14,7 +14,7 @@ run event -- is preempted instead of failed:
 2. the checkpoint SHA is anchored under the exact engine-owned Git ref
    ``refs/saberops/checkpoints/<job_id>/<n>`` and verified;
 3. a factual bounded harness-neutral resume capsule is persisted through the
-   actual handoff contract (:func:`saberops.handoff.create_handoffs`);
+   resume capsule (:func:`saberops.handoff.create_resume_capsule`);
 4. the RUN ends as :attr:`RunStatus.PREEMPTED <saberops.models.RunStatus.PREEMPTED>`
    -- terminal for that RUN, never an accepted candidate;
 5. the JOB returns to QUEUED with ``waiting_reason == PREEMPTED``, a verified
@@ -53,7 +53,6 @@ truthful failure behavior.
 
 from __future__ import annotations
 
-import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -77,7 +76,6 @@ from saberops.models import (
     TERMINAL_RUN_STATUSES,
     AttemptStatus,
     RunStatus,
-    WorkerCheckpoint,
     WorkerInterruptionReason,
 )
 from saberops.ownership import ExecutionOwner
@@ -1142,7 +1140,6 @@ def _ensure_old_checkpoint_row(
     job: Job,
     checkpoint_sha: str,
     handoff_id: str | None,
-    now_iso: str,
     reason: str = _QUOTA_EXHAUSTED,
 ) -> None:
     """Ensure the old run owns a checkpoint row for the anchored SHA.
@@ -1189,19 +1186,18 @@ def _ensure_old_checkpoint_row(
             pass
     if not source_attempt:
         return
+    from saberops.resume import record_checkpoint
+
     try:
-        db.create_worker_checkpoint(
-            WorkerCheckpoint(
-                id=f"cp_{uuid.uuid4().hex[:10]}",
-                run_id=run_id,
-                source_attempt_id=source_attempt,
-                source_base_sha=job.base_sha,
-                checkpoint_sha=checkpoint_sha,
-                reason=reason,
-                changed_paths=changed,
-                created_at=now_iso,
-                handoff_id=handoff_id,
-            )
+        record_checkpoint(
+            db,
+            run_id=run_id,
+            attempt_id=source_attempt,
+            base_sha=job.base_sha,
+            checkpoint_sha=checkpoint_sha,
+            reason=reason,
+            changed_paths=changed,
+            handoff_id=handoff_id,
         )
     except Exception:
         pass
@@ -1595,10 +1591,10 @@ def complete_preemption(
         if checkpoint_sha is None:
             return PreemptionOutcome(owned=False, detail="no_anchor", job=job)
 
-        from saberops.handoff import create_handoffs
+        from saberops.handoff import create_resume_capsule
 
         try:
-            _, capsule = create_handoffs(db, run_id)
+            capsule = create_resume_capsule(db, run_id)
             handoff_id = capsule.id
         except Exception:
             return PreemptionOutcome(owned=False, detail="capsule_failed", job=job)
@@ -1612,7 +1608,7 @@ def complete_preemption(
 
         _ensure_old_checkpoint_row(
             db, run_id=run_id, job=job, checkpoint_sha=checkpoint_sha,
-            handoff_id=handoff_id, now_iso=now_iso,
+            handoff_id=handoff_id,
             reason=_interruption_label(interruption),
         )
         intent_payload: dict[str, Any] = {
@@ -1770,8 +1766,6 @@ def prepare_resume(
     launcher does): checkpoint and event writes reference it by foreign
     key, so staging into a nonexistent run fails closed with a skip.
     """
-    moment = now if now is not None else datetime.now(UTC)
-    now_iso = moment.isoformat()
     resume = job.resume_from
     if resume is None:
         return ResumePreparation(resumed=False, reason="no_resume")
@@ -1889,23 +1883,21 @@ def prepare_resume(
         except Exception:
             pass
         return ResumePreparation(resumed=False, reason="no_source_attempt")
+    from saberops.resume import stage_checkpoint
+
     try:
-        db.create_worker_checkpoint(
-            WorkerCheckpoint(
-                id=f"cp_{uuid.uuid4().hex[:10]}",
-                run_id=new_run_id,
-                # Intentional cross-run lineage: the attempt that produced
-                # the checkpoint lives on the preempted run; the new run
-                # reads only its provider/reason/SHA through the ordinary
-                # continuation channel.  The id is real, so the FK holds.
-                source_attempt_id=source_attempt,
-                source_base_sha=job.base_sha,
-                checkpoint_sha=resume.checkpoint_sha,
-                reason=reason,
-                changed_paths=changed,
-                created_at=now_iso,
-                handoff_id=resume.handoff_id,
-            )
+        # Intentional cross-run lineage: the attempt that produced the
+        # checkpoint lives on the preempted run; the new run reads only its
+        # provider/reason/SHA through the ordinary checkpoint channel.
+        stage_checkpoint(
+            db,
+            new_run_id=new_run_id,
+            attempt_id=source_attempt,
+            base_sha=job.base_sha,
+            checkpoint_sha=resume.checkpoint_sha,
+            reason=reason,
+            changed_paths=changed,
+            handoff_id=resume.handoff_id,
         )
     except Exception:
         return ResumePreparation(resumed=False, reason="checkpoint_stage_failed")

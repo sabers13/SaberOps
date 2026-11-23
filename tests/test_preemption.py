@@ -183,7 +183,7 @@ def _seed_prepared_intent(
     checkpoint anchor ref.  Only the setup is realistic; the behaviour under
     test is unchanged.
     """
-    from saberops.handoff import create_handoffs
+    from saberops.handoff import create_resume_capsule
 
     owner = db.claim_execution_owner(run_id, identity=_dead_owner_identity())
     job = store.get_job(db, job_id)
@@ -194,7 +194,7 @@ def _seed_prepared_intent(
         decision_ref="test:bound-crash-fixture",
     )
     assert preemption.record_preparation_decision(db, decision)
-    _, capsule = create_handoffs(db, run_id)
+    capsule = create_resume_capsule(db, run_id)
     db.record_event(
         run_id,
         "preemption_committed",

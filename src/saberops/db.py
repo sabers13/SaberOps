@@ -1047,7 +1047,7 @@ class Database:
                     (reference["parent_run_id"], run.id),
                 )
                 if not inserted.rowcount:
-                    from saberops.continuation import ContinuationExists
+                    from saberops.resume import ContinuationExists
 
                     child = conn.execute(
                         "SELECT child_run_id FROM run_continuations WHERE parent_run_id=?",

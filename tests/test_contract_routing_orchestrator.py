@@ -21,7 +21,6 @@ import pytest
 from pytest import MonkeyPatch
 
 from saberops.config import resolve_run_config
-from saberops.continuation import prepare_continuation
 from saberops.db import Database
 from saberops.git import GitManager
 from saberops.jobs import store
@@ -45,6 +44,7 @@ from saberops.models import (
 )
 from saberops.orchestrator import Orchestrator
 from saberops.process import run_process
+from saberops.resume import prepare_continuation
 from saberops.supervisor import RunSupervisor
 from saberops.workers.base import WorkerAdapter
 from saberops.workers.registry import AdapterRegistry

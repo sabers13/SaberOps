@@ -617,7 +617,7 @@ def test_supervisor_blocks_legacy_intent_with_valid_artifacts(
     terminal outcome, so restart must retain WIP/job/charge and NOT preempt or
     orphan.
     """
-    from saberops.handoff import create_handoffs
+    from saberops.handoff import create_resume_capsule
     from saberops.supervisor import RunSupervisor
 
     repo = tmp_path / "repo"
@@ -629,7 +629,7 @@ def test_supervisor_blocks_legacy_intent_with_valid_artifacts(
     db.claim_execution_owner("run_old", identity=_dead_identity())
     # Fully genuine artifacts, deliberately WITHOUT a bound decision receipt.
     GitManager.anchor_checkpoint_ref(repo, "job1", 0, base)
-    _, capsule = create_handoffs(db, "run_old")
+    capsule = create_resume_capsule(db, "run_old")
     db.record_event(
         "run_old",
         "preemption_committed",
@@ -667,7 +667,7 @@ def test_supervisor_blocks_legacy_intent_with_valid_artifacts(
 
 def test_settlement_retains_charge_for_a_legacy_parked_run(tmp_path: Path) -> None:
     """Covers: no release on an unauthenticated receipt."""
-    from saberops.handoff import create_handoffs
+    from saberops.handoff import create_resume_capsule
 
     repo = tmp_path / "repo"
     base = _repo(repo)
@@ -677,7 +677,7 @@ def test_settlement_retains_charge_for_a_legacy_parked_run(tmp_path: Path) -> No
     _quota_evidence(db, "run_old")
     db.claim_execution_owner("run_old", identity=_dead_identity())
     GitManager.anchor_checkpoint_ref(repo, "job1", 0, base)
-    _, capsule = create_handoffs(db, "run_old")
+    capsule = create_resume_capsule(db, "run_old")
     # Legacy parked state: PREEMPTED run + legacy intent, job requeued, with
     # NO authentic bound decision.
     db.record_event(
@@ -953,7 +953,7 @@ def test_split_db_settlement_releases_stranded_old_run_exactly_once(
 
 def test_split_db_settlement_retains_unbound_legacy_charge(tmp_path: Path) -> None:
     """Covers: split-DB legacy receipt is not authenticated."""
-    from saberops.handoff import create_handoffs
+    from saberops.handoff import create_resume_capsule
 
     repo = tmp_path / "repo"
     base = _repo(repo)
@@ -976,7 +976,7 @@ def test_split_db_settlement_retains_unbound_legacy_charge(tmp_path: Path) -> No
     exec_db.claim_execution_owner(run_id, identity=_dead_identity())
     # Genuine artifacts in the run's own DB, but NO bound decision receipt.
     GitManager.anchor_checkpoint_ref(repo, "job1", 0, base)
-    _, capsule = create_handoffs(exec_db, run_id)
+    capsule = create_resume_capsule(exec_db, run_id)
     exec_db.record_event(
         run_id,
         "preemption_committed",

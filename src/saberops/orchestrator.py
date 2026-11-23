@@ -1742,7 +1742,7 @@ class Orchestrator:
             )
 
         base_commit = GitManager.get_head_commit(repo)
-        from saberops.continuation import validate_continuation
+        from saberops.resume import validate_continuation
         continued_source = validate_continuation(self.db, config)
         if continued_source and run_id is None:
             raise ValueError("Continue must be admitted through the supervised run launcher.")
@@ -2565,60 +2565,57 @@ class Orchestrator:
                         )
                         existing_cp = self.db.get_worker_checkpoint_by_sha(run_id, current_head)
                         if existing_cp is None:
-                            cp_id = f"cp_{uuid.uuid4().hex[:12]}"
-                            recovered_cp = WorkerCheckpoint(
-                                id=cp_id,
+                            from saberops.resume import record_checkpoint
+
+                            recovered_cp = record_checkpoint(
+                                self.db,
                                 run_id=run_id,
-                                source_attempt_id=crashed_att.id,
-                                source_base_sha=crashed_base_sha,
+                                attempt_id=crashed_att.id,
+                                base_sha=crashed_base_sha,
                                 checkpoint_sha=current_head,
                                 reason=WorkerInterruptionReason.ABORTED.value,
                                 changed_paths=tuple(changed_between),
-                                created_at=current_iso_timestamp(),
                             )
-                            self.db.create_worker_checkpoint(recovered_cp)
                             self.db.journal_record_completed(
                                 idempotency_key=cp_key,
-                                result={"checkpoint_sha": current_head, "checkpoint_id": cp_id},
+                                result={
+                                    "checkpoint_sha": current_head,
+                                    "checkpoint_id": recovered_cp.id,
+                                },
                             )
                         else:
                             recovered_cp = existing_cp
                     elif GitManager.has_diff_against_base(wt_path, crashed_base_sha):
                         # Uncommitted partial edits exist in worktree
+                        from saberops.resume import save_interrupted_work
+
                         cold_changed_paths = GitManager.get_changed_paths(wt_path)
-                        self.db.journal_record_intent(
-                            idempotency_key=cp_key,
+                        prior = self.db.get_side_effect(cp_key)
+                        already_saved = (
+                            prior is not None
+                            and prior.state == SideEffectState.COMPLETED
+                        )
+                        recovered_cp = save_interrupted_work(
+                            self.db,
                             run_id=run_id,
                             attempt_id=crashed_att.id,
-                            operation=SideEffectOperation.CHECKPOINT_CREATION,
-                            payload={"cold_takeover": True},
+                            base_sha=crashed_base_sha,
+                            worktree_path=wt_path,
+                            reason=WorkerInterruptionReason.ABORTED.value,
+                            changed_paths=tuple(cold_changed_paths),
+                            journal=True,
+                            message=(
+                                "orch: checkpoint for crashed attempt "
+                                f"{crashed_att.id}"
+                            ),
                         )
-                        cp_sha = GitManager.create_checkpoint_commit(
-                            wt_path, f"orch: checkpoint for crashed attempt {crashed_att.id}"
-                        )
-                        if cp_sha:
-                            cp_id = f"cp_{uuid.uuid4().hex[:12]}"
-                            recovered_cp = WorkerCheckpoint(
-                                id=cp_id,
-                                run_id=run_id,
-                                source_attempt_id=crashed_att.id,
-                                source_base_sha=crashed_base_sha,
-                                checkpoint_sha=cp_sha,
-                                reason=WorkerInterruptionReason.ABORTED.value,
-                                changed_paths=tuple(cold_changed_paths),
-                                created_at=current_iso_timestamp(),
-                            )
-                            self.db.create_worker_checkpoint(recovered_cp)
-                            self.db.journal_record_completed(
-                                idempotency_key=cp_key,
-                                result={"checkpoint_sha": cp_sha, "checkpoint_id": cp_id},
-                            )
+                        if recovered_cp is not None and not already_saved:
                             self.db.record_event(
                                 run_id,
                                 "worker_interrupted_checkpoint_created",
                                 attempt_id=crashed_att.id,
                                 payload={
-                                    "checkpoint_sha": cp_sha,
+                                    "checkpoint_sha": recovered_cp.checkpoint_sha,
                                     "reason": WorkerInterruptionReason.ABORTED.value,
                                     "changed_paths": cold_changed_paths,
                                     "cold_takeover": True,
@@ -3477,7 +3474,33 @@ class Orchestrator:
                 dispatch_projection: ContextProjection | None = None
                 prior_attempt: Attempt | None = None
 
-                if (
+                if continued_source and next_attempt_num == 1:
+                    parent, prior_attempt = continued_source
+                    prior_checks = self.db.get_checks_for_attempt(prior_attempt.id)
+                    prior_reviews = self.db.get_reviews_for_run(parent.id)
+                    failure = prune_evidence(parent.result_summary, limit=2000).text
+                    review_evidence = prune_evidence(
+                        "\n".join(
+                            f"{r.verdict.value}: {r.summary}\n{r.details}"
+                            for r in prior_reviews[-3:]
+                        ),
+                        limit=4000,
+                    ).text
+                    dispatch_projection = build_retry_projection(
+                        original_task=task, attempt_idx=next_attempt_num,
+                        prior_attempt=prior_attempt,
+                        prior_check=prior_checks[-1] if prior_checks else None,
+                        inherited_base_sha=lineage_base_sha,
+                        invariants=(
+                            f"Owner-requested continuation of failed run {parent.id}.",
+                            "The worktree already contains its candidate. "
+                            "Preserve existing work; repair the recorded failure.",
+                            "Prior run result: " + (failure or "unavailable"),
+                            "Prior review evidence: " + (review_evidence
+                                or "No independent review was recorded."),
+                        ),
+                    )
+                elif (
                     active_continuation_reason is not None
                     and active_continuation_attempt is not None
                 ):
@@ -3517,32 +3540,6 @@ class Orchestrator:
                         changed_paths=continuation_changed_paths,
                         diff_summary=diff_summary,
                         role=DispatchRole.BUILD.value,
-                    )
-                elif continued_source and next_attempt_num == 1:
-                    parent, prior_attempt = continued_source
-                    prior_checks = self.db.get_checks_for_attempt(prior_attempt.id)
-                    prior_reviews = self.db.get_reviews_for_run(parent.id)
-                    failure = prune_evidence(parent.result_summary, limit=2000).text
-                    review_evidence = prune_evidence(
-                        "\n".join(
-                            f"{r.verdict.value}: {r.summary}\n{r.details}"
-                            for r in prior_reviews[-3:]
-                        ),
-                        limit=4000,
-                    ).text
-                    dispatch_projection = build_retry_projection(
-                        original_task=task, attempt_idx=next_attempt_num,
-                        prior_attempt=prior_attempt,
-                        prior_check=prior_checks[-1] if prior_checks else None,
-                        inherited_base_sha=lineage_base_sha,
-                        invariants=(
-                            f"Owner-requested continuation of failed run {parent.id}.",
-                            "The worktree already contains its candidate. "
-                            "Preserve existing work; repair the recorded failure.",
-                            "Prior run result: " + (failure or "unavailable"),
-                            "Prior review evidence: " + (review_evidence
-                                or "No independent review was recorded."),
-                        ),
                     )
                 elif next_attempt_num > 1 and attempts:
                     # Retry after a prior failed attempt.
@@ -4599,67 +4596,20 @@ class Orchestrator:
                     # Worktree changes check
                     changed_paths = tuple(GitManager.get_changed_paths(wt_path))
                     has_changes = len(changed_paths) > 0
-                    cp_obj: WorkerCheckpoint | None = None
-                    if has_changes:
-                        idempotency_key = f"checkpoint:{run_id}:{attempt_id}"
-                        existing_se = self.db.get_side_effect(idempotency_key)
-                        if (
-                            existing_se
-                            and existing_se.state == SideEffectState.COMPLETED
-                            and existing_se.result_json
-                        ):
-                            try:
-                                res_dict = json.loads(existing_se.result_json)
-                                cp_sha = res_dict.get("checkpoint_sha")
-                                if cp_sha:
-                                    cp_obj = self.db.get_worker_checkpoint_by_sha(run_id, cp_sha)
-                            except Exception:
-                                cp_obj = None
-                        if cp_obj is None:
-                            self.db.journal_record_intent(
-                                idempotency_key=idempotency_key,
-                                run_id=run_id,
-                                attempt_id=attempt_id,
-                                operation=SideEffectOperation.CHECKPOINT_CREATION,
-                                payload={"reason": interruption_reason.value},
-                            )
-                            try:
-                                cp_sha = GitManager.create_checkpoint_commit(
-                                    worktree_path=wt_path,
-                                    message=(
-                                        f"orch checkpoint({run_id}/{attempt_id}): "
-                                        f"partial worker state ({interruption_reason.value})"
-                                    ),
-                                )
-                                if cp_sha is not None:
-                                    cp_obj = WorkerCheckpoint(
-                                        id=f"cp_{uuid.uuid4().hex[:10]}",
-                                        run_id=run_id,
-                                        source_attempt_id=attempt_id,
-                                        source_base_sha=start_point,
-                                        checkpoint_sha=cp_sha,
-                                        reason=interruption_reason.value,
-                                        changed_paths=changed_paths,
-                                        created_at=current_iso_timestamp(),
-                                    )
-                                    self.db.create_worker_checkpoint(cp_obj)
-                                    self.db.journal_record_completed(
-                                        idempotency_key=idempotency_key,
-                                        result={
-                                            "checkpoint_sha": cp_sha,
-                                            "checkpoint_id": cp_obj.id,
-                                        },
-                                    )
-                                else:
-                                    self.db.journal_record_completed(
-                                        idempotency_key=idempotency_key,
-                                        result={"no_changes": True},
-                                    )
-                            except Exception as exc:
-                                self.db.journal_record_failed(
-                                    idempotency_key=idempotency_key, error=str(exc)
-                                )
-                                raise
+                    # The one save path: commit the interrupted work and
+                    # record it as this run's resume point.
+                    from saberops.resume import save_interrupted_work
+
+                    cp_obj = save_interrupted_work(
+                        self.db,
+                        run_id=run_id,
+                        attempt_id=attempt_id,
+                        base_sha=start_point,
+                        worktree_path=wt_path,
+                        reason=interruption_reason.value,
+                        changed_paths=changed_paths,
+                        journal=True,
+                    )
 
                     if cp_obj is not None:
                         active_continuation_checkpoint = cp_obj
