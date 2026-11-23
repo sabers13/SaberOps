@@ -1795,13 +1795,16 @@ def test_r1b2_package_transition_resets_skip_evidence_and_routing_context(
     resolved = [e for e in events if e.event_type == "tier_candidates_resolved"]
     assert len(resolved) >= 2
     pkg2_resolved = _payload(resolved[1])
-    assert pkg2_resolved["tier"] == "T2"
+    # H1: there is no per-package keyword tier any more.  The run records
+    # routine difficulty, so every package resolves the same T1 tier (the
+    # T2 ceiling does not raise it).
+    assert pkg2_resolved["tier"] == "T1"
     assert pkg2_resolved["routing_context"] == "BUILD"
 
     no_elig = [e for e in events if e.event_type == "no_eligible_candidate"]
     assert no_elig
     terminal = _payload(no_elig[-1])
-    assert terminal["tier"] == "T2"
+    assert terminal["tier"] == "T1"
     assert terminal["routing_context"] == "BUILD"
     assert terminal["routing_context"] == pkg2_resolved["routing_context"]
     terminal_models = [str(e.get("model")) for e in terminal["skipped_candidates"]]
