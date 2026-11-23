@@ -147,11 +147,13 @@ def ensure_tables(db: Any) -> None:
                 delivered_at TEXT,
                 delivered_run_id TEXT,
                 delivered_attempt_id TEXT,
+                discarded_at TEXT,
                 source TEXT NOT NULL DEFAULT 'owner'
             )
             """
         )
         _ensure_steering_source_column(conn)
+        _ensure_steering_discarded_column(conn)
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_job_steering_notes_job "
             "ON job_steering_notes(job_id, note_id)"
@@ -171,6 +173,18 @@ def _ensure_steering_source_column(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE job_steering_notes ADD COLUMN source TEXT NOT NULL DEFAULT 'owner'"
         )
+
+
+def _ensure_steering_discarded_column(conn: sqlite3.Connection) -> None:
+    """Add ``discarded_at`` to a steering-notes table created before H6.
+
+    A note that no longer applies is discarded explicitly, never silently
+    dropped: the column keeps the reason visible while the pending reads stop
+    seeing it (ADR-0016 §2).
+    """
+    columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(job_steering_notes)")}
+    if "discarded_at" not in columns:
+        conn.execute("ALTER TABLE job_steering_notes ADD COLUMN discarded_at TEXT")
 
 
 def _ensure_depends_on_column(conn: sqlite3.Connection) -> None:
@@ -681,6 +695,11 @@ def _row_to_steering_note(row: sqlite3.Row) -> SteeringNote:
             if row["delivered_attempt_id"] is not None
             else None
         ),
+        discarded_at=(
+            str(row["discarded_at"])
+            if "discarded_at" in row.keys() and row["discarded_at"] is not None
+            else None
+        ),
         source=(
             str(row["source"])
             if "source" in row.keys() and row["source"] is not None
@@ -815,11 +834,87 @@ def pending_steering_notes_for_run(
         rows = conn.execute(
             "SELECT n.* FROM job_steering_notes AS n"
             " JOIN jobs AS j ON j.job_id = n.job_id"
-            " WHERE n.delivered_at IS NULL AND j.current_run_id = ?"
+            " WHERE n.delivered_at IS NULL AND n.discarded_at IS NULL"
+            " AND j.current_run_id = ?"
             " ORDER BY n.note_id ASC LIMIT ?",
             (run_id, max(1, int(limit))),
         ).fetchall()
         return [_row_to_steering_note(r) for r in rows]
+
+
+def pending_steering_notes_for_job(db: Any, job_id: str) -> list[SteeringNote]:
+    """Every note on ``job_id`` that never reached a worker (read-only).
+
+    This is the acceptance gate: a delivered note or a deliberately discarded
+    one is resolved; anything else is a correction the engine still owes the
+    worker (ADR-0016 §2).
+    """
+    with _owner_conn(db) as conn:
+        present = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            ("job_steering_notes",),
+        ).fetchone()
+        if present is None:
+            return []
+        rows = conn.execute(
+            "SELECT * FROM job_steering_notes"
+            " WHERE job_id = ? AND delivered_at IS NULL AND discarded_at IS NULL"
+            " ORDER BY note_id ASC",
+            (job_id,),
+        ).fetchall()
+        return [_row_to_steering_note(r) for r in rows]
+
+
+def get_steering_note(db: Any, note_id: int) -> SteeringNote | None:
+    """Read one note by id (read-only); ``None`` when it does not exist."""
+    with _owner_conn(db) as conn:
+        present = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            ("job_steering_notes",),
+        ).fetchone()
+        if present is None:
+            return None
+        row = conn.execute(
+            "SELECT * FROM job_steering_notes WHERE note_id = ?", (int(note_id),)
+        ).fetchone()
+    return _row_to_steering_note(row) if row is not None else None
+
+
+def discard_steering_note(
+    db: Any, note_id: int, *, now: datetime | None = None
+) -> SteeringNote | None:
+    """Mark one undelivered note discarded; ``None`` when it was not pending.
+
+    A delivered note has already reached a worker and is evidence, so it is
+    never discarded; the caller reports that instead of rewriting history.
+    """
+    ensure_tables(db)
+    at = _utcnow_iso(now)
+    with _owner_conn(db) as conn:
+        cursor = conn.execute(
+            "UPDATE job_steering_notes SET discarded_at = ?"
+            " WHERE note_id = ? AND delivered_at IS NULL AND discarded_at IS NULL",
+            (at, int(note_id)),
+        )
+        updated = (cursor.rowcount or 0) > 0
+        row = conn.execute(
+            "SELECT * FROM job_steering_notes WHERE note_id = ?", (int(note_id),)
+        ).fetchone()
+        if updated and row is not None:
+            _append_event(
+                conn,
+                job_id=str(row["job_id"]),
+                at=at,
+                kind="steering_note_discarded",
+                from_state=None,
+                to_state=None,
+                payload={"note_id": int(note_id)},
+            )
+        conn.commit()
+    if not updated or row is None:
+        return None
+    return _row_to_steering_note(row)
+
 
 
 def mark_steering_notes_delivered(

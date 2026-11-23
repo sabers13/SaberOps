@@ -127,6 +127,12 @@ class WaitingReason(StrEnum):
     #: yet, so this job must not start.  Clears by itself once the dependency
     #: is accepted.
     DEPENDENCY = "DEPENDENCY"
+    #: H6: the owner or planner redirected a running attempt.  Its work is
+    #: anchored as a checkpoint and the job waits for the next dispatch, which
+    #: restores that work and carries the steering note in its prompt.  Unlike
+    #: ``PREEMPTED`` this is a deliberate correction and never spends the
+    #: preemption budget.
+    REDIRECTED = "REDIRECTED"
     #: F8: a dependency ended FAILED or CANCELLED, so this job can never start.
     #: It never clears by itself; the owner cancels or resubmits it.
     DEPENDENCY_FAILED = "DEPENDENCY_FAILED"
@@ -371,6 +377,10 @@ class SteeringNote:
     delivered_at: str | None = None
     delivered_run_id: str | None = None
     delivered_attempt_id: str | None = None
+    #: H6: set when the owner or planner deliberately dropped the note without
+    #: delivering it.  A discarded note no longer blocks acceptance; it stays
+    #: in the record so the decision is visible.
+    discarded_at: str | None = None
     #: Who wrote the note: ``owner`` (or the planner on the owner's behalf) or
     #: ``advisor`` (advice recorded before the on-demand advisor moved off the
     #: note channel).  Delivery semantics are identical.
@@ -379,6 +389,15 @@ class SteeringNote:
     @property
     def delivered(self) -> bool:
         return self.delivered_at is not None
+
+    @property
+    def discarded(self) -> bool:
+        return self.discarded_at is not None
+
+    @property
+    def pending(self) -> bool:
+        """True when this correction never reached a worker and was not dropped."""
+        return not self.delivered and not self.discarded
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -390,6 +409,9 @@ class SteeringNote:
             "delivered_at": self.delivered_at,
             "delivered_run_id": self.delivered_run_id,
             "delivered_attempt_id": self.delivered_attempt_id,
+            "discarded": self.discarded,
+            "discarded_at": self.discarded_at,
+            "pending": self.pending,
             "source": self.source,
         }
 

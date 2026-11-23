@@ -3,7 +3,8 @@
 The following tools are exposed::
 
     preflight start_walkthrough submit_job submit_plan get_job catch_up plan_status tail_job
-    wait_job list_jobs cancel_job note_job resume_job capacity read_evidence list_questions
+    wait_job list_jobs cancel_job note_job redirect_job discard_note resume_job
+    capacity read_evidence list_questions
     answer_question propose_config_change list_proposals get_mode propose_mode_change
 
 With ``ORCH_NATIVE_WORKERS`` enabled, four more tools exist for the hybrid
@@ -113,8 +114,10 @@ MUTATING_TOOLS: frozenset[str] = frozenset(
         "promote_scout",
         "refresh_candidate",
         "resume_job",
+        "redirect_job",
         "cancel_job",
         "note_job",
+        "discard_note",
         "answer_question",
         "propose_config_change",
         "propose_mode_change",
@@ -162,6 +165,7 @@ TOOL_NAMES: tuple[str, ...] = (
     "promote_scout",
     "refresh_candidate",
     "resume_job",
+    "redirect_job",
     "get_job",
     "catch_up",
     "plan_status",
@@ -170,6 +174,7 @@ TOOL_NAMES: tuple[str, ...] = (
     "list_jobs",
     "cancel_job",
     "note_job",
+    "discard_note",
     "capacity",
     "read_evidence",
     "list_questions",
@@ -637,6 +642,12 @@ def _job_guidance(job: Any, db: Any | None = None) -> str | None:
             "owner question (or set the away preflight policy) and the job "
             "starts again; independent jobs were not stopped."
         )
+    if waiting == WaitingReason.REDIRECTED:
+        return (
+            "This job was redirected: the stopped attempt's work is preserved as a "
+            "checkpoint and the pending note travels in the continuation attempt's "
+            "prompt. It starts on the next scheduler tick; no action is needed."
+        )
     if getattr(job, "state", None) is not None and job.state.value == "FAILED":
         return (
             "The job failed. Resume it from chat with resume_job: from='scratch' "
@@ -1090,6 +1101,40 @@ def _catch_up_next_action(
             "detail": f"Candidate {projection.candidate_sha[:8]} is already accepted.",
             "command": None,
         }
+    # H6 (ADR-0016): a note that never reached a worker blocks acceptance, so
+    # the one next action names both ways out instead of an accept the engine
+    # will refuse.  A running job may also redirect to deliver it now.
+    from saberops.steering import note_resolution_view
+
+    pending_notes = [
+        note for note in view.get("steering_notes") or [] if note.get("pending")
+    ]
+    pending_ids = [int(note["note_id"]) for note in pending_notes]
+    if pending_notes and job.state.value == "RUNNING":
+        resolution = note_resolution_view(job.job_id, pending_ids)
+        return {
+            "action": "redirect_or_wait",
+            "owner_only": False,
+            "detail": (
+                f"{len(pending_notes)} steering note(s) are pending: they reach the "
+                "worker only at the next attempt, and a candidate cannot be accepted "
+                "while they are undelivered. Call redirect_job to stop the current "
+                "attempt, keep its work and deliver the note now; otherwise let the "
+                "note ride the next attempt."
+            ),
+            "command": None,
+            "redirect": resolution["redirect"],
+        }
+    if pending_notes:
+        resolution = note_resolution_view(job.job_id, pending_ids)
+        return {
+            "action": "resolve_steering_note",
+            "owner_only": False,
+            "detail": str(resolution["detail"]),
+            "command": str(resolution["discard"]["cli"] or ""),
+            "redirect": resolution["redirect"],
+            "discard": resolution["discard"],
+        }
     report = result.get("report")
     if isinstance(report, dict) and report.get("report_path"):
         return {
@@ -1483,6 +1528,71 @@ def _note_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str,
             "pending: the note reaches the worker in the prompt of the job's "
             "next attempt, never mid-tool"
         ),
+    }
+
+
+def _redirect_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    """Stop the running attempt, keep its work and continue with the note (H6)."""
+    from saberops.jobs.service import JobNotFoundError, redirect_job
+
+    job_id = _require_text(arguments, "job_id", what="job_id")
+    text = _require_text(arguments, "text", what="text")
+    db = context.database(read_only=False)
+    try:
+        result = redirect_job(db, job_id, text)
+    except JobNotFoundError as exc:
+        raise NotFoundError(f"unknown job: {job_id}", data={"job_id": job_id}) from exc
+    except ValueError as exc:
+        raise InvalidParamsError(f"cannot redirect job: {exc}") from exc
+    context.ledger.append(
+        "job_redirected",
+        {
+            "job_id": job_id,
+            "note_id": result.note.note_id,
+            "stopped_run_id": result.stopped_run_id,
+            "checkpoint_sha": result.checkpoint_sha,
+        },
+        key=f"job-redirected:{job_id}:{result.note.note_id}",
+    )
+    return {
+        "v": SNAPSHOT_SCHEMA_VERSION,
+        "job_id": job_id,
+        "note_id": result.note.note_id,
+        "note": result.note.to_dict(),
+        "stopped_run_id": result.stopped_run_id,
+        "checkpoint_sha": result.checkpoint_sha,
+        "handoff_id": result.handoff_id,
+        "state": result.job.state.value,
+        "waiting_reason": (
+            result.job.waiting_reason.value if result.job.waiting_reason is not None else None
+        ),
+        "delivery": (
+            "the stopped attempt's work is preserved as a checkpoint; the next "
+            "scheduled attempt restores it and carries the note in its prompt"
+        ),
+    }
+
+
+def _discard_note(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    """Deliberately drop one undelivered note so it stops blocking acceptance."""
+    from saberops.jobs.service import discard_note
+
+    note_id = int(arguments.get("note_id", 0))
+    db = context.database(read_only=False)
+    try:
+        note = discard_note(db, note_id)
+    except ValueError as exc:
+        raise InvalidParamsError(f"cannot discard note: {exc}") from exc
+    context.ledger.append(
+        "job_note_discarded",
+        {"job_id": note.job_id, "note_id": note.note_id},
+        key=f"job-note-discarded:{note.note_id}",
+    )
+    return {
+        "v": SNAPSHOT_SCHEMA_VERSION,
+        "job_id": note.job_id,
+        "note_id": note.note_id,
+        "note": note.to_dict(),
     }
 
 
@@ -2354,6 +2464,33 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
             required=("job_id", "text"),
         ),
         _note_job,
+        mutating=True,
+    )
+    register(
+        "redirect_job",
+        "Stop a RUNNING job's current attempt, preserve its work and continue with "
+        "the note: the next attempt restores that work and carries the note in its "
+        "prompt. Use note_job when the next attempt is fine; a candidate with an "
+        "undelivered note cannot be accepted.",
+        _schema(
+            {
+                "job_id": {"type": "string", "minLength": 1},
+                "text": {"type": "string", "minLength": 1, "maxLength": 4000},
+            },
+            required=("job_id", "text"),
+        ),
+        _redirect_job,
+        mutating=True,
+    )
+    register(
+        "discard_note",
+        "Deliberately drop one undelivered steering note so it no longer blocks "
+        "acceptance. A delivered note is evidence and cannot be discarded.",
+        _schema(
+            {"note_id": {"type": "integer", "minimum": 1}},
+            required=("note_id",),
+        ),
+        _discard_note,
         mutating=True,
     )
     register(

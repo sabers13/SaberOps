@@ -12,7 +12,8 @@ already running.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any
 
 from saberops.jobs.models import SteeringNote
 
@@ -21,9 +22,12 @@ if TYPE_CHECKING:
 
 __all__ = [
     "append_steering_section",
+    "note_resolution_view",
+    "record_steering_delivery",
     "render_steering_section",
     "steering_section_for_run",
-    "record_steering_delivery",
+    "undelivered_note_block_text",
+    "undelivered_notes_for_run",
 ]
 
 _STEERING_BANNER = (
@@ -91,3 +95,58 @@ def record_steering_delivery(
             },
         )
     return delivered
+
+
+def undelivered_notes_for_run(
+    db: Database, run_id: str
+) -> tuple[SteeringNote, ...]:
+    """Notes on the run's job that never reached a worker (read-only).
+
+    Empty for a standalone run with no job record: notes are job state, so a
+    run that belongs to no job can carry none.
+    """
+    from saberops.jobs.store import find_job_for_run, pending_steering_notes_for_job
+
+    job = find_job_for_run(db, run_id)
+    if job is None:
+        return ()
+    return tuple(pending_steering_notes_for_job(db, job.job_id))
+
+
+def undelivered_note_block_text(job_id: str, notes: tuple[SteeringNote, ...]) -> str:
+    """One refusal reason shared by acceptance, auto-accept and the projections."""
+    ids = ", ".join(str(note.note_id) for note in notes) or "none"
+    label = "note" if len(notes) == 1 else "notes"
+    return (
+        f"job {job_id} has {len(notes)} undelivered steering {label} ({ids}); "
+        "the correction never reached a worker, so the candidate cannot be accepted. "
+        f"Call redirect_job(job_id='{job_id}', text=...) to carry the pending "
+        f"{label} into a new attempt, or discard_note(note_id=...) to drop a "
+        f"{label} that no longer applies."
+    )
+
+
+def note_resolution_view(job_id: str, note_ids: Sequence[int]) -> dict[str, Any]:
+    """The redirect-or-discard instruction a projection shows the planner."""
+    ids = [int(note_id) for note_id in note_ids]
+    first = ids[0] if ids else None
+    return {
+        "job_id": job_id,
+        "note_ids": ids,
+        "detail": (
+            f"{len(ids)} steering note(s) never reached a worker, so acceptance "
+            "is blocked. redirect_job stops the current attempt, keeps its work and "
+            "carries the note into the continuation attempt; discard_note drops a "
+            "note that no longer applies."
+        ),
+        "redirect": {
+            "tool": "redirect_job",
+            "job_id": job_id,
+            "cli": f"orch job redirect {job_id} --text \"<correction>\"",
+        },
+        "discard": {
+            "tool": "discard_note",
+            "note_id": first,
+            "cli": f"orch job note-discard {first}" if first is not None else None,
+        },
+    }

@@ -60,10 +60,12 @@ __all__ = [
     "PreemptionReconciliation",
     "PreemptionSettlement",
     "ReconcileChange",
+    "RedirectResult",
     "SubmitResult",
     "cancel_job",
     "capacity",
     "serialize_capacity_view",
+    "discard_note",
     "get_job",
     "job_dispatch_spec",
     "job_usage_view",
@@ -73,12 +75,14 @@ __all__ = [
     "reconcile_jobs",
     "reconcile_preemptions",
     "promote_scout",
+    "redirect_job",
     "requeue",
     "requeue_preemption",
     "settle_preemption_debts",
     "set_waiting",
     "steering_notes",
     "submit_job",
+    "undelivered_steering_notes",
 ]
 
 
@@ -536,6 +540,138 @@ def note_job(
 def steering_notes(db: Any, job_id: str) -> tuple[SteeringNote, ...]:
     """Every note recorded for a job, oldest first (read-only)."""
     return tuple(store.list_steering_notes(db, job_id))
+
+
+def undelivered_steering_notes(db: Any, job_id: str) -> tuple[SteeringNote, ...]:
+    """Notes on this job that never reached a worker and were not discarded."""
+    return tuple(store.pending_steering_notes_for_job(db, job_id))
+
+
+def discard_note(db: Any, note_id: int, *, now: datetime | None = None) -> SteeringNote:
+    """Deliberately drop one undelivered note so it no longer blocks acceptance.
+
+    Only a note that never reached a worker can be discarded: a delivered note
+    is evidence of what the worker was told, and rewriting that history would
+    make the record lie.
+    """
+    existing = store.get_steering_note(db, note_id)
+    if existing is None:
+        raise ValueError(f"unknown steering note: {note_id}")
+    if existing.delivered:
+        raise ValueError(
+            f"steering note {note_id} was already delivered to attempt "
+            f"{existing.delivered_attempt_id}; a delivered note is kept as evidence"
+        )
+    if existing.discarded:
+        raise ValueError(f"steering note {note_id} is already discarded")
+    note = store.discard_steering_note(db, note_id, now=now)
+    if note is None:
+        raise ValueError(f"steering note {note_id} could not be discarded")
+    return note
+
+
+@dataclass(frozen=True)
+class RedirectResult:
+    """One redirected attempt: the stopped run, its checkpoint and the note."""
+
+    job: Job
+    note: SteeringNote
+    stopped_run_id: str
+    checkpoint_sha: str | None
+    handoff_id: str | None
+
+
+def redirect_job(
+    db: Any,
+    job_id: str,
+    body: str,
+    *,
+    now: datetime | None = None,
+) -> RedirectResult:
+    """Stop the running attempt, keep its work, and continue with ``body``.
+
+    ADR-0016 §2: a redirect records the note first, then stops the running
+    attempt at the supervision safe point (never by typing into the process),
+    captures its work as a checkpoint plus resume capsule, and hands the job
+    back to the ordinary scheduler with ``waiting_reason=REDIRECTED``.  The
+    next dispatched attempt restores that work and carries the note in its
+    prompt through the existing attempt-boundary delivery.
+
+    Nothing here relaxes admission, the gate, review or acceptance: the
+    continuation is a normal scheduled run.
+    """
+    job = store.get_job(db, job_id)
+    if job is None:
+        raise JobNotFoundError(f"unknown job: {job_id}")
+    if job.state is not JobState.RUNNING or not job.current_run_id:
+        raise ValueError(
+            f"job {job_id} is {job.state.value}; only a RUNNING job can be redirected "
+            "(use note_job for the next attempt of a queued job)"
+        )
+    from saberops.native_workers import native_run_marker
+
+    run_id = job.current_run_id
+    if native_run_marker(db, run_id) is not None:
+        raise ValueError(
+            f"job {job_id} runs as a native child; SaberOps cannot stop it at a safe "
+            "point. Use note_job: the note is delivered at its next heartbeat."
+        )
+
+    note = note_job(db, job_id, body, now=now)
+    # The durable marker lets crash recovery finish this redirect as a redirect
+    # (a deliberate correction) rather than as quota preemption.
+    from saberops.preemption import REDIRECT_REQUESTED_EVENT
+
+    db.record_event(
+        run_id,
+        REDIRECT_REQUESTED_EVENT,
+        payload={"job_id": job_id, "note_id": note.note_id},
+    )
+
+    from saberops.preemption import complete_preemption
+    from saberops.supervisor import RunSupervisor
+
+    supervisor = RunSupervisor(db=db)
+    stopped = supervisor.pause(run_id, reason="redirect")
+    run = db.get_run(run_id)
+    already_stopped = bool(run is not None and run.status is RunStatus.PREEMPTED)
+    if not stopped and not already_stopped:
+        raise ValueError(
+            f"the worker for job {job_id} could not be confirmed stopped; the note "
+            f"({note.note_id}) is pending and will ride the next attempt"
+        )
+
+    outcome = complete_preemption(
+        db,
+        run_id=run_id,
+        repo_path=job.repo,
+        job_id=job_id,
+        base_sha=job.base_sha,
+        decision_ref=f"redirect:{note.note_id}",
+        interruption="redirect",
+        now=now,
+    )
+    if not outcome.owned:
+        raise ValueError(
+            f"the attempt for job {job_id} was stopped but its work could not be "
+            f"parked ({outcome.detail}); the checkpoint is preserved and the next "
+            f"scheduler tick finishes the redirect. Note {note.note_id} stays pending."
+        )
+    if outcome.job is not None:
+        job = outcome.job
+    try:
+        from saberops.capacity.loop import wake_scheduler
+
+        wake_scheduler()
+    except Exception:
+        pass
+    return RedirectResult(
+        job=job,
+        note=note,
+        stopped_run_id=run_id,
+        checkpoint_sha=outcome.checkpoint_sha,
+        handoff_id=outcome.handoff_id,
+    )
 
 
 def list_jobs(
@@ -1122,12 +1258,16 @@ def reconcile_jobs(
             # Crash between run terminalization and job requeue (D8): finish
             # the protocol from durable state.  The coordinator is
             # idempotent; a concurrent cancel still wins via CAS inside.
-            from saberops.preemption import complete_preemption
+            # H6: a run stopped for a deliberate redirect finishes as a
+            # redirect (REDIRECTED, no preemption budget), never as quota
+            # preemption.
+            from saberops.preemption import complete_preemption, redirect_requested
 
             try:
                 outcome = complete_preemption(
                     db, run_id=run_id, repo_path=job.repo,
                     job_id=job.job_id, base_sha=job.base_sha, now=now,
+                    interruption="redirect" if redirect_requested(db, run_id) else "quota",
                 )
             except Exception:
                 continue

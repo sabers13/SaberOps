@@ -72,6 +72,8 @@ first missing step with no stored cursor.
 | `plan_status` | no | `plan_id` or `repo` | `saberops.plan_state.project_plan_state` (the exact `STATE.md` projection) |
 | `cancel_job` | yes | `job_id`, `reason` | `saberops.jobs.service.cancel_job` |
 | `note_job` | yes | `job_id`, `text` | `saberops.jobs.service.note_job` |
+| `redirect_job` | yes | `job_id`, `text` | `saberops.jobs.service.redirect_job` (stop, keep the work, continue with the note) |
+| `discard_note` | yes | `note_id` | `saberops.jobs.service.discard_note` (drop an undelivered note deliberately) |
 | `resume_job` | yes | `job_id`, `from` (`scratch`/`last_candidate`), `note`, `worker_binding` | `saberops.service.OrchestratorService.resume_job` (retry/continue paths) |
 | `ask_advisor` | no | `job_id`, `question` | `saberops.advisor.ask_advisor` (only listed when this project has an advisor route; see below) |
 | `capacity` | no | — | `saberops.jobs.service.capacity` |
@@ -263,6 +265,19 @@ continuation — and the attempt, run and time are recorded on the note. A job
 that finishes before another attempt keeps the note pending. `catch_up` and
 `orch job notes` list every note with its delivery state.
 
+`note_job` means "the next attempt is fine". When the correction must land now,
+`redirect_job` (or `orch job redirect`) stops the running attempt at the
+supervision safe point, keeps its work as a checkpoint plus resume capsule and
+requeues the job; the next scheduled attempt restores that work and carries the
+note in its prompt. A redirect never spends the preemption budget.
+
+A candidate whose job still has an undelivered note **cannot be accepted**, and
+the away-mode auto-accept pass never accepts past one: the engine refuses with
+the note ids and both ways out. `catch_up` names `redirect_job` (deliver it) or
+`discard_note` (drop a note that no longer applies) as the next action, and the
+accept checklist shows the same blocker. `discard_note` only drops a note that
+never reached a worker; a delivered note stays as evidence.
+
 An optional advisor (ADR-0034) answers on demand rather than at fixed
 checkpoints. Set it per project with
 `orch project advisor set <provider> <model> [--calls N]` and turn it off with
@@ -358,8 +373,8 @@ exclusive `flock` during each read-modify-write.
   `initialize` and released at EOF.
 * A second live client (a different, live `pid` holds the record) is read-only:
   calls to `submit_job`, `submit_plan`, `promote_scout`, `cancel_job`,
-  `note_job`, `resume_job`, `answer_question`, `propose_config_change` and
-  `propose_mode_change` are refused with JSON-RPC error `-32020`. Its read
+  `note_job`, `redirect_job`, `discard_note`, `resume_job`, `answer_question`,
+  `propose_config_change` and `propose_mode_change` are refused with JSON-RPC error `-32020`. Its read
   tools (`get_job`, `catch_up`, `list_jobs`, `capacity`, `read_evidence`,
   `list_questions`, `list_proposals`, `get_mode`, `get_pause`,
   `start_walkthrough`) keep working.

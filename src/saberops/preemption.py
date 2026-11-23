@@ -94,6 +94,10 @@ PREPARATION_EVENT = "preemption_preparing"
 INTENT_EVENT = "preemption_committed"
 #: Terminal run event for a completed park.
 RUN_PREEMPTED_EVENT = "run_preempted"
+#: H6: durable intent that a stopped attempt was stopped for an owner/planner
+#: redirect, not for quota exhaustion.  Recovery reads it so a crash between
+#: the stop and the job requeue finishes the same deliberate redirect.
+REDIRECT_REQUESTED_EVENT = "redirect_requested"
 #: Bound payload schema version for the decision receipt and the intent.
 DECISION_VERSION: int = 1
 INTENT_VERSION: int = 2
@@ -105,6 +109,23 @@ _QUOTA_EXHAUSTED = WorkerInterruptionReason.QUOTA_EXHAUSTED.value
 #: (``not_before=None``) and the accepted probe/periodic wake behavior --
 #: never a guessed timestamp, never unsafe early re-admission.
 _EVIDENCE_BACKED_RESET = frozenset({"EXACT", "PARSED"})
+
+
+def redirect_requested(db: Any, run_id: str) -> bool:
+    """True when a durable redirect marker names this run (read-only)."""
+    try:
+        return bool(db.get_events_by_type(run_id, REDIRECT_REQUESTED_EVENT))
+    except Exception:
+        return False
+
+
+def _interruption_label(interruption: str) -> str:
+    """The truthful checkpoint reason for a park: quota, a pause or a redirect."""
+    if interruption == "pause":
+        return "PAUSED"
+    if interruption == "redirect":
+        return "REDIRECTED"
+    return _QUOTA_EXHAUSTED
 
 
 @dataclass(frozen=True)
@@ -693,7 +714,7 @@ def find_preempted_job_for_run(db: Any, run_id: str) -> Job | None:
     if not isinstance(run_id, str) or not run_id:
         return None
     for job in store.list_jobs_raw(db, state=JobState.QUEUED, limit=100_000):
-        if job.waiting_reason != WaitingReason.PREEMPTED:
+        if job.waiting_reason not in (WaitingReason.PREEMPTED, WaitingReason.REDIRECTED):
             continue
         resume = job.resume_from
         if resume is not None and resume.run_id == run_id:
@@ -982,6 +1003,7 @@ def _resolve_anchor_sha(
     job: Job,
     worktree_path: str | None,
     base_sha: str | None,
+    label: str = _QUOTA_EXHAUSTED,
 ) -> str | None:
     """Resolve the exact commit SHA to anchor, failing closed with None.
 
@@ -1044,7 +1066,7 @@ def _resolve_anchor_sha(
                 sha = GitManager.create_checkpoint_commit(
                     work,
                     f"orch checkpoint({run_id}/preempt): "
-                    "partial worker state (QUOTA_EXHAUSTED)",
+                    f"partial worker state ({label.upper()})",
                 )
                 if sha is None:
                     return None
@@ -1121,6 +1143,7 @@ def _ensure_old_checkpoint_row(
     checkpoint_sha: str,
     handoff_id: str | None,
     now_iso: str,
+    reason: str = _QUOTA_EXHAUSTED,
 ) -> None:
     """Ensure the old run owns a checkpoint row for the anchored SHA.
 
@@ -1133,6 +1156,10 @@ def _ensure_old_checkpoint_row(
     the anchor ref plus the resume capsule already carry the durable
     resume contract, and the tree is identical to base.  Best-effort
     history only: persistence failure here must not block preemption.
+
+    ``reason`` names what parked the work (quota exhaustion, a pause or a
+    redirect).  It must be truthful: the resumed run reads this row to decide
+    which providers the interruption implicated.
     """
     try:
         if db.get_worker_checkpoint_by_sha(run_id, checkpoint_sha) is not None:
@@ -1140,13 +1167,12 @@ def _ensure_old_checkpoint_row(
     except Exception:
         return
     source_attempt = ""
-    reason = _QUOTA_EXHAUSTED
     changed: tuple[str, ...] = ()
     try:
         latest = db.get_latest_worker_checkpoint(run_id)
         if latest is not None:
             source_attempt = str(getattr(latest, "source_attempt_id", "") or "")
-            reason = str(getattr(latest, "reason", "") or _QUOTA_EXHAUSTED)
+            reason = str(getattr(latest, "reason", "") or reason)
             raw_changed = getattr(latest, "changed_paths", ())
             changed = tuple(str(p) for p in (raw_changed or ()))
     except Exception:
@@ -1411,8 +1437,17 @@ def complete_preemption(
     # pause as for quota exhaustion, but a pause is the owner's stop, not a
     # resource failure: it must not consume the bounded preemption budget and
     # its job waits under PAUSED until the owner confirms a resume.
+    # H6: a redirect parks the same way but is a deliberate correction, so it
+    # also skips the budget and hands the job back under REDIRECTED for the
+    # ordinary scheduler to continue with the pending note.
     pause = interruption == "pause"
-    requeue_reason = WaitingReason.PAUSED if pause else WaitingReason.PREEMPTED
+    redirect = interruption == "redirect"
+    if pause:
+        requeue_reason = WaitingReason.PAUSED
+    elif redirect:
+        requeue_reason = WaitingReason.REDIRECTED
+    else:
+        requeue_reason = WaitingReason.PREEMPTED
     moment = now if now is not None else datetime.now(UTC)
     now_iso = moment.isoformat()
     repo = Path(repo_path).resolve() if not isinstance(repo_path, Path) else repo_path
@@ -1432,7 +1467,7 @@ def complete_preemption(
         return PreemptionOutcome(owned=False, detail="run_not_running")
     else:
         run_already_preempted = False
-    if not run_already_preempted and not pause:
+    if not run_already_preempted and not pause and not redirect:
         if not has_genuine_quota_signal(db, run_id):
             return PreemptionOutcome(owned=False, detail="no_quota_signal")
         if not has_no_eligible_evidence(db, run_id):
@@ -1466,14 +1501,17 @@ def complete_preemption(
                 owned=False, detail="job_not_owned", job=related
             )
         return PreemptionOutcome(owned=False, detail="no_job")
-    if job.state == JobState.QUEUED and job.waiting_reason == WaitingReason.PREEMPTED:
+    if (
+        job.state == JobState.QUEUED
+        and job.waiting_reason in (WaitingReason.PREEMPTED, WaitingReason.REDIRECTED)
+    ):
         resume = job.resume_from
         if resume is not None and resume.run_id == run_id:
-            # Already preempted by an earlier invocation: converge, count once.
+            # Already parked by an earlier invocation: converge, count once.
             return PreemptionOutcome(
                 owned=True, detail="already_preempted",
                 status=RunStatus.PREEMPTED,
-                summary=f"Run {run_id} already preempted for job {job.job_id}.",
+                summary=f"Run {run_id} already parked for job {job.job_id}.",
                 job=job, checkpoint_sha=resume.checkpoint_sha,
                 handoff_id=resume.handoff_id, preemptions=job.preemptions,
                 not_before=job.not_before,
@@ -1482,14 +1520,14 @@ def complete_preemption(
     if job.state != JobState.RUNNING or job.current_run_id != run_id:
         # Cancelled, terminal, or already re-dispatched: fail closed, touch nothing.
         return PreemptionOutcome(owned=False, detail="job_not_owned", job=job)
-    if not pause and job.preemptions >= max_preemptions:
+    if not pause and not redirect and job.preemptions >= max_preemptions:
         return _fail_at_limit(
             db, run_id=run_id, job=job,
             max_preemptions=max_preemptions, now=moment, now_iso=now_iso,
             owner_id=owner_id, owner_generation=owner_generation,
         )
 
-    not_before = None if pause else quota_reset_eta(db, run_id)
+    not_before = None if pause or redirect else quota_reset_eta(db, run_id)
     preemptions_before = int(job.preemptions)
 
     # Crash-replay: an existing prepared intent is reused ONLY when the whole
@@ -1552,6 +1590,7 @@ def complete_preemption(
         checkpoint_sha = _resolve_anchor_sha(
             db, repo_path=repo, run_id=run_id, job=job,
             worktree_path=worktree_path, base_sha=base_sha,
+            label=_interruption_label(interruption),
         )
         if checkpoint_sha is None:
             return PreemptionOutcome(owned=False, detail="no_anchor", job=job)
@@ -1574,6 +1613,7 @@ def complete_preemption(
         _ensure_old_checkpoint_row(
             db, run_id=run_id, job=job, checkpoint_sha=checkpoint_sha,
             handoff_id=handoff_id, now_iso=now_iso,
+            reason=_interruption_label(interruption),
         )
         intent_payload: dict[str, Any] = {
             "version": INTENT_VERSION,
@@ -1585,11 +1625,14 @@ def complete_preemption(
             "preemptions_before": preemptions_before,
             "owner_id": owner_id,
             "owner_generation": owner_generation,
-            "interruption": "pause" if pause else "quota",
+            "interruption": (
+                "pause" if pause else ("redirect" if redirect else "quota")
+            ),
         }
-        if not pause:
-            # A pause does not consume the preemption budget, so it records no
-            # ``preemptions_next`` (the verifier requires before+1 when present).
+        if not pause and not redirect:
+            # A pause or redirect does not consume the preemption budget, so it
+            # records no ``preemptions_next`` (the verifier requires before+1
+            # when present).
             intent_payload["preemptions_next"] = preemptions_before + 1
         try:
             db.record_event(run_id, INTENT_EVENT, payload=intent_payload)
@@ -1604,6 +1647,12 @@ def complete_preemption(
             f"Run {run_id} PAUSED ({decision_ref or 'owner gate'}). WIP anchored at "
             f"{checkpoint_ref} ({checkpoint_sha[:12]}); job {job.job_id} parked "
             "with its resume capsule until a confirmed resume."
+        )
+    elif redirect:
+        summary = (
+            f"Run {run_id} REDIRECTED ({decision_ref or 'owner correction'}). WIP "
+            f"anchored at {checkpoint_ref} ({checkpoint_sha[:12]}); job {job.job_id} "
+            "requeued with its resume capsule and the pending steering note."
         )
     else:
         summary = (
@@ -1685,7 +1734,9 @@ def complete_preemption(
     except Exception:
         pass
     return PreemptionOutcome(
-        owned=True, detail="preempted", status=RunStatus.PREEMPTED,
+        owned=True,
+        detail="redirected" if redirect else "preempted",
+        status=RunStatus.PREEMPTED,
         summary=summary, job=requeued, checkpoint_sha=checkpoint_sha,
         checkpoint_ref=checkpoint_ref, handoff_id=handoff_id,
         preemptions=requeued.preemptions, not_before=requeued.not_before,
@@ -1882,6 +1933,7 @@ __all__ = [
     "INTENT_EVENT",
     "INTENT_VERSION",
     "PREPARATION_EVENT",
+    "REDIRECT_REQUESTED_EVENT",
     "RUN_PREEMPTED_EVENT",
     "PreemptionDecision",
     "PreemptionOutcome",
@@ -1903,5 +1955,6 @@ __all__ = [
     "prepare_resume",
     "quota_reset_eta",
     "record_preparation_decision",
+    "redirect_requested",
     "verify_prepared_artifacts",
 ]

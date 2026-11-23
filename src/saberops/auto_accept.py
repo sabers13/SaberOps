@@ -40,6 +40,7 @@ from saberops.gate_receipt import find_valid_receipt
 from saberops.git import GitManager, GitRefRaceError
 from saberops.models import AttemptStatus, ReviewVerdict, RunStatus
 from saberops.owner_mode import ModeAction, OwnerMode, decide_owner_action
+from saberops.steering import undelivered_note_block_text, undelivered_notes_for_run
 
 if TYPE_CHECKING:
     from saberops.db import Database
@@ -381,6 +382,29 @@ def evaluate_auto_accept(
         True,
         f"candidate is commit {candidate_sha[:8]} from attempt #{attempt.attempt_number}",
     )
+
+    # H6 (ADR-0016): the away-mode pass must never accept past a steering note
+    # that never reached a worker.  The owner is told to redirect or discard it;
+    # until then the candidate is not auto-acceptable.
+    pending_notes = undelivered_notes_for_run(db, run_id)
+    if not _check(
+        checks,
+        "steering_notes",
+        not pending_notes,
+        (
+            undelivered_note_block_text(pending_notes[0].job_id, pending_notes)
+            if pending_notes
+            else "no undelivered steering note blocks this candidate"
+        ),
+    ):
+        return _refused(
+            run_id=run_id,
+            mode=mode_value,
+            checks=checks,
+            candidate_sha=candidate_sha,
+            base_sha=run.base_commit,
+            target_repo=run.target_repo,
+        )
 
     accepted_sha = _already_accepted_candidate(db, run_id)
     if not _check(

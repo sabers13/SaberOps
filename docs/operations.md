@@ -478,8 +478,10 @@ final state and the exact next owner action, renamed with an `-ok`, `-failed`,
 pause state.
 
 The view is read-only: the store is opened read-only and no window has a
-worker input path, so keystrokes cannot reach a worker. Steering is unchanged
-(`orch job note JOB_ID --text ...`). The session is marked with the tmux user
+worker input path, so keystrokes cannot reach a worker. Steering is unchanged:
+`orch job note JOB_ID --text ...` waits for the next attempt, and
+`orch job redirect JOB_ID --text ...` stops the attempt, keeps its work and
+delivers the note in the continuation attempt. The session is marked with the tmux user
 option `@saberops_watch=1`; a default name that belongs to another session is
 skipped with a numeric suffix, and an explicit `--session` name that already
 exists without the marker is refused rather than touched. Use `--once` to

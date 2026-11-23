@@ -35,6 +35,7 @@ from saberops.provenance import (
     assert_run_repository,
     execution_authorized_bases,
 )
+from saberops.steering import undelivered_note_block_text, undelivered_notes_for_run
 
 
 @dataclass(frozen=True)
@@ -932,6 +933,29 @@ class AcceptEngine:
             )
         )
 
+        # H6 (ADR-0016): a steering note that never reached a worker is a
+        # correction the engine still owes the worker.  Accepting past it would
+        # publish work the owner already asked to change, so the candidate is
+        # ineligible until the note is delivered by a redirect or the owner
+        # deliberately discards it.
+        pending_notes = undelivered_notes_for_run(self.db, run_id)
+        if pending_notes:
+            checks.append(
+                _fail(
+                    "steering_notes",
+                    "Steering notes delivered",
+                    undelivered_note_block_text(pending_notes[0].job_id, pending_notes),
+                )
+            )
+            return AcceptEligibility(run_id=run_id, eligible=False, checks=tuple(checks))
+        checks.append(
+            _pass(
+                "steering_notes",
+                "Steering notes delivered",
+                "No undelivered steering note blocks this candidate",
+            )
+        )
+
         # Target repository: derived from the run row, never the UI selection.
         try:
             target_repo = assert_run_repository(run).resolve()
@@ -1352,6 +1376,19 @@ class AcceptEngine:
                     f"into '{final_branch}' (durable acceptance record)."
                 ),
                 gate_passed=self._validation_policy(run_id)[0],
+            )
+
+        # H6 (ADR-0016): acceptance never publishes past a steering note that
+        # did not reach a worker.  Same predicate as the read-only checklist, so
+        # the projected eligibility and the enforced precondition cannot drift.
+        # This runs after the idempotent "already integrated" return: a repeat
+        # accept of a durable acceptance reports success, it does not resurrect
+        # a note the owner can no longer deliver.
+        pending_notes = undelivered_notes_for_run(self.db, run_id)
+        if pending_notes:
+            raise RuntimeError(
+                f"Cannot accept run '{run_id}': "
+                + undelivered_note_block_text(pending_notes[0].job_id, pending_notes)
             )
 
         # Target repository HEAD must match the run's base_commit, unless the

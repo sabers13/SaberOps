@@ -348,11 +348,16 @@ stays attended.
 - Report back to the owner in plain words: what finished, what failed and why,
   and what needs their decision. Link them to the run on the SaberOps page.
 - `cancel_job` only for work you submitted by mistake or that the owner stopped.
-- When the owner corrects a running job, call `note_job` with their correction.
-  It is stored durably and reaches the worker once, in the prompt of the next
-  attempt; it is never typed into a running worker, so a job that finishes
-  before another attempt keeps the note pending. `catch_up` lists every note
-  with whether it was delivered and to which attempt.
+- When the owner corrects a running job, call `redirect_job` with their
+  correction when it must land now: the current attempt stops at a safe point,
+  its work is kept as a checkpoint and the next attempt restores it with the
+  note in its prompt. Use `note_job` when the next attempt is soon enough.
+  Neither is ever typed into a running worker; `catch_up` lists every note with
+  whether it was delivered and to which attempt.
+- A candidate cannot be accepted while one of its job's notes is undelivered,
+  and away mode never auto-accepts past one. `catch_up` then offers
+  `redirect_job` to deliver the note or `discard_note` to drop one that no
+  longer applies.
 
 ## Resuming a failed job
 - When a job fails, call `resume_job` with its `job_id`. `from: "scratch"`

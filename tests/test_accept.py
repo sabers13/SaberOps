@@ -89,6 +89,7 @@ ENGINE_MIRRORED_BLOCKING_KEYS = frozenset(
         "candidate_available",
         "candidate_provenance",
         "candidate_not_rejected",
+        "steering_notes",
         "target_repository",
         "target_clean",
         "target_head",

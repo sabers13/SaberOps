@@ -2496,6 +2496,29 @@ def build_parser() -> argparse.ArgumentParser:
     job_notes.add_argument("job_id", type=str, help="Job identifier.")
     job_notes.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
     job_notes.add_argument("--json", action="store_true", help="JSON output")
+    job_redirect = job_sub.add_parser(
+        "redirect",
+        help=(
+            "Stop the running attempt, keep its work and continue with your correction "
+            "(the note travels in the continuation attempt's prompt)."
+        ),
+    )
+    job_redirect.add_argument("job_id", type=str, help="Job identifier (must be RUNNING).")
+    job_redirect.add_argument(
+        "--text",
+        type=str,
+        required=True,
+        help="Correction for the continuation attempt.",
+    )
+    job_redirect.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
+    job_redirect.add_argument("--json", action="store_true", help="JSON output")
+    job_note_discard = job_sub.add_parser(
+        "note-discard",
+        help="Drop one undelivered steering note so it no longer blocks acceptance.",
+    )
+    job_note_discard.add_argument("note_id", type=int, help="Steering note identifier.")
+    job_note_discard.add_argument("--db", type=str, default=None, help="Path to SQLite database.")
+    job_note_discard.add_argument("--json", action="store_true", help="JSON output")
 
     # orch scheduler run [--once] [--interval-seconds INT]
     scheduler_parser = subparsers.add_parser(
@@ -7854,12 +7877,71 @@ def handle_job_notes(args: argparse.Namespace) -> int:
         print("No steering notes recorded.")
         return 0
     for note in notes:
-        status = (
-            f"delivered to attempt {note.delivered_attempt_id}"
-            if note.delivered
-            else "pending"
-        )
+        if note.delivered:
+            status = f"delivered to attempt {note.delivered_attempt_id}"
+        elif note.discarded:
+            status = f"discarded at {note.discarded_at}"
+        else:
+            status = "pending"
         print(f"{note.note_id}: [{status}] {note.body}")
+    return 0
+
+
+def handle_job_redirect(args: argparse.Namespace) -> int:
+    """Handle `orch job redirect` (stop, keep the work, continue with the note)."""
+    from saberops.db import Database as _Database
+    from saberops.jobs.service import JobNotFoundError as _NotFound
+    from saberops.jobs.service import redirect_job as _redirect
+
+    try:
+        result = _redirect(_Database(args.db), str(args.job_id), str(args.text))
+    except _NotFound:
+        print(f"Error: unknown job: {args.job_id}", file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        print(f"[!] Cannot redirect job: {exc}", file=sys.stderr)
+        return 2
+    payload = {
+        "job_id": result.job.job_id,
+        "note_id": result.note.note_id,
+        "note": result.note.to_dict(),
+        "stopped_run_id": result.stopped_run_id,
+        "checkpoint_sha": result.checkpoint_sha,
+        "handoff_id": result.handoff_id,
+        "state": result.job.state.value,
+        "waiting_reason": (
+            result.job.waiting_reason.value
+            if result.job.waiting_reason is not None
+            else None
+        ),
+    }
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"Job        : {result.job.job_id}")
+    print(f"State      : {result.job.state.value}")
+    print(f"Stopped    : {result.stopped_run_id}")
+    print(f"Checkpoint : {result.checkpoint_sha or 'none'}")
+    print(f"Note       : {result.note.note_id} (carried by the continuation attempt)")
+    return 0
+
+
+def handle_job_note_discard(args: argparse.Namespace) -> int:
+    """Handle `orch job note-discard` (drop an undelivered note deliberately)."""
+    from saberops.db import Database as _Database
+    from saberops.jobs.service import discard_note as _discard
+
+    try:
+        note = _discard(_Database(args.db), int(args.note_id))
+    except ValueError as exc:
+        print(f"[!] Cannot discard note: {exc}", file=sys.stderr)
+        return 2
+    if getattr(args, "json", False):
+        print(json.dumps(note.to_dict(), indent=2, sort_keys=True))
+        return 0
+    print(f"Note       : {note.note_id}")
+    print(f"Job        : {note.job_id}")
+    print("State      : discarded (no longer blocks acceptance)")
     return 0
 
 
@@ -9086,6 +9168,10 @@ def _dispatch(args: argparse.Namespace) -> int:
             return handle_job_note(args)
         elif args.job_command == "notes":
             return handle_job_notes(args)
+        elif args.job_command == "redirect":
+            return handle_job_redirect(args)
+        elif args.job_command == "note-discard":
+            return handle_job_note_discard(args)
     elif args.command == "scheduler":
         if args.scheduler_command == "run":
             return handle_scheduler_run(args)
