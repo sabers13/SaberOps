@@ -127,10 +127,10 @@ class RunConfig:
     # Frozen candidate-publication decision for this run: whether every
     # gate-passed candidate commit is published (non-force, exact-SHA) to the
     # target repository's ``origin`` as the Orch candidate branch for external
-    # review.  Resolved once at run creation from the owner authority
-    # (``auto_publish_candidate``) unless the owner explicitly overrides it
-    # per run; retry/repair/review inherit this persisted decision and never
-    # re-read live authority policy.  This is candidate visibility only --
+    # review.  Resolved once at run creation from the owner mode's stored
+    # permissions (``auto_publish_candidate``) unless the owner explicitly
+    # overrides it per run; retry/repair/review inherit this persisted decision
+    # and never re-read the live mode.  This is candidate visibility only --
     # never accepted-target/main publication.
     publish_candidate: bool = False
     tool_refs: tuple[str, ...] = ()
@@ -477,8 +477,8 @@ def resolve_run_config(
         review_limit=review_limit,
         review_policy_mode=resolved_review_policy_mode,
         # Freeze the candidate-publication decision at run creation: an
-        # explicit owner override wins; otherwise the persisted authority
-        # policy decides.  Never re-derived later for an already-created run.
+        # explicit owner override wins; otherwise the owner mode's stored
+        # permissions decide.  Never re-derived later for an already-created run.
         publish_candidate=(
             bool(publish_candidate)
             if publish_candidate is not None

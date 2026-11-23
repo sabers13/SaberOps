@@ -3,11 +3,12 @@
 The rig builds a real isolated store and toy repository.  These tests exercise
 the owner-visible behaviour the lane promises:
 
-* plan auto-advance asks F1's typed effective-permission function; a narrower
-  authority preset refuses a start with the reason visible in ``STATE.md``;
+* plan auto-advance asks F1's typed effective-permission function; a migrated
+  store without auto_start refuses a start with the reason visible in
+  ``STATE.md``;
 * ``away`` keeps submitting unblocked lanes and then parks at the first
-  candidate when the preset does not grant auto-accept, with the accept as the
-  next action;
+  candidate when the stored permissions do not grant auto-accept, with the
+  accept as the next action;
 * a stall and a completion each notify once, and a repeated tick sends nothing;
 * M3's return summary carries the plan section, and ``catch_up`` exposes it;
 * the planner guide/skill and the MCP docs no longer claim a ledger wave or an

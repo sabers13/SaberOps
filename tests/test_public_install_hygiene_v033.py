@@ -15,7 +15,6 @@ from pathlib import Path
 import pytest
 
 from saberops import paths as saberops_paths
-from saberops.authority import get_authority_config_path
 from saberops.cli import (
     _check_core_imports,
     _check_dev_imports,
@@ -32,6 +31,7 @@ from saberops.db import (
     get_db_schema_version,
     get_default_db_path,
 )
+from saberops.paths import get_owner_mode_path
 from saberops.paths import get_projects_registry_path as get_default_projects_path
 from saberops.project import owner_state_dir, projects_state_root
 from saberops.routing_config import get_user_routing_path
@@ -172,13 +172,13 @@ def test_default_config_paths_use_saberops_namespace(
 ) -> None:
     expected_dir = isolated_xdg["XDG_CONFIG_HOME"] / "saberops"
     assert get_user_routing_path() == expected_dir / "routing.json"
-    assert get_authority_config_path() == expected_dir / "authority.json"
+    assert get_owner_mode_path() == expected_dir / "mode.json"
     assert get_control_plane_config_path() == expected_dir / "control_plane.json"
     assert get_binding_store_path() == expected_dir / "bindings.json"
     assert default_registry_path() == expected_dir / "tools.json"
     for path in (
         get_user_routing_path(),
-        get_authority_config_path(),
+        get_owner_mode_path(),
         get_control_plane_config_path(),
         get_binding_store_path(),
         default_registry_path(),
@@ -193,7 +193,7 @@ def test_binding_routing_authority_share_one_config_namespace(
     """All owner config resolves consistently under the one namespace."""
     parents = {
         get_user_routing_path().parent,
-        get_authority_config_path().parent,
+        get_owner_mode_path().parent,
         get_control_plane_config_path().parent,
         get_binding_store_path().parent,
         default_registry_path().parent,
@@ -272,8 +272,8 @@ def test_legacy_config_not_modified_by_starting_saberops(
 
     assert get_user_routing_path() != legacy_routing
     assert not get_user_routing_path().exists()
-    assert get_authority_config_path() != (
-        isolated_xdg["XDG_CONFIG_HOME"] / "orchestrator-v2" / "authority.json"
+    assert get_owner_mode_path() != (
+        isolated_xdg["XDG_CONFIG_HOME"] / "orchestrator-v2" / "mode.json"
     )
 
     assert _file_hash(legacy_routing) == before_hash
@@ -352,7 +352,7 @@ def test_no_default_path_carries_legacy_segments(
     candidates = [
         get_default_db_path(),
         get_user_routing_path(),
-        get_authority_config_path(),
+        get_owner_mode_path(),
         get_control_plane_config_path(),
         get_binding_store_path(),
         default_registry_path(),

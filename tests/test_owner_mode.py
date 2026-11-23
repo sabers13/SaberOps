@@ -191,33 +191,6 @@ def _expected_action(
     return expected[field]
 
 
-def test_frozen_legacy_table_matches_the_old_reader() -> None:
-    """Expand step: the frozen table is the old reader's answer, proven on main.
-
-    The preset rows come from the still-present ``saberops.authority``; the
-    ``ask-me`` clearing rule is transcribed from the pre-1.1
-    ``owner_mode.effective_authority_policy`` (git history).  This comparison is
-    deleted with ``saberops.authority`` in the contract step; the table itself
-    stays and keeps guarding the new reader.
-    """
-    from saberops.authority import AUTHORITY_PRESETS, AuthorityMode
-
-    for preset, mode in _LEGACY_EFFECTIVE:
-        old = AUTHORITY_PRESETS[AuthorityMode(preset)]
-        if mode == "ask-me":
-            old = replace(
-                old,
-                auto_retry=False,
-                auto_repair=False,
-                auto_escalate_when_policy_justifies=False,
-                auto_accept=False,
-                auto_safe_cleanup=False,
-                auto_publish=False,
-                auto_publish_candidate=False,
-            )
-        assert old.as_dict() == _expected(preset, mode), (preset, mode)
-
-
 def test_mode_ceiling_never_exceeds_the_widest_legacy_pair() -> None:
     """No mode can permit more than the widest old store already could."""
     for mode, ceiling in MODE_CEILINGS.items():

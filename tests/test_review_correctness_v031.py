@@ -243,6 +243,7 @@ def test_security_surface_recognized() -> None:
         "src/saberops/sandbox/policy.py",
         "src/saberops/control_plane/policy.py",
         "src/saberops/authority.py",
+        "src/saberops/owner_mode.py",
         "src/saberops/provenance.py",
     ):
         classification = _classify((path,))

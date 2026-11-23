@@ -179,7 +179,10 @@ _HARD_GOVERNANCE_PATH_PATTERNS: Final[tuple[str, ...]] = (
 _SECURITY_PATH_PATTERNS: Final[tuple[str, ...]] = (
     _PKG_PREFIX + r"sandbox/",
     _PKG_PREFIX + r"control_plane/",
+    # The permission declaration moved from authority.py to owner_mode.py in
+    # ADR-0082; both stay classified so a historical removal diff is covered.
     _PKG_PREFIX + r"authority\.py$",
+    _PKG_PREFIX + r"owner_mode\.py$",
     _PKG_PREFIX + r"publishing\.py$",
     _PKG_PREFIX + r"execution_failover\.py$",
     _PKG_PREFIX + r"ownership\.py$",

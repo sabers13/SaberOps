@@ -122,11 +122,6 @@ def get_user_routing_path() -> Path:
     return saberops_config_dir() / "routing.json"
 
 
-def get_authority_config_path() -> Path:
-    """Return the canonical owner authority-config path."""
-    return saberops_config_dir() / "authority.json"
-
-
 def get_owner_mode_path() -> Path:
     """Return the canonical owner-mode document path."""
     return saberops_config_dir() / "mode.json"
