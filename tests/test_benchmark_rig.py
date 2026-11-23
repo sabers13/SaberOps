@@ -21,6 +21,7 @@ from benchmark_rig import (
     BENCHMARK_TIMEOUT_SECONDS,
     C2_RECOVERY_LIMIT_SECONDS,
     DRILL_VISIBLE_LIMIT_SECONDS,
+    install_stub_notifier,
     run_failure_drills,
     run_fake_benchmark,
     run_gate_protection_drill,
@@ -1448,6 +1449,176 @@ def test_paced_submission_fills_free_slots_instead_of_a_queue() -> None:
     assert burst_before_tick[0] == len(order)
 
 
+def test_batch_pacer_uses_the_route_pool_limit() -> None:
+    """A batch's paced slots are min(global, its route's pool max_concurrent).
+
+    Claude's packaged plan allows one concurrent job while Codex and OpenCode
+    Go allow two, so the global default of two must not submit a second Claude
+    task into a queued position.
+    """
+    from saberops.benchmark import batch_submit_pacer
+    from saberops.control_plane.plans import (
+        PlanSet,
+        PoolMember,
+        PoolPlan,
+    )
+    from saberops.control_plane.policy import (
+        ControlPlanePolicy,
+        packaged_control_plane_policy,
+    )
+    from saberops.models import WorkerCandidate
+
+    global_pacer = SubmitPacer("paced", DEFAULT_SUBMIT_CONCURRENCY)
+    packaged = packaged_control_plane_policy()
+    codex = WorkerCandidate("codex", "gpt-6-luna")
+    opencode = WorkerCandidate("opencode", "opencode-go/deepseek-v4.1-flash")
+    claude = WorkerCandidate("anthropic", "claude-haiku-4-5-20251001")
+
+    assert batch_submit_pacer(global_pacer, codex, policy=packaged).concurrency == 2
+    assert (
+        batch_submit_pacer(global_pacer, opencode, policy=packaged).concurrency == 2
+    )
+    assert batch_submit_pacer(global_pacer, claude, policy=packaged).concurrency == 1
+    # A lower global setting still wins.
+    assert (
+        batch_submit_pacer(
+            SubmitPacer("paced", 1), codex, policy=packaged
+        ).concurrency
+        == 1
+    )
+    # Burst keeps its always-submit behaviour whatever the pool allows.
+    assert batch_submit_pacer(
+        SubmitPacer("burst", 2), claude, policy=packaged
+    ).may_submit(9)
+
+    # An owner plan override wins over the packaged limit.
+    owner_capped = ControlPlanePolicy(
+        packaged.provider_policies,
+        {},
+        "test-policy-hash",
+        PlanSet(
+            pool_plans={
+                "codex-one": PoolPlan(
+                    pool_id="codex-one",
+                    members=(PoolMember(route="codex"),),
+                    max_concurrent=1,
+                )
+            }
+        ),
+    )
+    assert (
+        batch_submit_pacer(global_pacer, codex, policy=owner_capped).concurrency == 1
+    )
+
+
+def test_paced_batch_never_queues_behind_a_one_slot_pool(
+    rig: RigEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """With a pool limit of 1 the second task is submitted only when it is free.
+
+    The owner plan is overridden to one codex slot while the global paced
+    default stays two.  The engine must never record a ``CONCURRENCY`` wait for
+    the batch, which is the failure the confirming run exposed when Claude's
+    one-slot pool was paced at the global two.
+    """
+    from saberops.benchmark import (
+        RealBatch,
+        _drive_real_batch,
+        _worker_submitter,
+        batch_submit_pacer,
+        batch_worker_candidate,
+        create_toy_repository,
+    )
+    from saberops.cli import main as cli_main
+    from saberops.control_plane.plans import load_packaged_plans_raw
+    from saberops.control_plane.policy import (
+        _read_raw_doc,
+        load_control_plane_policy,
+        save_owner_control_plane,
+    )
+    from saberops.jobs import store as jobs_store
+    from saberops.models import ReviewPolicyMode
+    from saberops.project_settings import set_project_review_policy
+
+    packaged = load_packaged_plans_raw()
+    entry = dict(packaged["quota_pools"]["chatgpt-plus"])
+    entry.pop("account", None)
+    entry["max_concurrent"] = 1
+    # Preserve the rig's posture attestations: a full owner document replaces
+    # every section it carries.
+    owner_doc = _read_raw_doc()
+    owner_doc.setdefault("version", 2)
+    raw_pools = owner_doc.get("quota_pools")
+    pools = dict(raw_pools) if isinstance(raw_pools, dict) else {}
+    pools["chatgpt-plus"] = entry
+    owner_doc["quota_pools"] = pools
+    save_owner_control_plane(owner_doc)
+    policy = load_control_plane_policy()
+    assert policy.plans.pool_plans["chatgpt-plus"].max_concurrent == 1
+
+    models = {"codex": "gpt-5.6-terra"}
+    candidate = batch_worker_candidate("codex", models)
+    global_pacer = SubmitPacer("paced", DEFAULT_SUBMIT_CONCURRENCY)
+    assert global_pacer.concurrency == 2
+    assert (
+        batch_submit_pacer(global_pacer, candidate, policy=policy).concurrency == 1
+    )
+
+    tasks = (TASKS_BY_ID["add-function"], TASKS_BY_ID["rename"])
+    parent = tmp_path / "one-slot-repos"
+    repos: dict[str, Path] = {}
+    for task in tasks:
+        repo, _sha = create_toy_repository(
+            parent, f"toy-{task.task_id}", task_id=task.task_id
+        )
+        set_project_review_policy(repo, ReviewPolicyMode.ALWAYS_REQUIRED)
+        assert (
+            cli_main(["project", "set-gate", "--repo", str(repo), rig.gate_command])
+            == 0
+        )
+        repos[task.task_id] = repo
+    rig.set_reviewer_verdict("PASS")
+    # The batch driver waits for the engine's completion-notice attempt; the
+    # suite disables desktop delivery, so give it the same local stub the fake
+    # benchmark uses instead of waiting for a notice that can never arrive.
+    install_stub_notifier(rig.root, monkeypatch)
+
+    db = rig.db()
+    jobs: dict[str, str] = {}
+    submitted_at: dict[str, float] = {}
+    all_jobs: list[str] = []
+    outcome = _drive_real_batch(
+        batch=RealBatch("codex", "anthropic", tasks),
+        db=db,
+        readiness=ReadinessService.for_owner_state(owner_state_dir()),
+        jobs=jobs,
+        max_wait=120.0,
+        worker_candidate=candidate,
+        policy=policy,
+        submit=_worker_submitter(
+            db=db,
+            repos=repos,
+            subscription="codex",
+            submitted_at=submitted_at,
+            all_jobs=all_jobs,
+        ),
+        pacer=global_pacer,
+    )
+
+    assert outcome.submit_concurrency == 1
+    assert outcome.max_submit_depth == 1
+    assert set(outcome.accepted) == {task.task_id for task in tasks}
+    for job_id in jobs.values():
+        reasons = [
+            json.loads(event["payload_json"] or "{}").get("waiting_reason")
+            for event in jobs_store.list_events(db, job_id)
+            if event["kind"] == "waiting"
+        ]
+        assert WaitingReason.CONCURRENCY.value not in reasons
+
+
 def _accepted_task(*, start_after: float, accepted_after: float) -> TaskResult:
     """One accepted row with known submit->start and submit->accept latencies."""
     return TaskResult(
@@ -1481,6 +1652,7 @@ def test_report_scores_final_targets_only_for_a_paced_real_run() -> None:
         finished_at=1200.0,
         submission_mode="paced",
         submit_concurrency=2,
+        batch_slot_limits=(("codex", 2), ("opencode", 2), ("claude", 1)),
     )
     assert report.targets_scored is True
     assert report.targets_passed is True
@@ -1489,6 +1661,10 @@ def test_report_scores_final_targets_only_for_a_paced_real_run() -> None:
     assert nearest_rank_percentile([10.0, 20.0, 30.0, 100.0], 95) == 100.0
     table = report.table()
     assert "submission: paced" in table
+    # Queue wait is part of the scored submit-to-start figure, and each batch's
+    # pool-capped slot count is printed beside the deepest queue.
+    assert "queue wait is included in submit-to-start" in table
+    assert "slots codex=2, opencode=2, claude=1" in table
     assert "target verdict: PASS" in table
     # From-start is printed next to the from-submit figure (100s vs 96s).
     for result in report.results:

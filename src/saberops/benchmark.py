@@ -31,7 +31,10 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from saberops.models import WorkerCandidate
 
 TaskExpectation = Literal["accepted", "review_blocked"]
 SubscriptionFamily = Literal["codex", "opencode"]
@@ -64,7 +67,8 @@ SubmitMode = Literal["paced", "burst"]
 DEFAULT_SUBMIT_MODE: SubmitMode = "paced"
 
 #: Worker slots the paced mode may fill.  The confirming real runs dispatched
-#: two workers at a time, so two is the default; pass ``--concurrency`` to match
+#: two workers at a time, so two is the default; each real batch further caps
+#: this at its route's pool ``max_concurrent``.  Pass ``--concurrency`` to match
 #: the host's actual concurrently dispatching worker count.
 DEFAULT_SUBMIT_CONCURRENCY = 2
 
@@ -110,6 +114,52 @@ class SubmitPacer:
         if not self.paced:
             return True
         return in_flight < self.concurrency
+
+
+def governing_pool_concurrency_limits(
+    candidate: WorkerCandidate,
+    *,
+    policy: Any | None = None,
+) -> tuple[int, ...]:
+    """Every pool concurrency limit that governs *candidate*'s route.
+
+    Resolves the same packaged-plus-owner plan view admission uses, draws the
+    pools an unbound route belongs to, and returns each non-null
+    ``max_concurrent``.  An empty tuple means no plan caps the route.
+    """
+    from saberops.control_plane.plans import resolve_binding_quota_pools
+    from saberops.control_plane.policy import load_control_plane_policy
+    from saberops.control_plane.quota_policy import pools_for
+
+    effective = load_control_plane_policy() if policy is None else policy
+    pools, plans = resolve_binding_quota_pools(effective, candidate, None)
+    limits: list[int] = []
+    for pool_id in pools_for(candidate, pools):
+        plan = plans.get(pool_id)
+        if plan is not None and plan.max_concurrent is not None:
+            limits.append(plan.max_concurrent)
+    return tuple(limits)
+
+
+def batch_submit_pacer(
+    pacer: SubmitPacer,
+    candidate: WorkerCandidate,
+    *,
+    policy: Any | None = None,
+) -> SubmitPacer:
+    """Cap one batch's paced slots by its route's pool plan.
+
+    A single global ``--concurrency`` cannot know that a vendor's plan allows
+    fewer concurrent jobs: the packaged Claude plan allows one while Codex and
+    OpenCode Go allow two.  A batch therefore uses
+    ``min(pacer.concurrency, plan.max_concurrent)``, so the next task is
+    submitted only when the pool really has a free slot and the engine never
+    queues it for ``CONCURRENCY``.  Burst mode keeps its always-submit behaviour
+    but carries the resolved count for the report.
+    """
+    limits = governing_pool_concurrency_limits(candidate, policy=policy)
+    concurrency = pacer.concurrency if not limits else min(pacer.concurrency, *limits)
+    return replace(pacer, concurrency=concurrency)
 
 
 @dataclass(frozen=True)
@@ -563,6 +613,8 @@ class BenchmarkReport:
     #: Paced submission keeps this at or below ``submit_concurrency``; burst
     #: reaches the whole catalogue size.
     max_submit_depth: int = 0
+    #: Per-batch paced slot count after each route's pool limit is applied.
+    batch_slot_limits: tuple[tuple[str, int], ...] = ()
 
     @property
     def scored_results(self) -> tuple[TaskResult, ...]:
@@ -658,6 +710,14 @@ class BenchmarkReport:
 
     def _submission_lines(self) -> list[str]:
         if self.submission_mode == "paced":
+            slots = (
+                "; slots "
+                + ", ".join(
+                    f"{batch}={count}" for batch, count in self.batch_slot_limits
+                )
+                if self.batch_slot_limits
+                else ""
+            )
             observed = (
                 f"; deepest queue {self.max_submit_depth}"
                 if self.max_submit_depth
@@ -666,7 +726,7 @@ class BenchmarkReport:
             return [
                 "submission: paced - the next task is submitted only when a "
                 f"worker slot is free (concurrency {self.submit_concurrency}"
-                f"{observed}); queue wait is not measured",
+                f"{slots}{observed}); queue wait is included in submit-to-start",
             ]
         return [
             "submission: burst - every measured task is submitted at once; the "
@@ -1426,6 +1486,8 @@ class BatchOutcome:
     accepted: dict[str, tuple[str, float]]
     #: Deepest submitted-but-not-terminal count this driver saw at a submission.
     max_submit_depth: int = 0
+    #: Paced slot count the driver actually used after the pool limit applied.
+    submit_concurrency: int | None = None
 
 
 def wait_for_batch(
@@ -1539,6 +1601,25 @@ _MODEL_KEY_FOR_SUBSCRIPTION: dict[str, str] = {
     "claude": "claude",
     "anthropic": "claude",
 }
+
+#: Worker provider each real batch routes through (Claude is ``anthropic``).
+REAL_SUBSCRIPTION_PROVIDER: dict[str, str] = {
+    "codex": "codex",
+    "opencode": "opencode",
+    "claude": "anthropic",
+}
+
+
+def batch_worker_candidate(
+    subscription: str, models: Mapping[str, str]
+) -> WorkerCandidate:
+    """The worker route a real batch submits through."""
+    from saberops.models import WorkerCandidate
+
+    return WorkerCandidate(
+        REAL_SUBSCRIPTION_PROVIDER[subscription],
+        real_model_for(subscription, models),
+    )
 
 
 @dataclass(frozen=True)
@@ -2249,13 +2330,24 @@ def _drive_real_batch(
     readiness: Any,
     jobs: MutableMapping[str, str],
     max_wait: float,
+    worker_candidate: WorkerCandidate,
+    policy: Any,
     submit: Callable[[BenchmarkTask], str] | None = None,
     pacer: SubmitPacer | None = None,
 ) -> BatchOutcome:
-    """Drive one real batch with the engine's own scheduler tick."""
+    """Drive one real batch with the engine's own scheduler tick.
+
+    The batch's pacer is capped by the route's pool plan, so a vendor whose
+    plan allows fewer concurrent jobs than the global ``--concurrency`` gets
+    its own slot count (Claude one, Codex and OpenCode Go two by default).
+    """
     from saberops.accept import AcceptEngine
     from saberops.capacity.loop import run_scheduler_loop
     from saberops.jobs.service import get_job
+
+    batch_pacer = (
+        None if pacer is None else batch_submit_pacer(pacer, worker_candidate, policy=policy)
+    )
 
     def job_state(job_id: str) -> str | None:
         job = get_job(db, job_id)
@@ -2268,7 +2360,7 @@ def _drive_real_batch(
         assert accepted.accepted, f"{batch.subscription}/{job_id}: {accepted}"
         return accepted.final_sha
 
-    return wait_for_batch(
+    outcome = wait_for_batch(
         tasks=batch.tasks,
         jobs=jobs,
         tick=lambda: run_scheduler_loop(
@@ -2281,7 +2373,13 @@ def _drive_real_batch(
         ),
         max_wait=max_wait,
         submit=submit,
-        pacer=pacer,
+        pacer=batch_pacer,
+    )
+    return replace(
+        outcome,
+        submit_concurrency=(
+            batch_pacer.concurrency if batch_pacer is not None else None
+        ),
     )
 
 
@@ -2341,13 +2439,16 @@ def run_real_benchmark(
     explicit acknowledgement flag.
 
     ``submission_mode`` defaults to ``paced``: a batch submits its next task
-    only when fewer than ``submit_concurrency`` submitted tasks are still
-    non-terminal, so a measured task starts in a free worker slot instead of
-    behind a queue.  ``burst`` submits the whole batch at once and exists only
-    for the labelled stress section.
+    only when fewer than its slot count submitted tasks are still non-terminal.
+    That count is ``submit_concurrency`` capped by the batch route's pool plan
+    (``min(submit_concurrency, plan.max_concurrent)``), so a one-slot vendor
+    plan such as Claude's is never submitted into a queued position.  ``burst``
+    submits the whole batch at once and exists only for the labelled stress
+    section.
     """
     pacer = SubmitPacer(mode=submission_mode, concurrency=submit_concurrency)
     from saberops.cli import main as cli_main
+    from saberops.control_plane.policy import load_control_plane_policy
     from saberops.db import Database
     from saberops.jobs.service import get_job
     from saberops.model_access.readiness_service import ReadinessService
@@ -2378,6 +2479,9 @@ def run_real_benchmark(
             batch.reviewer_subscription for batch in batches
         ),
     )
+    # Read the plan view once, after preparation: paced submission needs each
+    # batch route's pool concurrency, not only the global --concurrency.
+    control_plane_policy = load_control_plane_policy()
 
     # Every batch starts from its own clean, identically seeded repositories so
     # a later task never inherits an earlier batch's accepted change.  The gate
@@ -2430,12 +2534,14 @@ def run_real_benchmark(
     result_by_key: dict[tuple[str, str], TaskResult] = {}
     all_jobs: list[str] = []
     max_submit_depth = 0
+    batch_slot_limits: list[tuple[str, int]] = []
     seeded_reviews: list[tuple[RealBatch, BenchmarkTask]] = []
     with real_mode_presence(db):
         for batch in batches:
             reviewer_model = real_model_for(batch.reviewer_subscription, models)
             reviewer = f"{batch.reviewer_subscription}/{reviewer_model}"
             configure_real_reviewer(batch.reviewer_subscription, reviewer_model)
+            worker_candidate = batch_worker_candidate(batch.subscription, models)
 
             repos = repos_by_batch[batch.subscription]
             worker_tasks = tuple(
@@ -2461,13 +2567,30 @@ def run_real_benchmark(
                     readiness=readiness,
                     jobs=jobs,
                     max_wait=max_wait,
+                    worker_candidate=worker_candidate,
+                    policy=control_plane_policy,
                     submit=submit_worker,
                     pacer=pacer,
                 )
                 if worker_tasks
-                else BatchOutcome(terminal={}, noticed={}, accepted={})
+                else BatchOutcome(
+                    terminal={},
+                    noticed={},
+                    accepted={},
+                    submit_concurrency=batch_submit_pacer(
+                        pacer, worker_candidate, policy=control_plane_policy
+                    ).concurrency,
+                )
             )
             max_submit_depth = max(max_submit_depth, outcome.max_submit_depth)
+            batch_slot_limits.append(
+                (
+                    batch.subscription,
+                    outcome.submit_concurrency
+                    if outcome.submit_concurrency is not None
+                    else pacer.concurrency,
+                )
+            )
             for task in worker_tasks:
                 job_id = jobs[task.task_id]
                 job = get_job(db, job_id)
@@ -2572,4 +2695,5 @@ def run_real_benchmark(
         submission_mode=pacer.mode,
         submit_concurrency=pacer.concurrency,
         max_submit_depth=max_submit_depth,
+        batch_slot_limits=tuple(batch_slot_limits),
     )

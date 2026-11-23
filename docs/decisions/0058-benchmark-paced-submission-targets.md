@@ -32,9 +32,12 @@ pattern but answered a different question than the target.
    gains a shared `SubmitPacer`; the real batch driver and the fake rig submit
    the next measured task only when fewer than the configured concurrency
    (default 2, the count the confirming runs dispatched) submitted tasks are
-   non-terminal. A measured task therefore enters a free worker slot, and
-   submit-to-start and time-to-accepted describe an unqueued job. The setting is
-   explicit (`--concurrency N`) so it can match the host's real worker count.
+   non-terminal. For a real batch, that slot count is
+   `min(--concurrency, plan.max_concurrent)` for the batch route's pool plan, so
+   Claude's one-slot plan gets one and Codex/OpenCode Go get two. A measured
+   task therefore enters a free worker slot, and submit-to-start and
+   time-to-accepted describe an unqueued job. The setting is explicit
+   (`--concurrency N`) so it can match the host's real worker count.
 2. **Burst submission is kept as an explicit stress option.** `--submit burst`
    reproduces the original all-at-once submission. Its report is labelled as a
    stress measurement and is never scored against the targets, because queue
@@ -70,3 +73,21 @@ pattern but answered a different question than the target.
   of being queued; that is the realistic pattern and it spends no extra quota.
 - The engine scheduler is unchanged. Pacing is a benchmark submission policy,
   not engine behaviour, and the targets themselves are not redefined here.
+
+## 4. Amendment: paced slots follow the route's pool capacity (2026-11-23)
+
+The phase 1 confirming run on local `main` `7384d36` passed every honest and
+must-fail row but missed submit-to-start p95 (54.2 s against 10 s). The cause was
+this ADR's global pacer: it kept two Claude tasks submitted while the packaged
+Claude plan allows one concurrent job, so the second task waited 27–52 s in
+`QUEUED` with `waiting_reason=CONCURRENCY`.
+
+Each real batch now resolves its worker route's plan through the same packaged
+plus owner plan view admission uses and drives that batch with
+`min(--concurrency, plan.max_concurrent)` slots. A fast rig test overrides a pool
+to one slot while the global default stays two and asserts that the second task
+is never submitted while the first is non-terminal and that the batch records no
+`CONCURRENCY` wait. The report prints each batch's slot count beside the deepest
+queue. Its old "queue wait is not measured" sentence was wrong: submit-to-start
+*is* submit-to-dispatch plus the engine's queue wait, so the line now says the
+wait is included. The engine scheduler, plan values and targets are unchanged.

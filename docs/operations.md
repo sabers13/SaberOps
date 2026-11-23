@@ -534,10 +534,14 @@ and the subscription used.
 - **Submission pacing.** Both modes submit paced by default: the next task is
   submitted only when a worker slot is free, so at most `--concurrency` tasks
   (default 2, the count the confirming runs dispatched) are submitted but not
-  terminal. Submit-to-start and time-to-accepted then describe an unqueued job,
-  which is how daily use submits work. `--submit burst` keeps the original
-  all-at-once submission; its table is a labelled stress section and is **not**
-  scored against the final targets.
+  terminal. Each real batch's slot count is further capped by its route's pool
+  plan, `min(--concurrency, plan.max_concurrent)`: Claude's one-slot plan
+  submits one task at a time while Codex and OpenCode Go keep two. The run
+  prints the per-batch slot counts beside the deepest queue. Submit-to-start
+  and time-to-accepted then describe an unqueued job, and queue wait is
+  included in submit-to-start, which is exactly why pacing keeps it bounded.
+  `--submit burst` keeps the original all-at-once submission; its table is a
+  labelled stress section and is **not** scored against the final targets.
 - **Final targets.** A paced real run scores the owner's targets from submit:
   time-to-accepted median ≤ 90 s, time-to-accepted p95 ≤ 240 s, and
   submit-to-start p95 ≤ 10 s, with nearest-rank percentiles so every printed
