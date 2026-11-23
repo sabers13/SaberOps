@@ -32,8 +32,8 @@ candidate. `saberops.planning.represent_independent_ready_work` and
 authority: they perform dependency-state transitions against the run database.
 Step 015 adds the plan-data
 layer beside it (`saberops.project.ProjectRegistry`,
-`saberops.project_scope.plan_store`, chained `schedule_chained_waves` and
-`build_plan_run_report` in `saberops.ready_frontier`, via
+`saberops.project_scope.plan_store` and the `saberops.ready_frontier`
+projection, via
 `orch project list|register|active` and `orch plan-store show|validate`):
 versioned, tamper-evident plans with an explicit active revision, sequenced into
 waves and reported. The plan-file layer (`orch plan-file ...`) now submits one

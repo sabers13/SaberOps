@@ -205,13 +205,6 @@ from saberops.storage_gc import retire_run_worktrees
 from saberops.storage_maintenance import database_audit_sink
 from saberops.telemetry import persist_worker_usage
 from saberops.terminal import get_transcript_path
-from saberops.tooling import (
-    FrozenToolContract,
-    ToolRegistry,
-    freeze_tool_contract,
-    tool_context_metrics,
-)
-from saberops.tooling.invocation import read_telemetry
 from saberops.validation_policy import (
     VALIDATION_POLICY_MARKER,
     VALIDATION_POLICY_TEXT,
@@ -307,22 +300,12 @@ def _filtered_worker_env(
     return filtered
 
 
-def _telemetry_total(records: list[dict[str, object]], key: str) -> int:
-    total = 0
-    for record in records:
-        value = record.get(key)
-        if isinstance(value, int):
-            total += value
-    return total
-
-
 def _render_repair_task(
     original_task: str,
     attempt_idx: int,
     from_sha: str,
     review: ReviewResult,
     package: object | None = None,
-    tool_contract: FrozenToolContract | None = None,
     run_verification_text: str | None = None,
 ) -> RenderResult:
     """Build a concise, evidence-rich repair prompt for an implementation worker.
@@ -376,7 +359,6 @@ def _render_repair_task(
         projection,
         validation_policy_text=VALIDATION_POLICY_TEXT,
         validation_policy_marker=VALIDATION_POLICY_MARKER,
-        tool_contract=tool_contract,
         run_verification_text=run_verification_text,
     )
     return rendered
@@ -388,7 +370,6 @@ def _render_final_repair_task(
     from_sha: str,
     reviews: list[ReviewResult],
     package: object | None = None,
-    tool_contract: FrozenToolContract | None = None,
     run_verification_text: str | None = None,
 ) -> RenderResult:
     """Build a repair prompt that aggregates ALL outstanding findings for final convergence.
@@ -449,7 +430,6 @@ def _render_final_repair_task(
         projection,
         validation_policy_text=VALIDATION_POLICY_TEXT,
         validation_policy_marker=VALIDATION_POLICY_MARKER,
-        tool_contract=tool_contract,
         run_verification_text=run_verification_text,
     )
     return rendered
@@ -1065,7 +1045,6 @@ class Orchestrator:
         registry: AdapterRegistry | None = None,
         default_worker: WorkerAdapter | None = None,
         worktree_base: Path | None = None,
-        tool_registry: ToolRegistry | None = None,
         readiness_service: _ReadinessProvider | None = None,
     ) -> None:
         self.db = db or Database()
@@ -1076,7 +1055,6 @@ class Orchestrator:
         else:
             self.registry = AdapterRegistry.default()
         self.worktree_base = worktree_base
-        self.tool_registry = tool_registry or ToolRegistry.from_environment()
         # ``None`` here is an explicit test/compatibility-only
         # disable of readiness admission (legacy hermetic unit scope).
         # Production construction never passes ``None``: the
@@ -2076,7 +2054,6 @@ class Orchestrator:
         routing_snapshot = None
         routing_payload: dict[str, Any] | None = None
         frozen_control_plane: FrozenControlPlane
-        frozen_tools: FrozenToolContract
         # The run's own authoritative base_commit, captured once the run
         # is resolved below; used only when ``is_adoption`` is True.
         adopted_base_commit: str = ""
@@ -2248,14 +2225,6 @@ class Orchestrator:
             # RunConfig on adoption or recovery.
             if config.worker_binding_registry != effective_registry:
                 config = _frozen_replace(config, worker_binding_registry=effective_registry)
-            if adopted.tool_contract_json is not None:
-                frozen_tools = FrozenToolContract.from_json(adopted.tool_contract_json)
-                if adopted.tool_contract_digest != frozen_tools.digest:
-                    raise ValueError(
-                        f"Stored tool contract digest mismatch for run '{effective_run_id}'"
-                    )
-            else:
-                frozen_tools = freeze_tool_contract(config.tool_refs, self.tool_registry)
             if adopted.control_plane_snapshot_json is not None:
                 frozen_control_plane = reconstruct_frozen_control_plane(
                     adopted.control_plane_snapshot_json,
@@ -2317,7 +2286,6 @@ class Orchestrator:
             provenance = mint_run_provenance(repo, task)
             effective_run_id = provenance.run_id
             routing_payload = snapshot_to_payload(routing_snapshot, created_at)
-            frozen_tools = freeze_tool_contract(config.tool_refs, self.tool_registry)
             run = Run(
                 id=effective_run_id,
                 task=task,
@@ -2332,8 +2300,6 @@ class Orchestrator:
                 routing_snapshot_json=json.dumps(routing_payload),
                 control_plane_snapshot_json=frozen_control_plane.as_json(),
                 control_plane_snapshot_digest=frozen_control_plane.digest,
-                tool_contract_json=frozen_tools.to_json(),
-                tool_contract_digest=frozen_tools.digest,
                 project_id=provenance.project_id,
                 project_identity_json=provenance.identity.to_json(),
                 objective_id=provenance.objective_id,
@@ -3107,7 +3073,7 @@ class Orchestrator:
                 lineage_base_sha = execute_team(
                     self.db, config, run_id, base_wt_dir,
                     RunSupervisor(db=self.db, registry=self.registry,
-                                  worktree_base=base_wt_dir, tool_registry=self.tool_registry),
+                                  worktree_base=base_wt_dir),
                 )
                 task = (
                     "Finish the assembled team candidate. Inspect the combined changes against "
@@ -4127,7 +4093,6 @@ class Orchestrator:
                         dispatch_projection,
                         validation_policy_text=VALIDATION_POLICY_TEXT,
                         validation_policy_marker=VALIDATION_POLICY_MARKER,
-                        tool_contract=frozen_tools,
                         run_verification_text=verification_contract(
                             config.gate_command, config.gate_enabled,
                             config.review_disabled,
@@ -4800,18 +4765,6 @@ class Orchestrator:
                             "ORCH_ASSOCIATION_ID": attempt_id,
                             "ORCH_DB_PATH": str(self.db.db_path),
                             **(auto_resolved.overlay if auto_resolved is not None else {}),
-                            **(
-                                {
-                                    "ORCH_TOOL_TELEMETRY_SINK": str(
-                                        self.db.db_path.parent
-                                        / "tool-telemetry"
-                                        / f"{run_id}_{attempt_id}.jsonl"
-                                    ),
-                                    "ORCH_TOOL_CONTRACT_DIGEST": frozen_tools.digest,
-                                }
-                                if frozen_tools.bindings
-                                else {}
-                            ),
                         },
                     ),
                 )
@@ -4903,14 +4856,6 @@ class Orchestrator:
                         else None
                     ),
                 )
-                metrics = tool_context_metrics(worker_req.task, frozen_tools)
-                if frozen_tools.bindings:
-                    dispatch_evidence.tool_transport = ",".join(
-                        sorted({binding.transport.value for binding in frozen_tools.bindings})
-                    )
-                    dispatch_evidence.tool_schema_bytes = metrics["tool_schema_bytes"]
-                    dispatch_evidence.tool_description_bytes = metrics["tool_description_bytes"]
-                    dispatch_evidence.tools_exposed_count = metrics["tools_exposed_count"]
                 self.db.create_dispatch_evidence(dispatch_evidence)
                 # Plain evidence folder: the exact prompt this attempt will
                 # receive plus an immutable snapshot of the project note that
@@ -5008,17 +4953,6 @@ class Orchestrator:
                     self.readiness_service.record_success(
                         readiness_pre.connection_id
                     )
-
-                if frozen_tools.bindings:
-                    records = read_telemetry(
-                        self.db.db_path.parent / "tool-telemetry" / f"{run_id}_{attempt_id}.jsonl"
-                    )
-                    used_refs = {str(record["ref"]) for record in records}
-                    dispatch_evidence.tool_discovery_bytes = _telemetry_total(
-                        records, "discovery_bytes"
-                    )
-                    dispatch_evidence.tool_result_bytes = _telemetry_total(records, "result_bytes")
-                    dispatch_evidence.tools_actually_used_count = len(used_refs)
 
                 update_dispatch_from_result(dispatch_evidence, worker_res)
                 self.db.update_dispatch_evidence(dispatch_evidence)
@@ -6485,20 +6419,6 @@ class Orchestrator:
                                                     if repair_resolved is not None
                                                     else {}
                                                 ),
-                                                **(
-                                                    {
-                                                        "ORCH_TOOL_TELEMETRY_SINK": str(
-                                                            self.db.db_path.parent
-                                                            / "tool-telemetry"
-                                                            / f"{run_id}_{local_attempt_id}.jsonl"
-                                                        ),
-                                                        "ORCH_TOOL_CONTRACT_DIGEST": (
-                                                            frozen_tools.digest
-                                                        ),
-                                                    }
-                                                    if frozen_tools.bindings
-                                                    else {}
-                                                ),
                                             },
                                         ),
                                     )
@@ -6600,25 +6520,6 @@ class Orchestrator:
                                             else None
                                         ),
                                     )
-                                    metrics = tool_context_metrics(w_req.task, frozen_tools)
-                                    if frozen_tools.bindings:
-                                        repair_dispatch_evidence.tool_transport = ",".join(
-                                            sorted(
-                                                {
-                                                    binding.transport.value
-                                                    for binding in frozen_tools.bindings
-                                                }
-                                            )
-                                        )
-                                        repair_dispatch_evidence.tool_schema_bytes = metrics[
-                                            "tool_schema_bytes"
-                                        ]
-                                        repair_dispatch_evidence.tool_description_bytes = metrics[
-                                            "tool_description_bytes"
-                                        ]
-                                        repair_dispatch_evidence.tools_exposed_count = metrics[
-                                            "tools_exposed_count"
-                                        ]
                                     self.db.create_dispatch_evidence(repair_dispatch_evidence)
                                     try:
                                         record_attempt_prompt(
@@ -6720,101 +6621,6 @@ class Orchestrator:
                                         self.readiness_service.record_success(
                                             selected_repair_readiness.connection_id
                                         )
-                                    try:
-                                        if frozen_tools.bindings:
-                                            records = read_telemetry(
-                                                self.db.db_path.parent
-                                                / "tool-telemetry"
-                                                / f"{run_id}_{local_attempt_id}.jsonl"
-                                            )
-                                            used_refs = {str(record["ref"]) for record in records}
-                                            repair_dispatch_evidence.tool_discovery_bytes = (
-                                                _telemetry_total(records, "discovery_bytes")
-                                            )
-                                            repair_dispatch_evidence.tool_result_bytes = (
-                                                _telemetry_total(records, "result_bytes")
-                                            )
-                                            repair_dispatch_evidence.tools_actually_used_count = (
-                                                len(used_refs)
-                                            )
-                                    except Exception as exc:
-                                        from saberops.session_control import ManualControlStopped
-                                        if isinstance(exc, ManualControlStopped):
-                                            raise
-                                        exception_result = WorkerResult(
-                                            provider=cand_provider,
-                                            model=cand_model,
-                                            status=AttemptStatus.FAILED,
-                                            summary="Repair adapter raised during dispatch",
-                                            stdout="",
-                                            stderr=str(exc),
-                                            error=str(exc),
-                                            outcome=DispatchOutcome.PROVIDER_OR_RUNTIME_FAILURE,
-                                        )
-                                        update_dispatch_from_result(
-                                            repair_dispatch_evidence, exception_result
-                                        )
-                                        self.db.update_dispatch_evidence(repair_dispatch_evidence)
-                                        persist_worker_usage(
-                                            self.db,
-                                            run_id=run_id,
-                                            association_id=local_attempt_id,
-                                            attempt_id=local_attempt_id,
-                                            review_id=None,
-                                            stage=DispatchStage.REPAIR,
-                                            tier=cur_tier,
-                                            provider=cand_provider,
-                                            model=cand_model,
-                                            prompt_bytes=prompt_bytes_rep,
-                                            transport=cur_adapter.prompt_transport_for(
-                                                prompt_bytes_rep
-                                            ),
-                                            result=exception_result,
-                                        )
-                                        self.db.record_event(
-                                            run_id,
-                                            "worker_completed",
-                                            attempt_id=local_attempt_id,
-                                            payload={
-                                                "provider": cand_provider,
-                                                "model": cand_model,
-                                                "status": AttemptStatus.FAILED.value,
-                                                "summary": f"Worker exception: {exc}",
-                                                "stdout": "",
-                                                "stderr": str(exc),
-                                                "error": str(exc),
-                                                "role": DispatchRole.BUILD.value,
-                                            },
-                                        )
-                                        now_exc2 = current_iso_timestamp()
-                                        rep_attempt.status = AttemptStatus.FAILED
-                                        rep_attempt.worker_error = str(exc)
-                                        rep_attempt.completed_at = now_exc2
-                                        self.db.update_attempt(
-                                            attempt_id=local_attempt_id,
-                                            status=AttemptStatus.FAILED,
-                                            worker_error=rep_attempt.worker_error,
-                                            completed_at=now_exc2,
-                                        )
-                                        self.db.update_worker_activation_state(
-                                            run_id,
-                                            attempt_number,
-                                            WorkerActivationState.FAILED,
-                                        )
-                                        self.db.record_event(
-                                            run_id,
-                                            "worker_failed",
-                                            attempt_id=local_attempt_id,
-                                            payload={
-                                                "error": str(exc),
-                                                "status": AttemptStatus.FAILED.value,
-                                                "role": DispatchRole.BUILD.value,
-                                            },
-                                        )
-                                        attempts.append(rep_attempt)
-                                        active_attempt_id = None
-                                        return rep_attempt, None, None, False, None
-
                                     repair_prompt_bytes = (
                                         w_res.prompt_bytes
                                         if w_res.prompt_bytes is not None
@@ -7069,8 +6875,7 @@ class Orchestrator:
                                             proj,
                                             validation_policy_text=VALIDATION_POLICY_TEXT,
                                             validation_policy_marker=VALIDATION_POLICY_MARKER,
-                                            tool_contract=frozen_tools,
-                                            run_verification_text=verification_contract(
+                                                                                        run_verification_text=verification_contract(
                                                 config.gate_command, config.gate_enabled,
                                                 config.review_disabled,
                                             ),
@@ -7439,8 +7244,7 @@ class Orchestrator:
                                             from_sha=from_sha_pre,
                                             reviews=outstanding,
                                             package=current_package,
-                                            tool_contract=frozen_tools,
-                                            run_verification_text=verification_contract(
+                                                                                        run_verification_text=verification_contract(
                                                 config.gate_command, config.gate_enabled,
                                                 config.review_disabled,
                                             ),
@@ -7597,8 +7401,7 @@ class Orchestrator:
                                             from_sha=from_sha2,
                                             review=rev_res,
                                             package=current_package,
-                                            tool_contract=frozen_tools,
-                                            run_verification_text=verification_contract(
+                                                                                        run_verification_text=verification_contract(
                                                 config.gate_command, config.gate_enabled,
                                                 config.review_disabled,
                                             ),
@@ -7891,8 +7694,7 @@ class Orchestrator:
                                         from_sha=from_sha_m,
                                         review=rev_res,
                                         package=current_package,
-                                        tool_contract=frozen_tools,
-                                        run_verification_text=verification_contract(
+                                                                                run_verification_text=verification_contract(
                                             config.gate_command, config.gate_enabled,
                                             config.review_disabled,
                                         ),

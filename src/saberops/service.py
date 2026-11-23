@@ -47,7 +47,6 @@ from saberops.orchestrator import Orchestrator
 from saberops.project import owner_state_dir
 from saberops.review import ReviewEngine
 from saberops.routing_config import load_effective_routing
-from saberops.tooling import ToolRegistry
 from saberops.workers.registry import AdapterRegistry
 
 if TYPE_CHECKING:
@@ -100,13 +99,11 @@ class OrchestratorService:
         db: Database | None = None,
         registry: AdapterRegistry | None = None,
         worktree_base: Path | None = None,
-        tool_registry: ToolRegistry | None = None,
         readiness_service: ReadinessService | bool | None = None,
     ) -> None:
         self.db = db or Database()
         self.registry = registry or AdapterRegistry.default()
         self.worktree_base = worktree_base
-        self.tool_registry = tool_registry or ToolRegistry.from_environment()
         # The composition layer owns readiness acquisition.
         # ``None``/``True`` builds the owner-state service; when that
         # authority cannot be constructed/read the seam resolves to the
@@ -131,7 +128,6 @@ class OrchestratorService:
             db=self.db,
             registry=self.registry,
             worktree_base=self.worktree_base,
-            tool_registry=self.tool_registry,
             readiness_service=self.readiness_service,
         )
         self._supervisor: RunSupervisor | None = None
@@ -149,7 +145,6 @@ class OrchestratorService:
                 db=self.db,
                 worktree_base=self.worktree_base,
                 registry=self.registry,
-                tool_registry=self.tool_registry,
             )
         return self._supervisor
 
@@ -232,7 +227,6 @@ class OrchestratorService:
         review_timeout: float | None = None,
         config: RunConfig | None = None,
         run_id: str | None = None,
-        tool_refs: tuple[str, ...] = (),
         gate_scratch_mode: GateScratchMode | str | None = None,
     ) -> RunResult:
         """Execute a run synchronously (used by CLI orch run).
@@ -263,7 +257,6 @@ class OrchestratorService:
             gate_timeout=gate_timeout,
             review=review,
             review_timeout=review_timeout,
-            tool_refs=tool_refs,
             gate_scratch_mode=resolved_gate_scratch_mode,
         )
         return self.orchestrator.run(config=config, is_peak=is_peak, run_id=run_id)

@@ -395,7 +395,6 @@ def _new_run(db: Database, job: Job, *, vendor: str, model: str) -> Run:
         snapshot_to_payload,
     )
     from saberops.run_creation import RunRequest, resolve_effective_run_config
-    from saberops.tooling import freeze_tool_contract
 
     repo = Path(job.repo).resolve()
     config = resolve_effective_run_config(
@@ -416,9 +415,6 @@ def _new_run(db: Database, job: Job, *, vendor: str, model: str) -> Run:
         reserve_override=config.reserve_override,
         host_access=load_owner_mode_settings().host_access.value,
     )
-    from saberops.supervisor import RunSupervisor
-
-    frozen_tools = freeze_tool_contract(config.tool_refs, RunSupervisor(db=db).tool_registry)
     provenance = mint_run_provenance(repo, job.goal)
     created_at = current_iso_timestamp()
     run = Run(
@@ -435,8 +431,6 @@ def _new_run(db: Database, job: Job, *, vendor: str, model: str) -> Run:
         routing_snapshot_json=json.dumps(snapshot_to_payload(snapshot, created_at)),
         control_plane_snapshot_json=frozen_policy.as_json(),
         control_plane_snapshot_digest=frozen_policy.digest,
-        tool_contract_json=frozen_tools.to_json(),
-        tool_contract_digest=frozen_tools.digest,
         project_id=provenance.project_id,
         project_identity_json=provenance.identity.to_json(),
         objective_id=provenance.objective_id,

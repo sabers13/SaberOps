@@ -114,9 +114,6 @@ from saberops.storage_maintenance import database_audit_sink
 from saberops.supervisor import RunSupervisor
 from saberops.tooling.context_cli import CONTEXT_REFS as _CONTEXT_REFS
 from saberops.tooling.context_cli import context_json, list_context_refs
-from saberops.tooling.contracts import FrozenToolContract, ToolManifestError
-from saberops.tooling.invocation import ToolInvoker
-from saberops.tooling.registry import ToolRegistry
 from saberops.wake import subscribe_run
 from saberops.workers.registry import AdapterRegistry
 
@@ -183,7 +180,6 @@ def _resolve_cli_run_config(args: argparse.Namespace, repo: Path | str) -> RunCo
         review_focus=getattr(args, "review_focus", None),
         review_timeout=args.review_timeout,
         publish_candidate=getattr(args, "publish_candidate", None),
-        tool_refs=tuple(args.tool_refs),
     )
     config: RunConfig = resolve_effective_run_config(full)
     return config
@@ -643,31 +639,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # orch tools: deterministic logical tool inspection and invocation.
-    tools_parser = subparsers.add_parser(
-        "tools", help="Inspect or invoke registered logical tools."
-    )
-    tools_parser.add_argument("--registry", type=str, default=None, help="Tool registry JSON path.")
-    tools_parser.add_argument("--db", type=str, default=None)
-    tools_parser.add_argument("--run-id", type=str, default=None)
-    tools_subparsers = tools_parser.add_subparsers(dest="tools_command", required=True)
-    tools_list = tools_subparsers.add_parser("list", help="List compact logical tool refs.")
-    tools_list.add_argument("--db", type=str, default=argparse.SUPPRESS)
-    tools_list.add_argument("--run-id", type=str, default=argparse.SUPPRESS)
-    tools_list.add_argument("--json", action="store_true", help="Emit JSON.")
-    tools_describe = tools_subparsers.add_parser("describe", help="Describe one logical tool.")
-    tools_describe.add_argument("logical_ref", type=str)
-    tools_describe.add_argument("--db", type=str, default=argparse.SUPPRESS)
-    tools_describe.add_argument("--run-id", type=str, default=argparse.SUPPRESS)
-    tools_describe.add_argument("--json", action="store_true", help="Emit JSON.")
-    tools_exec = tools_subparsers.add_parser("exec", help="Invoke one logical tool.")
-    tools_exec.add_argument("logical_ref", type=str)
-    tools_exec.add_argument("--db", type=str, default=argparse.SUPPRESS)
-    tools_exec.add_argument("--run-id", type=str, default=argparse.SUPPRESS)
-    tools_exec.add_argument("--attempt-id", type=str, default=None)
-    tools_exec.add_argument("--operation-id", type=str, default=None)
-    tools_exec.add_argument("tool_args", nargs=argparse.REMAINDER)
-
     # orch scope: deterministic project-scope inspection and expansion.
     scope_parser = subparsers.add_parser(
         "scope", help="Inspect or expand deterministic project scope."
@@ -794,14 +765,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="CAPABILITY",
         help="Require a factual provider capability; repeat for multiple requirements.",
-    )
-    run_parser.add_argument(
-        "--tool",
-        dest="tool_refs",
-        action="append",
-        default=[],
-        metavar="LOGICAL_REF",
-        help="Expose a registered logical tool; repeat for multiple tools.",
     )
     training_group = run_parser.add_mutually_exclusive_group()
     training_group.add_argument(
@@ -8421,123 +8384,6 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
 
-def handle_tools(args: argparse.Namespace) -> int:
-    """Handle the deterministic logical-tool surface."""
-    try:
-        raw_args = list(getattr(args, "tool_args", ()))
-        explicit_db = getattr(args, "db", None)
-        explicit_run_id = getattr(args, "run_id", None)
-        explicit_attempt_id = getattr(args, "attempt_id", None)
-        explicit_operation_id = getattr(args, "operation_id", None)
-        if args.tools_command == "exec" and raw_args:
-            delimiter = raw_args.index("--") if "--" in raw_args else len(raw_args)
-            control_args = raw_args[:delimiter]
-            tool_payload = raw_args[delimiter + 1 :] if delimiter < len(raw_args) else []
-            parsed_control: list[str] = []
-            index = 0
-            flag_destinations = {
-                "--db": "db",
-                "--run-id": "run_id",
-                "--attempt-id": "attempt_id",
-                "--operation-id": "operation_id",
-            }
-            while index < len(control_args):
-                destination = flag_destinations.get(control_args[index])
-                if destination is None:
-                    parsed_control.append(control_args[index])
-                    index += 1
-                    continue
-                if index + 1 >= len(control_args):
-                    raise ToolManifestError(f"{control_args[index]} requires a value")
-                value = control_args[index + 1]
-                if destination == "db" and explicit_db is None:
-                    explicit_db = value
-                elif destination == "run_id" and explicit_run_id is None:
-                    explicit_run_id = value
-                elif destination == "attempt_id" and explicit_attempt_id is None:
-                    explicit_attempt_id = value
-                elif destination == "operation_id" and explicit_operation_id is None:
-                    explicit_operation_id = value
-                else:
-                    parsed_control.extend((control_args[index], value))
-                index += 2
-            raw_args = [*parsed_control, *tool_payload]
-        db_path = explicit_db or os.environ.get("ORCH_DB_PATH", "").strip() or None
-        run_id = explicit_run_id or os.environ.get("ORCH_RUN_ID", "").strip() or None
-        if (db_path is None) != (run_id is None):
-            raise ToolManifestError(
-                "run-scoped tool access requires both --db/ORCH_DB_PATH and "
-                "--run-id/ORCH_RUN_ID"
-            )
-
-        db: Database | None = None
-        contract: FrozenToolContract | None = None
-        if db_path is not None and run_id is not None:
-            # Inspection is strictly read-only. Invocation uses the writable
-            # handle only because the side-effect journal is durable evidence.
-            db = Database(db_path, read_only=args.tools_command != "exec")
-            run = db.get_run(run_id)
-            if run is None:
-                raise ToolManifestError(f"unknown run: {run_id}")
-            if not run.tool_contract_json or not run.tool_contract_digest:
-                raise ToolManifestError("run has no immutable frozen tool contract")
-            contract = FrozenToolContract.from_json(run.tool_contract_json)
-            if run.tool_contract_digest != contract.digest:
-                raise ToolManifestError(f"stored tool contract digest mismatch for run: {run_id}")
-            expected_digest = os.environ.get("ORCH_TOOL_CONTRACT_DIGEST", "").strip()
-            if expected_digest and expected_digest != contract.digest:
-                raise ToolManifestError("ORCH_TOOL_CONTRACT_DIGEST does not match the run contract")
-            # A frozen contract is self-contained. An empty registry makes it
-            # impossible for this path to accidentally consult mutable owner
-            # state.
-            registry = ToolRegistry()
-        else:
-            registry = ToolRegistry.from_path(args.registry)
-
-        if args.tools_command == "list":
-            specs = (
-                contract.bindings
-                if contract is not None
-                else registry.list_refs()
-            )
-            list_payload = [{"ref": spec.ref, "hint": spec.hint} for spec in specs]
-            if args.json:
-                print(json.dumps(list_payload, sort_keys=True, separators=(",", ":")))
-            else:
-                for item in list_payload:
-                    print(f"{item['ref']} — {item['hint']}")
-            return 0
-        if args.tools_command == "describe":
-            describe_payload = ToolInvoker(
-                registry, contract=contract
-            ).describe(args.logical_ref, run_id=run_id)
-            print(
-                json.dumps(describe_payload, sort_keys=True)
-                if args.json
-                else "\n".join(f"{key}: {value}" for key, value in describe_payload.items())
-            )
-            return 0
-        result = ToolInvoker(
-            registry,
-            contract=contract,
-            journal=db if run_id else None,
-        ).invoke(
-            args.logical_ref,
-            raw_args,
-            run_id=run_id,
-            attempt_id=explicit_attempt_id,
-            operation_id=explicit_operation_id,
-        )
-        if result.stdout:
-            print(result.stdout, end="")
-        if result.stderr:
-            print(result.stderr, end="", file=sys.stderr)
-        return result.exit_code
-    except (ToolManifestError, OSError, ValueError) as exc:
-        print(f"[!] Tool operation failed: {exc}", file=sys.stderr)
-        return 1
-
-
 def handle_orch_context(args: argparse.Namespace) -> int:
     """Deprecated alias: ``orch report --context`` prints the same evidence."""
     _print_view_alias_notice("orch-context", "orch report <run-id> --context [REF]")
@@ -8547,9 +8393,7 @@ def handle_orch_context(args: argparse.Namespace) -> int:
 
 def _dispatch(args: argparse.Namespace) -> int:
     """Route a parsed command to its handler."""
-    if args.command == "tools":
-        return handle_tools(args)
-    elif args.command == "scope":
+    if args.command == "scope":
         from saberops.project_scope.cli import handle_scope
 
         return handle_scope(args)

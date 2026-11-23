@@ -117,7 +117,6 @@ class RunRequest:
     review_mode: str = "bounded"
     review_limit: int = DEFAULT_REVIEW_LIMIT
     publish_candidate: bool | None = None
-    tool_refs: tuple[str, ...] = ()
     tier: Tier | str | None = None
     effort: str | None = None
 
@@ -321,7 +320,6 @@ def resolve_effective_run_config(request: RunRequest) -> RunConfig:
             publish_candidate=(
                 False if kind == SCOUT_RUN_KIND else request.publish_candidate
             ),
-            tool_refs=request.tool_refs,
             tier=request.tier,
             effort=effort,
             gate_scratch_mode=gate_scratch_mode,

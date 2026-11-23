@@ -736,7 +736,6 @@ def _default_run_launcher(
     from saberops.routing_config import snapshot_references_exact_bindings, snapshot_to_payload
     from saberops.run_creation import resolve_effective_run_config
     from saberops.supervisor import RunSupervisor
-    from saberops.tooling import freeze_tool_contract
 
     spec = job_dispatch_spec(job)
     # D5: a dependant starts from the revision its accepted dependencies
@@ -773,7 +772,6 @@ def _default_run_launcher(
         reserve_override=config.reserve_override,
         host_access=load_owner_mode_settings().host_access.value,
     )
-    frozen_tools = freeze_tool_contract(config.tool_refs, supervisor.tool_registry)
     provenance = mint_run_provenance(config.target_repo, config.task)
     created_at = datetime.now(UTC).isoformat()
 
@@ -791,8 +789,6 @@ def _default_run_launcher(
         routing_snapshot_json=json.dumps(snapshot_to_payload(snapshot, created_at)),
         control_plane_snapshot_json=frozen_policy.as_json(),
         control_plane_snapshot_digest=frozen_policy.digest,
-        tool_contract_json=frozen_tools.to_json(),
-        tool_contract_digest=frozen_tools.digest,
         project_id=provenance.project_id,
         project_identity_json=provenance.identity.to_json(),
         objective_id=provenance.objective_id,

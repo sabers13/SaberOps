@@ -35,7 +35,6 @@ from saberops.paths import get_owner_mode_path
 from saberops.paths import get_projects_registry_path as get_default_projects_path
 from saberops.project import owner_state_dir, projects_state_root
 from saberops.routing_config import get_user_routing_path
-from saberops.tooling.registry import default_registry_path
 
 
 @pytest.fixture
@@ -175,13 +174,11 @@ def test_default_config_paths_use_saberops_namespace(
     assert get_owner_mode_path() == expected_dir / "mode.json"
     assert get_control_plane_config_path() == expected_dir / "control_plane.json"
     assert get_binding_store_path() == expected_dir / "bindings.json"
-    assert default_registry_path() == expected_dir / "tools.json"
     for path in (
         get_user_routing_path(),
         get_owner_mode_path(),
         get_control_plane_config_path(),
         get_binding_store_path(),
-        default_registry_path(),
     ):
         assert "orchestrator-mvp" not in str(path)
         assert "orchestrator-v2" not in str(path)
@@ -196,7 +193,6 @@ def test_binding_routing_authority_share_one_config_namespace(
         get_owner_mode_path().parent,
         get_control_plane_config_path().parent,
         get_binding_store_path().parent,
-        default_registry_path().parent,
     }
     assert parents == {isolated_xdg["XDG_CONFIG_HOME"] / "saberops"}
     assert get_default_projects_path().parent == isolated_xdg["XDG_STATE_HOME"] / "saberops"
@@ -355,7 +351,6 @@ def test_no_default_path_carries_legacy_segments(
         get_owner_mode_path(),
         get_control_plane_config_path(),
         get_binding_store_path(),
-        default_registry_path(),
         get_default_projects_path(),
         owner_state_dir(),
         projects_state_root(),

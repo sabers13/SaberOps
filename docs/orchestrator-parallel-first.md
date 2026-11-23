@@ -56,9 +56,8 @@ validation and owner approval path.
   3-active-project cap), `saberops.project_scope.plan_store`
   (`PlanRevision`/`PlanStore`: immutable versions, SHA-256 tamper detection,
   DAG validation, `plan_revisions_to_snapshot` adapter into the single
-  readiness authority), deterministic chained wave sequencing
-  (`schedule_chained_waves`) and structured run summaries
-  (`build_plan_run_report`) in `saberops.ready_frontier`, surfaced read-only
+  readiness authority) and the deterministic ready-frontier projection in
+  `saberops.ready_frontier`, surfaced read-only
   via `orch project list|register|active` and
   `orch plan-store show|validate` (the store verbs live on the `plan-store`
   command group so the legacy `orch plan <run_id>` verb is byte-for-byte

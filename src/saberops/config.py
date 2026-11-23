@@ -19,7 +19,6 @@ from saberops.control_plane.capabilities import (
 from saberops.jobs.models import Difficulty, JobRole, coerce_difficulty, coerce_job_role
 from saberops.models import GateScratchMode, Tier
 from saberops.owner_mode import ModeAction, decide_owner_action
-from saberops.tooling.contracts import validate_logical_ref
 
 RoutingMode = Literal["auto", "manual"]
 ReviewMode = Literal["bounded", "max"]
@@ -124,7 +123,6 @@ class RunConfig:
     # and never re-read the live mode.  This is candidate visibility only --
     # never accepted-target/main publication.
     publish_candidate: bool = False
-    tool_refs: tuple[str, ...] = ()
     effort: str | None = None
     # Autonomous execution is a run-scoped contract.  It contains
     # references and policy, never resolved secret material.
@@ -335,7 +333,6 @@ def resolve_run_config(
     review_limit: int = DEFAULT_REVIEW_LIMIT,
     review_focus: str | None = None,
     publish_candidate: bool | None = None,
-    tool_refs: tuple[str, ...] = (),
     # ``tier`` keeps legacy callers source-compatible while normalizing them.
     tier: Tier | str | None = None,
     gate_scratch_mode: GateScratchMode | str | None = None,
@@ -383,7 +380,6 @@ def resolve_run_config(
         if review_enabled is not None
         else (not review_disabled and raw_kind != "scout")
     )
-    normalized_tool_refs = tuple(sorted({validate_logical_ref(ref) for ref in tool_refs}))
     if gate_scratch_mode is None:
         resolved_gate_scratch_mode = GateScratchMode.DISK
     elif isinstance(gate_scratch_mode, GateScratchMode):
@@ -433,7 +429,6 @@ def resolve_run_config(
                 ModeAction.PUBLISH_CANDIDATE
             ).effective_policy.auto_publish_candidate
         ),
-        tool_refs=normalized_tool_refs,
         effort=(str(effort).strip().lower() if effort else None),
         gate_scratch_mode=resolved_gate_scratch_mode,
         accept_target_branch=(str(accept_target_branch).strip() if accept_target_branch else ""),
@@ -502,9 +497,6 @@ def reconstruct_run_config(data: dict[str, Any]) -> RunConfig:
         # Legacy or partial payloads have no recorded decision: stay
         # conservative (no automatic remote mutation).
         publish_candidate=bool(data.get("publish_candidate", False)),
-        tool_refs=tuple(
-            sorted({validate_logical_ref(str(ref)) for ref in (data.get("tool_refs") or ())})
-        ),
         autonomous_runtime=(
             dict(data["autonomous_runtime"])
             if isinstance(data.get("autonomous_runtime"), Mapping)

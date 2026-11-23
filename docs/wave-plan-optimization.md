@@ -111,8 +111,8 @@ path_owned(path, scope) = path == scope
 5. Ready tasks are ordered by earliest start, then longest duration first, then
    stable identity, so results are deterministic.
 
-`chained=True` models today's chained-wave baseline (mirroring
-`ready_frontier.schedule_chained_waves`): every task in wave *n* also waits for
+`chained=True` models the retired chained-wave baseline: every task in wave
+*n* also waits for
 the whole of its predecessor wave. `chained=False` is dependency-driven start —
 a task begins as soon as its own dependencies finish, even while unrelated
 tasks from an earlier wave are still running.

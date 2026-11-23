@@ -49,7 +49,6 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from saberops.models import DispatchRole
-from saberops.tooling.contracts import FrozenToolContract
 
 # ---------------------------------------------------------------------------
 # Public configuration constants — small, explicit, deterministic budgets.
@@ -947,7 +946,6 @@ def render_projection(
     *,
     validation_policy_text: str,
     validation_policy_marker: str,
-    tool_contract: FrozenToolContract | None = None,
     project_scope_text: str | None = None,
     project_notes_text: str | None = None,
     run_verification_text: str | None = None,
@@ -973,14 +971,6 @@ def render_projection(
         )
 
     body = projection.render_body()
-    if tool_contract is not None and tool_contract.bindings:
-        tools_section = "[AVAILABLE TOOLS]\n"
-        tools_section += "\n".join(
-            f"- {binding.ref} — {binding.hint}" for binding in tool_contract.bindings
-        )
-        tools_section += "\n\nInspect one tool lazily with:\n  orch tools describe <logical-ref>"
-        tools_section += "\nInvoke one tool lazily with:\n  orch tools exec <logical-ref> -- <args>"
-        body = body.rstrip() + "\n\n" + tools_section
     stripped = body.rstrip()
     if project_scope_text is not None and "[PROJECT SCOPE]" not in stripped:
         stripped = stripped + "\n\n" + project_scope_text.rstrip()

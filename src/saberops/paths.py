@@ -147,11 +147,6 @@ def get_binding_store_path_no_override() -> Path:
     return saberops_config_dir() / "bindings.json"
 
 
-def get_tool_registry_path() -> Path:
-    """Return the canonical logical-tool registry path."""
-    return saberops_config_dir() / "tools.json"
-
-
 def get_projects_registry_path() -> Path:
     """Return the canonical UI project-registry path."""
     return saberops_state_dir() / "ui-projects.json"

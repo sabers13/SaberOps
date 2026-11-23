@@ -43,11 +43,7 @@ def source_candidate(db: Database, parent_id: str) -> tuple[Run, Attempt]:
         for effect in db.get_side_effects_for_run(parent.id)
     ):
         raise ContinuationError("The previous run has an unresolved execution effect.")
-    if not (
-        parent.routing_snapshot_json
-        and parent.control_plane_snapshot_json
-        and parent.tool_contract_json
-    ):
+    if not (parent.routing_snapshot_json and parent.control_plane_snapshot_json):
         raise ContinuationError(
             "This run lacks the frozen execution contracts needed to continue safely."
         )

@@ -524,16 +524,12 @@ def _seed_run(
     routing_json: str | None = None
     control_json: str | None = None
     control_digest: str | None = None
-    tool_json: str | None = None
-    tool_digest: str | None = None
     if with_contracts:
         from saberops.control_plane import (
             freeze_control_plane_policy,
             load_control_plane_policy,
         )
         from saberops.routing_config import load_effective_routing, snapshot_to_payload
-        from saberops.tooling.contracts import freeze_tool_contract
-        from saberops.tooling.registry import ToolRegistry
 
         created = current_iso_timestamp()
         routing_json = json.dumps(
@@ -542,9 +538,6 @@ def _seed_run(
         frozen_control = freeze_control_plane_policy(load_control_plane_policy())
         control_json = frozen_control.as_json()
         control_digest = frozen_control.digest
-        frozen_tools = freeze_tool_contract((), ToolRegistry())
-        tool_json = frozen_tools.to_json()
-        tool_digest = frozen_tools.digest
     run = Run(
         id=run_id,
         task=config.task,
@@ -559,8 +552,6 @@ def _seed_run(
         routing_snapshot_json=routing_json,
         control_plane_snapshot_json=control_json,
         control_plane_snapshot_digest=control_digest,
-        tool_contract_json=tool_json,
-        tool_contract_digest=tool_digest,
     )
     db.create_run(run)
     return run

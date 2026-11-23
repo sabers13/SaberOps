@@ -1,4 +1,4 @@
-"""Hermetic tests for the versioned plan store, wave scheduling and run reports.
+"""Hermetic tests for the versioned plan store.
 
 Every test is hermetic: all state lives under ``tmp_path`` or in immutable
 in-memory snapshots, with no provider call, no network and no clock. Each
@@ -26,17 +26,10 @@ from saberops.project_scope.plan_store import (
     plan_revisions_to_snapshot,
 )
 from saberops.ready_frontier import (
-    FrontierLimits,
     FrontierReason,
     FrontierRequest,
-    PlanTask,
-    ProjectPlan,
     TaskRef,
-    WaveScheduleError,
-    build_plan_run_report,
-    default_frontier_limits,
     project_ready_frontier,
-    schedule_chained_waves,
 )
 
 
@@ -62,28 +55,6 @@ def _task(
         integration_prerequisites=integrate,
         owns=owns,
     )
-
-
-def _row(
-    project: str,
-    task_id: str,
-    status: str = "pending",
-    start: tuple[TaskRef, ...] = (),
-    integrate: tuple[TaskRef, ...] = (),
-) -> PlanTask:
-    """Covers: compact wave-scheduler row construction."""
-    return PlanTask(
-        task_id=task_id,
-        phase="P1",
-        status=status,
-        start_dependencies=start,
-        integration_prerequisites=integrate,
-    )
-
-
-def _plan(project: str, *tasks: PlanTask) -> ProjectPlan:
-    """Covers: compact single-project wave input."""
-    return ProjectPlan(project_id=project, tasks=tasks)
 
 
 # ---------------------------------------------------------------------------
@@ -328,225 +299,6 @@ def test_adapter_cross_project_edge_resolves() -> None:
     projection = project_ready_frontier(FrontierRequest(snapshot=snapshot))
     assert projection.projected is True
     assert [task.task_id for task in projection.eligible] == ["t9"]
-
-
-# ---------------------------------------------------------------------------
-# Chained wave scheduling
-# ---------------------------------------------------------------------------
-
-
-def test_waves_follow_start_topology() -> None:
-    """Covers: waves sequence so each wave's START deps sit in earlier waves."""
-    waves = schedule_chained_waves(
-        (
-            _plan(
-                "p1",
-                _row("p1", "t1"),
-                _row("p1", "t2", start=(TaskRef("p1", "t1"),)),
-                _row("p1", "t3", start=(TaskRef("p1", "t2"),)),
-            ),
-        )
-    )
-    assert [[task.task_id for task in wave.tasks] for wave in waves] == [
-        ["t1"],
-        ["t2"],
-        ["t3"],
-    ]
-    assert [wave.index for wave in waves] == [0, 1, 2]
-
-
-def test_waves_group_independent_tasks() -> None:
-    """Covers: independent tasks share one wave in stable identity order."""
-    waves = schedule_chained_waves(
-        (_plan("p1", _row("p1", "b"), _row("p1", "a")),), default_frontier_limits()
-    )
-    assert len(waves) == 1
-    assert [task.task_id for task in waves[0].tasks] == ["a", "b"]
-
-
-def test_waves_split_oversized_project_layer() -> None:
-    """Covers: a layer beyond 5 child slots per project splits into waves."""
-    tasks = tuple(_row("p1", f"t{i:02d}") for i in range(6))
-    waves = schedule_chained_waves((_plan("p1", *tasks),), default_frontier_limits())
-    assert [len(wave.tasks) for wave in waves] == [5, 1]
-
-
-def test_waves_split_oversized_project_set() -> None:
-    """Covers: a wave holds at most 3 distinct projects (4 projects -> 2 waves)."""
-    plans = tuple(_plan(f"p{i}", _row(f"p{i}", "t1")) for i in range(4))
-    waves = schedule_chained_waves(plans, default_frontier_limits())
-    assert len(waves) == 2
-    assert [task.project_id for task in waves[0].tasks] == ["p0", "p1", "p2"]
-    assert [task.project_id for task in waves[1].tasks] == ["p3"]
-
-
-def test_waves_custom_limits_respected() -> None:
-    """Covers: caller-supplied limits bound wave width (1x1 serializes)."""
-    limits = FrontierLimits(active_projects=1, child_slots_per_project=1)
-    waves = schedule_chained_waves((_plan("p1", _row("p1", "a"), _row("p1", "b")),), limits)
-    assert [[task.task_id for task in wave.tasks] for wave in waves] == [["a"], ["b"]]
-
-
-def test_running_tasks_reported_in_wave_zero() -> None:
-    """Covers: RUNNING tasks sit in wave 0 as underway work, not new admission."""
-    waves = schedule_chained_waves(
-        (
-            _plan(
-                "p1",
-                _row("p1", "t1", status="running"),
-                _row("p1", "t2", start=(TaskRef("p1", "t1"),)),
-            ),
-        )
-    )
-    assert [task.task_id for task in waves[0].tasks] == ["t1"]
-    assert waves[0].tasks[0].running is True
-    assert [task.task_id for task in waves[1].tasks] == ["t2"]
-
-
-def test_completed_tasks_excluded_as_satisfied() -> None:
-    """Covers: COMPLETED tasks impose no wave and unblock dependents."""
-    waves = schedule_chained_waves(
-        (
-            _plan(
-                "p1",
-                _row("p1", "t1", status="completed"),
-                _row("p1", "t2", start=(TaskRef("p1", "t1"),)),
-            ),
-        )
-    )
-    assert [[task.task_id for task in wave.tasks] for wave in waves] == [["t2"]]
-
-
-def test_blocked_task_fails_closed() -> None:
-    """Covers: no wave can execute past a BLOCKED task — schedule is refused."""
-    with pytest.raises(WaveScheduleError):
-        schedule_chained_waves(
-            (
-                _plan(
-                    "p1",
-                    _row("p1", "t1", status="failed"),
-                    _row("p1", "t2", start=(TaskRef("p1", "t1"),)),
-                ),
-            )
-        )
-
-
-def test_undepended_blocked_task_fails_closed() -> None:
-    """Covers: even an undepended-upon BLOCKED task refuses scheduling."""
-    with pytest.raises(WaveScheduleError):
-        schedule_chained_waves((_plan("p1", _row("p1", "t1", status="blocked")),))
-
-
-def test_wave_cycle_fails_closed() -> None:
-    """Covers: START cycles are refused by the scheduler."""
-    with pytest.raises(WaveScheduleError):
-        schedule_chained_waves(
-            (
-                _plan(
-                    "p1",
-                    _row("p1", "t1", start=(TaskRef("p1", "t2"),)),
-                    _row("p1", "t2", start=(TaskRef("p1", "t1"),)),
-                ),
-            )
-        )
-
-
-def test_wave_missing_dependency_fails_closed() -> None:
-    """Covers: edges to unknown tasks refuse scheduling."""
-    with pytest.raises(WaveScheduleError):
-        schedule_chained_waves((_plan("p1", _row("p1", "t1", start=(TaskRef("p1", "ghost"),))),))
-
-
-def test_wave_unknown_status_fails_closed() -> None:
-    """Covers: unknown statuses refuse scheduling (never silently dropped)."""
-    with pytest.raises(WaveScheduleError):
-        schedule_chained_waves((_plan("p1", _row("p1", "t1", status="mystery")),))
-
-
-def test_wave_invalid_limits_refused() -> None:
-    """Covers: non-positive wave limits are refused."""
-    with pytest.raises(WaveScheduleError):
-        schedule_chained_waves(
-            (_plan("p1", _row("p1", "t1")),),
-            FrontierLimits(active_projects=0, child_slots_per_project=5),
-        )
-
-
-def test_wave_empty_input_schedules_nothing() -> None:
-    """Covers: empty plan input yields zero waves (legitimate null schedule)."""
-    assert schedule_chained_waves(()) == ()
-
-
-def test_wave_coordination_rows_ignored() -> None:
-    """Covers: plan/wave wrappers schedule nothing and block nothing."""
-    row = PlanTask(task_id="w1", phase="P1", status="pending", kind="wave_wrapper")
-    waves = schedule_chained_waves((_plan("p1", row, _row("p1", "t1")),))
-    assert [[task.task_id for task in wave.tasks] for wave in waves] == [["t1"]]
-
-
-def test_integration_prerequisites_never_block_waves() -> None:
-    """Covers: deferred INTEGRATE edges never move a task to a later wave."""
-    waves = schedule_chained_waves(
-        (_plan("p1", _row("p1", "t1", integrate=(TaskRef("p1", "t2"),)), _row("p1", "t2")),)
-    )
-    assert len(waves) == 1
-
-
-# ---------------------------------------------------------------------------
-# Run reports
-# ---------------------------------------------------------------------------
-
-
-def test_run_report_sections_mirror_projection() -> None:
-    """Covers: eligible/running/held sections mirror the projection exactly."""
-    from saberops.ready_frontier import FrontierSnapshot, SnapshotSource
-
-    plans = (
-        ProjectPlan(
-            project_id="alpha-1",
-            tasks=(
-                _row("alpha-1", "done", status="completed"),
-                _row("alpha-1", "work", status="running"),
-                _row("alpha-1", "next", start=(TaskRef("alpha-1", "work"),)),
-            ),
-        ),
-    )
-
-    full = FrontierSnapshot(
-        owner_id="owner-1", source=SnapshotSource.OWNER_DB.value, complete=True, projects=plans
-    )
-    projection = project_ready_frontier(FrontierRequest(snapshot=full))
-    assert projection.projected is True
-    report = build_plan_run_report(
-        projection, plan_version="v3", generated_at="2026-10-18T00:00:00+00:00", wave_count=2
-    )
-    assert report.status == "PROJECTED"
-    assert [(ref.project_id, ref.task_id) for ref in report.eligible] == []
-    assert [(ref.project_id, ref.task_id) for ref in report.running] == [("alpha-1", "work")]
-    held_ids = {(item.project_id, item.task_id) for item in report.held}
-    assert ("alpha-1", "next") in held_ids
-    payload = report.to_dict()
-    json.dumps(payload)
-    assert payload["plan_version"] == "v3"
-    assert payload["wave_count"] == 2
-    assert payload["limits"] == {"active_projects": 3, "child_slots_per_project": 5}
-
-
-def test_run_report_denied_projection_reports_denial() -> None:
-    """Covers: a DENIED projection reports denial, never an empty ready set."""
-    from saberops.ready_frontier import FrontierSnapshot, SnapshotSource
-
-    snapshot = FrontierSnapshot(
-        owner_id="", source=SnapshotSource.UNKNOWN.value, complete=False, projects=()
-    )
-    projection = project_ready_frontier(FrontierRequest(snapshot=snapshot))
-    assert projection.projected is False
-    report = build_plan_run_report(
-        projection, plan_version="v1", generated_at="2026-10-18T00:00:00+00:00"
-    )
-    assert report.status == "DENIED"
-    assert report.eligible == () and report.held == ()
-    assert "unknown_snapshot_source" in report.detail
 
 
 # ---------------------------------------------------------------------------

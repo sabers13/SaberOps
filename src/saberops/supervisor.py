@@ -66,7 +66,6 @@ from saberops.provenance import (
     mint_run_provenance,
 )
 from saberops.routing import resolve_candidate_chain
-from saberops.tooling import ToolRegistry, freeze_tool_contract
 from saberops.workers.registry import AdapterRegistry
 
 
@@ -159,13 +158,11 @@ class RunSupervisor:
         db: Database,
         worktree_base: Path | None = None,
         registry: AdapterRegistry | None = None,
-        tool_registry: ToolRegistry | None = None,
         memory_lease: Any = None,
     ) -> None:
         self.db = db
         self.worktree_base = worktree_base
         self.registry = registry
-        self.tool_registry = tool_registry or ToolRegistry.from_environment()
         self.memory_lease = memory_lease
         self._processes: dict[str, subprocess.Popen[Any]] = {}
         self._lock = threading.Lock()
@@ -256,12 +253,10 @@ class RunSupervisor:
         routing_payload = snapshot_to_payload(snapshot, created_at)
         if frozen_source:
             from saberops.control_plane.policy import reconstruct_frozen_control_plane
-            from saberops.tooling.contracts import FrozenToolContract
-            assert frozen_source.control_plane_snapshot_json and frozen_source.tool_contract_json
+            assert frozen_source.control_plane_snapshot_json
             frozen_control_plane = reconstruct_frozen_control_plane(
                 frozen_source.control_plane_snapshot_json, frozen_source.control_plane_snapshot_digest
             )
-            frozen_tools = FrozenToolContract.from_json(frozen_source.tool_contract_json)
         else:
             frozen_control_plane = freeze_control_plane_policy(
                 load_control_plane_policy(),
@@ -269,7 +264,6 @@ class RunSupervisor:
                 reserve_override=config.reserve_override,
                 host_access=load_owner_mode_settings().host_access.value,
             )
-            frozen_tools = freeze_tool_contract(config.tool_refs, self.tool_registry)
         # The gateway cut removed the frozen gateway contract: new runs
         # never write a gateway snapshot, and continuations no longer
         # inherit one.  Legacy rows that carry a snapshot stay readable
@@ -288,8 +282,6 @@ class RunSupervisor:
             routing_snapshot_json=json.dumps(routing_payload),
             control_plane_snapshot_json=frozen_control_plane.as_json(),
             control_plane_snapshot_digest=frozen_control_plane.digest,
-            tool_contract_json=frozen_tools.to_json(),
-            tool_contract_digest=frozen_tools.digest,
             project_id=provenance.project_id,
             project_identity_json=provenance.identity.to_json(),
             objective_id=provenance.objective_id,
@@ -299,8 +291,6 @@ class RunSupervisor:
             run.routing_snapshot_json = parent.routing_snapshot_json
             run.control_plane_snapshot_json = parent.control_plane_snapshot_json
             run.control_plane_snapshot_digest = parent.control_plane_snapshot_digest
-            run.tool_contract_json = parent.tool_contract_json
-            run.tool_contract_digest = parent.tool_contract_digest
         try:
             self.db.create_run(run)
         except ContinuationExists as exc:
@@ -1689,8 +1679,6 @@ class RunSupervisor:
             args.extend(["--model", config.model_override])
         for capability in config.required_capabilities:
             args.extend(["--require-capability", capability])
-        for tool_ref in config.tool_refs:
-            args.extend(["--tool", tool_ref])
         if not config.training_allowed:
             args.append("--training-denied")
         # Only an explicit owner timeout is forwarded as a flag.
