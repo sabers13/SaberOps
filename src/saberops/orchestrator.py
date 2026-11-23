@@ -31,10 +31,8 @@ from saberops.config import (
     resolve_run_config,
 )
 from saberops.context_projection import (
-    EVIDENCE_BLOCK_MAX_CHARS,
     ContextProjection,
     RenderResult,
-    build_retry_projection,
 )
 from saberops.control_plane import (
     NO_ELIGIBLE_CANDIDATE,
@@ -99,16 +97,12 @@ from saberops.models import (
     HealthState,
     ManagerState,
     PhaseKind,
-    PlanStatus,
-    PlanStep,
-    PlanStepStatus,
     ProviderReadiness,
     QuotaState,
     ReasoningEffort,
     ReviewResult,
     ReviewVerdict,
     Run,
-    RunPlan,
     RunResult,
     RunStatus,
     SideEffectOperation,
@@ -122,7 +116,6 @@ from saberops.models import (
     WorkerInterruptionReason,
     WorkerRequest,
     WorkerResult,
-    WorkPackage,
     role_for_stage,
 )
 from saberops.observability import new_dispatch_evidence, update_dispatch_from_result
@@ -137,12 +130,6 @@ from saberops.ownership import (
     OwnershipError,
     ProcessIdentity,
     probe_liveness,
-)
-from saberops.planning import (
-    build_context_capsule,
-    mark_step,
-    persist_plan,
-    ready_dependents,
 )
 from saberops.process import (
     AutonomousDispatchConfig,
@@ -160,7 +147,7 @@ from saberops.project_scope.persistence import (
     load_scope_bundle,
     scope_section_for_run,
 )
-from saberops.project_scope.resolver import resolve_package_scope, resolve_scope
+from saberops.project_scope.resolver import resolve_scope
 from saberops.provenance import (
     ProvenanceError,
     assert_candidate_provenance,
@@ -195,7 +182,6 @@ from saberops.scout import (
     record_report,
     write_report,
 )
-from saberops.slicing import resolve_work_packages
 from saberops.steering import (
     append_steering_section,
     record_steering_delivery,
@@ -304,7 +290,6 @@ def _render_repair_task(
     attempt_idx: int,
     from_sha: str,
     review: ReviewResult,
-    package: object | None = None,
     run_verification_text: str | None = None,
 ) -> RenderResult:
     """Build a concise, evidence-rich repair prompt for an implementation worker.
@@ -312,48 +297,19 @@ def _render_repair_task(
     Projection: the raw full ``original_task`` is intentionally NOT
     prepended.  The repair worker receives the bounded objective digest,
     the inherited candidate SHA, and bounded review evidence.
-
-    When ``package`` is provided the prompt is emitted as a single
-    PACKAGE-mode projection; when ``package`` is None it is emitted as the
-    ordinary REPAIR projection.  No concatenation of an INITIAL/REPAIR
-    contract with a PACKAGE contract.
     """
     from saberops.context_projection import (
-        build_package_retry_projection,
         build_repair_projection,
-        prune_evidence,
         render_projection,
     )
 
-    if package is not None:
-        summary = getattr(review, "summary", "") or ""
-        details = getattr(review, "details", "") or ""
-        bounded_summary = prune_evidence(summary, limit=2048)
-        bounded_details = prune_evidence(details, limit=2048)
-        review_excerpt_parts: list[str] = []
-        if bounded_summary.text:
-            review_excerpt_parts.append(f"Summary: {bounded_summary.text}")
-        if bounded_details.text:
-            review_excerpt_parts.append(f"Details:\n{bounded_details.text}")
-        review_excerpt = "\n".join(review_excerpt_parts) or None
-        evidence_truncated = bounded_summary.truncated or bounded_details.truncated
-        projection = build_package_retry_projection(
-            original_task=original_task,
-            package=package,
-            inherited_base_sha=from_sha,
-            prior_check=None,
-            review_excerpt=review_excerpt,
-            evidence_truncated=evidence_truncated,
-            role="REPAIR",
-        )
-    else:
-        projection = build_repair_projection(
-            original_task=original_task,
-            attempt_idx=attempt_idx,
-            from_sha=from_sha,
-            review=review,
-            role="REPAIR",
-        )
+    projection = build_repair_projection(
+        original_task=original_task,
+        attempt_idx=attempt_idx,
+        from_sha=from_sha,
+        review=review,
+        role="REPAIR",
+    )
     rendered = render_projection(
         projection,
         validation_policy_text=VALIDATION_POLICY_TEXT,
@@ -368,7 +324,6 @@ def _render_final_repair_task(
     attempt_idx: int,
     from_sha: str,
     reviews: list[ReviewResult],
-    package: object | None = None,
     run_verification_text: str | None = None,
 ) -> RenderResult:
     """Build a repair prompt that aggregates ALL outstanding findings for final convergence.
@@ -376,55 +331,19 @@ def _render_final_repair_task(
     Projection: the raw full ``original_task`` is intentionally NOT
     prepended.  Outstanding review findings are deterministically bounded and
     deduplicated; already-resolved findings are NOT re-emitted.
-
-    When ``package`` is provided the prompt is emitted as a single
-    PACKAGE-mode projection; when ``package`` is None it is emitted as the
-    ordinary REPAIR projection.
     """
     from saberops.context_projection import (
         build_final_repair_projection,
-        build_package_retry_projection,
-        prune_evidence,
         render_projection,
     )
 
-    if package is not None:
-        parts: list[str] = []
-        seen_keys: set[str] = set()
-        evidence_truncated_any = False
-        for idx, rev in enumerate(reviews, start=1):
-            provider = getattr(rev, "provider", "?")
-            model = getattr(rev, "model", "?")
-            summary = (getattr(rev, "summary", "") or "").strip()
-            details = (getattr(rev, "details", "") or "").strip()
-            key = f"{summary.lower()}|{details.lower()}"
-            if key in seen_keys:
-                continue
-            seen_keys.add(key)
-            bs = prune_evidence(summary, limit=2048)
-            bd = prune_evidence(details, limit=2048)
-            evidence_truncated_any = evidence_truncated_any or bs.truncated or bd.truncated
-            parts.append(f"--- Finding #{idx} ({provider}/{model}) ---\nSummary: {bs.text}")
-            if details:
-                parts.append(f"Details:\n{bd.text}")
-        review_excerpt = "\n".join(parts) if parts else None
-        projection = build_package_retry_projection(
-            original_task=original_task,
-            package=package,
-            inherited_base_sha=from_sha,
-            prior_check=None,
-            review_excerpt=review_excerpt,
-            evidence_truncated=evidence_truncated_any,
-            role="REPAIR",
-        )
-    else:
-        projection = build_final_repair_projection(
-            original_task=original_task,
-            attempt_idx=attempt_idx,
-            from_sha=from_sha,
-            reviews=reviews,
-            role="REPAIR",
-        )
+    projection = build_final_repair_projection(
+        original_task=original_task,
+        attempt_idx=attempt_idx,
+        from_sha=from_sha,
+        reviews=reviews,
+        role="REPAIR",
+    )
     rendered = render_projection(
         projection,
         validation_policy_text=VALIDATION_POLICY_TEXT,
@@ -567,16 +486,15 @@ def _authorize_ordinary_failover_start(
     )
 
 
-# Durable event types that install a genuinely fresh routing candidate
-# chain.  Each is emitted exactly where the in-memory
-# ``chain_attempt_start`` marker advances during uninterrupted execution
-# (the tier-escalation block emits ``tier_escalated``; the next-package
-# transition emits ``next_package_started``).  Neither is re-emitted by the
-# recovery/adoption entry path, so the last such event in the durable log
-# is the authoritative pre-crash chain boundary.  ``tier_candidates_resolved``
-# is deliberately NOT a boundary here: the entry path re-emits it for the
-# resumed chain, so it cannot distinguish pre-crash history.
-_FRESH_CHAIN_BOUNDARY_EVENTS = ("next_package_started", "tier_escalated")
+# Durable events that install a genuinely fresh routing candidate chain.
+# The tier-escalation block emits ``tier_escalated`` exactly where the
+# in-memory ``chain_attempt_start`` marker advances during uninterrupted
+# execution.  It is not re-emitted by the recovery/adoption entry path, so the
+# last such event in the durable log is the authoritative pre-crash chain
+# boundary.  ``tier_candidates_resolved`` is deliberately NOT a boundary here:
+# the entry path re-emits it for the resumed chain, so it cannot distinguish
+# pre-crash history.
+_FRESH_CHAIN_BOUNDARY_EVENTS = ("tier_escalated",)
 
 # Actionable bounded error raised when the chain boundary cannot be proven.
 # It follows the existing "Recovery blocked:" convention: the run is left
@@ -595,42 +513,31 @@ def _reconstruct_chain_attempt_start(
 
     ``existing_attempts`` is the run-global attempt history ordered by
     attempt number (as :meth:`Database.get_attempts_for_run` returns it).
-    The result is the index at which the currently active package/tier
-    candidate chain begins, so ``existing_attempts[result:]`` holds exactly
-    the launches belonging to the current chain.  Run-global history stays
-    complete; only the chain-local slice is bounded.
+    The result is the index at which the currently active tier candidate
+    chain begins, so ``existing_attempts[result:]`` holds exactly the launches
+    belonging to the current chain.  Run-global history stays complete; only
+    the chain-local slice is bounded.
 
     The boundary is derived from the ordered durable event log, never from
     process-local state:
 
-    * no ``next_package_started`` / ``tier_escalated`` event: no fresh chain
-      was ever installed, so recovered history belongs to the still-active
-      chain (retries, timeouts, checkpoint continuations and cold-takeover
-      replacements never move the boundary) -- return ``0``;
-    * otherwise the complete durable attempt history must first be reconciled
-      with the ``attempt_started`` launch markers: each durable attempt must
-      carry exactly one marker of its own, markers must not be duplicated,
-      and the marker attempt-id sequence must account for the attempt
-      sequence in the same order.  Only a fully reconciled history may be
-      divided at the last boundary event -- markers at or before the
-      boundary are the old-chain prefix, markers after it are the
-      current-chain suffix (including an empty suffix).  A durable attempt
-      with no marker, duplicated markers, or an ordering inconsistent with
-      the attempt history means the split is NOT proven;
-    * when marker evidence is incomplete, a package transition's
-      ``package_completed`` linkage may still independently prove the split,
-      but only when every launch marker names a durable attempt exactly once
-      (a marker with no durable attempt row, or a duplicated marker for one
-      attempt, is contradictory evidence and fails closed), the linkage names
-      the last old-chain attempt, every current-chain attempt is positively
-      evidenced by a post-boundary marker, and no known marker contradicts
-      the split.
+    * no ``tier_escalated`` event: no fresh chain was ever installed, so
+      recovered history belongs to the still-active chain (retries, timeouts,
+      checkpoint continuations and cold-takeover replacements never move the
+      boundary) -- return ``0``;
+    * otherwise the complete durable attempt history must be reconciled with
+      the ``attempt_started`` launch markers: each durable attempt must carry
+      exactly one marker of its own and the marker attempt-id sequence must
+      account for the attempt sequence in the same order.  Only a fully
+      reconciled history may be divided at the last boundary event -- markers
+      at or before the boundary are the old-chain prefix, markers after it are
+      the current-chain suffix (including an empty suffix).  A durable attempt
+      with no marker, duplicated markers, or an ordering inconsistent with the
+      attempt history means the split is NOT proven.
 
     Ambiguous evidence returns ``None`` -- never a fabricated precise
-    boundary.  This covers an unreadable event log, missing launch markers,
-    an ordering inconsistent with the attempt history, and any package
-    linkage that does not actually prove the split.  Callers must fail
-    closed; the absence of proof is never treated as proof of zero.
+    boundary.  Callers must fail closed; the absence of proof is never treated
+    as proof of zero.
     """
     if not existing_attempts:
         return 0
@@ -640,11 +547,9 @@ def _reconstruct_chain_attempt_start(
         # The evidence cannot even be read: the split cannot be proven.
         return None
     boundary_id: int | None = None
-    boundary_type: str | None = None
     for event in events:
         if event.event_type in _FRESH_CHAIN_BOUNDARY_EVENTS:
             boundary_id = event.id
-            boundary_type = event.event_type
     if boundary_id is None:
         return 0
     existing_ids = [attempt.id for attempt in existing_attempts]
@@ -653,209 +558,21 @@ def _reconstruct_chain_attempt_start(
         for event in events
         if event.event_type == "attempt_started" and event.attempt_id is not None
     ]
-    marker_sequence: list[str] = []
-    for event in started_events:
-        attempt_id = event.attempt_id
-        if attempt_id is not None:
-            marker_sequence.append(attempt_id)
+    marker_sequence = [
+        event.attempt_id for event in started_events if event.attempt_id is not None
+    ]
 
-    # Complete reconciliation: the launch markers must account for the whole
-    # durable attempt history in attempt order.  Event ids are monotonic with
-    # event order, so a reconciled marker sequence divides cleanly into an
-    # old-chain prefix (markers at or before the boundary) and a current-chain
-    # suffix (markers after it).
-    if marker_sequence == existing_ids:
-        return sum(1 for event in started_events if event.id <= boundary_id)
-
-    # Marker evidence is incomplete or contradictory.  For a package
-    # transition the ``package_completed`` linkage can still independently
-    # prove where the old chain ended -- but never against the known markers.
-    if boundary_type == "next_package_started":
-        marker_ids_by_attempt: dict[str, list[int]] = {}
-        for event in started_events:
-            attempt_id = event.attempt_id
-            if attempt_id is not None:
-                marker_ids_by_attempt.setdefault(attempt_id, []).append(event.id)
-        # Contradictory durable evidence never authorizes a precise boundary:
-        # an authoritative ``attempt_started`` marker naming no durable attempt
-        # row, or more than one marker for a single durable attempt, is
-        # ambiguous and must fail closed before any package linkage is trusted.
-        existing_id_set = set(existing_ids)
-        for attempt_id, marker_event_ids in marker_ids_by_attempt.items():
-            if attempt_id not in existing_id_set or len(marker_event_ids) > 1:
-                return None
-        completed_attempt_id: str | None = None
-        for event in events:
-            if event.event_type == "package_completed" and event.id < boundary_id:
-                if event.attempt_id is not None:
-                    completed_attempt_id = event.attempt_id
-        if completed_attempt_id is not None and completed_attempt_id in existing_ids:
-            split = existing_ids.index(completed_attempt_id) + 1
-            proven = True
-            for index, attempt_id in enumerate(existing_ids):
-                marker_event_ids = marker_ids_by_attempt.get(attempt_id, [])
-                if index >= split:
-                    # Current-chain membership needs positive proof: the
-                    # attempt must carry a post-boundary launch marker.
-                    if not marker_event_ids or any(
-                        event_id <= boundary_id for event_id in marker_event_ids
-                    ):
-                        proven = False
-                        break
-                elif any(
-                    event_id > boundary_id for event_id in marker_event_ids
-                ):
-                    # A known old-chain marker after the boundary contradicts
-                    # the split.
-                    proven = False
-                    break
-            if proven:
-                return split
-    return None
-
-
-def _durable_plan_expected_package_count(
-    db: Database, run_id: str, plan: RunPlan
-) -> int | None:
-    """Return the durable expected package count for ``plan``, or ``None``.
-
-    ``persist_plan`` records ``plan_created`` with the intended
-    ``package_count`` *before* it persists the step/package pairs, so that
-    event -- and only that event -- is the durable completeness authority.
-    Recovery must prove the complete normalized footprint from durable
-    evidence alone; it never consults the planner to infer what is missing.
-
-    Exactly one unambiguous matching event carrying a valid positive integer
-    is required.  Missing, duplicated or malformed completeness evidence
-    returns ``None`` so the caller fails closed instead of adopting a
-    truncated plan.
-    """
-    try:
-        events = db.get_complete_events_for_run(run_id)
-    except Exception:
-        # The evidence cannot even be read: completeness cannot be proven.
+    # The launch markers must account for the whole durable attempt history in
+    # attempt order.  Event ids are monotonic with event order, so a reconciled
+    # marker sequence divides cleanly into an old-chain prefix (markers at or
+    # before the boundary) and a current-chain suffix (markers after it).
+    # Incomplete or contradictory markers cannot prove the split.
+    if marker_sequence != existing_ids:
         return None
-    matching_counts: list[Any] = []
-    for event in events:
-        if event.event_type != "plan_created":
-            continue
-        payload = event.payload
-        if isinstance(payload, dict) and payload.get("plan_id") == plan.id:
-            matching_counts.append(payload.get("package_count"))
-    if len(matching_counts) != 1:
-        return None
-    count = matching_counts[0]
-    if isinstance(count, bool) or not isinstance(count, int) or count < 1:
-        return None
-    return count
+    return sum(1 for event in started_events if event.id <= boundary_id)
 
 
-def _durable_plan_linkage_is_adoptable(
-    plan: RunPlan,
-    steps: list[PlanStep],
-    packages: list[WorkPackage],
-    expected_package_count: int,
-) -> bool:
-    """Return True when a durable plan's complete normalized footprint is proven.
-
-    Recovery adopts an existing plan as-is rather than repairing it: a plan
-    whose linkage is incomplete or contradictory must fail closed instead of
-    hiding the inconsistency behind a freshly regenerated plan or silently
-    adopting a truncated one.  ``expected_package_count`` is the durable
-    ``plan_created.package_count`` authority: the step/package rows, the
-    ordering and every dependency reference must all prove that complete
-    normalized footprint.
-    """
-    if not steps or len(steps) != len(packages):
-        return False
-    if len(steps) != expected_package_count:
-        return False
-    if len({step.id for step in steps}) != len(steps):
-        return False
-    if len({package.id for package in packages}) != len(packages):
-        return False
-    if sorted(step.ordering for step in steps) != list(
-        range(1, expected_package_count + 1)
-    ):
-        return False
-    package_by_step = {package.plan_step_id: package for package in packages}
-    if len(package_by_step) != len(packages):
-        return False
-    step_ids = {step.id for step in steps}
-    package_ids = {package.id for package in packages}
-    for step in steps:
-        if step.plan_id != plan.id or step.run_id != plan.run_id:
-            return False
-        if step.work_package_id is None:
-            return False
-        if any(dependency not in step_ids for dependency in step.dependency_ids):
-            return False
-        package = package_by_step.get(step.id)
-        if package is None:
-            return False
-        if package.id != step.work_package_id or package.run_id != plan.run_id:
-            return False
-        if any(
-            dependency not in package_ids
-            for dependency in package.dependency_package_ids
-        ):
-            return False
-    return True
-
-
-def _adopt_durable_plan_for_recovery(
-    db: Database, run_id: str
-) -> tuple[PlanStep, ...] | None:
-    """Return the run's durable plan steps for recovery adoption, or ``None``.
-
-    ``None`` means the run has no durable plan and must be planned normally.
-    Exactly one durable plan whose durable evidence proves its complete
-    normalized footprint is adopted as-is -- its plan id, step ids, package
-    ids and persisted lifecycle state are preserved and no second plan is
-    created.  The ``plan_created.package_count`` event is the durable
-    cardinality authority: the durable step/package rows, ordering and every
-    dependency reference must all account for that complete footprint.  Any
-    other shape records bounded evidence and raises so the RUNNING run fails
-    closed: multiple durable plans are never silently disambiguated, and an
-    incomplete or inconsistent linkage is never repaired by re-planning or by
-    guessing the missing packages.
-    """
-    plans = db.list_run_plans(run_id)
-    if not plans:
-        return None
-    if len(plans) > 1:
-        reason = f"Recovery blocked: multiple durable plans exist for run '{run_id}'"
-        db.record_event(
-            run_id,
-            "recovery_blocked_multiple_durable_plans",
-            payload={"reason": reason, "plan_ids": [plan.id for plan in plans]},
-        )
-        raise RuntimeError(reason)
-    plan = plans[0]
-    steps = db.get_plan_steps(run_id)
-    packages = db.get_work_packages(run_id)
-    expected_package_count = _durable_plan_expected_package_count(db, run_id, plan)
-    if expected_package_count is None or not _durable_plan_linkage_is_adoptable(
-        plan, steps, packages, expected_package_count
-    ):
-        reason = (
-            "Recovery blocked: durable plan linkage cannot be safely adopted "
-            f"for run '{run_id}'"
-        )
-        db.record_event(
-            run_id,
-            "recovery_blocked_incomplete_durable_plan",
-            payload={"reason": reason, "plan_id": plan.id},
-        )
-        raise RuntimeError(reason)
-    return tuple(steps)
-
-
-def _role_for_orchestrator_dispatch(
-    stage: DispatchStage | None,
-    *,
-    package: Any = None,
-) -> DispatchRole:
+def _role_for_orchestrator_dispatch(stage: DispatchStage | None) -> DispatchRole:
     """Return the canonical role for one Orchestrator-level dispatch.
 
     Build covers implementation, retry and repair; check covers review.  A
@@ -2011,12 +1728,6 @@ class Orchestrator:
                 review=review,
                 review_timeout=review_timeout,
             )
-        from saberops.parallel_work import validate_team_child, validate_work_config
-        validate_work_config(config)
-        validate_team_child(self.db, config, existing_run_id=run_id)
-        if config.execution_mode == "parallel":
-            if autonomous is not None or config.autonomous_runtime is not None:
-                raise ValueError("Parallel teams currently use supervised worker execution.")
         task = config.task
         gate_command = config.gate_command
         repo = Path(config.target_repo)
@@ -2546,80 +2257,18 @@ class Orchestrator:
         reviews: list[ReviewResult] = []
 
         active_attempt_id: str | None = None
-        # A plan is persisted for genuinely broad objectives. Ordinary tasks
-        # retain the standard lifecycle/events and do not incur planning model
-        # calls; the deterministic sizing assessment never reads adapters.
-        plan_steps: list[Any] = []
-        # An adopting/recovering run must never re-plan an already
-        # durable decomposition.  A durable plan is the authority on
-        # recovery: adopt its exact plan id, step ids, package ids and
-        # persisted lifecycle state.  Multiple or inconsistent durable plans
-        # fail closed (bounded evidence, run stays RUNNING) rather than
-        # silently planning the same objective again.
-        adopted_plan_steps: tuple[PlanStep, ...] | None = None
-        if continued_source:
-            assert continued_source[1].commit_sha
-            self.db.inherit_continuation_plan(
-                continued_source[0].id, run_id, continued_source[1].commit_sha
-            )
-        if is_adoption:
-            adopted_plan_steps = _adopt_durable_plan_for_recovery(self.db, run_id)
-        if adopted_plan_steps is not None:
-            plan_steps = list(adopted_plan_steps)
-        elif continued_source is None:
-            sizing, package_proposals = resolve_work_packages(task)
-            if config.execution_mode == "parallel":
-                from saberops.parallel_work import team_proposals
-                package_proposals = team_proposals(config)
-            if sizing.should_slice or config.execution_mode == "parallel":
-                persisted = persist_plan(
-                    self.db,
-                    run_id,
-                    task,
-                    sizing,
-                    package_proposals,
-                    base_commit,
-                )
-                plan_steps = list(persisted.steps)
-                # Attach the deterministic module scope to each work package
-                # so package workers receive their own bounded [PROJECT SCOPE].
-                assert scope_bundle is not None
-                for package in persisted.packages:
-                    package_scope = resolve_package_scope(
-                        scope_bundle.graph, package.goal, package.relevant_paths
-                    )
-                    self.db.set_work_package_scope(
-                        package.id,
-                        json.dumps(
-                            package_scope.to_dict(), sort_keys=True, separators=(",", ":")
-                        ),
-                    )
-        # Each successful package becomes the only permitted start point for
-        # its dependent.  The ordinary, no-plan path retains the base commit.
+        # Splitting work is the planner's job: one job is one worker, one
+        # coherent objective.  Parallel work is several jobs or PLAN.md lanes.
+        # Each successful attempt becomes the start point for its continuation;
+        # the ordinary path retains the base commit.
         lineage_base_sha = (
             continued_source[1].commit_sha if continued_source else base_commit
         )
         assert lineage_base_sha is not None
 
-        initial_step = next(
-            (
-                step
-                for step in self.db.get_plan_steps(run_id)
-                if step.status in (PlanStepStatus.READY, PlanStepStatus.RUNNING)
-            ),
-            None,
-        )
-        initial_package = (
-            self.db.get_work_package(initial_step.work_package_id)
-            if initial_step is not None and initial_step.work_package_id
-            else None
-        )
-        if config.execution_mode == "parallel":
-            initial_package = None  # The parent worker validates the full assembled objective.
         tier_decision: TierDecision = choose_tier(
             config,
             stage=DispatchStage.REPAIR if continued_source else DispatchStage.IMPLEMENTATION,
-            package=initial_package,
         )
         current_tier = tier_decision.effective_tier
         self.db.update_run_tier(run_id, current_tier)
@@ -2630,7 +2279,6 @@ class Orchestrator:
                 "tier_classified",
                 payload={
                     "chosen": current_tier.value,
-                    "package_id": tier_decision.package_id,
                     "source": tier_decision.source,
                     "signals": list(tier_decision.signals),
                 },
@@ -2640,7 +2288,7 @@ class Orchestrator:
             candidate_idx = 0
             attempt_number = 0
             stage_attempts = 0
-            package_dispatch_ordinal = 0
+            dispatch_ordinal = 0
             # Explicit escalation-evidence flag: True only when an actually
             # dispatched attempt produced an explicit typed capability
             # failure (DispatchOutcome.CAPABILITY_FAILURE) at the CURRENT
@@ -3062,40 +2710,7 @@ class Orchestrator:
                 if active_continuation_reason == WorkerInterruptionReason.QUOTA_EXHAUSTED.value:
                     blocked_providers_in_cycle.add(last_att.provider)
 
-            if config.execution_mode == "parallel" and not continued_source:
-                from saberops.parallel_work import execute_team
-                from saberops.supervisor import RunSupervisor
-                if any(e.event_type == "team_started"
-                       for e in self.db.get_complete_events_for_run(run_id)):
-                    raise RuntimeError(
-                        "Interrupted team is preserved; retry explicitly to start a new team."
-                    )
-                lineage_base_sha = execute_team(
-                    self.db, config, run_id, base_wt_dir,
-                    RunSupervisor(db=self.db, registry=self.registry,
-                                  worktree_base=base_wt_dir),
-                )
-                task = (
-                    "Finish the assembled team candidate. Inspect the combined changes against "
-                    "the owner objective, fix integration defects only, and report verification. "
-                    "The existing worker branches have already been integrated. Do not recreate "
-                    "their work or merge/push/accept branches.\n\nOwner objective:\n" + config.task
-                )
-
             while True:
-                current_plan_step = next(
-                    (
-                        step
-                        for step in self.db.get_plan_steps(run_id)
-                        if step.status in (PlanStepStatus.READY, PlanStepStatus.RUNNING)
-                    ),
-                    None,
-                )
-                current_package = (
-                    self.db.get_work_package(current_plan_step.work_package_id)
-                    if current_plan_step is not None and current_plan_step.work_package_id
-                    else None
-                )
                 # The candidate-ladder exhaustion check below applies to
                 # ordinary mode only.  Under autonomous supervision the
                 # supervisor is the authority that decides whether a same-
@@ -3833,19 +3448,16 @@ class Orchestrator:
                 # Assemble final prompt BEFORE creating attempt/worktree for eligibility preflight.
                 #
                 # ONE worker dispatch -> ONE context projection ->
-                # ONE rendered worker contract.  No composition of an INITIAL
-                # / REPAIR contract with a separate PACKAGE contract; the
-                # package branch selects ONE PACKAGE projection directly.  The
-                # durable ``context_projected`` event describes the FINAL
-                # model-visible prompt and carries the source parent byte
-                # count for downstream metrics.
+                # ONE rendered worker contract.  The durable
+                # ``context_projected`` event describes the FINAL model-visible
+                # prompt and carries the source parent byte count for
+                # downstream metrics.
                 is_explicit = config.model_override is not None
                 next_attempt_num = attempt_number + 1
                 from saberops.context_projection import (
                     build_continuation_projection,
                     build_initial_projection,
-                    build_package_initial_projection,
-                    build_package_retry_projection,
+                    build_retry_projection,
                     prune_evidence,
                     render_projection,
                 )
@@ -3856,7 +3468,7 @@ class Orchestrator:
                 local_stage_label = (
                     (DispatchStage.REPAIR.value if continued_source and attempt_number == 0
                      else DispatchStage.IMPLEMENTATION.value)
-                    if package_dispatch_ordinal == 0
+                    if dispatch_ordinal == 0
                     else DispatchStage.RETRY.value
                 )
                 local_stage = DispatchStage(local_stage_label)
@@ -3864,9 +3476,6 @@ class Orchestrator:
                 # The one and only projection for this dispatch.
                 dispatch_projection: ContextProjection | None = None
                 prior_attempt: Attempt | None = None
-                # Captured failure / review evidence for package retries.
-                pkg_failure_excerpt: str | None = None
-                pkg_evidence_truncated: bool = False
 
                 if (
                     active_continuation_reason is not None
@@ -3907,7 +3516,6 @@ class Orchestrator:
                         previous_model=active_continuation_attempt.model,
                         changed_paths=continuation_changed_paths,
                         diff_summary=diff_summary,
-                        package=current_package,
                         role=DispatchRole.BUILD.value,
                     )
                 elif continued_source and next_attempt_num == 1:
@@ -3936,110 +3544,8 @@ class Orchestrator:
                                 or "No independent review was recorded."),
                         ),
                     )
-                    if current_package is not None:
-                        dispatch_projection = build_package_retry_projection(
-                            original_task=task, package=current_package,
-                            inherited_base_sha=lineage_base_sha,
-                            prior_check=prior_checks[-1] if prior_checks else None,
-                            failure_excerpt=dispatch_projection.failure_excerpt,
-                            review_excerpt=review_evidence,
-                            role=DispatchRole.BUILD.value,
-                        )
-                elif current_package is not None:
-                    # PACKAGE branch: ONE package projection, NEVER composed
-                    # with an INITIAL/REPAIR contract.
-                    if next_attempt_num > 1 and attempts:
-                        # Package retry: bounded corrective evidence on the
-                        # inherited candidate commit.
-                        prior_attempt = attempts[-1]
-                        prior_checks = self.db.get_checks_for_attempt(prior_attempt.id)
-                        prior_chk = prior_checks[-1] if prior_checks else None
-                        # Pull bounded gate stderr / stdout from the prior
-                        # attempt's most recent gate_completed event payload.
-                        bounded_failure_parts: list[str] = []
-                        truncated_failure = False
-                        if prior_chk is not None:
-                            try:
-                                for ev in self.db.get_complete_events_for_run(run_id):
-                                    if (
-                                        ev.event_type == "gate_completed"
-                                        and ev.attempt_id == prior_attempt.id
-                                        and ev.payload is not None
-                                    ):
-                                        gate_stderr = str(ev.payload.get("stderr") or "")
-                                        gate_stdout = str(ev.payload.get("stdout") or "")
-                                        if gate_stderr.strip():
-                                            pe = prune_evidence(
-                                                gate_stderr.strip(),
-                                                limit=EVIDENCE_BLOCK_MAX_CHARS,
-                                            )
-                                            bounded_failure_parts.append(
-                                                f"Prior gate '{prior_chk.gate_command}' failed "
-                                                f"with exit code {prior_chk.exit_code}.\n"
-                                                f"Gate stderr excerpt:\n{pe.text}"
-                                            )
-                                            truncated_failure = truncated_failure or pe.truncated
-                                        elif gate_stdout.strip():
-                                            pe = prune_evidence(
-                                                gate_stdout.strip(),
-                                                limit=EVIDENCE_BLOCK_MAX_CHARS,
-                                            )
-                                            bounded_failure_parts.append(
-                                                f"Prior gate '{prior_chk.gate_command}' failed "
-                                                f"with exit code {prior_chk.exit_code}.\n"
-                                                f"Gate stdout excerpt:\n{pe.text}"
-                                            )
-                                            truncated_failure = truncated_failure or pe.truncated
-                                        else:
-                                            bounded_failure_parts.append(
-                                                f"Prior gate '{prior_chk.gate_command}' failed "
-                                                f"with exit code {prior_chk.exit_code}."
-                                            )
-                                        break
-                            except Exception:
-                                pass
-                        if getattr(prior_attempt, "worker_error", None):
-                            bounded_failure_parts.insert(
-                                0,
-                                f"Prior worker error: {prior_attempt.worker_error}",
-                            )
-                        pkg_failure_excerpt = (
-                            "\n".join(bounded_failure_parts) if bounded_failure_parts else None
-                        )
-                        pkg_evidence_truncated = truncated_failure
-                        # Review-repair path is handled separately by
-                        # ``_do_repair``; this dispatch is the gate-failure
-                        # retry on the same package.
-                        pkg_retry_role = _role_for_orchestrator_dispatch(
-                            DispatchStage.REPAIR
-                        )
-                        dispatch_projection = build_package_retry_projection(
-                            original_task=task,
-                            package=current_package,
-                            inherited_base_sha=lineage_base_sha,
-                            prior_check=prior_chk,
-                            failure_excerpt=pkg_failure_excerpt,
-                            evidence_truncated=pkg_evidence_truncated,
-                            role=pkg_retry_role.value,
-                        )
-                    else:
-                        # Initial package dispatch: bounded package
-                        # responsibility, no raw full parent objective.
-                        completed_steps = [
-                            f"{step.title}: {step.goal[:240]}"
-                            for step in self.db.get_plan_steps(run_id)
-                            if step.status == PlanStepStatus.COMPLETED
-                        ]
-                        pkg_role = _role_for_orchestrator_dispatch(local_stage)
-                        dispatch_projection = build_package_initial_projection(
-                            original_task=task,
-                            package=current_package,
-                            completed_summaries=tuple(completed_steps),
-                            inherited_base_sha=lineage_base_sha,
-                            role=pkg_role.value,
-                        )
                 elif next_attempt_num > 1 and attempts:
-                    # Unslciced retry (no current package).
+                    # Retry after a prior failed attempt.
                     prior_attempt = attempts[-1]
                     prior_checks = self.db.get_checks_for_attempt(prior_attempt.id)
                     prior_chk = prior_checks[-1] if prior_checks else None
@@ -4052,12 +3558,10 @@ class Orchestrator:
                         role=DispatchRole.BUILD.value,
                     )
                 else:
-                    # Unslciced initial dispatch.
                     initial_role = _role_for_orchestrator_dispatch(local_stage)
                     dispatch_projection = build_initial_projection(
                         original_task=task,
                         role=initial_role.value,
-                        package_id=current_package.id if current_package is not None else None,
                     )
 
                 assert dispatch_projection is not None
@@ -4082,7 +3586,6 @@ class Orchestrator:
                     phase=PhaseKind.CONTEXT_SELECTION_RENDERING,
                     source_kind="orchestrator._run_core",
                     boundary_kind="render_projection",
-                    package_id=(current_package.id if current_package is not None else None),
                     notes="rendering sub-boundary only -- time spent "
                     "inside render_projection() producing the worker prompt. "
                     "Projection construction (build_*_projection) happens "
@@ -4097,11 +3600,7 @@ class Orchestrator:
                             config.gate_command, config.gate_enabled,
                             config.review_disabled,
                         ),
-                        project_scope_text=scope_section_for_run(
-                            self.db,
-                            run_id,
-                            current_package.scope_json if current_package is not None else None,
-                        ),
+                        project_scope_text=scope_section_for_run(self.db, run_id),
                         project_notes_text=project_notes_text,
                     )
                 # ADR-0016: a pending owner steering note travels in the next
@@ -4203,7 +3702,6 @@ class Orchestrator:
                         phase=PhaseKind.ROUTING_POLICY,
                         source_kind="orchestrator._run_core",
                         boundary_kind="evaluate_eligibility",
-                        package_id=(current_package.id if current_package is not None else None),
                         notes="eligibility-evaluation sub-boundary only -- "
                         "time spent inside the quota evaluate_eligibility() call. "
                         "The preceding control_plane_decision() call happens "
@@ -4299,7 +3797,7 @@ class Orchestrator:
                         role=(
                             (DispatchRole.BUILD if local_stage == DispatchStage.REPAIR
                              else DispatchRole.BUILD)
-                            if package_dispatch_ordinal == 0
+                            if dispatch_ordinal == 0
                             else DispatchRole.BUILD
                         ),
                         candidate=candidate,
@@ -4517,7 +4015,7 @@ class Orchestrator:
                     continue
 
                 stage_label = local_stage_label
-                package_dispatch_ordinal += 1
+                dispatch_ordinal += 1
                 stage_attempts += 1
                 effective_role = _role_for_orchestrator_dispatch(
                     DispatchStage(stage_label)
@@ -4642,22 +4140,11 @@ class Orchestrator:
                         "tier": current_tier.value,
                         "tier_reason": tier_decision.source,
                         "package_id": tier_decision.package_id,
-                        "dispatch_ordinal": package_dispatch_ordinal,
+                        "dispatch_ordinal": dispatch_ordinal,
                         "attempt": attempt_number,
                         "inherited_base_sha": start_point,
                     },
                 )
-                if (
-                    current_plan_step is not None
-                    and current_plan_step.status == PlanStepStatus.READY
-                ):
-                    mark_step(
-                        self.db,
-                        current_plan_step,
-                        PlanStepStatus.RUNNING,
-                        attempt_id=attempt_id,
-                    )
-
                 # task_for_worker already assembled as task_for_worker_pre for this attempt
                 task_for_worker = task_for_worker_pre
 
@@ -4789,11 +4276,6 @@ class Orchestrator:
                             DispatchReason.CONTINUATION_AFTER_GRACEFUL_HANDOFF,
                         )
                     )
-                elif (
-                    current_package is not None
-                    and stage_label == DispatchStage.IMPLEMENTATION.value
-                ):
-                    dispatch_reason = DispatchReason.PACKAGE_IMPLEMENTATION
                 elif stage_label == DispatchStage.IMPLEMENTATION.value:
                     dispatch_reason = DispatchReason.INITIAL_IMPLEMENTATION
                 else:
@@ -4831,7 +4313,6 @@ class Orchestrator:
                         else None
                     ),
                     package_id=tier_decision.package_id,
-                    plan_step_id=current_plan_step.id if current_plan_step is not None else None,
                     authority_mode=load_owner_mode_settings().mode.value,
                     routing_snapshot_digest=routing_snapshot.content_hash,
                     control_plane_digest=frozen_control_plane.digest,
@@ -5022,7 +4503,7 @@ class Orchestrator:
                         "MEASURED on the worker result but the three "
                         "ROADMAP §11 sub-phases remain UNKNOWN here."
                     )
-                    pkg_id = current_package.id if current_package is not None else None
+                    pkg_id = None
                     for unknown_phase in (
                         PhaseKind.PROCESS_STARTUP,
                         PhaseKind.MODEL_WAIT,
@@ -5287,9 +4768,7 @@ class Orchestrator:
                     )
                     # Check for candidate changes
                     diff_base_sha = (
-                        base_commit
-                        if continued_source or config.execution_mode == "parallel"
-                        else lineage_base_sha
+                        base_commit if continued_source else lineage_base_sha
                     )
                     has_changes = GitManager.has_diff_against_base(wt_path, diff_base_sha)
                     changed_paths_in_wt = GitManager.get_changed_paths(wt_path)
@@ -5495,202 +4974,6 @@ class Orchestrator:
                         # passes (see the post-review gate below); review
                         # BLOCK / infrastructure failures must never leave a
                         # published candidate or a COMPLETED run behind.
-                        # Intermediate multi-package lineage candidates keep
-                        # the historical publish-then-continue behavior under
-                        # the run's frozen publication policy.
-
-                        # A broad objective is executed as strictly sequential
-                        # gated descendants.  Never create the next worktree
-                        # from the original base after package one.
-                        if current_plan_step is not None and current_package is not None:
-                            assert commit_sha is not None
-                            candidate_publication = self._publish_gate_passed_candidate(
-                                run_id=run_id,
-                                attempt_id=attempt_id,
-                                config=config,
-                                repo=repo,
-                                commit_sha=commit_sha,
-                                branch_name=branch_name,
-                                worktree_path=wt_path,
-                            )
-                            mark_step(
-                                self.db,
-                                current_plan_step,
-                                PlanStepStatus.COMPLETED,
-                                attempt_id=attempt_id,
-                            )
-                            self.db.update_work_package_candidate(
-                                current_package.id,
-                                lineage_base_sha,
-                                json.dumps(build_context_capsule(current_package)),
-                            )
-                            pkg_completed_payload: dict[str, Any] = {
-                                "step_id": current_plan_step.id,
-                                "package_id": current_package.id,
-                                "candidate_sha": commit_sha,
-                            }
-                            if not has_changes:
-                                pkg_completed_payload["disposition"] = "already_satisfied"
-                                pkg_completed_payload["no_changes"] = True
-                            self.db.record_event(
-                                run_id,
-                                "package_completed",
-                                attempt_id=attempt_id,
-                                payload=pkg_completed_payload,
-                            )
-                            lineage_base_sha = commit_sha
-                            active_continuation_checkpoint = None
-                            active_continuation_reason = None
-                            active_continuation_dispatch_reason = None
-                            active_continuation_attempt = None
-                            blocked_providers_in_cycle.clear()
-                            ready_dependents(self.db, run_id)
-                            next_step = next(
-                                (
-                                    step
-                                    for step in self.db.get_plan_steps(run_id)
-                                    if step.status == PlanStepStatus.READY
-                                ),
-                                None,
-                            )
-                            if next_step is not None:
-                                if next_step.work_package_id:
-                                    self.db.update_work_package_candidate(
-                                        next_step.work_package_id, lineage_base_sha
-                                    )
-                                self.db.record_event(
-                                    run_id,
-                                    "next_package_started",
-                                    payload={
-                                        "step_id": next_step.id,
-                                        "package_id": next_step.work_package_id,
-                                        "base_candidate_sha": lineage_base_sha,
-                                    },
-                                )
-                                attempts.append(attempt)
-                                active_attempt_id = None
-                                next_package = (
-                                    self.db.get_work_package(next_step.work_package_id)
-                                    if next_step.work_package_id
-                                    else None
-                                )
-                                tier_decision = choose_tier(
-                                    config,
-                                    stage=DispatchStage.IMPLEMENTATION,
-                                    package=next_package,
-                                )
-                                current_tier = tier_decision.effective_tier
-                                current_role = config.initial_role
-                                strong_start_active = config.initial_strong_start
-                                self.db.update_run_tier(run_id, current_tier)
-                                self.db.record_event(
-                                    run_id,
-                                    "tier_decision",
-                                    payload=tier_decision.as_payload(),
-                                )
-                                if config.routing_mode == "auto":
-                                    self.db.record_event(
-                                        run_id,
-                                        "tier_classified",
-                                        payload={
-                                            "chosen": current_tier.value,
-                                            "package_id": tier_decision.package_id,
-                                            "source": tier_decision.source,
-                                            "signals": list(tier_decision.signals),
-                                        },
-                                    )
-                                try:
-                                    from saberops.capacity.snapshot import effective_quota_states
-
-                                    quota_states = effective_quota_states(self.db)
-                                except Exception:
-                                    quota_states = self.db.list_quota()
-                                base_candidates = resolve_candidate_chain(
-                                    role=current_role,
-                                    training_allowed=config.training_allowed,
-                                    is_peak=is_peak,
-                                    model_override=config.model_override,
-                                    provider_override=config.provider_override,
-                                    snapshot=routing_snapshot,
-                                    strong_start=strong_start_active,
-                                )
-                                candidates = order_candidates_for_role(
-                                    role=current_role,
-                                    snapshot=routing_snapshot,
-                                    base_candidates=base_candidates,
-                                    policy=control_plane_policy,
-                                    quota_states=quota_states,
-                                    db=self.db,
-                                    strong_start=strong_start_active,
-                                )
-                                selected_routing_context = routing_context_for_role(current_role)
-                                considered_candidates = self._considered_candidate_chain(
-                                    base_candidates=base_candidates,
-                                    role=current_role,
-                                    config=config,
-                                    routing_snapshot=routing_snapshot,
-                                    is_peak=is_peak,
-                                    strong_start=strong_start_active,
-                                )
-                                self.db.record_event(
-                                    run_id,
-                                    "tier_candidates_resolved",
-                                    payload={
-                                        "tier": current_tier.value,
-                                        "role": current_role.value
-                                        if isinstance(current_role, JobRole)
-                                        else str(current_role),
-                                        "strong_start": strong_start_active,
-                                        "routing_context": selected_routing_context,
-                                        "package_id": tier_decision.package_id,
-                                        "candidates": [
-                                            {"provider": c.provider, "model": c.model}
-                                            for c in considered_candidates
-                                        ],
-                                        "candidate_decisions": (
-                                            self._candidate_resolution_evidence(
-                                                candidates=considered_candidates,
-                                                config=config,
-                                                policy=control_plane_policy,
-                                                quota_states=quota_states,
-                                                routing_snapshot=routing_snapshot,
-                                                required_capabilities=(
-                                                    frozen_control_plane.required_capabilities
-                                                ),
-                                                control_plane_digest=(
-                                                    frozen_control_plane.digest
-                                                ),
-                                                run_id=run_id,
-                                            )
-                                        ),
-                                        "effective_candidates": [
-                                            {"provider": c.provider, "model": c.model}
-                                            for c in candidates
-                                        ],
-                                    },
-                                )
-                                candidate_idx = 0
-                                stage_attempts = 0
-                                package_dispatch_ordinal = 0
-                                # Skip evidence belongs only to the
-                                # currently selected package/tier routing
-                                # chain.  A next-package transition installs
-                                # a fresh chain (possibly a new tier and
-                                # routing context), so prior-package skips
-                                # must never leak into the next package's
-                                # terminal exhaustion.  Reset alongside the
-                                # fresh attempt-budget/escalation cycle.
-                                # The same fresh chain restarts the
-                                # terminal attempt scope; prior-package
-                                # attempts stay durable in ``attempts``.
-                                skipped_candidate_details.clear()
-                                chain_exhaustion_recorded = False
-                                chain_attempt_start = len(attempts)
-                                tier_has_escalation_evidence = False
-                                escalation_outcome = None
-                                escalation_stage = None
-                                continue
-
                         lineage_base_sha = commit_sha
                         active_continuation_checkpoint = None
                         active_continuation_reason = None
@@ -5764,31 +5047,6 @@ class Orchestrator:
                                 attempt_id=ready_attempt_id,
                                 payload=ready_payload,
                             )
-                            if plan_steps:
-                                for plan_step in plan_steps:
-                                    if plan_step.status.value != "COMPLETED":
-                                        mark_step(
-                                            self.db,
-                                            plan_step,
-                                            PlanStepStatus.COMPLETED,
-                                            attempt_id=ready_attempt_id,
-                                        )
-                                persisted_plan = self.db.get_run_plan(run_id)
-                                if persisted_plan is not None:
-                                    self.db.update_run_plan(persisted_plan.id, PlanStatus.COMPLETED)
-                                pkg_completed_end_payload: dict[str, Any] = {
-                                    "candidate_sha": ready_commit_sha,
-                                }
-                                if ready_no_changes:
-                                    pkg_completed_end_payload["disposition"] = "already_satisfied"
-                                    pkg_completed_end_payload["no_changes"] = True
-                                self.db.record_event(
-                                    run_id,
-                                    "package_completed",
-                                    attempt_id=ready_attempt_id,
-                                    payload=pkg_completed_end_payload,
-                                )
-
                         def _terminal_review_verdict(
                             terminal_reviews: list[ReviewResult],
                         ) -> ReviewVerdict:
@@ -5865,9 +5123,6 @@ class Orchestrator:
                                     source_kind="orchestrator._run_core",
                                     boundary_kind="review_skipped_by_owner_policy",
                                     attempt_id=attempt_id,
-                                    package_id=(
-                                        current_package.id if current_package is not None else None
-                                    ),
                                     notes=(
                                         "Review did not apply to this candidate -- the "
                                         "owner's frozen manual switch resolved "
@@ -5917,7 +5172,6 @@ class Orchestrator:
                                 from_sha_local: str,
                                 rendered_task: RenderResult,
                                 findings_cnt: int,
-                                package_local: Any = current_package,
                                 base_sha_local: str = lineage_base_sha,
                             ) -> tuple[
                                 Attempt | None,
@@ -5956,7 +5210,6 @@ class Orchestrator:
                                     repair_decision = choose_tier(
                                         config,
                                         stage=DispatchStage.REPAIR,
-                                        package=package_local,
                                     )
                                     cur_tier = repair_decision.effective_tier
                                     self.db.record_event(
@@ -6453,11 +5706,7 @@ class Orchestrator:
                                         if is_cold_takeover:
                                             repair_dispatch_reason = DispatchReason.COLD_TAKEOVER
                                     else:
-                                        repair_dispatch_reason = (
-                                            DispatchReason.PACKAGE_REVIEW_REPAIR
-                                            if package_local is not None
-                                            else DispatchReason.REVIEW_REPAIR
-                                        )
+                                        repair_dispatch_reason = DispatchReason.REVIEW_REPAIR
                                     repair_handoff_id: str | None = None
                                     if rep_continuation_attempt is not None:
                                         repair_handoff = self.db.get_latest_handoff(
@@ -6869,7 +6118,6 @@ class Orchestrator:
                                             changed_paths=tuple(changed_paths_rep),
                                             diff_summary=w_res.summary,
                                             role="repair",
-                                            package=package_local,
                                         )
                                         cur_rendered_task = render_projection(
                                             proj,
@@ -6882,11 +6130,6 @@ class Orchestrator:
                                             project_scope_text=scope_section_for_run(
                                                 self.db,
                                                 run_id,
-                                                (
-                                                    package_local.scope_json
-                                                    if package_local is not None
-                                                    else None
-                                                ),
                                             ),
                                             project_notes_text=read_project_notes(
                                                 project_notes_state_dir
@@ -7243,7 +6486,6 @@ class Orchestrator:
                                             attempt_idx=attempt_number + 1,
                                             from_sha=from_sha_pre,
                                             reviews=outstanding,
-                                            package=current_package,
                                                                                         run_verification_text=verification_contract(
                                                 config.gate_command, config.gate_enabled,
                                                 config.review_disabled,
@@ -7400,7 +6642,6 @@ class Orchestrator:
                                             attempt_idx=attempt_number + 1,
                                             from_sha=from_sha2,
                                             review=rev_res,
-                                            package=current_package,
                                                                                         run_verification_text=verification_contract(
                                                 config.gate_command, config.gate_enabled,
                                                 config.review_disabled,
@@ -7693,7 +6934,6 @@ class Orchestrator:
                                         attempt_idx=attempt_number + 1,
                                         from_sha=from_sha_m,
                                         review=rev_res,
-                                        package=current_package,
                                                                                 run_verification_text=verification_contract(
                                             config.gate_command, config.gate_enabled,
                                             config.review_disabled,
@@ -8906,27 +8146,6 @@ class Orchestrator:
                     checks=checks,
                     reviews=reviews,
                 )
-            failed_step = next(
-                (
-                    step
-                    for step in self.db.get_plan_steps(run_id)
-                    if step.status == PlanStepStatus.RUNNING
-                ),
-                None,
-            )
-            if failed_step is not None:
-                mark_step(self.db, failed_step, PlanStepStatus.FAILED, error=summary)
-                for downstream in self.db.get_plan_steps(run_id):
-                    if downstream.status in (PlanStepStatus.PENDING, PlanStepStatus.READY):
-                        mark_step(
-                            self.db,
-                            downstream,
-                            PlanStepStatus.BLOCKED,
-                            blocker=f"dependency {failed_step.id} failed gate",
-                        )
-                persisted_plan = self.db.get_run_plan(run_id)
-                if persisted_plan is not None:
-                    self.db.update_run_plan(persisted_plan.id, PlanStatus.FAILED)
             self.db.update_run(
                 run_id=run_id,
                 status=RunStatus.FAILED,

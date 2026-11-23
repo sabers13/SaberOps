@@ -165,9 +165,10 @@ class RunConfig:
     accept_target_branch: str = ""
     # A linked repair run inherits a committed candidate, never a live provider session.
     continuation: dict[str, str] | None = None
-    execution_mode: str = "single"
-    max_parallel_workers: int = 3
-    parallel_plan: tuple[dict[str, Any], ...] = ()
+    # Legacy team-worker markers (no producer since phase 1.1).  Old stored
+    # configs still parse; the guards that refuse accepting, continuing or
+    # refreshing an internal team worker read them so a legacy child is never
+    # promoted to an owner-acceptable candidate.
     parallel_parent_run_id: str | None = None
     parallel_task_index: int | None = None
 
@@ -533,14 +534,9 @@ def reconstruct_run_config(data: dict[str, Any]) -> RunConfig:
         # preserves their acceptance behavior (live repo state).
         accept_target_branch=str(data.get("accept_target_branch", "") or ""),
         continuation=_reconstruct_continuation(data.get("continuation")),
-        execution_mode=str(data.get("execution_mode", "single")),
-        max_parallel_workers=data.get("max_parallel_workers", 3),
-        parallel_plan=tuple(data.get("parallel_plan", ())),
         parallel_parent_run_id=data.get("parallel_parent_run_id"),
         parallel_task_index=data.get("parallel_task_index"),
     )
-    from saberops.parallel_work import validate_work_config
-    validate_work_config(config)
     return config
 
 

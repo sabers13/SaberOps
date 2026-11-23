@@ -1,46 +1,28 @@
 # Parallel Work and Git tracking
 
-A parallel team runs two to six coherent tasks with a maximum of two, three,
-or four workers. The team request carries the task brief; SaberOps keeps the
-original objective alongside the linked team run.
+Parallel work is **several jobs or PLAN.md lanes**, not an in-run team.  Each
+job is one worker with one coherent objective; a plan submits one ordinary job
+per ready lane.  Routing, capacity, worktrees and owner acceptance stay where
+they are for every job.
 
-The configured orchestrator proposes two to six coherent tasks. Each task has
-a goal, acceptance checks, file ownership and explicit dependencies. SaberOps
-validates that proposal before admitting workers. An invalid or inseparable
-proposal does not silently start a single worker or an invented team.
+Phase 1.1 removed the legacy in-run team mode (`parallel_work.py`,
+`execution_mode`) and the persisted single-package run plan.  Splitting work is
+the planner's job: a large task submitted as one job runs as one job, and the
+same work written as PLAN.md lanes runs as lanes.  See ADR-0083.
 
-Each task's status, branch, commit, dependencies, owned files and worktree are
-recorded in run evidence and visible on the run-detail status page and in
-`orch report`. The parent remains the single team entry; internal worker runs
-stay inspectable through their own run-detail pages and reports.
-
-Overview and the canonical run report include team totals and linked worker
-checks. Parent-only counts stay separate: a parent with no final attempt can
-still have workers that dispatched, saved partial commits and failed checks.
-Outcome explanations include those worker results before later routing blockers.
-Failed worker commits remain partial work and do not become acceptable candidates.
+A stored pre-1.1 run may still carry `parallel_parent_run_id` /
+`parallel_task_index`; those markers are never produced now and are kept only
+so an old internal team worker is still refused as an acceptance candidate.
 
 ## Current capability versus target scheduler
 
-**CURRENT — implemented today.** `saberops.parallel_work.execute_team` runs
-**one** parallel team for one parent run: two to six coherent tasks executed by
-at most two, three or four local workers, on their own worktrees and branches,
-with dependency waves, an integration worktree, a stable-order merge into that
-integration branch, and one combined gate plus review on the assembled
-candidate. `saberops.planning.represent_independent_ready_work` and
-`ready_dependents` are the persisted *within-run* plan/package dependency
-authority: they perform dependency-state transitions against the run database.
-Step 015 adds the plan-data
-layer beside it (`saberops.project.ProjectRegistry`,
-`saberops.project_scope.plan_store` and the `saberops.ready_frontier`
-projection, via
-`orch project list|register|active` and `orch plan-store show|validate`):
-versioned, tamper-evident plans with an explicit active revision, sequenced into
-waves and reported. The plan-file layer (`orch plan-file ...`) now submits one
-ordinary job per ready lane from the scheduler tick (Phase 1 lanes P1-P3);
-routing, capacity, worktrees and owner acceptance stay where they are. This is
-a single-run team executor, **not** a cross-project, continuously refilled
-scheduler.
+**CURRENT — implemented today.**  A PLAN.md file submits one ordinary job per
+ready lane from the scheduler tick (`orch plan-file ...`, phase 1 lanes P1-P3).
+The plan-data layer is `saberops.project.ProjectRegistry`,
+`saberops.project_scope.plan_store` and the deterministic `saberops.ready_frontier`
+projection, surfaced read-only via `orch project list|register|active` and
+`orch plan-store show|validate`.  It is **not** a cross-project, continuously
+refilled scheduler.
 
 **TARGET — not yet implemented.** A deterministic, continuously refilled
 **cross-phase ready frontier across 3 active projects x 5 executing child tasks**
@@ -196,23 +178,9 @@ not incorporation of their implementations or license transfer.
 
 ## Validation
 
-`tests/test_parallel_work.py` uses real temporary Git repositories and controlled
-worker adapters. It verifies concurrency, merge order, dependencies, overlapping
-scopes, scope violations, combined checks/review, conflicts, policy inheritance,
-internal acceptance refusal and admission validation. The repository's normal
-lint/type/test gates cover the application integration.
-
-Validation on 2026-10-10 included controlled workers with real temporary Git
-repositories, cancellation, policy inheritance, conflict handling and acceptance.
-Browser checks covered both themes at 390, 760, 1161 and 1440 pixels, pane
-navigation, worker consoles and Chat-to-Work controls.
-
-A live four-task ParallelBoard team completed foundation, concurrent backend and
-frontend work, and integration. All child gates and independent reviews passed;
-the combined candidate passed 72 application tests and its independent review.
-The final Antigravity review carried the full 114,537-byte prompt through stdin.
-Eleven browser check groups passed against the candidate. It remained unaccepted,
-and the owner's project checkout remained unchanged. These observations apply
-to the tested provider accounts and CLI versions, not every supported adapter.
+PLAN.md lane submission, mid-run edit, landing order and STATE.md drills run in
+the full gate; the per-lane rig and benchmark cover job submission, routing,
+worktrees, checks, independent review and owner acceptance.  The repository's
+normal lint/type/test gates cover the application integration.
 
 See the [release notes](releases/0.4.0.md) for repository-wide release validation.

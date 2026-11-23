@@ -19,7 +19,6 @@ from saberops.db import Database
 from saberops.git import GitManager
 from saberops.models import (
     AttemptStatus,
-    PlanStepStatus,
     ReviewResult,
     ReviewVerdict,
     RunStatus,
@@ -29,10 +28,8 @@ from saberops.models import (
 )
 from saberops.orchestrator import Orchestrator
 from saberops.ownership import ProcessIdentity
-from saberops.planning import persist_plan
 from saberops.review import ReviewEngine
 from saberops.session_journal import SessionJournal
-from saberops.slicing import ProposedPackage, TaskSizingAssessment
 from saberops.supervisor import RunSupervisor
 from saberops.workers.codex import CodexAdapter
 from saberops.workers.registry import AdapterRegistry
@@ -362,95 +359,3 @@ def test_continue_refuses_live_or_uncertain_provider_sessions(
     journal.complete("old-worker", {"quiescent": quiescent})
     with pytest.raises(ContinuationError, match="confirmed stopped"):
         prepare_continuation(db, parent_id)
-
-
-def test_continue_keeps_completed_plan_dependencies_without_replanning(
-    failed: tuple[Database, Path, str, AdapterRegistry], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    db, _, parent_id, registry = failed
-    parent = db.get_run(parent_id)
-    assert parent
-    plan = persist_plan(
-        db,
-        parent_id,
-        parent.task,
-        TaskSizingAssessment(10, ("test",), 2, True),
-        [
-            ProposedPackage("Saved feature", "Build saved feature", ("Feature exists",)),
-            ProposedPackage("Repair gate", "Fix gate", ("Gate passes",), (0,)),
-        ],
-        parent.base_commit,
-    )
-    db.update_plan_step(plan.steps[0].id, PlanStepStatus.COMPLETED)
-    db.update_plan_step(plan.steps[1].id, PlanStepStatus.FAILED, error="Gate failed")
-    original_steps = db.get_plan_steps(parent_id)
-    supervisor, _ = launch_without_process(db, registry, monkeypatch)
-    config = prepare_continuation(db, parent_id)
-    assert config.continuation
-    child_id = supervisor.start_supervised_run(config).run_id
-    sha = config.continuation["candidate_sha"]
-    db.inherit_continuation_plan(parent_id, child_id, sha)
-    from saberops.orchestrator import _adopt_durable_plan_for_recovery
-
-    steps = _adopt_durable_plan_for_recovery(db, child_id)
-    assert steps and len(steps) == 2
-    assert steps[0].status == PlanStepStatus.COMPLETED
-    assert steps[1].status == PlanStepStatus.READY
-    assert steps[1].dependency_ids == (steps[0].id,)
-    assert steps[1].error is None and steps[1].attempt_id is None
-    packages = db.get_work_packages(child_id)
-    assert len(packages) == 2
-    by_id = {p.id: p for p in packages}
-    assert steps[0].work_package_id and steps[1].work_package_id
-    assert by_id[steps[1].work_package_id].dependency_package_ids == (steps[0].work_package_id,)
-    for package in packages:
-        assert package.base_candidate_sha == sha
-        assert json.loads(package.context_capsule_json or "{}")["base_candidate_sha"] == sha
-    assert db.get_plan_steps(parent_id) == original_steps
-    db.inherit_continuation_plan(parent_id, child_id, sha)
-    assert db.get_plan_steps(child_id) == list(steps)
-    assert len(db.get_events_by_type(child_id, "plan_created")) == 1
-
-    repaired: list[str] = []
-
-    def repair(request: WorkerRequest) -> WorkerResult:
-        assert (request.worktree_path / "features.json").is_file()
-        assert GitManager.get_head_commit(request.worktree_path) == sha
-        assert "Fix gate" in request.task and "No rule to make target" in request.task
-        repaired.append(request.task)
-        (request.worktree_path / "Makefile").write_text(".PHONY: gate\ngate:\n\t@true\n")
-        return WorkerResult(
-            "codex",
-            request.model,
-            AttemptStatus.SUCCESS,
-            "Repaired",
-            "Gate fixed",
-            "",
-            has_changes=True,
-            execution_quiescent=True,
-        )
-
-    def review(self: ReviewEngine, run_id: str, **kwargs: Any) -> ReviewResult:
-        result = ReviewResult(
-            id="plan-continue-review",
-            run_id=run_id,
-            provider="fake-reviewer",
-            model="independent",
-            verdict=ReviewVerdict.PASS,
-            summary="PASS",
-            details="PASS",
-        )
-        db.create_review(result)
-        return result
-
-    monkeypatch.setattr(registry.get("codex"), "run", repair)
-    monkeypatch.setattr(ReviewEngine, "review_run", review)
-    child = db.get_run(child_id)
-    assert child and child.config_json
-    outcome = Orchestrator(db=db, registry=registry).run(
-        config=reconstruct_run_config(json.loads(child.config_json)), run_id=child_id
-    )
-    assert outcome.status == RunStatus.COMPLETED
-    assert len(repaired) == 1
-    assert all(s.status == PlanStepStatus.COMPLETED for s in db.get_plan_steps(child_id))
-    assert db.get_plan_steps(parent_id) == original_steps

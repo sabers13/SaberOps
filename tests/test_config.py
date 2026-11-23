@@ -406,3 +406,30 @@ def test_config_decision_version_is_validated_on_read(tmp_path: Path) -> None:
     ledger.path.write_text(json.dumps(missing, sort_keys=True) + "\n", encoding="utf-8")
     with pytest.raises(ConfigError, match="version"):
         ledger.entries()
+
+
+def test_legacy_team_config_reconstructs_as_one_ordinary_run(tmp_path: Path) -> None:
+    """Covers: H2 (the legacy team mode is gone; old payloads still parse).
+
+    Before H2 a stored ``execution_mode="parallel"`` payload was validated as
+    a team plan; now the knob is ignored and the run is one ordinary job.
+    Legacy child markers still round-trip so an old team worker is still
+    refused as an acceptance candidate.
+    """
+    config = _config(tmp_path)
+    legacy = config.as_dict()
+    legacy["execution_mode"] = "parallel"
+    legacy["max_parallel_workers"] = 2
+    legacy["parallel_plan"] = [{"title": "only one task"}]
+    rebuilt = reconstruct_run_config(legacy)
+    assert not hasattr(rebuilt, "execution_mode")
+    assert not hasattr(rebuilt, "parallel_plan")
+    assert rebuilt.as_dict() == config.as_dict()
+
+    child = config.as_dict()
+    child["execution_mode"] = "single"
+    child["parallel_parent_run_id"] = "run_parent"
+    child["parallel_task_index"] = 1
+    restored_child = reconstruct_run_config(child)
+    assert restored_child.parallel_parent_run_id == "run_parent"
+    assert restored_child.parallel_task_index == 1

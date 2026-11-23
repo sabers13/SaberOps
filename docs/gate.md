@@ -238,8 +238,8 @@ reports INTERRUPTED. SIGKILL leaves an owned orphan for the next sweep.
 `pytest-timeout` enforces 180 seconds per test. Longer timeouts need a measured
 reason next to an explicit `@pytest.mark.timeout(N)`. Markers `serial` and `slow`
 are registered and strict marker validation is enabled. The timing/process-control
-modules `test_session_control.py` and `test_parallel_work.py` keep their `serial`
-marker as documentation, but there is no serial tier: they run in the single
+module `test_session_control.py` keeps its `serial` marker as documentation, but
+there is no serial tier: it runs in the single
 bounded parallel pass and, if they flake, are rerun once serially with just their
 node IDs (a still-flaky unquarantined test fails the full gate). Additional
 marks require evidence; no test logic is changed. Plain pytest retains only failed

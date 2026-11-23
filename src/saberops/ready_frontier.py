@@ -22,16 +22,13 @@ provider or mutate a project database.
 It is also **not** a replacement for either existing mechanism, and it does not
 reimplement them:
 
-* ``saberops.planning.represent_independent_ready_work`` / ``ready_dependents``
-  are the *persisted within-run* plan/package dependency authority. They issue
-  dependency-state transitions against the run database and validate the frozen
-  project write envelope. This module never reads or advances that state; it
-  consumes already-validated task facts supplied by a trusted caller.
+* PLAN.md lanes and separate jobs are the parallel-work authority. This module
+  never reads or advances run state; it consumes already-validated task facts
+  supplied by a trusted caller.
 * This module performs **no slot admission**: it has no lease,
   compare-and-swap or occupancy read. Its :class:`FrontierLimits` are
   planning bounds, not authorization to launch work.
-* ``saberops.parallel_work.execute_team`` is the current single-run 2-4 worker
-  team executor. This module computes no wave and launches nothing.
+* This module computes no wave and launches nothing.
 
 The 3x5 relationship in one sentence: this projection answers *"which tasks are
 ready and, up to the owner's declared per-project and active-project maxima,
@@ -580,9 +577,8 @@ def _path_owned(path: str, scope: str) -> bool:
 def _scopes_overlap(left: tuple[str, ...], right: tuple[str, ...]) -> bool:
     """Return True when two declared write scopes overlap.
 
-    Mirrors ``saberops.parallel_work.scopes_overlap`` semantics (exact match or
-    one subtree containing the other) but is implemented locally so this module
-    stays pure and free of database imports.
+    Exact match or one subtree containing the other; implemented locally so
+    this module stays pure and free of database imports.
     """
     return any(
         _path_owned(a[:-3] if a.endswith("/**") else a, b)

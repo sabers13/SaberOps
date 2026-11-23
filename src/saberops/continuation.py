@@ -60,30 +60,6 @@ def source_candidate(db: Database, parent_id: str) -> tuple[Run, Attempt]:
         raise ContinuationError("The saved candidate commit is no longer available.")
     if not GitManager.is_ancestor(target, parent.base_commit, sha):
         raise ContinuationError("The saved candidate does not descend from this run's base.")
-    plans = db.list_run_plans(parent.id)
-    if plans:
-        from saberops.orchestrator import (
-            _durable_plan_expected_package_count,
-            _durable_plan_linkage_is_adoptable,
-        )
-
-        count = _durable_plan_expected_package_count(db, parent.id, plans[0])
-        packages = db.get_work_packages(parent.id)
-        if (
-            len(plans) != 1
-            or count is None
-            or not _durable_plan_linkage_is_adoptable(
-                plans[0], db.get_plan_steps(parent.id), packages, count
-            )
-        ):
-            raise ContinuationError("The saved execution plan is incomplete or inconsistent.")
-        for package in packages:
-            if package.base_candidate_sha and not GitManager.is_ancestor(
-                target, package.base_candidate_sha, sha
-            ):
-                raise ContinuationError(
-                    "The saved candidate does not contain its plan prerequisites."
-                )
     worktree = Path(attempt.worktree_path)
     if worktree.exists():
         if not GitManager.is_clean(worktree) or GitManager.get_head_commit(worktree) != sha:

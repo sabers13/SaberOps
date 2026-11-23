@@ -1,4 +1,4 @@
-"""Small deterministic routing decisions with stage/package-local scope."""
+"""Small deterministic routing decisions."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ from saberops.models import (
     DispatchStage,
     Tier,
     WorkerResult,
-    WorkPackage,
 )
 
 
@@ -45,7 +44,6 @@ def choose_tier(
     config: RunConfig,
     *,
     stage: DispatchStage,
-    package: WorkPackage | None = None,
 ) -> TierDecision:
     """Choose a fresh base tier from the planner-recorded difficulty.
 
@@ -54,7 +52,7 @@ def choose_tier(
     ``max_auto_tier`` ceiling still caps both.  No keyword, prompt length or
     prior run tier participates.
     """
-    package_id = package.id if package is not None else None
+    package_id = None
     if config.routing_mode == "manual":
         assert config.manual_tier is not None
         return TierDecision(
@@ -77,7 +75,7 @@ def choose_tier(
         package_id=package_id,
         base_tier=base,
         effective_tier=effective,
-        source="package_difficulty" if package is not None else f"{stage.value}_difficulty",
+        source=f"{stage.value}_difficulty",
         signals=signals,
         max_auto_tier=config.max_auto_tier,
     )

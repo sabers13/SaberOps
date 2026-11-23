@@ -9,10 +9,6 @@ Context modes
 
 * ``INITIAL``              — initial unsliced implementation; the full original
                               task is allowed once.
-* ``PACKAGE``              — sliced implementation/repair of a single coherent
-                              package; the raw full parent objective is NEVER
-                              model-visible (it remains on the durable
-                              ``WorkPackage`` row for audit/reconstruction).
 * ``REPAIR``               — bounded corrective work on a committed candidate
                               (retry, repair, final-repair); the full original
                               task is NEVER model-visible.
@@ -31,7 +27,7 @@ Worker-contract invariants
 * Validation policy is appended exactly once and idempotently.
 * Section ordering is stable across renders (cache-friendly prefix).
 * No timestamps, UUIDs, or random attempt IDs appear in the prefix.
-* The full original task never appears in REPAIR/SURGICAL/PACKAGE modes.
+* The full original task never appears in REPAIR/SURGICAL modes.
 
 Determinism
 ===========
@@ -47,8 +43,6 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
-
-from saberops.models import DispatchRole
 
 # ---------------------------------------------------------------------------
 # Public configuration constants — small, explicit, deterministic budgets.
@@ -83,7 +77,6 @@ class DispatchContextMode(StrEnum):
     """
 
     INITIAL = "INITIAL"
-    PACKAGE = "PACKAGE"
     REPAIR = "REPAIR"
     SURGICAL = "SURGICAL"
     CONTINUATION = "CONTINUATION"
@@ -93,7 +86,6 @@ class DispatchContextMode(StrEnum):
 # Modes in which the raw full original task MUST NOT appear by default.
 MODES_WITHOUT_FULL_TASK: frozenset[DispatchContextMode] = frozenset(
     {
-        DispatchContextMode.PACKAGE,
         DispatchContextMode.REPAIR,
         DispatchContextMode.SURGICAL,
         DispatchContextMode.CONTINUATION,
@@ -141,7 +133,6 @@ class ContextProjection:
     source_original_task_bytes: int = 0
     focused_verification: str = "Run focused tests and nearby regressions; return the candidate."
     extra_sections: tuple[tuple[str, str], ...] = ()  # (title, body)
-    package_id: str | None = None
 
     def project_size_bytes(self) -> int:
         """Return approximate byte size of the projected prompt body."""
@@ -193,8 +184,6 @@ class ContextProjection:
             f"parent_slug: {self.parent_slug}",
             f"inherited_candidate_sha: {self.inherited_candidate_sha}",
         ]
-        if self.package_id:
-            lines.append(f"package_id: {self.package_id}")
         lines.append(f"responsibility: {self.responsibility}")
         return "\n".join(lines)
 
@@ -241,7 +230,7 @@ class ContextProjection:
 
         * ``original_task_bytes`` is the byte size of the durable source
           parent objective for this dispatch.  It is non-zero even in
-          REPAIR / SURGICAL / PACKAGE modes that do NOT model-expose the
+          REPAIR / SURGICAL modes that do NOT model-expose the
           full parent.
         * ``projected_context_bytes`` is the byte size of the semantic
           projection body.  Actual dispatch evidence must use
@@ -264,7 +253,6 @@ class ContextProjection:
             "context_mode": self.mode.value,
             "role": self.role,
             "inherited_candidate_sha": self.inherited_candidate_sha,
-            "package_id": self.package_id,
             "original_task_bytes": source_bytes,
             "projected_context_bytes": self.project_size_bytes(),
             "full_parent_included": self.full_parent_included,
@@ -683,7 +671,6 @@ def build_initial_projection(
     original_task: str,
     role: str = "BULK",
     invariants: tuple[str, ...] = (),
-    package_id: str | None = None,
 ) -> ContextProjection:
     """Build a :class:`ContextProjection` for the initial unsliced dispatch.
 
@@ -705,125 +692,8 @@ def build_initial_projection(
         full_parent_included=True,
         original_task=original_task,
         source_original_task_bytes=len(original_task.encode("utf-8")),
-        package_id=package_id,
         focused_verification=(
             "Run focused tests and nearby regressions; return the candidate to Orch."
-        ),
-    )
-
-
-def build_package_initial_projection(
-    *,
-    original_task: str,
-    package: object,
-    completed_summaries: tuple[str, ...] = (),
-    inherited_base_sha: str,
-    role: str | None = None,
-) -> ContextProjection:
-    """Build a single :class:`ContextProjection` for an INITIAL sliced
-    package dispatch.
-
-    This is the ONLY worker contract for an initial package
-    dispatch.  It does NOT concatenate with an INITIAL projection.  The
-    raw full original task is NEVER model-visible in PACKAGE mode.
-    """
-    pkg_goal = getattr(package, "goal", "") or ""
-    pkg_criteria = tuple(str(item) for item in getattr(package, "acceptance_criteria", ()) or ())
-    pkg_relevant_paths = tuple(getattr(package, "relevant_paths", ()) or ())
-    pkg_prereq_summaries = tuple(
-        completed_summaries or getattr(package, "prerequisite_summaries", ()) or ()
-    )
-    pkg_id = getattr(package, "id", None)
-    pkg_base_candidate_sha = getattr(package, "base_candidate_sha", None) or "UNKNOWN"
-    slug = objective_slug(original_task)
-    digest = objective_digest(original_task)
-    invariants = (
-        "Implement ONLY this package's responsibility; do not pre-implement "
-        "downstream packages merely because they exist.",
-        "Inspect the isolated worktree for source context; preserve completed prerequisite work.",
-        "Original task context (bounded digest): " + digest,
-    )
-    prereqs_section: tuple[tuple[str, str], ...] = (
-        ("PREREQUISITES", "\n".join(str(item) for item in pkg_prereq_summaries) or "(none yet)"),
-    )
-    return ContextProjection(
-        mode=DispatchContextMode.PACKAGE,
-        role=(role or DispatchRole.BUILD.value),
-        parent_slug=slug,
-        inherited_candidate_sha=inherited_base_sha,
-        dispatch_reason="package implementation",
-        responsibility=pkg_goal.strip() or "Implement this package's responsibility.",
-        acceptance_criteria=pkg_criteria,
-        invariants=invariants,
-        changed_paths=pkg_relevant_paths,
-        diff_ref=f"{pkg_base_candidate_sha}..{inherited_base_sha}",
-        package_id=pkg_id,
-        source_original_task_bytes=len(original_task.encode("utf-8")),
-        extra_sections=prereqs_section,
-        focused_verification=(
-            "Run focused tests and nearby regressions for this package only; "
-            "return the candidate to Orch."
-        ),
-    )
-
-
-def build_package_retry_projection(
-    *,
-    original_task: str,
-    package: object,
-    inherited_base_sha: str,
-    prior_check: object | None,
-    review_excerpt: str | None = None,
-    failure_excerpt: str | None = None,
-    evidence_truncated: bool = False,
-    role: str | None = None,
-) -> ContextProjection:
-    """Build a single :class:`ContextProjection` for a PACKAGE retry
-    dispatch (either a gate-failure retry or a review-repair).
-
-    This is the ONLY worker contract for a package retry
-    dispatch.  It does NOT concatenate with a generic REPAIR projection.
-    The raw full original task is NEVER model-visible in PACKAGE mode.
-    """
-    pkg_goal = getattr(package, "goal", "") or ""
-    pkg_criteria = tuple(str(item) for item in getattr(package, "acceptance_criteria", ()) or ())
-    pkg_relevant_paths = tuple(getattr(package, "relevant_paths", ()) or ())
-    pkg_id = getattr(package, "id", None)
-    pkg_base_candidate_sha = getattr(package, "base_candidate_sha", None) or "UNKNOWN"
-    slug = objective_slug(original_task)
-    digest = objective_digest(original_task)
-    invariants = (
-        "Implement ONLY this package's responsibility; do not pre-implement "
-        "downstream packages merely because they exist.",
-        "Inspect the isolated worktree for source context; preserve completed prerequisite work.",
-        "Acceptance criteria of the inherited candidate must remain satisfied.",
-        "Original task context (bounded digest): " + digest,
-    )
-    extra_sections: tuple[tuple[str, str], ...] = ()
-    if evidence_truncated:
-        extra_sections = (
-            ("EVIDENCE TRUNCATION", "Some bounded evidence was deterministically pruned."),
-        )
-    return ContextProjection(
-        mode=DispatchContextMode.PACKAGE,
-        role=(role or DispatchRole.BUILD.value),
-        parent_slug=slug,
-        inherited_candidate_sha=inherited_base_sha,
-        dispatch_reason="package retry",
-        responsibility=pkg_goal.strip()
-        or "Repair the package failure on the inherited candidate commit.",
-        acceptance_criteria=pkg_criteria,
-        invariants=invariants,
-        changed_paths=pkg_relevant_paths,
-        diff_ref=f"{pkg_base_candidate_sha}..{inherited_base_sha}",
-        failure_excerpt=failure_excerpt,
-        review_excerpt=review_excerpt,
-        package_id=pkg_id,
-        source_original_task_bytes=len(original_task.encode("utf-8")),
-        extra_sections=extra_sections,
-        focused_verification=(
-            "Re-run the focused tests associated with this package's bounded "
-            "evidence; return the candidate to Orch."
         ),
     )
 
@@ -841,7 +711,6 @@ def build_continuation_projection(
     changed_paths: tuple[str, ...] = (),
     diff_summary: str | None = None,
     failure_excerpt: str | None = None,
-    package: object | None = None,
     acceptance_criteria: tuple[str, ...] = (),
     invariants: tuple[str, ...] = (),
     side_effect_summary: str | None = None,
@@ -854,19 +723,12 @@ def build_continuation_projection(
     """
     slug = objective_slug(original_task)
     digest = objective_digest(original_task)
-    pkg_id = getattr(package, "id", None) if package else None
-    pkg_goal = getattr(package, "goal", "") if package else ""
-    pkg_criteria = (
-        tuple(str(c) for c in getattr(package, "acceptance_criteria", ()) or ()) if package else ()
-    )
-    all_criteria = tuple(dict.fromkeys((*acceptance_criteria, *pkg_criteria)))
+    all_criteria = tuple(dict.fromkeys(acceptance_criteria))
 
     responsibility = (
         f"Continue implementation from partial checkpoint {checkpoint_sha[:8]}; "
         f"previous worker ({previous_provider}/{previous_model}) interrupted due to {interruption_reason}."
     )
-    if pkg_goal.strip():
-        responsibility += f" Package goal: {pkg_goal.strip()}"
 
     all_invariants = (
         f"Continue from partial checkpoint {checkpoint_sha}; do not reset to base.",
@@ -908,7 +770,6 @@ def build_continuation_projection(
         diff_ref=f"{last_verified_candidate_sha}..{checkpoint_sha}",
         failure_excerpt=failure_excerpt,
         full_parent_included=False,
-        package_id=pkg_id,
         source_original_task_bytes=len(original_task.encode("utf-8")),
         extra_sections=tuple(extra_sections),
         focused_verification=(
@@ -954,7 +815,7 @@ def render_projection(
 
     The validation policy is appended exactly once and idempotently.  The
     invariant contract prefix is byte-identical for identical
-    (role, mode, parent_slug, package_id, dispatch_reason) tuples.
+    (role, mode, parent_slug, dispatch_reason) tuples.
     An optional bounded ``[PROJECT SCOPE]`` section is appended exactly
     once, before the validation policy.  An optional ``[PROJECT NOTES]``
     section carries the exact per-project note the owner maintains.
@@ -1013,8 +874,6 @@ __all__ = [
     "build_continuation_projection",
     "build_final_repair_projection",
     "build_initial_projection",
-    "build_package_initial_projection",
-    "build_package_retry_projection",
     "build_repair_projection",
     "build_retry_projection",
     "objective_digest",

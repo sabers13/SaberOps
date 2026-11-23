@@ -38,14 +38,9 @@ validation and owner approval path.
 
 **Implemented today (repository code).**
 
-- `saberops.parallel_work.execute_team` runs **one** team per parent run: two to
-  six coherent tasks, two to four local workers, one integration worktree,
-  dependency waves, ordered merge into the integration branch, one combined
-  gate and review. It is a single-run team executor, **not** a cross-project,
-  continuously refilled scheduler.
-- `saberops.planning.represent_independent_ready_work` and `ready_dependents`
-  are the persisted *within-run* plan/package dependency authority; they perform
-  dependency-state transitions against the run database.
+- Parallel work is **several jobs or PLAN.md lanes**: a plan submits one
+  ordinary job per ready lane; each job is one worker with one objective.  It is
+  not a cross-project, continuously refilled scheduler.
 - Early pure slices may exist on unmerged branches (for example a 3x5
   project-child slot-admission projection, and a cross-phase ready-frontier
   readiness projection such as `saberops.ready_frontier`). These are pure
