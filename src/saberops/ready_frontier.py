@@ -95,13 +95,10 @@ __all__ = [
     "ProjectionStatus",
     "READY_FRONTIER_VERSION",
     "REQUIRES_TRANSACTIONAL_VERIFICATION",
-    "ScheduledTask",
-    "ScheduledWave",
     "SnapshotSource",
     "TaskKind",
     "TaskRef",
     "TaskStatus",
-    "WaveScheduleError",
     "default_frontier_limits",
     "project_ready_frontier",
 ]
@@ -897,31 +894,5 @@ def project_ready_frontier(request: FrontierRequest) -> FrontierProjection:
     )
 
 
-class WaveScheduleError(ValueError):
-    """Raised when a plan cannot be sequenced into executable waves."""
-
-
-@dataclass(frozen=True)
-class ScheduledTask:
-    """One task placed in a chained wave, with its stable identity."""
-
-    project_id: str
-    task_id: str
-    phase: str
-    title: str
-    running: bool = False
-
-    @property
-    def stable_ref(self) -> TaskRef:
-        """The immutable stable identity of this task."""
-        return TaskRef(project_id=self.project_id, task_id=self.task_id)
-
-
-@dataclass(frozen=True)
-class ScheduledWave:
-    """One executable wave: tasks that may run once earlier waves completed."""
-
-    index: int
-    tasks: tuple[ScheduledTask, ...] = ()
-
-
+# ScheduledTask, ScheduledWave and WaveScheduleError lived here for the
+# web-only wave optimizer; both were deleted with it (ADR-0071).

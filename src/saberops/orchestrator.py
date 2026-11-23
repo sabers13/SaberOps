@@ -188,13 +188,6 @@ from saberops.validation_policy import (
     WORKER_INSTRUCTIONS,
     verification_contract,
 )
-from saberops.wave_admission import (
-    AncestryChecker,
-    RoutePostureValidator,
-    WaveAdmissionDecision,
-)
-from saberops.wave_admission import admit_wave as _admit_wave
-from saberops.wave_models import Wave
 from saberops.workers.base import WorkerAdapter
 from saberops.workers.registry import AdapterRegistry
 
@@ -8302,34 +8295,6 @@ class Orchestrator:
             run_process(["git", "clean", "-fd"], cwd=wt_path)
         except Exception:  # noqa: BLE001 - the scratch copy is disposable
             pass
-
-    # -- wave execution seam (Step 010 / WX-1) -----------------------------
-
-    def admit_wave(
-        self,
-        wave: Wave,
-        target_head: str,
-        posture_validator: RoutePostureValidator,
-        *,
-        repo: Path | str | None = None,
-        ancestry_checker: AncestryChecker | None = None,
-    ) -> WaveAdmissionDecision:
-        """Deterministic, fail-closed admission decision for one wave.
-
-        Covers: (admission) and §4 invariant 2.
-
-        Delegates to the pure :func:`saberops.wave_admission.admit_wave`. The
-        caller supplies the route-posture predicate from the owner-state
-        service; the repository defaults to this orchestrator's current
-        project only when one is bound, otherwise ancestry must be supplied.
-        """
-        return _admit_wave(
-            wave,
-            target_head,
-            posture_validator,
-            repo=repo,
-            ancestry_checker=ancestry_checker,
-        )
 
     def cleanup_run(self, run_id: str) -> dict[str, list[str]]:
         """Guardedly retire clean attempt worktrees for a terminal run.

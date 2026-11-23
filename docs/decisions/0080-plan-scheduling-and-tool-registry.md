@@ -77,5 +77,6 @@ pause) stays.
 - `grant_for_sandbox(tool_refs=...)` and `CapabilityEntry.tool_ref` remain as
   inert sandbox policy surface; no caller passes a ref. Removing them is a
   separate sandbox-policy change, not part of this lane.
-- `ScheduledTask`, `ScheduledWave` and `WaveScheduleError` stay for the
-  web-only wave optimizer, which H10 owns.
+- `ScheduledTask`, `ScheduledWave` and `WaveScheduleError` stayed here for the
+  web-only wave optimizer. H10 deleted the optimizer and those three models
+  together (see [ADR-0071](0071-web-only-planning-leftovers.md)).

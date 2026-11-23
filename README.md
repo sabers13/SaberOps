@@ -382,11 +382,9 @@ scripts/               gate wrappers and tooling
 - Operating: [operations](docs/operations.md) · [config](docs/config.md) ·
   [storage lifecycle](docs/storage-lifecycle.md) · [security](docs/security.md) ·
   [vendor CLI live check](docs/vendor-cli-live-check.md)
-- Execution: [wave optimization](docs/wave-plan-optimization.md) ·
-  [parallel work](docs/parallel-work.md) · [gate](docs/gate.md) ·
+- Execution: [parallel work](docs/parallel-work.md) · [gate](docs/gate.md) ·
   [unattended plans](docs/unattended-plans.md)
 - Orchestrator: [parallel-first policy](docs/orchestrator-parallel-first.md) ·
-  [project modes](docs/project-modes.md) ·
   [questions](docs/questions.md)
 - Interfaces: [MCP](docs/mcp.md) · [first-run web UI](docs/first-run-web-ui.md) ·
   [UI design principles](docs/ui-design-principles.md)
