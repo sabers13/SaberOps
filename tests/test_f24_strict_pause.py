@@ -39,7 +39,6 @@ from saberops.attendance import (
     record_attendance,
     record_path,
 )
-from saberops.authority import set_authority_mode
 from saberops.jobs.models import JobState
 from saberops.jobs.service import get_job, submit_job
 from saberops.mcp.ledger import EventLedger
@@ -92,7 +91,6 @@ def _tick(rig: RigEnvironment) -> Any:
 
 def test_fresh_store_with_no_session_never_dispatches(rig: RigEnvironment) -> None:
     """Covers: F24 -- a never-attended store dispatches nothing."""
-    set_authority_mode("autonomous")
     db = rig.db()
     submitted = submit_job(db, repo=rig.repo, goal="no session, no work").job
 
@@ -118,7 +116,6 @@ def test_submit_queues_until_an_attended_terminal_opens(
     rig: RigEnvironment,
 ) -> None:
     """Covers: F24 -- `orch submit` queues; work starts when presence opens."""
-    set_authority_mode("autonomous")
     db = rig.db()
     completed = rig.run_cli(
         "job", "submit", "--repo", str(rig.repo), "--goal", "attended terminal starts me", "--json"
@@ -157,7 +154,6 @@ def test_closing_the_attended_terminal_pauses_the_run(
     rig: RigEnvironment,
 ) -> None:
     """Covers: F24 -- presence ends when the attended terminal closes."""
-    set_authority_mode("autonomous")
     rig.set_worker_mode("hang", hang_seconds=180)
     db = rig.db()
     submitted = submit_job(db, repo=rig.repo, goal="paused when I close watch").job

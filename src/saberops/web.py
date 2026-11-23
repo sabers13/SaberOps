@@ -45,7 +45,6 @@ from fastapi.templating import Jinja2Templates
 
 from saberops import access_ops, plans_ops
 from saberops.accept import AcceptEngine
-from saberops.authority import label_for, load_authority_mode
 from saberops.away import (
     NEVER_DELEGABLE_KINDS,
     NEVER_DELEGABLE_POLICY,
@@ -509,17 +508,6 @@ def resolve_orch_executable() -> str:
     from saberops.cli_environment import resolve_orch_executable as _resolve
 
     return _resolve()
-
-#: What each authority preset changes in SaberOps today. Policy fields that
-#: only the unwired autonomous project runner reads are not promised here.
-_AUTHORITY_EFFECTS: dict[str, str] = {
-    "ask_before_actions": "Runs behave like Supervised. Your synced OpenCode agent asks before every action.",
-    "supervised": "Gate and review run automatically. You accept every candidate.",
-    "autonomous": "Like Supervised, and every candidate that passes the gate is pushed to the repository's origin as orch/<run>/a<n>. You still accept.",
-    "full_autonomy": "Like Autonomous. When the owner mode is Away or Critical only, a candidate that passed the gate and an independent review of that exact commit is accepted as a local commit; never in Ask me, and nothing is pushed.",
-    "full_autonomy_publish": "Like Full autonomy, and a verified candidate branch may be published to origin for external review. Acceptance stays local and is never automatic in Ask me.",
-}
-
 
 def _dashboard_context(
     service: OrchestratorService,
@@ -1425,8 +1413,6 @@ def _notice_from_query(request: Request) -> str | None:
         return "Quota updated."
     if request.query_params.get("enabled") == "1":
         return "Quota enabled."
-    if request.query_params.get("authority_saved") == "1":
-        return "Authority settings saved. New runs use them."
     if request.query_params.get("connection_saved") == "1":
         auto = request.query_params.get("auto_discovered")
         if auto is not None:
@@ -2477,15 +2463,6 @@ def _never_delegable_rows() -> list[dict[str, Any]]:
     ]
 
 
-def _authority_view() -> dict[str, Any]:
-    """The owner's current authority mode."""
-    try:
-        mode = load_authority_mode()
-        return {"mode": mode.value, "label": label_for(mode)}
-    except Exception as exc:
-        return {"mode": "UNKNOWN", "label": f"unavailable ({exc.__class__.__name__})"}
-
-
 def _owner_mode_view() -> dict[str, Any]:
     """The effective owner mode, its choices and each decision it permits."""
     try:
@@ -2502,7 +2479,6 @@ def _owner_mode_view() -> dict[str, Any]:
             "until": None,
             "expired": False,
             "config_path": None,
-            "authority_mode": "UNKNOWN",
             "choices": [],
             "decisions": {},
             "max_jobs": None,
@@ -2700,7 +2676,6 @@ def _onboarding_context(
         "self_answered_questions": _self_answered_question_rows(),
         "standing_decisions": _standing_decision_rows(),
         "never_delegable": _never_delegable_rows(),
-        "authority": _authority_view(),
         "owner_mode": _owner_mode_view(),
         "work_gate": _work_gate_view(db),
         "storage": _storage_view(repo_param, db),

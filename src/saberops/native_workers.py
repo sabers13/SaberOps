@@ -385,9 +385,9 @@ class _ClaimFields:
 
 def _new_run(db: Database, job: Job, *, vendor: str, model: str) -> Run:
     """Create the run row a native attempt lives in (no supervisor)."""
-    from saberops.authority import load_authority_settings
     from saberops.config import freeze_owner_binding_registry_payload
     from saberops.control_plane import freeze_control_plane_policy, load_control_plane_policy
+    from saberops.owner_mode import load_owner_mode_settings
     from saberops.provenance import mint_run_provenance
     from saberops.routing_config import (
         load_effective_routing,
@@ -414,7 +414,7 @@ def _new_run(db: Database, job: Job, *, vendor: str, model: str) -> Run:
         load_control_plane_policy(),
         required_capabilities=config.required_capabilities,
         reserve_override=config.reserve_override,
-        host_access=load_authority_settings().host_access.value,
+        host_access=load_owner_mode_settings().host_access.value,
     )
     from saberops.supervisor import RunSupervisor
 

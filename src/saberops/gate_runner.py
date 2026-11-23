@@ -317,7 +317,7 @@ def _atomic_write_json(path: Path, payload: Mapping[str, object]) -> None:
     The temp file lives next to the destination and is fsynced before
     :func:`os.replace` is called, so a crash cannot leave a half-written
     policy on disk.  This mirrors the persistence discipline already
-    used by :func:`saberops.authority.set_authority_mode`.
+    used by :func:`saberops.owner_mode.set_owner_mode`.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps(payload, indent=2, sort_keys=True) + "\n"

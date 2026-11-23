@@ -64,7 +64,7 @@
   {% if owner_mode.error %}
   <div class="banner" data-tone="bad" role="alert">Owner mode could not be read: {{ owner_mode.error }}</div>
   {% else %}
-  <p class="muted">The mode narrows your authority preset; it never widens it. Only you can switch it.</p>
+  <p class="muted">The mode decides what may run without you; no mode can widen its own permissions. Only you can switch it.</p>
   <form method="post" action="/questions/mode" class="form-inline">
     <input type="hidden" name="csrf" value="{{ csrf_token }}">
     <label class="field">Mode
@@ -80,7 +80,7 @@
     <button type="submit">Use ask-me</button>
   </form>
   <details class="tech"><summary>Technical details</summary>
-    <dl class="kv"><dt>Declared mode</dt><dd class="mono">{{ owner_mode.declared_mode }}</dd><dt>Authority preset</dt><dd class="mono">{{ owner_mode.authority_mode }}</dd><dt>Mode file</dt><dd class="mono">{{ owner_mode.config_path }}</dd></dl>
+    <dl class="kv"><dt>Declared mode</dt><dd class="mono">{{ owner_mode.declared_mode }}</dd><dt>Host access</dt><dd class="mono">{{ owner_mode.host_access }}</dd><dt>Mode file</dt><dd class="mono">{{ owner_mode.config_path }}</dd></dl>
     <div class="table-wrap">
       <table class="table stack-sm">
         <caption class="sr-only">What the effective mode permits without you</caption>
@@ -126,7 +126,7 @@
 </section>
 
 <section class="section" aria-labelledby="authority-h">
-  <div class="section-head"><h2 id="authority-h">What may run without you</h2><p>Authority preset: <strong>{{ authority.label }}</strong></p></div>
+  <div class="section-head"><h2 id="authority-h">What may run without you</h2><p>Owner mode: <strong>{{ owner_mode.label }}</strong></p></div>
   <div class="banner" data-tone="warn" role="status">Standing permissions below are recorded but <strong>not enforced yet</strong>; the engine will not act on them until the standing-decision wiring lands.</div>
   {% if standing_decisions.error %}
   <div class="banner" data-tone="bad" role="alert">Standing permissions could not be read: {{ standing_decisions.error }}</div>
@@ -159,7 +159,7 @@
       <ul class="rows">{% for row in never_delegable %}<li><div class="row-main"><span>{{ row.description }}</span><span class="row-sub mono">{{ row.kind }}</span></div></li>{% endfor %}</ul>
     </div>
   </details>
-  <details class="tech"><summary>Technical details</summary><dl class="kv"><dt>Authority mode</dt><dd class="mono">{{ authority.mode }}</dd>{% if standing_decisions.path %}<dt>Permissions file</dt><dd class="mono">{{ standing_decisions.path }}</dd>{% endif %}</dl></details>
+  <details class="tech"><summary>Technical details</summary><dl class="kv"><dt>Owner mode</dt><dd class="mono">{{ owner_mode.mode }}</dd>{% if standing_decisions.path %}<dt>Permissions file</dt><dd class="mono">{{ standing_decisions.path }}</dd>{% endif %}</dl></details>
 </section>
 
 {% if self_answered_questions and self_answered_questions.error %}

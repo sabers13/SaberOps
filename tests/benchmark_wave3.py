@@ -45,7 +45,6 @@ from saberops import away, vendor_health
 from saberops.accept import AcceptEngine
 from saberops.advisor import set_advisor_route
 from saberops.agent_connect import PROXIES, PROXY_FAMILY, PROXY_TOOLS, agent_document
-from saberops.authority import set_authority_mode
 from saberops.auto_accept import (
     AUTO_ACCEPT_EVENT,
     auto_accept_candidate,
@@ -180,7 +179,6 @@ def _feature_drill(
 def _reset_owner_state() -> None:
     """Return the shared owner store to its safe defaults between drills."""
     clear_owner_mode()
-    set_authority_mode("supervised")
     try:
         clear_pause(by="benchmark")
     except Exception:  # noqa: BLE001 - the pause store may predate the shutdown
@@ -317,7 +315,6 @@ def run_question_mode_drills(rig: RigEnvironment) -> tuple[DrillResult, ...]:
 
 def _drill_critical_only(rig: RigEnvironment) -> DrillResult:
     started = time.monotonic()
-    set_authority_mode("supervised")
     set_owner_mode(OwnerMode.CRITICAL_ONLY)
     store_path = rig.root / "drill-questions-critical.json"
     queue = OwnerQuestionQueue(store_path)
@@ -390,7 +387,6 @@ def _drill_critical_only(rig: RigEnvironment) -> DrillResult:
 
 def _drill_away(rig: RigEnvironment) -> DrillResult:
     started = time.monotonic()
-    set_authority_mode("supervised")
     set_owner_mode(OwnerMode.AWAY, until=FUTURE)
     away.save_away_policy(
         away.AwayPolicy(
@@ -1458,10 +1454,9 @@ def _record_review_for_b(fixture: AcceptanceFixture, verdict: ReviewVerdict) -> 
 
 
 def _drill_owner_modes(rig: RigEnvironment, fixture: AcceptanceFixture) -> DrillResult:
-    """Ask-me parks an accept a permissive preset would otherwise allow."""
+    """Ask-me parks an accept the unattended modes would otherwise allow."""
     started = time.monotonic()
     _record_review_for_b(fixture, ReviewVerdict.PASS)
-    set_authority_mode("full_autonomy")
     set_owner_mode(OwnerMode.ASK_ME)
     view = mode_view()
     assert view["mode"] == "ask-me", view
@@ -1490,7 +1485,6 @@ def _drill_auto_accept(rig: RigEnvironment, fixture: AcceptanceFixture) -> Drill
     """An eligible candidate auto-accepts in away; undo restores the base; ask-me never."""
     started = time.monotonic()
     db = rig.db()
-    set_authority_mode("full_autonomy")
     set_owner_mode(OwnerMode.AWAY, until=FUTURE)
     outcome = auto_accept_candidate(db=db, run_id=fixture.run_id)
     assert outcome.applied is True, outcome.reason
@@ -1638,7 +1632,6 @@ def _live_session(rig: RigEnvironment) -> OrchestratorLease:
 def _drill_pause_and_resume(rig: RigEnvironment) -> DrillResult:
     """A closed session pauses dispatch; nothing resumes without one confirmation."""
     started = time.monotonic()
-    set_authority_mode("supervised")
     db = rig.db()
     assert evaluate_gate(db=db).closed is True
     lease = _live_session(rig)
@@ -1690,7 +1683,6 @@ def _drill_pause_and_resume(rig: RigEnvironment) -> DrillResult:
 def _drill_park_running(rig: RigEnvironment) -> DrillResult:
     """An owner pause parks a running worker with its work preserved."""
     started = time.monotonic()
-    set_authority_mode("supervised")
     db = rig.db()
     lease = _live_session(rig)
     rig.set_worker_mode("hang", hang_seconds=180)

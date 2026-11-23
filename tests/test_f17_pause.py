@@ -19,7 +19,6 @@ from typing import Any
 import pytest
 from lifecycle_rig import RigEnvironment, build_lifecycle_rig
 
-from saberops.authority import set_authority_mode
 from saberops.cli import main
 from saberops.jobs.models import JobState, WaitingReason
 from saberops.jobs.service import get_job, submit_job
@@ -195,7 +194,6 @@ def test_closing_the_last_session_stops_new_dispatch(
     mode: str,
     closing: str,
 ) -> None:
-    set_authority_mode("autonomous")
     clear_owner_mode()
     if mode == "away":
         set_owner_mode("away", max_jobs=10)
@@ -238,7 +236,6 @@ def test_closing_the_last_session_stops_new_dispatch(
 def test_nothing_resumes_without_confirmation(
     rig: RigEnvironment, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    set_authority_mode("autonomous")
     lease = _live_session(rig, monkeypatch)
     db = rig.db()
     submitted = submit_job(db, repo=rig.repo, goal="resume needs confirmation").job
@@ -274,7 +271,6 @@ def test_nothing_resumes_without_confirmation(
 def test_owner_pause_pauses_immediately(
     rig: RigEnvironment, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    set_authority_mode("autonomous")
     _live_session(rig, monkeypatch)
     db = rig.db()
     submit_job(db, repo=rig.repo, goal="owner pause")
@@ -294,7 +290,6 @@ def test_owner_pause_pauses_immediately(
 def test_running_worker_is_parked_with_work_preserved(
     rig: RigEnvironment, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    set_authority_mode("autonomous")
     _live_session(rig, monkeypatch)
     rig.set_worker_mode("hang", hang_seconds=180)
     db = rig.db()
@@ -352,7 +347,6 @@ def test_running_worker_is_parked_with_work_preserved(
 def test_paused_job_redispatches_from_its_checkpoint(
     rig: RigEnvironment, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    set_authority_mode("autonomous")
     _live_session(rig, monkeypatch)
     rig.set_worker_mode("hang", hang_seconds=180)
     db = rig.db()
@@ -430,7 +424,6 @@ def test_away_without_an_end_time_or_budget_is_refused(
 def test_away_job_budget_pauses_once_with_a_notice(
     rig: RigEnvironment, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    set_authority_mode("autonomous")
     set_owner_mode("away", max_jobs=1)
     _live_session(rig, monkeypatch)
     notices: list[tuple[str, str, str]] = []
@@ -453,7 +446,6 @@ def test_expired_away_mode_ignores_its_own_sticky_pause(
     rig: RigEnvironment, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A legacy AWAY_ENDED record cannot keep work paused after the grant ends."""
-    set_authority_mode("autonomous")
     set_owner_mode("away", until="2026-01-01T00:00:00Z")
     _live_session(rig, monkeypatch)
     set_pause(PauseReason.AWAY_ENDED, "the away session ended")
@@ -466,7 +458,6 @@ def test_expired_away_mode_does_not_pause_work(
     rig: RigEnvironment, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An ended away grant narrows to ask-me; it never becomes a sticky pause."""
-    set_authority_mode("autonomous")
     set_owner_mode("away", until="2026-01-01T00:00:00Z")
     _live_session(rig, monkeypatch)
     state = refresh_gate(rig.db())
@@ -484,7 +475,6 @@ def test_expired_away_mode_does_not_pause_work(
 def test_digest_lists_running_work_and_usage(
     rig: RigEnvironment, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    set_authority_mode("autonomous")
     set_owner_mode("critical-only")
     _live_session(rig, monkeypatch)
     db = rig.db()
@@ -516,7 +506,6 @@ def test_digest_lists_running_work_and_usage(
 def test_catch_up_and_mcp_show_the_pause_but_only_the_owner_resumes(
     rig: RigEnvironment, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    set_authority_mode("autonomous")
     lease = _live_session(rig, monkeypatch)
     db = rig.db()
     submitted = submit_job(db, repo=rig.repo, goal="mcp pause").job
@@ -550,7 +539,6 @@ def test_turn_on_and_job_reads_surface_the_paused_gate(
     from saberops.mcp.tools import build_default_registry
 
     monkeypatch.setenv("SABEROPS_DISABLE_AUTO_SCHEDULER", "1")
-    set_authority_mode("autonomous")
     lease = _live_session(rig, monkeypatch)
     db = rig.db()
     submitted = submit_job(db, repo=rig.repo, goal="paused gate").job

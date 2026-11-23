@@ -88,7 +88,7 @@ now redirects on success to the page that owns it (`/setup`, `/routing`,
   class, options and blocks. The owner answers with `OWNER` authority (the local
   web surface is the owner surface; the MCP server explicitly refuses owner
   authority), and answers are stored verbatim.
-- **Unattended & standing decisions.** The authority mode, the never-delegable
+- **Unattended & standing decisions.** The owner mode, the never-delegable
   decision kinds, and any durable standing decisions are shown with their live/
   expired windows. Standing decisions are read from
   `<state>/unattended-decisions.json` (override: `ORCH_UNATTENDED_STORE`) and

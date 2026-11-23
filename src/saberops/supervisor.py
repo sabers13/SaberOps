@@ -193,12 +193,12 @@ class RunSupervisor:
         session.  Duplicate execution is prevented by the durable ownership
         claim taken before the process is created.
         """
-        from saberops.authority import load_authority_settings
         from saberops.continuation import ContinuationExists, validate_continuation
         from saberops.control_plane import (
             freeze_control_plane_policy,
             load_control_plane_policy,
         )
+        from saberops.owner_mode import load_owner_mode_settings
         from saberops.parallel_work import validate_team_child, validate_work_config
         from saberops.routing_config import (
             load_effective_routing,
@@ -267,7 +267,7 @@ class RunSupervisor:
                 load_control_plane_policy(),
                 required_capabilities=config.required_capabilities,
                 reserve_override=config.reserve_override,
-                host_access=load_authority_settings().host_access.value,
+                host_access=load_owner_mode_settings().host_access.value,
             )
             frozen_tools = freeze_tool_contract(config.tool_refs, self.tool_registry)
         # The gateway cut removed the frozen gateway contract: new runs

@@ -725,12 +725,12 @@ def _load_all_cost_states(db: Any) -> dict[tuple[str, str, str, str], CostState]
 def _default_run_launcher(
     db: Any, job: Job, decision: DispatchDecision, run_id: str, memory_lease: Any = None
 ) -> Any:
-    from saberops.authority import load_authority_settings
     from saberops.config import freeze_owner_binding_registry_payload
     from saberops.control_plane import freeze_control_plane_policy
     from saberops.jobs.dependencies import dispatch_base_sha
     from saberops.jobs.service import job_dispatch_spec
     from saberops.models import Run
+    from saberops.owner_mode import load_owner_mode_settings
     from saberops.preemption import prepare_resume
     from saberops.provenance import mint_run_provenance
     from saberops.routing_config import snapshot_references_exact_bindings, snapshot_to_payload
@@ -771,7 +771,7 @@ def _default_run_launcher(
         load_control_plane_policy(),
         required_capabilities=config.required_capabilities,
         reserve_override=config.reserve_override,
-        host_access=load_authority_settings().host_access.value,
+        host_access=load_owner_mode_settings().host_access.value,
     )
     frozen_tools = freeze_tool_contract(config.tool_refs, supervisor.tool_registry)
     provenance = mint_run_provenance(config.target_repo, config.task)
@@ -1428,9 +1428,8 @@ def scheduler_tick(
 
         elif isinstance(dec, DispatchDecision):
             # F1: one typed owner-mode decision before anything leaves QUEUED.
-            # Dispatch follows the authority preset's ``auto_start``; the owner
-            # mode never widens it (ask-me also narrows recovery in the
-            # supervisor).  The check happens before the lease, the memory
+            # Dispatch follows the mode's ``auto_start``; a persisted grant can
+            # only narrow it.  The check happens before the lease, the memory
             # reservation and the CAS, so a refused dispatch has zero side
             # effects.
             from saberops.owner_mode import ModeAction, decide_owner_action
@@ -1444,7 +1443,6 @@ def scheduler_tick(
                         reason=WaitingReason.MODE_RESTRICTED,
                         details={
                             "owner_mode": mode_decision.mode.value,
-                            "authority_mode": mode_decision.authority_mode.value,
                             "reason": mode_decision.reason,
                         },
                         now=moment,

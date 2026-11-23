@@ -15,7 +15,6 @@ from saberops.acceptance_review import (
     render_acceptance_protocol,
     render_clause_format_reask,
 )
-from saberops.authority import load_authority_settings
 from saberops.config import DEFAULT_REVIEW_LIMIT, RunConfig, reconstruct_run_config
 from saberops.control_plane import (
     legacy_frozen_control_plane,
@@ -59,6 +58,7 @@ from saberops.models import (
 )
 from saberops.observability import new_dispatch_evidence, update_dispatch_from_result
 from saberops.observability.phase_telemetry import measure_phase
+from saberops.owner_mode import load_owner_mode_settings
 from saberops.process import run_process
 from saberops.provenance import ProvenanceError, assert_run_repository
 from saberops.review_evidence import build_review_evidence
@@ -1303,7 +1303,7 @@ class ReviewEngine:
                         context_mode="REVIEW",
                         raw_parent_included=True,
                         prompt_transport=adapter.prompt_transport_for(prompt_bytes),
-                        authority_mode=load_authority_settings().mode.value,
+                        authority_mode=load_owner_mode_settings().mode.value,
                         routing_snapshot_digest=routing_digest,
                         control_plane_digest=frozen_control_plane.digest,
                         # The exact reviewer binding identity
@@ -1552,7 +1552,7 @@ class ReviewEngine:
                             prompt_transport=adapter.prompt_transport_for(
                                 retry_prompt_bytes
                             ),
-                            authority_mode=load_authority_settings().mode.value,
+                            authority_mode=load_owner_mode_settings().mode.value,
                             routing_snapshot_digest=routing_digest,
                             control_plane_digest=frozen_control_plane.digest,
                             binding_id=review_binding_id,

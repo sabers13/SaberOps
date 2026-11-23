@@ -26,7 +26,6 @@ from typing import Any
 import pytest
 from lifecycle_rig import RigEnvironment, build_lifecycle_rig
 
-from saberops.authority import set_authority_mode
 from saberops.capacity.loop import run_scheduler_loop
 from saberops.capacity.scheduler import DispatchDecision
 from saberops.db import Database, current_iso_timestamp
@@ -39,7 +38,7 @@ from saberops.mcp.tools import ServerContext, build_default_registry
 from saberops.model_access.readiness_service import ReadinessService
 from saberops.models import Run, RunStatus, Tier
 from saberops.owner_mode import set_owner_mode
-from saberops.paths import owner_state_dir
+from saberops.paths import get_owner_mode_path, owner_state_dir
 from saberops.plan_runner import (
     NO_PLANNING_SESSION,
     get_plan,
@@ -270,11 +269,23 @@ LANES_A_B_C: list[dict[str, Any]] = [
 # ---------------------------------------------------------------------------
 
 
-def test_authority_without_auto_start_refuses_auto_advance(
+def _legacy_store_without_auto_start() -> None:
+    """A pre-1.1 ``ask_before_actions`` store migrates with start parked."""
+    import json
+
+    path = get_owner_mode_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.unlink(missing_ok=True)
+    (path.parent / "authority.json").write_text(
+        json.dumps({"version": 1, "mode": "ask_before_actions"}), encoding="utf-8"
+    )
+
+
+def test_a_narrowed_store_without_auto_start_refuses_auto_advance(
     rig: RigEnvironment, planner: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     db = rig.db()
-    set_authority_mode("ask_before_actions")
+    _legacy_store_without_auto_start()
     submission = _activate(rig, LANES_A_B_C, owner_initiated=False)
     assert submission.submitted == ()
     assert submission.paused is not None
@@ -292,8 +303,8 @@ def test_authority_without_auto_start_refuses_auto_advance(
     rendered = plan_state_path(plan).read_text(encoding="utf-8")
     assert "Auto-advance: on - blocked:" in rendered
 
-    # The same plan advances once the authority preset allows a start.
-    set_authority_mode("supervised")
+    # The same plan advances once the mode allows a start.
+    set_owner_mode("ask-me")
     result = reconcile_plan_lanes(db)
     assert set(result[0].submitted) == {"A", "C"}
     assert project_plan_state(db, get_plan(db, PLAN_ID)).advance_refusal is None  # type: ignore[arg-type]

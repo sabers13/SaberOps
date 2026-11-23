@@ -1,6 +1,11 @@
 # ADR-0020: One owner mode narrows authority; it never widens it
 
-- **Status:** Accepted. Implemented in Phase 1 lane F1 (Wave 3).
+- **Status:** Accepted. Implemented in Phase 1 lane F1 (Wave 3). The
+  authority-preset half of §2 is superseded by
+  [ADR-0082](0082-owner-mode-carries-authority.md): the five presets are folded
+  into the mode as stored grants, and the mode's permission ceiling replaces
+  the intersection. The mode document, the typed decision function, the
+  owner-only switch surfaces and the expiry rule remain as written here.
 - **Date:** 2026-11-19
 - **Decider:** Saber (owner), Phase 1 plan lane F1
 - **Related:** [ADR-0001](0001-saberops-engine-mcp-first.md) (plan limits),

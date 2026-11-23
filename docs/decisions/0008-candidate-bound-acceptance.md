@@ -45,11 +45,11 @@ mode-scoped extension of this decision, implemented by Phase 1 lane F15 in
 `saberops.auto_accept`:
 
 1. **Only `away` and `critical-only` may auto-accept, never `ask-me`.** The
-   effective owner mode must be one of those two *and* the authority preset
-   must still grant `auto_accept` (`full_autonomy` or
-   `full_autonomy_publish`); the mode can only narrow that grant. An expired
-   `away` is `ask-me` and accepts nothing. `ask-me` keeps the owner's manual
-   accept for every candidate.
+   effective owner mode must be one of those two *and* the stored permissions
+   must still grant `auto_accept`; the mode ceiling is the grant and a migrated
+   store can only narrow it ([ADR-0082](0082-owner-mode-carries-authority.md)).
+   An expired `away` is `ask-me` and accepts nothing. `ask-me` keeps the owner's
+   manual accept for every candidate.
 2. **The evidence is this record's evidence, for the exact candidate.** The
    candidate must be the run's final successful attempt and must hold its own
    candidate-linked independent review with a substantive approval

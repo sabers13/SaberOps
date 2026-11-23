@@ -22,7 +22,6 @@ from lifecycle_rig import (
     build_lifecycle_rig,
 )
 
-from saberops.authority import set_authority_mode
 from saberops.auto_accept import (
     ACCEPT_UNDONE_EVENT,
     AUTO_ACCEPT_EVENT,
@@ -47,7 +46,7 @@ from saberops.models import (
     Tier,
 )
 from saberops.owner_mode import set_owner_mode
-from saberops.paths import owner_state_dir
+from saberops.paths import get_owner_mode_path, owner_state_dir
 
 pytestmark = pytest.mark.packaged_routing_default
 
@@ -74,11 +73,24 @@ def acceptance_rig(rig: RigEnvironment) -> AcceptanceFixture:
 
 
 def _grant_auto_accept(mode: str = "away") -> None:
-    set_authority_mode("full_autonomy")
     if mode == "away":
         set_owner_mode(mode, until=FUTURE)
     else:
         set_owner_mode(mode)
+
+
+def _legacy_store(preset: str, mode: str) -> None:
+    """Write a pre-1.1 store (preset + mode) so migration decides its grant."""
+    import json
+
+    path = get_owner_mode_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    (path.parent / "authority.json").write_text(
+        json.dumps({"version": 1, "mode": preset}), encoding="utf-8"
+    )
+    path.write_text(
+        json.dumps({"version": 1, "mode": mode, "until": FUTURE}), encoding="utf-8"
+    )
 
 
 def _record_review_for_b(
@@ -213,10 +225,9 @@ def test_auto_accept_works_in_critical_only(acceptance_rig: AcceptanceFixture) -
 
 
 def test_auto_accept_never_runs_in_ask_me(acceptance_rig: AcceptanceFixture) -> None:
-    """Ask-me keeps every accept manual, even with full autonomy selected."""
+    """Ask-me keeps every accept manual."""
     db = acceptance_rig.rig.db()
     _record_review_for_b(acceptance_rig, ReviewVerdict.PASS)
-    set_authority_mode("full_autonomy")
     set_owner_mode("ask-me")
 
     decision = evaluate_auto_accept(db=db, run_id=acceptance_rig.run_id)
@@ -465,7 +476,6 @@ def test_scheduler_tick_auto_accepts_only_when_the_mode_allows(
     db = acceptance_rig.rig.db()
     _record_review_for_b(acceptance_rig, ReviewVerdict.PASS)
 
-    set_authority_mode("full_autonomy")
     set_owner_mode("ask-me")
     _tick(db)
     assert _git(acceptance_rig.rig.repo, "rev-parse", "HEAD") == acceptance_rig.base_sha
@@ -479,17 +489,16 @@ def test_scheduler_tick_auto_accepts_only_when_the_mode_allows(
 def test_scheduler_tick_skips_auto_accept_when_no_mode_grants_it(
     acceptance_rig: AcceptanceFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A normal attended store never even scans completed runs for acceptance."""
+    """A store without an acceptance grant never scans completed runs."""
     db = acceptance_rig.rig.db()
     _record_review_for_b(acceptance_rig, ReviewVerdict.PASS)
-    set_authority_mode("supervised")
-    set_owner_mode("away", until=FUTURE)
+    _legacy_store("supervised", "away")
 
     calls: list[str] = []
 
     def boom(*args: Any, **kwargs: Any) -> None:
         calls.append("scanned")
-        raise AssertionError("auto-accept must not scan without a granting preset")
+        raise AssertionError("auto-accept must not scan without an acceptance grant")
 
     monkeypatch.setattr("saberops.auto_accept.auto_accept_candidate", boom)
     assert auto_accept_next_candidate(db=db) is None

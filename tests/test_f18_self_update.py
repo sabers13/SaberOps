@@ -358,7 +358,6 @@ def test_self_update_parks_and_resumes_a_running_job(
 
     from lifecycle_rig import RigEnvironment, build_lifecycle_rig
 
-    from saberops.authority import set_authority_mode
     from saberops.capacity.loop import run_scheduler_loop
     from saberops.jobs.models import JobState, WaitingReason
     from saberops.jobs.service import get_job, submit_job
@@ -375,7 +374,6 @@ def test_self_update_parks_and_resumes_a_running_job(
     rig: RigEnvironment = build_lifecycle_rig(tmp_path / "rig", monkeypatch)
     monkeypatch.delenv("SABEROPS_RUNTIME_GATE", raising=False)
     try:
-        set_authority_mode("autonomous")
         lease = OrchestratorLease()
         lease.configure_database(Path(rig.db().db_path))
         assert lease.acquire() is True

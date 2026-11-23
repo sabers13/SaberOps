@@ -34,7 +34,7 @@ evidence**: during the day and while you sleep.
 - [What's in the engine](#whats-in-the-engine)
 - [Interfaces](#interfaces)
 - [Worker adapters](#worker-adapters)
-- [Authority settings](#authority-settings)
+- [Owner mode](#owner-mode)
 - [Installation](#installation)
 - [Quick start](#quick-start)
 - [Security and execution boundaries](#security-and-execution-boundaries)
@@ -80,7 +80,7 @@ flowchart LR
     G -- fail --> R[Build route repair<br/>same worker role]
     R --> W
     G -- pass --> RV[Independent review<br/>read-only]
-    RV --> A[Acceptance<br/>per authority setting]
+    RV --> A[Acceptance<br/>per owner mode]
     W -. plan exhausted .-> P[Preempt: commit WIP<br/>+ resume capsule]
     P --> J
 ```
@@ -102,7 +102,7 @@ flowchart LR
    reviewer must answer each one and a `PASS` is accepted only when every
    clause passes (see [ADR-0053](docs/decisions/0053-acceptance-clause-review-gate.md)).
 6. **Accept.** A verified candidate integrates fast-forward only, followed by a
-   post-integration gate, under the configured [authority mode](#authority-modes).
+   post-integration gate, under the configured [owner mode](#owner-mode).
 7. **Preempt and resume.** If a plan runs out mid-run, the work in progress is
    committed to a checkpoint ref with a resume capsule and re-queued until the
    window resets.
@@ -159,16 +159,36 @@ drift without sending prompts or reading credentials.
 
 ---
 
-## Owner mode and authority settings
+## Owner mode: one switch for what may run without you
 
-Two persisted settings decide what SaberOps may do without asking.
+One persisted owner setting decides what SaberOps may do without asking:
+`ask-me` (default), `critical-only` or `away`. Only the owner switches it with
+`orch mode show|set|clear` or the Questions page. An `away` session needs an
+end time, a job budget, or both (`--until`, `--max-jobs`); an expired `away`
+behaves as `ask-me`.
 
-**Owner mode** is `ask-me` (default), `critical-only` or `away`. An `away`
-session needs an end time, a job budget, or both (`--until`, `--max-jobs`). It
-is a presence switch, not a second authority system: it can only narrow the
-authority preset, never widen it. Only the owner switches it with
-`orch mode show|set|clear` or the Questions page. An expired `away` behaves as
-`ask-me`.
+Each mode carries a fixed permission ceiling. A saved store can only narrow it
+(an upgraded store keeps exactly the permissions it had), never widen it.
+
+| Mode | Start / gate / review | Recovery (retry / repair / escalation) | Auto-accept (local commit) |
+| --- | :---: | :---: | :---: |
+| `ask-me` | Yes | No | No |
+| `critical-only` | Yes | Yes | Yes |
+| `away` | Yes | Yes | Yes |
+
+`ask-me` keeps every recovery and acceptance decision for the owner.
+`critical-only` and `away` converge on a candidate that passed its gate and an
+independent review of that exact commit and accept it as a local commit; they
+never push. `critical-only` still asks the owner about critical questions,
+while `away` parks only the irreversible or consequential ones. Nothing in any
+mode pushes accepted work or publishes a branch: candidate-branch publication
+is an explicit per-run choice (`orch run --publish-candidate`).
+
+Undo an automatic acceptance with `orch accept <run-id> --undo`, which restores
+the target branch and keeps the candidate. Inspect the effective permissions
+and every decision with `orch mode show`. Host access (`governed` or
+`unrestricted`) is a separate technical setting:
+`orch mode set-host-access`.
 
 **Closing the planning CLI pauses all work, in every mode.** No new job, plan
 lane, retry, repair or refresh starts, and every running worker is stopped at a
@@ -178,28 +198,9 @@ never from an agent session. Use `orch pause` (or the Questions page) for an
 instant owner stop, and `get_pause`/`catch_up` to see what is parked. While
 away or critical-only, a periodic digest notice lists running jobs, the
 subscriptions in use and the usage so far. See
-[ADR-0029](docs/decisions/0029-no-work-without-a-planning-session.md) and
-[ADR-0045](docs/decisions/0045-owner-confirmed-resume.md).
-
-**Authority preset** is the ceiling. Unknown values fail closed and never degrade
-into a more permissive setting.
-
-| Setting | Recovery (retry / repair / escalation) | Candidate branch publication | Auto-accept a local commit (away / critical-only) |
-| --- | :---: | :---: | :---: |
-| `ask_before_actions` | No | No | No |
-| `supervised` (default) | No | No | No |
-| `autonomous` | Yes | Yes | No |
-| `full_autonomy` | Yes | Yes | Yes |
-| `full_autonomy_publish` | Yes | Yes | Yes |
-
-Recovery, candidate-branch publication, the owner-mode decisions and
-auto-accept are enforced today. Auto-accept applies only while the owner mode is
-`away` or `critical-only` **and** the preset grants it. It accepts only a
-candidate whose gate passed and whose exact commit holds an independent review,
-as a local commit: it never pushes. `ask-me` never auto-accepts. Undo one with
-`orch accept <run-id> --undo`, which restores the target branch and keeps the
-candidate. Inspect or change the preset with `orch authority show|list|set` and
-the mode with `orch mode show|set|clear`.
+[ADR-0029](docs/decisions/0029-no-work-without-a-planning-session.md),
+[ADR-0045](docs/decisions/0045-owner-confirmed-resume.md) and
+[ADR-0082](docs/decisions/0082-owner-mode-carries-authority.md).
 
 ---
 
@@ -316,7 +317,7 @@ the owner decision with `orch accept <run_id>`.
 
 Worktree isolation separates candidate changes; it is not an operating-system
 sandbox against a worker granted `unrestricted` host access
-(`orch authority set-host-access`).
+(`orch mode set-host-access`).
 
 ---
 
@@ -364,8 +365,9 @@ scripts/               gate wrappers and tooling
   `refresh_candidate` with its run ID (or run `orch refresh <run-id>`); the
   refreshed candidate gets fresh checks and review and the owner accepts it
   separately.
-- **No governed publication.** Accepted work is not pushed automatically;
-  `full_autonomy_publish` stops at the accepted state.
+- **No governed publication.** Accepted work is not pushed automatically; no
+  owner mode grants publication, and a per-run candidate-branch push stays an
+  explicit choice.
 - **Adapter coverage.** Not every adapter/account combination has been
   live-validated; Antigravity is attended-only.
 - **Merge conflicts** stop integration and preserve branches; automatic conflict

@@ -22,19 +22,6 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from saberops.certification import CertificationResult
 
-from saberops.authority import (
-    ADVISORY_POLICY_FIELDS,
-    AUTHORITY_ORDER,
-    ENFORCED_POLICY_FIELDS,
-    AuthorityConfigError,
-    HostAccessMode,
-    label_for,
-    list_presets,
-    load_authority_settings,
-    parse_authority_mode,
-    set_authority_mode,
-    set_host_access,
-)
 from saberops.config import RunConfig, reconstruct_run_config
 from saberops.db import Database, get_default_db_path
 from saberops.dispatch import READINESS_AUTHORITY_UNAVAILABLE
@@ -62,12 +49,15 @@ from saberops.observability.run_report import (
     render_report_text,
 )
 from saberops.owner_mode import (
+    ENFORCED_POLICY_FIELDS,
     OWNER_MODE_ORDER,
+    HostAccessMode,
     OwnerMode,
     OwnerModeError,
     clear_owner_mode,
     mode_view,
     parse_owner_mode,
+    set_host_access,
     set_owner_mode,
 )
 from saberops.ownership import (
@@ -964,7 +954,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Explicitly enable candidate publication for this run: every "
             "gate-passed candidate is pushed (never force) to the candidate "
-            "branch on origin for external review. Overrides authority mode."
+            "branch on origin for external review. Overrides the mode default."
         ),
     )
     publish_group.add_argument(
@@ -973,7 +963,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_false",
         help=(
             "Explicitly disable candidate publication for this run, even in "
-            "high-autonomy authority modes. Overrides authority mode."
+            "even in away and critical-only. Overrides the mode default."
         ),
     )
 
@@ -1721,38 +1711,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     routing_accept_default.add_argument("--json", action="store_true", help="JSON output")
 
-    # orch authority show|list|set|sync-opencode
-    authority_parser = subparsers.add_parser(
-        "authority",
-        help="Manage the owner authority preset (show/list/set/sync-opencode).",
-    )
-    authority_sub = authority_parser.add_subparsers(dest="authority_command", required=True)
-
-    authority_show = authority_sub.add_parser(
-        "show", help="Show the effective authority mode, label, and policy."
-    )
-    authority_show.add_argument("--json", action="store_true", help="JSON output")
-
-    authority_list = authority_sub.add_parser(
-        "list", help="List all authority presets in stable product order."
-    )
-    authority_list.add_argument("--json", action="store_true", help="JSON output")
-
-    authority_set = authority_sub.add_parser("set", help="Persist the owner authority mode.")
-    authority_set.add_argument(
-        "mode",
-        type=str,
-        help="Exact authority mode id: " + ", ".join(m.value for m in AUTHORITY_ORDER) + ".",
-    )
-    authority_set.add_argument("--json", action="store_true", help="JSON output")
-
-    authority_host = authority_sub.add_parser(
-        "set-host-access", help="Persist governed or unrestricted technical host access."
-    )
-    authority_host.add_argument("mode", choices=[mode.value for mode in HostAccessMode], type=str)
-    authority_host.add_argument("--json", action="store_true", help="JSON output")
-
-    # orch mode show|set|clear
+    # orch mode show|set|clear|set-host-access
     mode_parser = subparsers.add_parser(
         "mode",
         help="Show or switch the owner mode (ask-me, critical-only, away).",
@@ -1765,7 +1724,7 @@ def build_parser() -> argparse.ArgumentParser:
     mode_show.add_argument("--json", action="store_true", help="JSON output")
 
     mode_set = mode_sub.add_parser(
-        "set", help="Persist the owner mode (owner-only; a mode only narrows authority)."
+        "set", help="Persist the owner mode (owner-only; it never widens a permission)."
     )
     mode_set.add_argument(
         "mode",
@@ -1791,6 +1750,12 @@ def build_parser() -> argparse.ArgumentParser:
         "clear", help="Remove the saved owner mode (ask-me applies)."
     )
     mode_clear.add_argument("--json", action="store_true", help="JSON output")
+
+    mode_host = mode_sub.add_parser(
+        "set-host-access", help="Persist governed or unrestricted technical host access."
+    )
+    mode_host.add_argument("mode", choices=[mode.value for mode in HostAccessMode], type=str)
+    mode_host.add_argument("--json", action="store_true", help="JSON output")
 
     # orch away show|grant|revoke|policy|summary|reset-breaker
     away_parser = subparsers.add_parser(
@@ -6289,74 +6254,12 @@ def handle_advisor(args: argparse.Namespace) -> int:
     return 0
 
 
-def handle_authority_show(args: argparse.Namespace) -> int:
-    """Handle `orch authority show`."""
-    try:
-        settings = load_authority_settings()
-    except AuthorityConfigError as exc:
-        print(f"[!] Authority config invalid: {exc}", file=sys.stderr)
-        return 1
-    payload = settings.as_dict()
-    payload["enforced_fields"] = sorted(ENFORCED_POLICY_FIELDS)
-    payload["advisory_fields"] = sorted(ADVISORY_POLICY_FIELDS)
-    if getattr(args, "json", False):
-        print(json.dumps(payload, indent=2))
-        return 0
-    print(f"Mode          : {settings.mode.value}")
-    print(f"Label         : {settings.label}")
-    print(f"Source        : {settings.source} {settings.source_path or '(packaged default)'}")
-    print(f"Host access   : {settings.host_access.value}")
-    print(f"Config path   : {payload['config_path']}")
-    print(f"Package default: {payload['package_default_mode']}")
-    print("Policy:")
-    policy = settings.policy.as_dict()
-    for key in policy:
-        marker = "" if key in ENFORCED_POLICY_FIELDS else "  (advisory: not enforced yet)"
-        print(f"  {key}: {'true' if policy[key] else 'false'}{marker}")
-    return 0
-
-
-def handle_authority_list(args: argparse.Namespace) -> int:
-    """Handle `orch authority list`."""
-    presets = list_presets()
-    if getattr(args, "json", False):
-        print(json.dumps({"presets": presets}, indent=2))
-        return 0
-    for index, preset in enumerate(presets, start=1):
-        print(f"{index}. {preset['label']} ({preset['mode']})")
-    return 0
-
-
-def handle_authority_set(args: argparse.Namespace) -> int:
-    """Handle `orch authority set <mode>`."""
-    try:
-        mode = parse_authority_mode(args.mode)
-    except AuthorityConfigError as exc:
-        print(f"[!] {exc}", file=sys.stderr)
-        return 1
-    try:
-        path = set_authority_mode(mode)
-    except OSError as exc:
-        print(f"[!] Could not persist authority mode: {exc}", file=sys.stderr)
-        return 1
-    if getattr(args, "json", False):
-        print(
-            json.dumps(
-                {"mode": mode.value, "label": label_for(mode), "config_path": str(path)},
-                indent=2,
-            )
-        )
-        return 0
-    print(f"Authority mode set to '{mode.value}' ({label_for(mode)}) at {path}")
-    return 0
-
-
-def handle_authority_set_host_access(args: argparse.Namespace) -> int:
-    """Handle `orch authority set-host-access <mode>`."""
+def handle_mode_set_host_access(args: argparse.Namespace) -> int:
+    """Handle `orch mode set-host-access <mode>`."""
     try:
         mode = HostAccessMode(str(args.mode))
         path = set_host_access(mode)
-    except (ValueError, OSError, AuthorityConfigError) as exc:
+    except (ValueError, OSError, OwnerModeError) as exc:
         print(f"[!] Could not persist host access: {exc}", file=sys.stderr)
         return 1
     if getattr(args, "json", False):
@@ -6377,24 +6280,26 @@ def _print_mode_view(view: dict[str, Any]) -> None:
         print(f"Until         : {view['until']}{suffix}")
     if view.get("max_jobs") is not None:
         print(f"Job budget    : {view['max_jobs']}")
-    print(f"Authority     : {view['authority_mode']} ({view['authority_label']})")
+    print(f"Host access   : {view['host_access']}")
     print(f"Source        : {view['source']} {view['source_path'] or '(packaged default)'}")
     print(f"Config path   : {view['config_path']}")
     print("Decisions:")
     for action, decision in view["decisions"].items():
         verdict = "allowed" if decision["allowed"] else "parked"
         print(f"  {action}: {verdict} - {decision['reason']}")
-    print("Policy (effective):")
+    print("Permissions (effective):")
     for key, value in view["effective_policy"].items():
         marker = "" if key in ENFORCED_POLICY_FIELDS else "  (advisory: not enforced yet)"
         print(f"  {key}: {'true' if value else 'false'}{marker}")
+    if view.get("notice"):
+        print(f"[!] {view['notice']}")
 
 
 def handle_mode_show(args: argparse.Namespace) -> int:
     """Handle `orch mode show`."""
     try:
         view = mode_view()
-    except (AuthorityConfigError, OwnerModeError) as exc:
+    except OwnerModeError as exc:
         print(f"[!] Owner mode unavailable: {exc}", file=sys.stderr)
         return 1
     if getattr(args, "json", False):
@@ -6457,7 +6362,7 @@ def handle_mode_set(args: argparse.Namespace) -> int:
             "until": args.until,
             "max_jobs": args.max_jobs,
             "config_path": str(path),
-            "note": "a mode only narrows the authority preset",
+            "note": "the selected mode applies its permission ceiling",
         }
         if mode is OwnerMode.AWAY:
             payload["away_policy"] = away_state
@@ -6470,7 +6375,7 @@ def handle_mode_set(args: argparse.Namespace) -> int:
     if args.max_jobs:
         until += f", up to {args.max_jobs} job(s)"
     print(f"Owner mode set to '{mode.value}'{until} at {path}")
-    print("A mode only narrows the authority preset; it never widens it.")
+    print("The selected mode applies its permission ceiling; nothing can widen it.")
     if away_warning:
         print(f"[!] {away_warning}")
     return 0
@@ -9248,15 +9153,6 @@ def _dispatch(args: argparse.Namespace) -> int:
             return handle_routing_suggest(args)
         elif args.routing_command == "accept-default":
             return handle_routing_accept_default(args)
-    elif args.command == "authority":
-        if args.authority_command == "show":
-            return handle_authority_show(args)
-        elif args.authority_command == "list":
-            return handle_authority_list(args)
-        elif args.authority_command == "set":
-            return handle_authority_set(args)
-        elif args.authority_command == "set-host-access":
-            return handle_authority_set_host_access(args)
     elif args.command == "mode":
         if args.mode_command == "show":
             return handle_mode_show(args)
@@ -9264,6 +9160,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             return handle_mode_set(args)
         elif args.mode_command == "clear":
             return handle_mode_clear(args)
+        elif args.mode_command == "set-host-access":
+            return handle_mode_set_host_access(args)
     elif args.command == "away":
         if args.away_command == "show":
             return handle_away_show(args)

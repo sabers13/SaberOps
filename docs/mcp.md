@@ -151,13 +151,14 @@ job per lane whose dependencies are already accepted. Independent lanes run in
 parallel; a `run: "owner"` lane is never dispatched and waits for the owner's
 `orch plan-file done`. A ready lane starts only while a live planning session
 holds the planning lease **and** the typed owner-mode decision
-(`owner_mode.decide_owner_action(DISPATCH)`) allows a start; a mode can only
-narrow the authority preset, never widen it. Ask-me still allows a start (it is
-not an owner judgment); `ask_before_actions` refuses it with the reason shown in
-`STATE.md`. Closing the planning CLI pauses lane submission. In `away` or
-`critical-only` with a full-autonomy preset, a lane candidate that passed its
-gate and an independent review of that exact commit is auto-accepted as a local
-commit (never pushed) and `STATE.md` shows the undo command; in ask-me, or with
+(`owner_mode.decide_owner_action(DISPATCH)`) allows a start; the mode carries a
+fixed permission ceiling and a saved store can only narrow it. Ask-me still
+allows a start (it is not an owner judgment); a store migrated from the removed
+`ask_before_actions` preset refuses it with the reason shown in `STATE.md`.
+Closing the planning CLI pauses lane submission. In `away` or `critical-only`,
+a lane candidate that passed its gate and an independent review of that exact
+commit is auto-accepted as a local commit (never pushed) and `STATE.md` shows
+the undo command; in ask-me, or with
 a preset that does not grant auto-accept, `away` parks at the first candidate
 and the next owner action names that accept instead of looking stalled.
 
@@ -323,10 +324,10 @@ planning session no self-answer is possible and no background planner starts
 proposal. It **applies nothing**: only the owner approving through
 `orch config approve <id>` or the local web surface writes the config ledger.
 
-`get_mode` is read-only: it returns the effective owner mode, the authority
-preset it intersects, and every decision the mode permits or parks. A mode only
-narrows the authority preset. `propose_mode_change` raises an owner question and
-**never flips the mode**; only the owner sets it with `orch mode set` or the
+`get_mode` is read-only: it returns the effective owner mode, its permission
+ceiling and every decision the mode permits or parks; a saved store can only
+narrow that ceiling (ADR-0082). `propose_mode_change` raises an owner question
+and **never flips the mode**; only the owner sets it with `orch mode set` or the
 Questions page (ADR-0020).
 
 `get_pause` is read-only: it reports the work gate -- running, or paused with

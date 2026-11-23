@@ -10,9 +10,9 @@ touches worktrees/candidates/gates/reviews/publication, and never accepts runs.
 production path (it raises).  :func:`_verify_accept_engine_evidence` checks
 durable AcceptEngine evidence for the candidate lifecycle.
 
-Production authority always comes from the persisted owner settings
-(:func:`load_authority_settings`); nothing here accepts a caller-supplied
-authority override.
+Production authority always comes from the persisted owner document
+(:func:`saberops.owner_mode.load_owner_mode_settings`); nothing here accepts a
+caller-supplied authority override.
 """
 
 from __future__ import annotations
@@ -24,7 +24,6 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
-from saberops.authority import AuthorityPolicy, load_authority_settings
 from saberops.control_plane.bindings import (
     BindingRegistry,
     BindingResolutionError,
@@ -49,12 +48,7 @@ from saberops.models import (
     ReasoningEffort,
     WorkerCandidate,
 )
-from saberops.owner_mode import (
-    ModeAction,
-    decide_owner_action,
-    effective_authority_policy,
-    load_effective_owner_mode,
-)
+from saberops.owner_mode import ModeAction, decide_owner_action
 from saberops.process import AutonomousDispatchConfig
 
 
@@ -307,11 +301,6 @@ class AutonomousSupervisor:
         self._failover = FailoverEngine(db=db)
 
     # -- authority (persisted owner state; no caller override exists) --------
-
-    @property
-    def _policy(self) -> AuthorityPolicy:
-        settings = load_authority_settings()
-        return effective_authority_policy(settings.policy, load_effective_owner_mode())
 
     @property
     def _work_gate_open(self) -> bool:

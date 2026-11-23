@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import Any, ClassVar, Protocol
 
 from saberops.advisor import advisor_prompt_section, advisor_route_or_none
-from saberops.authority import load_authority_settings
 from saberops.autonomous_runtime import (
     AutonomousRuntimeContract,
     AutonomousSupervisor,
@@ -133,6 +132,7 @@ from saberops.observability.phase_telemetry import (
     mark_phase_unknown,
     measure_phase,
 )
+from saberops.owner_mode import load_owner_mode_settings
 from saberops.ownership import (
     Liveness,
     OwnershipError,
@@ -2563,7 +2563,7 @@ class Orchestrator:
                 load_control_plane_policy(),
                 required_capabilities=config.required_capabilities,
                 reserve_override=config.reserve_override,
-                host_access=load_authority_settings().host_access.value,
+                host_access=load_owner_mode_settings().host_access.value,
             )
             provenance = mint_run_provenance(repo, task)
             effective_run_id = provenance.run_id
@@ -5170,7 +5170,7 @@ class Orchestrator:
                     ),
                     package_id=tier_decision.package_id,
                     plan_step_id=current_plan_step.id if current_plan_step is not None else None,
-                    authority_mode=load_authority_settings().mode.value,
+                    authority_mode=load_owner_mode_settings().mode.value,
                     routing_snapshot_digest=routing_snapshot.content_hash,
                     control_plane_digest=frozen_control_plane.digest,
                     prior_failure_refs=([prior_attempt.id] if prior_attempt is not None else None),
@@ -6879,7 +6879,7 @@ class Orchestrator:
                                             prompt_bytes_rep
                                         ),
                                         package_id=repair_decision.package_id,
-                                        authority_mode=load_authority_settings().mode.value,
+                                        authority_mode=load_owner_mode_settings().mode.value,
                                         routing_snapshot_digest=routing_snapshot.content_hash,
                                         control_plane_digest=frozen_control_plane.digest,
                                         prior_failure_refs=(

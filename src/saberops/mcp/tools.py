@@ -2592,7 +2592,7 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
     )
     register(
         "get_mode",
-        "Read the effective owner mode, its authority intersection and every decision it permits.",
+        "Read the effective owner mode, its permissions and every decision it permits.",
         _schema({}),
         _get_mode,
         mutating=False,

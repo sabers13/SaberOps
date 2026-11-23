@@ -125,10 +125,10 @@ Gates, landing, the memory and disk guard and cleanup are deterministic engine
 steps, not model roles. There is one owner mode, described next.
 
 ## Owner mode
-SaberOps runs in one owner mode: `ask-me`, `critical-only` or `away`. It is a
-presence switch, **not** another authority system: the mode can only narrow the
-owner's authority preset, never widen it. Only the owner switches it, from the
-CLI (`orch mode set`) or the Questions page.
+SaberOps runs in one owner mode: `ask-me`, `critical-only` or `away`. It is the
+only authority setting: each mode carries a fixed permission ceiling, a saved
+store may narrow it, and nothing can widen it. Only the owner switches it, from
+the CLI (`orch mode set`) or the Questions page.
 
 - Call `get_mode` to read the effective mode and what it permits. Never claim a
   mode you have not read.
@@ -320,15 +320,15 @@ stays attended.
   lanes run in parallel. Do not queue a dependent lane by hand; its accepted
   dependency starts it.
 - A ready lane starts on the scheduler tick while a live planning session holds
-  the planning lease, and only when the owner mode and authority preset allow a
-  start. Ask-me still allows it: starting an activated lane is not an owner
-  judgment. Away and Critical only keep starting unblocked lanes. With a
-  full-autonomy preset in those modes, a lane candidate that passed its gate and
-  an independent review of that exact commit is auto-accepted as a local commit
-  (never pushed), and `STATE.md` shows the undo command; in Ask me, or with a
-  preset that does not grant auto-accept, the plan stops at the first candidate
-  and `STATE.md` says which accept it is waiting for. Critical-only notifies a
-  stalled lane instead of answering it.
+  the planning lease, and only when the owner mode allows a start. Ask-me
+  still allows it: starting an activated lane is not an owner judgment. Away
+  and Critical only keep starting unblocked lanes. In those modes a lane
+  candidate that passed its gate and an independent review of that exact commit
+  is auto-accepted as a local commit (never pushed), and `STATE.md` shows the
+  undo command; in Ask me, or in a store whose saved permissions do not grant
+  auto-accept, the plan stops at the first candidate and `STATE.md` says which
+  accept it is waiting for. Critical-only notifies a stalled lane instead of
+  answering it.
 - `run: "owner"` lanes are never dispatched. They are completed only by the
   owner with `orch plan-file done <lane> --plan <id> --evidence "<what happened>"`.
 - `plan_status` returns the same record-derived table as `STATE.md`: lane
