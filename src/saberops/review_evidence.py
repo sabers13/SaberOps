@@ -20,8 +20,14 @@ so the evidence describes exactly the revision under review.
 from __future__ import annotations
 
 import re
-from pathlib import Path
+from collections.abc import Sequence
+from pathlib import Path, PurePosixPath
 
+from saberops.gate_scope import (
+    GateScopeError,
+    check_test_retirement,
+    check_write_scope,
+)
 from saberops.git import GitManager
 from saberops.process import run_process
 
@@ -124,6 +130,145 @@ def _search_evidence(worktree: Path, term: str) -> str:
     return f"{command}\nexit {result.exit_code}\n{_bounded(result.stderr, _SEARCH_CHARS)}"
 
 
+_SUPPRESSION_RE = re.compile(
+    r"#\s*(?:noqa|type:\s*ignore|pylint:\s*disable|ruff:\s*noqa|"
+    r"pyright:\s*ignore|mypy:|eslint-disable)",
+    re.IGNORECASE,
+)
+_CATCH_ALL_RE = re.compile(r"except\s*(?:\(\s*)?(?:BaseException|Exception)\b|except\s*:")
+_SKIP_MARKER_RE = re.compile(
+    r"pytest\.mark\.(?:skip|skipif|xfail)|pytest\.skip\(|unittest\.skip|"
+    r"@skip\b|skipIf|expectedFailure",
+    re.IGNORECASE,
+)
+
+
+def _is_test_path(path: str) -> bool:
+    name = PurePosixPath(path).name
+    return (
+        path.startswith("tests/")
+        or name.startswith("test_")
+        or name.endswith("_test.py")
+    )
+
+
+def _added_lines(
+    worktree: Path, base_commit: str, paths: Sequence[str] = ()
+) -> dict[str, list[str]]:
+    """Added lines per changed path from the committed candidate diff."""
+    command = ["git", "diff", "--unified=0", f"{base_commit}..HEAD"]
+    if paths:
+        command.extend(["--", *paths])
+    result = run_process(command, cwd=worktree, timeout=30.0)
+    if not result.passed:
+        return {}
+    added: dict[str, list[str]] = {}
+    current = ""
+    for line in result.stdout.splitlines():
+        if line.startswith("+++ b/"):
+            current = line[6:]
+            continue
+        if current and line.startswith("+") and not line.startswith("+++"):
+            added.setdefault(current, []).append(line[1:])
+    return added
+
+
+def _source_at(worktree: Path, revision: str, path: str) -> str | None:
+    result = run_process(
+        ["git", "show", f"{revision}:{path}"], cwd=worktree, timeout=10.0
+    )
+    return result.stdout if result.passed else None
+
+
+def _matching_added_lines(
+    added: dict[str, list[str]], pattern: re.Pattern[str], paths: Sequence[str] = ()
+) -> list[str]:
+    wanted = set(paths)
+    matches: list[str] = []
+    for path, lines in added.items():
+        if wanted and path not in wanted:
+            continue
+        for line in lines:
+            if pattern.search(line):
+                matches.append(f"{path}: {line.strip()}")
+    return matches
+
+
+def _scope_evidence(
+    changed: tuple[str, ...], touches: Sequence[str], must_not_touch: Sequence[str]
+) -> str:
+    if not touches and not must_not_touch:
+        return (
+            "Write scope: the lane declared no write scope (empty owns or a "
+            "legacy plan); no write-scope evidence."
+        )
+    try:
+        scope = check_write_scope(changed, touches, must_not_touch)
+    except GateScopeError as exc:
+        return f"Write scope: the declaration is unreadable ({exc}); no verdict."
+    if scope.allowed:
+        return (
+            "Write scope: every changed path is inside the lane's declared "
+            "area and outside its must-not-touch paths."
+        )
+    return (
+        "Write scope: changed paths outside the lane's declared area "
+        f"(evidence only; the reviewer decides): {scope.reason}"
+    )
+
+
+def _retirement_evidence(
+    worktree: Path, base_commit: str, changed: tuple[str, ...]
+) -> str:
+    test_paths = tuple(path for path in changed if _is_test_path(path))
+    if not test_paths:
+        return "Test retirement: no test file changed."
+    base_sources: dict[str, str] = {}
+    head_sources: dict[str, str] = {}
+    for path in test_paths:
+        before = _source_at(worktree, base_commit, path)
+        after = _source_at(worktree, "HEAD", path)
+        if before is not None:
+            base_sources[path] = before
+        if after is not None:
+            head_sources[path] = after
+    try:
+        retirement = check_test_retirement(base_sources, head_sources)
+    except GateScopeError as exc:
+        return f"Test retirement: could not parse a changed test file ({exc})."
+    parts = ["Test retirement (evidence only; ordinary fixes edit tests):"]
+    if retirement.removed:
+        parts.append(f"- deleted tests: {', '.join(retirement.removed)}")
+    if retirement.rewritten:
+        parts.append(
+            "- rewritten test bodies (possible weakening): "
+            + ", ".join(retirement.rewritten)
+        )
+    if not retirement.removed and not retirement.rewritten:
+        parts.append("- no test was deleted or rewritten")
+    added = _added_lines(worktree, base_commit, test_paths)
+    skips = _matching_added_lines(added, _SKIP_MARKER_RE)
+    if skips:
+        parts.append("- new skip/xfail markers: " + "; ".join(skips[:20]))
+    return "\n".join(parts)
+
+
+def _diff_scan_evidence(worktree: Path, base_commit: str) -> str:
+    added = _added_lines(worktree, base_commit)
+    suppressions = _matching_added_lines(added, _SUPPRESSION_RE)
+    catch_alls = _matching_added_lines(added, _CATCH_ALL_RE)
+    parts = ["Added-line scan (evidence only; the reviewer decides):"]
+    parts.append(
+        "- new suppression comments: "
+        + ("; ".join(suppressions[:20]) if suppressions else "none")
+    )
+    parts.append(
+        "- new catch-all exception handlers: "
+        + ("; ".join(catch_alls[:20]) if catch_alls else "none")
+    )
+    return "\n".join(parts)
+
+
 def build_review_evidence(
     *,
     worktree: Path,
@@ -134,6 +279,8 @@ def build_review_evidence(
     gate_exit_code: int | None = None,
     gate_stdout: str = "",
     gate_stderr: str = "",
+    touches: Sequence[str] = (),
+    must_not_touch: Sequence[str] = (),
 ) -> str:
     """Render the engine-verified evidence block for one review prompt.
 
@@ -182,6 +329,15 @@ def build_review_evidence(
             "Changed files at the candidate commit: none. The candidate diff is "
             "empty; the engine found no file changed between the base commit and "
             "the candidate."
+        )
+
+    if changed:
+        sections.append(
+            _scope_evidence(changed, touches, must_not_touch)
+            + "\n\n"
+            + _retirement_evidence(worktree, base_commit, changed)
+            + "\n\n"
+            + _diff_scan_evidence(worktree, base_commit)
         )
 
     if gate_command:

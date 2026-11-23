@@ -1464,6 +1464,20 @@ class AcceptEngine:
                 f"Cannot accept run '{run_id}': cannot prepare the durable "
                 f"gate evidence directory at {evidence_dir}: {exc}"
             ) from exc
+        try:
+            candidate_changed_files = tuple(
+                GitManager.get_changed_paths_between(
+                    target_repo, run.base_commit, candidate_sha
+                )
+            )
+        except Exception:  # noqa: BLE001 - base content comparison still applies
+            candidate_changed_files = ()
+        try:
+            from saberops.plan_runner import lane_touches_for_run
+
+            lane_touches = lane_touches_for_run(self.db, run_id)
+        except Exception:  # noqa: BLE001 - scope is evidence, never a block
+            lane_touches = ()
         runner = GateRunner()
         runner_request = GateRunnerRequest(
             target_repo=target_repo,
@@ -1471,6 +1485,9 @@ class AcceptEngine:
             timeout=gate_timeout,
             frozen_gate_scratch_mode=frozen_mode,
             candidate_sha=candidate_sha,
+            base_sha=run.base_commit,
+            changed_files=candidate_changed_files,
+            touches=lane_touches,
             # The CAS below installs exactly ``candidate_sha`` and fails
             # closed if the post-CAS HEAD is anything else, so the
             # expected post-gate SHA is exactly the candidate SHA.

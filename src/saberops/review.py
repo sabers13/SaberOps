@@ -766,40 +766,46 @@ class ReviewEngine:
             acceptance_block = "\n\n" + render_acceptance_protocol(acceptance_clauses)
 
         engine_evidence_context = ""
-        if acceptance_clauses or (extra_evidence and extra_evidence.strip()):
-            last_check = checks[-1] if checks else None
-            try:
-                engine_evidence = build_review_evidence(
-                    worktree=wt_path,
-                    base_commit=run.base_commit,
-                    task=run.task,
-                    clauses=acceptance_clauses,
-                    gate_command=last_check.gate_command if last_check else None,
-                    gate_exit_code=last_check.exit_code if last_check else None,
-                    gate_stdout=last_check.stdout if last_check else "",
-                    gate_stderr=last_check.stderr if last_check else "",
-                )
-            except Exception as exc:
-                self.db.record_event(
-                    run_id,
-                    "review_engine_evidence_failed",
-                    payload={
-                        "error": str(exc)[:500],
-                        "candidate_sha": final_attempt.commit_sha,
-                    },
-                )
-                engine_evidence = ""
-            if engine_evidence:
-                self.db.record_event(
-                    run_id,
-                    "review_engine_evidence_included",
-                    payload={
-                        "chars": len(engine_evidence),
-                        "candidate_sha": final_attempt.commit_sha,
-                        "clause_count": len(acceptance_clauses),
-                    },
-                )
-                engine_evidence_context = "\n\n" + engine_evidence
+        last_check = checks[-1] if checks else None
+        try:
+            from saberops.plan_runner import lane_touches_for_run
+
+            lane_touches = lane_touches_for_run(self.db, run_id)
+        except Exception:  # noqa: BLE001 - scope is evidence, never a block
+            lane_touches = ()
+        try:
+            engine_evidence = build_review_evidence(
+                worktree=wt_path,
+                base_commit=run.base_commit,
+                task=run.task,
+                clauses=acceptance_clauses,
+                gate_command=last_check.gate_command if last_check else None,
+                gate_exit_code=last_check.exit_code if last_check else None,
+                gate_stdout=last_check.stdout if last_check else "",
+                gate_stderr=last_check.stderr if last_check else "",
+                touches=lane_touches,
+            )
+        except Exception as exc:
+            self.db.record_event(
+                run_id,
+                "review_engine_evidence_failed",
+                payload={
+                    "error": str(exc)[:500],
+                    "candidate_sha": final_attempt.commit_sha,
+                },
+            )
+            engine_evidence = ""
+        if engine_evidence:
+            self.db.record_event(
+                run_id,
+                "review_engine_evidence_included",
+                payload={
+                    "chars": len(engine_evidence),
+                    "candidate_sha": final_attempt.commit_sha,
+                    "clause_count": len(acceptance_clauses),
+                },
+            )
+            engine_evidence_context = "\n\n" + engine_evidence
 
         extra_evidence_context = ""
         if extra_evidence and extra_evidence.strip():

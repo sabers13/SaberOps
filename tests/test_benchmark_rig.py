@@ -23,6 +23,7 @@ from benchmark_rig import (
     DRILL_VISIBLE_LIMIT_SECONDS,
     run_failure_drills,
     run_fake_benchmark,
+    run_gate_protection_drill,
     run_recovery_drill,
 )
 from benchmark_wave3 import (
@@ -260,6 +261,16 @@ def test_failure_drills_reach_visible_state(
             f"  {drill.name:<20} {drill.final_state:<10} "
             f"{drill.seconds:>6.1f}s notices={drill.notices} {drill.reason}"
         )
+
+
+def test_gate_protection_must_fail_drill(
+    rig: RigEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    drill = run_gate_protection_drill(rig, monkeypatch)
+    assert drill.passed, drill
+    assert drill.final_state == "FAILED"
+    assert "GATE_PROTECTED_PATH_MUTATED" in drill.reason
 
 
 def test_combined_recovery_drill(

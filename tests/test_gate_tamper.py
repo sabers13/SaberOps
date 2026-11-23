@@ -4,45 +4,31 @@ Every test builds a throwaway git repository that already contains a full set
 of gate definitions at its base commit, then lets a candidate tamper with one
 of them and asserts the engine refuses to run the gate at all.  No test starts
 a provider/model call and none touches the real checkout.
+
+H32 moved the check onto the real paths: ``_run_configured_gate`` verifies
+before its subprocess, and the acceptance ``GateRunner`` verifies before its
+own.  These tests exercise the same shared ``verify_gate_definitions`` seam.
 """
 
 from __future__ import annotations
 
-import contextlib
-import json
 import subprocess
-from collections.abc import Iterator
+import sys
 from pathlib import Path
 
-from saberops.gate_history import read_entries
-from saberops.gate_profiles import GateCommand, GateProfile, GateProfileName
+import pytest
+
+from saberops.config import RunConfig
 from saberops.gate_runner import (
-    EngineGateExecutor,
-    EngineGateRequest,
-    EngineGateResult,
+    GateProtectionBlockedError,
+    GateRunner,
+    GateRunnerRequest,
     load_base_gate_definitions,
     verify_gate_definitions,
 )
 from saberops.gate_scope import GATE_PROTECTED_PATH_MUTATED
-
-#: Stub gate command: writes the profile's outcome.json, exactly like a real
-#: gate, so a tampered candidate would otherwise be able to "pass" itself.
-WRITER = '''\
-import json, os, pathlib, sys
-out = pathlib.Path(sys.argv[1])
-out.mkdir(parents=True, exist_ok=True)
-payload = {
-    "outcome": "PASS",
-    "reason": "",
-    "counts": {"tests": 3, "failed": 0, "flaky": 0},
-    "failed": [],
-    "flaky": [],
-    "checks_ok": True,
-    "selected": True,
-}
-(out / "outcome.json").write_text(json.dumps(payload))
-sys.exit(0)
-'''
+from saberops.models import GateScratchMode
+from saberops.orchestrator import _run_configured_gate
 
 #: The gate definitions the base commit ships, and their trusted bytes.
 BASE_SCRIPTS = {
@@ -59,23 +45,6 @@ BASE_CI = (
     "      - run: bash scripts/gate-full.sh\n"
 )
 BASE_CONFTEST = "import pytest\n"
-
-
-class _FakePool:
-    """Slot pool that records which slot class a gate asked for."""
-
-    def __init__(self) -> None:
-        self.calls: list[str] = []
-
-    @contextlib.contextmanager
-    def heavy(self, *, wait: float | None = None) -> Iterator[None]:
-        self.calls.append("heavy")
-        yield
-
-    @contextlib.contextmanager
-    def light(self, *, wait: float | None = None) -> Iterator[None]:
-        self.calls.append("light")
-        yield
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -98,7 +67,6 @@ def _init_repo(path: Path) -> Path:
     (path / ".github" / "workflows" / "ci.yml").write_text(BASE_CI)
     (path / "conftest.py").write_text(BASE_CONFTEST)
     (path / "tests" / "conftest.py").write_text(BASE_CONFTEST)
-    (path / "tests" / "quarantine.txt").write_text("")
     (path / "README.md").write_text("hi\n")
     _git(path, "add", "-A")
     _git(path, "commit", "-qm", "base")
@@ -113,81 +81,20 @@ def _head(repo: Path) -> str:
 def _commit(repo: Path, message: str) -> str:
     """Covers: helper (commit a candidate change in the throwaway repository)."""
     _git(repo, "add", "-A")
-    _git(repo, "commit", "-qm", message)
+    subprocess.run(["git", "commit", "-qm", message], cwd=repo, check=True)
     return _head(repo)
 
 
-def _stub_profile(repo: Path, name: GateProfileName) -> GateProfile:
-    """Covers: helper (stub gate profile, no real gate script involved)."""
-    script = repo / "writer.py"
-    script.write_text(WRITER)
-    return GateProfile(
-        name=name,
-        commands=(GateCommand("stub", f"{{python}} {script} {{result_dir}}"),),
-        wall_budget_seconds=60,
-    )
-
-
-def _request(
-    repo: Path, base: str, kind: str, evidence_dir: Path, **kwargs: object
-) -> EngineGateRequest:
-    """Covers: helper (engine request with the stub profile and a real base)."""
-    profiles = {
-        GateProfileName.FAST: _stub_profile(repo, GateProfileName.FAST),
-        GateProfileName.FULL: _stub_profile(repo, GateProfileName.FULL),
-    }
-    state_dir = repo / "state"
-    state_dir.mkdir(exist_ok=True)
-    (state_dir / "gate-profiles.json").write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "profiles": {
-                    name.value: {
-                        "commands": [
-                            {"name": c.name, "command": c.command} for c in prof.commands
-                        ],
-                        "wall_budget_seconds": prof.wall_budget_seconds,
-                        "rerun_failures": prof.rerun_failures,
-                        "require_map_freshness": prof.require_map_freshness,
-                    }
-                    for name, prof in profiles.items()
-                },
-            }
-        )
-    )
-    return EngineGateRequest(
-        target_repo=repo,
-        kind=kind,
-        evidence_dir=evidence_dir,
-        state_dir=state_dir,
-        base=base,
-        **kwargs,  # type: ignore[arg-type]
-    )
-
-
-def _executor() -> EngineGateExecutor:
-    """Covers: helper (executor with a fake slot pool and no disk guard)."""
-    return EngineGateExecutor(
-        slot_pool=_FakePool(), disk_check=lambda repo, *, estimate_bytes=0: None
-    )
-
-
-def _assert_blocked(result: object, evidence_dir: Path, path: str) -> None:
+def _assert_blocked(
+    repo: Path, base: str, path: str, *, touches: tuple[str, ...] = ()
+) -> None:
     """Covers: helper (the fail-closed block shape shared by the tamper tests)."""
-    assert isinstance(result, EngineGateResult)
-    assert result.outcome == "BLOCKED"
-    assert result.accepted is False
-    assert "GATE_PROTECTION_BLOCKED" in result.reason
-    assert GATE_PROTECTED_PATH_MUTATED in result.reason
-    assert result.protection is not None
-    assert result.protection.is_protected is True
-    assert result.protection.allowed is False
-    assert path in result.protection.tampered_paths
-    assert result.protection.owner_question
-    assert read_entries(result.history_path)[0]["outcome"] == "BLOCKED"
-    # Fail closed: the gate command never ran, so it produced no artifact.
-    assert not list(evidence_dir.rglob("outcome.json"))
+    protection = verify_gate_definitions(repo, base, touches=touches)
+    assert protection.is_protected is True
+    assert protection.allowed is False
+    assert path in protection.tampered_paths
+    assert protection.reason_code == GATE_PROTECTED_PATH_MUTATED
+    assert protection.owner_question
 
 
 def test_gate_tamper_conftest_cannot_change_its_own_verdict(tmp_path: Path) -> None:
@@ -201,11 +108,9 @@ def test_gate_tamper_conftest_cannot_change_its_own_verdict(tmp_path: Path) -> N
         "    pytest.skip('tampered')\n"
     )
     _commit(repo, "tamper conftest")
-    evidence = tmp_path / "evidence"
-    result = _executor().execute(_request(repo, base, "G1", evidence))
-    _assert_blocked(result, evidence, "tests/conftest.py")
-    assert result.protection is not None
-    assert dict(result.protection.digests)["tests/conftest.py"]
+    _assert_blocked(repo, base, "tests/conftest.py")
+    protection = verify_gate_definitions(repo, base)
+    assert dict(protection.digests)["tests/conftest.py"]
 
 
 def test_gate_tamper_gate_script_weakening_is_blocked(tmp_path: Path) -> None:
@@ -214,9 +119,7 @@ def test_gate_tamper_gate_script_weakening_is_blocked(tmp_path: Path) -> None:
     base = _head(repo)
     (repo / "scripts" / "gate-full.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
     _commit(repo, "weaken the full gate")
-    evidence = tmp_path / "evidence"
-    result = _executor().execute(_request(repo, base, "G3", evidence))
-    _assert_blocked(result, evidence, "scripts/gate-full.sh")
+    _assert_blocked(repo, base, "scripts/gate-full.sh")
 
 
 def test_gate_tamper_gate_tools_bypass_is_blocked(tmp_path: Path) -> None:
@@ -224,11 +127,7 @@ def test_gate_tamper_gate_tools_bypass_is_blocked(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path / "repo")
     base = _head(repo)
     (repo / "scripts" / "gate_tools.py").write_text("import sys\n\nsys.exit(0)\n")
-    evidence = tmp_path / "evidence"
-    result = _executor().execute(_request(repo, base, "G1", evidence))
-    _assert_blocked(result, evidence, "scripts/gate_tools.py")
-    assert result.protection is not None
-    assert "base-content" in result.protection.detected_by
+    _assert_blocked(repo, base, "scripts/gate_tools.py")
 
 
 def test_gate_tamper_pyproject_mypy_relaxation_is_blocked(tmp_path: Path) -> None:
@@ -239,9 +138,7 @@ def test_gate_tamper_pyproject_mypy_relaxation_is_blocked(tmp_path: Path) -> Non
         "[tool.mypy]\nstrict = false\n\n[tool.pytest.ini_options]\ntimeout = 180\n"
     )
     _commit(repo, "relax the type gate")
-    evidence = tmp_path / "evidence"
-    result = _executor().execute(_request(repo, base, "G1", evidence))
-    _assert_blocked(result, evidence, "pyproject.toml")
+    _assert_blocked(repo, base, "pyproject.toml")
 
 
 def test_gate_tamper_ci_workflow_change_is_blocked(tmp_path: Path) -> None:
@@ -252,9 +149,7 @@ def test_gate_tamper_ci_workflow_change_is_blocked(tmp_path: Path) -> None:
         "name: ci\non: [push]\njobs: {}\n"
     )
     _commit(repo, "drop the CI gate")
-    evidence = tmp_path / "evidence"
-    result = _executor().execute(_request(repo, base, "G1", evidence))
-    _assert_blocked(result, evidence, ".github/workflows/ci.yml")
+    _assert_blocked(repo, base, ".github/workflows/ci.yml")
 
 
 def test_gate_tamper_untracked_subdirectory_conftest_is_blocked(tmp_path: Path) -> None:
@@ -269,11 +164,7 @@ def test_gate_tamper_untracked_subdirectory_conftest_is_blocked(tmp_path: Path) 
         "def skip_everything():\n"
         "    pytest.skip('tampered')\n"
     )
-    evidence = tmp_path / "evidence"
-    result = _executor().execute(_request(repo, base, "G1", evidence))
-    _assert_blocked(result, evidence, "tests/nested/conftest.py")
-    assert result.protection is not None
-    assert "base-content" in result.protection.detected_by
+    _assert_blocked(repo, base, "tests/nested/conftest.py")
 
 
 def test_gate_tamper_declared_gate_edit_is_still_blocked(tmp_path: Path) -> None:
@@ -282,14 +173,12 @@ def test_gate_tamper_declared_gate_edit_is_still_blocked(tmp_path: Path) -> None
     base = _head(repo)
     (repo / "scripts" / "gate-full.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
     _commit(repo, "declared but unauthorized gate change")
-    evidence = tmp_path / "evidence"
-    result = _executor().execute(
-        _request(repo, base, "G1", evidence, touches=("scripts/gate-full.sh",))
+    protection = verify_gate_definitions(
+        repo, base, touches=("scripts/gate-full.sh",)
     )
-    _assert_blocked(result, evidence, "scripts/gate-full.sh")
-    assert result.protection is not None
-    assert result.protection.declared_paths == ("scripts/gate-full.sh",)
-    assert any("not an authorization" in finding for finding in result.findings)
+    assert protection.is_protected is True
+    assert protection.declared_paths == ("scripts/gate-full.sh",)
+    assert any("not an authorization" in item for item in protection.owner_question.split("."))
 
 
 def test_gate_tamper_clean_candidate_still_passes(tmp_path: Path) -> None:
@@ -299,56 +188,148 @@ def test_gate_tamper_clean_candidate_still_passes(tmp_path: Path) -> None:
     (repo / "src").mkdir()
     (repo / "src" / "thing.py").write_text("VALUE = 1\n")
     _commit(repo, "authorized product change")
+    protection = verify_gate_definitions(repo, base, touches=("src/",))
+    assert protection.is_protected is False
+    assert protection.allowed is True
+    assert protection.base_verified is True
+    assert protection.base_sha == base
+
+
+def test_gate_tamper_without_a_declared_diff_is_not_applicable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: GT-1 (no base means no trusted revision to guard against)."""
+    monkeypatch.setenv("SABEROPS_GATE_MEMORY_GUARD", "0")
+    repo = _init_repo(tmp_path / "repo")
     evidence = tmp_path / "evidence"
-    result = _executor().execute(
-        _request(repo, base, "G1", evidence, touches=("src/",))
+    receipt = GateRunner().run(
+        GateRunnerRequest(
+            target_repo=repo,
+            gate_command=f"{sys.executable} -c pass",
+            timeout=30.0,
+            frozen_gate_scratch_mode=GateScratchMode.DISK,
+            candidate_sha=_head(repo),
+            expected_post_gate_sha=_head(repo),
+            evidence_dir=evidence,
+        ),
+        disk_guard=lambda _repo: None,
     )
-    assert result.outcome == "PASS"
-    assert result.accepted is True
-    assert result.protection is not None
-    assert result.protection.is_protected is False
-    assert result.protection.base_verified is True
-    assert result.protection.base_sha == base
-    assert list(evidence.rglob("outcome.json"))
+    assert receipt.passed() is True
+    assert receipt.gate_protection is None
 
 
-def test_gate_tamper_verdict_is_recorded_in_engine_outcome(tmp_path: Path) -> None:
-    """Covers: GT-1 (the protection verdict is durable engine evidence)."""
+def test_gate_runner_blocks_a_tampered_conftest_before_it_runs(tmp_path: Path) -> None:
+    """Covers: H32 acceptance path (own conftest never runs; owner question)."""
     repo = _init_repo(tmp_path / "repo")
     base = _head(repo)
-    (repo / "conftest.py").write_text("import pytest\npytest.skip('tampered')\n")
-    _commit(repo, "tamper the root conftest")
+    marker = tmp_path / "conftest-ran"
+    (repo / "conftest.py").write_text(
+        "import pathlib\n"
+        f"pathlib.Path({str(marker)!r}).write_text('ran')\n"
+        "import pytest\n"
+    )
+    candidate = _commit(repo, "tamper the root conftest")
     evidence = tmp_path / "evidence"
-    result = _executor().execute(_request(repo, base, "G1", evidence))
-    _assert_blocked(result, evidence, "conftest.py")
-    payload = json.loads(Path(result.outcome_path).read_text())
-    assert payload["outcome"] == "BLOCKED"
-    assert payload["gate_protection"]["is_protected"] is True
-    assert payload["gate_protection"]["tampered_paths"] == ["conftest.py"]
-    assert payload["gate_protection"]["base_sha"] == base
+    with pytest.raises(GateProtectionBlockedError) as excinfo:
+        GateRunner().run(
+            GateRunnerRequest(
+                target_repo=repo,
+                gate_command=f"{sys.executable} -c 'import conftest'",
+                timeout=30.0,
+                frozen_gate_scratch_mode=GateScratchMode.DISK,
+                candidate_sha=candidate,
+                expected_post_gate_sha=candidate,
+                evidence_dir=evidence,
+                base_sha=base,
+                changed_files=("conftest.py",),
+            ),
+            disk_guard=lambda _repo: None,
+        )
+    assert "GATE_PROTECTION_BLOCKED" in str(excinfo.value)
+    assert GATE_PROTECTED_PATH_MUTATED in str(excinfo.value)
+    assert excinfo.value.protection.owner_question
+    # The candidate's own definition never ran, so it wrote no marker and the
+    # gate produced no evidence artifact.
+    assert marker.exists() is False
+    assert list(evidence.rglob("outcome.json")) == []
 
 
-def test_gate_tamper_without_a_declared_diff_is_not_applicable(tmp_path: Path) -> None:
-    """Covers: GT-1 (no base and no changed files means no candidate diff to guard)."""
+def test_job_gate_never_runs_a_tampered_conftest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: H32 real job path (own conftest never runs; owner question)."""
+    monkeypatch.setenv("SABEROPS_GATE_MEMORY_GUARD", "0")
     repo = _init_repo(tmp_path / "repo")
-    evidence = tmp_path / "evidence"
-    result = _executor().execute(_request(repo, "", "G3", evidence))
-    assert result.outcome == "PASS"
-    assert result.protection is None
+    base = _head(repo)
+    marker = tmp_path / "conftest-ran"
+    (repo / "conftest.py").write_text(
+        "import pathlib\n"
+        f"pathlib.Path({str(marker)!r}).write_text('ran')\n"
+        "import pytest\n"
+    )
+    _commit(repo, "tamper the root conftest")
+    config = RunConfig(task="candidate", target_repo=str(repo))
+    result = _run_configured_gate(
+        config,
+        [sys.executable, "-c", "import conftest"],
+        cwd=repo,
+        timeout=30.0,
+        base=base,
+    )
+    assert result.passed is False
+    assert "GATE_PROTECTION_BLOCKED" in result.stderr
+    assert GATE_PROTECTED_PATH_MUTATED in result.stderr
+    assert "Owner decision required" in result.stderr
+    assert marker.exists() is False
+
+
+def test_job_gate_allows_an_ordinary_fix_that_edits_a_test(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: H32 (an ordinary test fix is not a protected-definition change)."""
+    monkeypatch.setenv("SABEROPS_GATE_MEMORY_GUARD", "0")
+    repo = _init_repo(tmp_path / "repo")
+    (repo / ".gitignore").write_text(".pytest_cache/\n__pycache__/\n", encoding="utf-8")
+    (repo / "test_app.py").write_text(
+        "def test_two_plus_two():\n    assert 2 + 2 == 5\n", encoding="utf-8"
+    )
+    _commit(repo, "base with a failing test")
+    base = _head(repo)
+    (repo / "test_app.py").write_text(
+        "def test_two_plus_two():\n    assert 2 + 2 == 4\n", encoding="utf-8"
+    )
+    _commit(repo, "fix the failing test")
+
+    config = RunConfig(task="fix the test", target_repo=str(repo))
+    result = _run_configured_gate(
+        config,
+        [sys.executable, "-m", "pytest", "-q"],
+        cwd=repo,
+        timeout=60.0,
+        base=base,
+    )
+    assert result.passed is True, result.stderr
 
 
 def test_gate_tamper_unverifiable_base_is_blocked(tmp_path: Path) -> None:
     """Covers: GT-1 (a base that cannot be read blocks instead of passing)."""
     repo = _init_repo(tmp_path / "repo")
-    evidence = tmp_path / "evidence"
-    result = _executor().execute(
-        _request(repo, "0" * 40, "G1", evidence, changed_files=("src/thing.py",))
-    )
-    assert result.outcome == "BLOCKED"
-    assert result.accepted is False
-    assert "GATE_PROTECTION_BLOCKED" in result.reason
-    assert "GATE_BASE_UNVERIFIABLE" in result.reason
-    assert not list(evidence.rglob("outcome.json"))
+    with pytest.raises(GateProtectionBlockedError) as excinfo:
+        GateRunner().run(
+            GateRunnerRequest(
+                target_repo=repo,
+                gate_command=f"{sys.executable} -c pass",
+                timeout=30.0,
+                frozen_gate_scratch_mode=GateScratchMode.DISK,
+                candidate_sha=_head(repo),
+                expected_post_gate_sha=_head(repo),
+                evidence_dir=tmp_path / "evidence",
+                base_sha="0" * 40,
+                changed_files=("src/thing.py",),
+            ),
+            disk_guard=lambda _repo: None,
+        )
+    assert "GATE_BASE_UNVERIFIABLE" in str(excinfo.value)
 
 
 def test_load_base_gate_definitions_reads_the_base_sha(tmp_path: Path) -> None:

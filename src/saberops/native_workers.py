@@ -831,7 +831,7 @@ def _verify_diff_paths(paths: list[str], worktree: Path) -> None:
             )
 
 
-def _run_gate(config: Any, worktree: Path) -> Any:
+def _run_gate(config: Any, worktree: Path, *, base: str) -> Any:
     from saberops.orchestrator import _run_configured_gate
     from saberops.process import split_command
 
@@ -840,7 +840,9 @@ def _run_gate(config: Any, worktree: Path) -> Any:
         raise NativeWorkerError(
             "NATIVE_GATE_MISSING", "a native attempt requires a configured project gate"
         )
-    return _run_configured_gate(config, args, cwd=worktree, timeout=config.gate_timeout)
+    return _run_configured_gate(
+        config, args, cwd=worktree, timeout=config.gate_timeout, base=base
+    )
 
 
 def _default_reviewer(db: Database, run_id: str, timeout: float) -> Any:
@@ -982,7 +984,7 @@ def record_native_attempt(
         commit_sha=candidate,
         completed_at=current_iso_timestamp(),
     )
-    runner = gate_runner or _run_gate
+    runner = gate_runner or (lambda cfg, wt: _run_gate(cfg, wt, base=base))
     try:
         gate = runner(config, reported_worktree)
     except Exception as exc:

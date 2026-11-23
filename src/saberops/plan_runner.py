@@ -121,6 +121,7 @@ __all__ = [
     "lane_digest",
     "lane_refresh_failure",
     "lane_run",
+    "lane_touches_for_run",
     "latest_lane_refresh_event",
     "list_active_plans",
     "mark_owner_lane_done",
@@ -860,6 +861,38 @@ def _lane_rows(db: Any, plan_id: str) -> dict[str, _LaneRow]:
 def plan_lane_rows(db: Any, plan_id: str) -> dict[str, _LaneRow]:
     """Public read-only accessor for one plan's lane rows (P3 projection)."""
     return _lane_rows(db, plan_id)
+
+
+def lane_touches_for_run(db: Any, run_id: str) -> tuple[str, ...]:
+    """The declared ``owns`` of the plan lane a run belongs to, if any.
+
+    Returns an empty tuple for an ordinary (non-lane) job and for a legacy
+    plan whose revision no longer resolves.  Callers treat an empty result as
+    "no scope evidence", never as a block: write scope is reviewer evidence,
+    and the lane explicitly allows legacy plans with no scope declaration.
+    """
+    job = store.find_job_for_run(db, run_id)
+    if job is None:
+        return ()
+    ensure_plan_tables(db)
+    with _owner_conn(db) as conn:
+        row = conn.execute(
+            "SELECT plan_id, lane_id FROM plan_lanes WHERE job_id = ?",
+            (job.job_id,),
+        ).fetchone()
+    if row is None:
+        return ()
+    plan = get_plan(db, str(row["plan_id"]))
+    if plan is None:
+        return ()
+    try:
+        revision = plan.plan_store().get_revision(plan.project_id, plan.active_version)
+    except (PlanNotFoundError, PlanTamperError, PlanValidationError):
+        return ()
+    for task in revision.tasks:
+        if task.task_id == str(row["lane_id"]):
+            return tuple(task.owns)
+    return ()
 
 
 # ---------------------------------------------------------------------------

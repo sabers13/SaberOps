@@ -112,11 +112,13 @@ Mechanism (`saberops.gate_scope`, `saberops.gate_runner`):
   changes, uncommitted edits and untracked files (`git status --untracked-files=all`),
   so an added or deleted `conftest.py` counts as well. Byte-identical definitions
   *are* the base definitions, so a gate that runs is a base-trusted gate.
-- `EngineGateExecutor` runs this before the host-disk admission and before the
-  gate slot, so a blocked candidate never starts a gate command. The result is
-  `outcome: BLOCKED`, `reason: GATE_PROTECTION_BLOCKED: GATE_PROTECTED_PATH_MUTATED:
-  <paths>`, and the same line is written to the engine history and `outcome.json`
-  (`gate_protection`, with the tampered paths, per-path digests and the base SHA).
+- The real job check (`_run_configured_gate`) and acceptance (`GateRunner`) both
+  run `verify_gate_definitions` before their command. The job check returns a
+  failed check whose stderr carries `GATE_PROTECTION_BLOCKED:
+  GATE_PROTECTED_PATH_MUTATED: <paths>` and the owner question; acceptance
+  raises `GateProtectionBlockedError`, rolls the target back and records the
+  same question. A successful acceptance receipt records the verdict under
+  `gate_protection` (tampered paths, per-path digests and the base SHA).
 - `touches` is **evidence, not authorization**: a lane that declares a protected
   path in its `Touches` is still blocked; the declaration is recorded in
   `declared_paths` and named in the owner question.

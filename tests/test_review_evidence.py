@@ -122,3 +122,82 @@ def test_an_empty_candidate_states_that_the_engine_saw_no_change(tmp_path: Path)
 
     assert "none" in evidence
     assert "the engine found no file changed" in evidence
+
+
+def test_retirement_suppressions_and_catch_alls_are_engine_evidence(
+    tmp_path: Path,
+) -> None:
+    repo, base = _repo(tmp_path)
+    (repo / "test_app.py").unlink()
+    (repo / "app.py").write_text(
+        "def greet(name: str) -> str:\n"
+        "    try:\n"
+        "        return f\"hello {name}\"\n"
+        "    except Exception:\n"
+        "        return \"hello\"  # noqa: BLE001\n",
+        encoding="utf-8",
+    )
+    (repo / "test_new.py").write_text(
+        "import pytest\n\n\n"
+        "@pytest.mark.skip(reason='temporarily disabled')\n"
+        "def test_greet() -> None:\n"
+        "    assert True\n",
+        encoding="utf-8",
+    )
+    _commit(repo)
+
+    evidence = build_review_evidence(
+        worktree=repo,
+        base_commit=base,
+        task="Make greeting robust.\n\nAcceptance:\nThe greeting still works.",
+        clauses=("The greeting still works.",),
+        touches=("app.py",),
+    )
+
+    assert "deleted tests: test_app.py::test_greet" in evidence
+    assert "outside the lane's declared area" in evidence
+    assert "test_app.py" in evidence
+    assert "new skip/xfail markers" in evidence
+    assert "new suppression comments: app.py:" in evidence
+    assert "new catch-all exception handlers: app.py:" in evidence
+
+
+def test_empty_owns_is_no_scope_evidence_and_never_a_block(tmp_path: Path) -> None:
+    repo, base = _repo(tmp_path)
+    (repo / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _commit(repo)
+
+    evidence = build_review_evidence(
+        worktree=repo,
+        base_commit=base,
+        task="Change the value.",
+        clauses=(),
+    )
+
+    assert "declared no write scope" in evidence
+    assert "legacy plan" in evidence
+
+
+def test_an_ordinary_fix_that_edits_a_test_is_only_evidence(tmp_path: Path) -> None:
+    repo, base = _repo(tmp_path)
+    (repo / "test_app.py").write_text(
+        "from app import greet\n\n\ndef test_greet() -> None:\n"
+        '    assert greet("Ada") == "hello Ada"\n',
+        encoding="utf-8",
+    )
+    (repo / "app.py").write_text(
+        'def greet(name: str) -> str:\n    return f"hello {name}"\n',
+        encoding="utf-8",
+    )
+    _commit(repo)
+
+    evidence = build_review_evidence(
+        worktree=repo,
+        base_commit=base,
+        task="Fix the failing test.",
+        clauses=("The failing test passes.",),
+        touches=("app.py", "test_app.py"),
+    )
+
+    assert "rewritten test bodies" in evidence
+    assert "test_app.py::test_greet" in evidence

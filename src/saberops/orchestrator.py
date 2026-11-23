@@ -73,12 +73,6 @@ from saberops.dispatch import (
 from saberops.dispatch import control_plane_decision as control_plane_decision
 from saberops.execution_failover import FailoverEngine
 from saberops.gate_receipt import record_receipt as _record_gate_receipt
-from saberops.gate_runner import (
-    EngineGateExecutor,
-    EngineGateRequest,
-    EngineGateResult,
-    GateSlotPool,
-)
 from saberops.git import (
     CandidatePublication,
     CandidatePublicationError,
@@ -1065,67 +1059,6 @@ def _gate_disposition_payload(disposition: GateDisposition) -> dict[str, object]
         "candidate_sha": disposition.candidate_sha,
         "source_tree_hash": disposition.source_tree_hash,
     }
-
-
-def run_engine_gate(
-    *,
-    target_repo: Path | str,
-    kind: str,
-    evidence_dir: Path | str,
-    base: str = "",
-    head_sha: str = "",
-    requested_profile: str | None = None,
-    state_dir: Path | str | None = None,
-    touches: tuple[str, ...] = (),
-    must_not_touch: tuple[str, ...] = (),
-    changed_files: tuple[str, ...] = (),
-    disk_estimate_bytes: int = 0,
-) -> EngineGateResult:
-    """Run one engine-owned gate and record ``producer: engine`` evidence.
-
-    Covers: (engine is the only producer of gate evidence),
-     write-scope preflight, profiles and D3 slots.
-
-    A model's own run of the same commands stays G0: it never reaches the
-    history ledger and is rejected by :func:`project_gate_outcome` as
-    non-engine evidence.  This seam is intentionally thin so the engine can
-    call it for G1, G2, G3 and the periodic main gate with the same rules.
-    """
-    resolve_state = Path(state_dir).expanduser() if state_dir is not None else None
-    executor = EngineGateExecutor(slot_pool=GateSlotPool(_common_dir_for(target_repo)))
-    return executor.execute(
-        EngineGateRequest(
-            target_repo=Path(target_repo).expanduser(),
-            kind=kind,
-            evidence_dir=Path(evidence_dir).expanduser(),
-            base=base,
-            head_sha=head_sha,
-            requested_profile=requested_profile,
-            state_dir=resolve_state,
-            touches=touches,
-            must_not_touch=must_not_touch,
-            changed_files=changed_files,
-            disk_estimate_bytes=disk_estimate_bytes,
-        )
-    )
-
-
-def _common_dir_for(repo: Path | str) -> Path:
-    """Resolve the git common dir for a repository path (engine gate seam)."""
-    path = Path(repo).expanduser()
-    completed = subprocess.run(
-        ["git", "rev-parse", "--git-common-dir"],
-        cwd=path,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if completed.returncode != 0:
-        raise RuntimeError(
-            f"cannot resolve git common dir for {path}: {completed.stderr.strip()}"
-        )
-    raw = completed.stdout.strip()
-    return (path / raw).resolve() if not Path(raw).is_absolute() else Path(raw)
 
 
 def load_owner_runtime_bindings(
@@ -5786,6 +5719,7 @@ class Orchestrator:
                             gate_args,
                             cwd=wt_path,
                             timeout=config.gate_timeout,
+                            base=diff_base_sha,
                         )
                     # Changed paths must describe the candidate, not the now-clean
                     # worktree: the commit landed before the gate ran, so
@@ -7651,7 +7585,8 @@ class Orchestrator:
                                     split_command(gate_command) if config.gate_enabled else []
                                 )
                                 gate_res_local = _run_configured_gate(config,
-                                    gate_args_local, cwd=local_wt_path, timeout=config.gate_timeout
+                                    gate_args_local, cwd=local_wt_path,
+                                    timeout=config.gate_timeout, base=base_sha_local,
                                 )
                                 changed_paths_local_t = tuple(
                                     sorted(
@@ -8716,6 +8651,7 @@ class Orchestrator:
                                     gate_cmd_parts,
                                     cwd=desc_wt_path,
                                     timeout=config.gate_timeout,
+                                    base=base_commit,
                                 )
                                 chk_id = f"chk_{uuid.uuid4().hex[:10]}"
                                 chk = CheckResult(
@@ -9899,44 +9835,6 @@ class Orchestrator:
         except Exception:  # noqa: BLE001 - the scratch copy is disposable
             pass
 
-    def run_engine_gate(
-        self,
-        *,
-        target_repo: Path | str,
-        kind: str,
-        evidence_dir: Path | str,
-        base: str = "",
-        head_sha: str = "",
-        requested_profile: str | None = None,
-        state_dir: Path | str | None = None,
-        touches: tuple[str, ...] = (),
-        must_not_touch: tuple[str, ...] = (),
-        changed_files: tuple[str, ...] = (),
-        disk_estimate_bytes: int = 0,
-    ) -> EngineGateResult:
-        """Orchestrator-owned entry point for engine-run G1/G2/G3 evidence.
-
-        Covers: engine gate evidence + write-scope preflight.
-
-        Delegates to the deterministic :func:`run_engine_gate` seam so the
-        engine (and only the engine) produces authoritative gate evidence; a
-        model's iteration run remains G0 and can never be submitted as
-        evidence.
-        """
-        return run_engine_gate(
-            target_repo=target_repo,
-            kind=kind,
-            evidence_dir=evidence_dir,
-            base=base,
-            head_sha=head_sha,
-            requested_profile=requested_profile,
-            state_dir=state_dir,
-            touches=touches,
-            must_not_touch=must_not_touch,
-            changed_files=changed_files,
-            disk_estimate_bytes=disk_estimate_bytes,
-        )
-
     # -- wave execution seam (Step 010 / WX-1) -----------------------------
 
     def admit_wave(
@@ -10000,13 +9898,57 @@ class Orchestrator:
 
 
 def _run_configured_gate(
-    config: RunConfig, args: list[str], *, cwd: Path, timeout: float
+    config: RunConfig,
+    args: list[str],
+    *,
+    cwd: Path,
+    timeout: float,
+    base: str | None = None,
+    touches: tuple[str, ...] = (),
 ) -> ProcessResult:
     if config.gate_enabled:
         from dataclasses import replace
 
         from saberops._gate_tools import gate_tools as gt
+        from saberops.gate_runner import verify_gate_definitions
+        from saberops.gate_scope import git_changed_files
         from saberops.verification_snapshot import fixed_snapshot, source_tree
+
+        # GT-1: the candidate must run the gate definitions trusted at its base.
+        # A changed check script, conftest.py or gate configuration never runs:
+        # the engine refuses before the subprocess and surfaces the owner
+        # question the GateProtectionResult carries.  An empty base is a legacy
+        # caller with no trusted revision to compare; the real job paths always
+        # pass one.
+        if base:
+            try:
+                changed = git_changed_files(str(cwd), base, "HEAD")
+                protection = verify_gate_definitions(
+                    cwd, base, changed_paths=changed, touches=touches
+                )
+            except Exception as exc:  # noqa: BLE001 - unreadable base fails closed
+                return ProcessResult(
+                    args=args,
+                    exit_code=-1,
+                    stdout="",
+                    stderr=(
+                        "GATE_PROTECTION_BLOCKED: GATE_BASE_UNVERIFIABLE: "
+                        f"{exc}"
+                    ),
+                    duration_seconds=0.0,
+                    launch_failed=True,
+                )
+            if not protection.allowed:
+                return ProcessResult(
+                    args=args,
+                    exit_code=-1,
+                    stdout="",
+                    stderr=(
+                        f"GATE_PROTECTION_BLOCKED: {protection.reason}\n"
+                        f"{protection.owner_question}"
+                    ),
+                    duration_seconds=0.0,
+                )
 
         try:
             with fixed_snapshot(cwd) as snapshot:

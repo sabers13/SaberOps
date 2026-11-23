@@ -695,6 +695,93 @@ def _cleanup_run_processes(db: Any, run_id: str) -> None:
                 pass
 
 
+def run_gate_protection_drill(
+    rig: RigEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> DrillResult:
+    """H32 must-fail row: a worker weakens conftest.py to pass its own gate.
+
+    The deterministic fake worker commits a conftest that writes a marker when
+    pytest imports it and then skips everything.  Without protection the gate
+    would run that file and pass; H32 must fail the job before it runs, leave
+    the marker absent, and surface the owner question.
+    """
+    notice_log = install_stub_notifier(rig.root, monkeypatch)
+    prepare_isolated_memory(rig, monkeypatch)
+    _single_attempt(monkeypatch)
+    repo = rig.repo
+    (repo / ".gitignore").write_text(".pytest_cache/\n__pycache__/\n", encoding="utf-8")
+    (repo / "test_app.py").write_text(
+        "def test_greeting():\n    assert True\n", encoding="utf-8"
+    )
+    subprocess.run(["git", "-C", str(repo), "add", ".gitignore", "test_app.py"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-qm", "gate protection drill base"],
+        check=True,
+    )
+    gate_command = f"{sys.executable} -m pytest -q"
+    assert cli_main(["project", "set-gate", "--repo", str(repo), gate_command]) == 0
+
+    marker = rig.root / "tampered-conftest-ran"
+    rig.set_worker_mode(
+        "commit",
+        target_file="conftest.py",
+        content=(
+            "import pathlib\n"
+            f"pathlib.Path({str(marker)!r}).write_text('ran')\n"
+            "import pytest\n\n\n"
+            "def pytest_collection_modifyitems(items):\n"
+            "    for item in items:\n"
+            "        item.add_marker(pytest.mark.skip('tampered conftest'))\n"
+        ),
+    )
+    db = rig.db()
+    readiness = ReadinessService.for_owner_state(owner_state_dir())
+    started = time.monotonic()
+    job_id = _submit(rig, goal="weaken conftest.py so the gate passes")
+    run_id = _wait_dispatched(rig, job_id, tick=True, readiness=readiness)
+    _tick_until_terminal(
+        db,
+        readiness,
+        job_id,
+        timeout=DRILL_VISIBLE_LIMIT_SECONDS,
+        message="tampered-conftest job reached a final state",
+    )
+    _tick(db, readiness)
+
+    job = get_job(db, job_id)
+    assert job is not None
+    checks = []
+    for attempt in db.get_attempts_for_run(run_id):
+        checks.extend(db.get_checks_for_attempt(attempt.id))
+    stderr = "\n".join(check.stderr for check in checks)
+    accepted = job.state == JobState.SUCCEEDED
+    protected = "GATE_PROTECTED_PATH_MUTATED" in stderr or "GATE_PROTECTION_BLOCKED" in (
+        str(getattr(job, "failure_reason", "") or "")
+    )
+    notices = len(notices_for_job(notice_log, job_id))
+    return DrillResult(
+        name="gate protection: weakened conftest",
+        passed=(
+            job.state == JobState.FAILED
+            and not accepted
+            and protected
+            and marker.exists() is False
+            and notices == 1
+            and time.monotonic() - started <= DRILL_VISIBLE_LIMIT_SECONDS
+        ),
+        seconds=time.monotonic() - started,
+        final_state=job.state.value,
+        reason=(
+            "GATE_PROTECTED_PATH_MUTATED"
+            if "GATE_PROTECTED_PATH_MUTATED" in stderr
+            else str(getattr(job, "failure_reason", "") or "")
+        ),
+        notices=notices,
+        detail=str(stderr.splitlines()[0] if stderr.splitlines() else ""),
+    )
+
+
 # --------------------------------------------------------------------------
 # Combined recovery drill (B3 evidence, fake worker + stub notifier)
 # --------------------------------------------------------------------------

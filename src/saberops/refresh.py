@@ -168,7 +168,11 @@ def refresh_candidate(service: OrchestratorService, run_id: str) -> dict[str, An
         )
         db.create_attempt(new_attempt)
         gate = _run_configured_gate(
-            config, split_command(config.gate_command), cwd=wt, timeout=config.gate_timeout
+            config,
+            split_command(config.gate_command),
+            cwd=wt,
+            timeout=config.gate_timeout,
+            base=base,
         )
         db.create_check(
             CheckResult(
