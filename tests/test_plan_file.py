@@ -68,7 +68,8 @@ VALID_PLAN = """# SaberOps plan: example-plan
 - **Needs:** P1
 
 ```plan
-{"id": "P2", "wave": 1, "depends_on": ["P1"], "size": "S", "effort": "low"}
+{"id": "P2", "wave": 1, "depends_on": ["P1"], "size": "S", "effort": "low",
+ "difficulty": "hard"}
 ```
 """
 
@@ -166,6 +167,8 @@ def test_firstmate_style_plan_validates() -> None:
     assert [lane.lane_id for lane in parsed.lanes] == ["P1", "P2"]
     assert parsed.lanes[0].size == "M"
     assert parsed.lanes[0].effort == "medium"
+    assert parsed.lanes[0].difficulty == ""
+    assert parsed.lanes[1].difficulty == "hard"
     assert parsed.lanes[0].owns == ("src/saberops/base.py",)
     assert parsed.lanes[1].needs == ("P1",)
     assert parsed.lanes[1].depends_on == ("P1",)
@@ -182,6 +185,13 @@ def test_owner_lane_validates_and_never_declares_job_fields() -> None:
     bad = _plan(_lane("O1", machine={"run": "owner", "size": "M"}))
     with pytest.raises(PlanFileError, match=r"lane O1: owner lanes may not declare job-only"):
         _parse(bad)
+
+    difficulty = _plan(_lane("O1", machine={"run": "owner", "difficulty": "hard"}))
+    with pytest.raises(
+        PlanFileError,
+        match=r"lane O1: owner lanes may not declare job-only field\(s\).*difficulty",
+    ):
+        _parse(difficulty)
 
 
 def test_scope_normalization() -> None:
@@ -283,6 +293,10 @@ def test_invalid_size_effort_priority_and_wave_refused() -> None:
     """Covers: enumerated machine values fail closed."""
     with pytest.raises(PlanFileError, match=r"lane P1: size 'XL' is invalid"):
         _parse(_plan(_lane("P1", machine={"size": "XL"})))
+    with pytest.raises(PlanFileError, match=r"lane P1: difficulty 't3' is invalid"):
+        _parse(_plan(_lane("P1", machine={"difficulty": "T3"})))
+    with pytest.raises(PlanFileError, match=r"lane P1: difficulty 'extreme' is invalid"):
+        _parse(_plan(_lane("P1", machine={"difficulty": "extreme"})))
     with pytest.raises(PlanFileError, match=r"lane P1: effort 'extreme' is invalid"):
         _parse(_plan(_lane("P1", machine={"effort": "extreme"})))
     with pytest.raises(PlanFileError, match=r"lane P1: priority 'HIGH' is invalid"):
@@ -425,6 +439,7 @@ def test_format_two_revision_records_lane_detail(tmp_path: Path) -> None:
     assert revision.verify() is True
     assert revision.tasks[0].goal == "- add the base module"
     assert revision.tasks[0].acceptance == ("the base test passes",)
+    assert revision.tasks[1].difficulty == "hard"
     assert store.load_active("example-project") == revision
 
 

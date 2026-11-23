@@ -1,8 +1,10 @@
 """Contract: orchestrator dispatches through role chains.
 
-The classifier still labels the run tier, but it no longer selects routes:
-every dispatch resolves the build route, and an escalation moves that route to
-its stronger-model ``strong_start`` setting (ADR-0005 §3: no second role).
+The planner's recorded difficulty labels the run tier, and it selects the
+route: ``hard`` starts on the build route's stronger-model ``strong_start``
+setting, ``routine`` or a missing value starts on the ordinary build chain
+(ADR-0005 §3: no second role).  Escalation still moves the build route to its
+strong start, and only on typed capability-failure evidence.
 """
 
 from __future__ import annotations
@@ -261,7 +263,7 @@ def _events_by_type(events: list[Any], event_type: str) -> list[Any]:
 def test_auto_run_labelled_t1_dispatches_worker_chain_head(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
-    """Covers: classifier labels, role chain routes."""
+    """Covers: a missing difficulty stays on the build route head."""
     repo = tmp_path / "repo"
     _init_repo(repo)
     log: list[str] = []
@@ -285,7 +287,7 @@ def test_auto_run_labelled_t1_dispatches_worker_chain_head(
     assert result.status == RunStatus.COMPLETED
     impl_log = [e for e in log if not e.startswith("review:")]
     assert impl_log == ["m1"], impl_log
-    # The classifier labelled T1, but the route came from the build route.
+    # Missing difficulty means routine: the route came from the build route.
     assert db.get_run(result.run_id) is not None
     assert db.get_run(result.run_id).tier == Tier.T1  # type: ignore[union-attr]
     assert calls and calls[0] == "BUILD:ordinary"
@@ -435,6 +437,94 @@ def test_manual_t3_starts_on_build_strong_start_without_escalation(
     assert resolved[0].payload["role"] == "BUILD"
     assert resolved[0].payload["strong_start"] is True
     assert _events_by_type(events, "tier_escalated") == []
+
+
+@pytest.mark.parametrize(
+    ("difficulty", "expected_model", "expected_call", "expected_tier"),
+    [
+        ("hard", "s1", "BUILD:strong", Tier.T3),
+        ("routine", "m1", "BUILD:ordinary", Tier.T1),
+        (None, "m1", "BUILD:ordinary", Tier.T1),
+    ],
+)
+def test_recorded_difficulty_selects_the_start_chain(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+    difficulty: str | None,
+    expected_model: str,
+    expected_call: str,
+    expected_tier: Tier,
+) -> None:
+    """Covers: H1 (hard starts strong, routine/missing start on the build chain)."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    log: list[str] = []
+    calls: list[str] = []
+    worker = ScriptedWorker(
+        "h3",
+        {
+            "m1": _success_with_file("h3", "m1", "A.txt", "A\n"),
+            "s1": _success_with_file("h3", "s1", "A.txt", "A\n"),
+        },
+        log,
+    )
+    monkeypatch.setattr(
+        "saberops.orchestrator.resolve_candidate_chain",
+        _role_keyed_chain([WorkerCandidate("h3", "m1")], [WorkerCandidate("h3", "s1")], calls),
+    )
+    db = Database(tmp_path / "orch.db")
+    orch = Orchestrator(db=db, registry=AdapterRegistry([worker]), worktree_base=tmp_path / "wt")
+    config = resolve_run_config(
+        task="fix typo in readme",
+        target_repo=repo,
+        difficulty=difficulty,
+        gate_command=_passing_gate(),
+        review_disabled=True,
+        publish_candidate=False,
+    )
+    result = orch.run(config=config, is_peak=False)
+    assert result.status == RunStatus.COMPLETED
+    impl_log = [e for e in log if not e.startswith("review:")]
+    assert impl_log == [expected_model], impl_log
+    assert calls and calls[0] == expected_call
+    run = db.get_run(result.run_id)
+    assert run is not None and run.tier is expected_tier
+    resolved = _events_by_type(db.get_events(result.run_id), "tier_candidates_resolved")
+    assert resolved and resolved[0].payload is not None
+    assert resolved[0].payload["strong_start"] is (expected_call == "BUILD:strong")
+
+
+def test_hard_difficulty_never_overrides_a_capped_auto_ceiling(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """Covers: H1 (the owner's max_auto_tier cap still wins over hard)."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    log: list[str] = []
+    calls: list[str] = []
+    worker = ScriptedWorker("h3", {"m1": _success_with_file("h3", "m1", "A.txt", "A\n")}, log)
+    monkeypatch.setattr(
+        "saberops.orchestrator.resolve_candidate_chain",
+        _role_keyed_chain([WorkerCandidate("h3", "m1")], [WorkerCandidate("h3", "s1")], calls),
+    )
+    db = Database(tmp_path / "orch.db")
+    orch = Orchestrator(db=db, registry=AdapterRegistry([worker]), worktree_base=tmp_path / "wt")
+    config = resolve_run_config(
+        task="implement the hard thing",
+        target_repo=repo,
+        difficulty="hard",
+        max_auto_tier="T2",
+        gate_command=_passing_gate(),
+        review_disabled=True,
+        publish_candidate=False,
+    )
+    result = orch.run(config=config, is_peak=False)
+    assert result.status == RunStatus.COMPLETED
+    impl_log = [e for e in log if not e.startswith("review:")]
+    assert impl_log == ["m1"], impl_log
+    assert calls and calls[0] == "BUILD:ordinary"
+    run = db.get_run(result.run_id)
+    assert run is not None and run.tier is Tier.T2
 
 
 @pytest.mark.parametrize(

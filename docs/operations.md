@@ -259,10 +259,12 @@ migration with `orch routing migrate` (dry run by default, `--write` persists
 with a timestamped backup), which prints the before/after mapping and what it
 migrated. Role editors (`orch routing add|remove|move|reorder ROLE ...`, roles
 case-insensitive) refuse schema-1/2 files until migrated and accept a retired
-role name as `build`. `orch run --tier T1|T2` runs the build route without
-escalation and `--tier T3` starts on its `strong_start` setting; `--max-tier
-T1|T2` disables escalation (default T3 allows it). Each explicit flag prints
-one deprecation line.
+role name as `build`. `orch run --difficulty hard` starts on the build route's
+`strong_start` setting and `routine` (the default, and what an omitted value
+means) stays on the ordinary build chain. `orch run --tier T1|T2` runs the
+build route without escalation and `--tier T3` starts on its `strong_start`
+setting; `--max-tier T1|T2` disables escalation (default T3 allows it). Each
+explicit deprecated flag prints one deprecation line.
 
 Escalation moves the build route to its `strong_start` setting, only on
 explicit typed `CAPABILITY_FAILURE` evidence (gate failure never escalates),
@@ -406,9 +408,11 @@ only `BUILD` is dispatchable, and retired names `WORKER`/`SURGEON`/
 `INTEGRATOR`/`REVIEWER` are accepted and migrated), optional `effort` (low |
 medium | high, a reasoning-budget hint that never selects a chain), required
 factual capabilities (plus `--read-only`), model-family allow/deny lists
-(validated and stored; enforced at admission), and a `size_hint` (S | M | L,
-shared with the capacity cost buckets). Callers never name a provider, model,
-tier or billing route.
+(validated and stored; enforced at admission), a `size_hint` (S | M | L,
+shared with the capacity cost buckets), and a `difficulty` (`routine`, the
+default, or `hard`; a hard task starts on the build route's `strong_start`
+chain, still under quota and the automatic routing ceiling). Callers never
+name a provider, model, tier or billing route.
 
 Idempotency: pass `--idempotency-key KEY` with a stable `caller_id`
 (`owner` for now). The same key with the same request returns the
@@ -419,7 +423,7 @@ key always creates a new job.
 - `orch job submit --repo PATH --goal TEXT [--acceptance TEXT]
   [--base-ref REF] [--role ROLE] [--effort low|medium|high]
   [--capability NAME]... [--read-only] [--family-include F]...
-  [--family-exclude F]... [--size S|M|L]
+  [--family-exclude F]... [--size S|M|L] [--difficulty routine|hard]
   [--priority URGENT|NORMAL|BACKGROUND] [--deadline ISO]
   [--not-before ISO] [--idempotency-key KEY] [--json]`, e.g.
   `orch job submit --repo ~/projects/foo --goal "Fix the login retry"

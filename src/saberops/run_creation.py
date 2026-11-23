@@ -100,6 +100,9 @@ class RunRequest:
     # F19: "build" (default) or "scout".  A scout run is read-only and ends
     # with a report, never a candidate; roles are unchanged.
     kind: str = "build"
+    #: Planner-recorded judgement (H1): ``routine`` (default) or ``hard``.
+    #: Never a provider, model, tier or route name.
+    difficulty: str | None = None
     manual_tier: Tier | str | None = None
     max_auto_tier: Tier | str | None = None
     provider_override: str | None = None
@@ -360,6 +363,7 @@ def resolve_effective_run_config(request: RunRequest) -> RunConfig:
             repo_path=request.repo_path,
             routing_mode=request.routing_mode,
             kind=kind,
+            difficulty=request.difficulty,
             manual_tier=request.manual_tier,
             max_auto_tier=request.max_auto_tier,
             training_allowed=training_allowed,

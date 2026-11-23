@@ -220,6 +220,7 @@ def _resolve_cli_run_config(args: argparse.Namespace, repo: Path | str) -> RunCo
         routing_mode="auto" if tier_raw == "auto" else "manual",
         manual_tier=None if tier_raw == "auto" else tier_raw,
         max_auto_tier=max_tier_raw,
+        difficulty=getattr(args, "difficulty", None),
         provider_override=args.provider,
         model_override=args.model,
         reserve_override=args.reserve_override,
@@ -800,6 +801,16 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["auto", "T1", "T2", "T3"],
         default=argparse.SUPPRESS,
         help="Deprecated: routing mode auto (default) or a manual tier override.",
+    )
+    run_parser.add_argument(
+        "--difficulty",
+        type=str,
+        choices=["routine", "hard"],
+        default=None,
+        help=(
+            "How hard the task is (default: routine). 'hard' starts on the "
+            "build route's strong-start chain, still under quota and --max-tier."
+        ),
     )
     run_parser.add_argument(
         "--max-tier",
@@ -2442,6 +2453,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Model family denylist entry; repeat for multiple.",
     )
     job_submit.add_argument("--size", type=str, default=None, choices=["S", "M", "L"])
+    job_submit.add_argument(
+        "--difficulty",
+        type=str,
+        default=None,
+        choices=["routine", "hard"],
+        help=(
+            "How hard the task is (default: routine). 'hard' starts on the "
+            "build route's strong-start chain, under quota and the routing ceiling."
+        ),
+    )
     job_submit.add_argument(
         "--priority",
         type=str,
@@ -7623,6 +7644,7 @@ def handle_job_submit(args: argparse.Namespace) -> int:
             model_family_include=tuple(args.family_include or ()),
             model_family_exclude=tuple(args.family_exclude or ()),
             size_hint=args.size,
+            difficulty=args.difficulty,
         )
     except ValueError as exc:
         print(f"[!] Invalid job requirements: {exc}", file=sys.stderr)

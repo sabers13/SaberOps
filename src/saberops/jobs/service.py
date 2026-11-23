@@ -27,6 +27,7 @@ from saberops.jobs.models import (
     RUN_FAILED,
     RUN_MISSING,
     TERMINAL_JOB_STATES,
+    Difficulty,
     Effort,
     Job,
     JobKind,
@@ -246,6 +247,12 @@ def _request_digest(
     not_before: str | None,
     depends_on: tuple[str, ...] = (),
 ) -> str:
+    requirement_payload = requirements.to_dict()
+    # A default difficulty must not change the identity of a request stored
+    # before H1: routine is the historical meaning of "no difficulty", so the
+    # key is omitted entirely (exactly the pre-H1 canonical payload).
+    if requirement_payload.get("difficulty") == Difficulty.ROUTINE.value:
+        requirement_payload.pop("difficulty", None)
     canonical = {
         "acceptance": acceptance,
         "base_ref": base_ref,
@@ -259,7 +266,7 @@ def _request_digest(
         "not_before": not_before,
         "priority": priority.value,
         "repo": repo,
-        "requirements": requirements.to_dict(),
+        "requirements": requirement_payload,
     }
     raw = json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(raw).hexdigest()
@@ -1667,6 +1674,7 @@ def job_dispatch_spec(job: Job) -> JobDispatchSpec:
         routing_mode="auto",
         kind=job.kind.value.lower(),
         required_capabilities=tuple(sorted(caps)),
+        difficulty=job.requirements.difficulty.value,
     )
     return JobDispatchSpec(
         job_id=job.job_id,

@@ -191,6 +191,7 @@ _JOB_STATES = ["QUEUED", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"]
 _PRIORITIES = ["URGENT", "NORMAL", "BACKGROUND"]
 _JOB_ROLES = ["PLAN", "BUILD", "CHECK"]
 _EFFORTS = ["low", "medium", "high"]
+_DIFFICULTIES = ["routine", "hard"]
 _QUESTION_STATUSES = ["OPEN", "DEFERRED", "ANSWERED", "MOOT"]
 _ANSWER_AUTHORITIES = ["OWNER", "PLAN"]
 _ANSWER_ROLES = ["OWNER", "PLAN"]
@@ -444,13 +445,25 @@ def _deny_requirement_fields(arguments: Mapping[str, Any]) -> None:
 
 
 def _submit_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
-    from saberops.jobs.models import Effort, JobRequirements, Priority, coerce_job_role
+    from saberops.jobs.models import (
+        DIFFICULTIES,
+        Effort,
+        JobRequirements,
+        Priority,
+        coerce_difficulty,
+        coerce_job_role,
+    )
     from saberops.jobs.service import IdempotencyConflictError, submit_job
 
     _deny_requirement_fields(arguments)
     raw_requirements = arguments.get("requirements")
     requirements = JobRequirements()
     if isinstance(raw_requirements, Mapping):
+        difficulty = raw_requirements.get("difficulty")
+        if difficulty is not None and str(difficulty).strip().lower() not in DIFFICULTIES:
+            raise InvalidParamsError(
+                f"invalid requirements: difficulty must be one of {list(DIFFICULTIES)}"
+            )
         try:
             requirements = JobRequirements(
                 role=coerce_job_role(str(raw_requirements.get("role", "BUILD"))),
@@ -474,6 +487,7 @@ def _submit_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[st
                     if raw_requirements.get("size_hint")
                     else None
                 ),
+                difficulty=coerce_difficulty(difficulty),
             )
         except ValueError as exc:
             raise InvalidParamsError(f"invalid requirements: {exc}") from exc
@@ -2291,6 +2305,7 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
                             "items": {"type": "string"},
                         },
                         "size_hint": {"type": "string"},
+                        "difficulty": {"type": "string", "enum": _DIFFICULTIES},
                     }
                 ),
             },

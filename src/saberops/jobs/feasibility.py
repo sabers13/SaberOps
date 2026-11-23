@@ -6,9 +6,11 @@ never reads quota or posture.
 
 Which chain: the candidate set is the build route
 (``snapshot.chain_for_role(JobRole.BUILD)``); approved dynamic
-candidates in that chain count. A requirement only the build route's
-``strong_start`` setting satisfies is not feasible at submit: a strong start
-is an escalation setting, not an ordinary route.
+candidates in that chain count.  A ``hard`` requirement asks for the build
+route's ``strong_start`` setting when one is configured, so feasibility checks
+that chain too; routine (or missing) difficulty stays on the ordinary build
+chain.  An empty ``strong_start`` setting falls back to the ordinary chain, so
+a strong start is never a reason to refuse a job at submit.
 
 ``model_family_include`` is checked here with the same
 :func:`~saberops.capacity.admission.matches_model_family` matcher admission
@@ -25,6 +27,7 @@ from saberops.control_plane.capabilities import Capability, capability_profile_f
 from saberops.jobs.models import (
     DISPATCHABLE_ROLES,
     NO_ROUTE_FOR_REQUIREMENTS,
+    Difficulty,
     JobRequirements,
     JobRole,
 )
@@ -51,7 +54,11 @@ def feasible(
     """Return (True, None) when a route could ever satisfy ``requirements``."""
     if requirements.role not in DISPATCHABLE_ROLES:
         return False, NO_ROUTE_FOR_REQUIREMENTS
-    chain = list(routing.chain_for_role(JobRole.BUILD))
+    strong_start = (
+        requirements.difficulty is Difficulty.HARD
+        and bool(getattr(routing, "strong_start", ()))
+    )
+    chain = list(routing.chain_for_role(JobRole.BUILD, strong_start=strong_start))
     if not chain:
         return False, NO_ROUTE_FOR_REQUIREMENTS
     need = set(requirements.required_capabilities)

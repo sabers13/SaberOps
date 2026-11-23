@@ -12,12 +12,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final, Literal
 
-from saberops.classifier import classify_task_tier
 from saberops.control_plane.capabilities import (
     Capability,
     normalize_required_capabilities,
 )
-from saberops.jobs.models import JobRole, coerce_job_role
+from saberops.jobs.models import Difficulty, JobRole, coerce_difficulty, coerce_job_role
 from saberops.models import GateScratchMode, ReviewPolicyMode, Tier
 from saberops.owner_mode import ModeAction, decide_owner_action
 from saberops.tooling.contracts import validate_logical_ref
@@ -77,6 +76,10 @@ class RunConfig:
     task: str
     target_repo: str
     routing_mode: RoutingMode = "auto"
+    #: Planner-recorded task judgement (H1), frozen at run creation.  Missing
+    #: means routine: the ordinary build chain.  It maps to a route and a tier
+    #: inside the engine, never to a caller-chosen provider/model/tier.
+    difficulty: Difficulty = Difficulty.ROUTINE
     #: F19 job kind frozen at creation: ``"build"`` (a candidate) or
     #: ``"scout"`` (a read-only report, no gate/review/acceptance).
     kind: str = "build"
@@ -173,6 +176,12 @@ class RunConfig:
     parallel_parent_run_id: str | None = None
     parallel_task_index: int | None = None
 
+    def __post_init__(self) -> None:
+        # Difficulty is a small closed vocabulary; normalize here so every
+        # construction path (resolve, reconstruct, direct callers) compares
+        # the same value.
+        object.__setattr__(self, "difficulty", coerce_difficulty(self.difficulty))
+
     @property
     def owner_review_requested(self) -> bool:
         """Return the owner's explicit review request for audit decisions.
@@ -186,11 +195,17 @@ class RunConfig:
 
     @property
     def initial_tier(self) -> Tier:
-        """Return manual tier or deterministic auto classification capped by policy."""
+        """Return the tier derived from the recorded difficulty, capped by policy.
+
+        The planner's judgement is the only input: ``hard`` is the strong tier,
+        ``routine`` (or missing) is the ordinary one.  The owner's
+        ``max_auto_tier`` ceiling still wins.
+        """
         if self.routing_mode == "manual":
             assert self.manual_tier is not None
             return self.manual_tier
-        return cap_tier(classify_task_tier(self.task).tier, self.max_auto_tier)
+        base = Tier.T3 if self.difficulty is Difficulty.HARD else Tier.T1
+        return cap_tier(base, self.max_auto_tier)
 
     @property
     def initial_role(self) -> JobRole:
@@ -204,21 +219,28 @@ class RunConfig:
 
     @property
     def initial_strong_start(self) -> bool:
-        """True when a manual high-tier run starts on the stronger-model setting.
+        """True when the run starts on the build route's stronger-model setting.
 
-        A strong start is a route setting on the build route, not a role: a
-        manual run at ``T3`` resolves the routing document's ``strong_start``
-        chain (falling back to the ordinary build chain when it is empty).
-        Automatic runs start on the ordinary build chain and keep the right to
-        escalate to the strong chain under the existing evidence rule.
+        A strong start is a route setting on the build route, not a role.  A
+        manual run at ``T3`` or a planner-recorded ``hard`` difficulty starts
+        on the routing document's ``strong_start`` chain (falling back to the
+        ordinary build chain when it is empty).  The owner's ``max_auto_tier``
+        ceiling caps the automatic case: a ceiling below ``T3`` keeps even a
+        ``hard`` run on the ordinary build chain.  Missing difficulty means
+        routine and never selects the strong start.
         """
-        return self.routing_mode == "manual" and self.manual_tier == Tier.T3
+        if self.routing_mode == "manual":
+            return self.manual_tier == Tier.T3
+        return (
+            self.difficulty is Difficulty.HARD
+            and self.max_auto_tier == Tier.T3
+        )
 
     @property
     def has_worker_deadline(self) -> bool:
         """True when the owner explicitly supplied an absolute runtime budget.
 
-        A tier-derived default is still a deadline (see
+        A role default is still a deadline (see
         :meth:`worker_timeout_for_role`); this flag only reports whether the
         owner overrode it explicitly.
         """
@@ -248,6 +270,7 @@ class RunConfig:
         data = asdict(self)
         data["manual_tier"] = self.manual_tier.value if self.manual_tier else None
         data["max_auto_tier"] = self.max_auto_tier.value
+        data["difficulty"] = self.difficulty.value
         return data
 
 
@@ -333,6 +356,7 @@ def resolve_run_config(
     repo_path: Path | str | None = None,
     routing_mode: str = "auto",
     kind: str = "build",
+    difficulty: Difficulty | str | None = None,
     manual_tier: Tier | str | None = None,
     max_auto_tier: Tier | str | None = None,
     training_allowed: bool = True,
@@ -428,6 +452,7 @@ def resolve_run_config(
         target_repo=str(Path(target).resolve()),
         routing_mode=raw_mode,  # type: ignore[arg-type]
         kind=raw_kind,
+        difficulty=coerce_difficulty(difficulty),
         manual_tier=manual if raw_mode == "manual" else None,
         max_auto_tier=ceiling,
         training_allowed=training_allowed,
@@ -497,6 +522,9 @@ def reconstruct_run_config(data: dict[str, Any]) -> RunConfig:
             if str(data.get("kind", "build")).strip().lower() == "scout"
             else "build"
         ),
+        # A legacy payload predates the planner's difficulty; missing means
+        # routine, exactly as at submit time.
+        difficulty=coerce_difficulty(data.get("difficulty")),
         manual_tier=manual_tier if raw_mode == "manual" else None,
         max_auto_tier=max_auto_tier,
         training_allowed=bool(data.get("training_allowed", True)),

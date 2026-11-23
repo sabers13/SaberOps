@@ -103,6 +103,8 @@ def _lane_block(lane: Mapping[str, Any]) -> list[str]:
     if machine["run"] == "job":
         machine["size"] = lane.get("size", "S")
         machine["effort"] = lane.get("effort", "low")
+        if lane.get("difficulty"):
+            machine["difficulty"] = lane["difficulty"]
     needs = ", ".join(lane.get("needs", ())) or "none"
     return [
         f"### {lane['id']}. {lane.get('title', lane['id'])}",
@@ -246,6 +248,27 @@ LANES_A_B_C: list[dict[str, Any]] = [
 # ---------------------------------------------------------------------------
 # Done-when: parallel ready lanes, held dependent
 # ---------------------------------------------------------------------------
+
+
+def test_lane_difficulty_reaches_the_submitted_job(
+    rig: RigEnvironment, planner: Any
+) -> None:
+    """Covers: H1 (a lane's difficulty is a requirement of its job)."""
+    from saberops.jobs.models import Difficulty
+
+    db = rig.db()
+    submission = _activate(
+        rig,
+        [
+            {"id": "H", "title": "Hard lane", "difficulty": "hard"},
+            {"id": "R", "title": "Routine lane"},
+        ],
+    )
+    assert set(submission.submitted) == {"H", "R"}
+    hard = _lane_job(db, "H")
+    routine = _lane_job(db, "R")
+    assert hard is not None and hard.requirements.difficulty is Difficulty.HARD
+    assert routine is not None and routine.requirements.difficulty is Difficulty.ROUTINE
 
 
 def test_ready_lanes_submit_in_parallel_and_hold_the_dependent(

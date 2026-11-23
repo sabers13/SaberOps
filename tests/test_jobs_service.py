@@ -19,6 +19,8 @@ from saberops.jobs import store
 from saberops.jobs.feasibility import feasible
 from saberops.jobs.models import (
     NO_ROUTE_FOR_REQUIREMENTS,
+    Difficulty,
+    JobKind,
     JobRequirements,
     JobRole,
     JobState,
@@ -265,6 +267,8 @@ def test_size_effort_family_validation(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         JobRequirements(effort="ultra")  # type: ignore[arg-type]
     with pytest.raises(ValueError):
+        JobRequirements(difficulty="T3")  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
         JobRequirements(
             model_family_include=("a",), model_family_exclude=("a",)
         )
@@ -272,6 +276,32 @@ def test_size_effort_family_validation(tmp_path: Path) -> None:
         JobRequirements(model_family_include=("UPPER",))
     db = Database(tmp_path / "jobs.db")
     assert list_jobs(db, limit=100) == []
+
+
+def test_routine_difficulty_keeps_the_preexisting_request_identity() -> None:
+    """Covers: H1 (a default difficulty does not break stored idempotency keys)."""
+    from saberops.jobs.service import _request_digest
+
+    def digest(requirements: JobRequirements) -> str:
+        return _request_digest(
+            caller_id="owner",
+            repo="/repo",
+            goal="g",
+            acceptance=None,
+            base_ref="HEAD",
+            requirements=requirements,
+            priority=Priority.NORMAL,
+            kind=JobKind.BUILD,
+            deadline=None,
+            not_before=None,
+        )
+
+    assert digest(JobRequirements()) == digest(
+        JobRequirements(difficulty=Difficulty.ROUTINE)
+    )
+    assert digest(JobRequirements()) != digest(
+        JobRequirements(difficulty=Difficulty.HARD)
+    )
 
 
 # ---------------------------------------------------------------------------

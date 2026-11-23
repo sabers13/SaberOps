@@ -94,6 +94,15 @@ confirmation. `resume_work` is not an MCP tool (ADR-0045).
 inside `requirements` (ADR-0001 invariant 3), and the tool schema sets
 `additionalProperties: false`, so an unknown field is never silently ignored.
 
+### Saying how hard the task is
+
+`requirements.difficulty` is the planner's judgement about the work: `routine`
+(the default, and what a missing value means) or `hard`. A `hard` job starts on
+the build route's `strong_start` chain; `routine` starts on the ordinary build
+chain. Both stay under quota and the owner's automatic routing ceiling, and a
+run still escalates only on typed capability-failure evidence. Difficulty is
+never a provider, model, tier or route name, and those fields stay refused.
+
 ### Asking for a worker family
 
 A job selects a worker only through `requirements.model_family_include` (and

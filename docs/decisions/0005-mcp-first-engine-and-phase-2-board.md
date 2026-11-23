@@ -95,8 +95,13 @@ Implemented in lane E1:
   snapshot keeps its original role keys and digest so adoption stays
   byte-stable.
 - A fresh setup needs one build route and one check binding. A repair after a
-  failed check runs on the build route. A manual high-tier run starts on the
-  build route's `strong_start` setting.
+  failed check runs on the build route. A run whose planner records
+  `difficulty: hard` starts on the build route's `strong_start` setting;
+  `routine` or a missing difficulty starts on the ordinary build chain. Both
+  stay under quota and the owner's automatic routing ceiling, and a manual
+  high-tier run keeps starting on `strong_start`. A run still escalates only on
+  typed capability-failure evidence. The keyword tier classifier is gone
+  (ADR-0063): the planner states the judgement, the engine maps it.
 - Every run and job record shows who planned, who built and who checked; an
   unreported identity stays `UNKNOWN`.
 - A docs-only review skip under the existing risk-adaptive policy is unchanged;

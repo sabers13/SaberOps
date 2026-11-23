@@ -33,6 +33,7 @@ from saberops.control_plane import (
     reviewer_candidate_for_dispatch,
 )
 from saberops.db import current_iso_timestamp
+from saberops.jobs.models import Difficulty, JobRequirements
 from saberops.jobs.service import get_job, submit_job
 from saberops.mcp.tools import _catch_up
 from saberops.model_access.readiness_service import ReadinessService
@@ -375,6 +376,65 @@ def test_lifecycle_happy_path_via_scheduler(rig: RigEnvironment) -> None:
     assert _git(rig.repo, "rev-parse", "HEAD") == accepted.final_sha
     assert accepted.final_sha != rig.base_sha
     assert (rig.repo / "fake_worker_output.txt").is_file()
+
+
+#: The rig's build chain is codex/gpt-5.6-terra plus opencode; this
+#: strong-start-only candidate is not on it.
+STRONG_START_ONLY = "codex/gpt-5.6-sol"
+
+
+def _configure_strong_start_only_chain() -> None:
+    """Add a strong-start setting distinct from the build chain (public writer)."""
+    from saberops.routing_config import load_effective_routing_payload, save_user_routing
+
+    payload = load_effective_routing_payload()
+    payload["strong_start"] = [{"routes": [STRONG_START_ONLY]}]
+    save_user_routing(payload)
+
+
+def _dispatch_one_job(rig: RigEnvironment, requirements: JobRequirements) -> list[Any]:
+    db = rig.db()
+    submitted = submit_job(
+        db,
+        repo=rig.repo,
+        goal="Rig difficulty dispatch",
+        requirements=requirements,
+    )
+    assert submitted.created is True
+    readiness = ReadinessService.for_owner_state(owner_state_dir())
+    tick = run_scheduler_loop(db, once=True, readiness_service=readiness)
+    assert tick is not None and tick.ran and tick.dispatched == 1
+    job = get_job(db, submitted.job.job_id)
+    assert job is not None and job.current_run_id is not None
+    run = rig.wait_for_run(job.current_run_id, timeout=30.0)
+    assert run.status == RunStatus.COMPLETED, run.result_summary
+    return db.get_attempts_for_run(run.id)
+
+
+def test_rig_hard_difficulty_dispatches_the_strong_start_chain(
+    rig: RigEnvironment,
+) -> None:
+    """Covers: H1 (a planner-recorded hard task starts on strong_start)."""
+    _configure_strong_start_only_chain()
+    attempts = _dispatch_one_job(rig, JobRequirements(difficulty=Difficulty.HARD))
+    assert attempts and (attempts[-1].provider, attempts[-1].model) == (
+        "codex",
+        "gpt-5.6-sol",
+    )
+
+
+def test_rig_routine_and_missing_difficulty_stay_on_the_build_chain(
+    rig: RigEnvironment,
+) -> None:
+    """Covers: H1 (routine and missing difficulty never take the strong start)."""
+    _configure_strong_start_only_chain()
+    for requirements in (
+        JobRequirements(difficulty=Difficulty.ROUTINE),
+        JobRequirements(),
+    ):
+        attempts = _dispatch_one_job(rig, requirements)
+        assert attempts
+        assert (attempts[-1].provider, attempts[-1].model) != ("codex", "gpt-5.6-sol")
 
 
 def _run_supervised_and_accept(

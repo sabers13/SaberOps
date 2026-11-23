@@ -95,6 +95,41 @@ def test_initial_role_survives_detached_reconstruction(tmp_path: Path) -> None:
         assert rebuilt.initial_role == expected
 
 
+def test_recorded_difficulty_maps_to_tier_and_strong_start(tmp_path: Path) -> None:
+    """Covers: H1 (hard is the strong start; routine/missing stay ordinary)."""
+    hard = _config(tmp_path, difficulty="hard")
+    assert hard.initial_tier is Tier.T3
+    assert hard.initial_strong_start is True
+    for config in (_config(tmp_path, difficulty="routine"), _config(tmp_path)):
+        assert config.initial_tier is Tier.T1
+        assert config.initial_strong_start is False
+
+
+def test_hard_difficulty_still_respects_the_auto_ceiling(tmp_path: Path) -> None:
+    """Covers: H1 (the owner's max_auto_tier cap wins over hard)."""
+    capped = _config(tmp_path, difficulty="hard", max_auto_tier=Tier.T2)
+    assert capped.initial_tier is Tier.T2
+    assert capped.initial_strong_start is False
+
+
+def test_difficulty_survives_detached_reconstruction(tmp_path: Path) -> None:
+    """Covers: H1 (the detached owner adopts the recorded difficulty)."""
+    config = _config(tmp_path, difficulty="hard")
+    rebuilt = reconstruct_run_config(config.as_dict())
+    assert rebuilt.difficulty is config.difficulty
+    assert rebuilt.as_dict() == config.as_dict()
+    # A payload stored before H1 means routine, not hard.
+    legacy = config.as_dict()
+    legacy.pop("difficulty")
+    assert reconstruct_run_config(legacy).difficulty.value == "routine"
+
+
+def test_difficulty_vocabulary_is_closed(tmp_path: Path) -> None:
+    """Covers: H1 (difficulty is a judgement, never a tier/model name)."""
+    with pytest.raises(ValueError, match="difficulty must be one of"):
+        _config(tmp_path, difficulty="T3")
+
+
 # ---------------------------------------------------------------------------
 # CFG-1: central workflow configuration, approval and the audit ledger
 # ---------------------------------------------------------------------------

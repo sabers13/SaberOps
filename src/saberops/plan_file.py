@@ -64,6 +64,7 @@ LANE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,31}")
 PLAN_ID_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?")
 
 SIZES = frozenset({"S", "M", "L"})
+DIFFICULTIES = frozenset({"routine", "hard"})
 EFFORTS = frozenset({"low", "medium", "high", "xhigh"})
 PRIORITIES = frozenset({"URGENT", "NORMAL", "BACKGROUND"})
 RUN_KINDS = frozenset({"job", "owner"})
@@ -78,6 +79,7 @@ _MACHINE_KEYS = frozenset(
         "depends_on",
         "owns",
         "size",
+        "difficulty",
         "effort",
         "model_family_include",
         "model_family_exclude",
@@ -122,6 +124,8 @@ class PlanLane:
     depends_on: tuple[str, ...] = ()
     owns: tuple[str, ...] = ()
     size: str = ""
+    #: Planner-recorded judgement (H1): ``routine`` (default) or ``hard``.
+    difficulty: str = ""
     effort: str = ""
     model_family_include: tuple[str, ...] = ()
     model_family_exclude: tuple[str, ...] = ()
@@ -144,6 +148,7 @@ class PlanLane:
             out_of_scope=self.out_of_scope,
             acceptance=self.acceptance,
             size=self.size,
+            difficulty=self.difficulty,
             effort=self.effort,
             model_family_include=self.model_family_include,
             model_family_exclude=self.model_family_exclude,
@@ -346,6 +351,12 @@ def _parse_lane(lane_id: str, title: str, chunk: list[str]) -> PlanLane:
         raise PlanFileError(
             f"lane {lane_id}: size {size!r} is invalid (use one of S, M, L)"
         )
+    difficulty = str(machine.get("difficulty", "") or "").strip().lower()
+    if difficulty and difficulty not in DIFFICULTIES:
+        raise PlanFileError(
+            f"lane {lane_id}: difficulty {difficulty!r} is invalid "
+            "(use one of routine, hard)"
+        )
     effort = str(machine.get("effort", "") or "").strip().lower()
     if effort and effort not in EFFORTS:
         raise PlanFileError(
@@ -396,6 +407,8 @@ def _parse_lane(lane_id: str, title: str, chunk: list[str]) -> PlanLane:
     if run == "owner":
         if size:
             job_only.append("size")
+        if difficulty:
+            job_only.append("difficulty")
         if effort:
             job_only.append("effort")
         if priority:
@@ -422,6 +435,7 @@ def _parse_lane(lane_id: str, title: str, chunk: list[str]) -> PlanLane:
         depends_on=depends_on,
         owns=tuple(owns),
         size=size,
+        difficulty=difficulty,
         effort=effort,
         model_family_include=include,
         model_family_exclude=exclude,
@@ -642,6 +656,8 @@ def render_plan_markdown(revision: PlanRevision) -> str:
             }
             if task.size:
                 machine["size"] = task.size
+            if task.difficulty:
+                machine["difficulty"] = task.difficulty
             if task.effort:
                 machine["effort"] = task.effort
             if task.model_family_include:
@@ -672,6 +688,7 @@ def render_init_plan(plan_id: str = "example") -> str:
         "depends_on": [],
         "owns": [],
         "size": "M",
+        "difficulty": "routine",
         "effort": "medium",
         "run": "job",
     }

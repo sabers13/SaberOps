@@ -265,7 +265,6 @@ def _review_tier_decision(run: Run) -> TierDecision:
     return choose_tier(
         config,
         stage=DispatchStage.REVIEW,
-        requirements=run.task,
     )
 
 

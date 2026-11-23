@@ -70,6 +70,7 @@ from saberops.jobs.models import (
     JobRole,
     JobState,
     Priority,
+    coerce_difficulty,
 )
 from saberops.jobs.service import cancel_job, submit_job
 from saberops.models import Run, RunStatus
@@ -1394,6 +1395,7 @@ def _lane_requirements(task: PlanTaskDef) -> JobRequirements:
         model_family_include=task.model_family_include,
         model_family_exclude=task.model_family_exclude,
         size_hint=size,
+        difficulty=coerce_difficulty(task.difficulty or None),
     )
 
 

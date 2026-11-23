@@ -173,6 +173,35 @@ class Effort(StrEnum):
     xhigh = "xhigh"
 
 
+class Difficulty(StrEnum):
+    """Planner-recorded task difficulty (H1).
+
+    The planner understands the task; the engine maps the recorded value onto
+    a route.  These are judgements, never provider, model, tier or route
+    names, and a caller cannot spell one of those here (the MCP denylist still
+    refuses them).  Missing means :attr:`ROUTINE`: the ordinary build chain.
+    """
+
+    ROUTINE = "routine"
+    HARD = "hard"
+
+
+DIFFICULTIES: tuple[str, ...] = tuple(d.value for d in Difficulty)
+
+
+def coerce_difficulty(value: Difficulty | str | None) -> Difficulty:
+    """Return the canonical :class:`Difficulty`; missing means routine."""
+    if value is None:
+        return Difficulty.ROUTINE
+    if isinstance(value, Difficulty):
+        return value
+    try:
+        return Difficulty(str(value).strip().lower())
+    except ValueError as exc:
+        known = ", ".join(d.value for d in Difficulty)
+        raise ValueError(f"difficulty must be one of {known}; got {value!r}") from exc
+
+
 NO_ROUTE_FOR_REQUIREMENTS = "NO_ROUTE_FOR_REQUIREMENTS"
 RUN_FAILED = "RUN_FAILED"
 RUN_MISSING = "RUN_MISSING"
@@ -272,6 +301,9 @@ class JobRequirements:
     model_family_include: tuple[str, ...] = ()
     model_family_exclude: tuple[str, ...] = ()
     size_hint: str | None = None
+    #: Planner-recorded judgement, never a route name (H1).  Missing means
+    #: routine: the ordinary build chain.
+    difficulty: Difficulty = Difficulty.ROUTINE
 
     def __post_init__(self) -> None:
         from saberops.control_plane.capabilities import normalize_required_capabilities
@@ -280,6 +312,7 @@ class JobRequirements:
         object.__setattr__(self, "role", role)
         effort = _coerce_effort(self.effort)
         object.__setattr__(self, "effort", effort)
+        object.__setattr__(self, "difficulty", coerce_difficulty(self.difficulty))
         caps = tuple(self.required_capabilities) if self.required_capabilities else ()
         # Unknown capability names are a validation error (ValueError),
         # never a FAILED job.
@@ -317,6 +350,7 @@ class JobRequirements:
             "model_family_include": list(self.model_family_include),
             "model_family_exclude": list(self.model_family_exclude),
             "size_hint": self.size_hint,
+            "difficulty": self.difficulty.value,
         }
 
     @classmethod
@@ -329,6 +363,8 @@ class JobRequirements:
             model_family_include=tuple(data.get("model_family_include", ())),
             model_family_exclude=tuple(data.get("model_family_exclude", ())),
             size_hint=data.get("size_hint"),
+            # A row written before H1 has no difficulty; missing means routine.
+            difficulty=coerce_difficulty(data.get("difficulty")),
         )
 
 

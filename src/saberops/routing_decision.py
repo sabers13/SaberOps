@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from saberops.classifier import TierClassification, classify_task_tier
 from saberops.config import RunConfig, cap_tier
+from saberops.jobs.models import Difficulty
 from saberops.models import (
     DispatchOutcome,
     DispatchStage,
@@ -41,20 +41,19 @@ class TierDecision:
         }
 
 
-def package_requirements(package: WorkPackage) -> str:
-    """Return deterministic capability requirements for one package only."""
-    parts = [package.goal, *package.acceptance_criteria, *package.constraints]
-    return "\n".join(part.strip() for part in parts if part.strip())
-
-
 def choose_tier(
     config: RunConfig,
     *,
     stage: DispatchStage,
     package: WorkPackage | None = None,
-    requirements: str | None = None,
 ) -> TierDecision:
-    """Choose a fresh base tier without consulting any prior/current run tier."""
+    """Choose a fresh base tier from the planner-recorded difficulty.
+
+    The planner's judgement is the only input.  ``hard`` is the strong tier,
+    ``routine`` (or a missing value) is the ordinary one, and the owner's
+    ``max_auto_tier`` ceiling still caps both.  No keyword, prompt length or
+    prior run tier participates.
+    """
     package_id = package.id if package is not None else None
     if config.routing_mode == "manual":
         assert config.manual_tier is not None
@@ -68,24 +67,17 @@ def choose_tier(
             max_auto_tier=config.max_auto_tier,
         )
 
-    text = (
-        requirements
-        if requirements is not None
-        else package_requirements(package)
-        if package is not None
-        else config.task
-    )
-    classified: TierClassification = classify_task_tier(text)
-    effective = cap_tier(classified.tier, config.max_auto_tier)
-    signals = classified.signals
-    if effective != classified.tier:
+    base = Tier.T3 if config.difficulty is Difficulty.HARD else Tier.T1
+    effective = cap_tier(base, config.max_auto_tier)
+    signals: tuple[str, ...] = (f"difficulty:{config.difficulty.value}",)
+    if effective != base:
         signals = (*signals, f"ceiling:{config.max_auto_tier.value}")
     return TierDecision(
         stage=stage,
         package_id=package_id,
-        base_tier=classified.tier,
+        base_tier=base,
         effective_tier=effective,
-        source="package_classifier" if package is not None else f"{stage.value}_classifier",
+        source="package_difficulty" if package is not None else f"{stage.value}_difficulty",
         signals=signals,
         max_auto_tier=config.max_auto_tier,
     )

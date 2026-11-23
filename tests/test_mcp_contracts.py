@@ -348,6 +348,41 @@ def test_submit_job_refuses_a_nested_denylisted_field(tmp_path: Path) -> None:
     assert response["result"]["isError"] is True
 
 
+@pytest.mark.parametrize("field", ["model", "tier", "route"])
+def test_submit_job_still_refuses_nested_route_fields_with_difficulty(
+    tmp_path: Path, field: str
+) -> None:
+    """Covers: H1 (difficulty is allowed; model/tier/route stay refused)."""
+    server = _server(tmp_path)
+    response = _call(
+        server,
+        "submit_job",
+        {
+            "repo": "/tmp",
+            "goal": "g",
+            "requirements": {"difficulty": "hard", field: "T3"},
+        },
+    )
+    assert response["result"]["isError"] is True
+
+
+def test_submit_job_records_the_planner_difficulty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Covers: H1 (difficulty travels from the planner to the durable job)."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    repo = _git_repo(tmp_path / "repo")
+    server = _server(tmp_path)
+    payload = _payload(
+        server,
+        "submit_job",
+        {"repo": str(repo), "goal": "hard task", "requirements": {"difficulty": "hard"}},
+    )
+    assert payload["job"]["requirements"]["difficulty"] == "hard"
+    missing = _payload(server, "submit_job", {"repo": str(repo), "goal": "plain task"})
+    assert missing["job"]["requirements"]["difficulty"] == "routine"
+
+
 def test_submit_job_is_idempotent_with_a_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

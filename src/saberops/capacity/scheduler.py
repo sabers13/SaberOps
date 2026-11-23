@@ -27,6 +27,7 @@ from saberops.jobs.models import (
     DISPATCHABLE_ROLES,
     NO_ROUTE_FOR_REQUIREMENTS,
     DependencyBlocker,
+    Difficulty,
     Job,
     JobKind,
     JobRole,
@@ -237,7 +238,17 @@ def schedule(
             continue
 
         try:
-            groups = routing_snapshot.groups_for(role)
+            # H1: the planner's recorded difficulty selects the route, not a
+            # keyword score.  ``hard`` asks for the build route's
+            # ``strong_start`` chain; ``routine`` or a missing value stays on
+            # the ordinary build chain.  An empty strong-start setting falls
+            # back to the build chain, so a planner omission can never park a
+            # job on a route the owner does not have.
+            strong_start = (
+                job.requirements.difficulty is Difficulty.HARD
+                and bool(getattr(routing_snapshot, "strong_start", ()))
+            )
+            groups = routing_snapshot.groups_for(role, strong_start=strong_start)
         except Exception:
             decisions.append(
                 WaitDecision(
@@ -258,7 +269,9 @@ def schedule(
             )
             continue
 
-        pacing_meta = routing_snapshot.prefer_wait_minutes_for(role)
+        pacing_meta = routing_snapshot.prefer_wait_minutes_for(
+            role, strong_start=strong_start
+        )
         scout_preferred: frozenset[tuple[str, str]] | None = None
         if job.kind is JobKind.SCOUT:
             from saberops.scout_routing import scout_candidate_view

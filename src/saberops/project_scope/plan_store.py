@@ -92,6 +92,7 @@ _TASK_V2_KEYS = _TASK_V1_KEYS | {
     "out_of_scope",
     "acceptance",
     "size",
+    "difficulty",
     "effort",
     "model_family_include",
     "model_family_exclude",
@@ -158,6 +159,7 @@ def _has_lane_detail(task: PlanTaskDef) -> bool:
         or task.out_of_scope
         or task.acceptance
         or task.size
+        or task.difficulty
         or task.effort
         or task.model_family_include
         or task.model_family_exclude
@@ -189,6 +191,8 @@ class PlanTaskDef:
     out_of_scope: str = ""
     acceptance: tuple[str, ...] = ()
     size: str = ""
+    #: Planner-recorded judgement (H1): ``routine`` (default) or ``hard``.
+    difficulty: str = ""
     effort: str = ""
     model_family_include: tuple[str, ...] = ()
     model_family_exclude: tuple[str, ...] = ()
@@ -219,6 +223,7 @@ class PlanTaskDef:
             "goal",
             "out_of_scope",
             "size",
+            "difficulty",
             "effort",
             "priority",
             "run",
@@ -264,6 +269,10 @@ class PlanTaskDef:
         # before F19 hashes exactly as it did, so it still verifies.
         if self.kind and self.kind != "job":
             legacy["kind"] = self.kind
+        # ``difficulty`` is written only when recorded, so a revision stored
+        # before H1 keeps its original content hash.
+        if self.difficulty:
+            legacy["difficulty"] = self.difficulty
         return legacy
 
     @classmethod
@@ -303,6 +312,7 @@ class PlanTaskDef:
             "goal",
             "out_of_scope",
             "size",
+            "difficulty",
             "effort",
             "priority",
             "run",
@@ -327,6 +337,7 @@ class PlanTaskDef:
             out_of_scope=detail["out_of_scope"],
             acceptance=_require_str_tuple(data.get("acceptance", ()), task_id),
             size=detail["size"],
+            difficulty=detail["difficulty"],
             effort=detail["effort"],
             model_family_include=_require_str_tuple(
                 data.get("model_family_include", ()), task_id

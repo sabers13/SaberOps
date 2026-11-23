@@ -76,7 +76,14 @@ Use every AI subscription Saber pays for **through plan limits, not pay-per-toke
 ### 3.4 Non-negotiable invariants
 1. Providers are reached **only through their official CLIs/binaries** with the owner's own login. No subscription credentials behind any gateway or proxy; no reading of OAuth tokens or credential files; no multi-account pooling.
 2. **Billing safety is a vendor-side + launch-time invariant, not a quota estimate:** overage/usage-credits/auto-reload off at every vendor; hermetic allowlisted child environments; pinned CLI config; refuse unless the login is the intended subscription.
-3. **Policy stays inside SaberOps.** Callers (MCP/CLI/other agents) may request; they can never choose a billing route, skip a gate, override posture or accept their own result. "LLMs advise; deterministic software decides."
+3. **Policy stays inside SaberOps.** Callers (MCP/CLI/other agents) may request
+   requirements — including a task *difficulty* (`routine` or `hard`, amended
+   2026-11-23 by [ADR-0063](0063-planner-recorded-difficulty.md)) — but they
+   can never choose a provider, model, tier, billing route, skip a gate,
+   override posture or accept their own result. The engine maps a recorded
+   difficulty to a route under quota and the owner's automatic ceiling; the
+   planner never names the route. "LLMs advise; deterministic software
+   decides."
 4. **Per-caller budgets and authentication** for every external client (stdio = launcher identity; HTTP = localhost + per-client token).
 5. **Personal use only.** Many agents of Saber's, not many users: running other people's tasks on consumer subscriptions is using the plan on their behalf, which consumer terms forbid.
 6. Submitted task text is untrusted input: it reaches worker prompts, never policy decisions.

@@ -637,12 +637,12 @@ def _matching_groups(
 def classify_review_risk(task_text: str, changed_paths: Sequence[str] = ()) -> ReviewRiskAssessment:
     """Classify review effort with deterministic additive scoring.
 
-    In the transparent style of :mod:`saberops.classifier`: each
-    distinct high-risk category present adds +3 (signals ``high:<category>``),
-    each distinct light category subtracts 2 (signals ``light:<category>``).
-    Score >= 3 is HIGH, score <= -2 is LIGHT, otherwise STANDARD. Changed
-    paths are scanned alongside the task text so e.g. a migrations directory
-    counts. Persisted callers record level + signals + reason.
+    Each distinct high-risk category present adds +3 (signals
+    ``high:<category>``), each distinct light category subtracts 2 (signals
+    ``light:<category>``).  Score >= 3 is HIGH, score <= -2 is LIGHT,
+    otherwise STANDARD. Changed paths are scanned alongside the task text so
+    e.g. a migrations directory counts. Persisted callers record level +
+    signals + reason.
     """
     normalized = "\n".join((task_text, *changed_paths)).strip().lower()
     high_signals = _matching_groups(normalized, _HIGH_RISK_TERMS, "high")

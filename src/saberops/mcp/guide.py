@@ -280,11 +280,16 @@ stays attended.
    `effort: high` or `size_hint: "L"` job keeps the ordinary build route.
    `acceptance` is a string or list of strings.
    `requirements` may include `role`, `effort`, `size_hint`, `required_capabilities`,
-   `read_only`, `model_family_include`, and `model_family_exclude`. The role
+   `read_only`, `model_family_include`, `model_family_exclude`, and `difficulty`.
+   The role
    values are PLAN, BUILD and CHECK; only BUILD is dispatchable, and every
    submitted job builds (reasoning and any repair happen on the build route).
    A failed check is repaired by the same build route. `effort` is low, medium or high;
-   `size_hint` is S, M or L and informs capacity estimates. Family inclusion and
+   `size_hint` is S, M or L and informs capacity estimates. `difficulty` is
+   `routine` (the default, and what a missing value means) or `hard`: a hard
+   task starts on the build route's strong-start chain, still under quota and
+   the owner's automatic routing ceiling; it is a judgement about the task,
+   never a model, tier or route. Family inclusion and
    exclusion filter candidates at admission. Supported family tokens for a
    cross-CLI proxy request are `anthropic` (Claude Code worker), `codex` (Codex
    worker) and `opencode-go` (OpenCode worker on the Go subscription); `claude`
@@ -292,7 +297,8 @@ stays attended.
    `model_family_include` no build route can satisfy is refused at submit with
    NO_ROUTE_FOR_REQUIREMENTS.
    Never send `provider`, `model`, `tier`, `billing`, `route`, `quota` or `account`:
-   they are refused. SaberOps picks the model on the build route.
+   they are refused. SaberOps picks the model on the build route. Say how hard
+   the task is with `difficulty`; the engine maps that judgement to a route.
 3. Several independent tasks: submit one `submit_job` per independent task, each
    with its own distinct `idempotency_key` and non-overlapping scope. The
    scheduler dispatches admitted jobs in parallel across available providers.

@@ -6293,7 +6293,6 @@ class Orchestrator:
                                 from_sha_local: str,
                                 rendered_task: RenderResult,
                                 findings_cnt: int,
-                                repair_requirements: str,
                                 package_local: Any = current_package,
                                 base_sha_local: str = lineage_base_sha,
                             ) -> tuple[
@@ -6334,7 +6333,6 @@ class Orchestrator:
                                         config,
                                         stage=DispatchStage.REPAIR,
                                         package=package_local,
-                                        requirements=repair_requirements,
                                     )
                                     cur_tier = repair_decision.effective_tier
                                     self.db.record_event(
@@ -7762,10 +7760,6 @@ class Orchestrator:
                                                 from_sha_pre,
                                                 final_repair_task,
                                                 len(outstanding),
-                                                "\n".join(
-                                                    f"{item.summary}\n{item.details}"
-                                                    for item in outstanding
-                                                ),
                                             )
                                         )
                                         if rep is None:
@@ -7929,7 +7923,6 @@ class Orchestrator:
                                             from_sha2,
                                             single_task,
                                             1,
-                                            f"{rev_res.summary}\n{rev_res.details}",
                                         )
                                         if rep2 is None:
                                             self.db.update_review_loop_state(
@@ -8224,7 +8217,6 @@ class Orchestrator:
                                         from_sha_m,
                                         single_task_m,
                                         1,
-                                        f"{rev_res.summary}\n{rev_res.details}",
                                     )
                                     if rep_m is None:
                                         self.db.update_review_loop_state(
