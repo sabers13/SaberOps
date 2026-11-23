@@ -18,11 +18,11 @@ import pytest
 from pre_1_1_store import Pre11Store, restore_pre_1_1_store
 
 from saberops.accept import AcceptEngine
-from saberops.authority import AuthorityMode, load_authority_mode
 from saberops.capacity.loop import run_scheduler_loop
 from saberops.control_plane.binding_store import load_owner_bindings
 from saberops.jobs.service import get_job, submit_job
 from saberops.model_access.readiness_service import ReadinessService
+from saberops.owner_mode import HostAccessMode, OwnerMode, load_owner_mode_settings
 from saberops.paths import owner_state_dir
 from saberops.preflight import collect_preflight
 from saberops.project_settings import load_project_settings
@@ -52,19 +52,41 @@ class NoticeRow:
     probe: Callable[[Pre11Store], list[str]]
 
 
-#: Empty in wave 0: no phase-1.1 lane has removed or renamed anything yet.
-#: H3 (orchestrator binding), H4 (review knobs), H7 (recovery verbs), H9 (view
-#: names), H17 (Cline route) and H22 (authority presets) each add their row.
-NOTICE_ROWS: tuple[NoticeRow, ...] = ()
+#: The stable fragment of H22's one-shot migration notice.
+AUTHORITY_FOLD_NOTICE = "authority preset 'autonomous' is folded into the owner mode"
+
+
+def _probe_authority_fold(store: Pre11Store) -> list[str]:
+    """H22: the authority preset is folded into the owner mode, once."""
+    del store
+    settings = load_owner_mode_settings()
+    notice = settings.notice or ""
+    return [AUTHORITY_FOLD_NOTICE] if AUTHORITY_FOLD_NOTICE in notice else []
+
+
+#: H22 (authority presets) adds its row; H3 (orchestrator binding), H4 (review
+#: knobs), H7 (recovery verbs), H9 (view names) and H17 (Cline route) follow.
+NOTICE_ROWS: tuple[NoticeRow, ...] = (
+    NoticeRow(
+        key="authority-fold",
+        lane="H22",
+        surface="config/saberops/authority.json",
+        expected=AUTHORITY_FOLD_NOTICE,
+        probe=_probe_authority_fold,
+    ),
+)
 
 
 def current_code_notices(store: Pre11Store) -> list[str]:
     """Return every migration notice the current code prints for this store.
 
-    Later lanes extend this with their probes; wave 0 has nothing to collect.
+    The owner-mode migration writes its v2 document on the first read, so this
+    must run before the test reads the settings (the notice is one-shot).
     """
-    del store
-    return []
+    notices: list[str] = []
+    for row in NOTICE_ROWS:
+        notices.extend(row.probe(store))
+    return notices
 
 
 def _run_job_to_acceptance(store: Pre11Store) -> None:
@@ -101,8 +123,18 @@ def test_pre_1_1_store_keeps_its_settings_and_runs_a_job(
 ) -> None:
     store = restore_pre_1_1_store(tmp_path, monkeypatch)
 
+    # 0. The one-shot migration notices are collected on the first read.
+    notices = current_code_notices(store)
+
     # 1. Every captured owner setting still reads back on the current code.
-    assert load_authority_mode() is AuthorityMode.AUTONOMOUS
+    mode_settings = load_owner_mode_settings()
+    assert mode_settings.mode is OwnerMode.ASK_ME
+    assert mode_settings.host_access is HostAccessMode.GOVERNED
+    # The pre-1.1 effective permission was autonomous ∩ ask-me: start, gate,
+    # review, and no autonomous recovery or acceptance.
+    assert mode_settings.permissions.auto_start is True
+    assert mode_settings.permissions.auto_retry is False
+    assert mode_settings.permissions.auto_accept is False
     bindings = load_owner_bindings()
     assert bindings.policy is not None
     assert bindings.policy.pinned_binding_id == store.orchestrator_binding_id
@@ -129,10 +161,9 @@ def test_pre_1_1_store_keeps_its_settings_and_runs_a_job(
     ]
     assert failures == [], failures
 
-    # 3. No lane has claimed a notice yet; the table is the growth point.
+    # 3. Each removed surface prints one notice; the table is the growth point.
     kinds = [row.key for row in NOTICE_ROWS]
     assert len(kinds) == len(set(kinds)), kinds
-    notices = current_code_notices(store)
     for row in NOTICE_ROWS:
         assert notices.count(row.expected) == 1, (row.key, notices)
 

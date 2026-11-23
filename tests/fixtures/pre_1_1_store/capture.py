@@ -107,7 +107,8 @@ def main() -> int:
     monkeypatch = pytest.MonkeyPatch()
     rig = build_lifecycle_rig(work, monkeypatch)
 
-    from saberops.authority import set_authority_mode  # noqa: PLC0415
+    from saberops.authority import set_authority_mode  # type: ignore[import-not-found]  # noqa: PLC0415
+
     from saberops.control_plane.binding_store import load_owner_bindings  # noqa: PLC0415
     from saberops.db import Database  # noqa: PLC0415
     from saberops.routing_config import (  # noqa: PLC0415
