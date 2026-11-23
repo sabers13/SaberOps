@@ -35,7 +35,6 @@ from saberops.workers.exhaustion import (
     ExhaustionClassification,
     classify_antigravity,
     classify_claude,
-    classify_cline,
     classify_codex,
     classify_opencode,
     parse_antigravity_usage,
@@ -53,7 +52,6 @@ EXPECTED_CONSUMERS: dict[str, Any] = {
     "saberops.workers.exhaustion.classify_codex": classify_codex,
     "saberops.workers.exhaustion.classify_claude": classify_claude,
     "saberops.workers.exhaustion.classify_opencode": classify_opencode,
-    "saberops.workers.exhaustion.classify_cline": classify_cline,
     "saberops.workers.exhaustion.classify_antigravity": classify_antigravity,
     "saberops.workers.exhaustion.parse_antigravity_usage": parse_antigravity_usage,
     "saberops.vendor_cli_fixtures:server_api_drift": server_api_drift,
@@ -165,7 +163,7 @@ def _invoke(fixture: Fixture, text: str) -> Any:
         return _serialize(classify_opencode(text, now=_now(fixture)))
     if consumer.endswith(("classify_codex", "classify_claude")):
         return _serialize(target(text, now=_now(fixture), tz=_tz(fixture)))
-    if consumer.endswith(("classify_cline", "classify_antigravity")):
+    if consumer.endswith("classify_antigravity"):
         return _serialize(target(text, now=_now(fixture)))
     raise AssertionError(f"no replay dispatch for consumer {consumer!r}")
 

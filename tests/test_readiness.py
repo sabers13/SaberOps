@@ -180,8 +180,8 @@ def test_ported_verified_login_does_not_imply_execution_adapter(
         )
 
 
-def test_ported_api_credential_missing_never_ready(isolated: Path) -> None:
-    """Ported from the CREDENTIAL_MISSING half of the access-test rules."""
+def test_ported_api_connection_is_never_ready(isolated: Path) -> None:
+    """A stored direct-API row has no transport (H17) and is never ready."""
     connection = ProviderConnection(
         connection_id="t7-keyless-api",
         provider="custom",
@@ -197,4 +197,4 @@ def test_ported_api_credential_missing_never_ready(isolated: Path) -> None:
     )
     evidence = service.refresh(connection)
     assert evidence.state is not ProviderReadiness.READY
-    assert evidence.reason == "CREDENTIAL_MISSING"
+    assert evidence.reason == "PROTOCOL_UNSUPPORTED"

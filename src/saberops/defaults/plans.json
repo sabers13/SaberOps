@@ -29,13 +29,6 @@
       "toggles_attested_on": null,
       "notes": ""
     },
-    "clinepass": {
-      "vendor": "cline",
-      "plan": "ClinePass",
-      "required_toggles": ["credit_balance=0"],
-      "toggles_attested_on": null,
-      "notes": ""
-    },
     "google-ai-pro": {
       "vendor": "google",
       "plan": "Google AI Pro",
@@ -104,19 +97,6 @@
         {"id": "daily", "kind": "CALENDAR", "duration_min": 1440, "unit": "PERCENT"}
       ]
     },
-    "clinepass": {
-      "mode": "STRICT",
-      "red_line_pct": 15.0,
-      "members": ["cline/cline-pass/*"],
-      "account": "clinepass",
-      "overage_possible": true,
-      "max_concurrent": null,
-      "windows": [
-        {"id": "5h", "kind": "ROLLING", "duration_min": 300, "unit": "PERCENT"},
-        {"id": "weekly", "kind": "CALENDAR", "duration_min": 10080, "unit": "PERCENT"},
-        {"id": "monthly", "kind": "CALENDAR", "duration_min": 43200, "unit": "PERCENT"}
-      ]
-    },
     "antigravity": {
       "mode": "STRICT",
       "red_line_pct": 15.0,
@@ -179,14 +159,6 @@
       "account": "opencode-zen",
       "note": ""
     },
-    "cline/cline-pass/*": {
-      "class": "A",
-      "policy_urls": ["https://docs.cline.bot/getting-started/clinepass"],
-      "ttl_days": null,
-      "verified_on": null,
-      "account": "clinepass",
-      "note": "terms for unattended use not yet checked by owner"
-    },
     "antigravity": {
       "class": "B",
       "policy_urls": ["https://antigravity.google/terms/"],
@@ -196,12 +168,12 @@
       "note": ""
     },
     "backend:DIRECT_API": {
-      "class": "D",
+      "class": "X",
       "policy_urls": [],
       "ttl_days": null,
       "verified_on": null,
       "account": null,
-      "note": "OmniRoute/direct_api: prepaid API keys, auto-recharge OFF"
+      "note": "removed (H17)"
     },
     "copilot": {
       "class": "X",

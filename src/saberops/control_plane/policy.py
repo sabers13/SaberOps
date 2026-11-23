@@ -193,7 +193,7 @@ def _default() -> dict[str, object]:
         "version": 1,
         "providers": {
             provider: {"state": ProviderPolicyState.ALLOWED}
-            for provider in ("opencode", "codex", "cline", "anthropic")
+            for provider in ("opencode", "codex", "anthropic")
         },
         "quota_pools": {},
     }

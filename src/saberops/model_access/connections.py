@@ -86,11 +86,8 @@ __all__ = [
     "AccessProtocol",
     "access_registry_from_mapping",
     "build_access_registry",
-    "classify_api_probe",
     "connection_from_mapping",
     "default_account_connections",
-    "list_presets",
-    "preset_connection",
     "resolve_access",
 ]
 
@@ -654,45 +651,6 @@ class ConnectionTestResult:
         }
 
 
-def classify_api_probe(
-    *,
-    credential_configured: bool,
-    endpoint_configured: bool = True,
-    transport_error: bool = False,
-    http_status: int | None = None,
-    model_found: bool = True,
-    protocol_supported: bool = True,
-) -> ConnectionTestReason:
-    """Classify an API probe outcome without collapsing it to a boolean.
-
-    Precedence is fail-closed and deterministic: configuration errors
-    first, then transport, then authentication, then model identity,
-    then protocol support.
-    """
-    if not endpoint_configured:
-        return ConnectionTestReason.CONFIG_INVALID
-    if not credential_configured:
-        return ConnectionTestReason.CREDENTIAL_MISSING
-    if not protocol_supported:
-        return ConnectionTestReason.PROTOCOL_UNSUPPORTED
-    if transport_error:
-        return ConnectionTestReason.ENDPOINT_UNREACHABLE
-    if http_status is not None:
-        if http_status in (401, 403):
-            return ConnectionTestReason.CREDENTIAL_REJECTED
-        if http_status == 404:
-            return (
-                ConnectionTestReason.MODEL_NOT_FOUND
-                if model_found is False
-                else ConnectionTestReason.ENDPOINT_UNREACHABLE
-            )
-        if http_status >= 400:
-            return ConnectionTestReason.ENDPOINT_UNREACHABLE
-    if not model_found:
-        return ConnectionTestReason.MODEL_NOT_FOUND
-    return ConnectionTestReason.OK
-
-
 def probe_account_backend(
     connection: ProviderConnection,
     *,
@@ -896,140 +854,6 @@ def default_account_connections(*, owner: str = "") -> tuple[ProviderConnection,
             notes=(f"Authentication managed by the {descriptor.executable} CLI.",),
         )
         for descriptor in ACCOUNT_BACKENDS
-    )
-
-
-#: OmniRoute's default local OpenAI-compatible base URL.
-OMNIROUTE_DEFAULT_ENDPOINT = "http://127.0.0.1:20128/v1"
-#: Presets whose endpoint may run without an API key (local servers).
-#: OmniRoute is deliberately NOT in this set: it is a metered,
-#: API-key-billed route (METERED_KEY posture), so a connection without
-#: an explicit ``env:`` credential reference is unconfigured and must
-#: be refused at every execution boundary.  Only genuinely local
-#: servers may run keyless.
-_NO_AUTH_PRESETS: frozenset[str] = frozenset({"local-openai-compatible"})
-
-
-def is_virtual_route(provider: str, model_id: str) -> bool:
-    """True for gateway routes that pick the model themselves.
-
-    OmniRoute's ``auto`` and ``auto/<goal>`` routes choose a different
-    upstream model per request, so a run could not record which model
-    did the work. They stay listed but are never executable.
-    """
-    model = model_id.strip().lower()
-    return provider == "omniroute" and (model == "auto" or model.startswith("auto/"))
-
-
-_PRESET_DEFAULTS: dict[str, dict[str, Any]] = {
-    "minimax": {
-        "provider": "minimax",
-        "protocol": AccessProtocol.OPENAI_COMPATIBLE,
-        "backend": "openai-compatible-api",
-        "endpoint": "https://api.minimax.chat/v1",
-        "model": "MiniMax-M3",
-        "notes": ("MiniMax preset over the generic OpenAI-compatible protocol.",),
-    },
-    "openrouter": {
-        "provider": "openrouter",
-        "protocol": AccessProtocol.OPENAI_COMPATIBLE,
-        "backend": "openai-compatible-api",
-        "endpoint": "https://openrouter.ai/api/v1",
-        "model": "",
-        "notes": ("OpenRouter preset over the generic OpenAI-compatible protocol.",),
-    },
-    "general-compute": {
-        "provider": "general-compute",
-        "protocol": AccessProtocol.OPENAI_COMPATIBLE,
-        "backend": "openai-compatible-api",
-        "endpoint": "",
-        "model": "",
-        "notes": ("General Compute preset; endpoint is user-supplied.",),
-    },
-    "tokenrouter": {
-        "provider": "tokenrouter",
-        "protocol": AccessProtocol.OPENAI_COMPATIBLE,
-        "backend": "openai-compatible-api",
-        "endpoint": "",
-        "model": "",
-        "notes": ("TokenRouter preset; endpoint is user-supplied.",),
-    },
-    "custom-openai-compatible": {
-        "provider": "custom",
-        "protocol": AccessProtocol.OPENAI_COMPATIBLE,
-        "backend": "openai-compatible-api",
-        "endpoint": "",
-        "model": "",
-        "notes": ("Generic custom OpenAI-compatible endpoint.",),
-    },
-    "omniroute": {
-        "provider": "omniroute",
-        "protocol": AccessProtocol.OPENAI_COMPATIBLE,
-        "backend": "openai-compatible-api",
-        "endpoint": OMNIROUTE_DEFAULT_ENDPOINT,
-        "model": "",
-        "notes": (
-            "OmniRoute route over the generic OpenAI-compatible protocol, "
-            "executed via workers/direct_api.py (never via saberops.gateway). "
-            "Metered API-key posture: an explicit env: credential reference "
-            "is required; keyless connections are unconfigured and refused. "
-            "Virtual auto/* routes are listed but never routed: SaberOps "
-            "needs the exact model.",
-        ),
-    },
-    "local-openai-compatible": {
-        "provider": "local",
-        "protocol": AccessProtocol.OPENAI_COMPATIBLE,
-        "backend": "openai-compatible-api",
-        "endpoint": "http://127.0.0.1:11434/v1",
-        "model": "",
-        "notes": ("Local OpenAI-compatible server; no credential required.",),
-    },
-}
-
-
-def list_presets() -> tuple[str, ...]:
-    """Return preset ids (presets prefill; they never route)."""
-    return tuple(sorted(_PRESET_DEFAULTS))
-
-
-def preset_connection(
-    preset_id: str,
-    *,
-    credential_ref: str = "",
-    owner: str = "",
-    endpoint: str = "",
-    model: str = "",
-    connection_id: str = "",
-) -> ProviderConnection:
-    """Build a connection from a named preset over the generic contract.
-
-    Presets only prefill protocol / endpoint / auth convention on the
-    shared ``OPENAI_COMPATIBLE`` path; every preset produces an
-    ordinary :class:`ProviderConnection` with no independent routing
-    behavior.  ``connection_id`` defaults to ``byok-<preset_id>``.
-    """
-    key = preset_id.strip().lower()
-    if key not in _PRESET_DEFAULTS:
-        raise ValueError(f"unknown provider preset: {preset_id!r}")
-    defaults = _PRESET_DEFAULTS[key]
-    resolved_endpoint = endpoint.strip() or str(defaults["endpoint"])
-    auth_mode = (
-        AuthMode.LOCAL_NO_AUTH
-        if key in _NO_AUTH_PRESETS and not credential_ref.strip()
-        else AuthMode.API_KEY
-    )
-    return ProviderConnection(
-        connection_id=connection_id.strip() or f"byok-{key}",
-        provider=str(defaults["provider"]),
-        protocol=defaults["protocol"],
-        backend=str(defaults["backend"]),
-        auth_mode=auth_mode,
-        endpoint=resolved_endpoint,
-        credential_ref=credential_ref,
-        model=model.strip() or str(defaults["model"]),
-        account_owner=owner,
-        notes=tuple(defaults["notes"]),
     )
 
 

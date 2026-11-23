@@ -297,8 +297,8 @@ uses an isolated empty workspace and submits only `/usage`, without inference.
 `pyte` reconstructs the terminal screen; only quota percentages and displayed
 reset labels enter usage evidence. CLI layout changes or login dialogs can make
 the query unavailable; the last-known observation is retained with
-its original timestamp. Cline and OpenCode providers other than Go still need
-their own account quota interface.
+its original timestamp. OpenCode providers other than Go still need their own
+account quota interface.
 
 OpenCode Go rolling, weekly and monthly account percentages are queried through
 an ephemeral OpenCode auth plugin while running `opencode models opencode-go`.
@@ -334,8 +334,10 @@ sections (version 1) loads exactly as before; writes are always version
 
 Selector grammar: `provider` (e.g. `codex`), `provider/model` (e.g.
 `codex/gpt-5.6-terra`), or `provider/<prefix>/*` with a trailing glob
-only (e.g. `opencode/opencode-go/*`). Posture selectors may also be
-`backend:DIRECT_API`. The most specific selector wins: exact
+only (e.g. `opencode/opencode-go/*`). The legacy `backend:DIRECT_API`
+selector is still accepted in older owner documents but matches nothing:
+the direct-API worker was removed in phase 1.1 (ADR-0073). The most
+specific selector wins: exact
 `provider/model`, then the longest `provider/<prefix>/*`, then
 `provider`, then `backend:X`. Note: Claude Code's provider id is
 `anthropic` (not `claude`), and there is currently no `openai` model

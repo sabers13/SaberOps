@@ -150,17 +150,17 @@ def test_stale_active_session_after_restart_is_not_shown_as_live(tmp_path: Path)
 
 
 # ---------------------------------------------------------------------------
-# Ported from the removed test_native_access.py checks: cline session-id
-# parsing (the copilot half is obsolete).
+# Ported from the removed test_native_access.py checks: the legacy session-id
+# fallback (the remaining provider on that branch).
 # ---------------------------------------------------------------------------
 
 
-def test_ported_cline_session_id_parsing() -> None:
-    """Ported cline half of test_additional_provider_session_ids_are_captured."""
+def test_ported_session_id_fallback_parsing() -> None:
     from saberops.agent_sessions import _native_id
 
     assert (
-        _native_id(json.dumps({"type": "run_result", "sessionId": "native_session123"}), "cline")
+        _native_id(json.dumps({"type": "run_result", "sessionId": "native_session123"}),
+                   "copilot")
         == "native_session123"
     )
-    assert _native_id(json.dumps({"type": "other"}), "cline") is None
+    assert _native_id(json.dumps({"type": "other"}), "copilot") is None

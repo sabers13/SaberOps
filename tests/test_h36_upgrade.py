@@ -31,7 +31,11 @@ from saberops.owner_mode import HostAccessMode, OwnerMode, load_owner_mode_setti
 from saberops.paths import owner_state_dir
 from saberops.preflight import collect_preflight
 from saberops.project_settings import load_project_settings
-from saberops.routing_config import load_effective_routing_payload
+from saberops.routing_config import (
+    RETIRED_ROUTE_NOTICE,
+    load_effective_routing,
+    load_effective_routing_payload,
+)
 
 pytestmark = [
     pytest.mark.packaged_routing_default,
@@ -79,8 +83,18 @@ def _probe_orchestrator_retired(store: Pre11Store) -> list[str]:
     return [RETIRED_SELECTION_NOTICE] if RETIRED_SELECTION_NOTICE in text else []
 
 
-#: H22 (authority presets) adds its row; H3 (orchestrator binding), H4 (review
-#: knobs), H7 (recovery verbs), H9 (view names) and H17 (Cline route) follow.
+def _probe_cline_route(store: Pre11Store) -> list[str]:
+    """H17: the retired Cline route is dropped on load, with one notice."""
+    del store
+    snapshot = load_effective_routing()
+    return [RETIRED_ROUTE_NOTICE] if RETIRED_ROUTE_NOTICE in "\n".join(
+        snapshot.notices
+    ) else []
+
+
+#: H22 (authority presets), H3 (orchestrator binding) and H17 (Cline route) add
+#: their rows; H4 (review knobs), H7 (recovery verbs) and H9 (view names)
+#: follow.
 NOTICE_ROWS: tuple[NoticeRow, ...] = (
     NoticeRow(
         key="authority-fold",
@@ -95,6 +109,13 @@ NOTICE_ROWS: tuple[NoticeRow, ...] = (
         surface="config/saberops/bindings.json",
         expected=RETIRED_SELECTION_NOTICE,
         probe=_probe_orchestrator_retired,
+    ),
+    NoticeRow(
+        key="cline-route",
+        lane="H17",
+        surface="config/saberops/routing.json",
+        expected=RETIRED_ROUTE_NOTICE,
+        probe=_probe_cline_route,
     ),
 )
 
@@ -177,7 +198,7 @@ def test_pre_1_1_store_keeps_its_settings_and_runs_a_job(
         for entry in group
         for route in entry.get("routes", ())
     ]
-    assert store.cline_route in routes, routes
+    assert store.cline_route not in routes, routes
 
     # 2. The old store starts on the new code.  The scheduler is the one
     #    runtime item preflight reports; this test drives the same engine

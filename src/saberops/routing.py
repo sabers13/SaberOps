@@ -151,11 +151,6 @@ def _parse_candidate(
             return WorkerCandidate(provider="antigravity", model=remainder.strip())
         elif prefix_lower == "opencode-go":
             return WorkerCandidate(provider="opencode", model=model_clean)
-        elif prefix_lower == "cline-pass":
-            # ClinePass models keep the full cline-pass/<model-id> identity as
-            # the Orch model while routing to the "cline" Orch provider; the
-            # adapter passes the full id to the Cline CLI's -m flag.
-            return WorkerCandidate(provider="cline", model=model_clean)
         else:
             return WorkerCandidate(provider=prefix_lower, model=remainder.strip())
 

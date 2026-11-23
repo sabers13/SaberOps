@@ -128,7 +128,7 @@ def test_copilot_adapter_module_is_gone() -> None:
 
 def test_policy_defaults_exclude_cut_providers() -> None:
     policy = packaged_control_plane_policy()
-    assert set(policy.provider_policies) == {"opencode", "codex", "cline", "anthropic"}
+    assert set(policy.provider_policies) == {"opencode", "codex", "anthropic"}
     assert "antigravity" not in policy.provider_policies
     assert "copilot" not in policy.provider_policies
 

@@ -11,7 +11,7 @@ reset moment is ambiguous the classifier returns ``reset_at=None``
 rather than guessing.  Auth / billing errors are never quota.
 
 Confidence: ``VERIFIED`` rules are quoted against real CLI captures in
-R-001; ``PROVISIONAL`` rules (Cline, Antigravity failure text) have no
+R-001; ``PROVISIONAL`` rules (Antigravity failure text) have no
 verified exact signal yet and are marked as such in code.
 """
 
@@ -719,61 +719,6 @@ def classify_opencode(
 
 
 # ---------------------------------------------------------------------------
-# Cline CLI -- ``cline --json`` (PROVISIONAL text-only rule).
-# ---------------------------------------------------------------------------
-
-# PROVISIONAL (R-001: no verified exact ClinePass-exhausted CLI signal
-# exists; only the stderr error channel and agent_event error vocabulary
-# are documented).  Text matching is the only lead and is fragile: the
-# first live capture must confirm or revise this rule.
-_CLINE_QUOTA_RE = re.compile(
-    r"ClinePassLimitError|clinepass[^\n]*limit|weekly[^\n]*limit|5-hour[^\n]*limit"
-    r"|five.hour[^\n]*limit|monthly[^\n]*limit|usage limit",
-    re.IGNORECASE,
-)
-_CLINE_RATE_RE = re.compile(r"rate.?limit|too many requests|\b429\b", re.IGNORECASE)
-
-
-def classify_cline(
-    stdout: str, stderr: str = "", *, now: datetime | None = None
-) -> ExhaustionClassification:
-    """Classify Cline ``--json`` output (PROVISIONAL text-only rule).
-
-    Channels: stderr ``{"type":"error","message":...}`` lines and
-    ``agent_event`` / ``event.type=="error"`` payloads.  Reset format
-    is UNKNOWN until verified, so the reset is always ``None``; prose
-    resets are deliberately NOT parsed here.
-    """
-    _ = now
-    texts: list[str] = []
-    for event in _json_lines(stderr) + _json_lines(stdout):
-        if event.get("type") == "error" and isinstance(event.get("message"), str):
-            texts.append(event["message"])
-        inner = event.get("event")
-        if isinstance(inner, dict) and inner.get("type") == "error":
-            texts.append(json.dumps(inner))
-    combined = "\n".join(texts)
-    if not combined.strip():
-        return ExhaustionClassification(
-            ExhaustionVerdict.OTHER, None, PROVISIONAL, "cline:no-error-signal"
-        )
-    if _AUTH_RE.search(combined):
-        return ExhaustionClassification(ExhaustionVerdict.OTHER, None, PROVISIONAL, "cline:auth")
-    if _BILLING_RE.search(combined):
-        return ExhaustionClassification(ExhaustionVerdict.OTHER, None, PROVISIONAL, "cline:billing")
-    if _CLINE_QUOTA_RE.search(combined):
-        return ExhaustionClassification(
-            ExhaustionVerdict.QUOTA_EXHAUSTED, None, PROVISIONAL, "cline:clinepass-window",
-            window=_window_from_text(combined), model_scope=None, reset_confidence="UNKNOWN",
-        )
-    if _CLINE_RATE_RE.search(combined):
-        return ExhaustionClassification(
-            ExhaustionVerdict.RATE_LIMITED, None, PROVISIONAL, "cline:rate-limit"
-        )
-    return ExhaustionClassification(ExhaustionVerdict.OTHER, None, PROVISIONAL, "cline:other")
-
-
-# ---------------------------------------------------------------------------
 # Antigravity -- ``agy -p --output-format stream-json``.
 # ---------------------------------------------------------------------------
 
@@ -894,17 +839,15 @@ def classify_antigravity(
 # ---------------------------------------------------------------------------
 
 #: Default quota pool per worker provider for exhaustion evidence.
-#: All five CLIs expose weekly plan windows (Codex weekly pool, Claude
-#: weekly/session windows, OpenCode Go weekly bucket, ClinePass weekly
-#: window, Antigravity weekly buckets); the finer window rides
-#: ``window_type``.
+#: Every CLI exposes weekly plan windows (Codex weekly pool, Claude
+#: weekly/session windows, OpenCode Go weekly bucket, Antigravity weekly
+#: buckets); the finer window rides ``window_type``.
 DEFAULT_POOL = "weekly"
 
 _PROVIDER_SOURCE = {
     "codex": "plan-exhaustion:codex",
     "anthropic": "plan-exhaustion:claude",
     "opencode": "plan-exhaustion:opencode",
-    "cline": "plan-exhaustion:cline",
     "antigravity": "plan-exhaustion:antigravity",
 }
 
@@ -972,8 +915,8 @@ def record_exhaustion(
     every pool the candidate draws (D). It no longer calls
     ``db.set_quota(..., 0.0, ...)``. The observation is purely exclusionary
     and never synthesizes, enables, or fails over to any other route (in
-    particular never to an API-key / METERED_KEY route such as OmniRoute
-    or direct_api). Returns a synthesized remaining-0 ``QuotaState`` for
+    particular never to an API-key / METERED_KEY route). Returns a
+    synthesized remaining-0 ``QuotaState`` for
     caller convenience (routing NORMAL; exclusion handled via the seam).
     """
     from saberops.models import RoutingState
@@ -1068,7 +1011,6 @@ __all__ = [
     "build_quota_observation",
     "classify_antigravity",
     "classify_claude",
-    "classify_cline",
     "classify_codex",
     "classify_opencode",
     "parse_antigravity_usage",

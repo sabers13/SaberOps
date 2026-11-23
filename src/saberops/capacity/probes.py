@@ -20,7 +20,6 @@ HARNESS_PROVIDER: dict[str, str] = {
 REGISTERED_HARNESSES: tuple[str, ...] = ("codex", "claude", "opencode-go")
 
 #: Antigravity is intentionally not registered (owner-initiated only).
-#: Cline has no probe.
 
 
 class ProbeWindow(tuple):  # type: ignore[type-arg]

@@ -187,8 +187,8 @@ def is_evidence_uncertain_error(error: str | None) -> bool:
 # Generic autonomous execution seam.
 #
 # This is the ONE place where autonomous semantic execution meets the
-# process boundary.  Every worker adapter -- OpenCode, Codex, Cline,
-# Antigravity, Copilot, and any test-local backend -- launches its
+# process boundary.  Every worker adapter -- OpenCode, Codex, Claude, Antigravity, and
+# any test-local backend -- launches its
 # child through :func:`launch_worker_process`, which routes to the
 # proven :func:`run_sandboxed_process` containment seam whenever an
 # autonomous boundary is installed, and refuses plain ``run_process``

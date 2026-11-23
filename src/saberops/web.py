@@ -91,7 +91,6 @@ from saberops.model_access import (
     ReadinessService,
     ReadinessStore,
     discover_connection_models,
-    is_virtual_route,
 )
 from saberops.models import (
     TERMINAL_RUN_STATUSES,
@@ -775,130 +774,6 @@ def _load_owner_bindings_safely() -> OwnerBindings:
         return OwnerBindings()
 
 
-def _http_get(
-    url: str,
-    headers: dict[str, str],
-    opener: Callable[[str, dict[str, str]], bytes] | None,
-) -> bytes:
-    """Perform one bounded GET at the narrow transport boundary.
-
-    ``opener`` is injectable so a credential-bearing request can be observed
-    in tests without a live network; the production path uses urllib with a
-    short timeout.  No request header is ever logged.
-    """
-    if opener is not None:
-        return opener(url, headers)
-    from urllib.request import Request as UrlRequest
-    from urllib.request import build_opener
-
-    from saberops.workers.api_agent import NoRedirect
-
-    request = UrlRequest(url, method="GET", headers=headers)
-    with build_opener(NoRedirect()).open(request, timeout=5) as response:
-        return bytes(response.read(8_000_001))
-
-
-def _model_list_url(endpoint: str) -> str:
-    """Derive a read-only catalog URL without changing connection configuration."""
-    from urllib.parse import urlsplit, urlunsplit
-
-    parsed = urlsplit(endpoint)
-    path = parsed.path.rstrip("/")
-    # OpenRouter's model catalog is shared across its API surfaces, including
-    # alpha/decisions. Never apply this host-specific rule to a custom server.
-    if parsed.hostname == "openrouter.ai":
-        path = "/api/v1/models"
-    else:
-        for suffix in ("/chat/completions", "/completions", "/responses"):
-            if path.endswith(suffix):
-                path = path[:-len(suffix)]
-                break
-        if not path.endswith("/models"):
-            path += "/models"
-    return urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, parsed.fragment))
-
-
-def _fetch_openai_compatible_models(
-    endpoint: str,
-    *,
-    auth_headers: Callable[[], dict[str, str]] | None = None,
-    opener: Callable[[str, dict[str, str]], bytes] | None = None,
-) -> list[str]:
-    """Enumerate models from an OpenAI-compatible ``/models`` endpoint.
-
-    ``auth_headers`` is the caller-owned *narrow boundary*: when supplied, the
-    caller has already resolved the configured credential through the existing
-    security authority and returns only the header(s) needed here.  This
-    function never resolves a credential itself and never persists the value.
-    When ``auth_headers`` is ``None`` the request is deliberately
-    unauthenticated, so a 401/403 means *authentication required* (never
-    *configured credential rejected*).  Outcomes are classified, not collapsed
-    to a boolean, and never echoed back as raw secret-bearing text.
-    """
-    from urllib.error import HTTPError, URLError
-
-    if not endpoint:
-        raise ModelListingError(ConnectionTestReason.CONFIG_INVALID, "endpoint not configured")
-    url = _model_list_url(endpoint)
-    headers: dict[str, str] = {"Accept": "application/json"}
-    credential_transmitted = False
-    if auth_headers is not None:
-        supplied = dict(auth_headers())
-        if supplied:
-            headers.update(supplied)
-            credential_transmitted = True
-    try:
-        raw = _http_get(url, headers, opener)
-    except HTTPError as exc:
-        if exc.code in (401, 403):
-            if credential_transmitted:
-                raise ModelListingError(
-                    ConnectionTestReason.CREDENTIAL_REJECTED,
-                    f"model list rejected the configured credential (HTTP {exc.code})",
-                ) from exc
-            raise ModelListingError(
-                ConnectionTestReason.NOT_AUTHENTICATED,
-                f"model list requires authentication (HTTP {exc.code}); "
-                "credential NOT transmitted",
-            ) from exc
-        if exc.code == 404:
-            raise ModelListingError(
-                ConnectionTestReason.ENDPOINT_UNREACHABLE,
-                "model list endpoint not found (HTTP 404)",
-            ) from exc
-        raise ModelListingError(
-            ConnectionTestReason.ENDPOINT_UNREACHABLE,
-            f"model list request failed (HTTP {exc.code})",
-        ) from exc
-    except (URLError, OSError, ValueError) as exc:
-        raise ModelListingError(
-            ConnectionTestReason.ENDPOINT_UNREACHABLE,
-            f"model list endpoint unreachable: {exc.__class__.__name__}",
-        ) from exc
-    if len(raw) > 8_000_000:
-        raise ModelListingError(
-            ConnectionTestReason.PROTOCOL_UNSUPPORTED, "model list exceeds response size limit"
-        )
-    try:
-        payload = json.loads(raw.decode("utf-8", errors="replace"))
-    except ValueError as exc:
-        raise ModelListingError(
-            ConnectionTestReason.PROTOCOL_UNSUPPORTED, "model list response was not JSON"
-        ) from exc
-    data = payload.get("data") if isinstance(payload, dict) else None
-    if not isinstance(data, list):
-        raise ModelListingError(
-            ConnectionTestReason.PROTOCOL_UNSUPPORTED,
-            "model list response missing 'data' array",
-        )
-    models = [
-        str(item.get("id", "")).strip()
-        for item in data
-        if isinstance(item, dict)
-    ]
-    return [model_id for model_id in models if model_id]
-
-
 #: Bounded wall-clock budget for one backend model-list subprocess.
 _BACKEND_LIST_TIMEOUT_SECONDS = 15.0
 
@@ -1115,16 +990,13 @@ def _materialize_discovered_binding(
     never become executable without an exact binding that actually
     resolves.  Returns ``(owner, worker_binding)`` or ``None``.
     """
+    if not connection.is_account_backed:
+        # Direct API execution was removed (H17).
+        return None
     adapter = registry.get(connection.provider)
     if adapter is None:
         return None
     from saberops.control_plane.bindings import BindingKind
-    from saberops.workers.direct_api import DirectAPIAdapter, supports_connection
-    api = not connection.is_account_backed
-    if api:
-        if not supports_connection(connection):
-            return None
-        adapter = DirectAPIAdapter(connection.provider)
     profile = capability_profile_for(adapter)
     worker_binding, execution_profile, pool = materialize_discovered_binding(
         connection_id=connection.connection_id,
@@ -1133,7 +1005,7 @@ def _materialize_discovered_binding(
         provider_transport=profile.transport,
         harness_capabilities=profile.capabilities,
         binding_role=BindingRole.BUILD,
-        backend=BindingKind.DIRECT_API if api else BindingKind.DIRECT_CLI,
+        backend=BindingKind.DIRECT_CLI,
     )
     reviewer_binding, _reviewer_profile, _reviewer_pool = materialize_discovered_binding(
         connection_id=connection.connection_id,
@@ -1142,7 +1014,7 @@ def _materialize_discovered_binding(
         provider_transport=profile.transport,
         harness_capabilities=profile.capabilities,
         binding_role=BindingRole.CHECK,
-        backend=BindingKind.DIRECT_API if api else BindingKind.DIRECT_CLI,
+        backend=BindingKind.DIRECT_CLI,
     )
     owner = owner if owner is not None else _load_owner_bindings_safely()
     candidate = upsert_owner_binding(
@@ -1200,12 +1072,9 @@ def _apply_exact_execution_bindings(
             support[model.identity] = model.execution_support
             continue
         if not connection.is_account_backed:
-            from saberops.workers.direct_api import supports_connection
-            if not supports_connection(connection) or is_virtual_route(
-                connection.provider, model.model_id
-            ):
-                support[model.identity] = ExecutionSupport.UNSUPPORTED
-                continue
+            # Direct API connections were removed (H17): no execution exists.
+            support[model.identity] = ExecutionSupport.UNSUPPORTED
+            continue
         if registry.get(connection.provider) is None:
             support[model.identity] = ExecutionSupport.UNSUPPORTED
             continue
@@ -1238,59 +1107,35 @@ def _discover_connection(
     """Run bounded discovery for one connection.
 
     Account-backed backends use their own supported listing boundary where
-    one exists (listing commands or Claude/Copilot native control protocols); backends with no
-    supported enumeration stay truthfully ``UNKNOWN`` rather than inventing a
-    catalog. API connections use their configured env credential reference
-    for a read-only OpenAI-compatible catalog request; credentials never
-    enter durable discovery evidence. Missing credentials permit only public listing.
+    one exists (listing commands or Claude/Copilot native control protocols);
+    backends with no supported enumeration stay truthfully ``UNKNOWN`` rather
+    than inventing a catalog.  A stored direct-API connection (removed, H17)
+    enumerates nothing: it has no executable transport.
 
     Execution support is proven *after* enumeration by materializing an exact
     Binding and resolving it with the real adapter -- never inferred
     from the mere presence of a registered adapter.
     """
     discovered_at = datetime.now(UTC).isoformat()
-    if connection.is_account_backed:
-        descriptor = next(
-            (
-                entry
-                for entry in ACCOUNT_BACKENDS
-                if entry.connection_id == connection.connection_id
-            ),
-            None,
-        )
-        if descriptor is not None and descriptor.has_model_listing:
-            result = discover_connection_models(
-                connection,
-                list_models=lambda: _list_account_models(connection),
-                discovered_at=discovered_at,
-            )
-        else:
-            result = discover_connection_models(
-                connection,
-                discovered_at=discovered_at,
-            )
-    else:
-        from saberops.workers.direct_api import credential_value, supports_connection
-
-        def api_headers() -> dict[str, str]:
-            headers = dict(connection.public_headers)
-            if supports_connection(connection):
-                try:
-                    credential = credential_value(connection)
-                except ValueError:
-                    credential = ""
-                if credential:
-                    name = connection.auth_header_name or "Authorization"
-                    headers[name] = (
-                        f"Bearer {credential}" if name.lower() == "authorization" else credential
-                    )
-            return headers
-
+    if not connection.is_account_backed:
+        return discover_connection_models(connection, discovered_at=discovered_at)
+    descriptor = next(
+        (
+            entry
+            for entry in ACCOUNT_BACKENDS
+            if entry.connection_id == connection.connection_id
+        ),
+        None,
+    )
+    if descriptor is not None and descriptor.has_model_listing:
         result = discover_connection_models(
             connection,
-            list_models=lambda: _fetch_openai_compatible_models(
-                connection.endpoint, auth_headers=api_headers
-            ),
+            list_models=lambda: _list_account_models(connection),
+            discovered_at=discovered_at,
+        )
+    else:
+        result = discover_connection_models(
+            connection,
             discovered_at=discovered_at,
         )
     return _apply_exact_execution_bindings(connection, result, registry)
@@ -1315,58 +1160,6 @@ def initialize_account_readiness() -> None:
     ReadinessService(
         registry=_access_store().load(), store=_readiness_store()
     ).refresh_accounts_on_startup()
-
-
-def _probe_api_connection(*, endpoint: str) -> dict[str, str]:
-    """Safely probe an API connection without transmitting any secret.
-
-    The probe performs an unauthenticated GET against the derived model-list
-    URL with a short timeout. A 404 reports a missing catalog route; other
-    HTTP answers prove reachability (authentication remains NOT VERIFIED --
-    the stored credential value is never read, let alone sent).
-    """
-    from urllib.error import HTTPError, URLError
-    from urllib.request import Request as UrlRequest
-    from urllib.request import urlopen
-
-    if not endpoint:
-        return {"ok": "FALSE", "reason": "CONFIG_INVALID", "detail": "endpoint not configured"}
-    request = UrlRequest(_model_list_url(endpoint), method="GET")
-    try:
-        with urlopen(request, timeout=5) as response:  # noqa: S310
-            status = int(getattr(response, "status", 200))
-    except HTTPError as exc:
-        if exc.code == 404:
-            return {
-                "ok": "FALSE",
-                "reason": ConnectionTestReason.ENDPOINT_UNREACHABLE.value,
-                "detail": "server reachable, but model list endpoint not found (HTTP 404); "
-                "check the API base URL. Authentication NOT VERIFIED (credential never transmitted)",
-            }
-        # An HTTP answer -- even 401/403 -- proves the endpoint is
-        # reachable; auth acceptance stays NOT VERIFIED by design.
-        return {
-            "ok": "TRUE",
-            "reason": ConnectionTestReason.OK.value,
-            "detail": (
-                f"endpoint reachable (HTTP {exc.code}); "
-                "authentication NOT VERIFIED (credential never transmitted)"
-            ),
-        }
-    except (URLError, OSError, ValueError) as exc:
-        return {
-            "ok": "FALSE",
-            "reason": ConnectionTestReason.ENDPOINT_UNREACHABLE.value,
-            "detail": f"endpoint unreachable: {exc.__class__.__name__}",
-        }
-    return {
-        "ok": "TRUE",
-        "reason": ConnectionTestReason.OK.value,
-        "detail": (
-            f"endpoint reachable (HTTP {status}); "
-            "authentication NOT VERIFIED (credential never transmitted)"
-        ),
-    }
 
 
 def _notice_from_query(request: Request) -> str | None:
@@ -1904,7 +1697,6 @@ def _role_chain_rows() -> list[dict[str, Any]]:
 _ACCOUNT_LABELS: dict[str, str] = {
     "anthropic": "Claude",
     "antigravity": "Antigravity",
-    "cline": "Cline",
     "codex": "Codex",
     "google": "Google",
     "openai": "OpenAI",
@@ -1923,7 +1715,6 @@ def _account_label(provider: str) -> str:
 _UPSTREAM_LABELS: dict[str, str] = {
     "opencode": "OpenCode Zen",
     "opencode-go": "OpenCode Go",
-    "cline-pass": "Cline Pass",
     "minimax-coding-plan": "MiniMax Coding Plan",
     "generalcompute": "General Compute",
     "tokenrouter": "TokenRouter",

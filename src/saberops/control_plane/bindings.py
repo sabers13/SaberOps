@@ -988,10 +988,10 @@ def resolve_execution_binding(
     except KeyError as exc:
         raise BindingResolutionError("POOL_UNKNOWN") from exc
     if binding.backend is BindingKind.DIRECT_API:
-        from saberops.workers.direct_api import DirectAPIAdapter
-        api_adapter = DirectAPIAdapter(binding.provider)
-        api_adapter.validate_profile(binding, profile)
-        adapter = api_adapter
+        # The direct-API worker was removed (H17).  A pre-upgrade binding that
+        # names it stays readable evidence but has no executable transport, so
+        # resolution fails closed instead of silently falling back to a CLI.
+        raise BindingResolutionError("UNSUPPORTED_BACKEND")
     if adapter is None:
         raise BindingResolutionError("NO_ADAPTER")
     if reasoning_effort is not None and not binding.supports_effort(reasoning_effort):

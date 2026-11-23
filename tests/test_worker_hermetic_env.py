@@ -26,7 +26,6 @@ from saberops.models import WorkerRequest
 from saberops.orchestrator import Orchestrator, _filtered_worker_env
 from saberops.workers.antigravity import AntigravityAdapter
 from saberops.workers.claude import ClaudeCodeAdapter
-from saberops.workers.cline import ClineAdapter
 from saberops.workers.codex import CodexAdapter
 from saberops.workers.env import (
     BASE_ENV_ALLOWLIST,
@@ -51,7 +50,7 @@ CANARIES: dict[str, str] = {
     "SOME_RANDOM_SECRET": "canary-random",
 }
 
-HARNESSES: tuple[str, ...] = ("claude", "codex", "opencode", "antigravity", "cline")
+HARNESSES: tuple[str, ...] = ("claude", "codex", "opencode", "antigravity")
 
 
 def _adapter_for(harness: str, binary: str) -> Any:
@@ -63,8 +62,6 @@ def _adapter_for(harness: str, binary: str) -> Any:
         return OpenCodeAdapter(opencode_bin=binary)
     if harness == "antigravity":
         return AntigravityAdapter(agy_bin=binary)
-    if harness == "cline":
-        return ClineAdapter(cline_bin=binary)
     raise AssertionError(harness)
 
 
@@ -129,7 +126,7 @@ def test_base_allowlist_admits_exact_names_and_drops_everything_else() -> None:
     parent.update(
         {"SOME_RANDOM_SECRET": "no", "OPENAI_API_KEY": "no", "AWS_SECRET_ACCESS_KEY": "no"}
     )
-    env = hermetic_env("cline", None, parent)
+    env = hermetic_env("antigravity", None, parent)
     for name in BASE_ENV_ALLOWLIST:
         assert env[name] == f"value-{name}"
     assert "SOME_RANDOM_SECRET" not in env
@@ -139,7 +136,7 @@ def test_base_allowlist_admits_exact_names_and_drops_everything_else() -> None:
 
 def test_lc_prefixed_names_are_admitted_by_prefix() -> None:
     parent = {"PATH": "/p", "LC_ALL": "C", "LC_CTYPE": "UTF-8", "LC_MESSAGES": "en", "LCX": "no"}
-    env = hermetic_env("cline", None, parent)
+    env = hermetic_env("antigravity", None, parent)
     assert env["LC_ALL"] == "C"
     assert env["LC_CTYPE"] == "UTF-8"
     assert env["LC_MESSAGES"] == "en"
@@ -154,7 +151,7 @@ def test_per_harness_additions_are_harness_specific() -> None:
     codex = hermetic_env("codex", None, parent)
     assert codex["CODEX_HOME"] == "/codex"
     assert "CLAUDE_CONFIG_DIR" not in codex
-    for harness in ("opencode", "antigravity", "cline"):
+    for harness in ("opencode", "antigravity"):
         assert HARNESS_ENV_ADDITIONS[harness] == ()
         env = hermetic_env(harness, None, parent)
         assert "CLAUDE_CONFIG_DIR" not in env
@@ -268,7 +265,7 @@ DISALLOWED_GATEWAY_OVERLAY: dict[str, str] = {
 }
 
 
-@pytest.mark.parametrize("harness", ["claude", "codex", "opencode", "antigravity", "cline"])
+@pytest.mark.parametrize("harness", ["claude", "codex", "opencode", "antigravity"])
 def test_gateway_overlay_is_denied_for_every_harness(harness: str) -> None:
     overlay = {**DISALLOWED_GATEWAY_OVERLAY, "ORCH_RUN_ID": "r"}
     env = hermetic_env(harness, overlay, {})
@@ -280,7 +277,7 @@ def test_gateway_overlay_is_denied_for_every_harness(harness: str) -> None:
 def test_parent_env_none_reads_os_environ(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PATH", "/only-source")
     monkeypatch.setenv("CANARY", "no")
-    env = hermetic_env("cline", None)
+    env = hermetic_env("antigravity", None)
     assert env["PATH"] == "/only-source"
     assert "CANARY" not in env
 
@@ -385,7 +382,7 @@ def test_codex_adapter_child_env_is_hermetic(
     assert "_ORCH_BRIDGE_AUTH_SENTINEL" not in child
 
 
-@pytest.mark.parametrize("harness", ["claude", "codex", "opencode", "antigravity", "cline"])
+@pytest.mark.parametrize("harness", ["claude", "codex", "opencode", "antigravity"])
 def test_no_adapter_child_sees_gateway_env(
     stub_worker_env: tuple[Path, Path, Path], tmp_path: Path, harness: str
 ) -> None:

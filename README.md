@@ -137,20 +137,19 @@ flowchart LR
 
 ## Worker adapters
 
-All model execution goes through the vendors' official CLIs or an explicitly
-configured direct API. SaberOps never extracts OAuth tokens or impersonates a
-CLI.
+All model execution goes through the vendors' official CLIs. SaberOps never
+extracts OAuth tokens or impersonates a CLI.
 
 | Adapter | Automatic routing | Notes |
 | --- | :---: | --- |
 | Codex CLI | Yes | User config ignored on every invocation; billing-relevant settings pinned |
 | Claude Code CLI | Yes | Subscription login checked before each task; API/gateway overrides stripped; Fast mode disabled; user/project settings excluded |
 | OpenCode | Yes | Isolated config/plugin root per child; billing-relevant settings pinned |
-| Cline | Yes | |
-| Direct API (OpenAI-compatible, incl. OmniRoute) | Yes | Bounded tool loop; billed to the API account (posture class D, never scheduled unattended) |
 | Antigravity | **No** | Attended-only: used only when the owner explicitly selects provider and model for a run |
 
-The Copilot adapter was removed in v0.4.0. "Implemented" means the adapter
+The Copilot adapter was removed in v0.4.0; the Cline adapter and the direct-API
+tool loop were removed in phase 1.1 ([ADR-0073](docs/decisions/0073-retire-cline-and-direct-api-workers.md)).
+"Implemented" means the adapter
 exists and is covered by hermetic tests replaying recorded CLI fixtures; it does
 not mean every adapter has been live-certified against every account. The
 owner-run [vendor CLI live check](docs/vendor-cli-live-check.md) detects CLI

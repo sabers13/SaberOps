@@ -15,6 +15,7 @@ from saberops.jobs.models import JobRole
 from saberops.models import Tier, WorkerCandidate
 from saberops.routing import is_peak_hours, resolve_candidate_chain
 from saberops.routing_config import (
+    RETIRED_ROUTE_NOTICE,
     ROUTED_ROLES,
     DynamicCandidate,
     RoutingConfigError,
@@ -286,6 +287,62 @@ def test_legacy_v2_owner_file_loads_with_migrated_from_2(
     assert snapshot.migrated_from == 2
     assert [f"{c.provider}/{c.model}" for c in snapshot.chain_for_role(JobRole.BUILD)] == [B, A, C]
     assert path.read_text() == original
+
+
+CLINE_ROUTE = "cline/cline-pass/glm-5.3-flash"
+
+
+def test_effective_document_drops_a_retired_cline_route_with_one_notice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.delenv("SABEROPS_PROFILE", raising=False)
+    path = get_user_routing_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    document = {
+        "schema_version": 3,
+        "roles": {"BUILD": [{"routes": [A]}, {"routes": [CLINE_ROUTE]}]},
+        "strong_start": [],
+    }
+    original = json.dumps(document)
+    path.write_text(original)
+    snapshot = load_effective_routing()
+    assert [f"{c.provider}/{c.model}" for c in snapshot.chain_for_role(JobRole.BUILD)] == [A]
+    assert len(snapshot.notices) == 1
+    assert RETIRED_ROUTE_NOTICE in snapshot.notices[0]
+    assert CLINE_ROUTE in snapshot.notices[0]
+    payload = load_effective_routing_payload()
+    assert payload["roles"]["BUILD"] == [{"routes": [A]}]
+    # A load never rewrites the owner's file.
+    assert path.read_text() == original
+
+
+def test_persisted_snapshot_naming_a_retired_route_still_verifies() -> None:
+    document = {
+        "schema_version": 3,
+        "roles": {"BUILD": [{"routes": [A]}, {"routes": [CLINE_ROUTE]}]},
+        "strong_start": [],
+    }
+    # Build the persisted payload the way a pre-upgrade run stored it.
+    from saberops.routing_config import _validate_v3_structure
+
+    validated = _validate_v3_structure(
+        document, "persisted snapshot", allow_retired=True
+    )
+    digest = _content_hash(
+        {"BUILD": validated.build, "strong_start": validated.strong_start},
+        3,
+        None,
+        pacing_metadata=validated.pacing(),
+    )
+    payload = {**document, "content_hash": digest}
+    restored = payload_to_snapshot(payload, run_id="run-pre-h17")
+    assert [f"{c.provider}/{c.model}" for c in restored.chain_for_role(JobRole.BUILD)] == [
+        A,
+        CLINE_ROUTE,
+    ]
+    assert restored.notices == ()
 
 
 def test_legacy_snapshot_digest_still_checked_before_use() -> None:

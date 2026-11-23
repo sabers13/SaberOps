@@ -84,7 +84,7 @@ def observe_invocation(
     if (request.env or {}).get("ORCH_COPILOT_PROFILE_ID"):
         native_provider = "copilot"
     supported = native_provider in (
-        "codex", "opencode", "claude-code", "antigravity", "cline", "copilot"
+        "codex", "opencode", "claude-code", "antigravity", "copilot"
     )
     binding = (request.env or {}).get("ORCH_EXECUTION_BINDING_ID")
     resume_id = request.native_resume_id
@@ -612,7 +612,7 @@ def _native_id(text: str, provider: str) -> str | None:
                 else event.get("session_id") or event.get("sessionId") or event.get("taskId")
                 or (event.get("data") or {}).get("sessionId")
                 or event.get("sessionID")
-                if provider in ("cline", "copilot")
+                if provider in ("copilot",)
                 else event.get("sessionID") or (event.get("part") or {}).get("sessionID")
             )
             if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{7,127}", value):

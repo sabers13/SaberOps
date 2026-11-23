@@ -15,8 +15,7 @@ owner-authorized bounded model check the ``/access/verify-model`` route
 performed -- it never runs implicitly.
 
 Discovery execution itself stays housed in :mod:`saberops.web`
-(:func:`saberops.web._discover_connection` and
-:func:`saberops.web._probe_api_connection`), imported locally to keep
+(:func:`saberops.web._discover_connection`), imported locally to keep
 the ``web -> service`` module graph cycle-free.  Nothing is duplicated.
 """
 
@@ -26,7 +25,6 @@ import os
 import shutil
 import subprocess
 from collections.abc import Callable
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +33,6 @@ from saberops.model_access import (
     AccessRegistry,
     AccessStore,
     AccessStoreError,
-    AuthMode,
     ModelCatalog,
     ModelCatalogStore,
     ModelCatalogStoreError,
@@ -43,10 +40,7 @@ from saberops.model_access import (
     ProviderReadinessEvidence,
     ReadinessStore,
     ReadinessStoreError,
-    build_access_registry,
-    preset_connection,
 )
-from saberops.model_access.connections import AccessProtocol
 from saberops.model_access.discovery import apply_discovery_result
 from saberops.model_access.readiness_service import ReadinessService
 from saberops.models import ProviderReadiness
@@ -94,31 +88,6 @@ def load_catalog_safely() -> ModelCatalog:
         return ModelCatalog()
 
 
-def parse_public_headers(raw: str) -> dict[str, str]:
-    """Parse literal ``Name: value`` public-header lines (fail closed).
-
-    Same contract as the removed ``/access/connections`` route helper:
-    a malformed line is identified by its 1-based line number and the
-    structural defect only; submitted text is never echoed, so a
-    rejected line carrying secret-shaped material can never be
-    reflected into an error.
-    """
-    headers: dict[str, str] = {}
-    for number, line in enumerate(raw.splitlines(), start=1):
-        stripped = line.strip()
-        if not stripped:
-            continue
-        name, separator, value = stripped.partition(":")
-        if not separator:
-            raise ValueError(f"invalid public header line {number}: missing ':' separator")
-        if not name.strip():
-            raise ValueError(f"invalid public header line {number}: missing header name")
-        if not value.strip():
-            raise ValueError(f"invalid public header line {number}: missing header value")
-        headers[name.strip()] = value.strip()
-    return headers
-
-
 def _require_registry() -> AccessRegistry:
     try:
         return access_store().load()
@@ -138,13 +107,6 @@ def _require_connection(registry: AccessRegistry, connection_id: str) -> Provide
             "UNKNOWN_CONNECTION", f"Unknown connection: {wanted}"
         )
     return connection
-
-
-def _redact(message: str, credential_ref: str) -> str:
-    submitted = credential_ref.strip()
-    if submitted and submitted in message:
-        return message.replace(submitted, "[redacted]")
-    return message
 
 
 def list_access_connections() -> dict[str, Any]:
@@ -194,122 +156,6 @@ def show_access_connection(connection_id: str) -> dict[str, Any]:
     }
 
 
-def add_access_connection(
-    *,
-    connection_id: str,
-    preset: str = "custom-openai-compatible",
-    protocol: str = AccessProtocol.OPENAI_COMPATIBLE.value,
-    endpoint: str = "",
-    credential_ref: str = "",
-    auth_header_name: str = "",
-    model: str = "",
-    public_headers: str = "",
-) -> dict[str, Any]:
-    """Save a user-owned API connection (references only, never secrets).
-
-    Same validation and persistence as the removed
-    ``POST /access/connections`` route: the credential field is a
-    *reference* (``env:`` / ``profile:`` / ``store:`` handle); there is
-    no field for a raw secret value anywhere.  A bounded discovery runs
-    immediately after a successful save; it never fails the save and
-    never erases durable state.
-    """
-    wanted = connection_id.strip()
-    if not wanted:
-        raise AccessOperationError("CONNECTION_ID_REQUIRED", "Connection name is required.")
-    try:
-        headers = parse_public_headers(public_headers)
-    except ValueError as exc:
-        raise AccessOperationError(
-            "INVALID_PUBLIC_HEADERS", f"Invalid public headers: {exc}"
-        ) from exc
-    try:
-        store = access_store()
-        registry = store.load()
-        if registry.try_get(wanted) is not None:
-            raise ValueError(f"connection '{wanted}' already exists")
-        if preset.strip() and preset.strip().lower() != "custom-openai-compatible":
-            connection = preset_connection(
-                preset.strip(),
-                credential_ref=credential_ref,
-                endpoint=endpoint,
-                model=model,
-                connection_id=wanted,
-            )
-            if auth_header_name.strip() or headers:
-                connection = replace(
-                    connection,
-                    auth_header_name=auth_header_name.strip(),
-                    public_headers=tuple(sorted(headers.items())),
-                )
-        else:
-            try:
-                access_protocol = AccessProtocol(protocol.strip())
-            except ValueError as exc:
-                raise ValueError(f"unknown protocol {protocol!r}") from exc
-            connection = ProviderConnection(
-                connection_id=wanted,
-                provider="custom",
-                protocol=access_protocol,
-                backend=(
-                    "openai-compatible-api"
-                    if access_protocol is AccessProtocol.OPENAI_COMPATIBLE
-                    else "custom-api"
-                ),
-                auth_mode=AuthMode.API_KEY,
-                endpoint=endpoint,
-                credential_ref=credential_ref,
-                public_headers=tuple(sorted(headers.items())),
-                auth_header_name=auth_header_name.strip(),
-                model=model,
-            )
-        store.save(build_access_registry((*registry.list_connections(), connection)))
-    except (ValueError, AccessStoreError) as exc:
-        # Never reflect potential secret material: the submitted
-        # reference is redacted from the error text (validation
-        # messages may otherwise quote the offending value).
-        raise AccessOperationError(
-            "CONNECTION_NOT_SAVED",
-            f"Connection not saved: {_redact(str(exc), credential_ref)}",
-        ) from exc
-    # Adding a provider makes its models available for selection, so run
-    # one bounded discovery immediately after a successful save.  This
-    # never fails the save itself and never erases durable state.
-    discovery: dict[str, Any] = {"attempted": False}
-    try:
-        from saberops.web import _discover_connection
-
-        saved_connection = access_store().load().try_get(wanted)
-        if saved_connection is not None:
-            from saberops.workers.registry import AdapterRegistry
-
-            auto_result = _discover_connection(
-                saved_connection, AdapterRegistry.default()
-            )
-            try:
-                auto_catalog = model_catalog_store().load()
-            except ModelCatalogStoreError:
-                auto_catalog = ModelCatalog()
-            auto_catalog = apply_discovery_result(auto_catalog, auto_result)
-            try:
-                model_catalog_store().save(auto_catalog)
-            except ModelCatalogStoreError:
-                auto_result = replace(auto_result, ok=False)
-            discovery = {
-                "attempted": True,
-                "ok": auto_result.ok,
-                "models_found": len(auto_result.models) if auto_result.ok else 0,
-            }
-    except (AccessStoreError, ValueError):
-        discovery = {"attempted": True, "ok": False, "models_found": 0}
-    return {
-        "connection_id": wanted,
-        "saved": True,
-        "credential_display": connection.credential_display,
-        "discovery": discovery,
-    }
-
-
 def _readiness_probe_payload(
     connection: ProviderConnection,
     evidence: ProviderReadinessEvidence,
@@ -335,12 +181,8 @@ def _readiness_probe_payload(
         "ok": "TRUE" if evidence.state is ProviderReadiness.READY else "FALSE",
         "reason": evidence.reason,
         "detail": (
-            (
-                "endpoint metadata verified; authentication/model entitlement not proven; "
-                if evidence.reason == "API_ENDPOINT_READY"
-                else "readiness evidence persisted; "
-            )
-            + f"state={evidence.state.value} observed_at={evidence.observed_at}"
+            "readiness evidence persisted; "
+            f"state={evidence.state.value} observed_at={evidence.observed_at}"
         ),
         "readiness_state": evidence.state.value,
         "readiness_reason": evidence.reason,
@@ -363,54 +205,52 @@ def test_access_connection(
     canonical :class:`ReadinessService` refresh over the exact
     already-loaded connection -- only the declared non-inference status
     command runs, no model call occurs, and ``UNKNOWN`` stays
-    ``UNKNOWN``.  Unsupported transports keep the unauthenticated
-    reachability probe (the stored credential value is never read, let
-    alone sent).
+    ``UNKNOWN``.  A stored direct-API row (removed, H17) has no
+    transport and is refused; the stored credential value is never read,
+    let alone sent.
     """
-    from saberops.workers.direct_api import supports_connection
-
     registry = _require_registry()
     connection = _require_connection(registry, connection_id)
-    if connection.is_account_backed or supports_connection(connection):
-        try:
-            service = ReadinessService(
-                registry,
-                readiness_store(),
-                which=which or shutil.which,
-                run=run or subprocess.run,
+    if not connection.is_account_backed:
+        raise AccessOperationError(
+            "UNSUPPORTED_CONNECTION",
+            "Direct API connections were removed (H17); only declared CLI accounts are tested.",
+        )
+    try:
+        service = ReadinessService(
+            registry,
+            readiness_store(),
+            which=which or shutil.which,
+            run=run or subprocess.run,
+        )
+        evidence = service.refresh(connection)
+        missing_evidence: tuple[str, ...] = ()
+        if evidence.state is ProviderReadiness.UNKNOWN:
+            from saberops.model_access import TriState
+
+            missing_parts: list[str] = []
+            disc = (
+                service.last_discovery(connection.connection_id)
+                if hasattr(service, "last_discovery")
+                else None
             )
-            evidence = service.refresh(connection)
-            missing_evidence: tuple[str, ...] = ()
-            if evidence.state is ProviderReadiness.UNKNOWN:
-                from saberops.model_access import TriState
-
-                missing_parts: list[str] = []
-                disc = (
-                    service.last_discovery(connection.connection_id)
-                    if hasattr(service, "last_discovery")
-                    else None
-                )
-                if disc is None:
-                    missing_parts.extend(["installed", "authenticated", "reachable"])
-                else:
-                    if disc.installed is not TriState.TRUE:
-                        missing_parts.append("installed")
-                    if disc.authenticated is not TriState.TRUE:
-                        missing_parts.append("authenticated")
-                    if disc.reachable is not TriState.TRUE:
-                        missing_parts.append("reachable")
-                if not missing_parts:
-                    missing_parts.append("connection_test")
-                missing_evidence = tuple(missing_parts)
-        except ReadinessStoreError as exc:
-            raise AccessOperationError(
-                "READINESS_STORE_UNWRITABLE", f"Readiness store unwritable: {exc}"
-            ) from exc
-        return _readiness_probe_payload(connection, evidence, missing_evidence=missing_evidence)
-    from saberops.web import _probe_api_connection
-
-    outcome = _probe_api_connection(endpoint=connection.endpoint)
-    return {"connection_id": connection.connection_id, **outcome}
+            if disc is None:
+                missing_parts.extend(["installed", "authenticated", "reachable"])
+            else:
+                if disc.installed is not TriState.TRUE:
+                    missing_parts.append("installed")
+                if disc.authenticated is not TriState.TRUE:
+                    missing_parts.append("authenticated")
+                if disc.reachable is not TriState.TRUE:
+                    missing_parts.append("reachable")
+            if not missing_parts:
+                missing_parts.append("connection_test")
+            missing_evidence = tuple(missing_parts)
+    except ReadinessStoreError as exc:
+        raise AccessOperationError(
+            "READINESS_STORE_UNWRITABLE", f"Readiness store unwritable: {exc}"
+        ) from exc
+    return _readiness_probe_payload(connection, evidence, missing_evidence=missing_evidence)
 
 
 def discover_access_models(connection_id: str) -> dict[str, Any]:

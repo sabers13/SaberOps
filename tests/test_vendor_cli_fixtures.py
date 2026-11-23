@@ -130,9 +130,9 @@ def test_load_manifest_reads_fake_only(tmp_path: Path) -> None:
                 "fixtures": [],
                 "fake_only": [
                     {
-                        "vendor": "cline",
+                        "vendor": "antigravity",
                         "kind": "exhaustion",
-                        "consumer": "saberops.workers.exhaustion.classify_cline",
+                        "consumer": "saberops.workers.exhaustion.classify_antigravity",
                         "reason": "no exact signal",
                     }
                 ],
@@ -142,9 +142,9 @@ def test_load_manifest_reads_fake_only(tmp_path: Path) -> None:
     manifest = load_manifest(path)
     assert manifest.fake_only == (
         FakeOnly(
-            vendor="cline",
+            vendor="antigravity",
             kind="exhaustion",
-            consumer="saberops.workers.exhaustion.classify_cline",
+            consumer="saberops.workers.exhaustion.classify_antigravity",
             reason="no exact signal",
         ),
     )

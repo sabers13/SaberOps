@@ -22,7 +22,6 @@ CLIS = (
     ("anthropic", "claude", "Claude Code"),
     ("opencode", "opencode", "OpenCode"),
     ("antigravity", "agy", "Antigravity"),
-    ("cline", "cline", "Cline"),
     ("gemini", "gemini", "Gemini CLI"),
 )
 MAX_LOG_BYTES = 32 * 1024 * 1024

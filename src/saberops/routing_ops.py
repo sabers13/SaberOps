@@ -125,9 +125,8 @@ class RoutingOption:
 
 def _adapter_for(binding: Any, registry: AdapterRegistry) -> Any | None:
     if binding.backend is BindingKind.DIRECT_API:
-        from saberops.workers.direct_api import DirectAPIAdapter
-
-        return DirectAPIAdapter(binding.provider)
+        # Direct-API execution was removed (H17): no adapter can serve it.
+        return None
     return registry.get(binding.provider)
 
 

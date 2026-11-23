@@ -442,7 +442,6 @@ def test_packaged_defaults_load_and_validate() -> None:
         "claude-pro",
         "opencode-go",
         "opencode-zen",
-        "clinepass",
         "google-ai-pro",
     }
     assert set(plans.pool_plans) == {
@@ -451,7 +450,6 @@ def test_packaged_defaults_load_and_validate() -> None:
         "claude-pro",
         "opencode-go",
         "opencode-zen",
-        "clinepass",
         "antigravity",
     }
     assert plans.pool_plans["opencode-zen"].overage_possible is False

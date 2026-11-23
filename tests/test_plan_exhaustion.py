@@ -40,7 +40,6 @@ from saberops.workers.exhaustion import (
     build_quota_observation,
     classify_antigravity,
     classify_claude,
-    classify_cline,
     classify_codex,
     classify_opencode,
     parse_antigravity_usage,
@@ -409,45 +408,6 @@ def test_opencode_auth_is_never_quota() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Cline fixtures (ALL SYNTHETIC: R-001 UNKNOWN exact signal; PROVISIONAL).
-# ---------------------------------------------------------------------------
-
-CLINE_QUOTA_STDERR = _line(
-    {
-        "type": "error",
-        "message": "ClinePassLimitError: You have reached your weekly Clinepass limit",
-    }
-)
-CLINE_RATE_STDERR = _line(
-    {"type": "error", "message": "Rate limit exceeded, too many requests (429)"}
-)
-CLINE_AUTH_STDERR = _line({"type": "error", "message": "Not authenticated: sign in to Cline"})
-CLINE_COMPLETED_STDOUT = _line(
-    {
-        "type": "run_result",
-        "ts": "2026-10-11T10:00:00Z",
-        "finishReason": "completed",
-        "text": "Done",
-    }
-)
-
-
-def test_cline_provisional_quota_rule() -> None:
-    result = classify_cline("", CLINE_QUOTA_STDERR)
-    assert result.verdict is ExhaustionVerdict.QUOTA_EXHAUSTED
-    assert result.confidence == PROVISIONAL
-    # Reset format UNKNOWN: never parsed.
-    assert result.reset_at is None
-
-
-def test_cline_rate_auth_and_completed() -> None:
-    assert classify_cline("", CLINE_RATE_STDERR).verdict is ExhaustionVerdict.RATE_LIMITED
-    assert classify_cline("", CLINE_AUTH_STDERR).verdict is ExhaustionVerdict.OTHER
-    assert classify_cline(CLINE_COMPLETED_STDOUT, "").verdict is ExhaustionVerdict.OTHER
-    assert classify_cline("", "").verdict is ExhaustionVerdict.OTHER
-
-
-# ---------------------------------------------------------------------------
 # Antigravity fixtures (failure text SYNTHETIC/INFERRED; /usage VERIFIED).
 # ---------------------------------------------------------------------------
 
@@ -543,7 +503,6 @@ def worktree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "saberops.workers.codex",
         "saberops.workers.claude",
         "saberops.workers.opencode",
-        "saberops.workers.cline",
         "saberops.workers.antigravity",
     ):
         monkeypatch.setattr(f"{module}.GitManager.get_changed_paths", lambda path: [])
@@ -654,35 +613,6 @@ def test_opencode_adapter_rate_limit_keeps_retry_behaviour(worktree: Path) -> No
     )
     assert result.status is AttemptStatus.FAILED
     assert result.interruption_reason is None
-
-
-def test_cline_adapter_maps_provisional_quota_to_interruption(worktree: Path) -> None:
-    from saberops.workers.cline import ClineAdapter
-
-    stdout = (
-        _line(
-            {
-                "type": "agent_event",
-                "ts": "2026-10-11T10:00:00Z",
-                "event": {"type": "error", "error": {"message": "ClinePassLimitError: weekly"}},
-            }
-        )
-        + "\n"
-        + _line(
-            {
-                "type": "run_result",
-                "ts": "2026-10-11T10:00:01Z",
-                "finishReason": "error",
-                "text": "",
-            }
-        )
-    )
-
-    def runner(argv: list[str], **kwargs: Any) -> ProcessResult:
-        return ProcessResult(argv, 0, stdout, CLINE_QUOTA_STDERR, 0.1)
-
-    result = ClineAdapter(runner=runner).run(WorkerRequest("Do work", worktree, "cline-pass/m"))
-    _require_quota_interruption(result, "cline")
 
 
 def test_antigravity_adapter_maps_quota_to_interruption(worktree: Path) -> None:

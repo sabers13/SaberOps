@@ -865,13 +865,12 @@ def preflight_executable(policy: SandboxPolicy, argv: list[str]) -> str:
 #: has been factually verified for autonomous use.  These are the
 #: ``source_kind`` strings produced by adapters that carry the
 #: ``structured_usage`` factual capability after observation + testing
-#: (OpenCode JSONL, Cline JSONL, Codex JSONL).  Copilot / Antigravity
+#: (OpenCode JSONL, Codex JSONL).  Copilot / Antigravity
 #: CLI paths are deliberately NOT members: mere executable presence
 #: never proves a structured event stream.
 NATIVE_STRUCTURED_VERIFIED_SOURCES: frozenset[str] = frozenset(
     {
         "opencode_jsonl",
-        "cline_jsonl",
         "codex_jsonl",
     }
 )
@@ -889,7 +888,6 @@ NATIVE_STRUCTURED_VERIFIED_SOURCES: frozenset[str] = frozenset(
 #: instead.
 NATIVE_STRUCTURED_ADAPTER_SOURCES: dict[str, frozenset[str]] = {
     "opencode": frozenset({"opencode_jsonl"}),
-    "cline": frozenset({"cline_jsonl"}),
     "codex": frozenset({"codex_jsonl"}),
 }
 

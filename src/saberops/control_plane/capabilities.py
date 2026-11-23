@@ -114,18 +114,6 @@ _PROFILES: dict[str, CapabilityProfile] = {
             }
         ),
     ),
-    "cline": CapabilityProfile(
-        "cline",
-        ProviderTransport.DIRECT_CLI,
-        frozenset(
-            {
-                Capability.STREAMING,
-                Capability.STRUCTURED_USAGE,
-                Capability.PROCESS_IDENTITY,
-                Capability.CANCELLATION,
-            }
-        ),
-    ),
     "antigravity": CapabilityProfile(
         "antigravity",
         ProviderTransport.DIRECT_CLI,

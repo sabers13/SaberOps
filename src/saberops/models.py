@@ -533,8 +533,8 @@ class TraceCapability(StrEnum):
     """Evidence class for a structured execution trace.
 
     * ``NATIVE_STRUCTURED``     -- backend/harness emits a native structured
-      event stream (e.g. OpenCode JSONL step_finish, Cline JSONL,
-      Codex JSONL turn.completed).  The runtime must never fall back to
+      event stream (e.g. OpenCode JSONL step_finish, Codex JSONL
+      turn.completed).  The runtime must never fall back to
       parsing terminal-rendering text when a native event exists.
     * ``SANDBOX_INTERCEPTED``   -- backend lacks a structured event stream
       but the per-Attempt sandbox can deterministically observe tool

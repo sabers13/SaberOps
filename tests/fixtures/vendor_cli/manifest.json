@@ -221,18 +221,6 @@
       "kind": "config_help",
       "consumer": "saberops.workers.antigravity:AntigravityAdapter",
       "reason": "No installed Antigravity CLI on this host."
-    },
-    {
-      "vendor": "cline",
-      "kind": "exhaustion",
-      "consumer": "saberops.workers.exhaustion.classify_cline",
-      "reason": "PROVISIONAL text-only rule; no verified exact Cline CLI limit signal and no installed CLI."
-    },
-    {
-      "vendor": "cline",
-      "kind": "config_help",
-      "consumer": "saberops.workers.cline:ClineAdapter",
-      "reason": "No installed Cline CLI on this host."
     }
   ]
 }

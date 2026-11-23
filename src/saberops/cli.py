@@ -121,10 +121,9 @@ _BIN_ATTR: dict[str, str] = {
     "opencode": "opencode_bin",
     "codex": "codex_bin",
     "antigravity": "agy_bin",
-    "cline": "cline_bin",
 }
 
-_DOCTOR_PROVIDERS: tuple[str, ...] = ("opencode", "codex", "antigravity", "cline")
+_DOCTOR_PROVIDERS: tuple[str, ...] = ("opencode", "codex", "antigravity")
 
 #: Runtime imports necessary to use SaberOps (from ``pyproject.toml``
 #: ``dependencies``).  Missing entries are a genuine readiness failure.
@@ -1829,7 +1828,7 @@ def build_parser() -> argparse.ArgumentParser:
     # orch access list|show|add|test|discover|verify-model
     access_parser = subparsers.add_parser(
         "access",
-        help="Manage model-access connections (list/show/add/test/discover/verify-model).",
+        help="Manage CLI account connections (list/show/test/discover/verify-model).",
     )
     access_sub = access_parser.add_subparsers(dest="access_command", required=True)
     access_list = access_sub.add_parser("list", help="List connections with readiness.")
@@ -1837,35 +1836,6 @@ def build_parser() -> argparse.ArgumentParser:
     access_show = access_sub.add_parser("show", help="Show one connection and its evidence.")
     access_show.add_argument("connection_id", type=str, help="Connection id.")
     access_show.add_argument("--json", action="store_true", help="JSON output")
-    access_add = access_sub.add_parser(
-        "add", help="Save a user-owned API connection (credential reference only, no secret)."
-    )
-    access_add.add_argument("--id", dest="connection_id", type=str, required=True)
-    access_add.add_argument(
-        "--preset",
-        type=str,
-        default="custom-openai-compatible",
-        help="Provider preset id (default: custom-openai-compatible).",
-    )
-    access_add.add_argument("--protocol", type=str, default="OPENAI_COMPATIBLE")
-    access_add.add_argument("--endpoint", type=str, default="")
-    access_add.add_argument(
-        "--credential-ref",
-        type=str,
-        default="",
-        help="Credential handle (env:/profile:/store:), never a secret value.",
-    )
-    access_add.add_argument("--auth-header-name", type=str, default="")
-    access_add.add_argument("--model", type=str, default="")
-    access_add.add_argument(
-        "--public-header",
-        dest="public_headers",
-        action="append",
-        default=[],
-        metavar="NAME: value",
-        help="Literal public metadata header; repeat for multiple headers.",
-    )
-    access_add.add_argument("--json", action="store_true", help="JSON output")
     access_test = access_sub.add_parser(
         "test", help="Verify one connection (non-inference status check only)."
     )
@@ -5029,6 +4999,8 @@ def handle_models(
     print("Configured Multi-Provider Execution Roles & Routing Chains:\n")
     print(f"Routing Source: {snap.source} {snap.source_path or '(packaged default)'}")
     print(f"Content Hash: {snap.content_hash}\n")
+    for notice in snap.notices:
+        print(f"Note: {notice}")
     print("BUILD:\n")
     for number, group in enumerate(snap.groups_for(JobRole.BUILD), start=1):
         for c in group:
@@ -5074,6 +5046,7 @@ def handle_routing_show(args: argparse.Namespace) -> int:
                 ],
             },
             "migrated_roles": list(snap.migrated_roles),
+            "notices": list(snap.notices),
             "managed_elsewhere": {
                 "PLAN": "orch mcp status",
                 "CHECK": "orch reviewer show",
@@ -5095,6 +5068,8 @@ def handle_routing_show(args: argparse.Namespace) -> int:
             f"{', '.join(snap.migrated_roles)} -> BUILD/strong_start; "
             "run `orch routing migrate --write` to persist"
         )
+    for notice in snap.notices:
+        print(f"Note: {notice}")
     print("BUILD:")
     for number, group in enumerate(snap.groups_for(JobRole.BUILD), start=1):
         print(f"  {number}.", [f"{c.provider}/{c.model}" for c in group])
@@ -5120,6 +5095,8 @@ def handle_routing_validate(args: argparse.Namespace) -> int:  # noqa: ARG001
     try:
         snap = load_effective_routing()
         print(f"Routing config valid at {snap.source_path} (hash {snap.content_hash})")
+        for notice in snap.notices:
+            print(f"Note: {notice}")
         return 0
     except RoutingConfigError as exc:
         print(f"[!] Routing config invalid: {exc}", file=sys.stderr)
@@ -6618,36 +6595,6 @@ def handle_access_show(args: argparse.Namespace) -> int:
     if payload["observed_at"]:
         print(f"Observed at : {payload['observed_at']}")
     print(f"Catalog     : {len(payload['catalog_models'])} model(s) last enumerated")
-    return 0
-
-
-def handle_access_add(args: argparse.Namespace) -> int:
-    """Handle `orch access add`."""
-    from saberops.access_ops import AccessOperationError, add_access_connection
-
-    try:
-        result = add_access_connection(
-            connection_id=str(args.connection_id),
-            preset=str(args.preset),
-            protocol=str(args.protocol),
-            endpoint=str(args.endpoint),
-            credential_ref=str(args.credential_ref),
-            auth_header_name=str(args.auth_header_name),
-            model=str(args.model),
-            public_headers="\n".join(str(item) for item in (args.public_headers or [])),
-        )
-    except AccessOperationError as exc:
-        print(f"[!] {exc}", file=sys.stderr)
-        return 1
-    if getattr(args, "json", False):
-        print(json.dumps(result, indent=2, sort_keys=True))
-        return 0
-    print(f"Connection saved: {result['connection_id']} (credential reference only; no secret stored).")
-    discovery = result["discovery"]
-    if discovery.get("attempted") and discovery.get("ok"):
-        print(f"Bounded discovery found {discovery['models_found']} model(s); nothing was placed into routing.")
-    elif discovery.get("attempted"):
-        print("Automatic discovery could not enumerate models; use 'orch access discover' to retry.")
     return 0
 
 
@@ -8512,8 +8459,6 @@ def _dispatch(args: argparse.Namespace) -> int:
             return handle_access_list(args)
         elif args.access_command == "show":
             return handle_access_show(args)
-        elif args.access_command == "add":
-            return handle_access_add(args)
         elif args.access_command == "test":
             return handle_access_test(args)
         elif args.access_command == "discover":

@@ -173,8 +173,17 @@ class ReadinessService:
     def refresh(self, connection: ProviderConnection) -> ProviderReadinessEvidence:
         """Execute at most the declared non-inference status command and persist its projection."""
         if not connection.is_account_backed:
-            from saberops.model_access.api_verification import verify_api
-            evidence = verify_api(connection)
+            # A stored direct-API connection has no executable transport since
+            # H17; it is never READY and nothing is sent anywhere.
+            evidence = ProviderReadinessEvidence(
+                connection_id=connection.connection_id,
+                provider=connection.provider,
+                backend=connection.backend,
+                state=ProviderReadiness.NOT_READY,
+                reason="PROTOCOL_UNSUPPORTED",
+                observed_at=self.now(),
+                source=ReadinessEvidenceSource.CONNECTION_TEST,
+            )
             self.store.replace(evidence)
             return evidence
         descriptor = next(
@@ -327,8 +336,9 @@ class ReadinessService:
         """Detect declared CLIs and run only their supported login-status commands.
 
         Called explicitly by the interactive UI launcher, never by page rendering
-        or application construction. API connections are excluded; no model
-        prompt, credentials, owner bindings or routing configuration are used.
+        or application construction.  Stored API rows have no transport and are
+        never tested; no model prompt, credentials, owner bindings or routing
+        configuration are used.
         """
         for descriptor in ACCOUNT_BACKENDS:
             connection = self.registry.try_get(descriptor.connection_id)
@@ -362,20 +372,11 @@ class ReadinessService:
                 )
             connection = matches[0]
         if not connection.is_account_backed:
-            from saberops.workers.direct_api import credential_value, supports_connection
-
-            if not supports_connection(connection):
-                return ReadinessAdmission(
-                    ProviderReadiness.NOT_READY, "PROTOCOL_UNSUPPORTED", False,
-                    connection.connection_id,
-                )
-            try:
-                credential_value(connection)
-            except ValueError:
-                return ReadinessAdmission(
-                    ProviderReadiness.NOT_READY, "CREDENTIAL_MISSING", False,
-                    connection.connection_id,
-                )
+            # Direct API execution was removed (H17).
+            return ReadinessAdmission(
+                ProviderReadiness.NOT_READY, "PROTOCOL_UNSUPPORTED", False,
+                connection.connection_id,
+            )
         descriptor = next(
             (
                 item

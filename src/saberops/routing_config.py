@@ -59,12 +59,6 @@ ALLOWED_CANDIDATES: frozenset[str] = frozenset(
         "codex/gpt-5.6-terra",
         "codex/gpt-5.6-sol",
         "codex/gpt-5.6-luna",
-        "cline/cline-pass/glm-5.3-flash",
-        "cline/cline-pass/glm-5.3",
-        "cline/cline-pass/mimo-v2.5",
-        "cline/cline-pass/deepseek-v4-flash",
-        "cline/cline-pass/deepseek-v4-pro",
-        "cline/cline-pass/minimax-m3",
         "opencode/opencode/big-pickle",
         "opencode/opencode/mimo-v2.5-free",
         "opencode/opencode/hy3-free",
@@ -82,6 +76,21 @@ ALLOWED_CANDIDATES: frozenset[str] = frozenset(
 #: executable candidates that are not part of the closed static registry.  It is
 #: part of the *same* canonical routing document (never a second routing file).
 _APPROVED_TOP_KEY = "approved_candidates"
+
+#: Route ids retired with a worker adapter (H17).  An effective routing document
+#: that still names one loads without it and reports one notice; a persisted
+#: pre-upgrade snapshot keeps its ids so its stored digest still verifies.
+_RETIRED_CANDIDATES: frozenset[str] = frozenset(
+    {
+        "cline/cline-pass/glm-5.3-flash",
+        "cline/cline-pass/glm-5.3",
+        "cline/cline-pass/mimo-v2.5",
+        "cline/cline-pass/deepseek-v4-flash",
+        "cline/cline-pass/deepseek-v4-pro",
+        "cline/cline-pass/minimax-m3",
+    }
+)
+RETIRED_ROUTE_NOTICE = "Cline worker adapter was removed (H17); retired route(s) dropped"
 
 # Legacy tier context keys (private tables kept for the 1→2 merge and for
 # verifying persisted schema-1/2 snapshots; never public editor inputs).
@@ -131,6 +140,71 @@ def requires_training_permission(candidate_id: str) -> bool:
 
 def _is_muse_id(cid: str) -> bool:
     return requires_training_permission(cid)
+
+
+def _route_id(entry: Any) -> str | None:
+    if isinstance(entry, str):
+        return entry.strip()
+    if isinstance(entry, dict):
+        provider = entry.get("provider")
+        model = entry.get("model")
+        if isinstance(provider, str) and isinstance(model, str):
+            return f"{provider}/{model}"
+    return None
+
+
+def _strip_retired_routes(data: dict[str, Any]) -> tuple[dict[str, Any], tuple[str, ...]]:
+    """Return ``data`` without retired route ids, plus the ids that were dropped.
+
+    Applies to the effective owner document only.  A persisted pre-upgrade
+    snapshot is run evidence: it is reconstructed unchanged (with the retired
+    ids still accepted) so its stored digest keeps verifying.
+    """
+    dropped: list[str] = []
+
+    def clean_chain(chain: Any) -> Any:
+        if not isinstance(chain, list):
+            return chain
+        kept: list[Any] = []
+        for entry in chain:
+            cid = _route_id(entry)
+            if cid in _RETIRED_CANDIDATES:
+                if cid not in dropped:
+                    dropped.append(cid)
+                continue
+            kept.append(entry)
+        return kept
+
+    def clean_groups(groups: Any) -> Any:
+        if not isinstance(groups, list):
+            return groups
+        kept_groups: list[Any] = []
+        for group in groups:
+            if isinstance(group, dict) and "routes" in group:
+                routes = clean_chain(group.get("routes"))
+                if not routes:
+                    continue
+                kept_groups.append({**group, "routes": routes})
+            else:
+                kept_groups.append(group)
+        return kept_groups
+
+    cleaned = json.loads(json.dumps(data))
+    roles = cleaned.get("roles")
+    if isinstance(roles, dict):
+        for role in list(roles):
+            roles[role] = clean_groups(roles[role])
+    if STRONG_START_KEY in cleaned:
+        cleaned[STRONG_START_KEY] = clean_groups(cleaned[STRONG_START_KEY])
+    for tier in ("T1", "T2", "T3"):
+        tier_obj = cleaned.get(tier)
+        if isinstance(tier_obj, dict):
+            for sub in list(tier_obj):
+                tier_obj[sub] = clean_chain(tier_obj[sub])
+    notices: tuple[str, ...] = ()
+    if dropped:
+        notices = (f"{RETIRED_ROUTE_NOTICE}: {', '.join(dropped)}",)
+    return cleaned, notices
 
 
 def get_user_routing_path() -> Path:
@@ -207,6 +281,7 @@ def _validate_context_chain(
     ctx_key: str,
     source_label: str,
     approved: Mapping[str, DynamicCandidate] | None = None,
+    allow_retired: bool = False,
 ) -> list[str]:
     if not isinstance(chain, list):
         raise RoutingConfigError(
@@ -235,13 +310,18 @@ def _validate_context_chain(
             approved=approved,
             source_label=source_label,
             scope_label=f"context {ctx_key}",
+            allow_retired=allow_retired,
         )
         cids.append(cid)
     return cids
 
 
 def _validate_legacy_structure(
-    data: Any, source_path: Path | None, *, approved: Mapping[str, DynamicCandidate] | None = None
+    data: Any,
+    source_path: Path | None,
+    *,
+    approved: Mapping[str, DynamicCandidate] | None = None,
+    allow_retired: bool = False,
 ) -> dict[str, list[str]]:
     source_label = str(source_path) if source_path else "packaged default"
     if not isinstance(data, dict):
@@ -276,7 +356,8 @@ def _validate_legacy_structure(
                 f"Routing config at {source_label}: unknown keys in {top}: {sorted(unknown_subs)}"
             )
         result[ctx_key] = _validate_context_chain(
-            top_val[sub], ctx_key, source_label, approved=approved
+            top_val[sub], ctx_key, source_label, approved=approved,
+            allow_retired=allow_retired,
         )
     return result
 
@@ -321,6 +402,7 @@ def _validate_role_groups(
     source_label: str,
     approved: Mapping[str, DynamicCandidate] | None = None,
     out_pacing: list[int] | None = None,
+    allow_retired: bool = False,
 ) -> list[list[str]]:
     if not isinstance(chain, list):
         raise RoutingConfigError(
@@ -365,6 +447,7 @@ def _validate_role_groups(
                 approved=approved,
                 source_label=source_label,
                 scope_label=f"role {role}",
+                allow_retired=allow_retired,
             )
             cids.append(cid)
         groups.append(cids)
@@ -395,6 +478,7 @@ def _validate_v3_structure(
     *,
     approved: Mapping[str, DynamicCandidate] | None = None,
     out_pacing: dict[str, list[int]] | None = None,
+    allow_retired: bool = False,
 ) -> ValidatedRouting:
     if not isinstance(data, dict):
         raise RoutingConfigError(f"Routing config at {source_label}: top-level must be JSON object")
@@ -446,6 +530,7 @@ def _validate_v3_structure(
         source_label,
         approved=approved,
         out_pacing=build_pacing,
+        allow_retired=allow_retired,
     )
     if STRONG_START_KEY in data and "SURGEON" in roles_obj:
         raise RoutingConfigError(
@@ -465,6 +550,7 @@ def _validate_v3_structure(
         source_label,
         approved=approved,
         out_pacing=strong_pacing,
+        allow_retired=allow_retired,
     )
     migrated = tuple(
         key
@@ -632,6 +718,10 @@ class RoutingSnapshot:
     #: Retired routing roles the effective document named and the load migrated,
     #: in document order.
     migrated_roles: tuple[str, ...] = ()
+    #: One notice per effective-document migration the owner must see (for
+    #: example a route dropped with a retired worker adapter).  Empty when the
+    #: document needed no migration.
+    notices: tuple[str, ...] = ()
     #: Pre-ADR-0005 role chains when the snapshot was reconstructed from a
     #: persisted schema-3 payload that still named them.  Re-emitted unchanged
     #: (same keys, same digest) so an adopted run never rewrites its evidence.
@@ -725,6 +815,7 @@ def _snapshot_from_v3(
     approved: Mapping[str, DynamicCandidate] | None = None,
     migrated_from: int | None = None,
     migrated_roles: tuple[str, ...] | None = None,
+    notices: tuple[str, ...] = (),
 ) -> RoutingSnapshot:
     pacing = validated.pacing()
     ch = _content_hash(
@@ -756,6 +847,7 @@ def _snapshot_from_v3(
         migrated_roles=(
             validated.migrated_roles if migrated_roles is None else migrated_roles
         ),
+        notices=notices,
     )
 
 
@@ -771,6 +863,7 @@ def load_packaged_default() -> RoutingSnapshot:
     except json.JSONDecodeError as exc:
         raise RoutingConfigError(f"Packaged default routing.json invalid JSON: {exc}") from exc
     retired = _retired_role_keys(data)
+    data, notices = _strip_retired_routes(data)
     canonical = canonical_routing_payload(data)
     approved = _parse_approved_candidates(canonical, str(path))
     validated = _validate_v3_structure(canonical, str(path), approved=approved)
@@ -780,6 +873,7 @@ def load_packaged_default() -> RoutingSnapshot:
         source_path=None,
         approved=approved,
         migrated_roles=retired,
+        notices=notices,
     )
 
 
@@ -808,6 +902,7 @@ def load_effective_routing() -> RoutingSnapshot:
         raw_sv = data.get("schema_version")
         migrated_from = raw_sv if type(raw_sv) is int and raw_sv in (1, 2) else None
         retired = _retired_role_keys(data)
+        data, notices = _strip_retired_routes(data)
         canonical = canonical_routing_payload(data)
         approved = _parse_approved_candidates(canonical, str(user_path))
         validated = _validate_v3_structure(canonical, str(user_path), approved=approved)
@@ -815,6 +910,7 @@ def load_effective_routing() -> RoutingSnapshot:
             validated, source="user", source_path=user_path, approved=approved,
             migrated_from=migrated_from,
             migrated_roles=retired if retired else None,
+            notices=notices,
         )
     return load_packaged_default()
 
@@ -977,7 +1073,7 @@ def payload_to_snapshot(payload: Any, run_id: str | None = None) -> RoutingSnaps
                 )
             chain = chains_obj[ctx_key]
             validated[ctx_key] = _validate_context_chain(
-                chain, ctx_key, source_label, approved=approved
+                chain, ctx_key, source_label, approved=approved, allow_retired=True
             )
 
         # A persisted snapshot is self-consistent only when its stored
@@ -1078,6 +1174,7 @@ def payload_to_snapshot(payload: Any, run_id: str | None = None) -> RoutingSnaps
                 source_label,
                 approved=approved,
                 out_pacing=pacing_list,
+                allow_retired=True,
             )
             legacy_groups[role] = groups
             legacy_pacing[role] = pacing_list
@@ -1098,7 +1195,10 @@ def payload_to_snapshot(payload: Any, run_id: str | None = None) -> RoutingSnaps
         if STRONG_START_KEY in payload:
             # New shape with a stray legacy key: honor both.
             mixed = _validate_v3_structure(
-                _document_keys(payload, source_label), source_label, approved=approved
+                _document_keys(payload, source_label),
+                source_label,
+                approved=approved,
+                allow_retired=True,
             )
             build_groups = mixed.build
             build_pacing = mixed.build_pacing
@@ -1145,7 +1245,10 @@ def payload_to_snapshot(payload: Any, run_id: str | None = None) -> RoutingSnaps
             ),
         )
     current = _validate_v3_structure(
-        _document_keys(payload, source_label), source_label, approved=approved
+        _document_keys(payload, source_label),
+        source_label,
+        approved=approved,
+        allow_retired=True,
     )
     canonical_hash_v3 = _content_hash(
         {"BUILD": current.build, STRONG_START_KEY: current.strong_start},
@@ -1431,6 +1534,7 @@ def load_effective_routing_payload() -> dict[str, Any]:
             raise RoutingConfigError(
                 f"Routing config at {user_path}: top-level must be JSON object"
             )
+        data, _notices = _strip_retired_routes(data)
         return canonical_routing_payload(data)
     path = _packaged_default_path()
     try:
@@ -1443,6 +1547,7 @@ def load_effective_routing_payload() -> dict[str, Any]:
         raise RoutingConfigError(f"Packaged default routing.json invalid JSON: {exc}") from exc
     if not isinstance(data, dict):
         raise RoutingConfigError("Packaged default routing.json top-level must be JSON object")
+    data, _notices = _strip_retired_routes(data)
     return canonical_routing_payload(data)
 
 
@@ -1635,9 +1740,14 @@ def _require_known_candidate_id(
     approved: Mapping[str, Any] | None,
     source_label: str,
     scope_label: str,
+    allow_retired: bool = False,
 ) -> None:
     approved_entry = approved.get(cid) if approved else None
-    if cid in ALLOWED_CANDIDATES or approved_entry is not None:
+    if (
+        (allow_retired and cid in _RETIRED_CANDIDATES)
+        or cid in ALLOWED_CANDIDATES
+        or approved_entry is not None
+    ):
         return
     discovered = _discovered_candidate_ids()
     if cid in discovered:

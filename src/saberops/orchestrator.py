@@ -459,9 +459,8 @@ def _record_quota_exhaustion_evidence(
     exclusion per pool the candidate draws via
     :func:`saberops.workers.exhaustion.record_exhaustion`.  The evidence
     only ever excludes: it never synthesizes, enables, or fails over to
-    any other route (in particular never to an API-key / METERED_KEY route
-    such as OmniRoute or direct_api -- those dispatch only when already
-    present in the owner's routing chain).  Evidence failure never breaks
+    any other route (in particular never to an API-key / METERED_KEY route).
+    Evidence failure never breaks
     continuation: the in-memory blocked-provider set already governs this
     cycle.
     """

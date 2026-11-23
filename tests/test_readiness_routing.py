@@ -809,10 +809,10 @@ def test_r1b_verify_unprovable_stays_unknown(
     assert evidence.state.value == "UNKNOWN"
 
 
-def test_r1b_verify_api_connection_not_falsely_not_ready(
+def test_r1b_api_connection_never_reports_ready(
     isolated_state: dict[str, Path], tmp_path: Path
 ) -> None:
-    """API verification classifies a missing credential without requiring a CLI."""
+    """A stored direct-API row has no transport (H17) and never sends anything."""
     api = ProviderConnection(
         connection_id="byok-r1b-api",
         provider="testapi",
@@ -835,7 +835,7 @@ def test_r1b_verify_api_connection_not_falsely_not_ready(
     service.refresh(connection)
     catalog = ReadinessStore(isolated_state["readiness"]).load()
     evidence = catalog.try_get("byok-r1b-api")
-    assert evidence is not None and evidence.reason == "CREDENTIAL_MISSING"
+    assert evidence is not None and evidence.reason == "PROTOCOL_UNSUPPORTED"
     assert evidence.state is ProviderReadiness.NOT_READY
 
 

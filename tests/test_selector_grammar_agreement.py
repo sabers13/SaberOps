@@ -108,23 +108,23 @@ def test_packaged_go_zero_probe_does_not_exclude_zen(
         ).eligible is eligible
 
 
-def test_clinepass_route_clears_after_backoff_until_m2_4b(
+def test_zen_route_clears_after_backoff_until_m2_4b(
     tmp_path: Path, packaged_policy: ControlPlanePolicy,
 ) -> None:
     # Interim behaviour while every effective pool has overage_possible=False;
     # it flips to "kept" when M2-4b activates the evidence rule. (Orchestrator
-    # decision 2026-10-12: safe, because the Cline credit balance is $0 and
-    # ClinePass exhaustion is a hard stop.)
+    # decision 2026-10-12: safe, because the pool has no overage and an
+    # exhausted plan window is a hard stop.)
     db = Database(tmp_path / "capacity.db")
     pools = effective_quota_pools(packaged_policy)
     now = datetime.now(UTC)
     record_exhaustion(
-        db, provider="cline", model="cline-pass/test-model", pool_policies=pools
+        db, provider="opencode", model="opencode/test-model", pool_policies=pools
     )
-    candidate = WorkerCandidate(provider="cline", model="cline-pass/test-model")
+    candidate = WorkerCandidate(provider="opencode", model="opencode/test-model")
     early = effective_quota_states(db, now=now, run_probes=False)
     assert any(
-        state.exclusion_id and state.pool_id == "clinepass" for state in early
+        state.exclusion_id and state.pool_id == "opencode-zen" for state in early
     )
     assert not quota_decision(
         candidate, early, pool_policies=pools, now=now,

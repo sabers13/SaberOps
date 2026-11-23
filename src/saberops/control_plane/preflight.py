@@ -169,7 +169,7 @@ def evaluate_control_plane(
     unevaluated, the same way the contract is silent about adapters
     that have no opinion about project instructions.  Adapters that
     never carry an automatic project-instruction mechanism (for
-    example Codex, Cline, Antigravity, Copilot) are correctly outside
+    example Codex, Antigravity, Copilot) are correctly outside
     this contract and behave exactly as before.  The default ``False``
     preserves every existing caller exactly.
     """

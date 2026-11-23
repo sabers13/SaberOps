@@ -72,7 +72,6 @@ HARNESS_ENV_ADDITIONS: Mapping[str, tuple[str, ...]] = {
     "codex": ("CODEX_HOME",),
     "opencode": (),
     "antigravity": (),
-    "cline": (),
 }
 
 #: Exact SaberOps-owned overlay names safe to forward to a native child.
@@ -102,7 +101,7 @@ SABEROPS_OWNED_ENV_ALLOWLIST: tuple[str, ...] = (
 #:   (``orchestrator.py``), executable-binding identity and profile selectors
 #:   (``control_plane/bindings.py``), the ``ORCH_MODEL_*`` / ``ORCH_BINDING_*``
 #:   reason vocabulary, and adapter profile selectors
-#:   (``workers/opencode.py``, ``workers/antigravity.py``, ``workers/cline.py``);
+#:   (``workers/opencode.py``, ``workers/antigravity.py``);
 #: * ``_ORCH_`` -- the Copilot MiniMax sentinel (``workers/copilot.py``).
 #:
 #: The removed gateway seam formerly emitted ``ORCH_GATEWAY_*`` control
@@ -173,7 +172,7 @@ def hermetic_env(
     """Return the hermetic child environment for one native CLI dispatch.
 
     ``harness`` is the adapter identity (``claude``, ``codex``, ``opencode``,
-    ``antigravity``, or ``cline``).  ``overlay`` is the environment SaberOps
+    ``antigravity``).  ``overlay`` is the environment SaberOps
     supplied in ``WorkerRequest.env``; only its allowlisted subset is applied.
     ``parent_env`` defaults to ``os.environ``.
 
