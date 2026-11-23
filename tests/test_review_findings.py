@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fastapi.testclient import TestClient
 
 from saberops.config import resolve_run_config
 from saberops.control_plane import (
@@ -31,7 +30,6 @@ from saberops.models import (
 from saberops.orchestrator import Orchestrator
 from saberops.review import render_findings, structured_review_outcome
 from saberops.review_policy import FINDINGS_PROMPT
-from saberops.web import create_app
 from saberops.workers.base import WorkerAdapter
 from saberops.workers.registry import AdapterRegistry
 
@@ -234,7 +232,7 @@ class _Adapter(WorkerAdapter):
                             stderr="", changed_paths=["f.txt"], has_changes=True)
 
 
-def test_review_run_persists_findings_and_run_page_shows_them(
+def test_review_run_persists_structured_findings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     for name, sub in (("XDG_STATE_HOME", "state"), ("XDG_CONFIG_HOME", "config"),
@@ -275,6 +273,3 @@ def test_review_run_persists_findings_and_run_page_shows_them(
     assert review.verdict is ReviewVerdict.PASS
     stored = db.get_findings_for_review(review.id)
     assert [f.classification for f in stored] == ["N1"] and not stored[0].blocking
-    page = TestClient(create_app(db_path=tmp_path / "orch.db")).get(f"/runs/{result.run_id}")
-    assert "Structured findings" in page.text and "Delete skips the version check" in page.text
-    assert "N1 Non-blocking note" in page.text and "0 blocking" in page.text

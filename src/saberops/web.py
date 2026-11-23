@@ -1,15 +1,14 @@
-"""Local web dashboard for SaberOps.
+"""Local web onboarding pages for SaberOps.
 
-This module wires the FastAPI application served by ``orch ui``. It uses
-OrchestratorService as a shared facade for reading state and dispatching
-runs, reviews, accept, cleanup, and live SSE event streaming.
+This module wires the small FastAPI application served by ``orch ui``. It keeps
+only the first-run setup, accounts and questions pages; run monitoring, plan
+and wave scoring, the routing editor and the storage cleanup page were retired
+by phase 1.1 lane H23, and phase 2 rebuilds the board on this server.
 """
 # ruff: noqa: E501
 
 from __future__ import annotations
 
-import asyncio
-import hashlib
 import hmac
 import json
 import os
@@ -21,7 +20,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
-from collections.abc import AsyncGenerator, Callable, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -38,29 +37,16 @@ from fastapi.responses import (
     HTMLResponse,
     JSONResponse,
     RedirectResponse,
-    StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from saberops import access_ops, plans_ops
-from saberops.accept import AcceptEngine
 from saberops.away import (
     NEVER_DELEGABLE_KINDS,
     NEVER_DELEGABLE_POLICY,
     DecisionScope,
     StandingDecision,
-)
-from saberops.config import (
-    MAX_CONCURRENT_TASKS,
-    MAX_WORKER_SESSIONS_PER_PROJECT,
-    ConfigError,
-    ConfigLedger,
-    approve_config_proposal,
-    config_ledger_path,
-    current_workflow_settings,
-    default_workflow_settings,
-    propose_config_change,
 )
 from saberops.control_plane import (
     BindingRole,
@@ -92,22 +78,8 @@ from saberops.model_access import (
     ReadinessStore,
     discover_connection_models,
 )
-from saberops.models import (
-    TERMINAL_RUN_STATUSES,
-    CheckResult,
-    ReviewVerdict,
-    Run,
-    RunStatus,
-)
 from saberops.observability.run_report import (
-    build_run_report,
-    run_explanation,
     saberops_version,
-)
-from saberops.owner_actions import (
-    LAUNCH_FAILED_REASON,
-    OwnerActionSupervisor,
-    summarize_owner_actions,
 )
 from saberops.owner_mode import (
     OwnerModeError,
@@ -119,19 +91,7 @@ from saberops.owner_mode import (
 from saberops.owner_mode import (
     mode_view as owner_mode_view,
 )
-from saberops.paths import saberops_state_dir
 from saberops.project import ProjectRegistry, owner_state_dir
-from saberops.project_mode import (
-    MODE_LABELS,
-    MODE_ORDER,
-    allowed_modes,
-    extract_project_mode_facts,
-    mode_rank,
-    mode_requirements,
-    preflight,
-    recommend_mode,
-    requires_owner_confirmation,
-)
 from saberops.questions import (
     AnswerAuthority,
     AskRole,
@@ -141,26 +101,11 @@ from saberops.questions import (
     is_due,
     question_view,
 )
-from saberops.routing_config import load_effective_routing
-from saberops.run_titles import fallback_title
 from saberops.runtime import ProjectRuntime, ProjectRuntimeManager
 from saberops.service import OrchestratorService
 from saberops.storage_cleanup import (
-    GcPolicyError,
-    apply_gc,
-    build_inventory,
     current_disk_floor_bytes,
-    database_audit_sink,
-    default_gc_policy_path,
     disk_ok,
-    load_gc_policy,
-    preview_gc,
-)
-from saberops.wake import subscribe_run
-from saberops.wave_plan_optimizer import (
-    default_optimization_limits,
-    graph_from_revisions,
-    optimize_plan,
 )
 from saberops.workers.registry import AdapterRegistry
 
@@ -251,19 +196,6 @@ OWNER_ACTION_SSE_EVENT_TYPES: tuple[str, ...] = (
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
 
-def _owner_actions_stream_active(db: Any, run_id: str) -> bool:
-    """True while a Review or Accept owner action is effectively active.
-
-    Read-only liveness projection: never mutates storage.  Used by the
-    SSE stream so a terminal run with live post-run owner work keeps a
-    usable event stream until the work settles.
-    """
-    try:
-        summary = summarize_owner_actions(db, run_id)
-    except Exception:
-        return False
-    return summary.active_review is not None or summary.active_accept is not None
-
 
 def format_timestamp(value: str | None) -> str:
     """Render a stored timestamp in canonical format: YYYY-MM-DD HH:MM:SS UTC."""
@@ -284,205 +216,10 @@ def format_timestamp(value: str | None) -> str:
     return parsed.strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
-def _status_class(status: str) -> str:
-    """Normalize a status string into a CSS-friendly class token."""
-    return status.strip().lower().replace(" ", "-").replace("_", "-")
 
 
-def _gate_result(checks: list[CheckResult]) -> str | None:
-    """Derive an overall gate result from a list of checks."""
-    if not checks:
-        return None
-    return "PASS" if all(check.passed for check in checks) else "FAIL"
 
 
-def _run_rows(runs: list[Run]) -> list[dict[str, Any]]:
-    """Convert runs into dashboard table rows."""
-    return [
-        {
-            "id": run.id,
-            "repository": run.target_repo,
-            "tier": run.tier.value,
-            "status": run.status.value,
-            "status_class": _status_class(run.status.value),
-            "created_at": run.created_at,
-            "completed_at": run.completed_at,
-            "summary": run.display_title or fallback_title(run.task, run.target_repo),
-        }
-        for run in runs
-    ]
-
-
-def _attempt_rows(db: Database, run: Run) -> list[dict[str, Any]]:
-    """Convert attempts (plus their gate results) into template rows."""
-    rows: list[dict[str, Any]] = []
-    dispatches = {
-        event.attempt_id: event.payload
-        for event in db.get_events(run.id, limit=1000)
-        if event.event_type == "worker_started"
-        and event.attempt_id
-        and isinstance(event.payload, dict)
-    }
-    for attempt in db.get_attempts_for_run(run.id):
-        checks = db.get_checks_for_attempt(attempt.id)
-        last_check = checks[-1] if checks else None
-        rows.append(
-            {
-                "attempt_number": attempt.attempt_number,
-                "provider": attempt.provider,
-                "model": attempt.model,
-                "status": attempt.status.value,
-                "status_class": _status_class(attempt.status.value),
-                "commit_sha": attempt.commit_sha,
-                "worktree_path": attempt.worktree_path,
-                "worker_stdout": attempt.worker_stdout,
-                "worker_stderr": attempt.worker_stderr,
-                "worker_error": attempt.worker_error,
-                "gate_result": _gate_result(checks),
-                "gate_stdout": last_check.stdout if last_check else "",
-                "gate_stderr": last_check.stderr if last_check else "",
-                "gate_exit_code": last_check.exit_code if last_check else None,
-                "created_at": attempt.created_at,
-                "completed_at": attempt.completed_at,
-                "stage": (dispatches.get(attempt.id) or {}).get("stage", "Unknown"),
-                "tier": (dispatches.get(attempt.id) or {}).get("tier", "Unknown"),
-            }
-        )
-    return rows
-
-
-def _review_rows(db: Database, run: Run) -> list[dict[str, Any]]:
-    """Convert reviews into detailed template rows for the Review UX."""
-    raw_reviews = db.get_reviews_for_run(run.id)
-    if not raw_reviews:
-        return []
-
-    config_data: dict[str, Any] = {}
-    if run.config_json:
-        try:
-            config_data = json.loads(run.config_json)
-        except Exception:
-            config_data = {}
-
-    review_mode = str(config_data.get("review_mode") or "bounded").lower()
-    review_limit = int(config_data.get("review_limit") or 3)
-
-    # Gather attempts and repair events to track candidate SHA and related repair SHA
-    attempts = db.get_attempts_for_run(run.id)
-    events = db.get_events(run.id)
-    repair_events = [e for e in events if e.event_type == "repair_started"]
-
-    # Initial candidate SHA (commit of the attempt before reviews started)
-    initial_candidate_sha: str | None = None
-    for att in attempts:
-        if att.commit_sha:
-            initial_candidate_sha = att.commit_sha
-            break
-
-    # Attempts that are repairs (attempt_number >= 2 or matching repair events)
-    repair_attempts = [att for att in attempts if att.attempt_number > 1]
-
-    rows: list[dict[str, Any]] = []
-    for idx, review in enumerate(raw_reviews):
-        review_number = idx + 1
-
-        # Review progress label and final flag
-        if review_mode == "max":
-            progress_label = f"Review {review_number} / MAX"
-            is_final = False
-        else:
-            progress_label = f"Review {review_number} / {review_limit}"
-            is_final = review_number == review_limit
-
-        # Execution status vs substantive verdict
-        if review.verdict == ReviewVerdict.REVIEW_EXECUTION_FAILED:
-            execution_status = "FAILED"
-        elif review.verdict == ReviewVerdict.REVIEW_UNAVAILABLE:
-            execution_status = "UNAVAILABLE"
-        else:
-            execution_status = "COMPLETED"
-
-        # Candidate SHA reviewed: resolve from lineage
-        candidate_sha: str | None
-        if idx == 0:
-            candidate_sha = initial_candidate_sha
-        elif (idx - 1) < len(repair_attempts):
-            sha = repair_attempts[idx - 1].commit_sha
-            candidate_sha = sha if sha is not None else initial_candidate_sha
-        else:
-            candidate_sha = None
-            if idx < len(repair_events):
-                payload = repair_events[idx].payload
-                if isinstance(payload, dict):
-                    raw = payload.get("from_sha")
-                    if isinstance(raw, str) and raw:
-                        candidate_sha = raw
-            if candidate_sha is None and repair_attempts:
-                last = repair_attempts[-1].commit_sha
-                candidate_sha = last if last is not None else initial_candidate_sha
-            if candidate_sha is None:
-                candidate_sha = initial_candidate_sha
-
-        # Related repair SHA produced as a result of this review
-        repair_sha: str | None = None
-        if idx < len(repair_attempts):
-            repair_sha = repair_attempts[idx].commit_sha
-
-        rows.append(
-            {
-                "id": review.id,
-                "review_number": review_number,
-                "progress_label": progress_label,
-                "is_final": is_final,
-                "provider": review.provider,
-                "model": review.model,
-                "execution_status": execution_status,
-                "verdict": review.verdict.value,
-                "status_class": _status_class(review.verdict.value),
-                "candidate_sha": candidate_sha,
-                "repair_sha": repair_sha,
-                "summary": review.summary,
-                "details": review.details,
-                "created_at": review.created_at,
-                "findings": _finding_rows(db, review.id),
-            }
-        )
-    return rows
-
-
-def _finding_rows(db: Database, review_id: str) -> list[dict[str, Any]]:
-    """Structured reviewer findings for one review, blocking ones first."""
-    from saberops.review_policy import FINDING_LABELS
-
-    try:
-        findings = db.get_findings_for_review(review_id)
-    except Exception:
-        return []
-    rows = [
-        {
-            "code": f.classification,
-            "label": FINDING_LABELS.get(f.classification, f.classification),
-            "tone": "fail" if f.blocking else (
-                "warning" if f.classification == "D1" else "pass"
-            ),
-            "blocking": f.blocking,
-            "title": f.title,
-            "severity": f.severity,
-            "location": f.code_location or "",
-            "requirement": f.invariant_or_requirement,
-            "contract": f.contract_reference or "",
-            "failure": f.failure_scenario,
-            "evidence": f.evidence,
-            "correction": f.minimum_correction,
-            "scope": f.repair_scope.replace("_", " ").lower(),
-        }
-        for f in findings
-    ]
-    order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-    rows.sort(
-        key=lambda r: (not r["blocking"], r["code"] != "D1", order.get(str(r["severity"]), 4))
-    )
-    return rows
 
 
 def resolve_owner_argv_prefix() -> list[str]:
@@ -506,223 +243,7 @@ def resolve_orch_executable() -> str:
 
     return _resolve()
 
-def _dashboard_context(
-    service: OrchestratorService,
-    *,
-    error: str | None = None,
-    notice: str | None = None,
-) -> dict[str, Any]:
-    """Build the minimal status-page context: the run list."""
-    return {
-        "runs": _run_rows(service.list_runs(limit=50)),
-        "db_path": str(service.db.db_path),
-        "saberops_version": saberops_version(),
-        "error": error,
-        "notice": notice,
-    }
 
-
-def _run_detail_context(
-    db: Database,
-    run: Run,
-    *,
-    confirming_accept: bool = False,
-    confirming_reject: bool = False,
-    accept_result: dict[str, str] | None = None,
-    error: str | None = None,
-    notice: str | None = None,
-) -> dict[str, Any]:
-    """Build the minimal run-detail status context.
-
-    L-A step 5: status, attempts, gate results, review verdict, and diff
-    only.  Continuation offers, git worktrees, resume capsules, frozen
-    tools, plans, and the review/cleanup/retry/cancel actions now live in
-    the ``orch`` CLI.
-    """
-    # Acceptance authority lives in AcceptEngine.  The Web renders the
-    # engine-derived read-only projection as a checklist and gates the
-    # Accept button on it; it never recreates acceptance policy.
-    eligibility = AcceptEngine(db=db).check_accept_eligibility(run.id)
-    can_accept = eligibility.eligible
-    accept_checklist = eligibility.as_dict()["checks"]
-    # Rejectability derives from the same service/projection
-    # authority as the Reject action (never from RunStatus alone), and
-    # the Candidate State shown is the projection including
-    # REJECTED.  Reads here never record rejection events.
-    from saberops.candidate_lifecycle import can_reject_candidate, project_candidate_state
-
-    try:
-        _projection = project_candidate_state(db, run.id)
-        candidate_state: str | None = (
-            _projection.state.value if _projection.state is not None else None
-        )
-    except Exception:
-        candidate_state = None
-    try:
-        can_reject = can_reject_candidate(db, run.id)
-    except Exception:
-        can_reject = False
-    attempts = db.get_attempts_for_run(run.id)
-    events = db.get_events(run.id, limit=1000)
-    review_rows = db.get_reviews_for_run(run.id)
-    review_count = len(review_rows)
-
-    candidate_sha: str | None = None
-    changed_files: list[str] = []
-    diff_text = ""
-    diff_files: tuple[dict[str, object], ...] = ()
-    diff_totals: dict[str, int | bool] | None = None
-    diff_truncated = False
-    diff_available = False
-    diff_unavailable_reason: str | None = None
-    failure_reason: str | None = run.result_summary
-
-    for att in attempts:
-        if att.worker_error:
-            failure_reason = att.worker_error
-
-    # The Changes view is the same read-only candidate-diff
-    # projection as GET /runs/{run_id}/diff -- frozen base_commit ..
-    # Current candidate SHA from the run's persisted repository.
-    # Event changed_paths and latest-attempt SHAs are never consulted.
-    try:
-        from saberops.candidate_diff import project_candidate_diff
-
-        diff = project_candidate_diff(db, run.id)
-        candidate_sha = diff.candidate_sha
-        changed_files = list(diff.changed_paths)
-        diff_text = diff.diff_text
-        diff_files = diff.files
-        diff_totals = diff.totals
-        diff_truncated = diff.truncated
-        diff_available = diff.available
-        diff_unavailable_reason = diff.unavailable_reason
-    except Exception:
-        candidate_sha = None
-        changed_files = []
-        diff_text = ""
-        diff_truncated = False
-        diff_available = False
-        diff_unavailable_reason = "diff_failed"
-
-    current_dispatch: dict[str, Any] | None = None
-    for ev in reversed(events):
-        if ev.event_type in ("worker_started", "review_dispatch_started") and isinstance(
-            ev.payload, dict
-        ):
-            current_dispatch = {
-                "stage": ev.payload.get("stage") or "Unknown",
-                "tier": ev.payload.get("tier") or "Unknown",
-                "tier_reason": ev.payload.get("tier_reason") or "Unknown",
-                "provider": ev.payload.get("provider") or "Unknown",
-                "model": ev.payload.get("model") or "Unknown",
-            }
-            break
-    usage = db.aggregate_model_call_usage(run.id)
-    try:
-        run_report: dict[str, Any] | None = build_run_report(db, run.id)
-    except Exception:
-        # The monitoring projection must never break the run page: a
-        # report build failure degrades to "unavailable" in the UI
-        # while the canonical CLI/API surfaces still fail closed.
-        run_report = None
-    # Durable owner-action projection.  This says whether the
-    # detached process executing Review/Accept authority is active or how
-    # the last one settled -- it is never a second review verdict or
-    # acceptance-policy authority (those stay in the reviews table and
-    # the AcceptEngine evidence).
-    try:
-        owner_summary = summarize_owner_actions(db, run.id)
-    except Exception:
-        owner_summary = None
-    if owner_summary is not None and owner_summary.active_review is not None:
-        owner_review_active = True
-        owner_review_state: str | None = owner_summary.active_review.state.value
-        owner_review_action: str | None = owner_summary.active_review.action_id
-    else:
-        owner_review_active = False
-        owner_review_state = None
-        owner_review_action = None
-    if owner_summary is not None and owner_summary.active_accept is not None:
-        owner_accept_active = True
-        owner_accept_state: str | None = owner_summary.active_accept.state.value
-        owner_accept_action: str | None = owner_summary.active_accept.action_id
-    else:
-        owner_accept_active = False
-        owner_accept_state = None
-        owner_accept_action = None
-    if owner_summary is not None and owner_summary.last_review is not None:
-        owner_review_last_error: str | None = (
-            owner_summary.last_review.reason
-            or owner_summary.last_review.error
-            or owner_summary.last_review.state.value
-        )
-    else:
-        owner_review_last_error = None
-    if owner_summary is not None and owner_summary.last_accept is not None:
-        owner_accept_last_error: str | None = (
-            owner_summary.last_accept.reason
-            or owner_summary.last_accept.error
-            or owner_summary.last_accept.state.value
-        )
-    else:
-        owner_accept_last_error = None
-
-    return {
-        "missing": False,
-        "run_id": run.id,
-        "task": run.task,
-        "display_title": run.display_title or fallback_title(run.task, run.target_repo),
-        "target_repo": run.target_repo,
-        "base_commit": run.base_commit,
-        "tier": run.tier.value,
-        "training_policy": "Allowed" if run.training_allowed else "Denied",
-        "status": run.status.value,
-        "status_class": _status_class(run.status.value),
-        "gate_command": run.gate_command,
-        "summary": run.result_summary,
-        "created_at": run.created_at,
-        "completed_at": run.completed_at,
-        "attempts": _attempt_rows(db, run),
-        "reviews": _review_rows(db, run),
-        "review_count": review_count,
-        "events": events,
-        "candidate_sha": candidate_sha,
-        "changed_files": changed_files,
-        "diff_text": diff_text,
-        "diff_files": diff_files,
-        "diff_totals": diff_totals,
-        "diff_truncated": diff_truncated,
-        "diff_available": diff_available,
-        "diff_unavailable_reason": diff_unavailable_reason,
-        "failure_reason": failure_reason,
-        "can_accept": can_accept,
-        "accept_checklist": accept_checklist,
-        "candidate_state": candidate_state,
-        "can_reject": can_reject,
-        "owner_review_active": owner_review_active,
-        "owner_review_state": owner_review_state,
-        "owner_review_action": owner_review_action,
-        "owner_accept_active": owner_accept_active,
-        "owner_accept_state": owner_accept_state,
-        "owner_accept_action": owner_accept_action,
-        "owner_review_last_error": owner_review_last_error,
-        "owner_accept_last_error": owner_accept_last_error,
-        "confirming_accept": confirming_accept,
-        "confirming_reject": confirming_reject,
-        "accept_result": accept_result,
-        "error": error,
-        "notice": notice,
-        "current_dispatch": current_dispatch,
-        "usage": usage,
-        "run_report": run_report,
-        "chat_explanation": run_explanation(run_report) if run_report else run.result_summary,
-    }
-
-
-def _missing_run_context(run_id: str) -> dict[str, Any]:
-    """Build the no-such-run context."""
-    return {"missing": True, "run_id": run_id}
 
 
 def _access_store() -> AccessStore:
@@ -1160,70 +681,6 @@ def initialize_account_readiness() -> None:
     ).refresh_accounts_on_startup()
 
 
-def _notice_from_query(request: Request) -> str | None:
-    """Translate a success-redirect flag into a human notice."""
-    reviewed = request.query_params.get("reviewed")
-    if reviewed == "1":
-        return "Review completed."
-    if reviewed == "unavailable":
-        return "Review unavailable."
-    if reviewed == "failed":
-        return "Review failed."
-    if request.query_params.get("cleaned") == "1":
-        return "Cleanup completed."
-    if request.query_params.get("rejected") == "1":
-        return "Candidate rejected (durable owner decision)."
-    if request.query_params.get("review_queued") == "1":
-        return "Review queued: a detached owner action is running; this page updates via live events."
-    if request.query_params.get("accept_queued") == "1":
-        return "Accept queued: a detached owner action is running; this page updates via live events."
-    if request.query_params.get("action_active") == "review":
-        return "A Review owner action is already running for this candidate."
-    if request.query_params.get("action_active") == "accept":
-        return "An Accept owner action is already running for this candidate."
-    if request.query_params.get("updated") == "1":
-        return "Quota updated."
-    if request.query_params.get("enabled") == "1":
-        return "Quota enabled."
-    if request.query_params.get("connection_saved") == "1":
-        auto = request.query_params.get("auto_discovered")
-        if auto is not None:
-            try:
-                count = int(auto)
-            except ValueError:
-                count = -1
-            if count >= 0:
-                return (
-                    "Connection saved (credential reference only; no secret stored). "
-                    f"Bounded discovery ran automatically and found {count} model(s) "
-                    "below; adding a provider only makes models available, it does "
-                    "not place them into routing."
-                )
-        if request.query_params.get("auto_discover_failed") == "1":
-            return (
-                "Connection saved (credential reference only; no secret stored). "
-                "Automatic discovery could not enumerate models; use "
-                "'Refresh models' to retry. Nothing was invented."
-            )
-        return "Connection saved (credential reference only; no secret stored)."
-    if request.query_params.get("connection_tested") == "1":
-        return "Connection probed (see result below)."
-    if request.query_params.get("routing_model_added") == "1":
-        return "Model added to the routing chain (owner decision)."
-    if request.query_params.get("routing_model_removed") == "1":
-        return "Model removed from the routing chain."
-    if request.query_params.get("routing_model_moved") == "1":
-        return "Routing chain reordered (canonical order saved)."
-    if request.query_params.get("selected") == "1":
-        return (
-            "Reviewer model selection saved (exact binding identity)."
-            if request.query_params.get("role") == "reviewer"
-            else "Orchestrator model selection saved (exact binding identity)."
-        )
-    if request.query_params.get("project_selected") == "1":
-        return "Target project updated."
-    return None
-
 
 _LOOPBACK_HOST_NAMES = frozenset({"127.0.0.1", "localhost", "::1"})
 _SYNTHETIC_TEST_HOST = "testserver"
@@ -1309,12 +766,12 @@ def _host_header_allowed(request: Request) -> bool:
 
 
 def _is_private_web_path(path: str) -> bool:
-    """Paths whose responses may carry owner run data or mutate state.
+    """Paths whose responses may carry owner data or mutate state.
 
     ``/health`` reports non-secret install identity for diagnostics and
-    ``/static/*`` serves bundled assets; everything else (dashboard,
-    run pages, report/actions/streams JSON, accept/reject POSTs, API
-    docs) requires a trusted Host header.
+    ``/static/*`` serves bundled assets; everything else (setup, accounts
+    and questions pages, their POSTs, and API docs) requires a trusted Host
+    header.
     """
     if path == "/health" or path == "/static" or path.startswith("/static/"):
         return False
@@ -1322,15 +779,14 @@ def _is_private_web_path(path: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Step 019 (UI-1) — first-run onboarding surface.
+# Step 019 (UI-1) — the kept first-run onboarding surface.
 #
-# Read projections and owner-confirmed mutations for the complete first-run
-# UI: readiness diagnostics, honest vendor logins, connection/model discovery,
-# fail-closed posture, per-role routing, 3x5 concurrency, project entry modes,
-# plan/wave inspection, the question queue, unattended standing decisions and
-# the storage/Git lifecycle dry-run.  Every projection degrades to an honest
-# empty state and never raises into the request path; every mutation is gated
-# on a process-local CSRF token plus explicit owner confirmation.
+# Read projections and owner-confirmed mutations for first-run Setup, Accounts
+# and Questions: readiness diagnostics, honest vendor logins, connection/model
+# discovery, fail-closed posture, the question queue, unattended standing
+# decisions, the owner mode and the work gate.  Every projection degrades to
+# an honest empty state and never raises into the request path; every mutation
+# is gated on a process-local CSRF token plus explicit owner confirmation.
 # ---------------------------------------------------------------------------
 
 _CSRF_TOKEN: str = secrets.token_urlsafe(32)
@@ -1361,25 +817,11 @@ def _pill_class(state: str) -> str:
     return "warn"
 
 
-def _config_ledger() -> ConfigLedger:
-    """Return the owner configuration ledger (``ORCH_CONFIG_LEDGER`` override)."""
-    override = os.environ.get("ORCH_CONFIG_LEDGER", "").strip()
-    if override:
-        return ConfigLedger(Path(override).expanduser())
-    return ConfigLedger(config_ledger_path(saberops_state_dir()))
-
 
 def _question_queue() -> OwnerQuestionQueue:
     """Return the durable owner-question queue (``ORCH_QUESTIONS_STORE`` override)."""
     return OwnerQuestionQueue()
 
-
-def _gc_policy_path() -> Path:
-    """Resolve the owner GC standing policy path (``ORCH_GC_POLICY`` override)."""
-    override = os.environ.get("ORCH_GC_POLICY", "").strip()
-    if override:
-        return Path(override).expanduser()
-    return default_gc_policy_path()
 
 
 def _unattended_store_path() -> Path:
@@ -1399,15 +841,6 @@ def _onboarding_notice(request: Request) -> str | None:
         return "Work paused. Nothing starts or resumes until you confirm a resume."
     if params.get("resumed") == "1":
         return "Resumed. Parked work returns to the scheduler on its next tick."
-    saved = params.get("saved")
-    if saved in ("added", "removed", "moved"):
-        return {
-            "added": "Saved. The model was added.",
-            "removed": "Saved. The model was removed.",
-            "moved": "Saved. The order changed.",
-        }[saved]
-    if params.get("concurrency_saved") == "1":
-        return "Saved. New limits apply to the next task that starts."
     if params.get("discovered") == "1":
         connection = params.get("connection") or "the connection"
         return f"Model list refreshed for {connection}."
@@ -1446,19 +879,10 @@ def _onboarding_notice(request: Request) -> str | None:
             "no-executable": "Usage not checked: this account's command-line tool is not installed.",
             "failed": "Usage could not be read. The reason and next step are shown on this account.",
         }.get(outcome, "Usage was not checked this time.")
-    if params.get("project_registered") == "1":
-        return "Project registered (inactive until you activate it)."
     if params.get("answered") == "1":
         return "Owner answer recorded verbatim."
     if params.get("deferred") == "1":
         return "Question deferred; it resurfaces on the chosen date."
-    if params.get("gc_applied") == "1":
-        applied = params.get("applied") or "0"
-        refused = params.get("refused") or "0"
-        message = f"Cleanup applied: {applied} action(s); refused {refused}."
-        if params.get("audit_uncertain") == "1":
-            message += " Audit persistence was uncertain; reconcile before relying on the log."
-        return message
     return None
 
 
@@ -1638,58 +1062,6 @@ def _posture_rows() -> list[dict[str, Any]]:
     return rows
 
 
-def _role_binding_view() -> dict[str, Any]:
-    """Owner bindings grouped by semantic role, plus explicit selections."""
-    owner = _load_owner_bindings_safely()
-    roles: dict[str, list[dict[str, Any]]] = {
-        "worker": [],
-        "reviewer": [],
-    }
-    try:
-        for binding in owner.registry.list_bindings():
-            key = binding.binding_role.value.lower()
-            if key not in roles:
-                continue
-            roles[key].append(
-                {
-                    "binding_id": binding.binding_id,
-                    "provider": binding.provider,
-                    "model": binding.model,
-                    "backend": binding.backend.value,
-                    "quota_pool_id": binding.quota_pool_id,
-                    "verified_at": binding.verified_at,
-                }
-            )
-    except Exception:
-        pass
-    try:
-        selected_reviewer = list(owner.role_binding_ids("reviewer"))
-    except Exception:
-        selected_reviewer = []
-    return {
-        "roles": roles,
-        "selected_reviewer": selected_reviewer,
-    }
-
-
-def _role_chain_rows() -> list[dict[str, Any]]:
-    """Effective build-route chains and its stronger-model start setting."""
-    try:
-        snapshot = load_effective_routing()
-    except Exception:
-        return []
-    rows: list[dict[str, Any]] = []
-    for role, groups in snapshot.role_chains:
-        rows.append(
-            {
-                "role": role,
-                "groups": [
-                    [f"{candidate.provider}/{candidate.model}" for candidate in group]
-                    for group in groups
-                ],
-            }
-        )
-    return rows
 
 
 _ACCOUNT_LABELS: dict[str, str] = {
@@ -1701,11 +1073,6 @@ _ACCOUNT_LABELS: dict[str, str] = {
     "opencode": "OpenCode",
 }
 
-
-def _account_label(provider: str) -> str:
-    """Plain account name for a provider id ("codex" -> "Codex")."""
-    key = provider.strip().lower()
-    return _ACCOUNT_LABELS.get(key, key.replace("-", " ").replace("_", " ").title() or "Unknown")
 
 
 #: Owner-facing names for the upstream providers an aggregator account (OpenCode,
@@ -1734,40 +1101,8 @@ _UPSTREAM_LABELS: dict[str, str] = {
 }
 
 
-def _upstream_label(prefix: str) -> str:
-    key = prefix.strip().lower().lstrip("~")
-    if key in _UPSTREAM_LABELS:
-        return _UPSTREAM_LABELS[key]
-    words = key.replace("_", " ").replace("-", " ").split()
-    return " ".join(w.upper() if w == "ai" else w.capitalize() for w in words) or prefix
 
 
-def _model_origin(provider: str, model: str) -> str:
-    """Where a model really comes from, in words: "OpenCode Go · via OpenCode"."""
-    account = _account_label(provider)
-    head, sep, _rest = model.partition("/")
-    if not sep:
-        return f"{account} account"
-    return f"{_upstream_label(head)} · via {account}"
-
-
-def _search_text(*parts: str) -> str:
-    """Lowercased words with separators flattened, so "opencode go" finds "opencode-go"."""
-    text = " ".join(parts).lower()
-    for mark in "-_/.~·":
-        text = text.replace(mark, " ")
-    return " ".join(text.split())
-
-
-def _model_family(provider: str, model: str) -> str:
-    """The company behind a model, used only to hint at independent review."""
-    text = f"{provider}/{model}".lower()
-    for needle, family in (
-        ("claude", "Anthropic"), ("gemini", "Google"), ("gpt", "OpenAI"), ("codex", "OpenAI"),
-    ):
-        if needle in text:
-            return family
-    return _account_label(provider)
 
 
 def _planner_view() -> dict[str, Any]:
@@ -1788,337 +1123,11 @@ def _planner_view() -> dict[str, Any]:
     return {"connected": True, "name": name, "since": record.acquired_at, "holder": record.holder}
 
 
-def _chain_row(position: int, key: str, provider: str, model: str, technical: str) -> dict[str, Any]:
-    return {
-        "position": position,
-        "key": key,
-        # Stable per-model name so a reorder animates the row, not the list.
-        "vt": "m" + hashlib.sha1(key.encode("utf-8")).hexdigest()[:12],
-        "label": model.rsplit("/", 1)[-1],
-        "account": _account_label(provider),
-        "origin": _model_origin(provider, model),
-        "family": _model_family(provider, model),
-        "technical": technical,
-    }
 
 
-def _routing_view(request: Request, registry: AdapterRegistry) -> dict[str, Any]:
-    """Everything the Routing page shows: jobs, the selected job and its picker."""
-    from saberops import routing_ops
-    from saberops.routing_config import load_effective_routing_payload
-
-    owner = _load_owner_bindings_safely()
-    error: str | None = None
-    try:
-        payload = load_effective_routing_payload()
-    except Exception as exc:
-        payload = {"roles": {}}
-        error = f"The routing file could not be read: {exc}"
-    approvals = payload.get("approved_candidates") or {}
-    planner = _planner_view()
-    jobs: list[dict[str, Any]] = []
-    for job in routing_ops.JOBS:
-        chain: list[dict[str, Any]] = []
-        if job.store == "routing":
-            groups = payload.get("roles", {}).get(job.role, [])
-            for number, group in enumerate(groups, start=1):
-                for candidate_id in group.get("routes", []):
-                    provider, _, model = str(candidate_id).partition("/")
-                    approval = approvals.get(candidate_id) or {}
-                    technical = str(approval.get("binding_id") or candidate_id)
-                    chain.append(_chain_row(number, candidate_id, provider, model, technical))
-        elif job.store == "reviewer":
-            for number, binding_id in enumerate(owner.role_binding_ids("reviewer"), start=1):
-                binding = owner.registry.try_get(binding_id)
-                provider = binding.provider if binding is not None else binding_id
-                model = binding.model if binding is not None else binding_id
-                chain.append(_chain_row(number, binding_id, provider, model, binding_id))
-        jobs.append(
-            {
-                "slug": job.slug,
-                "role": job.role,
-                "name": job.name,
-                "verb": job.verb,
-                "help": job.help,
-                "store": job.store,
-                "chain": chain,
-                "ready": planner["connected"] if job.store == "agent" else bool(chain),
-            }
-        )
-    wanted = (request.query_params.get("job") or "").strip().lower()
-    selected = next((job for job in jobs if job["slug"] == wanted), None)
-    if selected is None:
-        selected = next((j for j in jobs if j["store"] != "agent" and not j["ready"]), jobs[1])
-    query = (request.query_params.get("q") or "").strip()
-    account = (request.query_params.get("account") or "").strip()
-    options: list[dict[str, Any]] = []
-    if selected["store"] != "agent":
-        try:
-            if selected["store"] == "reviewer":
-                found = routing_ops.reviewer_options(owner, registry)
-            else:
-                found = routing_ops.chain_options(
-                    owner, access_ops.load_catalog_safely(), registry
-                )
-        except Exception:
-            found = []
-        taken = {row["key"] for row in selected["chain"]}
-        writer = next((j for j in jobs if j["slug"] == "write"), None)
-        writer_family = writer["chain"][0]["family"] if writer and writer["chain"] else ""
-        for option in found:
-            if option.key in taken:
-                continue
-            family = _model_family(option.provider, option.model)
-            label = option.label.rsplit("/", 1)[-1]
-            origin = _model_origin(option.provider, option.model)
-            head, sep, _tail = option.model.partition("/")
-            upstream = _search_text(_upstream_label(head) if sep else _account_label(option.provider))
-            options.append(
-                {
-                    "key": option.key,
-                    "label": label,
-                    "account": _account_label(option.provider),
-                    "origin": origin,
-                    "search": _search_text(label, option.key, origin),
-                    "upstream": upstream,
-                    "upstream_key": _search_text(head) if sep else upstream,
-                    "provider": option.provider,
-                    "technical": option.binding_id,
-                    "same_company": selected["slug"] == "check" and family == writer_family,
-                }
-            )
-    accounts: dict[str, int] = {}
-    for row in options:
-        accounts[row["account"]] = accounts.get(row["account"], 0) + 1
-    needle = _search_text(query)
-    # A search that names a provider exactly ("opencode go") shows that provider's
-    # models only; anything else is a plain substring search.
-    exact = needle and any(needle in (row["upstream"], row["upstream_key"]) for row in options)
-    shown = [
-        row
-        for row in options
-        if (not account or row["account"] == account)
-        and (
-            not needle
-            or (needle in (row["upstream"], row["upstream_key"]) if exact else needle in row["search"])
-        )
-    ]
-    # Accounts whose model list is out of date: their models are never offered
-    # (stale evidence never routes), so say so and offer a refresh in place.
-    outdated: dict[str, dict[str, Any]] = {}
-    if selected["store"] != "agent":
-        try:
-            for entry in access_ops.load_catalog_safely().list_models():
-                if entry.is_stale and entry.is_discovery_verified:
-                    row = outdated.setdefault(
-                        entry.connection_id,
-                        {
-                            "connection_id": entry.connection_id,
-                            "account": _account_label(entry.provider),
-                            "count": 0,
-                        },
-                    )
-                    row["count"] += 1
-        except Exception:
-            outdated = {}
-    per_page = 10
-    pages = max(1, -(-len(shown) // per_page))
-    try:
-        page = min(max(1, int(request.query_params.get("page") or 1)), pages)
-    except ValueError:
-        page = 1
-    return {
-        "outdated": sorted(outdated.values(), key=lambda row: row["account"]),
-        "per_page": per_page,
-        "page": page,
-        "pages": pages,
-        "jobs": jobs,
-        "selected": selected,
-        "planner": planner,
-        "options": shown,
-        "option_total": len(options),
-        "accounts": sorted(accounts.items()),
-        "query": query,
-        "account": account,
-        "missing": [j for j in jobs if j["store"] != "agent" and not j["ready"]],
-        "error": error,
-    }
 
 
-def _concurrency_view() -> dict[str, Any]:
-    """Effective 3-project x 5-task concurrency limits and their maxima."""
-    ledger = _config_ledger()
-    try:
-        settings = current_workflow_settings(ledger)
-    except Exception:
-        settings = default_workflow_settings()
-    try:
-        configured = ledger.tip_for("config") is not None
-    except Exception:
-        configured = False
-    return {
-        "active_projects": settings.max_concurrent_tasks,
-        "child_slots_per_project": settings.max_worker_sessions_per_project,
-        "max_active_projects": MAX_CONCURRENT_TASKS,
-        "max_child_slots": MAX_WORKER_SESSIONS_PER_PROJECT,
-        "derived_ceiling": (
-            settings.max_concurrent_tasks * settings.max_worker_sessions_per_project
-        ),
-        "gate_light_slots_max": settings.gate_light_slots_max,
-        "configured": configured,
-    }
 
-
-def _project_mode_view(repo_param: str) -> dict[str, Any]:
-    """Observed project-entry-mode facts, recommendation and preflight."""
-    modes = [
-        {
-            "value": mode.value,
-            "label": MODE_LABELS[mode],
-            "rank": mode_rank(mode),
-            "requires_owner_confirmation": requires_owner_confirmation(mode),
-            "requirements": [fact.value for fact in mode_requirements(mode)],
-        }
-        for mode in MODE_ORDER
-    ]
-    view: dict[str, Any] = {
-        "repo": repo_param,
-        "modes": modes,
-        "facts": None,
-        "recommended": None,
-        "allowed": [],
-        "preflight": None,
-        "error": None,
-    }
-    if not repo_param:
-        return view
-    path = Path(repo_param).expanduser()
-    if not path.exists():
-        view["error"] = f"path not found: {repo_param}"
-        return view
-    try:
-        facts = extract_project_mode_facts(path)
-        recommendation = recommend_mode(facts)
-        report = preflight(recommendation.mode, facts)
-        view["facts"] = facts.as_dict()
-        view["recommended"] = {
-            "mode": recommendation.mode.value,
-            "label": MODE_LABELS[recommendation.mode],
-            "confidence": recommendation.confidence,
-            "runner_up": (
-                recommendation.runner_up.value if recommendation.runner_up is not None else None
-            ),
-        }
-        view["allowed"] = [
-            {"value": mode.value, "label": MODE_LABELS[mode]} for mode in allowed_modes(facts)
-        ]
-        view["preflight"] = {
-            "mode": report.mode.value,
-            "ok": report.ok,
-            "blockers": [
-                {
-                    "code": blocker.code.value,
-                    "summary": blocker.summary,
-                    "fix": blocker.fix_command,
-                }
-                for blocker in report.blockers
-            ],
-            "warnings": list(report.warnings),
-        }
-    except Exception as exc:
-        view["error"] = f"{exc.__class__.__name__}: {exc}"
-    return view
-
-
-def _plans_view() -> dict[str, Any]:
-    """Effective plan registry (accounts, quota pools, postures, reserves)."""
-    try:
-        payload = plans_ops.show_plans()
-    except Exception as exc:
-        return {
-            "error": f"{exc.__class__.__name__}: {exc}",
-            "accounts": {},
-            "quota_pools": {},
-            "postures": {},
-            "reserves": [],
-        }
-    return {
-        "error": None,
-        "accounts": payload.get("accounts", {}),
-        "quota_pools": payload.get("quota_pools", {}),
-        "postures": payload.get("postures", {}),
-        "reserves": payload.get("reserves", []),
-    }
-
-
-def _optimizer_limits_view() -> dict[str, Any]:
-    """The wave optimizer's owner maxima and tuning knobs."""
-    try:
-        limits = default_optimization_limits()
-    except Exception:
-        return {}
-    return {
-        "active_projects": limits.active_projects,
-        "workers_per_project": limits.workers_per_project,
-        "heavy_gate_slots": limits.heavy_gate_slots,
-        "max_rounds": limits.max_rounds,
-        "min_gain": limits.min_gain,
-    }
-
-
-def _wave_view(project_id: str) -> dict[str, Any]:
-    """Dependency DAG and wave-optimization scores for a stored plan revision."""
-    view: dict[str, Any] = {
-        "project_id": project_id,
-        "available": False,
-        "error": None,
-        "limits": _optimizer_limits_view(),
-        "waves": [],
-        "task_count": 0,
-        "critical_path": None,
-        "makespan": None,
-        "parallelism": None,
-        "scope_overlap_count": 0,
-        "peak_workers": 0,
-        "revisions": [],
-    }
-    if not project_id:
-        return view
-    try:
-        from saberops.project_scope.plan_store import PlanStore
-
-        store = PlanStore()
-        view["revisions"] = list(store.list_revisions(project_id))
-        if store.active_version(project_id) is None:
-            view["error"] = "no active plan revision"
-            return view
-        revision = store.load_active(project_id)
-        graph = graph_from_revisions([revision])
-        result = optimize_plan(graph, limits=default_optimization_limits())
-        final = result.final_score
-        view.update(
-            {
-                "available": True,
-                "task_count": len(graph.nodes),
-                "waves": [
-                    {
-                        "index": wave.index,
-                        "tasks": [
-                            f"{ref.project_id}/{ref.task_id}" for ref in wave.tasks
-                        ],
-                    }
-                    for wave in final.waves
-                ],
-                "critical_path": final.critical_path,
-                "makespan": final.makespan,
-                "parallelism": final.parallelism,
-                "scope_overlap_count": final.scope_overlap_count,
-                "peak_workers": final.resource_demand.peak_workers,
-            }
-        )
-    except Exception as exc:
-        view["error"] = f"{exc.__class__.__name__}: {exc}"
-    return view
 
 
 def _question_rows() -> dict[str, Any]:
@@ -2272,86 +1281,8 @@ def _work_gate_view(db: Database) -> dict[str, Any]:
         }
 
 
-def _storage_view(repo_param: str, db: Database) -> dict[str, Any]:
-    """Storage/Git lifecycle dry-run: retained, eligible and blocked artifacts."""
-    view: dict[str, Any] = {
-        "repo": repo_param,
-        "available": False,
-        "error": None,
-        "policy_ref": None,
-        "approved": False,
-        "preview_id": None,
-        "candidates": [],
-        "exclusions": [],
-        "estimated_reclaimable_bytes": None,
-        "inventory": [],
-        "warnings": [],
-    }
-    if not repo_param:
-        return view
-    repo = Path(repo_param).expanduser()
-    if not repo.exists():
-        view["error"] = f"path not found: {repo_param}"
-        return view
-    try:
-        policy_path = _gc_policy_path()
-        policy = load_gc_policy(policy_path)
-        effective_policy_path = policy_path if policy_path.exists() else None
-        inventory = build_inventory(db, repo_root=repo)
-        preview = preview_gc(
-            inventory, policy=policy, policy_path=effective_policy_path, classes=None
-        )
-    except GcPolicyError as exc:
-        view["error"] = f"GC policy invalid: {exc}"
-        return view
-    except Exception as exc:
-        view["error"] = f"{exc.__class__.__name__}: {exc}"
-        return view
-    view.update(
-        {
-            "available": True,
-            "policy_ref": preview.policy_ref,
-            "approved": preview.approved,
-            "preview_id": preview.preview_id,
-            "estimated_reclaimable_bytes": preview.estimated_reclaimable_bytes,
-            "warnings": list(inventory.warnings),
-            "candidates": [
-                {
-                    "artifact_class": candidate.artifact_class.value,
-                    "action": candidate.action.value,
-                    "reference": candidate.reference,
-                    "owner": candidate.owner,
-                    "reason": candidate.reason,
-                    "estimated_bytes": candidate.estimated_bytes,
-                    "reclaimable": candidate.reclaimable,
-                }
-                for candidate in preview.candidates
-            ],
-            "exclusions": [
-                {
-                    "artifact_class": exclusion.artifact_class.value,
-                    "reference": exclusion.reference,
-                    "reason": exclusion.reason,
-                }
-                for exclusion in preview.exclusions
-            ],
-            "inventory": [
-                {
-                    "artifact_class": item.artifact_class.value,
-                    "reference": item.reference,
-                    "ownership": item.ownership.value,
-                    "reason": item.reason,
-                    "size_bytes": item.size_bytes,
-                    "reclaimable_bytes": item.reclaimable_bytes,
-                }
-                for item in inventory.items[:200]
-            ],
-        }
-    )
-    return view
 
-
-OWNER_PAGES: tuple[str, ...] = ("setup", "routing", "accounts", "projects", "questions")
+OWNER_PAGES: tuple[str, ...] = ("setup", "accounts", "questions")
 
 
 def _nav_state() -> dict[str, Any]:
@@ -2413,13 +1344,7 @@ def _onboarding_context(
     error: str | None = None,
     notice: str | None = None,
 ) -> dict[str, Any]:
-    """Build the complete first-run onboarding context (never raises)."""
-    repo_param = (request.query_params.get("repo") or "").strip()
-    wave_project = (request.query_params.get("wave_project") or "").strip()
-    try:
-        runs = _run_rows(service.list_runs(limit=25))
-    except Exception:
-        runs = []
+    """Build the kept owner-page context (setup, accounts, questions)."""
     return {
         "csrf_token": _CSRF_TOKEN,
         "saberops_version": saberops_version(),
@@ -2431,22 +1356,12 @@ def _onboarding_context(
         "models": _model_rows(),
         "postures": _posture_rows(),
         "planner": _planner_view(),
-        "role_bindings": _role_binding_view(),
-        "role_chains": _role_chain_rows(),
-        "concurrency": _concurrency_view(),
-        "project": _project_mode_view(repo_param),
-        "plans": _plans_view(),
-        "wave": _wave_view(wave_project),
-        "runs": runs,
         "questions": _question_rows(),
         "self_answered_questions": _self_answered_question_rows(),
         "standing_decisions": _standing_decision_rows(),
         "never_delegable": _never_delegable_rows(),
         "owner_mode": _owner_mode_view(),
         "work_gate": _work_gate_view(db),
-        "storage": _storage_view(repo_param, db),
-        "repo_param": repo_param,
-        "wave_project": wave_project,
     }
 
 
@@ -2458,16 +1373,17 @@ def create_app(
     state_root: Path | str | None = None,
     seed_cwd_if_empty: bool = True,
 ) -> FastAPI:
-    """Build the minimal FastAPI status application.
+    """Build the kept owner-pages application.
 
-    L-A step 5 cut the console to a minimal status page: run list,
-    run detail (status, attempts, gate results, review verdict, diff),
-    report JSON, accept/reject actions, and health.  Owner configuration
-    (routing, quota, access, reviewer, projects, chats) lives in the
-    ``orch`` CLI now.  The ``projects`` parameter is gone with
+    Phase 1.1 lane H23 reduced the console to the pages phase 2 reuses:
+    first-run Setup, Accounts and Questions, plus ``/health`` for
+    stale-install diagnostics.  Run monitoring, run reports and owner
+    accept/reject, plan and wave scoring, the routing editor and the storage
+    cleanup page moved out with it; the engine and the ``orch`` CLI keep
+    those operations.  The ``projects`` parameter is gone with
     ``saberops.projects``; ``repo_path`` is accepted for launch
-    compatibility but the page always shows the pinned store's runs.
-    Passing an explicit ``db_path`` pins the whole app to that single store.
+    compatibility.  Passing an explicit ``db_path`` pins the whole app to
+    that single store.
     """
     del seed_cwd_if_empty
     resolved_db_path: str | Path | None = db_path
@@ -2513,13 +1429,11 @@ def create_app(
 
         Host/Origin headers never choose what the actions do; a foreign
         Host or a foreign origin fails closed.  The Host allowlist
-        applies to every private route -- dashboard, run pages, report /
-        actions / event-stream reads, and the accept/reject POSTs -- so
-        a missing Origin header (curl, DNS rebinding, old browser) can
-        never smuggle a foreign Host past the guard.  Every POST is treated
-        as a state mutation for the Origin / sec-fetch-site check, so the
-        first-run onboarding, question-queue and cleanup mutations are
-        covered exactly like the accept/reject POSTs.  ``/health`` and
+        applies to every private route -- setup, accounts and questions,
+        the first-run and account POSTs, and API docs -- so a missing
+        Origin header (curl, DNS rebinding, old browser) can never smuggle
+        a foreign Host past the guard.  Every POST is treated as a state
+        mutation for the Origin / sec-fetch-site check.  ``/health`` and
         ``/static/*`` stay open by design (non-secret diagnostics and
         bundled assets).
         """
@@ -2541,17 +1455,6 @@ def create_app(
     app.state.supervisor = supervisor
     app.state.runtimes = runtimes
 
-    @app.get("/", response_class=HTMLResponse, name="dashboard")
-    def dashboard(request: Request) -> HTMLResponse:
-        if _first_run_required(service):
-            # Fresh install: land directly on Setup instead of an empty run table.
-            return onboarding_page(request, page="setup", first_run=True)
-        return templates.TemplateResponse(
-            request,
-            "dashboard.html",
-            _dashboard_context(service, notice=_notice_from_query(request)),
-        )
-
     def onboarding_page(
         request: Request,
         *,
@@ -2561,11 +1464,9 @@ def create_app(
         status_code: int = 200,
         first_run: bool = False,
     ) -> HTMLResponse:
-        """Render one owner page (setup/routing/projects/questions) for GET and POST."""
+        """Render one kept owner page (setup/accounts/questions) for GET and POST."""
         context = _onboarding_context(service, db, request, error=error, notice=notice)
         context["first_run"] = first_run
-        if page == "routing":
-            context["routing"] = _routing_view(request, resolved_registry)
         if page == "setup":
             from saberops.agent_connect import agent_rows
             from saberops.mcp.switch import mcp_enabled
@@ -2578,6 +1479,11 @@ def create_app(
         return templates.TemplateResponse(
             request, f"{page}.html", context, status_code=status_code
         )
+
+    @app.get("/", name="home")
+    def home(request: Request) -> RedirectResponse:
+        """The app opens on Setup until phase 2's board page replaces this entry."""
+        return RedirectResponse(url="/setup", status_code=303)
 
     @app.get("/first-run", name="first_run")
     def first_run(request: Request) -> RedirectResponse:
@@ -2606,142 +1512,14 @@ def create_app(
             name=f"{_page}_page",
         )
 
-    @app.post("/first-run/concurrency", name="save_concurrency")
-    def save_concurrency(
-        request: Request,
-        csrf: Annotated[str, Form()] = "",
-        active_projects: Annotated[str, Form()] = "",
-        child_slots_per_project: Annotated[str, Form()] = "",
-        owner_confirmed: Annotated[str, Form()] = "",
-    ) -> Response:
-        """Persist the owner-confirmed 3-project x 5-task concurrency limits.
-
-        The change is recorded as an immutable owner-approved decision in the
-        configuration ledger; the Web never edits the ledger entry directly.
-        """
-        if not _csrf_valid(csrf):
-            return onboarding_page(
-                request,
-                page="routing",
-                error="Refused: missing or invalid confirmation token.",
-                status_code=403,
-            )
-        if owner_confirmed != "yes":
-            return onboarding_page(
-                request,
-                page="routing",
-                error="Owner confirmation is required before saving concurrency limits.",
-                status_code=400,
-            )
-        try:
-            projects = int(active_projects)
-            slots = int(child_slots_per_project)
-        except ValueError:
-            return onboarding_page(
-                request,
-                page="routing", error="Concurrency limits must be whole numbers.", status_code=400
-            )
-        ledger = _config_ledger()
-        try:
-            base = current_workflow_settings(ledger)
-            proposal = propose_config_change(
-                base,
-                {
-                    "max_concurrent_tasks": projects,
-                    "max_worker_sessions_per_project": slots,
-                },
-                rationale="Owner-configured concurrency limits from the first-run UI.",
-                proposed_by="owner",
-            )
-            approve_config_proposal(proposal, ledger=ledger, approved_by="owner")
-        except ConfigError as exc:
-            return onboarding_page(
-                request,
-                page="routing", error=f"Concurrency not saved: {exc}", status_code=400
-            )
-        return RedirectResponse(url="/routing?concurrency_saved=1", status_code=303)
-
-    def _routing_refusal(request: Request, message: str, status_code: int) -> HTMLResponse:
-        return onboarding_page(request, page="routing", error=message, status_code=status_code)
-
-    def _routing_done(job: str, saved: str) -> RedirectResponse:
-        return RedirectResponse(url=f"/routing?job={quote(job)}&saved={saved}", status_code=303)
-
-    @app.post("/routing/add", name="add_routing_model")
-    def routing_add(
-        request: Request,
-        csrf: Annotated[str, Form()] = "",
-        job: Annotated[str, Form()] = "",
-        model: Annotated[str, Form()] = "",
-    ) -> Response:
-        """Owner decision: append one evidenced model to a job's fallback order."""
-        from saberops import routing_ops
-
-        if not _csrf_valid(csrf):
-            return _routing_refusal(request, "Refused: missing or invalid confirmation token.", 403)
-        try:
-            routing_ops.add_to_job(
-                job,
-                model,
-                owner=_load_owner_bindings_safely(),
-                catalog=access_ops.load_catalog_safely(),
-                registry=resolved_registry,
-            )
-        except (routing_ops.RoutingEditError, BindingStoreError) as exc:
-            return _routing_refusal(request, str(exc), 400)
-        return _routing_done(job, "added")
-
-    @app.post("/routing/remove", name="remove_routing_model")
-    def routing_remove(
-        request: Request,
-        csrf: Annotated[str, Form()] = "",
-        job: Annotated[str, Form()] = "",
-        model: Annotated[str, Form()] = "",
-    ) -> Response:
-        """Owner decision: take one model off a job (an empty job stays empty)."""
-        from saberops import routing_ops
-
-        if not _csrf_valid(csrf):
-            return _routing_refusal(request, "Refused: missing or invalid confirmation token.", 403)
-        try:
-            routing_ops.remove_from_job(job, model, owner=_load_owner_bindings_safely())
-        except (routing_ops.RoutingEditError, BindingStoreError) as exc:
-            return _routing_refusal(request, str(exc), 400)
-        return _routing_done(job, "removed")
-
-    @app.post("/routing/move", name="move_routing_model")
-    def routing_move(
-        request: Request,
-        csrf: Annotated[str, Form()] = "",
-        job: Annotated[str, Form()] = "",
-        position: Annotated[str, Form()] = "",
-        direction: Annotated[str, Form()] = "",
-    ) -> Response:
-        """Owner decision: move one model a place earlier or later in a job."""
-        from saberops import routing_ops
-
-        if not _csrf_valid(csrf):
-            return _routing_refusal(request, "Refused: missing or invalid confirmation token.", 403)
-        try:
-            routing_ops.move_in_job(
-                job, int(position), direction, owner=_load_owner_bindings_safely()
-            )
-        except ValueError as exc:
-            return _routing_refusal(request, f"Order not saved: {exc}", 400)
-        except BindingStoreError as exc:
-            return _routing_refusal(request, str(exc), 400)
-        return _routing_done(job, "moved")
-
     @app.post("/first-run/discover", name="discover_models")
     def discover_models(
         request: Request,
         csrf: Annotated[str, Form()] = "",
         connection_id: Annotated[str, Form()] = "",
-        return_to: Annotated[str, Form()] = "",
-        job: Annotated[str, Form()] = "",
     ) -> Response:
         """Run bounded model discovery for one connection (evidence only)."""
-        page = "routing" if return_to == "routing" else "setup"
+        page = "setup"
         if not _csrf_valid(csrf):
             return onboarding_page(
                 request,
@@ -2780,9 +1558,8 @@ def create_app(
                 ),
                 status_code=502,
             )
-        back = f"/routing?job={quote(job)}&" if page == "routing" and job else f"/{page}?"
         return RedirectResponse(
-            url=f"{back}discovered=1&connection={quote(wanted)}", status_code=303
+            url=f"/{page}?discovered=1&connection={quote(wanted)}", status_code=303
         )
 
     @app.post("/first-run/posture/verify", name="verify_posture_route")
@@ -2923,46 +1700,6 @@ def create_app(
         return RedirectResponse(
             url=f"/accounts?checked={quote(account)}&outcome={quote(outcome)}", status_code=303
         )
-
-    @app.post("/first-run/project/register", name="register_project")
-    def register_project(
-        request: Request,
-        csrf: Annotated[str, Form()] = "",
-        project_id: Annotated[str, Form()] = "",
-        display_name: Annotated[str, Form()] = "",
-        repository_root: Annotated[str, Form()] = "",
-        state_dir: Annotated[str, Form()] = "",
-        owner_confirmed: Annotated[str, Form()] = "",
-    ) -> Response:
-        """Register one project identity (explicit owner-confirmed values)."""
-        if not _csrf_valid(csrf):
-            return onboarding_page(
-                request,
-                page="projects",
-                error="Refused: missing or invalid confirmation token.",
-                status_code=403,
-            )
-        if owner_confirmed != "yes":
-            return onboarding_page(
-                request,
-                page="projects",
-                error="Owner confirmation is required before registering a project.",
-                status_code=400,
-            )
-        try:
-            ProjectRegistry().register(
-                project_id.strip(),
-                display_name.strip(),
-                repository_root.strip(),
-                state_dir.strip(),
-                active=False,
-            )
-        except Exception as exc:
-            return onboarding_page(
-                request,
-                page="projects", error=f"Project not registered: {exc}", status_code=400
-            )
-        return RedirectResponse(url="/projects?project_registered=1", status_code=303)
 
     @app.post("/questions/{question_id}/answer", name="answer_question")
     def answer_question_route(
@@ -3137,529 +1874,6 @@ def create_app(
                 page="questions", error=f"Question not deferred: {exc}", status_code=400
             )
         return RedirectResponse(url="/questions?deferred=1", status_code=303)
-
-    @app.post("/first-run/storage/apply", name="apply_storage_cleanup")
-    def apply_storage_cleanup(
-        request: Request,
-        csrf: Annotated[str, Form()] = "",
-        repo: Annotated[str, Form()] = "",
-        preview_id: Annotated[str, Form()] = "",
-        confirm: Annotated[str, Form()] = "",
-    ) -> Response:
-        """Execute the previewed cleanup only under explicit owner confirmation.
-
-        Fail-closed: an unapproved standing policy refuses; the typed preview
-        id must match the freshly re-computed preview; every action is audited.
-        """
-        if not _csrf_valid(csrf):
-            return onboarding_page(
-                request,
-                page="projects",
-                error="Refused: missing or invalid confirmation token.",
-                status_code=403,
-            )
-        repo_path = Path(repo.strip()).expanduser()
-        if not repo.strip() or not repo_path.exists():
-            return onboarding_page(
-                request,
-                page="projects",
-                error="A valid repository path is required to apply cleanup.",
-                status_code=400,
-            )
-        try:
-            policy_path = _gc_policy_path()
-            policy = load_gc_policy(policy_path)
-            effective = policy_path if policy_path.exists() else None
-            inventory = build_inventory(db, repo_root=repo_path)
-            preview = preview_gc(
-                inventory, policy=policy, policy_path=effective, classes=None
-            )
-        except Exception as exc:
-            return onboarding_page(
-                request,
-                page="projects",
-                error=f"Cleanup preview failed: {exc.__class__.__name__}: {exc}",
-                status_code=400,
-            )
-        if not preview.approved:
-            return onboarding_page(
-                request,
-                page="projects",
-                error=(
-                    "Refused: no validated standing owner policy authorizes "
-                    "destructive cleanup."
-                ),
-                status_code=403,
-            )
-        if not preview.preview_id or confirm.strip() != preview.preview_id:
-            return onboarding_page(
-                request,
-                page="projects",
-                error="Owner confirmation required: type the exact preview id to apply cleanup.",
-                status_code=400,
-            )
-        if preview_id.strip() and preview_id.strip() != preview.preview_id:
-            return onboarding_page(
-                request,
-                page="projects",
-                error="The preview changed; refresh the dry-run before applying.",
-                status_code=409,
-            )
-        try:
-            result = apply_gc(
-                preview,
-                preview.candidates,
-                db=db,
-                repo_root=repo_path,
-                audit=database_audit_sink(db),
-            )
-        except Exception as exc:
-            return onboarding_page(
-                request,
-                page="projects",
-                error=f"Cleanup failed: {exc.__class__.__name__}: {exc}",
-                status_code=500,
-            )
-        applied = len(result.applied)
-        refused = len(result.refused)
-        uncertain = "&audit_uncertain=1" if result.audit_uncertain else ""
-        return RedirectResponse(
-            url=f"/projects?gc_applied=1&applied={applied}&refused={refused}{uncertain}",
-            status_code=303,
-        )
-
-    @app.get("/runs/{run_id}", response_class=HTMLResponse, name="run_detail")
-    def run_detail(request: Request, run_id: str) -> HTMLResponse:
-        runtime = runtime_for_run(run_id)
-        run = runtime.db.get_run(run_id) if runtime is not None else None
-        if runtime is None or run is None:
-            return templates.TemplateResponse(
-                request, "run_detail.html", _missing_run_context(run_id), status_code=404
-            )
-        context = _run_detail_context(runtime.db, run, notice=_notice_from_query(request))
-        return templates.TemplateResponse(request, "run_detail.html", context)
-
-    @app.get("/runs/{run_id}/report")
-    def run_report_json(run_id: str) -> JSONResponse:
-        """Read-only canonical run report as JSON.
-
-        Same projection as ``orch report RUN_ID --json``; the payload
-        is deterministic for a given persisted state.
-        """
-        runtime = runtime_for_run(run_id)
-        if runtime is None or runtime.db.get_run(run_id) is None:
-            return JSONResponse({"error": "run not found"}, status_code=404)
-        try:
-            return JSONResponse(build_run_report(runtime.db, run_id))
-        except ValueError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=404)
-
-    @app.get("/runs/{run_id}/actions")
-    def run_actions(run_id: str) -> JSONResponse:
-        """Authoritative run-action state for live button refresh.
-
-        The run page fetches this after lifecycle SSE events so Accept /
-        Review / Cancel / Cleanup controls refresh from server state
-        instead of remaining stale from the initial page load.  The
-        acceptance portion is the same engine-derived projection the
-        page renders and the POST gates on.
-        """
-        runtime = runtime_for_run(run_id)
-        run = runtime.db.get_run(run_id) if runtime is not None else None
-        if runtime is None or run is None:
-            return JSONResponse({"error": "run not found"}, status_code=404)
-        eligibility = AcceptEngine(db=runtime.db).check_accept_eligibility(run_id)
-        from saberops.candidate_lifecycle import can_reject_candidate, project_candidate_state
-
-        try:
-            _projection = project_candidate_state(runtime.db, run_id)
-            _candidate_state: str | None = (
-                _projection.state.value if _projection.state is not None else None
-            )
-        except Exception:
-            _candidate_state = None
-        try:
-            _can_reject = can_reject_candidate(runtime.db, run_id)
-        except Exception:
-            _can_reject = False
-        try:
-            _owner_summary = summarize_owner_actions(runtime.db, run_id)
-            _owner_review_active = _owner_summary.active_review is not None
-            _owner_accept_active = _owner_summary.active_accept is not None
-            _owner_review_state = (
-                _owner_summary.active_review.state.value
-                if _owner_summary.active_review is not None
-                else None
-            )
-            _owner_accept_state = (
-                _owner_summary.active_accept.state.value
-                if _owner_summary.active_accept is not None
-                else None
-            )
-            # Projected terminal history (including a provably dead active
-            # action read-only-projected as UNCERTAIN / OWNER_PROCESS_DEAD).
-            _owner_review_last_state = (
-                _owner_summary.last_review.state.value
-                if _owner_summary.last_review is not None
-                else None
-            )
-            _owner_review_last_reason = (
-                _owner_summary.last_review.reason
-                if _owner_summary.last_review is not None
-                else None
-            )
-            _owner_accept_last_state = (
-                _owner_summary.last_accept.state.value
-                if _owner_summary.last_accept is not None
-                else None
-            )
-            _owner_accept_last_reason = (
-                _owner_summary.last_accept.reason
-                if _owner_summary.last_accept is not None
-                else None
-            )
-        except Exception:
-            _owner_review_active = False
-            _owner_accept_active = False
-            _owner_review_state = None
-            _owner_accept_state = None
-            _owner_review_last_state = None
-            _owner_review_last_reason = None
-            _owner_accept_last_state = None
-            _owner_accept_last_reason = None
-        return JSONResponse(
-            {
-                "run_id": run_id,
-                "status": run.status.value,
-                "can_accept": eligibility.eligible,
-                "can_review": run.status == RunStatus.COMPLETED
-                and _candidate_state != "REJECTED",
-                "can_cleanup": run.status in (RunStatus.COMPLETED, RunStatus.FAILED),
-                "can_retry": run.status in (RunStatus.COMPLETED, RunStatus.FAILED),
-                "can_cancel": run.status not in TERMINAL_RUN_STATUSES,
-                "candidate_state": _candidate_state,
-                "can_reject": _can_reject,
-                "accept_checklist": eligibility.as_dict()["checks"],
-                "owner_review_active": _owner_review_active,
-                "owner_review_state": _owner_review_state,
-                "owner_accept_active": _owner_accept_active,
-                "owner_accept_state": _owner_accept_state,
-                "owner_review_last_state": _owner_review_last_state,
-                "owner_review_last_reason": _owner_review_last_reason,
-                "owner_accept_last_state": _owner_accept_last_state,
-                "owner_accept_last_reason": _owner_accept_last_reason,
-            }
-        )
-
-    @app.get("/runs/{run_id}/events/stream")
-    async def stream_events(request: Request, run_id: str, after: int = 0) -> Response:
-        runtime = runtime_for_run(run_id)
-        if runtime is None:
-            return JSONResponse({"error": "run not found"}, status_code=404)
-        db = runtime.db
-        last_event_id_header = request.headers.get("last-event-id")
-        after_id = after
-        if after_id == 0 and last_event_id_header:
-            try:
-                after_id = int(last_event_id_header)
-            except ValueError:
-                pass
-
-        persisted = db.get_events(run_id, after_id=after_id, limit=200)
-        persisted_run = db.get_run(run_id)
-        terminal_persisted = (
-            persisted_run is not None
-            and persisted_run.status in TERMINAL_RUN_STATUSES
-        ) or any(event.event_type in TERMINAL_EVENT_TYPES for event in persisted)
-        # A terminal run with an active post-run owner action
-        # (Review / Accept) keeps a usable live stream so queued/started/
-        # completed/failed/uncertain events reach the run page.  The
-        # stream may close once the run is terminal AND no owner action
-        # remains active.
-        if terminal_persisted and not _owner_actions_stream_active(db, run_id):
-            payload = "".join(
-                f"id: {event.id}\nevent: {event.event_type}\ndata: {
-                    json.dumps(
-                        {
-                            'id': event.id,
-                            'run_id': event.run_id,
-                            'attempt_id': event.attempt_id,
-                            'event_type': event.event_type,
-                            'payload': event.payload,
-                            'created_at': event.created_at,
-                        }
-                    )
-                }\n\n"
-                for event in persisted
-            )
-            return Response(
-                content=payload,
-                media_type="text/event-stream",
-                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-            )
-
-        async def event_generator() -> AsyncGenerator[str, None]:
-            nonlocal after_id
-            # A terminal persisted run never needs a live listener.  This is
-            # also important for reconnects after a process restart.
-            initial_events = db.get_events(run_id, after_id=after_id, limit=200)
-            initial_run = db.get_run(run_id)
-            terminal_initial = (
-                initial_run is not None
-                and initial_run.status
-                in TERMINAL_RUN_STATUSES
-            ) or any(event.event_type in TERMINAL_EVENT_TYPES for event in initial_events)
-            if terminal_initial and not _owner_actions_stream_active(db, run_id):
-                for ev in initial_events:
-                    after_id = max(after_id, ev.id)
-                    data = {
-                        "id": ev.id,
-                        "run_id": ev.run_id,
-                        "attempt_id": ev.attempt_id,
-                        "event_type": ev.event_type,
-                        "payload": ev.payload,
-                        "created_at": ev.created_at,
-                    }
-                    yield f"id: {ev.id}\nevent: {ev.event_type}\ndata: {json.dumps(data)}\n\n"
-                return
-            q: asyncio.Queue[tuple[str, int]] = asyncio.Queue()
-            loop = asyncio.get_running_loop()
-
-            def on_event(event_run_id: str, event_id: int) -> None:
-                if event_run_id == run_id:
-                    loop.call_soon_threadsafe(q.put_nowait, (event_run_id, event_id))
-
-            db.add_event_listener(on_event)
-            # Events are written by the detached execution owner in its own
-            # process, where the in-process listener above cannot see them.
-            wake = subscribe_run(db.db_path, run_id).open()
-            stop_bridge = threading.Event()
-
-            def _bridge() -> None:
-                while not stop_bridge.is_set():
-                    if wake.wait(0.5):
-                        loop.call_soon_threadsafe(q.put_nowait, (run_id, 0))
-
-            bridge = threading.Thread(target=_bridge, daemon=True, name=f"wake-bridge-{run_id}")
-            bridge.start()
-
-            try:
-                while True:
-                    if await request.is_disconnected():
-                        break
-
-                    events = db.get_events(run_id, after_id=after_id, limit=200)
-                    for ev in events:
-                        after_id = max(after_id, ev.id)
-                        data = {
-                            "id": ev.id,
-                            "run_id": ev.run_id,
-                            "attempt_id": ev.attempt_id,
-                            "event_type": ev.event_type,
-                            "payload": ev.payload,
-                            "created_at": ev.created_at,
-                        }
-                        payload_json = json.dumps(data)
-                        yield f"id: {ev.id}\nevent: {ev.event_type}\ndata: {payload_json}\n\n"
-
-                    run = db.get_run(run_id)
-                    is_terminal = (
-                        run is not None
-                        and run.status
-                        in TERMINAL_RUN_STATUSES
-                    ) or any(ev.event_type in TERMINAL_EVENT_TYPES for ev in db.get_events(run_id))
-                    if is_terminal and not _owner_actions_stream_active(db, run_id):
-                        # Terminal events are durable before this check.  End immediately
-                        # after a final fetch so TestClient and browsers do not retain a
-                        # completed connection solely for a grace-period timer.
-                        leftover = db.get_events(run_id, after_id=after_id, limit=200)
-                        for ev in leftover:
-                            after_id = max(after_id, ev.id)
-                            data = {
-                                "id": ev.id,
-                                "run_id": ev.run_id,
-                                "attempt_id": ev.attempt_id,
-                                "event_type": ev.event_type,
-                                "payload": ev.payload,
-                                "created_at": ev.created_at,
-                            }
-                            payload_json = json.dumps(data)
-                            yield f"id: {ev.id}\nevent: {ev.event_type}\ndata: {payload_json}\n\n"
-                        break
-                    try:
-                        await asyncio.wait_for(q.get(), timeout=1.0)
-                    except TimeoutError:
-                        pass
-            finally:
-                stop_bridge.set()
-                db.remove_event_listener(on_event)
-                wake.close()
-
-        return StreamingResponse(
-            event_generator(),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
-        )
-
-    @app.post("/runs/{run_id}/accept", name="request_accept")
-    def request_accept(
-        request: Request,
-        run_id: str,
-        confirm_run_id: Annotated[str, Form()] = "",
-    ) -> Response:
-        runtime = runtime_for_run(run_id)
-        run = runtime.db.get_run(run_id) if runtime is not None else None
-        if runtime is None or run is None:
-            return templates.TemplateResponse(
-                request, "run_detail.html", _missing_run_context(run_id), status_code=404
-            )
-        db = runtime.db
-        # Gate on the same engine-derived eligibility the page renders.
-        # The POST never recreates acceptance policy; the engine remains
-        # the authority when accept_run executes.
-        eligibility = AcceptEngine(db=db).check_accept_eligibility(run.id)
-        if not eligibility.eligible:
-            blocker = next(
-                (check for check in eligibility.checks if not check.passed()),
-                None,
-            )
-            detail = (
-                f" {blocker.label}: {blocker.reason}" if blocker is not None else ""
-            )
-            return templates.TemplateResponse(
-                request,
-                "run_detail.html",
-                _run_detail_context(
-                    db,
-                    run,
-                    error=f"Accept is blocked by the acceptance checklist.{detail}",
-                ),
-                status_code=400,
-            )
-        if confirm_run_id == "":
-            return templates.TemplateResponse(
-                request,
-                "run_detail.html",
-                _run_detail_context(db, run, confirming_accept=True),
-                status_code=200,
-            )
-        if confirm_run_id != run_id:
-            return templates.TemplateResponse(
-                request,
-                "run_detail.html",
-                _run_detail_context(
-                    db,
-                    run,
-                    confirming_accept=True,
-                    error="Type the exact run id to confirm acceptance.",
-                ),
-                status_code=400,
-            )
-        # Confirmed Accept claims a durable owner action and detaches
-        # the Accept child immediately.  The checklist above stays advisory:
-        # the detached child (AcceptEngine) re-checks every canonical
-        # condition immediately before mutation.  The redirect returns at
-        # once; browser close can never stop the child, and duplicate
-        # confirms collapse onto the same active action.
-        from saberops.candidate_lifecycle import project_candidate_state as _accept_candidate_state
-
-        try:
-            accept_candidate = _accept_candidate_state(db, run.id).candidate_sha
-        except Exception:
-            accept_candidate = None
-        if not accept_candidate:
-            return templates.TemplateResponse(
-                request,
-                "run_detail.html",
-                _run_detail_context(
-                    db, run, error="Accept is unavailable: no trustworthy candidate."
-                ),
-                status_code=400,
-            )
-        try:
-            accept_launch = OwnerActionSupervisor(db).request_accept(
-                run_id=run.id,
-                candidate_sha=accept_candidate,
-                target_repo=run.target_repo,
-            )
-        except Exception as exc:
-            return templates.TemplateResponse(
-                request,
-                "run_detail.html",
-                _run_detail_context(db, run, error=f"Accept launch failed: {exc}"),
-                status_code=400,
-            )
-        if accept_launch.duplicate:
-            return RedirectResponse(
-                url=f"/runs/{run_id}?action_active=accept",
-                status_code=303,
-            )
-        if not accept_launch.launched:
-            reason = accept_launch.action.reason or LAUNCH_FAILED_REASON
-            return templates.TemplateResponse(
-                request,
-                "run_detail.html",
-                _run_detail_context(db, run, error=f"Accept launch failed: {reason}"),
-                status_code=400,
-            )
-        return RedirectResponse(
-            url=f"/runs/{run_id}?accept_queued=1",
-            status_code=303,
-        )
-
-    @app.post("/runs/{run_id}/reject", name="request_reject")
-    def request_reject(
-        request: Request,
-        run_id: str,
-        confirm: Annotated[str, Form()] = "",
-    ) -> Response:
-        """Two-step owner Reject: confirmation render, then durable decision.
-
-        Reject records a durable owner decision for the exact current
-        candidate; it never mutates the target repository, deletes the
-        candidate, or cleans worktrees.  The POST delegates to the
-        service seam -- the Web never writes ``candidate_rejected``
-        events directly -- and gates the confirmation step on the same
-        ``can_reject`` projection the page renders.
-        """
-        runtime = runtime_for_run(run_id)
-        run = runtime.db.get_run(run_id) if runtime is not None else None
-        if runtime is None or run is None:
-            return templates.TemplateResponse(
-                request, "run_detail.html", _missing_run_context(run_id), status_code=404
-            )
-        db = runtime.db
-        service = runtime.service
-        if confirm != "1":
-            if not service.can_reject_candidate(run.id):
-                return templates.TemplateResponse(
-                    request,
-                    "run_detail.html",
-                    _run_detail_context(
-                        db, run, error="Reject is not available for this candidate."
-                    ),
-                    status_code=400,
-                )
-            return templates.TemplateResponse(
-                request,
-                "run_detail.html",
-                _run_detail_context(db, run, confirming_reject=True),
-                status_code=200,
-            )
-        try:
-            service.reject_candidate(run_id)
-        except Exception as exc:
-            return templates.TemplateResponse(
-                request,
-                "run_detail.html",
-                _run_detail_context(db, run, error=f"Reject failed: {exc}"),
-                status_code=400,
-            )
-        return RedirectResponse(url=f"/runs/{run_id}?rejected=1", status_code=303)
 
     @app.get("/health")
     def health() -> JSONResponse:

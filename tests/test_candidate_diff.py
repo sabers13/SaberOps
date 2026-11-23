@@ -4,7 +4,7 @@ Builds every scenario with real Database APIs, a real Git repository,
 and the real ``project_candidate_diff`` seam -- never mocks of the
 projector itself.  Covers:
 
-A. Real gate-passed candidate (endpoint + Changes tab show filenames/hunks).
+A. Real gate-passed candidate shows filenames/hunks.
 B. Failed repair SHA never replaces the verified current candidate.
 C. New verified candidate becomes the diff head.
 D. No trustworthy candidate means diff unavailable (no fake data).
@@ -12,23 +12,20 @@ E. Forged/stale changed_paths events do not change the projected diff.
 F. Worktree independence (worktree removed, objects remain).
 G. Target HEAD movement does not redefine the diff endpoints.
 H. Large textual diff is truncated at the explicit limit.
-I. HTML-like candidate content is escaped in the rendered page.
-J. Projection/API reads write nothing (event/row counts unchanged).
+J. Projection reads write nothing (event/row counts unchanged).
 
 R3-B.1 gate authority (persisted from the temporary post-fix proof):
 K. SUCCESS + SHA but no gate receipt is gate-unproven (no diff).
 L. SUCCESS + SHA with only a non-passing gate receipt is gate-unproven.
 M. The same candidate becomes diffable once a real passed gate receipt lands.
-N. Endpoint + Changes-tab parity for the gate-unproven candidate.
-O. Gate-unproven projection/API/page reads write nothing.
+N. The gate-unproven candidate projects no SHA and no diff content.
+O. Gate-unproven projection reads write nothing.
 """
 
 from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-
-from fastapi.testclient import TestClient
 
 from saberops.candidate_diff import (
     CHANGED_PATHS_MAX,
@@ -44,7 +41,6 @@ from saberops.models import (
     RunStatus,
     Tier,
 )
-from saberops.web import create_app
 
 _CREATED = "2026-09-24T10:00:00+00:00"
 
@@ -230,15 +226,6 @@ def test_a_real_gate_passed_candidate(tmp_path: Path) -> None:
     assert "changed-a" in diff.diff_text
     assert "second file here" in diff.diff_text
 
-    client = TestClient(create_app(db_path=tmp_path / "r3b-a.db"))
-    page = client.get("/runs/run-r3b-a")
-    assert page.status_code == 200
-    assert "f1.txt" in page.text
-    assert "f2.txt" in page.text
-    assert "changed-a" in page.text
-    assert candidate in page.text
-    assert "<th>Count</th>" not in page.text
-
 
 def test_b_failed_repair_sha_never_replaces_candidate(tmp_path: Path) -> None:
     db = Database(tmp_path / "r3b-b.db")
@@ -258,11 +245,6 @@ def test_b_failed_repair_sha_never_replaces_candidate(tmp_path: Path) -> None:
     assert "evil.txt" not in diff.changed_paths
     assert "repair-only content" not in diff.diff_text
     assert "changed-a" in diff.diff_text
-
-    client = TestClient(create_app(db_path=tmp_path / "r3b-b.db"))
-    page = client.get("/runs/run-r3b-b")
-    assert "repair-only content" not in page.text
-    assert "changed-a" in page.text
 
 
 def test_c_new_verified_candidate_becomes_diff_head(tmp_path: Path) -> None:
@@ -295,12 +277,6 @@ def test_d_no_trustworthy_candidate_unavailable(tmp_path: Path) -> None:
     assert diff.changed_paths == ()
     assert diff.diff_text == ""
     assert diff.unavailable_reason is not None
-
-    client = TestClient(create_app(db_path=tmp_path / "r3b-d.db"))
-    page = client.get("/runs/run-r3b-d")
-    assert page.status_code == 200
-    assert "This run produced no changes to show." in page.text
-    assert "untrusted" not in page.text
 
 
 def test_e_event_noise_does_not_change_diff(tmp_path: Path) -> None:
@@ -383,28 +359,6 @@ def test_h_large_diff_truncated_at_limit(tmp_path: Path) -> None:
     assert len(diff.diff_text) == DIFF_MAX_CHARS
     assert DIFF_MAX_CHARS == 65536
 
-    client = TestClient(create_app(db_path=tmp_path / "r3b-h.db"))
-    page = client.get("/runs/run-r3b-h")
-    assert "truncated" in page.text.lower()
-
-
-def test_i_html_like_content_escaped(tmp_path: Path) -> None:
-    db = Database(tmp_path / "r3b-i.db")
-    repo, base = _make_repo(tmp_path / "i")
-    marker = "<script>alert(1)</script>"
-    candidate = _commit(repo, {"page.txt": f"hello\n{marker}\n"}, "html candidate")
-    _seed_run(db, "run-r3b-i", repo, base)
-    _gate_pass(db, "run-r3b-i", "run-r3b-i-a1", 1, candidate, base)
-
-    diff = project_candidate_diff(db, "run-r3b-i")
-    assert diff.available is True
-    assert marker in diff.diff_text
-
-    client = TestClient(create_app(db_path=tmp_path / "r3b-i.db"))
-    page = client.get("/runs/run-r3b-i")
-    assert page.status_code == 200
-    assert marker not in page.text
-    assert "&lt;script&gt;" in page.text
 
 
 def test_j_reads_write_nothing(tmp_path: Path) -> None:
@@ -419,12 +373,6 @@ def test_j_reads_write_nothing(tmp_path: Path) -> None:
     project_candidate_diff(db, "run-r3b-j")
     project_candidate_diff(db, "run-r3b-j")
     assert _row_counts(db, "run-r3b-j") == before
-
-    client = TestClient(create_app(db_path=tmp_path / "r3b-j.db"))
-    assert client.get("/runs/run-r3b-j/report").status_code == 200
-    assert client.get("/runs/run-r3b-j").status_code == 200
-    check_db = Database(tmp_path / "r3b-j.db")
-    assert _row_counts(check_db, "run-r3b-j") == before
 
 
 def test_r3b1_success_sha_without_check_unavailable(tmp_path: Path) -> None:
@@ -541,10 +489,10 @@ def test_r3b1_gate_transition_same_candidate_becomes_available(
     assert "candidate-change-r3b1" in diff.diff_text
 
 
-def test_r3b1_gate_unproven_endpoint_and_changes_parity(
+def test_r3b1_gate_unproven_projection_stays_truthful(
     tmp_path: Path,
 ) -> None:
-    """R3-B.1 N: endpoint + Changes tab stay truthful while unproven."""
+    """R3-B.1 N: the projection keeps the SHA and diff hidden while unproven."""
     db = Database(tmp_path / "r3b1-parity.db")
     repo, base = _make_repo(tmp_path / "r3b1-parity")
     _commit(repo, {"f1.txt": "one\ncandidate-change-r3b1\n"}, "candidate R3-B.1")
@@ -553,16 +501,11 @@ def test_r3b1_gate_unproven_endpoint_and_changes_parity(
     _success_with_sha(db, "run-r3b1-parity", "run-r3b1-parity-a1", 1, candidate, base)
     _failing_check(db, "run-r3b1-parity-a1")
 
-    client = TestClient(create_app(db_path=tmp_path / "r3b1-parity.db"))
-    page = client.get("/runs/run-r3b1-parity")
-    assert page.status_code == 200
-    assert "This run produced no changes to show." in page.text
-    assert "candidate_without_gate_success" in page.text
-    assert "Candidate SHA" not in page.text
-    assert "candidate-change-r3b1" not in page.text
-    # The Workers tab still shows the attempt's raw evidence; that is
-    # historical attempt data, not the verified current candidate.
-    assert "Candidate commit" in page.text
+    diff = project_candidate_diff(db, "run-r3b1-parity")
+    assert diff.available is False
+    assert diff.candidate_sha is None
+    assert diff.unavailable_reason == "candidate_without_gate_success"
+    assert "candidate-change-r3b1" not in diff.diff_text
 
 
 def test_r3b1_gate_unproven_reads_write_nothing(tmp_path: Path) -> None:
@@ -582,12 +525,6 @@ def test_r3b1_gate_unproven_reads_write_nothing(tmp_path: Path) -> None:
     project_candidate_diff(db, "run-r3b1-readonly")
     project_candidate_diff(db, "run-r3b1-readonly")
     assert _row_counts(db, "run-r3b1-readonly") == before
-
-    client = TestClient(create_app(db_path=tmp_path / "r3b1-readonly.db"))
-    assert client.get("/runs/run-r3b1-readonly/report").status_code == 200
-    assert client.get("/runs/run-r3b1-readonly").status_code == 200
-    check_db = Database(tmp_path / "r3b1-readonly.db")
-    assert _row_counts(check_db, "run-r3b1-readonly") == before
 
 
 def test_changed_paths_bound_reported(tmp_path: Path) -> None:
@@ -629,10 +566,6 @@ def test_file_counts_numbering_binary_and_odd_paths(tmp_path: Path) -> None:
     added = [r for r in rows if r['kind'] == 'add']
     assert removed['old'] == 1 and removed['new'] is None
     assert [r['new'] for r in added] == [1, 2]
-    page = TestClient(create_app(db_path=tmp_path / 'file-diffs.db')).get('/runs/run-file-diff')
-    assert page.status_code == 200
-    assert '<script>not markup</script>' not in page.text
-    assert '&lt;script&gt;not markup&lt;/script&gt;' in page.text
     assert before == _row_counts(db, 'run-file-diff')
 
 

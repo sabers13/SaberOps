@@ -1,8 +1,8 @@
 """Contract: the Step 019 first-run owner pages are present, safe and local-only.
 
-The first-run surface is wired: Setup / Routing / Projects / Questions pages on
-one shared shell (orch-UI "Framed sheet", 20 October 2026). The earlier preview-only
-assets (first_run.html/.css/.js) were removed on 20 October 2026.
+The first-run surface is wired: Setup / Accounts / Questions pages on one shared
+shell (orch-UI "Framed sheet", 20 October 2026). Phase 1.1 lane H23 retired the
+Routing and Projects templates; the kept pages still use the same shell.
 """
 
 from __future__ import annotations
@@ -19,12 +19,13 @@ def _read(path: Path) -> str:
 
 
 # --- Step 019 full delivery: the wired owner pages ------------------------
-# The single onboarding page was split into Setup / Routing / Projects /
-# Questions pages on one shared shell (orch-UI "Framed sheet", 20 October 2026).
+# The single onboarding page was split into owner pages on one shared shell
+# (orch-UI "Framed sheet", 20 October 2026). H23 keeps Setup, Accounts and
+# Questions; Routing and Projects are retired with their routes.
 
 TEMPLATES = REPO_ROOT / "src" / "saberops" / "templates"
 OWNER_TEMPLATES = tuple(
-    TEMPLATES / f"{name}.html" for name in ("setup", "routing", "accounts", "projects", "questions")
+    TEMPLATES / f"{name}.html" for name in ("setup", "accounts", "questions")
 )
 SHELL = TEMPLATES / "base.html"
 APP_CSS = REPO_ROOT / "src" / "saberops" / "static" / "css" / "app.css"
@@ -61,15 +62,11 @@ def test_onboarding_template_requires_csrf_and_owner_confirmation() -> None:
     assert len(forms) >= 5, "expected the wired mutation forms"
     for form in forms:
         assert 'name="csrf"' in form, form[:120]
-    for action in (
-        "/first-run/concurrency",
-        "/first-run/project/register",
-        "/first-run/storage/apply",
-    ):
+    for action in ("/questions/pause", "/questions/resume"):
         form = next((f for f in forms if action in f), None)
         assert form is not None, action
-        assert "owner_confirmed" in form or 'name="confirm"' in form, action
-    assert "Apply cleanup" in text
+        assert 'name="confirm"' in form, action
+    assert "Pause all work" in text
 
 
 def test_onboarding_css_reuses_tokens_and_is_responsive() -> None:

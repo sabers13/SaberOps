@@ -32,19 +32,19 @@ for asset in src/saberops/static/js/*.js; do
     node --check "$asset"
 done
 
-# Keep inherited dogfood paths/profiles out of these in-process rendering checks.
-ui_gate_scratch="$gate_scratch"
-export XDG_STATE_HOME="$ui_gate_scratch/state"
-export XDG_CONFIG_HOME="$ui_gate_scratch/config"
-export XDG_CACHE_HOME="$ui_gate_scratch/cache"
+# Keep inherited dogfood profiles and store overrides out of these in-process
+# rendering checks.  XDG isolation belongs to tests/conftest.py, which points
+# every unset XDG base at the test's own scratch tree and refuses a base that
+# resolves outside it, so this wrapper deliberately does not pin one.
+unset XDG_STATE_HOME XDG_CONFIG_HOME XDG_CACHE_HOME XDG_DATA_HOME
 unset SABEROPS_PROFILE ORCH_ACCESS_STORE ORCH_ACCESS_MODELS_STORE
 unset ORCH_BINDING_STORE ORCH_READINESS_STORE
 
 # Extra arguments should be inspected, affected rendering tests by exact node ID.
 gate_pytest -q \
-    tests/test_web.py::test_c16c2_dashboard_lists_runs_with_kept_tokens \
-    tests/test_web.py::test_c16c2_run_detail_renders_status_evidence_and_actions \
-    tests/test_web.py::test_c16c2_missing_run_keeps_minimal_page \
-    tests/test_web.py::test_c16c2_report_and_health_stay_json \
-    tests/test_web.py::test_c16c2_console_assets_are_served \
+    tests/test_web.py::test_h23_root_opens_setup \
+    tests/test_web.py::test_h23_retired_web_routes_are_gone \
+    tests/test_web.py::test_h23_console_assets_are_served \
+    tests/test_web.py::test_c16c2_health_stays_json \
+    tests/test_web.py::test_ui1_onboarding_sections_render \
     "$@"

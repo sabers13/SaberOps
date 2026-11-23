@@ -6,8 +6,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-from fastapi.testclient import TestClient
-
 from saberops.cli import main as orch_main
 from saberops.db import Database
 from saberops.models import (
@@ -38,7 +36,6 @@ from saberops.observability.run_report import (
     render_report_text,
 )
 from saberops.telemetry import persist_worker_usage
-from saberops.web import create_app
 
 _CREATED = "2026-09-23T10:00:00+00:00"
 _COMPLETED = "2026-09-23T10:05:00+00:00"
@@ -680,29 +677,6 @@ def test_c16b1_cli_report_and_monitor(tmp_path: Path, capsys: Any) -> None:
     assert orch_main(["report", "run_missing", "--db", str(db_path)]) == 1
 
 
-def test_c16b1_api_report_endpoint(tmp_path: Path) -> None:
-    db_path = tmp_path / "web.db"
-    db = Database(db_path)
-    _run(db)
-    client = TestClient(create_app(db_path=db_path))
-    response = client.get("/runs/run_c16b1/report")
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["identity"]["run_id"] == "run_c16b1"
-    assert payload["schema"] == REPORT_SCHEMA
-    missing = client.get("/runs/run_missing/report")
-    assert missing.status_code == 404
-
-
-def test_c16b1_run_page_shows_monitoring_section(tmp_path: Path) -> None:
-    db_path = tmp_path / "page.db"
-    db = Database(db_path)
-    _run(db)
-    client = TestClient(create_app(db_path=db_path))
-    response = client.get("/runs/run_c16b1")
-    assert response.status_code == 200
-    assert 'aria-label="Live monitoring"' in response.text
-    assert "stage" in response.text.lower()
 
 
 # --- plan / build / check roles (ADR-0005 §3) ------------------------------

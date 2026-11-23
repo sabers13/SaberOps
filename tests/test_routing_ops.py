@@ -7,11 +7,9 @@ credential or network access.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
 
 from saberops import routing_ops
 from saberops.access_ops import model_catalog_store
@@ -23,7 +21,6 @@ from saberops.control_plane import (
     save_owner_bindings,
     upsert_owner_binding,
 )
-from saberops.mcp.lease import LeaseRecord, OrchestratorLease
 from saberops.model_access.connections import TriState
 from saberops.model_access.discovery import DiscoveredModel, ExecutionSupport, ModelCatalog
 from saberops.routing_config import (
@@ -31,7 +28,6 @@ from saberops.routing_config import (
     load_effective_routing_payload,
     load_packaged_default,
 )
-from saberops.web import _csrf_token, create_app
 from saberops.workers.registry import AdapterRegistry
 
 pytestmark = pytest.mark.packaged_routing_default
@@ -182,105 +178,9 @@ def test_reviewer_order_uses_exact_reviewer_bindings(isolated_xdg: None) -> None
         )
 
 
-def test_routing_page_and_routes(isolated_xdg: None, tmp_path: Path) -> None:
-    _seed()
-    client = TestClient(create_app(db_path=tmp_path / "web.db"))
-    page = client.get("/routing?job=write")
-    assert page.status_code == 200
-    assert "Writes the code" in page.text and "No agent connected" in page.text
-    assert 'action="/routing/add"' in page.text and 'name="csrf"' in page.text
-    assert 'action="/first-run/concurrency"' in page.text and 'name="owner_confirmed"' in page.text
-
-    refused = client.post(
-        "/routing/add", data={"job": "write", "model": f"{_PROVIDER}/{_MODELS[0]}"}
-    )
-    assert refused.status_code == 403
-    assert not get_user_routing_path().exists()
-
-    done = client.post(
-        "/routing/add",
-        data={"csrf": _csrf_token(), "job": "write", "model": f"{_PROVIDER}/{_MODELS[0]}"},
-        follow_redirects=False,
-    )
-    assert done.status_code == 303 and done.headers["location"] == "/routing?job=write&saved=added"
-    shown = client.get("/routing?job=write&saved=added").text
-    assert "Saved. The model was added." in shown and "In charge" in shown
-
-    bad = client.post(
-        "/routing/move",
-        data={"csrf": _csrf_token(), "job": "write", "position": "x", "direction": "up"},
-    )
-    assert bad.status_code == 400
 
 
-def test_connected_agent_name_comes_from_the_lease(isolated_xdg: None, tmp_path: Path) -> None:
-    lease = OrchestratorLease()
-    assert lease.acquire()
-    assert lease.record_client("claude-code")
-    record = lease.read()
-    assert isinstance(record, LeaseRecord) and record.client == "claude-code"
-    raw = json.loads(lease.path.read_text(encoding="utf-8"))
-    assert raw["client"] == "claude-code"
-    page = TestClient(create_app(db_path=tmp_path / "web.db")).get("/routing?job=plan").text
-    assert "Claude Code" in page
-    # A read-only second client never relabels the writer's lease.
-    other = OrchestratorLease(pid=lease.pid + 1)
-    assert not other.record_client("intruder")
-    assert lease.release()
 
-
-def test_model_origin_names_the_upstream_provider_and_search_finds_it() -> None:
-    from saberops.web import _model_origin, _search_text
-
-    assert _model_origin("opencode", "opencode-go/deepseek-v4-pro") == "OpenCode Go · via OpenCode"
-    assert _model_origin("opencode", "opencode/big-pickle") == "OpenCode Zen · via OpenCode"
-    assert _model_origin("custom", "~moonshotai/kimi-k3") == "Moonshot AI · via Custom"
-    assert _model_origin("codex", "gpt-5.6-terra") == "Codex account"
-    assert _search_text("Opencode go") == _search_text("opencode-go") == "opencode go"
-
-
-def test_outdated_model_lists_are_named_with_a_refresh_back_to_routing(
-    isolated_xdg: None, tmp_path: Path
-) -> None:
-    stale = DiscoveredModel(
-        connection_id=_CONNECTION,
-        provider=_PROVIDER,
-        backend="opencode",
-        model_id="opencode/old-model",
-        discovery_status=TriState.TRUE,
-        execution_support=ExecutionSupport.SUPPORTED,
-        stale=True,
-    )
-    model_catalog_store().save(ModelCatalog(models=(stale,)))
-    page = TestClient(create_app(db_path=tmp_path / "web.db")).get("/routing?job=write").text
-    assert "OpenCode: 1 model hidden" in page
-    assert 'action="/first-run/discover"' in page
-    assert 'name="return_to" value="routing"' in page and 'name="job" value="write"' in page
-
-
-def test_failed_refresh_says_so_and_keeps_the_page(
-    isolated_xdg: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from saberops import access_ops
-
-    monkeypatch.setattr(
-        access_ops,
-        "discover_access_models",
-        lambda _cid: {"ok": False, "reason": "ENDPOINT_UNREACHABLE"},
-    )
-    client = TestClient(create_app(db_path=tmp_path / "web.db"))
-    page = client.post(
-        "/first-run/discover",
-        data={
-            "csrf": _csrf_token(),
-            "connection_id": "opencode-account",
-            "return_to": "routing",
-            "job": "write",
-        },
-    )
-    assert page.status_code == 502
-    assert "was not refreshed: the tool did not answer" in page.text
-    assert "Writes the code" in page.text
 
 
 def test_auto_refresh_only_relists_missing_stale_or_old_lists(

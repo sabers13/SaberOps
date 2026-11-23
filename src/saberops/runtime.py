@@ -182,13 +182,13 @@ class ProjectRuntimeManager:
         return legacy if legacy.db.get_run(run_id) is not None else None
 
     def for_active(self, repo_path: Path | str | None) -> ProjectRuntime:
-        """Return the runtime for the UI's currently selected project.
+        """Return the runtime for a caller's currently selected project.
 
-        This is a navigation convenience only: it decides what the dashboard
-        *shows*, never what an existing run acts on.  When the selection cannot
-        be resolved to a usable project the dashboard falls back to the
-        preserved global store rather than erroring; every *action* goes
-        through :meth:`for_repo` or :meth:`for_run`, which fail closed.
+        This is a navigation convenience only: it decides what a view *shows*,
+        never what an existing run acts on.  When the selection cannot be
+        resolved to a usable project the caller falls back to the preserved
+        global store rather than erroring; every *action* goes through
+        :meth:`for_repo` or :meth:`for_run`, which fail closed.
         """
         if repo_path is None:
             return self.legacy()

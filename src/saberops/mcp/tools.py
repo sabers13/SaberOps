@@ -952,8 +952,8 @@ def _catch_up_switch(db: Any, run_id: str, attempts: list[Any]) -> dict[str, Any
     F4: when a subscription runs out, the run continues from the interrupted
     attempt's checkpoint on a different binding.  That switch is durable
     evidence (attempt rows, worker checkpoints, dispatch evidence); this
-    projection only reads it, so the owner sees the handoff without opening
-    the run page.
+    projection only reads it, so the owner sees the handoff without a separate
+    report.
     """
     from saberops.models import AttemptStatus
 
@@ -1085,7 +1085,6 @@ def _catch_up_next_action(
     from saberops.jobs.models import JobState
     from saberops.models import CandidateState
 
-    run_id = result.get("run_id")
     if questions:
         question = questions[0]
         if question["answerable_by"] == "PLAN" and not question.get("critical", False):
@@ -1176,11 +1175,6 @@ def _catch_up_next_action(
             "owner_only": True,
             "detail": f"Candidate {short} is checked and ready; the owner accepts it.",
             "command": result["owner_action"],
-            "reject": {
-                "surface": "web",
-                "path": f"/runs/{run_id}",
-                "detail": "The owner can reject this candidate from the run page.",
-            },
         }
     if job.state is JobState.FAILED:
         work = view.get("work_location") or "the preserved work location"
@@ -1240,8 +1234,8 @@ def _catch_up_next_action(
         "action": "inspect",
         "owner_only": False,
         "detail": (
-            f"Nothing is acceptable yet ({reason}); read the run page for the full "
-            "check and review evidence."
+            f"Nothing is acceptable yet ({reason}); run "
+            "`orch report RUN_ID` for the full check and review evidence."
         ),
         "command": None,
     }
@@ -1389,7 +1383,6 @@ def _catch_up(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str,
         "usage": result["usage"],
         "result": result,
         "evidence": {
-            "run_page": f"/runs/{run_id}" if run_id is not None else None,
             "check": f"check:{check['check_id']}" if check is not None else None,
             "review": f"review:{review['review_id']}" if review is not None else None,
         },

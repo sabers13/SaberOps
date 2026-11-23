@@ -72,7 +72,7 @@ def test_r0a_manager_owner_navigation_gone(isolated_xdg: None, tmp_path: Path) -
     """No owner navigation points at the removed Manager/Ox capability."""
     client = _client(tmp_path)
     _seed_run(tmp_path)
-    for path in ("/", "/runs/run_r0a_probe"):
+    for path in ("/", "/setup"):
         page = client.get(path)
         assert page.status_code == 200, path
         assert "/manager" not in page.text, path
@@ -93,27 +93,20 @@ def test_r0a_no_unsafe_quick_actions(isolated_xdg: None, tmp_path: Path) -> None
     console = client.get("/static/js/console.js")
     assert console.status_code == 200
     assert "data-fill-composer" not in console.text
-    app_js = client.get("/static/js/app.js")
-    assert app_js.status_code == 200
-    assert "/manager/message" not in app_js.text
-    assert "Ox Alpha" not in app_js.text
 
 
 def test_r0a_placeholder_surfaces_absent(isolated_xdg: None, tmp_path: Path) -> None:
     """Removed placeholder/misleading surfaces stay absent."""
     client = _client(tmp_path)
     _seed_run(tmp_path)
-    dashboard = client.get("/").text
-    assert 'data-settings-section="notifications"' not in dashboard
-    assert 'data-settings-section="retention"' not in dashboard
-    assert "Not available in this version" not in dashboard
-    assert "Push remains CLI-only" not in dashboard
-    assert "Antigravity permission posture" not in dashboard
-    assert "Execution tiers" not in dashboard
-    assert "ox-alpha-free" not in dashboard
-    run_page = client.get("/runs/run_r0a_probe").text
-    assert "Push remains CLI-only" not in run_page
-    assert "3B plan" not in run_page
+    setup = client.get("/").text
+    assert 'data-settings-section="notifications"' not in setup
+    assert 'data-settings-section="retention"' not in setup
+    assert "Not available in this version" not in setup
+    assert "Push remains CLI-only" not in setup
+    assert "Antigravity permission posture" not in setup
+    assert "Execution tiers" not in setup
+    assert "ox-alpha-free" not in setup
 
 
 def test_r0a_saberops_branding_present(isolated_xdg: None, tmp_path: Path) -> None:
@@ -155,13 +148,13 @@ def test_r0a_health_unknown_outside_source_tree(
 
 
 def test_r0a_real_routes_still_render(isolated_xdg: None, tmp_path: Path) -> None:
-    """Surviving status routes still render after removals."""
+    """Surviving owner pages still render after the H23 removals."""
     client = _client(tmp_path)
     _seed_run(tmp_path)
     assert client.get("/").status_code == 200
-    assert client.get("/runs/run_r0a_probe").status_code == 200
-    assert client.get("/runs/run_r0a_probe/report").status_code == 200
-    assert client.get("/runs/run_r0a_probe/actions").status_code == 200
+    assert client.get("/setup").status_code == 200
+    assert client.get("/accounts").status_code == 200
+    assert client.get("/questions").status_code == 200
     assert client.get("/health").status_code == 200
 
 

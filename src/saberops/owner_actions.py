@@ -1,8 +1,8 @@
 """Durable non-blocking owner actions: detached Review and Accept.
 
-The Web dashboard must never execute a long-running Review or Accept inside
-the HTTP request: the browser may close, the owner may double-click, and the
-Web server itself may restart.  This module provides the smallest durable
+No owner surface may execute a long-running Review or Accept inside the
+request that asked for it: the client may close, the owner may double-click,
+and the serving process itself may restart.  This module provides the smallest durable
 primitive that makes both operations safe for real dogfooding:
 
 * :class:`RunOwnerAction` -- one bounded row per requested REVIEW or ACCEPT,
@@ -268,7 +268,7 @@ class OwnerActionLaunch:
 
 @dataclass(frozen=True)
 class OwnerActionSummary:
-    """Durable per-run projection for the run page and live actions JSON."""
+    """Durable per-run projection for owner-action readers (CLI, MCP, board)."""
 
     active_review: RunOwnerAction | None
     active_accept: RunOwnerAction | None

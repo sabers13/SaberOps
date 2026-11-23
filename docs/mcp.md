@@ -226,8 +226,10 @@ next action) and the one next action the engine allows. Pass `plan_id` instead
 of `job_id` to receive the plan header, lane table and per-lane open questions,
 so a fresh CLI can take over a plan without the planner that submitted it.
 It changes nothing, sends no notice, takes no lease, and is safe from a
-read-only second client. Owners reject a candidate from the run page
-(`/runs/<run_id>`).
+read-only second client. Owner decisions stay with the engine's recorded
+action and the `orch accept RUN_ID` command it names; phase 1.1 lane H23
+retired the run page that used to carry the owner's reject button, and phase 2
+returns owner reject on the board.
 
 The scheduler tick sends three plan-level notices, each once per key, from the
 same projection as `STATE.md`: `plan:<id>:complete` when every lane is accepted,

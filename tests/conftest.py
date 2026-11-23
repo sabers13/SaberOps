@@ -1,7 +1,7 @@
 """Shared test setup.
 
 Since 20 October 2026 the packaged default routing is empty: a fresh install
-routes nothing until the owner chooses models on the Routing page. Engine
+routes nothing until the owner chooses models with `orch routing`. Engine
 tests that never write a user routing file were built on the v0.4.0 packaged
 chains, so they keep reading that exact document from
 ``tests/fixtures/routing_v040_default.json``. Tests about the real packaged

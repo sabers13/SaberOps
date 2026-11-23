@@ -1514,13 +1514,13 @@ def build_parser() -> argparse.ArgumentParser:
     # orch ui
     ui_parser = subparsers.add_parser(
         "ui",
-        help="Start the local web dashboard.",
+        help="Start the local owner web pages (setup, accounts, questions).",
     )
     ui_parser.add_argument(
         "--host",
         type=str,
         default="127.0.0.1",
-        help="Bind host for the dashboard (default: 127.0.0.1, localhost-only).",
+        help="Bind host for the web pages (default: 127.0.0.1, localhost-only).",
     )
     ui_parser.add_argument(
         "--port",
@@ -8240,7 +8240,7 @@ def handle_ui(args: argparse.Namespace) -> int:
         initialize_account_readiness()
     except (AccessStoreError, ReadinessStoreError):
         # Preserve unreadable owner state for repair; the Access page explains
-        # unavailable evidence. Never reset it or block the dashboard from opening.
+        # unavailable evidence. Never reset it or block the owner pages from opening.
         print("Provider discovery could not read or save owner state; see Access.")
     app = create_app(db_path=args.db, repo_path=args.repo, seed_cwd_if_empty=False)
     if args.db:

@@ -161,13 +161,16 @@ it installs nothing. It compiles all current templates without importing the
 backend, runs `node --check` on the application JavaScript files, and runs
 only these existing test node IDs from `tests/test_web.py`:
 
-- `test_c16c2_dashboard_lists_runs_with_kept_tokens`: renders the real dashboard and
-  checks shell hooks, CSS/JS links, navigation, and absence of prototype controls.
-- `test_c16c2_run_detail_renders_status_evidence_and_actions`: renders seeded running and
-  completed runs; checks tabs and action links without executing those actions.
-- `test_c16c2_missing_run_keeps_minimal_page`: verifies the 404 page keeps the shared shell.
-- `test_c16c2_console_assets_are_served`: verifies all application CSS/JS assets
-  return HTTP 200 with nonempty content.
+- `test_h23_root_opens_setup`: the app entry redirects to Setup and the Setup
+  page renders on the shared shell with its navigation links.
+- `test_h23_retired_web_routes_are_gone`: run monitoring, plan/wave scoring, the
+  routing editor and the storage cleanup page stay retired (404, no static
+  controller).
+- `test_h23_console_assets_are_served`: the shared stylesheet and theme
+  controller return HTTP 200 with nonempty content.
+- `test_c16c2_health_stays_json`: `/health` keeps reporting the SaberOps identity.
+- `test_ui1_onboarding_sections_render`: renders Setup, Questions and Accounts
+  with their honest empty states.
 
 These are small in-process GET/render checks using existing temporary test state,
 not whole backend suites. The wrapper additionally isolates inherited state/config/
@@ -175,17 +178,17 @@ cache paths and store overrides in a disposable directory. No provider/model cal
 new fixtures, live service, or browser automation installation are required.
 
 The baseline is credible only for the eligibility rules above **plus inspection
-of the affected rendered page**. For templates outside dashboard/run-detail, add
-the smallest existing affected GET/render checks by exact node ID, e.g.:
+of the affected rendered page**. For a kept owner page, add the smallest existing
+affected GET/render checks by exact node ID, e.g.:
 
 ```bash
 bash scripts/gate-ui-fast.sh \
-  tests/test_web.py::test_c16c2_owner_pages_keep_forms
+  tests/test_web.py::test_ui1_question_answer_and_defer
 ```
 
-That existing test seeds routing test state and GET-renders access, routing, and
-orchestrator forms. `test_c16c2_settings_modal_marks_unavailable_sections` can be
-added for settings changes. Inspect any other candidate test's actual assertions
+That existing test seeds question-queue state and exercises the Questions page's
+answer/defer forms. `test_f17_questions_page_pauses_and_resumes_work` can be added
+for the pause/resume surface. Inspect any other candidate test's actual assertions
 and setup before selecting it; filenames containing "UI" are not selection criteria.
 Do not append a whole test file/suite. If no suitable related render test exists,
 record that limitation and inspect the real affected page; contract changes escalate.

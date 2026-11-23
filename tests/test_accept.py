@@ -1,10 +1,8 @@
-"""Acceptance tests: engine-derived truth and Web/engine projection parity.
+"""Acceptance tests: the engine-derived eligibility projection.
 
-Two merged R0-B generations:
+Phase 1.1 lane H23 retired the web run page (checklist and Accept button); the
+projection those controls read is still the safety property under test.
 
-* the Web acceptance surface derives from ``AcceptEngine`` (the run page
-  checklist and Accept button use the engine-derived read-only projection --
-  the Web holds no independent acceptance policy table);
 * every blocking condition in ``AcceptEngine.check_accept_eligibility`` must
   mirror a real pre-CAS rule enforced by ``AcceptEngine.accept_run``.  In
   particular the projection must not invent a ``not_already_accepted``
@@ -27,7 +25,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fastapi.testclient import TestClient
 
 from saberops.accept import AcceptEngine, AcceptResult
 from saberops.config import RunConfig
@@ -68,7 +65,6 @@ from saberops.models import (
     WorkerRequest,
     WorkerResult,
 )
-from saberops.web import create_app
 from saberops.workers.base import WorkerAdapter
 from saberops.workers.registry import AdapterRegistry
 
@@ -352,10 +348,6 @@ def _no_projection_only_blocker(run_id: str, db_path: Path) -> None:
     )
 
 
-def _client(db_path: Path) -> TestClient:
-    return TestClient(create_app(db_path=db_path), raise_server_exceptions=False)
-
-
 def _checks_by_key(db_path: Path, run_id: str) -> dict[str, dict[str, str]]:
     engine = AcceptEngine(db=Database(db_path))
     eligibility = engine.check_accept_eligibility(run_id)
@@ -580,21 +572,6 @@ def test_r0b_eligible_candidate_checklist_passes_and_accept_enabled(
     }
     assert all(c.passed() for c in eligibility.checks)
 
-    page = _client(db_path).get("/runs/run_r0b_a")
-    assert page.status_code == 200
-    assert 'data-check-key="review" data-check-status="pass"' in page.text
-    assert "Review requirement satisfied" in page.text
-    # Accept button rendered and NOT disabled.
-    assert 'id="acceptRunButton"' in page.text
-    accept_segment = page.text.split('id="acceptRunButton"')[1].split(">")[0]
-    assert "disabled" not in accept_segment
-
-    # The confirm step is reachable (gating passed, not a 400).
-    confirm = _client(db_path).post(
-        "/runs/run_r0b_a/accept", data={"confirm_run_id": ""}
-    )
-    assert confirm.status_code == 200
-    assert "Type the run id to confirm" in confirm.text
 
 
 def test_repeat_accept_after_durable_integration_reports_success(
@@ -638,18 +615,6 @@ def test_r0b_moved_target_head_blocks_accept(
     eligibility = AcceptEngine(db=Database(db_path)).check_accept_eligibility("run_r0b_b")
     assert not eligibility.eligible
 
-    page = _client(db_path).get("/runs/run_r0b_b")
-    assert page.status_code == 200
-    assert 'data-check-key="target_head" data-check-status="fail"' in page.text
-    assert "Target HEAD moved since this candidate was created" in page.text
-    accept_segment = page.text.split('id="acceptRunButton"')[1].split(">")[0]
-    assert "disabled" in accept_segment
-
-    blocked = _client(db_path).post(
-        "/runs/run_r0b_b/accept", data={"confirm_run_id": ""}
-    )
-    assert blocked.status_code == 400
-    assert "Accept is blocked by the acceptance checklist" in blocked.text
 
 
 def test_r0b_dirty_target_repo_blocks_accept(
@@ -666,11 +631,6 @@ def test_r0b_dirty_target_repo_blocks_accept(
     assert checks["target_clean"]["status"] == "fail"
     assert "must be clean before accept" in checks["target_clean"]["reason"]
 
-    page = _client(db_path).get("/runs/run_r0b_c")
-    assert page.status_code == 200
-    assert 'data-check-key="target_clean" data-check-status="fail"' in page.text
-    accept_segment = page.text.split('id="acceptRunButton"')[1].split(">")[0]
-    assert "disabled" in accept_segment
 
 
 def test_r0b_required_review_missing_blocks_accept(
@@ -685,17 +645,12 @@ def test_r0b_required_review_missing_blocks_accept(
     assert checks["review"]["status"] == "fail"
     assert "no candidate-linked review exists" in checks["review"]["reason"]
 
-    page = _client(db_path).get("/runs/run_r0b_d")
-    assert 'data-check-key="review" data-check-status="fail"' in page.text
-
     # A present non-substantive verdict blocks exactly like the engine.
     _add_review(db_path, "run_r0b_d", ReviewVerdict.BLOCK)
     checks = _checks_by_key(db_path, "run_r0b_d")
     assert checks["review"]["status"] == "fail"
     assert "BLOCK" in checks["review"]["reason"]
-    page = _client(db_path).get("/runs/run_r0b_d")
-    accept_segment = page.text.split('id="acceptRunButton"')[1].split(">")[0]
-    assert "disabled" in accept_segment
+    assert not AcceptEngine(db=Database(db_path)).check_accept_eligibility("run_r0b_d").eligible
 
 
 def test_r0b_review_not_required_does_not_block(
@@ -715,11 +670,6 @@ def test_r0b_review_not_required_does_not_block(
     eligibility = AcceptEngine(db=Database(db_path)).check_accept_eligibility("run_r0b_e")
     assert eligibility.eligible
 
-    page = _client(db_path).get("/runs/run_r0b_e")
-    assert page.status_code == 200
-    assert 'data-check-key="review" data-check-status="pass"' in page.text
-    accept_segment = page.text.split('id="acceptRunButton"')[1].split(">")[0]
-    assert "disabled" not in accept_segment
 
 
 def test_r0b_pass_with_backlog_matches_engine(
@@ -737,38 +687,22 @@ def test_r0b_pass_with_backlog_matches_engine(
     assert review_check.passed()
     assert "PASS_WITH_BACKLOG" in review_check.reason
 
-    page = _client(db_path).get("/runs/run_r0b_f")
-    assert 'data-check-key="review" data-check-status="pass"' in page.text
-    accept_segment = page.text.split('id="acceptRunButton"')[1].split(">")[0]
-    assert "disabled" not in accept_segment
 
 
-def test_r0b_engine_change_propagates_without_web_policy_table(
+def test_r0b_later_block_review_supersedes_pass(
     isolated_xdg: None, tmp_path: Path
 ) -> None:
-    """G: Web state follows the engine; no duplicate Web policy table."""
-    web_source = (Path(__file__).parent.parent / "src" / "saberops" / "web.py").read_text()
-    assert "latest_review.verdict == ReviewVerdict.PASS" not in web_source
-    assert "Accept is only available for completed runs with a PASS review" not in web_source
-
+    """G: the engine's eligibility follows the latest candidate-linked review."""
     repo, base, candidate = _make_repo(tmp_path, "repo-g")
     db_path = tmp_path / "web.db"
     _seed_run(db_path, "run_r0b_g", repo, base, candidate, review_enabled=True)
     _add_review(db_path, "run_r0b_g", ReviewVerdict.PASS, created_at=_CREATED)
-    client = _client(db_path)
-
-    enabled_page = client.get("/runs/run_r0b_g")
-    assert 'data-check-key="review" data-check-status="pass"' in enabled_page.text
-
-    # A later failing review changes the engine result; the Web follows
-    # with no code change and no second policy table.
-    _add_review(db_path, "run_r0b_g", ReviewVerdict.BLOCK, created_at=_LATER)
     engine = AcceptEngine(db=Database(db_path))
+    assert engine.check_accept_eligibility("run_r0b_g").eligible
+
+    # A later failing review changes the engine result.
+    _add_review(db_path, "run_r0b_g", ReviewVerdict.BLOCK, created_at=_LATER)
     assert not engine.check_accept_eligibility("run_r0b_g").eligible
-    followed_page = client.get("/runs/run_r0b_g")
-    assert 'data-check-key="review" data-check-status="fail"' in followed_page.text
-    accept_segment = followed_page.text.split('id="acceptRunButton"')[1].split(">")[0]
-    assert "disabled" in accept_segment
 
 
 # ---------------------------------------------------------------------------

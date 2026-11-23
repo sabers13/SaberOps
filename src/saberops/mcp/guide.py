@@ -115,9 +115,9 @@ You are the planner. SaberOps has exactly three roles:
 
 - **plan** — you, the CLI session the owner sits in. You submit and follow work.
 - **build** — one worker per task, including its own repair retries. It runs in
-  an isolated copy of the project with the models the owner chose on the
-  Routing page. A stronger-model start or escalation is a setting on the build
-  route, not another role.
+  an isolated copy of the project with the models the owner chose with
+  `orch routing`. A stronger-model start or escalation is a setting on the
+  build route, not another role.
 - **check** — an independent reviewer (ideally another vendor) that reads the
   built candidate before the owner sees it.
 
@@ -395,7 +395,7 @@ stays attended.
 - Tell the owner: the original request, the current candidate commit, the latest
   check and review with the commit each assessed, any open question, and the next
   action. When the result offers `orch accept RUN_ID`, show that exact command;
-  the owner accepts there or rejects from the run page for full evidence.
+  `orch report RUN_ID` shows the owner the full check and review evidence.
 - `usage` lists each attempt's subscription and token usage; `switch` describes
   the latest handoff (for example a quota-exhausted attempt continued on another
   subscription from its checkpoint). Report both plainly; they are durable

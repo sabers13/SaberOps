@@ -1,10 +1,10 @@
 """Contract: local web Host-header guard for private routes (Step 020 early).
 
-The dashboard exposes owner run data on private GET/read routes and owner
-mutations on the accept/reject POSTs.  A foreign or malformed Host header
-(DNS rebinding, curl without Origin, old browsers) must fail closed with
-403 before any run data is returned or any mutation runs; a missing Origin
-header alone never excuses a foreign Host.  Legitimate loopback traffic
+The owner pages expose setup, account and question state on private GET
+routes and owner mutations on their POSTs.  A foreign or malformed Host
+header (DNS rebinding, curl without Origin, old browsers) must fail closed
+with 403 before any owner data is returned or any mutation runs; a missing
+Origin header alone never excuses a foreign Host.  Legitimate loopback traffic
 (127.0.0.1 / localhost / [::1]) and the default Starlette TestClient Host
 (``testserver`` inside a synthetic ASGI scope only) keep working.
 """
@@ -34,13 +34,7 @@ def _loopback_client(tmp_path: Path) -> TestClient:
 
 
 def _private_paths() -> list[str]:
-    return [
-        "/",
-        "/runs/run-missing",
-        "/runs/run-missing/report",
-        "/runs/run-missing/actions",
-        "/runs/run-missing/events/stream",
-    ]
+    return ["/", "/setup", "/accounts", "/questions"]
 
 
 def test_valid_loopback_hosts_reach_private_routes(tmp_path: Path) -> None:
@@ -63,10 +57,9 @@ def test_default_testclient_host_keeps_working(tmp_path: Path) -> None:
     """Covers: prompt section 'compatibility' (TestClient Host=testserver)."""
     client = _client(tmp_path)
     assert client.get("/").status_code == 200
-    # A valid synthetic-scope request reaches routing, not the Host guard:
-    # an unknown run is a 404 from the app, never a 403 from the guard.
-    assert client.get("/runs/run-missing/report").status_code == 404
-    assert client.post("/runs/run-missing/accept").status_code in (400, 404)
+    # A valid synthetic-scope request reaches the app, not the Host guard:
+    # a retired route is a 404 from the app, never a 403 from the guard.
+    assert client.get("/routing").status_code == 404
 
 
 def test_foreign_host_rejected_on_private_get(tmp_path: Path) -> None:
@@ -87,11 +80,12 @@ def test_foreign_host_rejected_on_private_get(tmp_path: Path) -> None:
 def test_foreign_host_rejected_on_owner_post(tmp_path: Path) -> None:
     """Covers: threat-model V3 hostile POST (owner-action CSRF)."""
     client = _loopback_client(tmp_path)
-    for path in ("/runs/run-missing/accept", "/runs/run-missing/reject"):
+    for path in ("/questions/pause", "/accounts/confirm-all"):
         response = client.post(
-            path, headers={"Host": "evil.test"}, data={"confirm_run_id": "x"}
+            path, headers={"Host": "evil.test"}, data={"confirm": "yes"}
         )
         assert response.status_code == 403, path
+        assert "Host" in response.json()["error"]
 
 
 def test_missing_origin_cannot_bypass_foreign_host(tmp_path: Path) -> None:
@@ -99,7 +93,7 @@ def test_missing_origin_cannot_bypass_foreign_host(tmp_path: Path) -> None:
     client = _loopback_client(tmp_path)
     # No Origin header at all: the pre-existing Origin check stays silent,
     # so the Host guard alone must refuse.
-    response = client.post("/runs/run-missing/accept", headers={"Host": "evil.test"})
+    response = client.post("/questions/pause", headers={"Host": "evil.test"})
     assert response.status_code == 403
     assert "Host" in response.json()["error"]
 
@@ -108,25 +102,30 @@ def test_missing_origin_valid_host_reaches_app(tmp_path: Path) -> None:
     """Covers: prompt section 'compatibility' (curl-like localhost POST)."""
     client = _loopback_client(tmp_path)
     response = client.post(
-        "/runs/run-missing/accept", headers={"Host": "127.0.0.1:8765"}
+        "/questions/pause", headers={"Host": "127.0.0.1:8765"}
     )
-    # Guard passes; the app itself answers (unknown run), never 403.
-    assert response.status_code in (400, 404)
+    # Guard passes; the app's own CSRF refusal answers as HTML, not the
+    # guard's JSON refusal.
+    assert response.status_code == 403
+    assert "text/html" in response.headers["content-type"]
+    assert "confirmation token" in response.text
 
 
 def test_foreign_origin_still_rejected_with_valid_host(tmp_path: Path) -> None:
     """Covers: prompt section 'Preserve existing Origin protections'."""
     client = _loopback_client(tmp_path)
     response = client.post(
-        "/runs/run-missing/accept",
+        "/questions/pause",
         headers={"Host": "127.0.0.1:8765", "Origin": "https://evil.test"},
     )
     assert response.status_code == 403
+    assert "local SaberOps page" in response.json()["error"]
     response = client.post(
-        "/runs/run-missing/reject",
+        "/accounts/confirm-all",
         headers={"Host": "127.0.0.1:8765", "Sec-Fetch-Site": "cross-site"},
     )
     assert response.status_code == 403
+    assert "local SaberOps page" in response.json()["error"]
 
 
 def test_duplicate_host_headers_rejected(tmp_path: Path) -> None:
@@ -174,7 +173,7 @@ def test_testserver_host_rejected_outside_synthetic_scope(tmp_path: Path) -> Non
     # scope is a real loopback bind: it must fail closed here.
     assert client.get("/", headers={"Host": "testserver"}).status_code == 403
     assert (
-        client.post("/runs/run-missing/accept", headers={"Host": "testserver"}).status_code
+        client.post("/questions/pause", headers={"Host": "testserver"}).status_code
         == 403
     )
 

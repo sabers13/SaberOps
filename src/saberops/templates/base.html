@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 {# SaberOps app shell ("Framed sheet", orch-UI pick B, 20 October 2026).
    A tinted L-frame (sidebar + top bar) around a white sheet. Every page
-   extends this. console.js owns the theme; app.js owns run live refresh. #}
+   extends this. console.js owns the theme. #}
 {% set nav = nav_state() %}
 {% import "_ui.html" as ui %}
 {% set icon = ui.icon %}
@@ -10,10 +10,7 @@
 {%- endmacro %}
 {% macro nav_items() -%}
 <ul class="nav-list">
-  <li><a class="nav-link" href="/"{% if active_page == "runs" %} aria-current="page"{% endif %}>{{ icon("runs") }}Runs</a></li>
   <li><a class="nav-link" href="/questions"{% if active_page == "questions" %} aria-current="page"{% endif %}>{{ icon("questions") }}Questions{% if nav.pending_questions %}<span class="nav-count">{{ nav.pending_questions }}<span class="sr-only"> waiting</span></span>{% endif %}</a></li>
-  <li><a class="nav-link" href="/projects"{% if active_page == "projects" %} aria-current="page"{% endif %}>{{ icon("projects") }}Projects</a></li>
-  <li><a class="nav-link" href="/routing"{% if active_page == "routing" %} aria-current="page"{% endif %}>{{ icon("routing") }}Routing</a></li>
   <li><a class="nav-link" href="/accounts"{% if active_page == "accounts" %} aria-current="page"{% endif %}>{{ icon("accounts") }}Accounts</a></li>
   <li><a class="nav-link" href="/setup"{% if active_page == "setup" %} aria-current="page"{% endif %}>{{ icon("setup") }}Setup{% if nav.setup_attention %}<span class="nav-dot" role="img" aria-label="needs attention"></span>{% endif %}</a></li>
 </ul>

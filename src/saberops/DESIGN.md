@@ -160,8 +160,8 @@ when a candidate exists. Setup: four numbered steps with a ready count.
 `console-v2.css`, `saberops-console.css`, `workspace.css`, `chat-workspace.css`,
 `polish.css` and the `first_run.html`/`.css`/`.js` preview were removed on 20 October
 2026 at the owner's request; sections below that cite them are history. `console.js` remains the theme owner
-(it also adds pending feedback to POST buttons); `app.js` remains the single SSE
-owner and now also upgrades the run evidence tabs.
+(it also adds pending feedback to POST buttons). `app.js` retired with the run page
+in phase 1.1 lane H23 (ADR-0076).
 
 **Verification (this batch):** orch-UI screenshot loop at 375/768/1440 px, light and
 dark, on a disposable seeded store (no provider calls): no horizontal overflow, no
@@ -248,15 +248,12 @@ classifies task/package requirements, routing chains are keyed by tier/context,
 review using tiers. Their backend retirement is UNRESOLVED; removing UI labels
 alone would not remove this behavior. No execution rules change in this UI batch.
 
-### Live run results
+### Live run results (retired)
 
-The single SSE controller in `app.js` refreshes marked `data-run-refresh`
-regions from the existing read-only run-detail GET after lifecycle events,
-reconnection, tab selection and returning to the page. Reads are coalesced and
-serialized; a response overtaken by an event is discarded. Server rendering
-retains the existing escaping and canonical candidate/check/review projections.
-Persisted events omitted by the named SSE subscriptions are merged into the
-mounted event log without dropping newer streamed rows.
+The run page and its single SSE controller (`app.js`) retired in phase 1.1 lane
+H23 (ADR-0076) with run monitoring, reports and the web accept/reject actions.
+The live run facts still come from the same engine records; phase 2's board
+rebuilds the view on the kept server.
 
 The composer, acceptance confirmations and PTY remain mounted. Refreshes preserve
 expanded evidence and the selected tab; switching tabs resets the content scroll.
@@ -312,9 +309,10 @@ and gates. Open choices are explicitly UNRESOLVED.
   Dashboard and run-detail templates extend this shell.
 - **Application CSS order:** `static/css/console-v2.css`, then
   `static/css/saberops-console.css`. Run detail also loads vendored xterm styling.
-- **Application JavaScript:** `static/js/console.js` controls shell presentation;
-  `app.js` and `terminal.js` also support backend-connected interactions. IDs and
-  `data-od-id` hooks are existing contracts, not decorative attributes to rename.
+- **Application JavaScript:** `static/js/console.js` controls shell presentation.
+  The run-page controller (`app.js`) and `terminal.js` are gone; phase 1.1 lane
+  H23 removed the first with its page (ADR-0076). IDs and `data-od-id` hooks are
+  existing contracts, not decorative attributes to rename.
 - **Provenance:** The base template and stylesheet identify OpenDesign project
   `25e96df8-02ca-468a-9335-0ea38e57308f`, artifact
   `orchestrator-console-v2.html`, as the approved source. The referenced

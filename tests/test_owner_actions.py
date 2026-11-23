@@ -48,7 +48,6 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from fastapi.testclient import TestClient
 
 from saberops.accept import AcceptEligibility, AcceptResult
 from saberops.db import Database
@@ -93,7 +92,6 @@ from saberops.owner_actions import (
 from saberops.ownership import ProcessIdentity, current_boot_id
 from saberops.sandbox.isolation import SESSION_AUTHORITY_ENV, SessionAuthority
 from saberops.service import OrchestratorService
-from saberops.web import _owner_actions_stream_active, create_app
 
 _CREATED = "2026-09-24T10:00:00+00:00"
 _SHA_A = "a" * 40
@@ -416,63 +414,7 @@ def test_review_request_returns_without_synchronous_review(
     assert action.candidate_sha == _SHA_A
 
 
-def test_accept_post_returns_without_synchronous_accept(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, popen: _CountingPopen
-) -> None:
-    db_path = tmp_path / "web.db"
-    db = Database(db_path)
-    _seed_run(db, "run-a1")
-    _gate_pass(db, "run-a1", "run-a1-a1", 1, _SHA_A)
-    monkeypatch.setattr(subprocess, "Popen", popen)
-    monkeypatch.setattr("saberops.web.AcceptEngine", _EligibleEngine)
-    monkeypatch.setattr(OrchestratorService, "accept_run", _boom)
-    client = TestClient(create_app(db_path=db_path))
 
-    response = client.post(
-        "/runs/run-a1/accept", data={"confirm_run_id": "run-a1"}, follow_redirects=False
-    )
-
-    assert response.status_code == 303
-    assert response.headers["location"].endswith("/runs/run-a1?accept_queued=1")
-    assert popen.call_count == 1
-    action = db.get_active_owner_action("run-a1", "ACCEPT")
-    assert action is not None
-    assert action.candidate_sha == _SHA_A
-
-
-def test_accept_requires_exact_confirmation_before_launch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, popen: _CountingPopen
-) -> None:
-    db_path = tmp_path / "web.db"
-    db = Database(db_path)
-    _seed_run(db, "run-a2")
-    _gate_pass(db, "run-a2", "run-a2-a1", 1, _SHA_A)
-    monkeypatch.setattr(subprocess, "Popen", popen)
-    monkeypatch.setattr("saberops.web.AcceptEngine", _EligibleEngine)
-    client = TestClient(create_app(db_path=db_path))
-
-    response = client.post("/runs/run-a2/accept", data={"confirm_run_id": ""})
-
-    assert response.status_code == 200
-    assert popen.call_count == 0
-    assert db.list_owner_actions("run-a2") == []
-
-
-def test_accept_blocked_by_real_checklist_launches_nothing(tmp_path: Path) -> None:
-    db_path = tmp_path / "web.db"
-    db = Database(db_path)
-    # Candidate exists but the real engine refuses (no provenance/repo): the
-    # advisory pre-check stays a real gate and nothing is launched.
-    _seed_run(db, "run-a3", repo="/tmp/r3e2-no-such-repo")
-    _gate_pass(db, "run-a3", "run-a3-a1", 1, _SHA_A)
-    client = TestClient(create_app(db_path=db_path))
-
-    response = client.post(
-        "/runs/run-a3/accept", data={"confirm_run_id": "run-a3"}, follow_redirects=False
-    )
-
-    assert response.status_code == 400
-    assert db.list_owner_actions("run-a3") == []
 
 
 def test_review_without_candidate_launches_nothing(tmp_path: Path) -> None:
@@ -1152,49 +1094,6 @@ def test_queued_event_carries_bounded_secret_free_payload(
     assert "token" not in blob
 
 
-def test_run_page_and_actions_json_show_durable_action_state(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, popen: _CountingPopen
-) -> None:
-    db_path = tmp_path / "web.db"
-    db = Database(db_path)
-    _seed_run(db, "run-v2")
-    _gate_pass(db, "run-v2", "run-v2-a1", 1, _SHA_A)
-    monkeypatch.setattr(subprocess, "Popen", popen)
-    supervisor = OwnerActionSupervisor(db, popen_factory=popen)
-    launch = supervisor.request_review(
-        run_id="run-v2", candidate_sha=_SHA_A, target_repo="/tmp/r3e2-target"
-    )
-    assert launch.launched is True
-    client = TestClient(create_app(db_path=db_path))
-
-    actions = client.get("/runs/run-v2/actions").json()
-    assert actions["owner_review_active"] is True
-    assert actions["owner_review_state"] == "QUEUED"
-    assert actions["owner_accept_active"] is False
-
-    page = client.get("/runs/run-v2")
-    assert page.status_code == 200
-    assert 'id="owner-action-status"' in page.text
-    assert "A review you started is still running" in page.text
-
-
-def test_reject_remains_synchronous_and_untouched(tmp_path: Path) -> None:
-    from saberops.candidate_lifecycle import REJECTION_EVENT_TYPE
-
-    db_path = tmp_path / "web.db"
-    db = Database(db_path)
-    _seed_run(db, "run-v4")
-    _gate_pass(db, "run-v4", "run-v4-a1", 1, _SHA_A)
-    client = TestClient(create_app(db_path=db_path))
-
-    decided = client.post(
-        "/runs/run-v4/reject", data={"confirm": "1"}, follow_redirects=False
-    )
-
-    assert decided.status_code == 303
-    assert decided.headers["location"].endswith("/runs/run-v4?rejected=1")
-    assert len(db.get_events_by_type("run-v4", REJECTION_EVENT_TYPE)) == 1
-    assert db.list_owner_actions("run-v4") == []
 
 
 def test_launch_failure_surfaces_fast_without_false_running(
@@ -1387,7 +1286,7 @@ def _claim_dead_running(
     assert running.state is OwnerActionState.RUNNING
 
 
-def test_dead_running_review_projects_uncertain_everywhere(tmp_path: Path) -> None:
+def test_dead_running_review_projects_uncertain(tmp_path: Path) -> None:
     db_path = tmp_path / "web.db"
     db = Database(db_path)
     _seed_run(db, "run-u1")
@@ -1409,19 +1308,8 @@ def test_dead_running_review_projects_uncertain_everywhere(tmp_path: Path) -> No
     assert db.get_owner_action("oact_u1") is not None
     assert db.get_owner_action("oact_u1").state is OwnerActionState.RUNNING  # type: ignore[union-attr]
 
-    client = TestClient(create_app(db_path=db_path))
-    actions = client.get("/runs/run-u1/actions").json()
-    assert actions["owner_review_active"] is False
-    assert actions["owner_review_last_state"] == "UNCERTAIN"
-    assert actions["owner_review_last_reason"] == OWNER_PROCESS_DEAD_REASON
 
-    page = client.get("/runs/run-u1")
-    assert page.status_code == 200
-    assert 'id="owner-action-status"' in page.text
-    assert OWNER_PROCESS_DEAD_REASON in page.text
-
-
-def test_dead_running_accept_projects_uncertain_everywhere(tmp_path: Path) -> None:
+def test_dead_running_accept_projects_uncertain(tmp_path: Path) -> None:
     db_path = tmp_path / "web.db"
     db = Database(db_path)
     _seed_run(db, "run-u2")
@@ -1434,17 +1322,6 @@ def test_dead_running_accept_projects_uncertain_everywhere(tmp_path: Path) -> No
     assert summary.last_accept.reason == OWNER_PROCESS_DEAD_REASON
 
     assert db.get_owner_action("oact_u2").state is OwnerActionState.RUNNING  # type: ignore[union-attr]
-
-    client = TestClient(create_app(db_path=db_path))
-    actions = client.get("/runs/run-u2/actions").json()
-    assert actions["owner_accept_active"] is False
-    assert actions["owner_accept_last_state"] == "UNCERTAIN"
-    assert actions["owner_accept_last_reason"] == OWNER_PROCESS_DEAD_REASON
-
-    page = client.get("/runs/run-u2")
-    assert page.status_code == 200
-    assert 'id="owner-action-status"' in page.text
-    assert OWNER_PROCESS_DEAD_REASON in page.text
 
 
 def test_unknown_liveness_remains_active_and_duplicate_blocking(
@@ -1480,15 +1357,10 @@ def test_unknown_liveness_remains_active_and_duplicate_blocking(
 # --- 3. Owner-action SSE after run completion ----------------------------------
 
 
-def test_completed_run_keeps_stream_contract_for_active_review(
+def test_completed_run_review_events_are_ordered(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, popen: _CountingPopen
 ) -> None:
-    """Completed run -> Review -> queued/started/completed observable in order.
-
-    The run is already terminal; the owner-action event sequence is durable
-    in chronology and the ``/actions`` projection flips from active to
-    terminal through successive reads (no page reload involved).
-    """
+    """Completed run -> Review -> queued/started/completed recorded in order."""
     import subprocess as _subprocess
 
     from saberops.owner_actions import OwnerActionSupervisor
@@ -1498,20 +1370,11 @@ def test_completed_run_keeps_stream_contract_for_active_review(
     _seed_run(db, "run-s1")
     _gate_pass(db, "run-s1", "run-s1-a1", 1, _SHA_A)
     monkeypatch.setattr(_subprocess, "Popen", popen)
-    client = TestClient(create_app(db_path=db_path))
-
-    # No owner work yet: nothing streams for a terminal run.
-    assert _owner_actions_stream_active(db, "run-s1") is False
 
     launch = OwnerActionSupervisor(db, popen_factory=popen).request_review(
         run_id="run-s1", candidate_sha=_SHA_A, target_repo="/tmp/r3e21-target"
     )
     assert launch.launched is True
-
-    # The stream must now be usable for the terminal run.
-    assert _owner_actions_stream_active(db, "run-s1") is True
-    before = client.get("/runs/run-s1/actions").json()
-    assert before["owner_review_active"] is True
 
     action = db.get_active_owner_action("run-s1", "REVIEW")
     assert action is not None
@@ -1532,10 +1395,9 @@ def test_completed_run_keeps_stream_contract_for_active_review(
     assert len(started) == 1
     assert len(completed) == 1
     assert queued[0] < started[0] < completed[0]
-
-    after = client.get("/runs/run-s1/actions").json()
-    assert after["owner_review_active"] is False
-    assert _owner_actions_stream_active(db, "run-s1") is False
+    summary = summarize_owner_actions(db, "run-s1")
+    assert summary.active_review is None
+    assert summary.last_review is None  # success is not failure history
 
 
 def test_completed_run_failure_sequence_is_observable(
@@ -1550,12 +1412,10 @@ def test_completed_run_failure_sequence_is_observable(
     _seed_run(db, "run-s2")
     _gate_pass(db, "run-s2", "run-s2-a1", 1, _SHA_A)
     monkeypatch.setattr(_subprocess, "Popen", popen)
-    client = TestClient(create_app(db_path=db_path))
     launch = OwnerActionSupervisor(db, popen_factory=popen).request_review(
         run_id="run-s2", candidate_sha=_SHA_A, target_repo="/tmp/r3e21-target"
     )
     assert launch.launched is True
-    assert _owner_actions_stream_active(db, "run-s2") is True
 
     action = db.get_active_owner_action("run-s2", "REVIEW")
     assert action is not None
@@ -1576,36 +1436,11 @@ def test_completed_run_failure_sequence_is_observable(
     assert len(started) == 1
     assert len(failed) == 1
     assert queued[0] < started[0] < failed[0]
+    summary = summarize_owner_actions(db, "run-s2")
+    assert summary.active_review is None
+    assert summary.last_review is not None
+    assert summary.last_review.state is OwnerActionState.FAILED
 
-    after = client.get("/runs/run-s2/actions").json()
-    assert after["owner_review_active"] is False
-    assert after["owner_review_last_state"] == "FAILED"
-    assert _owner_actions_stream_active(db, "run-s2") is False
-
-
-def test_run_page_subscribes_to_owner_action_events_without_polling() -> None:
-    """The existing EventSource (no second loop) handles owner_action_*."""
-    app_js = (
-        Path(__file__).resolve().parents[1]
-        / "src"
-        / "saberops"
-        / "static"
-        / "js"
-        / "app.js"
-    ).read_text()
-    for event_type in (
-        "owner_action_queued",
-        "owner_action_started",
-        "owner_action_completed",
-        "owner_action_failed",
-        "owner_action_uncertain",
-    ):
-        assert event_type in app_js
-    # Owner-action events drive an authoritative /actions refresh.
-    assert app_js.count("/runs/") >= 2
-    assert "refreshActionState" in app_js
-    # No periodic polling loop was added: the only timer is the elapsed clock.
-    assert app_js.count("setInterval") == 1
 
 
 # --- 4. Spawn event/metadata race ----------------------------------------------

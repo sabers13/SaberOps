@@ -18,7 +18,7 @@
   <div>
     <h1>{% if first_run %}Welcome to SaberOps{% else %}Setup{% endif %}</h1>
     <p class="lede">
-      {% if steps_done == 5 %}Everything is connected. Choose which model does each job in <a href="/routing">Routing</a>.
+      {% if steps_done == 5 %}Everything is connected. Choose which model does each job from a terminal with <code>orch routing</code>.
       {% elif first_run %}<strong>Five short steps get this computer ready.</strong> Each one says exactly what to do. Everything stays on this machine.
       {% else %}<strong>{{ steps_done }} of 5 steps are ready.</strong> Open steps still need you.{% endif %}
     </p>
@@ -67,7 +67,7 @@
     <details class="step-card" data-tone="{{ 'ok' if models_ok else 'warn' }}"{% if not models_ok %} open{% endif %}>
       <summary><span class="step-mark" aria-hidden="true"></span><div><h2 id="step-models">Find models</h2><p class="num">{{ models_ok | length }} of {{ models | length }} found models can run</p></div><span class="status num" data-tone="{{ 'ok' if models_ok else 'warn' }}">{{ models_ok | length }} usable</span></summary>
       <div class="step-body">
-        <p class="muted">Only models SaberOps can really run are offered in Routing.</p>
+        <p class="muted">Only models SaberOps can really run are offered by <code>orch routing</code>.</p>
         {% if connections %}
         <ul class="rows">
           {% for row in connections %}
@@ -199,6 +199,6 @@
 </ol>
 
 {% if first_run %}
-<p class="muted" style="margin-top: var(--s5)">When the steps are ready, choose which model does each job in <a href="/routing">Routing</a>.</p>
+<p class="muted" style="margin-top: var(--s5)">When the steps are ready, choose which model does each job from a terminal with <code>orch routing</code>.</p>
 {% endif %}
 {% endblock %}

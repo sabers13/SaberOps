@@ -1,8 +1,8 @@
-"""Owner routing edits for the web UI (one job at a time).
+"""Owner routing edits (one job at a time).
 
-The Routing page answers "which model does each job, and who takes over
-when it is busy".  This module is the single seam between that page and
-the two existing routing authorities:
+`orch routing` answers "which model does each job, and who takes over when it
+is busy".  This module is the single seam between that surface and the two
+existing routing authorities:
 
 * the schema-3 routing document (``routing_config``) for the build route's
   fallback chain and its stronger-model start setting, written only through
@@ -79,7 +79,7 @@ class RoutingEditError(ValueError):
 
 @dataclass(frozen=True)
 class Job:
-    """One job on the Routing page, in the order work flows through them."""
+    """One job in `orch routing`, in the order work flows through them."""
 
     slug: str
     role: str  # engine role: PLAN, BUILD or CHECK

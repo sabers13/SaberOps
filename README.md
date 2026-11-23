@@ -131,7 +131,7 @@ flowchart LR
 | --- | --- |
 | **`orch` CLI** | Everything. Every owner-facing command supports `--json` for agents and scripts. |
 | **MCP server** (`orch mcp serve`, stdio; `orch connect` registers it in agent CLIs) | The primary integration surface for other agents: off until the user says "turn on saberops", then tools to submit and inspect jobs, read evidence, list/answer questions and propose configuration changes. `submit_job` rejects provider, model and billing fields. See [MCP](docs/mcp.md). |
-| **Web UI** (`orch ui`) | Localhost first-run onboarding (readiness, vendor logins, model discovery, billing-posture attestation), routing and concurrency, project registration, plan/wave scoring, question queue, run monitoring with live events, and storage cleanup with typed confirmation. See [first-run web UI](docs/first-run-web-ui.md). |
+| **Web UI** (`orch ui`) | Localhost first-run setup (readiness, vendor logins, model discovery, billing-posture attestation, agent connection), accounts and usage, and the question queue with the owner mode and work gate. Phase 1.1 retired run monitoring, routing, plans/waves and storage cleanup from the page; phase 2 rebuilds the board. See [owner web pages](docs/first-run-web-ui.md). |
 
 ---
 

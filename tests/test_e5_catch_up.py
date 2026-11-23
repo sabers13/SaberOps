@@ -456,7 +456,7 @@ def test_fresh_session_catches_up_and_changes_nothing(store: dict[str, Any]) -> 
     assert failed["next_action"]["action"] == "resume_job"
     assert "resume-job" in failed["next_action"]["command"]
     assert failed["result"]["owner_action"] is None
-    assert failed["evidence"]["run_page"] == "/runs/run-failed-check"
+    assert "run_page" not in failed["evidence"]
 
     # Waiting-on-answer job: the blocker and the owner's next action.
     assert waiting["state"] == "RUNNING"
@@ -485,7 +485,7 @@ def test_fresh_session_catches_up_and_changes_nothing(store: dict[str, Any]) -> 
     assert not notifications.exists()
 
 
-def test_next_action_offers_accept_and_the_web_reject_action() -> None:
+def test_next_action_offers_accept() -> None:
     from types import SimpleNamespace
 
     from saberops.mcp.tools import _catch_up_next_action
@@ -504,8 +504,7 @@ def test_next_action_offers_accept_and_the_web_reject_action() -> None:
     assert action["action"] == "owner_accept"
     assert action["command"] == "orch accept run-1"
     assert action["owner_only"] is True
-    assert action["reject"]["surface"] == "web"
-    assert action["reject"]["path"] == "/runs/run-1"
+    assert "reject" not in action
 
 
 def test_guide_and_installed_skill_teach_the_phrase() -> None:

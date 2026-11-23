@@ -741,28 +741,3 @@ def test_child_claim_refuses_parent_cancellation_atomically(
     assert db.get_execution_owner(child_id) is None
 
 
-def test_team_children_link_from_minimal_status_pages(
-    team: tuple[Database, Path, RunConfig, AdapterRegistry, list[threading.Thread]],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from fastapi.testclient import TestClient
-
-    from saberops.web import create_app
-
-    db, repo, _, registry, _ = team
-
-    def implement(request: WorkerRequest) -> WorkerResult:
-        if "Team task:" in request.task:
-            index = 0 if "Team task: Feature 0" in request.task else 1
-            (request.worktree_path / f"feature{index}.txt").write_text(str(index))
-        return result(request)
-
-    monkeypatch.setattr(registry.get("codex"), "run", implement)
-    run_id = run_team(team)
-    children = team_children(db, run_id)
-    assert len(children) == 2
-    app = create_app(db_path=db.db_path, repo_path=repo, registry=registry)
-    with TestClient(app) as client:
-        assert client.get(f"/runs/{children[0]}").status_code == 200
-        assert client.get("/").status_code == 200
-        assert db.list_runs()[0].id == run_id and len(db.list_runs()) == 1

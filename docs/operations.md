@@ -2,8 +2,9 @@
 
 Details on routing, usage limits, and fixed-source candidate verification.
 The [README](../README.md) covers installation and the overall model.
-Run status is visible on the minimal status page (`orch ui`); owner
-configuration lives in the `orch` CLI. Every command below supports
+Run status is read from the engine records through `orch status`, `orch watch`
+and `orch report`; the web pages (`orch ui`) keep first-run setup, accounts and
+the question queue, and owner configuration lives in the `orch` CLI. Every command below supports
 `--json` for machine-readable output (agents and scripts); human output
 goes to stdout and refusals to stderr with a nonzero exit. Nothing is
 persisted on a refusal.

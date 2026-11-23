@@ -145,10 +145,9 @@ project store that holds it.
 
 The early Step 020 commit `2ec8eee` added a Host-header allowlist to the local
 Web guard in `src/saberops/web.py` (`_host_header_allowed`,
-`_is_private_web_path`): every private route — dashboard, run pages,
-report / actions / event-stream reads and the accept/reject POSTs — refuses a
-foreign, duplicate or malformed `Host` with 403 before any run data is
-returned or any mutation runs. `/health` and `/static/*` stay open by design,
+`_is_private_web_path`): every private route — the setup, accounts and
+questions pages with their POSTs — refuses a foreign, duplicate or malformed
+`Host` with 403 before any owner data is returned or any mutation runs. `/health` and `/static/*` stay open by design,
 and the synthetic `testserver` Host is accepted only inside a synthetic ASGI
 test scope, never as a production bypass. That guard is retained unchanged and
 its contract tests live in `tests/test_contract_web_host_guard.py`.

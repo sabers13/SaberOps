@@ -527,70 +527,6 @@ def test_i_diff_preserved_after_rejection(tmp_path: Path) -> None:
     assert after.changed_paths == ("feature.txt",)
 
 
-def test_j_web_parity(tmp_path: Path) -> None:
-    from fastapi.testclient import TestClient
-
-    from saberops.web import create_app
-
-    repo, base, candidate = _git_repo(tmp_path / "repo-j")
-    db_path = tmp_path / "web.db"
-    db = Database(db_path)
-    _seed_eligible(db, "run-j", repo, base, candidate)
-    client = TestClient(create_app(db_path=db_path))
-
-    actions_before = client.get("/runs/run-j/actions").json()
-    assert actions_before["candidate_state"] == "READY"
-    assert actions_before["can_reject"] is True
-
-    page = client.get("/runs/run-j")
-    assert page.status_code == 200
-    assert ">Reject</button>" in page.text
-    assert 'data-action="reject"' in page.text
-
-    confirm = client.post("/runs/run-j/reject", data={"confirm": "0"})
-    assert confirm.status_code == 200
-    assert "Reject these changes?" in confirm.text
-    assert "This records your decision." in confirm.text
-    assert "It does not delete the copy or its commit." in confirm.text
-    assert "Type the exact run id" not in confirm.text
-    rejected_events = db.get_events_by_type("run-j", REJECTION_EVENT_TYPE)
-    assert rejected_events == []
-
-    decided = client.post(
-        "/runs/run-j/reject", data={"confirm": "1"}, follow_redirects=False
-    )
-    assert decided.status_code == 303
-    assert decided.headers["location"].endswith("/runs/run-j?rejected=1")
-
-    events = db.get_events_by_type("run-j", REJECTION_EVENT_TYPE)
-    assert len(events) == 1
-    assert isinstance(events[0].payload, dict)
-    assert events[0].payload["candidate_sha"] == candidate
-
-    after = client.get("/runs/run-j?rejected=1")
-    assert after.status_code == 200
-    assert "REJECTED" in after.text
-    assert 'id="candidate-state"' in after.text
-    assert 'data-action="reject"' not in after.text
-    assert 'id="acceptRunButton" disabled aria-describedby="accept-blocked"' in after.text
-    # The review page-action is gone (review runs via `orch review`); only
-    # the accept/reject owner actions remain on the page.
-    assert 'data-action="review"' not in after.text
-    assert (
-        'data-action="review"><button type="submit" '
-        'class="text-button primary-button">Request review' not in after.text
-    )
-    # Retry/retry links are gone with the run-ops routes (retry runs via
-    # `orch`); the rejected candidate SHA stays visible for inspection.
-    assert candidate in after.text
-
-    actions_after = client.get("/runs/run-j/actions").json()
-    assert actions_after["candidate_state"] == "REJECTED"
-    assert actions_after["can_reject"] is False
-    assert actions_after["can_accept"] is False
-    assert actions_after["can_review"] is False
-    assert actions_after["can_retry"] is True
-
 
 def test_g1_concurrent_reject_is_durably_idempotent(tmp_path: Path) -> None:
     """Concurrent Reject from separate DB instances writes exactly one event.
@@ -675,10 +611,7 @@ def test_g1_concurrent_reject_is_durably_idempotent(tmp_path: Path) -> None:
 
 
 def test_k_reads_alone_add_no_rejection_event(tmp_path: Path) -> None:
-    from fastapi.testclient import TestClient
-
     from saberops.candidate_diff import project_candidate_diff
-    from saberops.web import create_app
 
     repo, base, candidate = _git_repo(tmp_path / "repo-k")
     db_path = tmp_path / "web-k.db"
@@ -689,10 +622,6 @@ def test_k_reads_alone_add_no_rejection_event(tmp_path: Path) -> None:
     project_candidate_diff(db, "run-k")
     AcceptEngine(db=db).check_accept_eligibility("run-k")
     assert db.get_events_by_type("run-k", REJECTION_EVENT_TYPE) == []
-
-    client = TestClient(create_app(db_path=db_path))
-    assert client.get("/runs/run-k").status_code == 200
-    assert client.get("/runs/run-k/actions").status_code == 200
 
     fresh = Database(db_path)
     assert fresh.get_events_by_type("run-k", REJECTION_EVENT_TYPE) == []

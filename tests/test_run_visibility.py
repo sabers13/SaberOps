@@ -8,14 +8,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fastapi.testclient import TestClient
 
 from saberops.cli import main
 from saberops.db import Database, current_iso_timestamp
 from saberops.models import Run, RunStatus, Tier
 from saberops.paths import get_default_db_path
 from saberops.runtime import project_db_path_for_repo
-from saberops.web import create_app
 
 
 def _make_repo(path: Path) -> Path:
@@ -43,7 +41,7 @@ def isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
-def test_runs_visible_in_cli_and_web_for_second_project_from_fresh_store(
+def test_runs_visible_in_cli_for_second_project_from_fresh_store(
     isolated_env: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _make_repo(isolated_env / "proj1")
@@ -71,14 +69,8 @@ def test_runs_visible_in_cli_and_web_for_second_project_from_fresh_store(
     assert str(db2_path) in out
     assert "run_c9_proj2_fail" in out
 
-    client = TestClient(create_app(repo_path=proj2))
-    resp = client.get("/")
-    assert resp.status_code == 200
-    assert "c9 visible failed task" in resp.text
-    assert str(db2_path) in resp.text
 
-
-def test_list_and_web_without_repo_state_which_store_is_read(
+def test_list_names_the_store_it_reads_without_repo_state(
     isolated_env: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -113,12 +105,6 @@ def test_list_and_web_without_repo_state_which_store_is_read(
     assert code == 0
     assert str(default_db_path) in filled_out
     assert "run_c9_default_fail" in filled_out
-
-    client = TestClient(create_app())
-    resp = client.get("/")
-    assert resp.status_code == 200
-    assert "c9 default store task" in resp.text
-    assert str(default_db_path) in resp.text
 
 
 # ---------------------------------------------------------------------------

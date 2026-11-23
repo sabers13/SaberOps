@@ -1,15 +1,14 @@
-"""C16-C2: minimal status page for the SaberOps engine (L-A step 5).
+"""C16-C2 / H23: the kept owner pages (setup, accounts, questions) and health.
 
-The workspace console (chats, projects, sessions, settings, terminal) was
-cut; the page keeps exactly: run list, run detail (status, attempts, gate
-results, review verdict, diff), report JSON, accept/reject actions, health.
+Phase 1.1 lane H23 retired run monitoring, plan and wave scoring, the routing
+editor and the storage cleanup page from the web app.  These tests cover the
+surviving surface and prove the retired routes stay gone.
 """
 
 from __future__ import annotations
 
 import json
 import re
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -63,105 +62,70 @@ def _seed_run(
     )
 
 
-def test_c16c2_dashboard_lists_runs_with_kept_tokens(
-    isolated_xdg: None, tmp_path: Path
-) -> None:
-    """Dashboard lists runs on the shared shell and its single stylesheet."""
-    _seed_run(tmp_path)
-    page = _client(tmp_path).get("/")
+def test_h23_root_opens_setup(isolated_xdg: None, tmp_path: Path) -> None:
+    """The app entry redirects to Setup, and Setup stays reachable directly."""
+    client = _client(tmp_path)
+    root = client.get("/", follow_redirects=False)
+    assert root.status_code == 303
+    assert root.headers["location"] == "/setup"
+    page = client.get("/")
     assert page.status_code == 200
-    text = page.text
-    assert "/static/css/app.css" in text
-    assert "/static/js/console.js" in text
-    assert "console integration probe" in text
-    # Shared navigation reaches every owner page.
-    for page_link in ('href="/questions"', 'href="/projects"', 'href="/routing"', 'href="/setup"'):
-        assert page_link in text, page_link
-    assert 'href="/runs/run_c16c2"' in text
-    # Removed console surfaces stay gone.
-    for gone in (
-        "/access",
-        "/quota",
-        "/inbox",
-        "/chats",
-        "chat-composer",
-        "resolveDecision",
-        "Preview completed run",
-    ):
-        assert gone not in text, gone
+    assert "Welcome to SaberOps" in page.text
+    assert "/static/css/app.css" in page.text
+    for link in ('href="/questions"', 'href="/accounts"', 'href="/setup"'):
+        assert link in page.text, link
 
 
-def test_c16c2_run_detail_renders_status_evidence_and_actions(
-    isolated_xdg: None, tmp_path: Path
-) -> None:
-    """Run page shows status, attempts, gate, review, diff, and owner actions."""
+def test_h23_retired_web_routes_are_gone(isolated_xdg: None, tmp_path: Path) -> None:
+    """Run monitoring, plans/waves, routing and storage pages stay retired."""
+    _seed_run(tmp_path)
     client = _client(tmp_path)
-    _seed_run(tmp_path, "run_c16c2_live", RunStatus.RUNNING)
-    live = client.get("/runs/run_c16c2_live")
-    assert live.status_code == 200
-    text = live.text
-    for section in (
-        "Attempts and checks",
-        "Independent review",
-        "Changes",
-        "Owner actions",
-        "Events",
+    gone = (
+        "/routing",
+        "/projects",
+        "/runs/run_c16c2",
+        "/runs/run_c16c2/report",
+        "/runs/run_c16c2/actions",
+        "/runs/run_c16c2/events/stream",
+    )
+    for path in gone:
+        assert client.get(path).status_code == 404, path
+    for path in (
+        "/routing/add",
+        "/routing/remove",
+        "/routing/move",
+        "/first-run/concurrency",
+        "/first-run/project/register",
+        "/first-run/storage/apply",
+        "/runs/run_c16c2/accept",
+        "/runs/run_c16c2/reject",
     ):
-        assert section in text, section
-    assert 'data-run-refresh="events-status"' in text
-    assert 'href="/runs/run_c16c2_live/report"' in text
-    # Removed run operations stay gone.
-    for gone in (
-        "/runs/run_c16c2_live/cancel",
-        "/runs/run_c16c2_live/retry",
-        "/runs/run_c16c2_live/review",
-        "/runs/run_c16c2_live/cleanup",
-        "/runs/run_c16c2_live/continue",
-        "runComposerStopForm",
-        "resolveDecision",
-    ):
-        assert gone not in text, gone
+        assert client.post(path, data={}).status_code in (404, 405), path
+    # The run-page controller moved out with the page it drove.
+    assert client.get("/static/js/app.js").status_code == 404
 
 
-def test_c16c2_missing_run_keeps_minimal_page(
-    isolated_xdg: None, tmp_path: Path
-) -> None:
+def test_h23_console_assets_are_served(isolated_xdg: None, tmp_path: Path) -> None:
+    """The shared shell stylesheet and theme controller are still served."""
     client = _client(tmp_path)
-    page = client.get("/runs/does-not-exist")
-    assert page.status_code == 404
-    assert "Run not found" in page.text
-    assert "Back to runs" in page.text
-    assert 'aria-label="Main"' in page.text
-
-
-def test_c16c2_report_and_health_stay_json(
-    isolated_xdg: None, tmp_path: Path
-) -> None:
-    _seed_run(tmp_path, "run_c16c2_done", RunStatus.COMPLETED)
-    client = _client(tmp_path)
-    report = client.get("/runs/run_c16c2_done/report")
-    assert report.status_code == 200
-    assert report.json()["identity"]["run_id"] == "run_c16c2_done"
-    health = client.get("/health")
-    assert health.status_code == 200
-    assert health.json()["product"] == "SaberOps"
-
-
-def test_c16c2_console_assets_are_served(
-    isolated_xdg: None, tmp_path: Path
-) -> None:
-    client = _client(tmp_path)
-    for asset in (
-        "/static/css/app.css",
-        "/static/js/console.js",
-        "/static/js/app.js",
-    ):
+    for asset in ("/static/css/app.css", "/static/js/console.js"):
         response = client.get(asset)
         assert response.status_code == 200, asset
         assert len(response.text) > 100, asset
     # Removed feature scripts stay gone.
     assert client.get("/static/js/chat.js").status_code == 404
     assert client.get("/static/js/terminal.js").status_code == 404
+
+
+def test_c16c2_health_stays_json(isolated_xdg: None, tmp_path: Path) -> None:
+    health = _client(tmp_path).get("/health")
+    assert health.status_code == 200
+    assert health.json()["product"] == "SaberOps"
+
+
+
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -204,31 +168,50 @@ def _csrf(client: TestClient) -> str:
     return match.group(1)
 
 
-def _git_repo(tmp_path: Path) -> Path:
-    """Create a committed git repository for mode/storage projections."""
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    (repo / "README.md").write_text("# probe repo\n", encoding="utf-8")
-    for args in (
-        ("init", "-q"),
-        ("config", "user.email", "ui1@example.com"),
-        ("config", "user.name", "UI-1 probe"),
-        ("add", "-A"),
-        ("commit", "-qm", "initial"),
-    ):
-        subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
-    return repo
+def test_ui1_empty_store_lands_on_setup(
+    onboarding_env: None, tmp_path: Path
+) -> None:
+    """Covers: UI-1 Section A — the app entry always lands on Setup now."""
+    client = _client(tmp_path)
+    page = client.get("/")
+    assert page.status_code == 200
+    assert "Welcome to SaberOps" in page.text
+    legacy = client.get("/first-run", follow_redirects=False)
+    assert legacy.status_code == 303
+    assert legacy.headers["location"] == "/setup"
+    assert client.get("/first-run").status_code == 200
+    _seed_run(tmp_path)
+    # A configured store keeps the ordinary Setup heading, never the greeting.
+    configured = client.get("/").text
+    assert "Welcome to SaberOps" not in configured
+    assert "Setup" in configured
 
 
-def _dead_scratch(tmp_path: Path) -> Path:
-    """Create provably dead-owned gate scratch under the isolated state root."""
-    scratch = tmp_path / "state" / "saberops" / "gate-tmp" / "orchestrator-gate-ui1"
-    scratch.mkdir(parents=True)
-    (scratch / ".saberops-scratch-owner.json").write_text(
-        json.dumps({"pid": 2_147_483_000}), encoding="utf-8"
-    )
-    (scratch / "blob.bin").write_text("junk", encoding="utf-8")
-    return scratch
+def test_ui1_onboarding_sections_render(onboarding_env: None, tmp_path: Path) -> None:
+    """Covers: UI-1 Sections A/B/C render on the kept owner pages."""
+    client = _client(tmp_path)
+    expected = {
+        "/setup": (
+            "This computer",
+            "Sign in to your AI accounts",
+            "Find models",
+            "Confirm how each account is billed",
+            "never asks for a password or key",
+            "Connect your agent",
+        ),
+        "/questions": (
+            "No questions waiting",
+            "What may run without you",
+            "Always your decision",
+        ),
+        "/accounts": ("Accounts", "What is left", "How it is billed"),
+    }
+    for path, markers in expected.items():
+        page = client.get(path)
+        assert page.status_code == 200, path
+        assert "/static/css/app.css" in page.text, path
+        for marker in markers:
+            assert marker in page.text, (path, marker)
 
 
 def _seed_question(key: str, *, options: tuple[str, ...] = ()) -> None:
@@ -262,53 +245,6 @@ def _seed_question(key: str, *, options: tuple[str, ...] = ()) -> None:
     )
 
 
-def test_ui1_empty_store_lands_on_onboarding(
-    onboarding_env: None, tmp_path: Path
-) -> None:
-    """Covers: UI-1 Section A — empty-state navigation to the first-run wizard."""
-    client = _client(tmp_path)
-    page = client.get("/")
-    assert page.status_code == 200
-    assert "Welcome to SaberOps" in page.text
-    legacy = client.get("/first-run", follow_redirects=False)
-    assert legacy.status_code == 303
-    assert legacy.headers["location"] == "/setup"
-    assert client.get("/first-run").status_code == 200
-    _seed_run(tmp_path)
-    assert "Welcome to SaberOps" not in client.get("/").text
-
-
-def test_ui1_onboarding_sections_render(onboarding_env: None, tmp_path: Path) -> None:
-    """Covers: UI-1 Sections A/B/C render on their owner pages with honest empty states."""
-    client = _client(tmp_path)
-    expected = {
-        "/setup": (
-            "This computer",
-            "Sign in to your AI accounts",
-            "Find models",
-            "Confirm how each account is billed",
-            "never asks for a password or key",
-            "Connect your agent",
-        ),
-        "/routing": ("Plans the work", "Writes the code", "How much runs at once"),
-        "/projects": (
-            "Check a repository",
-            "Add a project",
-            "Plan preview",
-            "Free up space",
-        ),
-        "/questions": (
-            "No questions waiting",
-            "What may run without you",
-            "Always your decision",
-        ),
-    }
-    for path, markers in expected.items():
-        page = client.get(path)
-        assert page.status_code == 200, path
-        assert "/static/css/app.css" in page.text, path
-        for marker in markers:
-            assert marker in page.text, (path, marker)
 
 
 def test_ui1_onboarding_assets_are_served(
@@ -320,79 +256,6 @@ def test_ui1_onboarding_assets_are_served(
     assert len(response.text) > 100
 
 
-def test_ui1_concurrency_saves_owner_confirmed_limits(
-    onboarding_env: None, tmp_path: Path
-) -> None:
-    """Covers: UI-1 Section B — 3x5 concurrency persists as an owner decision."""
-    client = _client(tmp_path)
-    token = _csrf(client)
-    response = client.post(
-        "/first-run/concurrency",
-        data={
-            "csrf": token,
-            "active_projects": "2",
-            "child_slots_per_project": "4",
-            "owner_confirmed": "yes",
-        },
-        follow_redirects=False,
-    )
-    assert response.status_code == 303
-    assert response.headers["location"] == "/routing?concurrency_saved=1"
-    from saberops.config import (
-        ConfigLedger,
-        config_ledger_path,
-        current_workflow_settings,
-    )
-    from saberops.paths import saberops_state_dir
-
-    settings = current_workflow_settings(
-        ConfigLedger(config_ledger_path(saberops_state_dir()))
-    )
-    assert settings.max_concurrent_tasks == 2
-    assert settings.max_worker_sessions_per_project == 4
-
-
-def test_ui1_concurrency_requires_csrf_confirmation_and_range(
-    onboarding_env: None, tmp_path: Path
-) -> None:
-    """Covers: UI-1 security — CSRF, owner confirmation and range enforcement."""
-    client = _client(tmp_path)
-    token = _csrf(client)
-    assert (
-        client.post(
-            "/first-run/concurrency",
-            data={
-                "active_projects": "3",
-                "child_slots_per_project": "5",
-                "owner_confirmed": "yes",
-            },
-        ).status_code
-        == 403
-    )
-    assert (
-        client.post(
-            "/first-run/concurrency",
-            data={
-                "csrf": token,
-                "active_projects": "3",
-                "child_slots_per_project": "5",
-            },
-        ).status_code
-        == 400
-    )
-    for projects, slots in (("9", "5"), ("0", "5"), ("3", "6")):
-        assert (
-            client.post(
-                "/first-run/concurrency",
-                data={
-                    "csrf": token,
-                    "active_projects": projects,
-                    "child_slots_per_project": slots,
-                    "owner_confirmed": "yes",
-                },
-            ).status_code
-            == 400
-        ), (projects, slots)
 
 
 def test_ui1_posture_fail_closed_excludes_forbidden_routes(
@@ -455,89 +318,6 @@ def test_ui1_question_answer_and_defer(
     assert deferred_question.status is QuestionStatus.DEFERRED
 
 
-def test_ui1_storage_dry_run_requires_policy_and_confirmation(
-    onboarding_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Covers: UI-1 Section C — dry-run, fail-closed policy, typed confirmation."""
-    repo = _git_repo(tmp_path)
-    scratch = _dead_scratch(tmp_path)
-    client = _client(tmp_path)
-    token = _csrf(client)
-    refused = client.post(
-        "/first-run/storage/apply",
-        data={"csrf": token, "repo": str(repo), "preview_id": "x", "confirm": "x"},
-        follow_redirects=False,
-    )
-    assert refused.status_code == 403
-    assert scratch.is_dir()
-
-    policy = tmp_path / "gc-policy.json"
-    policy.write_text(
-        json.dumps(
-            {"approved": True, "version": "1", "allow_scratch_deletion": True}
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("ORCH_GC_POLICY", str(policy))
-    page = client.get("/projects", params={"repo": str(repo)}).text
-    assert "APPROVED" in page
-    assert str(scratch) in page
-    preview = re.search(r'name="preview_id" value="([^"]+)"', page)
-    assert preview is not None
-    preview_id = preview.group(1)
-    wrong = client.post(
-        "/first-run/storage/apply",
-        data={
-            "csrf": token,
-            "repo": str(repo),
-            "preview_id": preview_id,
-            "confirm": "wrong",
-        },
-        follow_redirects=False,
-    )
-    assert wrong.status_code == 400
-    assert scratch.is_dir()
-    applied = client.post(
-        "/first-run/storage/apply",
-        data={
-            "csrf": token,
-            "repo": str(repo),
-            "preview_id": preview_id,
-            "confirm": preview_id,
-        },
-        follow_redirects=False,
-    )
-    assert applied.status_code == 303
-    assert "applied=1" in applied.headers["location"]
-    assert not scratch.exists()
-
-
-def test_ui1_project_entry_modes_and_registration(
-    onboarding_env: None, tmp_path: Path
-) -> None:
-    """Covers: UI-1 Section B — entry-mode recommendation and registration."""
-    repo = _git_repo(tmp_path)
-    client = _client(tmp_path)
-    token = _csrf(client)
-    page = client.get("/projects", params={"repo": str(repo)}).text
-    assert "Recommended:" in page
-    assert "develop_existing" in page
-    registered = client.post(
-        "/first-run/project/register",
-        data={
-            "csrf": token,
-            "project_id": "proj-ui1",
-            "display_name": "UI-1 Project",
-            "repository_root": str(repo),
-            "state_dir": str(tmp_path / "state" / "proj-ui1"),
-            "owner_confirmed": "yes",
-        },
-        follow_redirects=False,
-    )
-    assert registered.status_code == 303
-    from saberops.project import ProjectRegistry
-
-    assert [p.project_id for p in ProjectRegistry().list_projects()] == ["proj-ui1"]
 
 
 def test_ui1_mutations_reject_untrusted_host_and_origin(
@@ -550,12 +330,12 @@ def test_ui1_mutations_reject_untrusted_host_and_origin(
         raise_server_exceptions=False,
     )
     assert (
-        client.post("/first-run/concurrency", headers={"Host": "evil.test"}).status_code
+        client.post("/accounts/check", headers={"Host": "evil.test"}).status_code
         == 403
     )
     assert (
         client.post(
-            "/first-run/concurrency",
+            "/accounts/check",
             headers={"Host": "127.0.0.1:8765", "Origin": "https://evil.test"},
         ).status_code
         == 403
