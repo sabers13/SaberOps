@@ -16,13 +16,13 @@ The invariants this module owns
   **evidence-backed** ``moot`` close.  Task completion and storage cleanup
   have no close authority at all -- :data:`TASK_LIFECYCLE_CLOSE_AUTHORITIES`
   is deliberately empty and this module exposes no delete/prune/clear path.
-* A later conflicting answer is recorded as a **divergent record** and
-  reported; the primary answer is never overwritten and nothing is
-  auto-closed.  Changing an owner decision requires a new question that
-  ``supersedes`` the old one.
+* A later conflicting answer is refused; the primary answer is never
+  overwritten and nothing is auto-closed.  Changing an owner decision requires
+  a new question that ``supersedes`` the old one.
 * A deferred question resurfaces on its date.
 * Every decision the Orchestrator took alone appears in the audit list, with
-  the evidence and the rejected alternative.
+  the evidence, the rejected alternative and, when given, the cost of a wrong
+  answer.
 * A repeated same-kind owner answer becomes a **standing-rule proposal** for
   CFG-1 (Step 013).  Proposals are inert data: this module applies nothing.
 
@@ -102,9 +102,6 @@ __all__ = [
     "coerce_ask_role",
     "coerce_answer_authority",
     "DecisionClass",
-    "DivergenceReason",
-    "DivergenceReport",
-    "DivergentRecord",
     "Escalation",
     "EscalationError",
     "OrchestratorAloneDecision",
@@ -160,7 +157,7 @@ ESCALATION_PARTS: tuple[str, ...] = (
 
 #: The only verbs that may change a question's status.
 QUESTION_TRANSITION_VERBS: frozenset[str] = frozenset(
-    {"answer", "defer", "mark_moot", "record_divergence"}
+    {"answer", "defer", "mark_moot"}
 )
 
 #: The verb recorded when a question is first asked.  Creation is not a status
@@ -337,16 +334,6 @@ CRITICAL_DECISION_CLASSES: frozenset[DecisionClass] = (
 )
 
 
-class DivergenceReason(StrEnum):
-    """Why a later record conflicts with the question's current outcome."""
-
-    DIFFERENT_WORDS = "DIFFERENT_WORDS"
-    DIFFERENT_OPTION = "DIFFERENT_OPTION"
-    ANSWER_AFTER_MOOT = "ANSWER_AFTER_MOOT"
-    MOOT_AFTER_ANSWER = "MOOT_AFTER_ANSWER"
-    DIFFERENT_EVIDENCE = "DIFFERENT_EVIDENCE"
-
-
 def resolve_answer_authority(decision_class: DecisionClass) -> AnswerAuthority:
     """Return the authority allowed to answer ``decision_class``.
 
@@ -470,10 +457,6 @@ def _decision_class(value: object, field_name: str) -> DecisionClass:
 
 def _status(value: object, field_name: str) -> QuestionStatus:
     return _enum(QuestionStatus, value, field_name)
-
-
-def _divergence_reason(value: object, field_name: str) -> DivergenceReason:
-    return _enum(DivergenceReason, value, field_name)
 
 
 def _mapping(value: object, field_name: str) -> Mapping[str, Any]:
@@ -632,6 +615,8 @@ class OwnerAnswer:
     chosen_option: str | None = None
     evidence: str | None = None
     rejected_alternative: str | None = None
+    #: What a wrong answer would cost, when the planner can name it (H27).
+    cost_if_wrong: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "question_id", _require_text(self.question_id, "question_id"))
@@ -661,6 +646,9 @@ class OwnerAnswer:
             "rejected_alternative",
             _optional_text(self.rejected_alternative, "rejected_alternative"),
         )
+        object.__setattr__(
+            self, "cost_if_wrong", _optional_text(self.cost_if_wrong, "cost_if_wrong")
+        )
         if self.authority is AnswerAuthority.PLAN:
             missing = [
                 name
@@ -689,6 +677,7 @@ class OwnerAnswer:
             "chosen_option": self.chosen_option,
             "evidence": self.evidence,
             "rejected_alternative": self.rejected_alternative,
+            "cost_if_wrong": self.cost_if_wrong,
         }
 
     @classmethod
@@ -709,66 +698,9 @@ class OwnerAnswer:
             rejected_alternative=_optional_text(
                 data.get("rejected_alternative"), "answer.rejected_alternative"
             ),
-        )
-
-
-@dataclass(frozen=True)
-class DivergentRecord:
-    """A later record that conflicts with a question's current outcome."""
-
-    question_id: str
-    reason: DivergenceReason
-    words: str
-    recorded_by: str
-    recorded_by_role: AskRole
-    recorded_at: str
-    chosen_option: str | None = None
-    note: str = ""
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "question_id", _require_text(self.question_id, "question_id"))
-        object.__setattr__(self, "words", _require_verbatim(self.words, "words"))
-        object.__setattr__(self, "recorded_by", _require_text(self.recorded_by, "recorded_by"))
-        object.__setattr__(self, "recorded_at", _require_text(self.recorded_at, "recorded_at"))
-        if not isinstance(self.reason, DivergenceReason):
-            raise QuestionStoreError("reason must be a DivergenceReason")
-        if not isinstance(self.recorded_by_role, AskRole):
-            raise QuestionStoreError("recorded_by_role must be an AskRole")
-        object.__setattr__(
-            self, "chosen_option", _optional_text(self.chosen_option, "chosen_option")
-        )
-        object.__setattr__(self, "note", str(self.note))
-
-    def to_mapping(self) -> dict[str, Any]:
-        """Render the divergent record verbatim."""
-        return {
-            "question_id": self.question_id,
-            "reason": self.reason.value,
-            "words": self.words,
-            "recorded_by": self.recorded_by,
-            "recorded_by_role": self.recorded_by_role.value,
-            "recorded_at": self.recorded_at,
-            "chosen_option": self.chosen_option,
-            "note": self.note,
-        }
-
-    @classmethod
-    def from_mapping(cls, payload: object) -> DivergentRecord:
-        """Rebuild one divergent record from its durable mapping."""
-        data = _mapping(payload, "divergence")
-        return cls(
-            question_id=_require_text(data.get("question_id"), "divergence.question_id"),
-            reason=_divergence_reason(data.get("reason"), "divergence.reason"),
-            words=_require_verbatim(data.get("words"), "divergence.words"),
-            recorded_by=_require_text(data.get("recorded_by"), "divergence.recorded_by"),
-            recorded_by_role=_ask_role(
-                data.get("recorded_by_role"), "divergence.recorded_by_role"
+            cost_if_wrong=_optional_text(
+                data.get("cost_if_wrong"), "answer.cost_if_wrong"
             ),
-            recorded_at=_require_text(data.get("recorded_at"), "divergence.recorded_at"),
-            chosen_option=_optional_text(
-                data.get("chosen_option"), "divergence.chosen_option"
-            ),
-            note=str(data.get("note") or ""),
         )
 
 
@@ -825,7 +757,6 @@ class OwnerQuestion:
     defer_until: str | None = None
     answer: OwnerAnswer | None = None
     moot_evidence: str | None = None
-    divergent_records: tuple[DivergentRecord, ...] = ()
     history: tuple[QuestionEvent, ...] = ()
 
     def __post_init__(self) -> None:
@@ -844,19 +775,8 @@ class OwnerQuestion:
             object.__setattr__(
                 self, "defer_until", _iso_date(self.defer_until, "defer_until")
             )
-        if not isinstance(self.divergent_records, tuple):
-            object.__setattr__(
-                self, "divergent_records", tuple(self.divergent_records)
-            )
         if not isinstance(self.history, tuple):
             object.__setattr__(self, "history", tuple(self.history))
-        for record in self.divergent_records:
-            if not isinstance(record, DivergentRecord):
-                raise QuestionStoreError("divergent_records must hold DivergentRecord")
-            if record.question_id != self.question_id:
-                raise QuestionStoreError(
-                    "divergent record belongs to a different question"
-                )
         for event in self.history:
             if not isinstance(event, QuestionEvent):
                 raise QuestionStoreError("history must hold QuestionEvent entries")
@@ -944,7 +864,6 @@ class OwnerQuestion:
             "defer_until": self.defer_until,
             "answer": None if self.answer is None else self.answer.to_mapping(),
             "moot_evidence": self.moot_evidence,
-            "divergent_records": [r.to_mapping() for r in self.divergent_records],
             "history": [e.to_mapping() for e in self.history],
             **self.request.to_mapping(),
         }
@@ -982,10 +901,6 @@ class OwnerQuestion:
             defer_until=data.get("defer_until"),
             answer=answer,
             moot_evidence=data.get("moot_evidence"),
-            divergent_records=tuple(
-                DivergentRecord.from_mapping(item)
-                for item in _sequence(data.get("divergent_records"), "divergent_records")
-            ),
             history=tuple(
                 QuestionEvent.from_mapping(item)
                 for item in _sequence(data.get("history"), "history")
@@ -1052,27 +967,6 @@ class QuestionLedger:
 
 
 @dataclass(frozen=True)
-class DivergenceReport:
-    """One divergent record with the question context that proves no auto-close."""
-
-    question_id: str
-    key: str
-    kind: str
-    status: QuestionStatus
-    record: DivergentRecord
-
-    def to_mapping(self) -> dict[str, Any]:
-        """Render the report for CLI or web consumption."""
-        return {
-            "question_id": self.question_id,
-            "key": self.key,
-            "kind": self.kind,
-            "status": self.status.value,
-            "record": self.record.to_mapping(),
-        }
-
-
-@dataclass(frozen=True)
 class OrchestratorAloneDecision:
     """One decision the Orchestrator took without the owner."""
 
@@ -1091,6 +985,7 @@ class OrchestratorAloneDecision:
     answered_at: str
     run_id: str | None = None
     blocks: tuple[str, ...] = ()
+    cost_if_wrong: str | None = None
 
     def to_mapping(self) -> dict[str, Any]:
         """Render the audit entry."""
@@ -1110,6 +1005,7 @@ class OrchestratorAloneDecision:
             "answered_at": self.answered_at,
             "run_id": self.run_id,
             "blocks": list(self.blocks),
+            "cost_if_wrong": self.cost_if_wrong,
         }
 
 
@@ -1221,7 +1117,6 @@ def question_view(question: OwnerQuestion, as_of: date | None = None) -> dict[st
         "escalation": question.request.escalation.to_mapping(),
         "answer": None if question.answer is None else question.answer.to_mapping(),
         "moot_evidence": question.moot_evidence,
-        "divergence_count": len(question.divergent_records),
         "history": [event.to_mapping() for event in question.history],
     }
 
@@ -1333,13 +1228,14 @@ class OwnerQuestionQueue:
         chosen_option: str | None = None,
         evidence: str | None = None,
         rejected_alternative: str | None = None,
+        cost_if_wrong: str | None = None,
         now: str | None = None,
     ) -> OwnerQuestion:
         """Record an answer, storing the words exactly as given.
 
-        A conflicting later answer is recorded as a divergent record and the
-        question's own outcome is left untouched: divergence is reported, never
-        auto-closed.
+        A later answer that conflicts with the recorded outcome is refused: the
+        primary answer and the status are never overwritten and nothing is
+        auto-closed.  A repeated identical answer is an idempotent confirmation.
         """
         question = self._require(ref)
         self._authorize_answer(question, authority=authority, answered_by=answered_by)
@@ -1353,6 +1249,7 @@ class OwnerQuestionQueue:
             chosen_option=chosen_option,
             evidence=evidence,
             rejected_alternative=rejected_alternative,
+            cost_if_wrong=cost_if_wrong,
         )
         if answer.chosen_option is not None and (
             answer.chosen_option not in question.request.options
@@ -1361,7 +1258,7 @@ class OwnerQuestionQueue:
                 f"chosen_option {answer.chosen_option!r} is not one of the question's options"
             )
         if question.status in (QuestionStatus.ANSWERED, QuestionStatus.MOOT):
-            return self._record_conflict(question, answer)
+            return self._refuse_conflicting_answer(question, answer)
         updated = replace(
             question,
             status=QuestionStatus.ANSWERED,
@@ -1446,24 +1343,14 @@ class OwnerQuestionQueue:
         if question.status is QuestionStatus.MOOT:
             if question.moot_evidence == closing_evidence:
                 return question
-            return self.record_divergence(
-                question.key,
-                reason=DivergenceReason.DIFFERENT_EVIDENCE,
-                words=closing_evidence,
-                recorded_by=closed_by,
-                recorded_by_role=closed_by_role,
-                note="a second moot close with different evidence",
-                now=at,
+            raise QuestionStateError(
+                "question is already MOOT on different evidence; a conflicting "
+                "moot close is refused (raise a new keyed question that supersedes it)"
             )
         if question.status is QuestionStatus.ANSWERED:
-            return self.record_divergence(
-                question.key,
-                reason=DivergenceReason.MOOT_AFTER_ANSWER,
-                words=closing_evidence,
-                recorded_by=closed_by,
-                recorded_by_role=closed_by_role,
-                note="a moot close after an owner answer; not auto-closed",
-                now=at,
+            raise QuestionStateError(
+                "question is already ANSWERED; a moot close after an answer is "
+                "refused (raise a new keyed question that supersedes it)"
             )
         updated = replace(
             question,
@@ -1478,47 +1365,6 @@ class OwnerQuestionQueue:
                     actor=closed_by,
                     role=closed_by_role,
                     detail="closed as moot on evidence",
-                ),
-            ),
-        )
-        return self._persist(updated)
-
-    def record_divergence(
-        self,
-        ref: str,
-        *,
-        reason: DivergenceReason,
-        words: str,
-        recorded_by: str,
-        recorded_by_role: AskRole,
-        chosen_option: str | None = None,
-        note: str = "",
-        now: str | None = None,
-    ) -> OwnerQuestion:
-        """Record a conflicting later record without changing the outcome."""
-        question = self._require(ref)
-        at = _require_text(now if now is not None else _now_iso(), "recorded_at")
-        record = DivergentRecord(
-            question_id=question.question_id,
-            reason=reason,
-            words=words,
-            recorded_by=recorded_by,
-            recorded_by_role=recorded_by_role,
-            recorded_at=at,
-            chosen_option=chosen_option,
-            note=note,
-        )
-        updated = replace(
-            question,
-            divergent_records=(*question.divergent_records, record),
-            history=(
-                *question.history,
-                QuestionEvent(
-                    at=at,
-                    verb="record_divergence",
-                    actor=recorded_by,
-                    role=recorded_by_role,
-                    detail=reason.value,
                 ),
             ),
         )
@@ -1561,28 +1407,6 @@ class OwnerQuestionQueue:
         """Return every question raised against one run."""
         return self.questions(run_id=_require_text(run_id, "run_id"))
 
-    def divergences(self, ref: str | None = None) -> tuple[DivergenceReport, ...]:
-        """Report divergent records (optionally for one question)."""
-        ledger = self.load()
-        selected = ledger.questions
-        if ref is not None:
-            question = self._require(ref)
-            selected = (question,)
-        reports = [
-            DivergenceReport(
-                question_id=question.question_id,
-                key=question.key,
-                kind=question.kind,
-                status=question.status,
-                record=record,
-            )
-            for question in selected
-            for record in question.divergent_records
-        ]
-        return tuple(
-            sorted(reports, key=lambda item: (item.record.recorded_at, item.question_id))
-        )
-
     def orchestrator_alone_decisions(self) -> tuple[OrchestratorAloneDecision, ...]:
         """Return the audit list of every Orchestrator-alone decision."""
         decisions = [
@@ -1602,6 +1426,7 @@ class OwnerQuestionQueue:
                 answered_at=question.answer.answered_at,
                 run_id=question.request.run_id,
                 blocks=question.request.blocks,
+                cost_if_wrong=question.answer.cost_if_wrong,
             )
             for question in self.load().questions
             if question.answer is not None
@@ -1682,20 +1507,14 @@ class OwnerQuestionQueue:
                 "an Orchestrator may never answer its own finding"
             )
 
-    def _record_conflict(
+    def _refuse_conflicting_answer(
         self, question: OwnerQuestion, answer: OwnerAnswer
     ) -> OwnerQuestion:
-        """Record a conflicting answer; never overwrite, never auto-close."""
+        """Refuse a conflicting answer; never overwrite, never auto-close."""
         if question.status is QuestionStatus.MOOT:
-            return self.record_divergence(
-                question.key,
-                reason=DivergenceReason.ANSWER_AFTER_MOOT,
-                words=answer.words,
-                recorded_by=answer.answered_by,
-                recorded_by_role=answer.answered_by_role,
-                chosen_option=answer.chosen_option,
-                note="an answer after an evidence-backed moot close",
-                now=answer.answered_at,
+            raise QuestionStateError(
+                "question is already MOOT; an answer after an evidence-backed moot "
+                "close is refused (raise a new keyed question that supersedes it)"
             )
         current = question.answer
         if current is None:  # pragma: no cover - ANSWERED always carries an answer
@@ -1715,20 +1534,9 @@ class OwnerQuestionQueue:
                 ),
             )
             return self._persist(confirmed)
-        reason = (
-            DivergenceReason.DIFFERENT_OPTION
-            if current.chosen_option != answer.chosen_option
-            else DivergenceReason.DIFFERENT_WORDS
-        )
-        return self.record_divergence(
-            question.key,
-            reason=reason,
-            words=answer.words,
-            recorded_by=answer.answered_by,
-            recorded_by_role=answer.answered_by_role,
-            chosen_option=answer.chosen_option,
-            note="a later conflicting answer; the earlier answer stands",
-            now=answer.answered_at,
+        raise QuestionStateError(
+            "question is already ANSWERED; a conflicting answer is refused "
+            "(raise a new keyed question that supersedes it)"
         )
 
 
@@ -1863,14 +1671,12 @@ def build_questions_router(
         run_id = request.query_params.get("run_id")
         try:
             questions = queue.questions(status=status, run_id=run_id or None)
-            divergences = queue.divergences()
             audit = queue.orchestrator_alone_decisions()
         except QuestionError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse(
             {
                 "questions": [question_view(item, as_of) for item in questions],
-                "divergences": [item.to_mapping() for item in divergences],
                 "orchestrator_alone": [item.to_mapping() for item in audit],
             }
         )
@@ -1894,17 +1700,6 @@ def build_questions_router(
                 "questions": [question_view(item, as_of) for item in pending],
             }
         )
-
-    @router.get("/divergences")
-    async def list_divergences(request: Request) -> JSONResponse:
-        _guard(request)
-        ref = request.query_params.get("ref")
-        try:
-            reports = queue.divergences(ref)
-        except QuestionError as exc:
-            status = 404 if "unknown question" in str(exc) else 400
-            raise HTTPException(status_code=status, detail=str(exc)) from exc
-        return JSONResponse({"divergences": [item.to_mapping() for item in reports]})
 
     @router.get("/standing-rules")
     async def list_standing_rules(request: Request) -> JSONResponse:
@@ -1960,6 +1755,7 @@ def build_questions_router(
                 chosen_option=payload.get("chosen_option"),
                 evidence=payload.get("evidence"),
                 rejected_alternative=payload.get("rejected_alternative"),
+                cost_if_wrong=payload.get("cost_if_wrong"),
             )
         except QuestionError as exc:
             status = 404 if "unknown question" in str(exc) else 400
@@ -1997,27 +1793,6 @@ def build_questions_router(
                 closed_by_role=_ask_role(
                     payload.get("closed_by_role"), "closed_by_role"
                 ),
-            )
-        except QuestionError as exc:
-            status = 404 if "unknown question" in str(exc) else 400
-            raise HTTPException(status_code=status, detail=str(exc)) from exc
-        return _question_response(question, None)
-
-    @router.post("/divergence")
-    async def divergence(request: Request) -> JSONResponse:
-        _guard(request)
-        payload = await _body(request)
-        try:
-            question = queue.record_divergence(
-                _ref(payload),
-                reason=_divergence_reason(payload.get("reason"), "reason"),
-                words=_require_verbatim(payload.get("words"), "words"),
-                recorded_by=_require_text(payload.get("recorded_by"), "recorded_by"),
-                recorded_by_role=_ask_role(
-                    payload.get("recorded_by_role"), "recorded_by_role"
-                ),
-                chosen_option=payload.get("chosen_option"),
-                note=str(payload.get("note") or ""),
             )
         except QuestionError as exc:
             status = 404 if "unknown question" in str(exc) else 400

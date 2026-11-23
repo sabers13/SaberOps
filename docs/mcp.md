@@ -79,7 +79,7 @@ first missing step with no stored cursor.
 | `capacity` | no | — | `saberops.jobs.service.capacity` |
 | `read_evidence` | no | `path` | guarded evidence reader |
 | `list_questions` | no | `status`, `run_id` | `saberops.questions.OwnerQuestionQueue.questions` |
-| `answer_question` | yes | `question_id_or_key`, `answer_text`, `authority` | `saberops.questions.OwnerQuestionQueue.answer` |
+| `answer_question` | yes | `question_id_or_key`, `answer_text`, `authority` (optional `evidence`, `rejected_alternative`, `cost_if_wrong`) | `saberops.questions.OwnerQuestionQueue.answer` |
 | `propose_config_change` | yes | `changes`, `rationale`, `proposed_by` | `saberops.config.propose_config_change` |
 | `list_proposals` | no | — | `saberops.config.ConfigLedger.entries` |
 | `get_mode` | no | — | `saberops.owner_mode.mode_view` |
@@ -308,6 +308,9 @@ accepted and mapped). Owner authority is not exercisable over MCP:
 class is owner-only is refused the same way. A planning session can never answer
 its own finding, and answers are idempotent --
 repeating an identical answer records a confirmation and changes nothing.
+A conflicting later answer is refused and the first answer stands. A planner
+may add `cost_if_wrong` when it can name what a wrong answer would cost; the
+value appears in the audit list, in `catch_up` and in the return summary.
 
 `list_questions` returns a derived `critical` tag and its reasons for every
 question. Critical is the union of an owner-only or acceptance class, a

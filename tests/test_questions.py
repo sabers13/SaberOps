@@ -32,7 +32,6 @@ from saberops.questions import (
     AnswerAuthorityError,
     AskRole,
     DecisionClass,
-    DivergenceReason,
     Escalation,
     EscalationError,
     OwnerQuestion,
@@ -428,32 +427,30 @@ def test_a_chosen_option_must_be_one_the_question_offered(
 
 
 # ---------------------------------------------------------------------------
-# divergence: reported, never auto-closed
+# a conflicting later answer is refused, never applied
 # ---------------------------------------------------------------------------
 
 
-def test_a_conflicting_later_answer_is_a_reported_divergence(
+def test_a_conflicting_later_answer_is_refused_and_the_first_answer_stands(
     queue: OwnerQuestionQueue,
 ) -> None:
     queue.ask(_request(), now="2026-10-18T09:00:00+00:00")
     _owner_answer(queue, "run_abc/gate-block", "yes, allow it")
-    question = _owner_answer(
-        queue, "run_abc/gate-block", "no, keep the test frozen", at="2026-10-18T13:00:00+00:00"
-    )
+    with pytest.raises(QuestionStateError):
+        _owner_answer(
+            queue,
+            "run_abc/gate-block",
+            "no, keep the test frozen",
+            at="2026-10-18T13:00:00+00:00",
+        )
+    question = queue.get("run_abc/gate-block")
+    assert question is not None
     assert question.status is QuestionStatus.ANSWERED
     assert question.answer is not None
     assert question.answer.words == "yes, allow it"
-    assert len(question.divergent_records) == 1
-    record = question.divergent_records[0]
-    assert record.reason is DivergenceReason.DIFFERENT_WORDS
-    assert record.words == "no, keep the test frozen"
-    reports = queue.divergences()
-    assert len(reports) == 1
-    assert reports[0].status is QuestionStatus.ANSWERED
-    assert reports[0].record.words == "no, keep the test frozen"
 
 
-def test_a_repeated_identical_answer_confirms_instead_of_diverging(
+def test_a_repeated_identical_answer_confirms_instead_of_conflicting(
     queue: OwnerQuestionQueue,
 ) -> None:
     queue.ask(_request(), now="2026-10-18T09:00:00+00:00")
@@ -461,25 +458,26 @@ def test_a_repeated_identical_answer_confirms_instead_of_diverging(
     question = _owner_answer(
         queue, "run_abc/gate-block", "yes, allow it", at="2026-10-18T13:00:00+00:00"
     )
-    assert question.divergent_records == ()
     assert question.history[-1].detail == "repeated identical answer (confirmed)"
 
 
-def test_a_different_option_is_an_option_divergence(queue: OwnerQuestionQueue) -> None:
+def test_a_different_option_is_refused(queue: OwnerQuestionQueue) -> None:
     queue.ask(_orchestrator_request(), now="2026-10-18T09:00:00+00:00")
     _orchestrator_answer(queue, "review/finding-f3", "classify as accept")
-    question = queue.answer(
-        "review/finding-f3",
-        words="classify as defer",
-        authority=AnswerAuthority.PLAN,
-        answered_by="orchestrator:session-2",
-        answered_by_role=AskRole.PLAN,
-        chosen_option="defer",
-        evidence="new evidence",
-        rejected_alternative="accept",
-        now="2026-10-18T12:00:00+00:00",
-    )
-    assert question.divergent_records[-1].reason is DivergenceReason.DIFFERENT_OPTION
+    with pytest.raises(QuestionStateError):
+        queue.answer(
+            "review/finding-f3",
+            words="classify as defer",
+            authority=AnswerAuthority.PLAN,
+            answered_by="orchestrator:session-2",
+            answered_by_role=AskRole.PLAN,
+            chosen_option="defer",
+            evidence="new evidence",
+            rejected_alternative="accept",
+            now="2026-10-18T12:00:00+00:00",
+        )
+    question = queue.get("review/finding-f3")
+    assert question is not None
     assert question.answer is not None
     assert question.answer.chosen_option == "accept"
 
@@ -583,7 +581,7 @@ def test_an_evidence_backed_moot_close_keeps_the_question(
     assert len(queue.questions()) == 1
 
 
-def test_an_answer_after_a_moot_close_is_a_divergence(queue: OwnerQuestionQueue) -> None:
+def test_an_answer_after_a_moot_close_is_refused(queue: OwnerQuestionQueue) -> None:
     queue.ask(_request(), now="2026-10-18T09:00:00+00:00")
     queue.mark_moot(
         "run_abc/gate-block",
@@ -591,26 +589,33 @@ def test_an_answer_after_a_moot_close_is_a_divergence(queue: OwnerQuestionQueue)
         closed_by="owner",
         closed_by_role=AskRole.OWNER,
     )
-    question = _owner_answer(
-        queue, "run_abc/gate-block", "actually, allow it", at="2026-10-18T15:00:00+00:00"
-    )
+    with pytest.raises(QuestionStateError):
+        _owner_answer(
+            queue,
+            "run_abc/gate-block",
+            "actually, allow it",
+            at="2026-10-18T15:00:00+00:00",
+        )
+    question = queue.get("run_abc/gate-block")
+    assert question is not None
     assert question.status is QuestionStatus.MOOT
-    assert question.divergent_records[-1].reason is DivergenceReason.ANSWER_AFTER_MOOT
     assert question.answer is None
 
 
-def test_a_moot_close_after_an_answer_is_a_divergence(queue: OwnerQuestionQueue) -> None:
+def test_a_moot_close_after_an_answer_is_refused(queue: OwnerQuestionQueue) -> None:
     queue.ask(_request(), now="2026-10-18T09:00:00+00:00")
     _owner_answer(queue, "run_abc/gate-block", "yes, allow it")
-    question = queue.mark_moot(
-        "run_abc/gate-block",
-        evidence="a later claim that it no longer matters",
-        closed_by="orchestrator",
-        closed_by_role=AskRole.PLAN,
-        now="2026-10-18T16:00:00+00:00",
-    )
+    with pytest.raises(QuestionStateError):
+        queue.mark_moot(
+            "run_abc/gate-block",
+            evidence="a later claim that it no longer matters",
+            closed_by="orchestrator",
+            closed_by_role=AskRole.PLAN,
+            now="2026-10-18T16:00:00+00:00",
+        )
+    question = queue.get("run_abc/gate-block")
+    assert question is not None
     assert question.status is QuestionStatus.ANSWERED
-    assert question.divergent_records[-1].reason is DivergenceReason.MOOT_AFTER_ANSWER
     assert question.answer is not None
     assert question.answer.words == "yes, allow it"
 
@@ -623,7 +628,7 @@ def test_a_moot_close_after_an_answer_is_a_divergence(queue: OwnerQuestionQueue)
 def test_no_task_lifecycle_or_cleanup_path_can_close_a_question() -> None:
     assert TASK_LIFECYCLE_CLOSE_AUTHORITIES == frozenset()
     assert QUESTION_TRANSITION_VERBS == frozenset(
-        {"answer", "defer", "mark_moot", "record_divergence"}
+        {"answer", "defer", "mark_moot"}
     )
     forbidden = ("prune", "purge", "delete", "remove", "clear", "cleanup", "auto_close", "sweep")
     public_names = list(questions_module.__all__)
@@ -665,7 +670,6 @@ def test_questions_survive_reload_and_reads(queue: OwnerQuestionQueue) -> None:
     for _ in range(3):
         queue.questions()
         queue.pending(date(2026, 10, 18))
-        queue.divergences()
         queue.orchestrator_alone_decisions()
         queue.standing_rule_proposals()
     assert queue.path.read_bytes() == before
@@ -696,6 +700,41 @@ def test_the_audit_list_holds_every_orchestrator_alone_decision(
     assert decision.rejected_alternative == "reject the finding and fix the code instead"
     assert decision.requirement == _escalation().requirement
     assert decision.answered_at == "2026-10-18T11:00:00+00:00"
+
+
+def test_a_self_answer_records_its_optional_cost_if_wrong(
+    queue: OwnerQuestionQueue,
+) -> None:
+    queue.ask(_orchestrator_request(), now="2026-10-18T09:00:00+00:00")
+    queue.answer(
+        "review/finding-f3",
+        words="classify as accept",
+        authority=AnswerAuthority.PLAN,
+        answered_by="orchestrator:session-1",
+        answered_by_role=AskRole.PLAN,
+        chosen_option="accept",
+        evidence="review finding F3 quotes the failing assertion",
+        rejected_alternative="reject the finding and fix the code instead",
+        cost_if_wrong="a rejected correct fix ships late and the review loop repeats",
+        now="2026-10-18T11:00:00+00:00",
+    )
+    (decision,) = queue.orchestrator_alone_decisions()
+    assert decision.cost_if_wrong == (
+        "a rejected correct fix ships late and the review loop repeats"
+    )
+    reloaded = OwnerQuestionQueue(queue.path).get("review/finding-f3")
+    assert reloaded is not None
+    assert reloaded.answer is not None
+    assert reloaded.answer.cost_if_wrong == decision.cost_if_wrong
+
+
+def test_a_self_answer_without_a_cost_if_wrong_stays_optional(
+    queue: OwnerQuestionQueue,
+) -> None:
+    queue.ask(_orchestrator_request(), now="2026-10-18T09:00:00+00:00")
+    _orchestrator_answer(queue, "review/finding-f3", "classify as accept")
+    (decision,) = queue.orchestrator_alone_decisions()
+    assert decision.cost_if_wrong is None
 
 
 def test_an_owner_answer_is_not_an_orchestrator_alone_decision(
@@ -954,7 +993,6 @@ def test_the_web_entry_point_carries_the_verbatim_owner_words(
     assert listed.status_code == 200
     payload = listed.json()
     assert payload["questions"][0]["answer"]["words"] == words
-    assert payload["divergences"] == []
     assert payload["orchestrator_alone"] == []
 
     shown = client.get(f"{QUESTIONS_ROUTER_PREFIX}/show", params={"ref": "run_abc/gate-block"})
@@ -980,11 +1018,11 @@ def test_the_web_entry_point_defers_and_resurfaces(client: TestClient) -> None:
     assert due.json()["questions"][0]["resurfaced"] is True
 
 
-def test_the_web_entry_point_reports_a_divergence_without_closing(
+def test_the_web_entry_point_refuses_a_conflicting_later_answer(
     client: TestClient,
 ) -> None:
     client.post(f"{QUESTIONS_ROUTER_PREFIX}/ask", json=_ask_body())
-    client.post(
+    first = client.post(
         f"{QUESTIONS_ROUTER_PREFIX}/answer",
         json={
             "ref": "run_abc/gate-block",
@@ -994,22 +1032,23 @@ def test_the_web_entry_point_reports_a_divergence_without_closing(
             "answered_by_role": "OWNER",
         },
     )
-    divergent = client.post(
-        f"{QUESTIONS_ROUTER_PREFIX}/divergence",
+    assert first.status_code == 200
+    second = client.post(
+        f"{QUESTIONS_ROUTER_PREFIX}/answer",
         json={
             "ref": "run_abc/gate-block",
-            "reason": "DIFFERENT_WORDS",
             "words": "no",
-            "recorded_by": "owner",
-            "recorded_by_role": "OWNER",
+            "authority": "OWNER",
+            "answered_by": "owner",
+            "answered_by_role": "OWNER",
         },
     )
-    assert divergent.status_code == 200
-    assert divergent.json()["status"] == "ANSWERED"
-    reports = client.get(f"{QUESTIONS_ROUTER_PREFIX}/divergences").json()["divergences"]
-    assert len(reports) == 1
-    assert reports[0]["status"] == "ANSWERED"
-    assert reports[0]["record"]["words"] == "no"
+    assert second.status_code == 400
+    shown = client.get(
+        f"{QUESTIONS_ROUTER_PREFIX}/show", params={"ref": "run_abc/gate-block"}
+    ).json()
+    assert shown["status"] == "ANSWERED"
+    assert shown["answer"]["words"] == "yes"
 
 
 def test_the_web_entry_point_refuses_owner_only_and_unknown_requests(

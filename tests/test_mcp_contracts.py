@@ -546,7 +546,6 @@ def test_answer_question_is_idempotent(tmp_path: Path) -> None:
     first = _payload(server, "answer_question", arguments)
     second = _payload(server, "answer_question", arguments)
     assert first["question"]["status"] == second["question"]["status"] == "ANSWERED"
-    assert OwnerQuestionQueue(store).divergences() == ()
     assert server.context.ledger.replay().counts.get("question_answered") == 1
 
 

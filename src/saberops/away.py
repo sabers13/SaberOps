@@ -57,7 +57,6 @@ __all__ = [
     "AcceptedCandidateRecord",
     "AlarmSeverity",
     "AuthorityMode",
-    "AutonomousAuditEntry",
     "AwayError",
     "AwayJournal",
     "AwayPolicy",
@@ -108,7 +107,6 @@ __all__ = [
     "StandingDecisionStore",
     "UNATTENDED_PLANS_VERSION",
     "answer_question_under_standing_decision",
-    "build_audit_entries",
     "build_morning_report",
     "build_return_summary",
     "compute_plan_impact",
@@ -1071,64 +1069,6 @@ def resolve_decision(
 
 
 @dataclass(frozen=True)
-class AutonomousAuditEntry:
-    """One action the engine took alone, for the Orchestrator-alone audit list."""
-
-    decision_id: str
-    scope: DecisionScope
-    autonomy_class: AutonomyClass
-    chosen_option: str
-    rejected_alternatives: tuple[str, ...]
-    evidence_paths: tuple[str, ...]
-    explanation: tuple[str, ...]
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "decision_id": self.decision_id,
-            "scope": self.scope.as_dict(),
-            "autonomy_class": self.autonomy_class.value,
-            "chosen_option": self.chosen_option,
-            "rejected_alternatives": list(self.rejected_alternatives),
-            "evidence_paths": list(self.evidence_paths),
-            "explanation": list(self.explanation),
-        }
-
-
-def build_audit_entries(
-    resolutions: Sequence[DecisionResolution],
-) -> tuple[AutonomousAuditEntry, ...]:
-    """Collect the actions taken alone (Class 1 and Class 2) into an audit list.
-
-    Only resolutions that required an audit are included; the caller persists
-    them. The order is the caller's order, so the list is reproducible.
-    """
-    if isinstance(resolutions, (str, bytes)) or not isinstance(resolutions, Sequence):
-        raise AwayError("build_audit_entries requires an ordered sequence")
-    entries: list[AutonomousAuditEntry] = []
-    for index, resolved in enumerate(resolutions):
-        if not isinstance(resolved, DecisionResolution):
-            raise AwayError(f"resolutions[{index}] must be a DecisionResolution")
-        if not resolved.audit_required:
-            continue
-        if resolved.autonomy_class is None or resolved.chosen_option is None:
-            raise AwayError(
-                "an audit-required resolution must name an autonomy class and a chosen option"
-            )
-        entries.append(
-            AutonomousAuditEntry(
-                decision_id=resolved.decision_id,
-                scope=resolved.scope,
-                autonomy_class=resolved.autonomy_class,
-                chosen_option=resolved.chosen_option,
-                rejected_alternatives=resolved.rejected_alternatives,
-                evidence_paths=resolved.evidence_paths,
-                explanation=resolved.explanation,
-            )
-        )
-    return tuple(entries)
-
-
-@dataclass(frozen=True)
 class RunProgress:
     """Consecutive-failure accounting for the circuit breaker.
 
@@ -1821,7 +1761,6 @@ class MorningReport:
     accepted_candidates: tuple[AcceptedCandidateRecord, ...]
     parked_branches: tuple[ParkedBranchRecord, ...]
     escalations: tuple[EscalationRecord, ...]
-    audit_entries: tuple[AutonomousAuditEntry, ...]
     stall_alarms: tuple[StallAlarm, ...]
     consecutive_failures: int
     circuit_open: bool
@@ -1839,7 +1778,6 @@ class MorningReport:
             ],
             "parked_branches": [parked.as_dict() for parked in self.parked_branches],
             "escalations": [escalation.as_dict() for escalation in self.escalations],
-            "audit_entries": [entry.as_dict() for entry in self.audit_entries],
             "stall_alarms": [alarm.as_dict() for alarm in self.stall_alarms],
             "consecutive_failures": self.consecutive_failures,
             "circuit_open": self.circuit_open,
@@ -1955,7 +1893,6 @@ def build_morning_report(
         accepted_candidates=tuple(accepted),
         parked_branches=tuple(parked),
         escalations=tuple(escalations),
-        audit_entries=build_audit_entries(resolutions),
         stall_alarms=tuple(alarm_list),
         consecutive_failures=state.consecutive_failures,
         circuit_open=state.circuit_open,
@@ -2518,13 +2455,14 @@ class ReturnSummary:
     accepted_candidates: tuple[dict[str, Any], ...]
     parked_branches: tuple[dict[str, Any], ...]
     escalations: tuple[dict[str, Any], ...]
-    audit_entries: tuple[dict[str, Any], ...]
     stall_alarms: tuple[dict[str, Any], ...]
     halts: tuple[dict[str, Any], ...]
     plan_impact: dict[str, Any] | None
     preflight: dict[str, Any] | None
     plans: tuple[dict[str, Any], ...] = ()
     awaiting_acceptance: tuple[dict[str, Any], ...] = ()
+    #: Every planning-session self-answer, read from the one kept record (H27).
+    self_answered: tuple[dict[str, Any], ...] = ()
 
     @property
     def has_items(self) -> bool:
@@ -2533,7 +2471,7 @@ class ReturnSummary:
             or self.accepted_candidates
             or self.parked_branches
             or self.escalations
-            or self.audit_entries
+            or self.self_answered
             or self.stall_alarms
             or self.halts
             or self.awaiting_acceptance
@@ -2549,7 +2487,7 @@ class ReturnSummary:
             f"{len(self.standing_decision_actions)} standing decision(s) applied",
             f"{len(self.parked_branches)} parked",
             f"{len(self.escalations)} escalated",
-            f"{len(self.audit_entries)} audited",
+            f"{len(self.self_answered)} self-answered",
         ]
         if self.awaiting_acceptance:
             parts.append(
@@ -2576,13 +2514,13 @@ class ReturnSummary:
             "accepted_candidates": list(self.accepted_candidates),
             "parked_branches": list(self.parked_branches),
             "escalations": list(self.escalations),
-            "audit_entries": list(self.audit_entries),
             "stall_alarms": list(self.stall_alarms),
             "halts": list(self.halts),
             "plan_impact": self.plan_impact,
             "preflight": self.preflight,
             "plans": list(self.plans),
             "awaiting_acceptance": list(self.awaiting_acceptance),
+            "self_answered": list(self.self_answered),
         }
 
 
@@ -2639,6 +2577,17 @@ def awaiting_acceptance(db: Any, *, limit: int = 1000) -> tuple[dict[str, Any], 
     return tuple(entries)
 
 
+def _self_answered_for_summary() -> tuple[dict[str, Any], ...]:
+    """Read every planning-session self-answer from the one kept record (H27)."""
+    from saberops.questions import OwnerQuestionQueue, QuestionStoreError
+
+    try:
+        decisions = OwnerQuestionQueue().orchestrator_alone_decisions()
+    except (QuestionStoreError, OSError) as exc:
+        raise AwayError(f"self-answered decisions unreadable: {exc}") from exc
+    return tuple(item.to_mapping() for item in decisions)
+
+
 def build_return_summary(
     journal: AwayJournal | None = None,
     *,
@@ -2652,7 +2601,8 @@ def build_return_summary(
     engine state a fresh session must be able to read after the planner closed.
     When ``db`` is available, standalone SUCCEEDED candidates that still wait
     for acceptance are projected too, so "while you were away" names the exact
-    accept command instead of reporting only plan lanes.
+    accept command instead of reporting only plan lanes.  Self-answered
+    decisions come from the question audit list, the one kept record (H27).
     """
     resolved = journal if journal is not None else AwayJournal()
     records = resolved.records()
@@ -2660,7 +2610,6 @@ def build_return_summary(
     accepted: list[dict[str, Any]] = []
     parked: list[dict[str, Any]] = []
     escalations: list[dict[str, Any]] = []
-    audit: list[dict[str, Any]] = []
     alarms: list[dict[str, Any]] = []
     halts: list[dict[str, Any]] = []
     plan_impact: dict[str, Any] | None = None
@@ -2677,7 +2626,6 @@ def build_return_summary(
                 ("accepted_candidates", accepted),
                 ("parked_branches", parked),
                 ("escalations", escalations),
-                ("audit_entries", audit),
                 ("stall_alarms", alarms),
             ):
                 for entry in report.get(key) or ():
@@ -2702,13 +2650,13 @@ def build_return_summary(
         accepted_candidates=tuple(accepted),
         parked_branches=tuple(parked),
         escalations=tuple(escalations),
-        audit_entries=tuple(audit),
         stall_alarms=tuple(alarms),
         halts=tuple(halts),
         plan_impact=plan_impact,
         preflight=preflight,
         plans=tuple(dict(plan) for plan in plans),
         awaiting_acceptance=(awaiting_acceptance(db) if db is not None else ()),
+        self_answered=_self_answered_for_summary(),
     )
 
 

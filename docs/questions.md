@@ -10,7 +10,7 @@ the web surface is the FastAPI router returned by `build_questions_router()`.
 
 | Module / surface | Responsibility |
 |---|---|
-| `saberops.questions` | one service layer: the queue, the status transitions, the escalation contract, the divergence and audit projections, the standing-rule proposals |
+| `saberops.questions` | one service layer: the queue, the status transitions, the escalation contract, the audit projection, the standing-rule proposals |
 | `orch questions ...` (`saberops.cli`) | thin CLI over exactly one queue verb per subcommand |
 | `build_questions_router()` | thin local-only web entry point over the same verbs (mounted by the web app) |
 | `$XDG_STATE_HOME/saberops/questions.json` | the durable owner document (`ORCH_QUESTIONS_STORE` overrides it) |
@@ -33,10 +33,10 @@ A question is keyed and immutable in its ask payload:
 
 | Status | Meaning | Left by |
 |---|---|---|
-| `OPEN` | waiting for an answer | `answer`, `defer`, `mark_moot`, `record_divergence` |
+| `OPEN` | waiting for an answer | `answer`, `defer`, `mark_moot` |
 | `DEFERRED` | postponed until `defer_until`; resurfaces on that date | `answer`, `defer` (a later date), `mark_moot` |
-| `ANSWERED` | the owner (or the Orchestrator, where allowed) answered | nothing; a later conflict becomes a divergent record |
-| `MOOT` | closed on explicit evidence that it no longer matters | nothing; a later conflict becomes a divergent record |
+| `ANSWERED` | the owner (or the Orchestrator, where allowed) answered | nothing; a later conflicting record is refused |
+| `MOOT` | closed on explicit evidence that it no longer matters | nothing; a later conflicting record is refused |
 
 `closed_by` reports the verb that produced the current status (`answer`,
 `defer`, `mark_moot`), which is what the CLI and the web API show.
@@ -63,8 +63,8 @@ on every read path. Only whitespace-only answers are refused.
 * Only the explicit verbs above may move a question out of `OPEN`. Answering,
   deferring or closing one question leaves every sibling question — including
   questions raised by the same run — untouched.
-* A later conflicting record is **reported**, never applied over the existing
-  outcome (see Divergence below).
+* A later conflicting record is **refused**; the existing outcome is never
+  overwritten (see Conflicts below).
 
 ## The five-part escalation protocol
 
@@ -118,30 +118,32 @@ Rules enforced in code:
   alternative), which is what makes the audit list usable.
 * An unknown decision class fails closed to `OWNER`.
 
-### Divergent records
+### Conflicts
 
 A later answer that conflicts with an answered question, a moot close after an
-answer, or an answer after a moot close is recorded as a `DivergentRecord`
-(`DIFFERENT_WORDS`, `DIFFERENT_OPTION`, `ANSWER_AFTER_MOOT`, `MOOT_AFTER_ANSWER`,
-`DIFFERENT_EVIDENCE`). The primary answer and the status are **not** changed and
-the question is **not** auto-closed. Divergences are reported by
-`orch questions divergences` and in the web API, always with the question's
-current status attached.
+answer, an answer after a moot close, or a second moot close on different
+evidence is **refused** with a typed `QuestionStateError`. The primary answer
+and the status are never changed and the question is never auto-closed. A
+repeated identical answer is recorded as a confirmation and changes nothing.
+Changing an owner decision requires a new keyed question that `supersedes` the
+old one.
 
 ## Audit and standing rules
 
 * `orchestrator_alone_decisions()` is the audit list of every decision the
   Orchestrator took without the owner: the question, its decision class, the
   forcing requirement, the Orchestrator's recommendation, the answer words, the
-  evidence, the rejected alternative and the run/job scope. `catch_up` returns
-  the job's self-answered decisions, and `question_return_summary()` is the
-  reusable projection (self-answered, open critical and open routine) for the
-  return summary.
+  evidence, the rejected alternative, the optional "cost if wrong" and the
+  run/job scope. This is the **one** self-answer record: `catch_up` returns the
+  job's self-answered decisions, `question_return_summary()` is the reusable
+  projection (self-answered, open critical and open routine), and
+  `away.build_return_summary()` reads the same list, so the return summary
+  lists every self-answer with its cost when the planner gave one.
 * `standing_rule_proposals(threshold=3)` groups **owner** answers by question
   kind and answer (the chosen option, or the words when there is no option) and
   proposes one standing rule per group that reached the threshold. A proposal
   targets `CFG-1` (Step 013) and is inert data: computing proposals writes
-  nothing and applies nothing. A divergent answer simply does not join the
+  nothing and applies nothing. A refused conflicting answer never joins the
   group.
 
 ## Storage
@@ -163,11 +165,9 @@ orch questions ask --key run_abc/gate-block --subject "May the lane touch the pr
 orch questions list [--status OPEN|DEFERRED|ANSWERED|MOOT] [--as-of 2026-11-01] [--run-id RUN] [--json]
 orch questions show REF [--as-of DATE] [--json]
 orch questions answer REF --words "..." [--authority owner|plan] [--by ACTOR] [--role ROLE] \
-  [--chosen-option OPTION] [--evidence E] [--rejected-alternative A] [--json]
+  [--chosen-option OPTION] [--evidence E] [--rejected-alternative A] [--cost-if-wrong C] [--json]
 orch questions defer REF --until YYYY-MM-DD [--by ACTOR] [--role OWNER|PLAN] [--note TEXT]
 orch questions moot REF --evidence "..." [--by ACTOR] [--role OWNER|PLAN|ENGINE]
-orch questions diverge REF --reason REASON --words "..." --by ACTOR --role ROLE [--note TEXT]
-orch questions divergences [REF] [--json]
 orch questions standing-rules [--threshold 3] [--json]
 orch questions audit [--json]
 ```
@@ -178,11 +178,11 @@ Exit codes follow the rest of the CLI: `0` success, `1` a typed refusal
 ## Web entry point
 
 `build_questions_router(store_path=None)` returns a FastAPI `APIRouter` with
-prefix `/questions`: `GET ""`, `GET /pending`, `GET /show`, `GET /divergences`,
-`GET /standing-rules`, `POST /ask`, `POST /answer`, `POST /defer`, `POST /moot`,
-`POST /divergence`. Every route calls exactly one queue verb and holds no
-authority of its own; a non-loopback client is refused with `403`, and the
-mounting application keeps its own local-only origin guard.
+prefix `/questions`: `GET ""`, `GET /pending`, `GET /show`,
+`GET /standing-rules`, `POST /ask`, `POST /answer`, `POST /defer`, `POST /moot`.
+Every route calls exactly one queue verb and holds no authority of its own; a
+non-loopback client is refused with `403`, and the mounting application keeps
+its own local-only origin guard.
 
 The web application (`saberops.web`) does not mount this router yet: the web
 console cut belongs to a separate step, and Step 012's authorised scope is the
@@ -203,9 +203,9 @@ map onto the same verbs when M3 lands, and inherit the same refusals.
 
 `tests/test_questions.py` covers the escalation contract, derived authority,
 keyed idempotency, verbatim storage, the implementer/self-answer refusals,
-divergence, defer/resurface, evidence-backed moot close, the
-never-closed-by-lifecycle invariant, the audit list, standing-rule proposals,
-the durable document (round trip, corrupt/unwritable, atomic write) and the web
-router. `tests/test_cli_questions.py` drives the real `orch questions` entry
-point with an isolated owner state. Both are hermetic: no provider call, no
-network, no clock dependency.
+conflict refusal, defer/resurface, evidence-backed moot close, the
+never-closed-by-lifecycle invariant, the audit list (including "cost if wrong"),
+standing-rule proposals, the durable document (round trip, corrupt/unwritable,
+atomic write) and the web router. `tests/test_cli_questions.py` drives the real
+`orch questions` entry point with an isolated owner state. Both are hermetic: no
+provider call, no network, no clock dependency.

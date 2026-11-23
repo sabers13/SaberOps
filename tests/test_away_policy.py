@@ -26,7 +26,6 @@ from saberops.away import (
     AcceptedCandidateRecord,
     AlarmSeverity,
     AuthorityMode,
-    AutonomousAuditEntry,
     AutonomyClass,
     AwayError,
     CandidateAcceptance,
@@ -49,7 +48,6 @@ from saberops.away import (
     StallObservation,
     StallSupervisionError,
     StandingDecision,
-    build_audit_entries,
     build_morning_report,
     compute_plan_impact,
     detect_stall,
@@ -628,57 +626,6 @@ def test_configuration_dataclasses_are_frozen() -> None:
 
 
 # --------------------------------------------------------------------------
-# The audit list
-# --------------------------------------------------------------------------
-
-
-def test_audit_entries_collect_only_class_1_and_class_2() -> None:
-    """Covers: RD-1 requirement 3 the Orchestrator-alone audit list is precise."""
-    resolutions = (
-        resolve_decision(_sheet(), _decision(acceptance=_acceptance()), now=NOW, current_turn=1),
-        resolve_decision(
-            _sheet(),
-            _decision(
-                decision_id="d-2",
-                recommended_option="skip wave 4",
-                alternatives=("extend",),
-            ),
-            now=NOW,
-            current_turn=1,
-        ),
-        resolve_decision(_sheet(), _decision(decision_id="d-3"), now=NOW, current_turn=1),
-    )
-    entries = build_audit_entries(resolutions)
-    assert [entry.autonomy_class for entry in entries] == [
-        AutonomyClass.CLASS_1_GATED_ACCEPT,
-        AutonomyClass.CLASS_2_RECOMMENDED,
-    ]
-    assert entries[1].rejected_alternatives == ("extend",)
-    assert entries[1].evidence_paths == ("evidence/g1.txt",)
-
-
-def test_audit_entry_shape_is_exact() -> None:
-    """Covers: RD-1 requirement 3 an audit entry names the class, option and evidence."""
-    resolution = resolve_decision(
-        _sheet(),
-        _decision(recommended_option="skip", alternatives=("extend",)),
-        now=NOW,
-        current_turn=1,
-    )
-    (entry,) = build_audit_entries((resolution,))
-    assert isinstance(entry, AutonomousAuditEntry)
-    assert entry.as_dict()["chosen_option"] == "skip"
-
-
-def test_audit_builder_rejects_malformed_input() -> None:
-    """Covers: RD-1 requirement 3 the audit list fails closed, not silently."""
-    with pytest.raises(AwayError):
-        build_audit_entries(cast("Any", "not-a-sequence"))
-    with pytest.raises(AwayError):
-        build_audit_entries([cast("Any", "not-a-resolution")])
-
-
-# --------------------------------------------------------------------------
 # Circuit breaker: three consecutive failures halt the plan
 # --------------------------------------------------------------------------
 
@@ -1147,7 +1094,6 @@ def test_morning_report_summarises_every_category() -> None:
     (parked,) = report.parked_branches
     assert parked.never_delegable is NeverDelegableKind.BUDGET_CAP
     assert len(report.escalations) == 1
-    assert len(report.audit_entries) == 2
     assert report.consecutive_failures == 3
     assert report.circuit_open is True
     assert report.halted is True
@@ -1170,7 +1116,6 @@ def test_morning_report_defaults_to_an_empty_run() -> None:
     assert report.accepted_candidates == ()
     assert report.parked_branches == ()
     assert report.escalations == ()
-    assert report.audit_entries == ()
     assert report.stall_alarms == ()
     assert report.circuit_open is False
 

@@ -34,6 +34,7 @@ from saberops.mcp.tools import ServerContext, _catch_up
 from saberops.models import RunStatus
 from saberops.owner_mode import OwnerMode, set_owner_mode
 from saberops.questions import (
+    AnswerAuthority,
     AskRole,
     DecisionClass,
     Escalation,
@@ -457,6 +458,45 @@ def test_return_summary_matches_records_and_catch_up(
     assert summary == expected
     assert advisor == payload["advisor"]
     assert payload["return_summary"]["parked_branches"] == expected["parked_branches"]
+
+
+def test_the_return_summary_lists_every_self_answer_with_its_cost(
+    owner_env: dict[str, Path],
+) -> None:
+    """H27: the kept self-answer record feeds the return summary, cost included."""
+    queue = OwnerQuestionQueue()
+    queue.ask(
+        QuestionRequest(
+            key="review/fix-up",
+            subject="Take the narrow fix?",
+            kind="review-finding",
+            decision_class=DecisionClass.FIX_UP_CONTENT,
+            raised_by_role=AskRole.CHECK,
+            raised_by="reviewer:run_a",
+            escalation=_escalation(),
+            run_id="run_a",
+            blocks=("job_a",),
+        )
+    )
+    queue.answer(
+        "review/fix-up",
+        words="take the narrow fix",
+        authority=AnswerAuthority.PLAN,
+        answered_by="planner",
+        answered_by_role=AskRole.PLAN,
+        evidence="the previous gate passed",
+        rejected_alternative="widen the fix",
+        cost_if_wrong="a wider fix ships late and delays the lane",
+    )
+
+    summary = away.build_return_summary()
+    (entry,) = summary.self_answered
+    assert entry["words"] == "take the narrow fix"
+    assert entry["evidence"] == "the previous gate passed"
+    assert entry["cost_if_wrong"] == "a wider fix ships late and delays the lane"
+    assert summary.has_items is True
+    assert "1 self-answered" in summary.one_line()
+    assert summary.as_dict()["self_answered"][0]["cost_if_wrong"] == entry["cost_if_wrong"]
 
 
 def test_cli_grants_exact_bounded_owner_decision(

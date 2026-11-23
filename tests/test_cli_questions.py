@@ -290,6 +290,8 @@ def test_an_orchestrator_alone_answer_requires_evidence_and_alternative(
         "review finding F3 quotes the failing assertion",
         "--rejected-alternative",
         "reject the finding",
+        "--cost-if-wrong",
+        "a correct fix is delayed one review round",
         "--json",
         capsys=capsys,
     )
@@ -303,18 +305,20 @@ def test_an_orchestrator_alone_answer_requires_evidence_and_alternative(
     assert audit[0]["decision_class"] == "REVIEW_FINDING_CLASSIFICATION"
     assert audit[0]["evidence"] == "review finding F3 quotes the failing assertion"
     assert audit[0]["rejected_alternative"] == "reject the finding"
+    assert audit[0]["cost_if_wrong"] == "a correct fix is delayed one review round"
 
     code, out, err = _cli("questions", "audit", capsys=capsys)
     assert (code, err) == (0, "")
     assert "rejected" in out
+    assert "cost" in out
 
 
 # ---------------------------------------------------------------------------
-# divergence, defer, moot
+# a conflicting answer is refused, defer, moot
 # ---------------------------------------------------------------------------
 
 
-def test_a_conflicting_answer_is_reported_and_never_auto_closed(
+def test_a_conflicting_answer_is_refused_and_never_auto_closed(
     capsys: pytest.CaptureFixture[str]
 ) -> None:
     assert _ask(capsys=capsys)[0] == 0
@@ -322,19 +326,15 @@ def test_a_conflicting_answer_is_reported_and_never_auto_closed(
     code, out, err = _answer(
         "run_abc/gate-block", "no, keep the test frozen", capsys=capsys
     )
+    assert code == 1
+    assert "conflicting answer is refused" in err
+    code, out, err = _cli(
+        "questions", "show", "run_abc/gate-block", "--json", capsys=capsys
+    )
     assert (code, err) == (0, "")
     view = json.loads(out)
     assert view["status"] == "ANSWERED"
-    assert view["divergence_count"] == 1
     assert view["answer"]["words"] == "yes, allow it"
-
-    code, out, err = _cli("questions", "divergences", "--json", capsys=capsys)
-    assert (code, err) == (0, "")
-    reports = json.loads(out)
-    assert len(reports) == 1
-    assert reports[0]["status"] == "ANSWERED"
-    assert reports[0]["record"]["reason"] == "DIFFERENT_WORDS"
-    assert reports[0]["record"]["words"] == "no, keep the test frozen"
 
 
 def test_a_deferred_question_resurfaces_on_its_date(
@@ -420,32 +420,6 @@ def test_the_cli_cannot_defer_as_an_implementer(
     code, out, _ = _cli("questions", "show", "run_abc/gate-block", "--json", capsys=capsys)
     assert code == 0
     assert json.loads(out)["status"] == "OPEN"
-
-
-def test_diverge_records_a_conflict_without_closing(
-    capsys: pytest.CaptureFixture[str]
-) -> None:
-    assert _ask(capsys=capsys)[0] == 0
-    assert _answer("run_abc/gate-block", "yes", capsys=capsys)[0] == 0
-    code, out, err = _cli(
-        "questions",
-        "diverge",
-        "run_abc/gate-block",
-        "--reason",
-        "DIFFERENT_WORDS",
-        "--words",
-        "no",
-        "--by",
-        "owner",
-        "--role",
-        "OWNER",
-        "--json",
-        capsys=capsys,
-    )
-    assert (code, err) == (0, "")
-    view = json.loads(out)
-    assert view["status"] == "ANSWERED"
-    assert view["divergence_count"] == 1
 
 
 # ---------------------------------------------------------------------------

@@ -28,7 +28,6 @@ under [Away mode wiring](#away-mode-wiring-f11) below.
 | `away.DecisionSheet` | the owner-frozen set of standing decisions for one run |
 | `away.NeverDelegableKind` / `NEVER_DELEGABLE_KINDS` | the immutable never-delegable list |
 | `away.resolve_decision` | the deterministic disposition for one decision |
-| `away.build_audit_entries` | the Orchestrator-alone audit list |
 | `away.run_preflight` | budget / wall-clock / scope / cap / channel readiness |
 | `away.RunProgress` | the 3-consecutive-failure circuit breaker |
 | `away.detect_stall` | the loud no-silent-stall alarm |
@@ -157,7 +156,8 @@ so an unattended run can never move a remote.
 **Class 2 — the recommended option.** A decision that the sheet does not answer
 and that is not never-delegable is settled by the Orchestrator's recommended
 option, but only when the recommendation carries evidence **and** at least one
-rejected alternative. Both are recorded in the Orchestrator-alone audit list.
+rejected alternative. Both are recorded in the journal's durable resolution
+record.
 A recommendation without an alternative or without evidence is not taken
 alone; it escalates.
 
@@ -175,11 +175,14 @@ decision reaches the owner. No other mode delegates authority to the engine.
 
 ## The Orchestrator-alone audit list
 
-`build_audit_entries(resolutions)` collects the resolutions that required an
-audit — the Class-1 acceptances and the Class-2 recommendations — in the
-caller's order. Each `AutonomousAuditEntry` records the decision, its scope, the
-autonomy class, the chosen option, the rejected alternatives, the evidence paths
-and the explanation. The caller persists the list; the module never writes it.
+The one self-answer record lives with the question queue
+(`OwnerQuestionQueue.orchestrator_alone_decisions()`, see
+[questions.md](questions.md)). It keeps every planning-session self-answer with
+its evidence, rejected alternative and, when given, what a wrong answer would
+cost. Away mode no longer keeps a second copy: the return summary reads that
+list, so every self-answer appears once, with its cost. Class-1 acceptances,
+Class-2 recommendations, standing decisions, parks and escalations stay in the
+journal's own sections.
 
 ## Preflight
 
@@ -254,7 +257,6 @@ and mixed projects all fail closed instead of guessing.
 | `accepted_candidates` | each Class-1 acceptance, with its candidate, exact head SHA, `local_commit_only=True` and `pushed=False` |
 | `parked_branches` | each never-delegable park, with its scope and kind |
 | `escalations` | each unhandled decision that reached the owner, with the reason |
-| `audit_entries` | the Orchestrator-alone audit list |
 | `stall_alarms` | every alarm raised during the run |
 | `consecutive_failures` / `circuit_open` / `halted` | the breaker state at the end |
 
@@ -278,9 +280,9 @@ The caller is the engine, never a model. A conforming caller:
 4. **Applies the disposition under its own fence.** `PARK_BRANCH` parks the
    scope and holds dependents via `compute_plan_impact`; `ESCALATE_OWNER` creates
    an owner question; `AUTO_ACCEPT_LOCAL_COMMIT` performs a **local commit
-   only**; `TAKE_RECOMMENDED_OPTION` applies the option and persists the audit
-   entry; `APPLY_STANDING_DECISION` applies the owner's answer and records the
-   words.
+   only**; `TAKE_RECOMMENDED_OPTION` applies the option and journals the
+   resolution; `APPLY_STANDING_DECISION` applies the owner's answer and records
+   the words.
 5. **Never pushes.** Pushing and moving `main` remain owner-only. The module
    cannot express either.
 6. **Feeds the breaker.** Call `after_task(passed=...)` after every task and stop
@@ -351,7 +353,7 @@ carries a `Covers: RD-1 …` docstring line naming the invariant it protects. Th
 suite covers the never-delegable list and its immutability, exact-scope matching
 (including prefix and wildcard refusals), absolute and turn expiry, owner-word
 verbatim recording, sheet integrity, all three decision classes and their
-precedence, the authority modes, the audit list, the circuit breaker, the stall
+precedence, the authority modes, the circuit breaker, the stall
 alarms, the preflight blockers and warnings, the plan-impact projection, the
 morning report, determinism, immutability and the absence of input side effects.
 

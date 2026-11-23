@@ -137,7 +137,8 @@ the CLI (`orch mode set`) or the Questions page.
 - In `ask-me`, every question waits for the owner. In `critical-only`, a live
   planning session may answer a **routine** question (`critical: false`) with
   `answer_question`, following the question's stored recommendation and
-  supplying evidence and a rejected alternative; every self-answer is logged and
+  supplying evidence and a rejected alternative; add `cost_if_wrong` when you
+  can name what a wrong answer would cost. Every self-answer is logged and
   appears in `catch_up`.
   Never answer a `critical: true` question: it notifies the owner and waits.
   `away` follows the same question rule while a planner is connected. Closing

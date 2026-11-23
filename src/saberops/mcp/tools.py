@@ -1757,6 +1757,7 @@ def _answer_question(context: ServerContext, arguments: Mapping[str, Any]) -> di
             chosen_option=arguments.get("chosen_option"),
             evidence=arguments.get("evidence"),
             rejected_alternative=arguments.get("rejected_alternative"),
+            cost_if_wrong=arguments.get("cost_if_wrong"),
         )
     except QuestionError as exc:
         raise ToolError(str(exc)) from exc
@@ -2576,6 +2577,7 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
                 "chosen_option": {"type": "string"},
                 "evidence": {"type": "string"},
                 "rejected_alternative": {"type": "string"},
+                "cost_if_wrong": {"type": "string"},
             },
             required=("question_id_or_key", "answer_text", "authority"),
         ),

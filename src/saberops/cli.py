@@ -2061,8 +2061,8 @@ def build_parser() -> argparse.ArgumentParser:
     self_update_parser.add_argument("--db", type=str, default=None)
     self_update_parser.add_argument("--json", action="store_true", help="JSON output")
 
-    # orch questions ask|list|show|answer|defer|moot|diverge|divergences|
-    # standing-rules|audit (Q-1 owner question queue).
+    # orch questions ask|list|show|answer|defer|moot|standing-rules|audit
+    # (Q-1 owner question queue).
     questions_parser = subparsers.add_parser(
         "questions",
         help="Owner question queue: ask, answer (verbatim), defer, moot and report (Q-1).",
@@ -2224,6 +2224,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Required for a planner-alone answer.",
     )
+    questions_answer.add_argument(
+        "--cost-if-wrong",
+        dest="cost_if_wrong",
+        type=str,
+        default=None,
+        help="Optional: what a wrong answer would cost.",
+    )
     questions_answer.add_argument("--json", action="store_true", help="JSON output")
     _add_store_arg(questions_answer)
 
@@ -2263,39 +2270,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     questions_moot.add_argument("--json", action="store_true", help="JSON output")
     _add_store_arg(questions_moot)
-
-    questions_diverge = questions_sub.add_parser(
-        "diverge", help="Record a conflicting later record (never auto-closes)."
-    )
-    questions_diverge.add_argument("ref", type=str, help="Question key or id.")
-    questions_diverge.add_argument(
-        "--reason",
-        type=str,
-        required=True,
-        choices=[
-            "DIFFERENT_WORDS",
-            "DIFFERENT_OPTION",
-            "ANSWER_AFTER_MOOT",
-            "MOOT_AFTER_ANSWER",
-            "DIFFERENT_EVIDENCE",
-        ],
-    )
-    questions_diverge.add_argument("--words", type=str, required=True)
-    questions_diverge.add_argument("--by", dest="recorded_by", type=str, required=True)
-    questions_diverge.add_argument(
-        "--role", type=str, required=True, choices=[item.value for item in AskRole]
-    )
-    questions_diverge.add_argument("--chosen-option", dest="chosen_option", type=str, default=None)
-    questions_diverge.add_argument("--note", type=str, default="")
-    questions_diverge.add_argument("--json", action="store_true", help="JSON output")
-    _add_store_arg(questions_diverge)
-
-    questions_divergences = questions_sub.add_parser(
-        "divergences", help="Report every divergent record."
-    )
-    questions_divergences.add_argument("ref", type=str, nargs="?", default=None)
-    questions_divergences.add_argument("--json", action="store_true", help="JSON output")
-    _add_store_arg(questions_divergences)
 
     questions_standing = questions_sub.add_parser(
         "standing-rules",
@@ -6992,10 +6966,10 @@ def _print_question(question: OwnerQuestion, *, as_json: bool) -> int:
         answer = view["answer"]
         print(f"Answer   : {answer['words']}")
         print(f"Authority: {answer['authority']} ({answer['answered_by']})")
+        if answer.get("cost_if_wrong"):
+            print(f"Cost if wrong: {answer['cost_if_wrong']}")
     if view["moot_evidence"]:
         print(f"Moot     : {view['moot_evidence']}")
-    if view["divergence_count"]:
-        print(f"Divergent: {view['divergence_count']} record(s) — reported, not auto-closed")
     return 0
 
 
@@ -7115,6 +7089,7 @@ def handle_questions_answer(args: argparse.Namespace) -> int:
             chosen_option=args.chosen_option,
             evidence=args.evidence,
             rejected_alternative=args.rejected_alternative,
+            cost_if_wrong=getattr(args, "cost_if_wrong", None),
         )
     except QuestionError as exc:
         return _questions_fail(exc)
@@ -7148,46 +7123,6 @@ def handle_questions_moot(args: argparse.Namespace) -> int:
     except QuestionError as exc:
         return _questions_fail(exc)
     return _print_question(question, as_json=bool(args.json))
-
-
-def handle_questions_diverge(args: argparse.Namespace) -> int:
-    """Handle `orch questions diverge REF ...` (records a conflict)."""
-    from saberops.questions import DivergenceReason
-
-    try:
-        question = _questions_queue(args).record_divergence(
-            str(args.ref),
-            reason=DivergenceReason(str(args.reason)),
-            words=str(args.words),
-            recorded_by=str(args.recorded_by),
-            recorded_by_role=AskRole(str(args.role)),
-            chosen_option=args.chosen_option,
-            note=str(args.note or ""),
-        )
-    except QuestionError as exc:
-        return _questions_fail(exc)
-    return _print_question(question, as_json=bool(args.json))
-
-
-def handle_questions_divergences(args: argparse.Namespace) -> int:
-    """Handle `orch questions divergences [REF]` (reported, never auto-closed)."""
-    try:
-        reports = _questions_queue(args).divergences(args.ref)
-    except QuestionError as exc:
-        return _questions_fail(exc)
-    if args.json:
-        print(json.dumps([report.to_mapping() for report in reports], sort_keys=True))
-        return 0
-    if not reports:
-        print("No divergent records.")
-        return 0
-    for report in reports:
-        record = report.record
-        print(
-            f"{record.recorded_at}  {report.question_id} [{report.status.value}]  "
-            f"{record.reason.value}  {record.words}"
-        )
-    return 0
 
 
 def handle_questions_standing_rules(args: argparse.Namespace) -> int:
@@ -7235,6 +7170,8 @@ def handle_questions_audit(args: argparse.Namespace) -> int:
         )
         print(f"    evidence : {item.evidence}")
         print(f"    rejected : {item.rejected_alternative}")
+        if item.cost_if_wrong:
+            print(f"    cost     : {item.cost_if_wrong}")
     return 0
 
 
@@ -8769,10 +8706,6 @@ def _dispatch(args: argparse.Namespace) -> int:
             return handle_questions_defer(args)
         elif args.questions_command == "moot":
             return handle_questions_moot(args)
-        elif args.questions_command == "diverge":
-            return handle_questions_diverge(args)
-        elif args.questions_command == "divergences":
-            return handle_questions_divergences(args)
         elif args.questions_command == "standing-rules":
             return handle_questions_standing_rules(args)
         elif args.questions_command == "audit":
