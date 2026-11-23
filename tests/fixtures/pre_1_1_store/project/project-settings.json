@@ -1,0 +1,8 @@
+{
+  "gate_command": "{python} -c 'import pathlib; assert pathlib.Path(\"app.py\").is_file()'",
+  "gate_enabled": true,
+  "review_disabled": false,
+  "review_limit": 5,
+  "review_mode": "max",
+  "version": 1
+}

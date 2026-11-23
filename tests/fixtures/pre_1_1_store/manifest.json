@@ -1,0 +1,21 @@
+{
+  "captured_at": "2026-11-23T02:00:19+00:00",
+  "captured_from_commit": "7384d36",
+  "contains": {
+    "authority_preset": "autonomous",
+    "cline_route": "cline/cline-pass/glm-5.3-flash",
+    "orchestrator_binding": "discovered-binding:orchestrator:codex-chatgpt-account:gpt-5.6-terra",
+    "review": {
+      "limit": 5,
+      "mode": "always-required",
+      "rounds": "max x5"
+    }
+  },
+  "fake_mode": true,
+  "restore_notes": [
+    "Paths inside the store are rewritten by tests/pre_1_1_store.py.",
+    "job history is empty: the upgrade check runs the first job itself."
+  ],
+  "schema_version": 1,
+  "source": "tests/lifecycle_rig.build_lifecycle_rig on an isolated store"
+}

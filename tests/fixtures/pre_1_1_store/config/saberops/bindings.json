@@ -1,0 +1,411 @@
+{
+  "binding_registry": {
+    "bindings": [
+      {
+        "backend": "DIRECT_CLI",
+        "binding_id": "discovered-binding:worker:codex-chatgpt-account:gpt-5.6-terra",
+        "binding_role": "BUILD",
+        "harness_capabilities": [
+          "cancellation",
+          "large_prompt_stdin",
+          "process_identity",
+          "read_only",
+          "streaming",
+          "structured_usage"
+        ],
+        "model": "gpt-5.6-terra",
+        "notes": [],
+        "profile_id": "discovered-profile:codex-chatgpt-account",
+        "provider": "codex",
+        "quota_pool_id": "discovered-pool:codex-chatgpt-account",
+        "reasoning_effort_capabilities": [],
+        "risk_levels": [],
+        "semantic_capabilities": [],
+        "supported_roles": [],
+        "transport": "DIRECT_CLI",
+        "verified_at": null
+      },
+      {
+        "backend": "DIRECT_CLI",
+        "binding_id": "discovered-binding:reviewer:codex-chatgpt-account:gpt-5.6-terra",
+        "binding_role": "CHECK",
+        "harness_capabilities": [
+          "cancellation",
+          "large_prompt_stdin",
+          "process_identity",
+          "read_only",
+          "streaming",
+          "structured_usage"
+        ],
+        "model": "gpt-5.6-terra",
+        "notes": [],
+        "profile_id": "discovered-profile:codex-chatgpt-account",
+        "provider": "codex",
+        "quota_pool_id": "discovered-pool:codex-chatgpt-account",
+        "reasoning_effort_capabilities": [],
+        "risk_levels": [],
+        "semantic_capabilities": [],
+        "supported_roles": [],
+        "transport": "DIRECT_CLI",
+        "verified_at": null
+      },
+      {
+        "backend": "DIRECT_CLI",
+        "binding_id": "discovered-binding:orchestrator:codex-chatgpt-account:gpt-5.6-terra",
+        "binding_role": "PLAN",
+        "harness_capabilities": [
+          "cancellation",
+          "large_prompt_stdin",
+          "process_identity",
+          "read_only",
+          "streaming",
+          "structured_usage"
+        ],
+        "model": "gpt-5.6-terra",
+        "notes": [],
+        "profile_id": "discovered-profile:codex-chatgpt-account",
+        "provider": "codex",
+        "quota_pool_id": "discovered-pool:codex-chatgpt-account",
+        "reasoning_effort_capabilities": [],
+        "risk_levels": [],
+        "semantic_capabilities": [],
+        "supported_roles": [],
+        "transport": "DIRECT_CLI",
+        "verified_at": null
+      },
+      {
+        "backend": "DIRECT_CLI",
+        "binding_id": "discovered-binding:worker:codex-chatgpt-account:gpt-5.6-sol",
+        "binding_role": "BUILD",
+        "harness_capabilities": [
+          "cancellation",
+          "large_prompt_stdin",
+          "process_identity",
+          "read_only",
+          "streaming",
+          "structured_usage"
+        ],
+        "model": "gpt-5.6-sol",
+        "notes": [],
+        "profile_id": "discovered-profile:codex-chatgpt-account",
+        "provider": "codex",
+        "quota_pool_id": "discovered-pool:codex-chatgpt-account",
+        "reasoning_effort_capabilities": [],
+        "risk_levels": [],
+        "semantic_capabilities": [],
+        "supported_roles": [],
+        "transport": "DIRECT_CLI",
+        "verified_at": null
+      },
+      {
+        "backend": "DIRECT_CLI",
+        "binding_id": "discovered-binding:reviewer:codex-chatgpt-account:gpt-5.6-sol",
+        "binding_role": "CHECK",
+        "harness_capabilities": [
+          "cancellation",
+          "large_prompt_stdin",
+          "process_identity",
+          "read_only",
+          "streaming",
+          "structured_usage"
+        ],
+        "model": "gpt-5.6-sol",
+        "notes": [],
+        "profile_id": "discovered-profile:codex-chatgpt-account",
+        "provider": "codex",
+        "quota_pool_id": "discovered-pool:codex-chatgpt-account",
+        "reasoning_effort_capabilities": [],
+        "risk_levels": [],
+        "semantic_capabilities": [],
+        "supported_roles": [],
+        "transport": "DIRECT_CLI",
+        "verified_at": null
+      },
+      {
+        "backend": "DIRECT_CLI",
+        "binding_id": "discovered-binding:orchestrator:codex-chatgpt-account:gpt-5.6-sol",
+        "binding_role": "PLAN",
+        "harness_capabilities": [
+          "cancellation",
+          "large_prompt_stdin",
+          "process_identity",
+          "read_only",
+          "streaming",
+          "structured_usage"
+        ],
+        "model": "gpt-5.6-sol",
+        "notes": [],
+        "profile_id": "discovered-profile:codex-chatgpt-account",
+        "provider": "codex",
+        "quota_pool_id": "discovered-pool:codex-chatgpt-account",
+        "reasoning_effort_capabilities": [],
+        "risk_levels": [],
+        "semantic_capabilities": [],
+        "supported_roles": [],
+        "transport": "DIRECT_CLI",
+        "verified_at": null
+      },
+      {
+        "backend": "DIRECT_CLI",
+        "binding_id": "discovered-binding:worker:opencode-account:opencode-go/deepseek-v4-flash",
+        "binding_role": "BUILD",
+        "harness_capabilities": [
+          "cancellation",
+          "large_prompt_stdin",
+          "process_identity",
+          "streaming",
+          "structured_usage"
+        ],
+        "model": "opencode-go/deepseek-v4-flash",
+        "notes": [],
+        "profile_id": "discovered-profile:opencode-account",
+        "provider": "opencode",
+        "quota_pool_id": "discovered-pool:opencode-account",
+        "reasoning_effort_capabilities": [],
+        "risk_levels": [],
+        "semantic_capabilities": [],
+        "supported_roles": [],
+        "transport": "DIRECT_CLI",
+        "verified_at": null
+      },
+      {
+        "backend": "DIRECT_CLI",
+        "binding_id": "discovered-binding:reviewer:opencode-account:opencode-go/deepseek-v4-flash",
+        "binding_role": "CHECK",
+        "harness_capabilities": [
+          "cancellation",
+          "large_prompt_stdin",
+          "process_identity",
+          "streaming",
+          "structured_usage"
+        ],
+        "model": "opencode-go/deepseek-v4-flash",
+        "notes": [],
+        "profile_id": "discovered-profile:opencode-account",
+        "provider": "opencode",
+        "quota_pool_id": "discovered-pool:opencode-account",
+        "reasoning_effort_capabilities": [],
+        "risk_levels": [],
+        "semantic_capabilities": [],
+        "supported_roles": [],
+        "transport": "DIRECT_CLI",
+        "verified_at": null
+      },
+      {
+        "backend": "DIRECT_CLI",
+        "binding_id": "discovered-binding:orchestrator:opencode-account:opencode-go/deepseek-v4-flash",
+        "binding_role": "PLAN",
+        "harness_capabilities": [
+          "cancellation",
+          "large_prompt_stdin",
+          "process_identity",
+          "streaming",
+          "structured_usage"
+        ],
+        "model": "opencode-go/deepseek-v4-flash",
+        "notes": [],
+        "profile_id": "discovered-profile:opencode-account",
+        "provider": "opencode",
+        "quota_pool_id": "discovered-pool:opencode-account",
+        "reasoning_effort_capabilities": [],
+        "risk_levels": [],
+        "semantic_capabilities": [],
+        "supported_roles": [],
+        "transport": "DIRECT_CLI",
+        "verified_at": null
+      },
+      {
+        "backend": "DIRECT_CLI",
+        "binding_id": "discovered-binding:worker:opencode-account:opencode-go/mimo-v2.5",
+        "binding_role": "BUILD",
+        "harness_capabilities": [
+          "cancellation",
+          "large_prompt_stdin",
+          "process_identity",
+          "streaming",
+          "structured_usage"
+        ],
+        "model": "opencode-go/mimo-v2.5",
+        "notes": [],
+        "profile_id": "discovered-profile:opencode-account",
+        "provider": "opencode",
+        "quota_pool_id": "discovered-pool:opencode-account",
+        "reasoning_effort_capabilities": [],
+        "risk_levels": [],
+        "semantic_capabilities": [],
+        "supported_roles": [],
+        "transport": "DIRECT_CLI",
+        "verified_at": null
+      },
+      {
+        "backend": "DIRECT_CLI",
+        "binding_id": "discovered-binding:reviewer:opencode-account:opencode-go/mimo-v2.5",
+        "binding_role": "CHECK",
+        "harness_capabilities": [
+          "cancellation",
+          "large_prompt_stdin",
+          "process_identity",
+          "streaming",
+          "structured_usage"
+        ],
+        "model": "opencode-go/mimo-v2.5",
+        "notes": [],
+        "profile_id": "discovered-profile:opencode-account",
+        "provider": "opencode",
+        "quota_pool_id": "discovered-pool:opencode-account",
+        "reasoning_effort_capabilities": [],
+        "risk_levels": [],
+        "semantic_capabilities": [],
+        "supported_roles": [],
+        "transport": "DIRECT_CLI",
+        "verified_at": null
+      },
+      {
+        "backend": "DIRECT_CLI",
+        "binding_id": "discovered-binding:orchestrator:opencode-account:opencode-go/mimo-v2.5",
+        "binding_role": "PLAN",
+        "harness_capabilities": [
+          "cancellation",
+          "large_prompt_stdin",
+          "process_identity",
+          "streaming",
+          "structured_usage"
+        ],
+        "model": "opencode-go/mimo-v2.5",
+        "notes": [],
+        "profile_id": "discovered-profile:opencode-account",
+        "provider": "opencode",
+        "quota_pool_id": "discovered-pool:opencode-account",
+        "reasoning_effort_capabilities": [],
+        "risk_levels": [],
+        "semantic_capabilities": [],
+        "supported_roles": [],
+        "transport": "DIRECT_CLI",
+        "verified_at": null
+      },
+      {
+        "backend": "DIRECT_CLI",
+        "binding_id": "discovered-binding:worker:claude-code-subscription:claude-sonnet-4-6",
+        "binding_role": "BUILD",
+        "harness_capabilities": [
+          "cancellation",
+          "large_prompt_stdin",
+          "process_identity",
+          "read_only",
+          "streaming"
+        ],
+        "model": "claude-sonnet-4-6",
+        "notes": [],
+        "profile_id": "discovered-profile:claude-code-subscription",
+        "provider": "anthropic",
+        "quota_pool_id": "discovered-pool:claude-code-subscription",
+        "reasoning_effort_capabilities": [],
+        "risk_levels": [],
+        "semantic_capabilities": [],
+        "supported_roles": [],
+        "transport": "DIRECT_CLI",
+        "verified_at": null
+      },
+      {
+        "backend": "DIRECT_CLI",
+        "binding_id": "discovered-binding:reviewer:claude-code-subscription:claude-sonnet-4-6",
+        "binding_role": "CHECK",
+        "harness_capabilities": [
+          "cancellation",
+          "large_prompt_stdin",
+          "process_identity",
+          "read_only",
+          "streaming"
+        ],
+        "model": "claude-sonnet-4-6",
+        "notes": [],
+        "profile_id": "discovered-profile:claude-code-subscription",
+        "provider": "anthropic",
+        "quota_pool_id": "discovered-pool:claude-code-subscription",
+        "reasoning_effort_capabilities": [],
+        "risk_levels": [],
+        "semantic_capabilities": [],
+        "supported_roles": [],
+        "transport": "DIRECT_CLI",
+        "verified_at": null
+      },
+      {
+        "backend": "DIRECT_CLI",
+        "binding_id": "discovered-binding:orchestrator:claude-code-subscription:claude-sonnet-4-6",
+        "binding_role": "PLAN",
+        "harness_capabilities": [
+          "cancellation",
+          "large_prompt_stdin",
+          "process_identity",
+          "read_only",
+          "streaming"
+        ],
+        "model": "claude-sonnet-4-6",
+        "notes": [],
+        "profile_id": "discovered-profile:claude-code-subscription",
+        "provider": "anthropic",
+        "quota_pool_id": "discovered-pool:claude-code-subscription",
+        "reasoning_effort_capabilities": [],
+        "risk_levels": [],
+        "semantic_capabilities": [],
+        "supported_roles": [],
+        "transport": "DIRECT_CLI",
+        "verified_at": null
+      }
+    ],
+    "pools": [
+      {
+        "notes": [],
+        "pool_id": "discovered-pool:codex-chatgpt-account",
+        "provider": "codex"
+      },
+      {
+        "notes": [],
+        "pool_id": "discovered-pool:opencode-account",
+        "provider": "opencode"
+      },
+      {
+        "notes": [],
+        "pool_id": "discovered-pool:claude-code-subscription",
+        "provider": "anthropic"
+      }
+    ],
+    "profiles": [
+      {
+        "account_ref": "",
+        "backend_ref": "",
+        "enabled": true,
+        "notes": [],
+        "profile_id": "discovered-profile:codex-chatgpt-account",
+        "provider": "codex"
+      },
+      {
+        "account_ref": "",
+        "backend_ref": "",
+        "enabled": true,
+        "notes": [],
+        "profile_id": "discovered-profile:opencode-account",
+        "provider": "opencode"
+      },
+      {
+        "account_ref": "",
+        "backend_ref": "",
+        "enabled": true,
+        "notes": [],
+        "profile_id": "discovered-profile:claude-code-subscription",
+        "provider": "anthropic"
+      }
+    ],
+    "schema_version": 1
+  },
+  "orch_binding_policy": {
+    "mode": "PINNED",
+    "pinned_binding_id": "discovered-binding:orchestrator:codex-chatgpt-account:gpt-5.6-terra",
+    "preferred_binding_ids": []
+  },
+  "reviewer_binding_id": "discovered-binding:reviewer:claude-code-subscription:claude-sonnet-4-6",
+  "reviewer_binding_ids": [
+    "discovered-binding:reviewer:claude-code-subscription:claude-sonnet-4-6"
+  ],
+  "schema_version": 1
+}

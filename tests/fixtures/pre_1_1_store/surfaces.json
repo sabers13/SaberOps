@@ -1,0 +1,25 @@
+{
+  "kept_views": [
+    "status",
+    "watch",
+    "report"
+  ],
+  "old_recovery_verbs": [
+    "retry",
+    "continue",
+    "try-worker",
+    "refresh",
+    "recover",
+    "reconcile",
+    "handoff"
+  ],
+  "old_views": [
+    "events",
+    "handoff",
+    "plan",
+    "observability",
+    "orch-context",
+    "monitor"
+  ],
+  "schema_version": 1
+}

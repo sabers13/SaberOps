@@ -2,10 +2,11 @@
 
 The following tools are exposed::
 
-    preflight start_walkthrough submit_job submit_plan get_job catch_up plan_status tail_job
-    wait_job list_jobs cancel_job note_job redirect_job discard_note resume_job
-    capacity read_evidence list_questions
+    preflight start_walkthrough submit_job submit_plan promote_scout refresh_candidate
+    resume_job redirect_job get_job catch_up plan_status tail_job wait_job list_jobs
+    cancel_job note_job discard_note capacity read_evidence list_questions
     answer_question propose_config_change list_proposals get_mode propose_mode_change
+    get_pause
 
 With ``ORCH_NATIVE_WORKERS`` enabled, four more tools exist for the hybrid
 native-worker path (ADR-0030): ``native_claim``, ``native_heartbeat``,

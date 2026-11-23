@@ -430,7 +430,8 @@ accepted on its own.
 - Owner decisions are never yours: accepting or rejecting changes, approving
   configuration, billing, merging, pushing. Tell the owner what to decide and where.
 - To suggest a setting, use `propose_config_change` with a short rationale. It
-  changes nothing until the owner approves it.
+  changes nothing until the owner approves it. `list_proposals` reads the
+  decision ledger: what the owner approved or rejected, and why.
 
 ## If the tools disappear
 The user turned SaberOps off, or the owner switched it off for every agent.

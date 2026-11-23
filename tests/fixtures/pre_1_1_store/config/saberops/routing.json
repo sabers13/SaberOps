@@ -1,0 +1,23 @@
+{
+  "roles": {
+    "BUILD": [
+      {
+        "routes": [
+          "codex/gpt-5.6-terra"
+        ]
+      },
+      {
+        "routes": [
+          "opencode/opencode-go/deepseek-v4-flash"
+        ]
+      },
+      {
+        "routes": [
+          "cline/cline-pass/glm-5.3-flash"
+        ]
+      }
+    ]
+  },
+  "schema_version": 3,
+  "strong_start": []
+}

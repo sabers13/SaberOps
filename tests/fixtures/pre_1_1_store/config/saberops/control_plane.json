@@ -1,0 +1,66 @@
+{
+  "accounts": {
+    "chatgpt-plus": {
+      "notes": "",
+      "plan": "ChatGPT Plus",
+      "required_toggles": [
+        "usage_credits=OFF",
+        "auto_reload=OFF",
+        "apps_use_credits=OFF"
+      ],
+      "toggles_attested_on": null,
+      "vendor": "openai"
+    },
+    "claude-pro": {
+      "notes": "",
+      "plan": "Claude Pro",
+      "required_toggles": [
+        "usage_credits=OFF"
+      ],
+      "toggles_attested_on": null,
+      "vendor": "anthropic"
+    },
+    "opencode-go": {
+      "notes": "",
+      "plan": "OpenCode Go",
+      "required_toggles": [
+        "use_balance=OFF"
+      ],
+      "toggles_attested_on": null,
+      "vendor": "opencode"
+    }
+  },
+  "postures": {
+    "anthropic": {
+      "account": "claude-pro",
+      "class": "A",
+      "note": "rig attestation",
+      "policy_urls": [
+        "https://code.claude.com/docs/en/legal-and-compliance"
+      ],
+      "ttl_days": null,
+      "verified_on": "2026-11-23"
+    },
+    "codex": {
+      "account": "chatgpt-plus",
+      "class": "A",
+      "note": "rig attestation",
+      "policy_urls": [
+        "https://learn.chatgpt.com/docs/pricing"
+      ],
+      "ttl_days": null,
+      "verified_on": "2026-11-23"
+    },
+    "opencode/opencode-go/*": {
+      "account": "opencode-go",
+      "class": "A",
+      "note": "rig attestation",
+      "policy_urls": [
+        "https://opencode.ai/docs/go/"
+      ],
+      "ttl_days": null,
+      "verified_on": "2026-11-23"
+    }
+  },
+  "version": 2
+}
