@@ -193,6 +193,7 @@ def test_catch_up_switch_reports_the_resource_handoff(db: Database, repo: Path) 
     """A later repair attempt never hides the quota handoff in ``catch_up``."""
     from saberops.mcp.tools import _catch_up_switch
     from saberops.models import DispatchEvidence, DispatchReason, DispatchRole, DispatchStage
+    from saberops.observability.run_report import build_run_report
 
     checkpoint = _checkpoint(db, repo)
     now = current_iso_timestamp()
@@ -245,7 +246,7 @@ def test_catch_up_switch_reports_the_resource_handoff(db: Database, repo: Path) 
         )
     )
 
-    switch = _catch_up_switch(db, RUN_ID, db.get_attempts_for_run(RUN_ID))
+    switch = _catch_up_switch(build_run_report(db, RUN_ID))
     assert switch is not None
     assert switch["reason"] == "QUOTA_EXHAUSTED"
     assert switch["from"]["attempt_id"] == SOURCE_ATTEMPT_ID
@@ -259,6 +260,7 @@ def test_catch_up_switch_reports_the_resource_handoff(db: Database, repo: Path) 
 
 def test_catch_up_switch_absent_without_an_interruption(db: Database, repo: Path) -> None:
     from saberops.mcp.tools import _catch_up_switch
+    from saberops.observability.run_report import build_run_report
 
     base_sha = _git(repo, "rev-parse", "HEAD")
     now = current_iso_timestamp()
@@ -293,4 +295,4 @@ def test_catch_up_switch_absent_without_an_interruption(db: Database, repo: Path
             )
         )
 
-    assert _catch_up_switch(db, clean_run_id, db.get_attempts_for_run(clean_run_id)) is None
+    assert _catch_up_switch(build_run_report(db, clean_run_id)) is None

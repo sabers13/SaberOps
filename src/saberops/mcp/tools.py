@@ -832,15 +832,22 @@ def _promote_scout(context: ServerContext, arguments: Mapping[str, Any]) -> dict
 
 
 def _tail_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
-    """Read a running job's live progress without touching it (Wave 3 F3)."""
+    """Read a running job's live progress without touching it (Wave 3 F3).
+
+    Structural progress and terminal output are the incremental tail; the
+    lifecycle, candidate, gate, review and acceptance facts are the same
+    run-report projection ``status``, ``report`` and ``catch_up`` read.
+    """
     from saberops.jobs.service import get_job, job_status_view
     from saberops.mcp.tail import DEFAULT_TAIL_BYTES, parse_cursor, tail_run
+    from saberops.observability.run_report import build_run_report
 
     job_id = _require_text(arguments, "job_id", what="job_id")
     db = context.database(read_only=True)
     job = None if db is None else get_job(db, job_id)
     if job is None:
         raise NotFoundError(f"unknown job: {job_id}", data={"job_id": job_id})
+    assert db is not None
     view = job_status_view(db, job)
     cursor = parse_cursor(arguments.get("after_sequence"))
     max_bytes = int(arguments.get("max_bytes", DEFAULT_TAIL_BYTES))
@@ -864,173 +871,162 @@ def _tail_job(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str,
             has_more=False,
         )
         return payload
+    try:
+        report = build_run_report(db, run_id)
+    except ValueError:
+        report = None
+    if report is not None:
+        payload["run"] = {
+            "status": report["lifecycle"]["status"],
+            "current_stage": report["lifecycle"]["current_stage"],
+            "candidate_sha": report["identity"]["candidate_sha"],
+            "candidate_source": report["identity"]["candidate_source"],
+            "gate": report["gate"]["summary"],
+            "review_verdicts": report["review"]["verdicts"],
+            "acceptance_status": report["acceptance"]["acceptance_status"],
+        }
     payload.update(
         tail_run(db, run_id=run_id, cursor=cursor, max_bytes=max_bytes)
     )
     return payload
 
 
-def _excerpt(text: str | None, *, limit: int = 400, tail: bool = False) -> str | None:
-    """Return a short, single-block excerpt; full evidence stays in the records."""
-    if not text:
-        return None
-    stripped = text.strip()
-    if not stripped:
-        return None
-    if len(stripped) <= limit:
-        return stripped
-    return "…" + (stripped[-limit:] if tail else stripped[:limit])
-
-
 def _catch_up_check(
-    db: Any, run_id: str, attempts: list[Any], candidate_sha: str | None
+    report: Mapping[str, Any], candidate_sha: str | None
 ) -> dict[str, Any] | None:
-    """Latest gate check for the run, with the commit that check assessed."""
-    checks = db.get_checks_for_run(run_id)
+    """Latest gate check, taken from the one run-report projection.
+
+    ``candidate_sha`` is the candidate the owner may accept (from the
+    candidate projection); the commit the check assessed comes from the
+    report.
+    """
+    checks = report["gate"]["checks"]
     if not checks:
         return None
     latest = checks[-1]
-    assessed = next(
-        (attempt.commit_sha for attempt in attempts if attempt.id == latest.attempt_id),
-        None,
-    )
     return {
-        "check_id": latest.id,
-        "attempt_id": latest.attempt_id,
-        "assessed_commit": assessed,
+        "check_id": latest["id"],
+        "attempt_id": latest["attempt_id"],
+        "assessed_commit": latest["assessed_commit"],
         "assessed_current_candidate": (
-            candidate_sha is not None and assessed == candidate_sha
+            candidate_sha is not None and latest["assessed_commit"] == candidate_sha
         ),
-        "passed": latest.passed,
-        "skipped": latest.skipped,
-        "gate_command": latest.gate_command,
-        "exit_code": latest.exit_code,
-        "excerpt": _excerpt(
-            latest.stdout if latest.passed else latest.stderr, tail=not latest.passed
-        ),
+        "passed": latest["passed"],
+        "skipped": latest["skipped"],
+        "gate_command": latest["gate_command"],
+        "exit_code": latest["exit_code"],
+        "excerpt": latest["output_excerpt"],
     }
 
 
 def _catch_up_review(
-    db: Any, run_id: str, candidate_sha: str | None
+    report: Mapping[str, Any], candidate_sha: str | None
 ) -> dict[str, Any] | None:
     """Latest review, preferring one bound to the current candidate.
 
-    The commit a review assessed lives in the REVIEW dispatch evidence row;
-    a review row itself carries no SHA.  Never infer the assessed commit from
-    "the latest commit" — a review of candidate A must not be attributed to a
-    later candidate B.
+    The assessed commit is projected from the REVIEW dispatch evidence row by
+    the run report; a review of candidate A is never attributed to a later
+    candidate B.  ``candidate_sha`` is the candidate the owner may accept.
     """
-    from saberops.models import DispatchStage
-
-    reviews = db.get_reviews_for_run(run_id)
-    if not reviews:
+    rounds = report["review"]["round_detail"]
+    if not rounds:
         return None
-    assessed: dict[str, str | None] = {}
-    for dispatch in db.get_dispatch_evidence_for_run(run_id):
-        if dispatch.stage != DispatchStage.REVIEW:
-            continue
-        for key in (dispatch.association_id, dispatch.review_id):
-            if key:
-                assessed.setdefault(key, dispatch.candidate_sha)
     relevant = [
-        review
-        for review in reviews
-        if candidate_sha is not None and assessed.get(review.id) == candidate_sha
+        round_
+        for round_ in rounds
+        if candidate_sha is not None and round_["assessed_commit"] == candidate_sha
     ]
-    chosen = (relevant or reviews)[-1]
-    assessed_sha = assessed.get(chosen.id)
+    chosen = (relevant or rounds)[-1]
     return {
-        "review_id": chosen.id,
-        "assessed_commit": assessed_sha,
+        "review_id": chosen["id"],
+        "assessed_commit": chosen["assessed_commit"],
         "assessed_current_candidate": (
-            candidate_sha is not None and assessed_sha == candidate_sha
+            candidate_sha is not None and chosen["assessed_commit"] == candidate_sha
         ),
-        "verdict": chosen.verdict.value,
-        "provider": chosen.provider,
-        "model": chosen.model,
-        "created_at": chosen.created_at,
-        "excerpt": _excerpt(chosen.summary),
+        "verdict": chosen["verdict"],
+        "provider": chosen["provider"],
+        "model": chosen["model"],
+        "created_at": chosen["created_at"],
+        "excerpt": chosen["summary_excerpt"],
     }
 
 
-def _catch_up_switch(db: Any, run_id: str, attempts: list[Any]) -> dict[str, Any] | None:
+def _catch_up_switch(report: Mapping[str, Any]) -> dict[str, Any] | None:
     """The latest handoff from one attempt to its replacement, for ``catch_up``.
 
     F4: when a subscription runs out, the run continues from the interrupted
     attempt's checkpoint on a different binding.  That switch is durable
-    evidence (attempt rows, worker checkpoints, dispatch evidence); this
-    projection only reads it, so the owner sees the handoff without a separate
-    report.
+    evidence (attempt rows, worker checkpoints, dispatch evidence, workspace
+    observation); this adapter only selects it from the run report.
     """
-    from saberops.models import AttemptStatus
-
+    attempts = report["evidence"]["candidate_lineage"]
     if len(attempts) < 2:
         return None
     checkpoints = {
-        checkpoint.source_attempt_id: checkpoint
-        for checkpoint in db.get_worker_checkpoints_for_run(run_id)
+        checkpoint["source_attempt_id"]: checkpoint
+        for checkpoint in report["evidence"]["continuation"]["checkpoints"]
     }
     dispatches = {
-        dispatch.attempt_id: dispatch
-        for dispatch in db.get_dispatch_evidence_for_run(run_id)
-        if dispatch.attempt_id is not None
+        dispatch["attempt_id"]: dispatch
+        for dispatch in report["evidence"]["dispatches"]
+        if dispatch.get("attempt_id") is not None
+    }
+    worktrees = {
+        entry["attempt_number"]: entry for entry in report["workspace"]["worktrees"]
     }
     # The latest resource interruption is the handoff the owner cares about;
     # later repair attempts on the same binding must not hide it.
-    pair: tuple[Any, Any] | None = None
+    pair: tuple[Mapping[str, Any], Mapping[str, Any]] | None = None
     for index in range(len(attempts) - 1, 0, -1):
         previous, following = attempts[index - 1], attempts[index]
         if (
-            previous.status in (AttemptStatus.FAILED, AttemptStatus.TIMEOUT)
-            and previous.interruption_reason
+            previous["status"] in ("FAILED", "TIMEOUT")
+            and previous["interruption_reason"]
         ):
             pair = (previous, following)
             break
     if pair is None:
         return None
     from_attempt, to_attempt = pair
-    checkpoint = checkpoints.get(from_attempt.id)
-    dispatch = dispatches.get(to_attempt.id)
-    inherited = getattr(dispatch, "inherited_checkpoint_sha", None)
-    from_binding = getattr(dispatches.get(from_attempt.id), "binding_id", None)
-    to_binding = getattr(dispatch, "binding_id", None)
+    checkpoint = checkpoints.get(from_attempt["id"])
+    dispatch = dispatches.get(to_attempt["id"])
+    from_dispatch = dispatches.get(from_attempt["id"])
+    inherited = dispatch.get("inherited_checkpoint_sha") if dispatch is not None else None
+    from_binding = (
+        from_dispatch.get("binding_id") if from_dispatch is not None else None
+    )
+    to_binding = dispatch.get("binding_id") if dispatch is not None else None
     if from_binding and to_binding:
         different_binding: bool | None = from_binding != to_binding
     else:
         different_binding = None
-    try:
-        preserved = bool(from_attempt.worktree_path) and Path(
-            from_attempt.worktree_path
-        ).is_dir()
-    except OSError:
-        preserved = False
+    worktree = worktrees.get(from_attempt["attempt_number"], {})
     return {
-        "reason": from_attempt.interruption_reason or "attempt_failed",
+        "reason": from_attempt["interruption_reason"] or "attempt_failed",
         "from": {
-            "attempt_id": from_attempt.id,
-            "provider": from_attempt.provider,
-            "model": from_attempt.model,
+            "attempt_id": from_attempt["id"],
+            "provider": from_attempt["provider"],
+            "model": from_attempt["model"],
             "binding_id": from_binding,
         },
         "to": {
-            "attempt_id": to_attempt.id,
-            "provider": to_attempt.provider,
-            "model": to_attempt.model,
+            "attempt_id": to_attempt["id"],
+            "provider": to_attempt["provider"],
+            "model": to_attempt["model"],
             "binding_id": to_binding,
         },
-        "different_provider": (from_attempt.provider, from_attempt.model)
-        != (to_attempt.provider, to_attempt.model),
+        "different_provider": (from_attempt["provider"], from_attempt["model"])
+        != (to_attempt["provider"], to_attempt["model"]),
         "different_binding": different_binding,
-        "checkpoint_sha": checkpoint.checkpoint_sha if checkpoint is not None else None,
+        "checkpoint_sha": checkpoint["checkpoint_sha"] if checkpoint is not None else None,
         "inherited_checkpoint_sha": inherited,
         "continued_from_checkpoint": (
             checkpoint is not None
             and inherited is not None
-            and inherited == checkpoint.checkpoint_sha
+            and inherited == checkpoint["checkpoint_sha"]
         ),
-        "work_location": from_attempt.worktree_path,
-        "work_location_preserved": preserved,
+        "work_location": worktree.get("worktree_path"),
+        "work_location_preserved": worktree.get("exists_now") is True,
     }
 
 
@@ -1285,6 +1281,7 @@ def _catch_up(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str,
     """
     from saberops.candidate_lifecycle import project_candidate_state
     from saberops.jobs.service import get_job, job_status_view
+    from saberops.observability.run_report import build_run_report
     from saberops.runtime_gate import gate_facts
 
     plan_id = arguments.get("plan_id")
@@ -1307,24 +1304,12 @@ def _catch_up(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str,
     projection = project_candidate_state(db, run_id) if run_id is not None else None
     run = db.get_run(run_id) if run_id is not None else None
 
-    attempts = db.get_attempts_for_run(run_id) if run_id is not None else []
-    check = (
-        _catch_up_check(
-            db,
-            run_id,
-            attempts,
-            projection.candidate_sha if projection is not None else None,
-        )
-        if run_id is not None
-        else None
-    )
-    review = (
-        _catch_up_review(db, run_id, projection.candidate_sha if projection else None)
-        if run_id is not None
-        else None
-    )
+    report = build_run_report(db, run_id) if run_id is not None else None
+    candidate_sha = projection.candidate_sha if projection is not None else None
+    check = _catch_up_check(report, candidate_sha) if report is not None else None
+    review = _catch_up_review(report, candidate_sha) if report is not None else None
     questions = _catch_up_questions(context, job)
-    switch = _catch_up_switch(db, run_id, attempts) if run_id is not None else None
+    switch = _catch_up_switch(report) if report is not None else None
 
     failure = None
     if job.state.value == "FAILED" or view.get("last_failed_attempt"):

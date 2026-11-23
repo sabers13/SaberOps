@@ -2,17 +2,18 @@
 
 This package contains no provider or model execution.  Dispatch evidence is
 created by the callers at the real adapter boundary; snapshot functions only
-read persisted state.  The trace recorder (:mod:`saberops.observability.trace`)
-provides structured-execution-trace evidence and never becomes a
-parallel reconstruction authority.  The phase recorder
-(:mod:`saberops.observability.phase_telemetry`) provides
-production phase telemetry (ROADMAP §11) and never becomes an authority for
-routing, effort, scheduling, lifecycle, review, or validation.
+read persisted state.  The one reader for run facts is
+:func:`saberops.observability.run_report.build_run_report`; ``orch status``,
+``orch report``, ``orch watch``, ``catch_up`` and ``tail_job`` all consume it.
+The trace recorder (:mod:`saberops.observability.trace`) provides
+structured-execution-trace evidence and never becomes a parallel
+reconstruction authority.  The phase recorder
+(:mod:`saberops.observability.phase_telemetry`) persists production phase
+telemetry (ROADMAP §11) and never becomes an authority for routing, effort,
+scheduling, lifecycle, review, or validation.
 """
 
 from saberops.observability._core import (
-    build_run_observability_snapshot,
-    canonical_snapshot_json,
     new_dispatch_evidence,
     normalize_remaining_percent,
     prompt_evidence,
@@ -21,18 +22,16 @@ from saberops.observability._core import (
 )
 from saberops.observability.phase_telemetry import (
     PhaseRecorder,
-    assert_canonical_phase,
-    list_phase_observations,
     mark_phase_not_applicable,
     mark_phase_unknown,
     measure_phase,
     record_phase_observation,
-    summarise_observations,
 )
 from saberops.observability.run_report import (
     REPORT_SCHEMA,
     REPORT_SCHEMA_VERSION,
     UNKNOWN,
+    build_roles_view,
     build_run_report,
     canonical_report_json,
     is_terminal_report,
@@ -56,15 +55,12 @@ __all__ = [
     "REPORT_SCHEMA",
     "REPORT_SCHEMA_VERSION",
     "UNKNOWN",
-    "assert_canonical_phase",
-    "build_run_observability_snapshot",
+    "build_roles_view",
     "build_run_report",
     "canonical_report_json",
-    "canonical_snapshot_json",
     "classify_failure",
     "is_autonomous_eligible",
     "is_terminal_report",
-    "list_phase_observations",
     "mark_phase_not_applicable",
     "mark_phase_unknown",
     "measure_phase",
@@ -78,6 +74,5 @@ __all__ = [
     "render_report_text",
     "run_explanation",
     "saberops_version",
-    "summarise_observations",
     "update_dispatch_from_result",
 ]

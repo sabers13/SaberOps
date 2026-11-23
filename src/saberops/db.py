@@ -4631,15 +4631,6 @@ class Database:
                 return None
             return self._row_to_worker_activation(row)
 
-    def get_worker_activations_for_run(self, run_id: str) -> list[WorkerActivation]:
-        """Fetch all worker activations for a run ordered by generation."""
-        with self._get_connection() as conn:
-            cursor = conn.execute(
-                "SELECT * FROM worker_activations WHERE run_id = ? ORDER BY generation ASC",
-                (run_id,),
-            )
-            return [self._row_to_worker_activation(row) for row in cursor.fetchall()]
-
     # -----------------------------------------------------------------------
     # Side-Effect Journal (Crash Window Idempotency)
     # -----------------------------------------------------------------------
@@ -4891,16 +4882,6 @@ class Database:
             )
             return [self._row_to_tool_effect(row) for row in cursor.fetchall()]
 
-    def get_tool_effects_for_run(self, run_id: str) -> list[ToolEffect]:
-        """Return every tool effect recorded against a run, in order."""
-        with self._get_connection() as conn:
-            cursor = conn.execute(
-                "SELECT * FROM tool_effects WHERE run_id = ? "
-                "ORDER BY started_at ASC, id ASC",
-                (run_id,),
-            )
-            return [self._row_to_tool_effect(row) for row in cursor.fetchall()]
-
     def create_attempt_trace(self, trace: AttemptTrace) -> None:
         """Insert a per-Attempt trace summary row.
 
@@ -4943,17 +4924,6 @@ class Database:
             )
             conn.commit()
 
-    def get_attempt_trace(self, trace_id: str) -> AttemptTrace | None:
-        """Fetch an AttemptTrace row by id."""
-        with self._get_connection() as conn:
-            cursor = conn.execute(
-                "SELECT * FROM attempt_traces WHERE id = ?", (trace_id,)
-            )
-            row = cursor.fetchone()
-            if row is None:
-                return None
-            return self._row_to_attempt_trace(row)
-
     def get_attempt_trace_for_attempt(self, attempt_id: str) -> AttemptTrace | None:
         """Return the trace summary row for an Attempt, if any."""
         with self._get_connection() as conn:
@@ -4966,16 +4936,6 @@ class Database:
             if row is None:
                 return None
             return self._row_to_attempt_trace(row)
-
-    def get_attempt_traces_for_run(self, run_id: str) -> list[AttemptTrace]:
-        """Return every AttemptTrace row recorded against a run, in order."""
-        with self._get_connection() as conn:
-            cursor = conn.execute(
-                "SELECT * FROM attempt_traces WHERE run_id = ? "
-                "ORDER BY started_at ASC, id ASC",
-                (run_id,),
-            )
-            return [self._row_to_attempt_trace(row) for row in cursor.fetchall()]
 
     # ------------------------------------------------------------------
     # Production phase telemetry (purely observational)
@@ -5036,17 +4996,6 @@ class Database:
                 (run_id,),
             )
             return [self._row_to_phase_observation(row) for row in cursor.fetchall()]
-
-    def get_phase_observation(self, observation_id: str) -> PhaseObservation | None:
-        """Fetch one PhaseObservation row by id."""
-        with self._get_connection() as conn:
-            cursor = conn.execute(
-                "SELECT * FROM phase_observations WHERE id = ?", (observation_id,)
-            )
-            row = cursor.fetchone()
-            if row is None:
-                return None
-            return self._row_to_phase_observation(row)
 
     def _row_to_phase_observation(self, row: sqlite3.Row) -> PhaseObservation:
         """Map one ``phase_observations`` row into the typed dataclass."""

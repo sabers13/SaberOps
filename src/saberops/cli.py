@@ -4352,6 +4352,13 @@ def handle_status(args: argparse.Namespace) -> int:
     if not run:
         print(f"Error: Run '{args.run_id}' not found in {service.db.db_path}", file=sys.stderr)
         return 1
+    try:
+        report = build_run_report(service.db, run.id)
+    except ValueError as exc:
+        # A tampered or unreadable frozen evidence row fails closed, exactly
+        # as ``orch report`` does; the status view never silently drops it.
+        print(f"Error: Could not read report for '{args.run_id}': {exc}", file=sys.stderr)
+        return 1
 
     print(f"Run ID           : {run.id}")
     print(f"Task             : {run.task}")
@@ -4376,6 +4383,12 @@ def handle_status(args: argparse.Namespace) -> int:
             print("Needs attention : yes — this run needs owner review")
 
     attempts = service.db.get_attempts_for_run(run.id)
+    # Gate and review facts come from the one run-report projection; the
+    # per-attempt worker text below stays raw because the canonical report
+    # deliberately does not copy worker output.
+    checks_by_attempt: dict[str, list[dict[str, Any]]] = {}
+    for check_row in report["gate"]["checks"]:
+        checks_by_attempt.setdefault(str(check_row["attempt_id"]), []).append(check_row)
     # Candidate-publication evidence comes from the durable event log so the
     # status surface stays consistent with what actually happened.
     publication_events = [
@@ -4428,18 +4441,23 @@ def handle_status(args: argparse.Namespace) -> int:
                     for line in stdout_tail:
                         print(f"      {line}")
 
-        checks = service.db.get_checks_for_attempt(att.id)
+        checks = checks_by_attempt.get(att.id, [])
         for chk in checks:
-            pass_str = "PASS" if chk.passed else "FAIL"
-            print(f"    Check    : Gate '{chk.gate_command}' -> {pass_str} (exit {chk.exit_code})")
+            pass_str = "PASS" if chk["passed"] else "FAIL"
+            print(
+                f"    Check    : Gate '{chk['gate_command']}' -> {pass_str} "
+                f"(exit {chk['exit_code']})"
+            )
 
-    reviews = service.db.get_reviews_for_run(run.id)
+    reviews = report["evidence"]["review_evidence"]
     if reviews:
         print(f"\nReviews ({len(reviews)}):")
         for rev in reviews:
-            print(f"  Review [{rev.provider} / {rev.model}] -> {rev.verdict.value}")
-            print(f"    Summary  : {rev.summary}")
-            details_tail = _format_output_tail(rev.details, max_lines=200, max_line_length=1000)
+            print(f"  Review [{rev['provider']} / {rev['model']}] -> {rev['verdict']}")
+            print(f"    Summary  : {rev['summary']}")
+            details_tail = _format_output_tail(
+                rev["details"], max_lines=200, max_line_length=1000
+            )
             if details_tail:
                 print("    Feedback:")
                 for line in details_tail:
@@ -4644,24 +4662,7 @@ def _follow_report(args: argparse.Namespace) -> int:
                 return 1
             print(render_monitor_frame(report))
             print("", flush=True)
-            # Readout-only: a PREEMPTED run is terminal
-            # for the run, so the follow view must stop here.  The canonical
-            # set is authoritative; is_terminal_report() still enumerates
-            # the pre-D8 statuses (see the Step 001 report for the narrow
-            # unification proposal), so PREEMPTED is recognized from the
-            # report's own lifecycle status without duplicating any list.
-            lifecycle = report.get("lifecycle")
-            lifecycle_status = (
-                lifecycle.get("status") if isinstance(lifecycle, dict) else None
-            )
-            if (
-                once
-                or is_terminal_report(report)
-                or (
-                    isinstance(lifecycle_status, str)
-                    and lifecycle_status in {s.value for s in TERMINAL_RUN_STATUSES}
-                )
-            ):
+            if once or is_terminal_report(report):
                 return 0
             if deadline is not None and time.monotonic() >= deadline:
                 print(

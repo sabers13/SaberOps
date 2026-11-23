@@ -1,12 +1,16 @@
 """Canonical run report and live monitoring projection.
 
 Product-owned, strictly read-only projection over already-persisted run
-evidence.  This module performs no model calls, no Git reads, no network
-I/O and no database writes: every field is derived from durable rows
-(``runs``, ``attempts``, ``dispatch_evidence``, ``model_call_usage``,
-``checks``, ``reviews``, ``events``, ``worker_checkpoints``) plus one
-explicitly labelled point-in-time filesystem observation (attempt
-worktree existence).
+evidence.  This is the one reader for run facts: ``orch status``,
+``orch report``, ``orch watch``, ``catch_up`` and ``tail_job`` all consume
+it instead of deriving their own view.  This module performs no model
+calls, no Git reads, no network I/O and no database writes: every field is
+derived from durable rows (``runs``, ``attempts``, ``dispatch_evidence``,
+``model_call_usage``, ``checks``, ``reviews``, ``review_findings``,
+``events``, ``worker_checkpoints``, ``handoffs``, ``quota_observations``,
+``phase_observations``, the frozen tool/gateway/control-plane contracts and
+the project-scope rows) plus one explicitly labelled point-in-time
+filesystem observation (attempt worktree existence).
 
 Evidence semantics (fail closed, never inferred):
 
@@ -37,6 +41,7 @@ render time (outside the canonical payload).
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -46,12 +51,12 @@ from saberops.db import Database
 from saberops.models import (
     TERMINAL_RUN_STATUSES,
     Attempt,
+    DispatchReason,
     DispatchRole,
     DispatchStage,
     ReviewVerdict,
     Run,
 )
-from saberops.observability._core import canonical_snapshot_json
 
 #: Canonical schema marker for the run report projection.
 REPORT_SCHEMA: str = "saberops.run_report/v1"
@@ -60,6 +65,10 @@ REPORT_SCHEMA_VERSION: int = 1
 
 #: Sentinel string denoting an unavailable or unmeasured metric value.
 UNKNOWN: str = "UNKNOWN"
+
+#: Bounded excerpt length for the reviewer/check evidence a planner reads
+#: without opening the store; the full row stays in the database.
+_EXCERPT_LIMIT: int = 400
 
 #: Lifecycle event types that carry an explicit pipeline-stage signal, in
 #: the order they normally occur.  Event types not listed here never move
@@ -161,6 +170,30 @@ def _wall_seconds(start: str | None, end: str | None) -> float | str:
     if delta < 0:
         return UNKNOWN
     return round(delta, 3)
+
+
+def _excerpt(text: str | None, *, tail: bool = False) -> str | None:
+    """Return a bounded single-block excerpt; the full row stays durable."""
+    if not text:
+        return None
+    stripped = text.strip()
+    if not stripped:
+        return None
+    if len(stripped) <= _EXCERPT_LIMIT:
+        return stripped
+    return "…" + (stripped[-_EXCERPT_LIMIT:] if tail else stripped[:_EXCERPT_LIMIT])
+
+
+def _load_events(db: Database, run_id: str) -> tuple[list[Any], bool]:
+    """Read the run's event log once for every section that projects from it.
+
+    ``False`` means the log could not be read; sections then report the
+    same explicit gap they reported when each read its own copy.
+    """
+    try:
+        return db.get_events(run_id, limit=10000), True
+    except Exception:
+        return [], False
 
 
 def _requested_identity(run: Run, gaps: list[str]) -> dict[str, str]:
@@ -281,7 +314,9 @@ def _candidate_sha(
     return {"candidate_sha": UNKNOWN, "candidate_source": "none"}
 
 
-def _current_stage(run: Run, db: Database, run_id: str, gaps: list[str]) -> dict[str, str]:
+def _current_stage(
+    run: Run, events: list[Any], events_ok: bool, gaps: list[str]
+) -> dict[str, str]:
     """Derive the live pipeline stage from explicit persisted signals.
 
     Terminal run status is monotonic and always wins.  Otherwise the
@@ -293,9 +328,7 @@ def _current_stage(run: Run, db: Database, run_id: str, gaps: list[str]) -> dict
             "current_stage": f"terminal:{run.status.value}",
             "current_stage_source": "run_row:status",
         }
-    try:
-        events = db.get_events(run_id, limit=10000)
-    except Exception:
+    if not events_ok:
         gaps.append("event log unreadable; current stage UNKNOWN")
         return {"current_stage": UNKNOWN, "current_stage_source": "none"}
     for event in reversed(events):
@@ -310,7 +343,7 @@ def _current_stage(run: Run, db: Database, run_id: str, gaps: list[str]) -> dict
 
 
 def _termination_section(
-    run: Run, db: Database, run_id: str, gaps: list[str]
+    run: Run, events: list[Any], events_ok: bool, gaps: list[str]
 ) -> dict[str, Any]:
     """Project the terminal explanation from the persisted terminal event.
 
@@ -320,9 +353,7 @@ def _termination_section(
     candidates -- never re-derived, so the report cannot contradict the
     run result.  A run with no terminal event reports ``UNKNOWN``.
     """
-    try:
-        events = db.get_events(run_id, limit=10000)
-    except Exception:
+    if not events_ok:
         gaps.append("event log unreadable; termination UNKNOWN")
         return {
             "terminal_event": UNKNOWN,
@@ -366,7 +397,13 @@ def _termination_section(
 
 
 def _review_section(
-    run: Run, db: Database, run_id: str, gaps: list[str]
+    run: Run,
+    db: Database,
+    run_id: str,
+    reviews: list[Any],
+    candidate_sha: str,
+    dispatches: list[Any],
+    gaps: list[str],
 ) -> dict[str, Any]:
     """Project review necessity, rounds, and verdicts from durable rows."""
     required: bool | str = UNKNOWN
@@ -432,7 +469,17 @@ def _review_section(
             gaps.append(
                 "no frozen review decision; treating review as required (fail closed)"
             )
-    reviews = db.get_reviews_for_run(run_id)
+    # The commit a review assessed lives in its REVIEW dispatch evidence row;
+    #: a review row itself carries no SHA, and "the latest commit" is never
+    #: substituted for it, so a review of candidate A cannot be attributed to
+    #: a later candidate B.
+    assessed: dict[str, str | None] = {}
+    for dispatch in dispatches:
+        if dispatch.stage != DispatchStage.REVIEW:
+            continue
+        for key in (dispatch.association_id, dispatch.review_id):
+            if key:
+                assessed.setdefault(key, dispatch.candidate_sha)
     rounds = [
         {
             "id": review.id,
@@ -440,6 +487,11 @@ def _review_section(
             "model": review.model,
             "verdict": review.verdict.value,
             "created_at": review.created_at,
+            "assessed_commit": assessed.get(review.id),
+            "assessed_current_candidate": (
+                candidate_sha != UNKNOWN and assessed.get(review.id) == candidate_sha
+            ),
+            "summary_excerpt": _excerpt(review.summary),
         }
         for review in reviews
     ]
@@ -458,19 +510,33 @@ def _review_section(
 
 
 def _gate_section(
-    run: Run, db: Database, run_id: str, gaps: list[str]
+    run: Run,
+    db: Database,
+    run_id: str,
+    attempts: list[Attempt],
+    candidate_sha: str,
+    events: list[Any],
+    gaps: list[str],
 ) -> dict[str, Any]:
     """Project gate evidence from check rows and gate-receipt events.
 
     Check rows have no duration. Full-gate receipts record timestamps and
     outcome; acceptance gate-runner receipts record a separate execution.
     These sources are reported side by side without joining them heuristically.
+    The commit each check assessed is the producing attempt's commit, and a
+    bounded output excerpt names why it failed without copying the full log.
     """
     checks = db.get_checks_for_run(run_id)
+    attempt_commits = {attempt.id: attempt.commit_sha for attempt in attempts}
     check_rows = [
         {
             "id": check.id,
             "attempt_id": check.attempt_id,
+            "assessed_commit": attempt_commits.get(check.attempt_id),
+            "assessed_current_candidate": (
+                candidate_sha != UNKNOWN
+                and attempt_commits.get(check.attempt_id) == candidate_sha
+            ),
             "gate_command": check.gate_command,
             "exit_code": check.exit_code,
             "passed": check.passed,
@@ -478,13 +544,12 @@ def _gate_section(
             "skipped": check.skipped,
             "created_at": check.created_at,
             "duration_seconds": UNKNOWN,
+            "output_excerpt": _excerpt(
+                check.stdout if check.passed else check.stderr, tail=not check.passed
+            ),
         }
         for check in checks
     ]
-    try:
-        events = db.get_events(run_id, limit=10000)
-    except Exception:
-        events = []
     receipts: list[dict[str, Any]] = []
     for event in events:
         if event.event_type not in {"gate_receipt", "full_gate_receipt"}:
@@ -580,6 +645,10 @@ def _usage_section(db: Database, run_id: str, gaps: list[str]) -> dict[str, Any]
         "calls_with_known_usage": len(known),
         "calls_with_unknown_usage": len(unknown),
         "events_by_stage": dict(sorted(by_stage.items())),
+        "rows": [
+            dict(row.__dict__, stage=row.stage.value, tier=row.tier.value) for row in rows
+        ],
+        "aggregate": db.aggregate_model_call_usage(run_id),
     }
 
 
@@ -633,6 +702,8 @@ def _workspace_section(
     db: Database,
     run_id: str,
     attempts: list[Attempt],
+    checkpoints: list[Any],
+    events: list[Any],
     gaps: list[str],
 ) -> dict[str, Any]:
     """Project workspace evidence from durable rows plus one labelled observation.
@@ -646,13 +717,9 @@ def _workspace_section(
     claimed as a durable cleanup state.
     """
     changed: set[str] = set()
-    for checkpoint in db.get_worker_checkpoints_for_run(run_id):
+    for checkpoint in checkpoints:
         for path in checkpoint.changed_paths:
             changed.add(str(path))
-    try:
-        events = db.get_events(run_id, limit=10000)
-    except Exception:
-        events = []
     for event in events:
         payload = event.payload if isinstance(event.payload, dict) else None
         if not payload:
@@ -724,8 +791,8 @@ def _workspace_section(
 def _warnings(
     dispatches: list[Any],
     reviews: list[Any],
-    db: Database,
-    run_id: str,
+    events: list[Any],
+    events_ok: bool,
 ) -> list[str]:
     """Collect provider/runtime failures and review execution failures."""
     warnings: list[str] = []
@@ -745,9 +812,7 @@ def _warnings(
                 f"review {review.id} did not produce a substantive verdict "
                 f"({review.verdict.value})"
             )
-    try:
-        events = db.get_events(run_id, limit=10000)
-    except Exception:
+    if not events_ok:
         return warnings
     for event in events:
         if event.event_type in (
@@ -942,6 +1007,365 @@ def _team_section(db: Database, run: Run, report: dict[str, Any]) -> dict[str, A
     }
 
 
+def _frozen_tool_contract(run: Run) -> dict[str, Any] | None:
+    """Validate persisted tool evidence without consulting the owner registry."""
+    if run.tool_contract_json is None and run.tool_contract_digest is None:
+        return None
+    if not run.tool_contract_json or not run.tool_contract_digest:
+        raise ValueError(f"run '{run.id}' has an incomplete frozen tool contract")
+    try:
+        raw = json.loads(run.tool_contract_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"run '{run.id}' has malformed frozen tool contract JSON") from exc
+    if not isinstance(raw, dict) or raw.get("schema_version") != 1:
+        raise ValueError(f"run '{run.id}' has unsupported frozen tool contract schema")
+    bindings = raw.get("bindings")
+    digest = raw.get("digest")
+    refs = (
+        [str(binding.get("ref")) for binding in bindings]
+        if isinstance(bindings, list) and all(isinstance(binding, dict) for binding in bindings)
+        else []
+    )
+    if (
+        not isinstance(bindings, list)
+        or any(not isinstance(binding, dict) for binding in bindings)
+        or len(refs) != len(set(refs))
+        or not isinstance(digest, str)
+        or not digest
+        or digest != hashlib.sha256(
+            json.dumps(
+                sorted(bindings, key=lambda item: str(item.get("ref", ""))),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        or run.tool_contract_digest != digest
+    ):
+        raise ValueError(f"run '{run.id}' has a frozen tool contract digest mismatch")
+    return raw
+
+
+def _frozen_gateway_contract(run: Run) -> dict[str, Any] | None:
+    """Validate persisted gateway evidence without invoking the gateway.
+
+    Reconstruction must be a pure read of the persisted JSON; no network
+    calls and no provider/model invocations. Legacy runs without a frozen
+    gateway contract remain readable and return ``None``.
+    """
+    raw_json = getattr(run, "gateway_snapshot_json", None)
+    raw_digest = getattr(run, "gateway_snapshot_digest", None)
+    if raw_json is None and raw_digest is None:
+        return None
+    if not raw_json or not raw_digest:
+        raise ValueError(f"run '{run.id}' has an incomplete frozen gateway contract")
+    try:
+        raw = json.loads(raw_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"run '{run.id}' has malformed frozen gateway contract JSON") from exc
+    if not isinstance(raw, dict) or raw.get("schema_version") != 1:
+        raise ValueError(f"run '{run.id}' has unsupported frozen gateway schema")
+    digest = raw.get("digest")
+    if not isinstance(digest, str) or not digest or digest != raw_digest:
+        raise ValueError(f"run '{run.id}' has a frozen gateway digest mismatch")
+    return raw
+
+
+def _gateway_evidence_row(row: Any) -> dict[str, Any]:
+    """Project one ``gateway_evidence_json`` row into a report field."""
+    raw = getattr(row, "gateway_evidence_json", None)
+    if not raw:
+        return {}
+    try:
+        decoded = json.loads(raw)
+    except json.JSONDecodeError:
+        return {"_invalid_json": True}
+    if not isinstance(decoded, dict):
+        return {"_invalid_json": True}
+    return decoded
+
+
+def _project_scope_snapshot(db: Database, run_id: str) -> dict[str, Any] | None:
+    """Reconstruct project-scope evidence from durable, plain JSON rows.
+
+    This reads generic persisted JSON through the persistence layer only; it
+    never imports project-scope runtime code, so the observability dependency
+    surface stays unchanged.
+    """
+    row = db.get_run_project_scope(run_id)
+    if row is None:
+        return None
+    try:
+        scope = json.loads(str(row["current_scope_json"]))
+    except json.JSONDecodeError:
+        scope = {}
+    try:
+        initial = json.loads(str(row["initial_scope_json"]))
+    except json.JSONDecodeError:
+        initial = {}
+    expansions = [
+        {
+            "attempt_id": expansion.get("attempt_id"),
+            "path": expansion.get("path"),
+            "symbol": expansion.get("symbol"),
+            "reason": expansion.get("reason"),
+            "before_digest": expansion.get("before_digest"),
+            "after_digest": expansion.get("after_digest"),
+            "created_at": expansion.get("created_at"),
+        }
+        for expansion in db.list_scope_expansions(run_id)
+    ]
+    return {
+        "graph_digest": row["project_graph_digest"],
+        "graph_source": row["graph_source"],
+        "analyzer": row["analyzer"],
+        "confidence": row["confidence"],
+        "base_revision": row["base_revision"],
+        "primary_module": (
+            initial.get("primary_module") if isinstance(initial, dict) else None
+        ),
+        "included_modules": (
+            initial.get("included_modules") if isinstance(initial, dict) else []
+        ),
+        "initial_source_paths": (
+            initial.get("source_paths") if isinstance(initial, dict) else []
+        ),
+        "dependency_interface_paths": (
+            initial.get("dependency_interface_paths") if isinstance(initial, dict) else []
+        ),
+        "relevant_tests": initial.get("test_paths") if isinstance(initial, dict) else [],
+        "closure_complete": (
+            initial.get("closure_complete") if isinstance(initial, dict) else False
+        ),
+        "truncation": initial.get("truncated") if isinstance(initial, dict) else False,
+        "scope_reasons": initial.get("reasons") if isinstance(initial, dict) else [],
+        "initial_scope_digest": row["initial_scope_digest"],
+        "current_scope_digest": row["current_scope_digest"],
+        "expansions": expansions,
+        "expansion_count": len(expansions),
+        "current_primary_module": (
+            scope.get("primary_module") if isinstance(scope, dict) else None
+        ),
+        "current_source_paths": (
+            scope.get("source_paths") if isinstance(scope, dict) else []
+        ),
+    }
+
+
+def _routing_digest(raw: str | None) -> str | None:
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        value = raw
+    canonical = json.dumps(value, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _attempt_row(attempt: Attempt) -> dict[str, Any]:
+    """Project one attempt row into the candidate-lineage evidence list."""
+    return {
+        "id": attempt.id,
+        "attempt_number": attempt.attempt_number,
+        "provider": attempt.provider,
+        "model": attempt.model,
+        "status": attempt.status.value,
+        "base_sha": attempt.base_sha,
+        "commit_sha": attempt.commit_sha,
+        "interruption_reason": attempt.interruption_reason,
+        "created_at": attempt.created_at,
+        "completed_at": attempt.completed_at,
+    }
+
+
+def _dispatch_row(row: Any) -> dict[str, Any]:
+    """Project one dispatch row, decoding its two JSON columns in place."""
+    values = dict(row.__dict__)
+    values["stage"] = row.stage.value
+    values["role"] = row.role.value
+    values["prior_failure_refs"] = (
+        json.loads(row.prior_failure_refs_json) if row.prior_failure_refs_json else []
+    )
+    values.pop("prior_failure_refs_json", None)
+    values["prompt_sections"] = (
+        json.loads(row.prompt_sections_json) if row.prompt_sections_json else []
+    )
+    values.pop("prompt_sections_json", None)
+    return values
+
+
+def _continuation_section(
+    db: Database,
+    run_id: str,
+    checkpoints: list[Any],
+    dispatches: list[Any],
+) -> dict[str, Any]:
+    """Project continuation evidence: checkpoints, handoffs and recovery counts."""
+    handoffs = db.get_handoffs_for_run(run_id)
+    return {
+        "checkpoints": [dict(checkpoint.__dict__) for checkpoint in checkpoints],
+        "handoffs": [
+            {
+                "id": handoff.id,
+                "kind": handoff.kind,
+                "version": handoff.version,
+                "sha256": hashlib.sha256(handoff.content.encode("utf-8")).hexdigest(),
+                "byte_count": len(handoff.content.encode("utf-8")),
+                "created_at": handoff.created_at,
+            }
+            for handoff in handoffs
+        ],
+        "checkpoint_count": len(checkpoints),
+        "recovery_dispatch_count": sum(
+            1
+            for row in dispatches
+            if row.dispatch_reason
+            in {
+                reason.value
+                for reason in (
+                    DispatchReason.CONTINUATION_AFTER_QUOTA,
+                    DispatchReason.CONTINUATION_AFTER_CONTEXT,
+                    DispatchReason.CONTINUATION_AFTER_GRACEFUL_HANDOFF,
+                    DispatchReason.COLD_TAKEOVER,
+                )
+            }
+        ),
+    }
+
+
+def _phase_section(db: Database, run_id: str) -> dict[str, Any]:
+    """Project phase telemetry rows and a coverage count per phase."""
+    rows = db.list_phase_observations_for_run(run_id)
+    summary: dict[str, dict[str, int]] = {}
+    for row in rows:
+        bucket = summary.setdefault(
+            row.phase, {"MEASURED": 0, "UNKNOWN": 0, "NOT_APPLICABLE": 0}
+        )
+        bucket[row.status] = bucket.get(row.status, 0) + 1
+    return {
+        "rows": [dict(row.__dict__) for row in rows],
+        "summary": summary,
+    }
+
+
+def _evidence_section(
+    db: Database,
+    run: Run,
+    run_id: str,
+    dispatches: list[Any],
+    attempts: list[Attempt],
+    reviews: list[Any],
+    checkpoints: list[Any],
+    usage: dict[str, Any],
+    events: list[Any],
+) -> dict[str, Any]:
+    """Project the durable evidence behind the report's derived facts.
+
+    Moved here from the retired ``observability._core`` snapshot reader so
+    one projection answers every evidence question: the frozen contracts,
+    dispatch and usage rows, findings, project scope, continuation rows,
+    quota observations, phase telemetry and reconstruction completeness.
+    """
+    findings = db.get_findings_for_run(run_id)
+    observations = db.get_quota_observations_for_run(run_id)
+    control_plane_events = [
+        {
+            "event_type": event.event_type,
+            "payload": event.payload,
+            "created_at": event.created_at,
+        }
+        for event in events
+        if event.event_type in {"control_plane_snapshot", "control_plane_decision"}
+    ]
+    frozen_control_plane: dict[str, Any] | None = None
+    if run.control_plane_snapshot_json is not None:
+        try:
+            raw_frozen = json.loads(run.control_plane_snapshot_json)
+            if isinstance(raw_frozen, dict):
+                frozen_control_plane = raw_frozen
+        except json.JSONDecodeError:
+            frozen_control_plane = None
+    frozen_tool_contract = _frozen_tool_contract(run)
+    frozen_gateway = _frozen_gateway_contract(run)
+    gateway_evidence = [
+        _gateway_evidence_row(row) for row in dispatches if row.gateway_evidence_json
+    ]
+    usage_associations = {str(row["association_id"]) for row in usage["rows"]}
+    dispatch_contract_complete = all(
+        row.prompt_bytes is not None and row.prompt_sha256 is not None for row in dispatches
+    )
+    dispatch_outcome_complete = all(row.dispatch_outcome is not None for row in dispatches)
+    usage_association_complete = all(
+        row.association_id in usage_associations for row in dispatches
+    )
+    usage_coverage_complete = bool(usage["aggregate"]["coverage_complete"])
+    reconstruction_complete = (
+        dispatch_contract_complete and dispatch_outcome_complete and usage_association_complete
+    )
+    return {
+        "candidate_lineage": [_attempt_row(attempt) for attempt in attempts],
+        "dispatches": [_dispatch_row(row) for row in dispatches],
+        "review_evidence": [
+            {
+                "id": review.id,
+                "provider": review.provider,
+                "model": review.model,
+                "verdict": review.verdict.value,
+                "summary": review.summary,
+                "details": review.details,
+                "created_at": review.created_at,
+            }
+            for review in reviews
+        ],
+        "review_findings": [dict(finding.__dict__) for finding in findings],
+        "project_scope": _project_scope_snapshot(db, run_id),
+        "continuation": _continuation_section(db, run_id, checkpoints, dispatches),
+        "quota_observations": [dict(observation.__dict__) for observation in observations],
+        "control_plane": control_plane_events,
+        "frozen_control_plane": frozen_control_plane,
+        "frozen_tool_contract": frozen_tool_contract,
+        "frozen_gateway": frozen_gateway,
+        "gateway_evidence": gateway_evidence,
+        "phases": _phase_section(db, run_id),
+        "completeness": {
+            "dispatch_count": len(dispatches),
+            "usage_row_count": len(usage["rows"]),
+            "dispatches_with_prompt_hash": sum(
+                1 for row in dispatches if row.prompt_sha256
+            ),
+            "dispatches_with_unknown_outcome": sum(
+                1 for row in dispatches if row.dispatch_outcome is None
+            ),
+            "dispatch_contract_complete": dispatch_contract_complete,
+            "dispatch_outcome_complete": dispatch_outcome_complete,
+            "usage_association_complete": usage_association_complete,
+            "usage_coverage_complete": usage_coverage_complete,
+            "reconstruction_complete": reconstruction_complete,
+            "unknown_fields": sorted(
+                {
+                    field
+                    for row in dispatches
+                    for field, value in row.__dict__.items()
+                    if value is None
+                    and field
+                    in {
+                        "actual_provider",
+                        "actual_model",
+                        "handoff_id",
+                        "tool_schema_bytes",
+                        "tool_description_bytes",
+                        "tool_discovery_bytes",
+                        "tool_result_bytes",
+                        "tools_exposed_count",
+                        "tools_actually_used_count",
+                    }
+                }
+            ),
+        },
+    }
+
+
 def build_run_report(db: Database, run_id: str) -> dict[str, Any]:
     """Build the canonical read-only run report for ``run_id``.
 
@@ -956,27 +1380,34 @@ def build_run_report(db: Database, run_id: str) -> dict[str, Any]:
     attempts = db.get_attempts_for_run(run_id)
     dispatches = _sorted_dispatches(db, run_id)
     reviews = db.get_reviews_for_run(run_id)
+    checkpoints = db.get_worker_checkpoints_for_run(run_id)
+    events, events_ok = _load_events(db, run_id)
 
     requested = _requested_identity(run, gaps)
     actual = _actual_identity(dispatches, gaps)
     candidate = _candidate_sha(run, attempts, gaps)
-    stage = _current_stage(run, db, run_id, gaps)
-    termination = _termination_section(run, db, run_id, gaps)
-    review = _review_section(run, db, run_id, gaps)
-    gate = _gate_section(run, db, run_id, gaps)
+    stage = _current_stage(run, events, events_ok, gaps)
+    termination = _termination_section(run, events, events_ok, gaps)
     usage = _usage_section(db, run_id, gaps)
+    review = _review_section(
+        run, db, run_id, reviews, candidate["candidate_sha"], dispatches, gaps
+    )
+    gate = _gate_section(
+        run, db, run_id, attempts, candidate["candidate_sha"], events, gaps
+    )
     acceptance = _acceptance_section(db, run_id, gaps)
-    workspace = _workspace_section(run, db, run_id, attempts, gaps)
-    warnings = _warnings(dispatches, reviews, db, run_id)
+    workspace = _workspace_section(
+        run, db, run_id, attempts, checkpoints, events, gaps
+    )
+    warnings = _warnings(dispatches, reviews, events, events_ok)
+    evidence = _evidence_section(
+        db, run, run_id, dispatches, attempts, reviews, checkpoints, usage, events
+    )
 
     worker_dispatches = sum(1 for row in dispatches if row.stage == DispatchStage.IMPLEMENTATION)
     retry_dispatches = sum(1 for row in dispatches if row.stage == DispatchStage.RETRY)
     repair_dispatches = sum(1 for row in dispatches if row.stage == DispatchStage.REPAIR)
     reviewer_dispatches = sum(1 for row in dispatches if row.stage == DispatchStage.REVIEW)
-    try:
-        events = db.get_events(run_id, limit=10000)
-    except Exception:
-        events = []
     resume_count = sum(1 for event in events if event.event_type == "worker_resumed")
 
     report: dict[str, Any] = {
@@ -1022,6 +1453,7 @@ def build_run_report(db: Database, run_id: str) -> dict[str, Any]:
         "acceptance": acceptance,
         "workspace": workspace,
         "warnings": warnings,
+        "evidence": evidence,
         "evidence_gaps": sorted(set(gaps)),
     }
     report["roles"] = _roles_section(db, run, dispatches, reviews)
@@ -1055,26 +1487,29 @@ def build_roles_view(
 
 def canonical_report_json(report: dict[str, Any]) -> bytes:
     """Serialize a run report using the stable canonical JSON contract."""
-    return canonical_snapshot_json(report)
+    return json.dumps(
+        report, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
 
 
 def is_terminal_report(report: dict[str, Any]) -> bool:
-    """Return True when the report's lifecycle status is terminal."""
+    """Return True when the report's lifecycle status is terminal.
+
+    The canonical ``TERMINAL_RUN_STATUSES`` set is authoritative, so the live
+    follow view and the report projection never disagree about whether a run
+    has stopped.
+    """
     lifecycle = report.get("lifecycle")
     if not isinstance(lifecycle, dict):
         return False
     status = lifecycle.get("status")
-    return status in {"COMPLETED", "FAILED", "ORPHANED"}
+    return isinstance(status, str) and status in {
+        value.value for value in TERMINAL_RUN_STATUSES
+    }
 
 
 def _fmt_scalar(value: Any) -> str:
     if value is None:
-        return UNKNOWN
-    return str(value)
-
-
-def _fmt_tokens(value: Any) -> str:
-    if value == UNKNOWN or value is None:
         return UNKNOWN
     return str(value)
 
@@ -1199,12 +1634,12 @@ def render_report_text(report: dict[str, Any]) -> str:
         f"  provider_usage_events  {usage['provider_usage_event_count']} "
         f"(known={usage['calls_with_known_usage']} "
         f"unknown={usage['calls_with_unknown_usage']})",
-        f"  input         {_fmt_tokens(usage['input_tokens'])}",
-        f"  output        {_fmt_tokens(usage['output_tokens'])}",
-        f"  cache-read    {_fmt_tokens(usage['cache_read_tokens'])}",
-        f"  cache-write   {_fmt_tokens(usage['cache_write_tokens'])}",
-        f"  reasoning     {_fmt_tokens(usage['reasoning_tokens'])}",
-        f"  total         {_fmt_tokens(usage['total_tokens'])}",
+        f"  input         {_fmt_scalar(usage['input_tokens'])}",
+        f"  output        {_fmt_scalar(usage['output_tokens'])}",
+        f"  cache-read    {_fmt_scalar(usage['cache_read_tokens'])}",
+        f"  cache-write   {_fmt_scalar(usage['cache_write_tokens'])}",
+        f"  reasoning     {_fmt_scalar(usage['reasoning_tokens'])}",
+        f"  total         {_fmt_scalar(usage['total_tokens'])}",
         "",
         "acceptance",
         f"  status                {acceptance['acceptance_status']}",
@@ -1298,12 +1733,12 @@ def render_monitor_frame(report: dict[str, Any], *, now_iso: str | None = None) 
         f"review={execution['reviewer_dispatch_count']} "
         f"resumes={execution['resume_count']}",
         f"Usage events={usage['provider_usage_event_count']} "
-        f"in={_fmt_tokens(usage['input_tokens'])} "
-        f"out={_fmt_tokens(usage['output_tokens'])} "
-        f"cache_r={_fmt_tokens(usage['cache_read_tokens'])} "
-        f"cache_w={_fmt_tokens(usage['cache_write_tokens'])} "
-        f"reason={_fmt_tokens(usage['reasoning_tokens'])} "
-        f"total={_fmt_tokens(usage['total_tokens'])}",
+        f"in={_fmt_scalar(usage['input_tokens'])} "
+        f"out={_fmt_scalar(usage['output_tokens'])} "
+        f"cache_r={_fmt_scalar(usage['cache_read_tokens'])} "
+        f"cache_w={_fmt_scalar(usage['cache_write_tokens'])} "
+        f"reason={_fmt_scalar(usage['reasoning_tokens'])} "
+        f"total={_fmt_scalar(usage['total_tokens'])}",
         f"Pipeline worker={execution['worker_dispatch_count']}x "
         f"gate={gate_state} review={review_state} "
         f"repair={execution['repair_dispatch_count']}x "

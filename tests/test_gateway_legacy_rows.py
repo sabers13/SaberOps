@@ -3,7 +3,7 @@
 New runs and dispatches never write the gateway columns, but databases
 written before the cut carry ``runs.gateway_snapshot_json/digest`` and
 ``dispatch_evidence.gateway_evidence_json``.  Those rows must still load,
-and the observability snapshot must still surface them -- without the
+and the one run-report projection must still surface them -- without the
 ``saberops.gateway`` package, which no longer exists.
 """
 
@@ -23,7 +23,8 @@ from saberops.models import (
     RunStatus,
     Tier,
 )
-from saberops.observability import build_run_observability_snapshot, new_dispatch_evidence
+from saberops.observability import new_dispatch_evidence
+from saberops.observability.run_report import build_run_report
 
 LEGACY_SNAPSHOT = {"schema_version": 1, "digest": "legacy-digest", "kind": "OMNIROUTE"}
 LEGACY_EVIDENCE = {"selection": {"requested_account_id": "acct-1"}, "status_code": 200}
@@ -86,12 +87,12 @@ def test_legacy_run_with_gateway_snapshot_still_loads(tmp_path: Path) -> None:
     assert json.loads(rows[0].gateway_evidence_json or "{}")["status_code"] == 200
 
 
-def test_legacy_gateway_evidence_still_surfaces_in_snapshot(tmp_path: Path) -> None:
+def test_legacy_gateway_evidence_still_surfaces_in_the_report(tmp_path: Path) -> None:
     db = _legacy_db(tmp_path)
-    snapshot = build_run_observability_snapshot(db, "run-legacy")
-    assert snapshot["frozen_gateway"] is not None
-    assert snapshot["frozen_gateway"]["digest"] == "legacy-digest"
-    assert snapshot["gateway_evidence"] == [LEGACY_EVIDENCE]
+    evidence = build_run_report(db, "run-legacy")["evidence"]
+    assert evidence["frozen_gateway"] is not None
+    assert evidence["frozen_gateway"]["digest"] == "legacy-digest"
+    assert evidence["gateway_evidence"] == [LEGACY_EVIDENCE]
 
 
 def test_new_rows_write_no_gateway_columns(tmp_path: Path) -> None:

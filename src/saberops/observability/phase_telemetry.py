@@ -350,57 +350,10 @@ class _PhaseMeasurement:
         self._cm.__exit__(exc_type, exc, tb)
 
 
-def list_phase_observations(db: Database, run_id: str) -> list[PhaseObservation]:
-    """Read back every phase observation for ``run_id`` in stable order.
-
-    This is a thin wrapper over
-    :meth:`saberops.db.Database.list_phase_observations_for_run` so
-    callers outside the persistence module do not need to import the
-    table-level method directly.  It still returns a fresh list of typed
-    rows with no in-process caching.
-    """
-    return db.list_phase_observations_for_run(run_id)
-
-
-def summarise_observations(
-    observations: list[PhaseObservation],
-) -> dict[str, dict[str, int]]:
-    """Bounded aggregate of measurement statuses per phase.
-
-    This is a coverage summary only: it never computes a synthetic total,
-    never collapses occurrences, and never invents durations.  It exists
-    so a supervisor can answer "for each phase, how many MEASURED /
-    UNKNOWN / NOT_APPLICABLE rows did the run produce?" without writing
-    the aggregation themselves.
-    """
-    summary: dict[str, dict[str, int]] = {}
-    for observation in observations:
-        bucket = summary.setdefault(
-            observation.phase,
-            {"MEASURED": 0, "UNKNOWN": 0, "NOT_APPLICABLE": 0},
-        )
-        bucket[observation.status] = bucket.get(observation.status, 0) + 1
-    return summary
-
-
-def assert_canonical_phase(value: object) -> str:
-    """Public guard that fails closed on an unknown phase string.
-
-    Tests and runtime callers use this as the canonical admission gate;
-    a free-form label cannot enter a typed production API.
-    """
-    if not isinstance(value, str):
-        raise ValueError(f"phase label must be a string, got {type(value).__name__}")
-    return _validate_phase(value)
-
-
 __all__ = [
     "PhaseRecorder",
-    "assert_canonical_phase",
-    "list_phase_observations",
     "mark_phase_not_applicable",
     "mark_phase_unknown",
     "measure_phase",
     "record_phase_observation",
-    "summarise_observations",
 ]

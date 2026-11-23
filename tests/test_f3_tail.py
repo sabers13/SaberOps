@@ -378,6 +378,26 @@ def test_tail_job_returns_an_empty_tail_before_dispatch(rig: RigEnvironment) -> 
     assert payload["next_sequence"] == ":0:0"
 
 
+def test_tail_job_reports_the_same_run_facts_as_the_report(rig: RigEnvironment) -> None:
+    """H24: the live tail's run facts are the one run-report projection."""
+    from saberops.observability.run_report import build_run_report
+
+    run = _run_to_completion(rig, task="Tail a finished run's report facts")
+    db = rig.db()
+    job_id = _job_for_run(db, run.id)
+    report = build_run_report(db, run.id)
+    payload = _tail(_second_session(rig), job_id)
+    assert payload["run"] == {
+        "status": report["lifecycle"]["status"],
+        "current_stage": report["lifecycle"]["current_stage"],
+        "candidate_sha": report["identity"]["candidate_sha"],
+        "candidate_source": report["identity"]["candidate_source"],
+        "gate": report["gate"]["summary"],
+        "review_verdicts": report["review"]["verdicts"],
+        "acceptance_status": report["acceptance"]["acceptance_status"],
+    }
+
+
 def test_tail_job_refuses_an_unknown_job(rig: RigEnvironment) -> None:
     server = _second_session(rig)
     response = _call(server, "tail_job", {"job_id": "job-missing"})
