@@ -800,10 +800,10 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_phase_observations_run
                     ON phase_observations(run_id, observed_at, id);
 
-                -- C09: run-scoped frozen project graph and scope evidence. The
-                -- initial graph/scope are immutable once written; expansions
-                -- live in scope_expansions and the current scope column is the
-                -- only field that changes afterwards.
+                -- C09: run-scoped frozen project graph and scope evidence.  New
+                -- runs write none of this after phase 1.1 lane H15; the tables
+                -- and readers stay so a stored run keeps its report evidence
+                -- (H24) and an old store upgrades without a migration.
                 CREATE TABLE IF NOT EXISTS run_project_scope (
                     run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
                     repo_root TEXT NOT NULL,
@@ -3635,56 +3635,10 @@ class Database:
             conn.commit()
 
     # ------------------------------------------------------------------
-    # Run-scoped project scope evidence (frozen graph + expansions).
-    # The persistence layer stores and returns plain JSON strings/dicts;
-    # project-scope semantics live in the project_scope module.
+    # Run-scoped project-scope evidence written before phase 1.1 lane H15.
+    # The readers return plain JSON rows so a stored run keeps its report
+    # evidence; no current path writes these tables.
     # ------------------------------------------------------------------
-
-    def set_run_project_scope(
-        self,
-        *,
-        run_id: str,
-        repo_root: str,
-        graph_json: str,
-        graph_digest: str,
-        initial_scope_json: str,
-        initial_scope_digest: str,
-        current_scope_json: str,
-        current_scope_digest: str,
-        analyzer: str,
-        graph_source: str,
-        confidence: str,
-        base_revision: str,
-    ) -> None:
-        """Freeze (or idempotently rewrite) the run's project scope record."""
-        now = current_iso_timestamp()
-        with self._get_connection() as conn:
-            conn.execute(
-                """INSERT OR REPLACE INTO run_project_scope (
-                       run_id, repo_root, project_graph_json, project_graph_digest,
-                       initial_scope_json, initial_scope_digest,
-                       current_scope_json, current_scope_digest,
-                       analyzer, graph_source, confidence, base_revision,
-                       created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    run_id,
-                    repo_root,
-                    graph_json,
-                    graph_digest,
-                    initial_scope_json,
-                    initial_scope_digest,
-                    current_scope_json,
-                    current_scope_digest,
-                    analyzer,
-                    graph_source,
-                    confidence,
-                    base_revision,
-                    now,
-                    now,
-                ),
-            )
-            conn.commit()
 
     def get_run_project_scope(self, run_id: str) -> dict[str, Any] | None:
         """Return the raw scope-evidence row for ``run_id`` as a plain dict."""
@@ -3695,50 +3649,6 @@ class Database:
         if row is None:
             return None
         return {key: row[key] for key in row.keys()}
-
-    def update_run_current_scope(self, *, run_id: str, scope_json: str, scope_digest: str) -> None:
-        """Promote the current scope after a recorded expansion."""
-        with self._get_connection() as conn:
-            cursor = conn.execute(
-                """UPDATE run_project_scope
-                   SET current_scope_json = ?, current_scope_digest = ?, updated_at = ?
-                   WHERE run_id = ?""",
-                (scope_json, scope_digest, current_iso_timestamp(), run_id),
-            )
-            if cursor.rowcount == 0:
-                raise ValueError(f"run '{run_id}' has no project scope record")
-            conn.commit()
-
-    def add_scope_expansion(
-        self,
-        *,
-        run_id: str,
-        attempt_id: str | None,
-        path: str | None,
-        symbol: str | None,
-        reason: str,
-        before_digest: str,
-        after_digest: str,
-    ) -> None:
-        """Append one durable expansion record."""
-        with self._get_connection() as conn:
-            conn.execute(
-                """INSERT INTO scope_expansions (
-                       run_id, attempt_id, path, symbol, reason,
-                       before_digest, after_digest, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    run_id,
-                    attempt_id,
-                    path,
-                    symbol,
-                    reason,
-                    before_digest,
-                    after_digest,
-                    current_iso_timestamp(),
-                ),
-            )
-            conn.commit()
 
     def list_scope_expansions(self, run_id: str) -> list[dict[str, Any]]:
         """Every recorded expansion for ``run_id`` in durable order."""

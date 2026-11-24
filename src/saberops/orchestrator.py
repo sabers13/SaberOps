@@ -73,7 +73,6 @@ from saberops.git import (
     CandidatePublication,
     CandidatePublicationError,
     GitManager,
-    assert_repository_at_revision,
 )
 from saberops.job_evidence import (
     job_folder,
@@ -141,13 +140,6 @@ from saberops.process import (
     run_process,
     split_command,
 )
-from saberops.project_scope.graph import build_project_graph
-from saberops.project_scope.persistence import (
-    freeze_run_scope,
-    load_scope_bundle,
-    scope_section_for_run,
-)
-from saberops.project_scope.resolver import resolve_scope
 from saberops.provenance import (
     ProvenanceError,
     assert_candidate_provenance,
@@ -1430,44 +1422,6 @@ class Orchestrator:
         self.db.update_review_risk_decision(run_id, decision.to_json())
         return decision
 
-    def _fail_run_for_project_scope_error(
-        self, run_id: str, *, phase: str, exc: BaseException, base_commit: str
-    ) -> None:
-        """Terminalize ``run_id`` after a fatal pre-dispatch scope failure.
-
-        Called once from the outer guard around project-scope reconstruction/
-        freezing in :meth:`_run_core`, before any worker is ever dispatched.
-        This is infrastructure failure evidence -- never a worker, provider or
-        model capability failure -- so it spends no tier escalation, no
-        stronger-model escalation and no worker retry budget.  Bounded,
-        non-secret evidence is recorded via the existing event log, and the run is terminalized
-        through the existing ``fail_run_if_nonterminal`` lifecycle helper
-        (idempotent: a run already terminal is left alone, no duplicate
-        terminalization event is created).
-        """
-        # ``raise ... from exc`` chains leave the original, more specific
-        # failure (e.g. ``ProjectMetadataError``/``ProjectScopeIntegrityError``)
-        # reachable via ``__cause__``; prefer that for evidence quality while
-        # still terminalizing on whatever exception actually propagated.
-        root_exc: BaseException = exc.__cause__ if exc.__cause__ is not None else exc
-        bounded_message = str(root_exc).strip()[:2000]
-        self.db.record_event(
-            run_id,
-            "project_scope_failed",
-            payload={
-                "phase": phase,
-                "error_class": type(root_exc).__name__,
-                "message": bounded_message,
-                "base_commit": base_commit,
-                "run_id": run_id,
-            },
-        )
-        self.db.fail_run_if_nonterminal(
-            run_id,
-            completed_at=current_iso_timestamp(),
-            result_summary=f"project scope analysis failed ({phase}): {bounded_message}"[:2000],
-        )
-
     def run(
         self,
         task: str | None = None,
@@ -1749,11 +1703,6 @@ class Orchestrator:
         continued_source = validate_continuation(self.db, config)
         if continued_source and run_id is None:
             raise ValueError("Continue must be admitted through the supervised run launcher.")
-        # Whether this call is adopting an existing run matters for which
-        # revision the frozen project graph/scope must be built against.  The
-        # ``run_id`` parameter is overwritten further down once the run is
-        # resolved, so its adoption/new-run meaning is captured once, here.
-        is_adoption = run_id is not None
         # Frozen per-run publication decision lives in ``config``; this tracks
         # the evidence of the latest successful candidate publication so the
         # final run result can surface it to the owner/reviewer.
@@ -1768,15 +1717,11 @@ class Orchestrator:
         routing_snapshot = None
         routing_payload: dict[str, Any] | None = None
         frozen_control_plane: FrozenControlPlane
-        # The run's own authoritative base_commit, captured once the run
-        # is resolved below; used only when ``is_adoption`` is True.
-        adopted_base_commit: str = ""
 
         if run_id is not None:
             existing_run = self.db.get_run(run_id)
             if existing_run is None:
                 raise ValueError(f"Cannot adopt run '{run_id}': run not found")
-            adopted_base_commit = existing_run.base_commit
             if adoption_mode == "pending_only":
                 if existing_run.status != RunStatus.PENDING:
                     raise ValueError(
@@ -2143,95 +2088,6 @@ class Orchestrator:
                 },
             )
 
-        # Freeze the run's project graph and initial scope exactly once.
-        # An adopted/recovered run reconstructs its frozen scope instead of
-        # re-analyzing; a new run analyzes the authoritative base revision.
-        #
-        # By this point the run has already been created/adopted into
-        # active execution state (RUNNING).  A fatal failure anywhere in this
-        # block is pre-dispatch project-scope infrastructure failure -- never
-        # a worker/provider/model failure -- and must never leave an orphaned
-        # RUNNING run behind: the outer ``except`` below persists bounded
-        # durable evidence and terminalizes the run before re-raising the
-        # exact exception unchanged.  ``recovery_only`` reaches this point
-        # only after fenced recovery ownership has already been verified
-        # above, so terminalizing here never mutates run state ahead of that
-        # authoritative check.
-        scope_failure_phase = "reconstruct_frozen_scope"
-        try:
-            scope_bundle = load_scope_bundle(self.db, run_id)
-            if scope_bundle is None:
-                # The run's own authoritative base_commit -- not necessarily
-                # the ``base_commit`` read from the live repository above,
-                # which for an adoption reflects whatever HEAD happens to be
-                # *now*, not whatever HEAD was when the run was created.
-                authoritative_base_commit = adopted_base_commit if is_adoption else base_commit
-                scope_failure_phase = "base_revision_mismatch"
-                if is_adoption and base_commit != authoritative_base_commit:
-                    # Legacy/older adoption safety: compatibility with a run
-                    # that has no frozen scope is allowed only fail-closed.
-                    # The working tree may only be analyzed as the run's
-                    # historical base revision when the repository truly is
-                    # still at that revision; otherwise this would silently
-                    # attach a graph built from the wrong revision to the
-                    # run's evidence.
-                    raise RuntimeError(
-                        f"cannot analyze project scope for run '{run_id}': repository "
-                        f"HEAD is {base_commit!r} but the run's base_commit is "
-                        f"{authoritative_base_commit!r}; refusing to build a project "
-                        "graph from the wrong revision"
-                    )
-                try:
-                    # Close the TOCTOU window between capturing
-                    # ``authoritative_base_commit`` and freezing the graph
-                    # built from it -- re-check the repository both
-                    # immediately before and immediately after analysis so a
-                    # mid-analysis move can never be frozen under the wrong
-                    # revision label.
-                    scope_failure_phase = "pre_analysis_revision_guard"
-                    assert_repository_at_revision(
-                        repo, authoritative_base_commit, when="before project-graph analysis"
-                    )
-                    scope_failure_phase = "project_graph_construction"
-                    project_graph = build_project_graph(
-                        repo, base_revision=authoritative_base_commit
-                    )
-                    scope_failure_phase = "post_analysis_revision_guard"
-                    assert_repository_at_revision(
-                        repo, authoritative_base_commit, when="after project-graph analysis"
-                    )
-                    scope_failure_phase = "scope_resolution"
-                    initial_scope = resolve_scope(project_graph, task)
-                    scope_failure_phase = "freeze_run_scope"
-                    freeze_run_scope(
-                        self.db,
-                        run_id,
-                        repo_root=str(repo),
-                        graph=project_graph,
-                        scope=initial_scope,
-                    )
-                    self.db.record_event(
-                        run_id,
-                        "project_scope_frozen",
-                        payload={
-                            "graph_digest": project_graph.digest,
-                            "graph_source": project_graph.graph_source.value,
-                            "analyzer": project_graph.analyzer,
-                            "confidence": project_graph.confidence.value,
-                            "scope_digest": initial_scope.digest,
-                            "primary_module": initial_scope.primary_module,
-                            "included_modules": list(initial_scope.included_modules),
-                        },
-                    )
-                    scope_bundle = load_scope_bundle(self.db, run_id)
-                except Exception as exc:  # noqa: BLE001 - fail the run, never guess
-                    raise RuntimeError(f"project scope analysis failed: {exc}") from exc
-            assert scope_bundle is not None
-        except Exception as exc:  # noqa: BLE001 - terminalize, never orphan RUNNING
-            self._fail_run_for_project_scope_error(
-                run_id, phase=scope_failure_phase, exc=exc, base_commit=base_commit
-            )
-            raise
         # Record routing snapshot evidence
         self.db.record_event(
             run_id,
@@ -3603,7 +3459,6 @@ class Orchestrator:
                             config.gate_command, config.gate_enabled,
                             config.review_disabled,
                         ),
-                        project_scope_text=scope_section_for_run(self.db, run_id),
                         project_notes_text=project_notes_text,
                         worker_instructions_text=worker_instructions_text,
                     )
@@ -3650,8 +3505,8 @@ class Orchestrator:
                     readiness_pre = None
                 # Governed worker dispatches against an
                 # Orchestrator-managed worktree MUST have the canonical
-                # project instruction contract (e.g. the scope-first
-                # `python -m saberops.devscope scope` rule)
+                # project instruction contract (the repository's own
+                # ``AGENTS.md`` guidance)
                 # faithfully delivered to the worker.  Quota policy evaluates the
                 # adapter's factual instruction-compatibility evidence at
                 # the SAME pre-dispatch boundary as every other hard
@@ -6083,10 +5938,6 @@ class Orchestrator:
                                                                                         run_verification_text=verification_contract(
                                                 config.gate_command, config.gate_enabled,
                                                 config.review_disabled,
-                                            ),
-                                            project_scope_text=scope_section_for_run(
-                                                self.db,
-                                                run_id,
                                             ),
                                             project_notes_text=read_project_notes(
                                                 project_notes_state_dir

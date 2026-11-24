@@ -698,41 +698,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # orch scope: deterministic project-scope inspection and expansion.
-    scope_parser = subparsers.add_parser(
-        "scope", help="Inspect or expand deterministic project scope."
-    )
-    scope_parser.add_argument("--db", type=str, default=None)
-    scope_parser.add_argument("--run-id", type=str, default=None)
-    scope_subparsers = scope_parser.add_subparsers(dest="scope_command", required=True)
-    scope_graph = scope_subparsers.add_parser(
-        "graph", help="Build and inspect a project graph (read-only)."
-    )
-    scope_graph.add_argument("--repo", type=str, default=None)
-    scope_graph.add_argument("--json", action="store_true", help="Emit JSON.")
-    scope_show = scope_subparsers.add_parser(
-        "show", help="Resolve and render a bounded scope for a query."
-    )
-    scope_show.add_argument("query", type=str)
-    scope_show.add_argument("--repo", type=str, default=None)
-    scope_show.add_argument("--json", action="store_true", help="Emit JSON.")
-    scope_expand = scope_subparsers.add_parser(
-        "expand", help="Expand the run scope with an explicit reason."
-    )
-    scope_expand.add_argument("--path", type=str, default=None)
-    scope_expand.add_argument("--symbol", type=str, default=None)
-    scope_expand.add_argument("--reason", type=str, required=True)
-    scope_expand.add_argument("--db", type=str, default=None)
-    scope_expand.add_argument("--run-id", type=str, default=None)
-    scope_expand.add_argument("--json", action="store_true", help="Emit JSON.")
-    scope_affected = scope_subparsers.add_parser(
-        "affected", help="Shadow affected-verification planning."
-    )
-    scope_affected.add_argument("--repo", type=str, default=None)
-    scope_affected.add_argument("--base", type=str, default=None, help="Git base revision.")
-    scope_affected.add_argument("--paths", nargs="*", default=None, help="Explicit paths.")
-    scope_affected.add_argument("--json", action="store_true", help="Emit JSON.")
-
     context_parser = subparsers.add_parser(
         "orch-context", help="Deprecated alias of `orch report <run-id> --context [REF]`."
     )
@@ -8559,11 +8524,7 @@ def handle_orch_context(args: argparse.Namespace) -> int:
 
 def _dispatch(args: argparse.Namespace) -> int:
     """Route a parsed command to its handler."""
-    if args.command == "scope":
-        from saberops.project_scope.cli import handle_scope
-
-        return handle_scope(args)
-    elif args.command == "orch-context":
+    if args.command == "orch-context":
         return handle_orch_context(args)
     elif args.command == "run":
         return handle_run(args)

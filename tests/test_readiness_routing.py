@@ -2005,3 +2005,76 @@ def test_h2_large_multi_part_task_is_one_job_and_writes_no_plan(
     assert "plan_created" not in event_types
     assert "package_completed" not in event_types
     assert "next_package_started" not in event_types
+
+
+def test_h15_worker_prompt_has_no_project_scope_section(
+    isolated_state: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """H15: the scope guessers are gone, the goal and the run still are not.
+
+    Before H15 every run built a project graph, resolved a keyword scope,
+    froze it in ``run_project_scope`` and appended a ``[PROJECT SCOPE]``
+    section to the worker prompt.  The prompt now carries the goal, acceptance,
+    planner-named paths and project notes only.
+    """
+    cand = "opencode/opencode-go/deepseek-v4-flash"
+    payload = load_effective_routing_payload()
+    payload["roles"]["BUILD"] = [{"routes": [cand]}]
+    save_user_routing(payload)
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    db = Database(tmp_path / "orch.db")
+    readiness = ReadinessService(
+        build_access_registry(default_account_connections()),
+        ReadinessStore(isolated_state["readiness"]),
+        which=lambda _exe: "/fake/bin",
+    )
+    readiness.record_success("opencode-account")
+    prompts: list[str] = []
+
+    class _RecordingSuccessAdapter(_PackageSuccessAdapter):
+        def run(self, request: WorkerRequest) -> WorkerResult:
+            prompts.append(request.task)
+            return super().run(request)
+
+    service = OrchestratorService(
+        db=db,
+        registry=AdapterRegistry([_RecordingSuccessAdapter("opencode")]),
+        worktree_base=tmp_path / "worktrees",
+        readiness_service=readiness,
+    )
+
+    def _pass_review(self: ReviewEngine, run_id: str, **kwargs: object) -> ReviewResult:
+        review = ReviewResult(
+            id="h15-review",
+            run_id=run_id,
+            provider="fake-reviewer",
+            model="independent",
+            verdict=ReviewVerdict.PASS,
+            summary="PASS",
+            details="PASS",
+        )
+        db.create_review(review)
+        return review
+
+    monkeypatch.setattr(ReviewEngine, "review_run", _pass_review)
+    task = "Add a tiny add(a, b) helper to calc.py and cover it with a test."
+    result = service.run_sync(
+        task=task,
+        repo_path=repo,
+        gate_command="true",
+        review=False,
+        is_peak=False,
+    )
+
+    assert result.status == RunStatus.COMPLETED, result.summary
+    assert len(prompts) == 1
+    assert task in prompts[0]
+    assert "context_mode: INITIAL" in prompts[0]
+    assert "[PROJECT SCOPE]" not in prompts[0]
+    assert db.get_run_project_scope(result.run_id) is None
+    event_types = {event.event_type for event in db.get_events(result.run_id, limit=10000)}
+    assert "project_scope_frozen" not in event_types
+    assert "project_scope_failed" not in event_types

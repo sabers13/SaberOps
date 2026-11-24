@@ -31,7 +31,7 @@ from saberops.config import (
     freeze_owner_binding_registry_payload,
 )
 from saberops.db import Database, current_iso_timestamp
-from saberops.git import _CANDIDATE_BRANCH_RE, GitManager, assert_repository_at_revision
+from saberops.git import _CANDIDATE_BRANCH_RE, GitManager
 from saberops.models import (
     TERMINAL_RUN_STATUSES,
     Attempt,
@@ -56,9 +56,6 @@ from saberops.ownership import (
     probe_liveness,
     terminate_owner,
 )
-from saberops.project_scope.graph import build_project_graph
-from saberops.project_scope.persistence import freeze_run_scope
-from saberops.project_scope.resolver import resolve_scope
 from saberops.provenance import (
     ProvenanceError,
     assert_run_not_retargeted,
@@ -323,82 +320,6 @@ class RunSupervisor:
             },
         )
         self.db.record_event(run_id, "routing_snapshot", payload=routing_payload)
-
-        # The project graph and initial task scope must be frozen against
-        # this exact ``base_commit`` -- and the execution owner must never be
-        # launched without that frozen contract in place.  Building the graph
-        # here, before ``_launch``, closes the race where the repository could
-        # otherwise change between PENDING creation and the detached child
-        # adopting the run.  If this fails, the run never launches.
-        #
-        # ``build_project_graph`` reads the working tree while
-        # ``base_commit`` is metadata captured a moment earlier -- close that
-        # TOCTOU window with a repository re-check both immediately before and
-        # immediately after analysis, so a mid-analysis repository move can
-        # never be frozen under the wrong revision label.
-        scope_failure_phase = "pre_analysis_revision_guard"
-        try:
-            assert_repository_at_revision(
-                repo, base_commit, when="before project-graph analysis"
-            )
-            scope_failure_phase = "project_graph_construction"
-            project_graph = build_project_graph(repo, base_revision=base_commit)
-            scope_failure_phase = "post_analysis_revision_guard"
-            assert_repository_at_revision(
-                repo, base_commit, when="after project-graph analysis"
-            )
-            scope_failure_phase = "scope_resolution"
-            initial_scope = resolve_scope(project_graph, config.task)
-            scope_failure_phase = "freeze_run_scope"
-            freeze_run_scope(
-                self.db,
-                run_id,
-                repo_root=str(repo),
-                graph=project_graph,
-                scope=initial_scope,
-            )
-            self.db.record_event(
-                run_id,
-                "project_scope_frozen",
-                payload={
-                    "graph_digest": project_graph.digest,
-                    "graph_source": project_graph.graph_source.value,
-                    "analyzer": project_graph.analyzer,
-                    "confidence": project_graph.confidence.value,
-                    "scope_digest": initial_scope.digest,
-                    "primary_module": initial_scope.primary_module,
-                    "included_modules": list(initial_scope.included_modules),
-                },
-            )
-        except Exception as exc:  # noqa: BLE001 - never launch without frozen scope
-            # Fatal pre-dispatch scope failure is infrastructure
-            # failure -- never a worker/provider/model failure -- and must
-            # never leave the run RUNNING with no execution owner.  Bounded
-            # durable evidence is recorded before terminalizing so the same
-            # ``project_scope_failed`` event/lifecycle contract holds
-            # regardless of whether the failure originates here or in the
-            # direct synchronous ``Orchestrator.run`` path.
-            bounded_message = str(exc).strip()[:2000]
-            self.db.record_event(
-                run_id,
-                "project_scope_failed",
-                payload={
-                    "phase": scope_failure_phase,
-                    "error_class": type(exc).__name__,
-                    "message": bounded_message,
-                    "base_commit": base_commit,
-                    "run_id": run_id,
-                },
-            )
-            self.db.fail_run_if_nonterminal(
-                run_id,
-                completed_at=current_iso_timestamp(),
-                result_summary=f"project scope analysis failed ({scope_failure_phase}): "
-                f"{bounded_message}"[:2000],
-            )
-            raise RuntimeError(
-                f"project scope analysis failed for run '{run_id}': {exc}"
-            ) from exc
 
         self._launch(run_id, config)
         return StartRunResult(run_id=run_id)

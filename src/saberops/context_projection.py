@@ -809,7 +809,6 @@ def render_projection(
     *,
     validation_policy_text: str,
     validation_policy_marker: str,
-    project_scope_text: str | None = None,
     project_notes_text: str | None = None,
     worker_instructions_text: str | None = None,
     run_verification_text: str | None = None,
@@ -819,9 +818,8 @@ def render_projection(
     The validation policy is appended exactly once and idempotently.  The
     invariant contract prefix is byte-identical for identical
     (role, mode, parent_slug, dispatch_reason) tuples.
-    An optional bounded ``[PROJECT SCOPE]`` section is appended exactly
-    once, before the validation policy.  An optional ``[PROJECT NOTES]``
-    section carries the exact per-project note the owner maintains.
+    An optional ``[PROJECT NOTES]`` section carries the exact per-project
+    note the owner maintains.
     """
     if projection.mode in MODES_WITHOUT_FULL_TASK:
         # Defense in depth: refuse to model-expose the full task in
@@ -836,8 +834,6 @@ def render_projection(
 
     body = projection.render_body()
     stripped = body.rstrip()
-    if project_scope_text is not None and "[PROJECT SCOPE]" not in stripped:
-        stripped = stripped + "\n\n" + project_scope_text.rstrip()
     if project_notes_text is not None:
         notes = project_notes_text.strip()
         if notes and "[PROJECT NOTES]" not in stripped:
