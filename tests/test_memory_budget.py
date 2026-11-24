@@ -490,7 +490,13 @@ def test_passing_per_change_gate_leaves_no_scratch(
     )
     scripts = repo / "scripts"
     scripts.mkdir()
-    for script_name in ("gate_tools.py", "select_tests.py", "gate-affected.sh"):
+    for script_name in (
+        "gate_tools.py",
+        "select_tests.py",
+        "gate-affected.sh",
+        "size_budget.py",
+        "size_budget.json",
+    ):
         shutil.copy2(root / "scripts" / script_name, scripts / script_name)
     # Reuse the current Python environment cleanly for mypy/ruff/pytest inside temp repo.
     os.symlink(root / ".venv", repo / ".venv")

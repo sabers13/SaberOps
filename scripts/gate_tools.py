@@ -2665,13 +2665,14 @@ class Runner:
         )
 
         self._next_cmd_meta = (self.memory_step, self.memory_bucket, False, False, False)
+        size, _ = self.command([self.python, "scripts/size_budget.py", "--check"], "size")
         lint, _ = self.command([self.python, "-m", "ruff", "check", "."], "ruff")
         cache = os.environ.get("MYPY_CACHE_DIR", str(self.common / "saberops-mypy-cache"))
         self._next_cmd_meta = ("mypy", "default", False, True, True)
         types, _ = self.command(
             [self.python, "-m", "mypy", "--strict", "--cache-dir", cache, "src", "tests"], "mypy"
         )
-        self.checks_ok = lint == 0 and types == 0
+        self.checks_ok = size == 0 and lint == 0 and types == 0
         initial = Evidence()
         rerun = None
         if self.kind == "full":
@@ -2723,7 +2724,7 @@ class Runner:
             initial,
             rerun,
             quarantine,
-            lint == 0 and types == 0,
+            size == 0 and lint == 0 and types == 0,
             self.kind == "full" or self.lane_full or self.selector_all_ghosts or bool(targets),
         )
         merged = ET.Element("testsuites")

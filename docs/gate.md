@@ -2,10 +2,11 @@
 
 Workers run `bash scripts/lane-check.sh --base REF [--also PATH_OR_NODE ...]
 [--out FILE]`. It prints committed and local changed files, checks the whole
-repository with ruff and strict mypy, and runs the tests selected by
-`scripts/select_tests.py` plus explicit targets. `scripts/gate-affected.sh` is
-the same runner with the same selector, so a diff always selects the same tests
-in both entry points. Tests marked `pytest.mark.slow` are excluded from the
+repository with ruff and strict mypy, runs the local size budget
+(`scripts/size_budget.py --check`, under a second), and runs the tests selected
+by `scripts/select_tests.py` plus explicit targets. `scripts/gate-affected.sh`
+is the same runner with the same selector, so a diff always selects the same
+tests in both entry points. Tests marked `pytest.mark.slow` are excluded from the
 per-change selection (the full gate still runs them); an all-slow selection is
 a clean pytest skip, not a selector failure. Deleted test files and stale map
 node IDs are omitted. Zero targets skips pytest, while lint and types still run.
@@ -62,6 +63,19 @@ assigned by changed file, with GLUE taking part as a lane. Route a single-lane f
 session; interaction, unattributed, closed-session or second-attempt failures go to
 a Fixer. Infrastructure problems require environment repair, not product edits.
 
+## Size budget (local only)
+
+Both wrappers run `python scripts/size_budget.py --check` before ruff. It counts
+first-party logic lines in `src/`, `tests/` and `scripts/`: a file's strings,
+docstrings and comments are blanked, and the remaining non-blank lines count.
+It also counts suppression comment directives (`# noqa`, `# type: ignore`,
+`# pragma: no cover`, and the like). Comments have no limit. The numbers are
+recorded in `scripts/size_budget.json`; growth past a recorded number fails the
+gate until the budget is updated with a one-line reason
+(`python scripts/size_budget.py --write --reason "..."`). The check takes well
+under a second and runs only locally, not in hosted CI. Both files are protected
+gate definitions.
+
 ## Outcomes and evidence
 
 The final line is `GATE OUTCOME: WORD` or `LANE CHECK OUTCOME: WORD`, with a reason
@@ -97,7 +111,7 @@ The protected definitions are:
 
 | Kind | Paths |
 | --- | --- |
-| Gate scripts / tooling | everything under `scripts/` (the named set: `gate-full.sh`, `gate-ui-fast.sh`, `gate-affected.sh`, `gate_tools.py`, `build_test_map.py`, `select_tests.py`, `test_hygiene.py`, plus the G1 runner `lane-check.sh`, `gate_lib.sh` and any future gate helper) |
+| Gate scripts / tooling | everything under `scripts/` (the named set: `gate-full.sh`, `gate-ui-fast.sh`, `gate-affected.sh`, `gate_tools.py`, `build_test_map.py`, `select_tests.py`, `test_hygiene.py`, `size_budget.py` and `size_budget.json`, plus the G1 runner `lane-check.sh`, `gate_lib.sh` and any future gate helper) |
 | Test infrastructure | every `conftest.py`, at the repository root, in `tests/` and in any subdirectory |
 | Gate configuration | `pyproject.toml` (`[tool.pytest.ini_options]`, `[tool.ruff]`, `[tool.mypy]`; the whole file is protected because the dev-dependency pins choose the tools the gate runs) and `.github/workflows/ci.yml` |
 

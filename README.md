@@ -345,6 +345,11 @@ credentials. Repository gate wrappers:
 | `scripts/gate-ui-fast.sh` | Presentation-only template/asset checks for UI tweaks |
 | `scripts/main-gate.sh` | Scheduled full gate with history and flaky-test report (systemd units in `scripts/systemd/`) |
 
+`scripts/gate-full.sh` and `scripts/gate-affected.sh` also run the local size
+budget (`scripts/size_budget.py --check`), which records logic lines and
+suppression comments in `scripts/size_budget.json`. It is local-only, not part
+of hosted CI.
+
 Contributor and agent workflow rules, including the frontend modes, are in
 [AGENTS.md](AGENTS.md); the visual language is in
 [DESIGN.md](src/saberops/DESIGN.md).

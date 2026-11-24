@@ -1,0 +1,5 @@
+{
+  "logic_lines": 176563,
+  "suppression_comments": 354,
+  "reason": "H34: record the post-phase-1.1 baseline with the size check, its tests and the gate fixture update"
+}
