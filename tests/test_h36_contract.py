@@ -22,6 +22,7 @@ from typing import Any
 import pytest
 
 from saberops.agent_connect import PROXIES, agent_document, skill_document
+from saberops.agent_skills import SKILL_NAMES
 from saberops.cli import main as cli_main
 from saberops.mcp.guide import GUIDE
 from saberops.mcp.lease import OrchestratorLease
@@ -86,8 +87,12 @@ def _proxy_documents() -> list[str]:
     ]
 
 
+def _skill_documents() -> list[str]:
+    return [skill_document(name) for name in SKILL_NAMES]
+
+
 def _surfaces() -> list[str]:
-    return [GUIDE, skill_document(), *_proxy_documents()]
+    return [GUIDE, *_skill_documents(), *_proxy_documents()]
 
 
 def _documented_tool_list() -> list[str]:
@@ -143,10 +148,44 @@ def test_module_docstring_lists_every_published_tool() -> None:
     assert sorted(_documented_tool_list()) == sorted(TOOL_NAMES)
 
 
-def test_guide_and_skill_name_every_published_tool() -> None:
-    for surface in (GUIDE, skill_document()):
-        missing = sorted(name for name in TOOL_NAMES if f"`{name}`" not in surface)
-        assert missing == [], missing
+def test_guide_and_skills_together_name_every_published_tool() -> None:
+    surfaces = [GUIDE, *_skill_documents()]
+    for name in TOOL_NAMES:
+        assert any(f"`{name}`" in surface for surface in surfaces), name
+
+
+def test_every_tool_a_skill_names_exists() -> None:
+    known = set(TOOL_NAMES) | set(NATIVE_TOOL_NAMES) | {"saberops_on", "saberops_off"}
+    # Backticked field names and step outcomes a skill quotes, not tools.
+    fields = {
+        "acceptance",
+        "all",
+        "candidate_sha",
+        "cost_if_wrong",
+        "depends_on",
+        "diff",
+        "difficulty",
+        "evidence",
+        "fixable",
+        "goal",
+        "hard",
+        "human",
+        "idempotency_key",
+        "not_before",
+        "owner_action",
+        "ready",
+        "rejected_alternative",
+        "repo",
+        "review_focus",
+        "routine",
+        "run_id",
+        "sample_first_job",
+        "spawn_agent",
+        "agent_type",
+    }
+    for document in _skill_documents():
+        mentioned = set(re.findall(r"`([a-z][a-z0-9_]+)`", document))
+        assert mentioned - known - fields == set(), document[:40]
 
 
 def test_every_surface_uses_only_live_server_names() -> None:

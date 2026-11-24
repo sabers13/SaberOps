@@ -8027,7 +8027,12 @@ def handle_connect(args: argparse.Namespace) -> int:
             print(("✓ " if result.ok else "✗ ") + result.message)
             for command in result.commands:
                 print(f"    $ {command}")
-            if result.skill_content:
+            if result.skill_files:
+                for skill in result.skill_files:
+                    if skill.content:
+                        print(f"    Skill file: {skill.path}")
+                        print("    " + skill.content.replace("\n", "\n    "))
+            elif result.skill_content:
                 print(f"    Skill file: {result.skill_path}")
                 print("    " + result.skill_content.replace("\n", "\n    "))
             if result.snippet and not result.ok:

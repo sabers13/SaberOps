@@ -2408,7 +2408,11 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
 
     register(
         "submit_job",
-        "Submit one job from stated requirements (no provider/model fields).",
+        "Submit one job from stated requirements (no provider, model, tier or route "
+        "fields). Write the goal as one plain sentence and acceptance as checks a "
+        "reviewer can verify, including at least one check tied to the requested "
+        "behaviour that the worker does not write. Add review_focus for what the "
+        "reviewer should watch. One job per independent task.",
         _schema(
             {
                 "repo": {"type": "string", "minLength": 1},
@@ -2513,9 +2517,10 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
     register(
         "resume_job",
         "Resume one failed job: from scratch (a fresh attempt of its frozen task) "
-        "or from last_candidate (continue from its saved candidate). Optional note "
-        "reaches the next attempt; an exact blocked worker binding is the folded-in "
-        "try-worker option. One successor per call; a running job returns its successor.",
+        "or from last_candidate (continue from its saved candidate, keeping that "
+        "work). Optional note reaches the next attempt; an exact blocked worker "
+        "binding is the folded-in try-worker option. One successor per call; a "
+        "running job returns the successor it already has.",
         _schema(
             {
                 "job_id": {"type": "string", "minLength": 1},
@@ -2533,7 +2538,9 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
     )
     register(
         "get_job",
-        "Return one job's record, state and timing.",
+        "Return one job's record, state and timing. When it succeeds, show the "
+        "result's candidate_sha, diff reference and exact owner_action (for example "
+        "`orch accept RUN_ID`); only the owner accepts.",
         _schema({"job_id": {"type": "string", "minLength": 1}}, required=("job_id",)),
         _get_job,
         mutating=False,
@@ -2542,7 +2549,8 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
         "catch_up",
         "Read-only handoff: original request, candidate, latest check and review, open "
         "question and the next allowed action for one job. Pass plan_id instead for the "
-        "plan header, lane table, per-lane open questions and next owner action.",
+        "plan header, lane table, per-lane open questions and next owner action. Use it "
+        "when the owner asks to catch up or a new session has no history.",
         _schema(
             {
                 "job_id": {"type": "string", "minLength": 1},
@@ -2588,7 +2596,9 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
     )
     register(
         "wait_job",
-        "Wait for a job outcome or a blocking question, up to the timeout.",
+        "Wait for a job outcome or a blocking question, up to the timeout. On success, "
+        "show the result's candidate_sha, diff reference and exact owner_action; only "
+        "the owner accepts. Call it again after a timeout.",
         _schema(
             {
                 "job_id": {"type": "string", "minLength": 1},
@@ -2627,7 +2637,9 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
     register(
         "note_job",
         "Record one owner steering note on a job; it is delivered once at the "
-        "next worker attempt (never typed into a running worker) and shown by catch_up.",
+        "next worker attempt (never typed into a running worker) and shown by catch_up. "
+        "Use note_job when the next attempt is soon enough, redirect_job when the "
+        "correction must land now, and a new job when the work is a different task.",
         _schema(
             {
                 "job_id": {"type": "string", "minLength": 1},
@@ -2642,7 +2654,8 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
         "redirect_job",
         "Stop a RUNNING job's current attempt, preserve its work and continue with "
         "the note: the next attempt restores that work and carries the note in its "
-        "prompt. Use note_job when the next attempt is fine; a candidate with an "
+        "prompt. Use it when the correction must land now; note_job is enough when the "
+        "next attempt is soon, and unrelated work is a new job. A candidate with an "
         "undelivered note cannot be accepted.",
         _schema(
             {
@@ -2728,7 +2741,9 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
     )
     register(
         "propose_config_change",
-        "Validate and return a config proposal (nothing is applied).",
+        "Validate and return a config proposal (nothing is applied). Propose when a "
+        "setting blocks accepted work or the owner asks to change behavior; include a "
+        "short rationale. Only the owner approves it, and proposing changes nothing.",
         _schema(
             {
                 "changes": {"type": "object"},

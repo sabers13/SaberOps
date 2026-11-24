@@ -528,3 +528,46 @@ def test_unavailable_clause_evidence_blocks_the_review(
             review_limit=1,
         )
     assert adapter.prompts == []
+
+
+def test_worker_instructions_end_with_the_lines_the_reviewer_reads(
+    isolated: Path,
+    posture: Path,
+) -> None:
+    """H12: the worker report's last lines are the reviewer's risk evidence."""
+    from saberops.validation_policy import WORKER_INSTRUCTIONS
+
+    repo, base, candidate = _repo_with_candidate(isolated / "report", big_file=False)
+    db = Database(isolated / "report.db")
+    binding_id, _owner = _reviewer_binding()
+    run_id = _seed_run(
+        db,
+        repo,
+        base,
+        candidate,
+        worker_report=(
+            "Implemented the change.\n"
+            "SKIPPED: nothing\n"
+            "NOT CHECKED: the database migration\n"
+            "RISKS: broad exception handler at app.py:12"
+        ),
+    )
+    adapter = _PromptInspectingAdapter()
+    _engine(db, adapter).review_run(
+        run_id,
+        reviewer_override=WorkerCandidate(
+            provider=_PROVIDER, model=_REVIEWER_MODEL, binding_id=binding_id
+        ),
+        review_limit=1,
+    )
+    prompt = adapter.prompts[-1]
+    for line in (
+        "SKIPPED: nothing",
+        "NOT CHECKED: the database migration",
+        "RISKS: broad exception handler at app.py:12",
+    ):
+        assert line in prompt, line
+    flat = " ".join(WORKER_INSTRUCTIONS.split())
+    assert "what you skipped" in flat
+    assert "what you did not check" in flat
+    assert "the risks" in flat

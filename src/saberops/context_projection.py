@@ -44,6 +44,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 
+from saberops.validation_policy import WORKER_INSTRUCTIONS_MARKER
+
 # ---------------------------------------------------------------------------
 # Public configuration constants — small, explicit, deterministic budgets.
 # ---------------------------------------------------------------------------
@@ -809,6 +811,7 @@ def render_projection(
     validation_policy_marker: str,
     project_scope_text: str | None = None,
     project_notes_text: str | None = None,
+    worker_instructions_text: str | None = None,
     run_verification_text: str | None = None,
 ) -> RenderResult:
     """Render a deterministic worker prompt for ``projection``.
@@ -839,6 +842,9 @@ def render_projection(
         notes = project_notes_text.strip()
         if notes and "[PROJECT NOTES]" not in stripped:
             stripped = stripped + "\n\n[PROJECT NOTES]\n" + notes
+    if worker_instructions_text is not None:
+        if WORKER_INSTRUCTIONS_MARKER not in stripped:
+            stripped = stripped + "\n\n" + worker_instructions_text.rstrip()
     if run_verification_text is not None:
         stripped += "\n\n" + run_verification_text.rstrip()
     if validation_policy_marker in stripped:

@@ -193,6 +193,7 @@ from saberops.terminal import get_transcript_path
 from saberops.validation_policy import (
     VALIDATION_POLICY_MARKER,
     VALIDATION_POLICY_TEXT,
+    WORKER_INSTRUCTIONS,
     verification_contract,
 )
 from saberops.wave_admission import (
@@ -314,6 +315,7 @@ def _render_repair_task(
         projection,
         validation_policy_text=VALIDATION_POLICY_TEXT,
         validation_policy_marker=VALIDATION_POLICY_MARKER,
+        worker_instructions_text=WORKER_INSTRUCTIONS,
         run_verification_text=run_verification_text,
     )
     return rendered
@@ -348,6 +350,7 @@ def _render_final_repair_task(
         projection,
         validation_policy_text=VALIDATION_POLICY_TEXT,
         validation_policy_marker=VALIDATION_POLICY_MARKER,
+        worker_instructions_text=WORKER_INSTRUCTIONS,
         run_verification_text=run_verification_text,
     )
     return rendered
@@ -3577,6 +3580,9 @@ class Orchestrator:
                     )
                 # Render ONE projection -- this is the actual prompt that
                 # the worker will receive.
+                worker_instructions_text = (
+                    None if config.kind == SCOUT_RUN_KIND else WORKER_INSTRUCTIONS
+                )
                 with measure_phase(
                     self.db,
                     run_id=run_id,
@@ -3599,6 +3605,7 @@ class Orchestrator:
                         ),
                         project_scope_text=scope_section_for_run(self.db, run_id),
                         project_notes_text=project_notes_text,
+                        worker_instructions_text=worker_instructions_text,
                     )
                 # ADR-0016: a pending owner steering note travels in the next
                 # attempt's prompt -- the next safe point.  Delivery is marked
@@ -6084,6 +6091,7 @@ class Orchestrator:
                                             project_notes_text=read_project_notes(
                                                 project_notes_state_dir
                                             ),
+                                            worker_instructions_text=WORKER_INSTRUCTIONS,
                                         )
                                         continue
 

@@ -26,6 +26,13 @@ from saberops.agent_connect import (
     skill_document,
     skill_path,
 )
+from saberops.agent_skills import (
+    MAX_MAIN_SKILL_LINES,
+    SKILL_MODES_NAME,
+    SKILL_NAMES,
+    SKILL_PLANNING_NAME,
+    SKILL_SETUP_NAME,
+)
 from saberops.mcp.guide import GUIDE
 from saberops.mcp.tools import TOOL_NAMES
 
@@ -79,13 +86,26 @@ def _expected(home: Path, slug: str) -> Path:
     return home / SUPPORTED[slug] / SKILL_NAME / "SKILL.md"
 
 
+def _expected_skill(home: Path, slug: str, name: str) -> Path:
+    return home / SUPPORTED[slug] / name / "SKILL.md"
+
+
+def _expected_all(home: Path, slug: str) -> list[Path]:
+    return [_expected_skill(home, slug, name) for name in SKILL_NAMES]
+
+
 @pytest.mark.parametrize("slug", sorted(SUPPORTED))
 def test_dry_run_shows_the_exact_file_and_path_for_each_cli(home: Path, slug: str) -> None:
     result = install_skill(slug, home=home, dry_run=True)
     assert result.ok and result.skill_action == "would-install"
     assert result.skill_path == str(_expected(home, slug))
     assert result.skill_content == skill_document()
-    assert not _expected(home, slug).exists()
+    assert [item.name for item in result.skill_files] == list(SKILL_NAMES)
+    for name, item in zip(SKILL_NAMES, result.skill_files, strict=True):
+        assert item.path == str(_expected_skill(home, slug, name))
+        assert item.content == skill_document(name)
+        assert item.action == "would-install"
+        assert not Path(item.path).exists()
 
 
 @pytest.mark.parametrize("slug", sorted(SUPPORTED))
@@ -93,8 +113,8 @@ def test_connect_dry_run_includes_the_skill(home: Path, slug: str) -> None:
     result = connect(slug, dry_run=True, runner=FakeRunner(), home=home, skill=True)
     assert result.ok and result.skill_action == "would-install"
     assert result.skill_path == str(_expected(home, slug))
-    assert result.skill_content == skill_document()
-    assert not _expected(home, slug).exists()
+    assert [item.name for item in result.skill_files] == list(SKILL_NAMES)
+    assert not any(path.exists() for path in _expected_all(home, slug))
 
 
 def test_cursor_has_no_skill_and_reports_unsupported(home: Path) -> None:
@@ -108,38 +128,46 @@ def test_cursor_has_no_skill_and_reports_unsupported(home: Path) -> None:
 
 
 @pytest.mark.parametrize("slug", sorted(SUPPORTED))
-def test_install_writes_one_owned_file(home: Path, slug: str) -> None:
+def test_install_writes_one_owned_file_per_skill(home: Path, slug: str) -> None:
     result = install_skill(slug, home=home)
     assert result.ok and result.skill_action == "installed"
-    path = _expected(home, slug)
-    assert path.is_file() and result.skill_path == str(path)
-    content = path.read_text(encoding="utf-8")
-    assert content == skill_document()
-    assert SKILL_MARKER in content
-    assert content.startswith("---\nname: saberops\ndescription: ")
-    assert GUIDE in content
+    assert result.skill_path == str(_expected(home, slug))
+    for name, path in zip(SKILL_NAMES, _expected_all(home, slug), strict=True):
+        assert path.is_file()
+        content = path.read_text(encoding="utf-8")
+        assert content == skill_document(name)
+        assert SKILL_MARKER in content
+        assert content.startswith(f"---\nname: {name}\ndescription: ")
+    # The full guide stays on the server; the main skill only points at it.
+    main = _expected(home, slug).read_text(encoding="utf-8")
+    assert GUIDE not in main
+    assert "saberops://guide" in main
 
 
 @pytest.mark.parametrize("slug", sorted(SUPPORTED))
 def test_reinstall_is_idempotent(home: Path, slug: str) -> None:
     first = install_skill(slug, home=home)
-    path = _expected(home, slug)
-    before = path.read_text(encoding="utf-8")
     second = install_skill(slug, home=home)
     assert first.ok and second.ok
     assert second.skill_action == "unchanged"
-    assert path.read_text(encoding="utf-8") == before
-    assert list(path.parent.glob("*.tmp")) == []
-    # An older SaberOps file (still carrying the marker) is refreshed.
-    path.write_text(before.replace("## The loop", "## Old loop"), encoding="utf-8")
+    for path in _expected_all(home, slug):
+        assert path.is_file()
+        assert list(path.parent.glob("*.tmp")) == []
+    # An older SaberOps file (still carrying the marker) is refreshed, in any
+    # of the four skills.
+    on_demand = _expected_skill(home, slug, SKILL_MODES_NAME)
+    on_demand.write_text(
+        on_demand.read_text(encoding="utf-8").replace("## The strict pause", "## Old pause"),
+        encoding="utf-8",
+    )
     refreshed = install_skill(slug, home=home)
     assert refreshed.ok and refreshed.skill_action == "installed"
-    assert path.read_text(encoding="utf-8") == skill_document()
+    assert on_demand.read_text(encoding="utf-8") == skill_document(SKILL_MODES_NAME)
 
 
 @pytest.mark.parametrize("slug", sorted(SUPPORTED))
 def test_a_foreign_file_is_never_overwritten_or_removed(home: Path, slug: str) -> None:
-    path = _expected(home, slug)
+    path = _expected_skill(home, slug, SKILL_PLANNING_NAME)
     path.parent.mkdir(parents=True)
     original = "---\nname: mine\ndescription: hand written\n---\n"
     path.write_text(original, encoding="utf-8")
@@ -148,10 +176,14 @@ def test_a_foreign_file_is_never_overwritten_or_removed(home: Path, slug: str) -
     assert not refused.ok and refused.skill_action == "refused"
     assert "left untouched" in refused.message
     assert path.read_text(encoding="utf-8") == original
+    # The other three installed; only the foreign file is protected.
+    assert _expected(home, slug).is_file()
+    assert _expected_skill(home, slug, SKILL_SETUP_NAME).is_file()
 
     removed = remove_skill(slug, home=home)
     assert not removed.ok and removed.skill_action == "refused"
     assert path.read_text(encoding="utf-8") == original
+    assert not _expected(home, slug).exists()
 
 
 @pytest.mark.parametrize("slug", sorted(SUPPORTED))
@@ -164,6 +196,7 @@ def test_removal_is_one_command_and_leaves_foreign_siblings(home: Path, slug: st
     removed = remove_skill(slug, home=home)
     assert removed.ok and removed.skill_action == "removed"
     assert not path.exists()
+    assert all(not _expected_skill(home, slug, name).exists() for name in SKILL_NAMES)
     assert sibling.read_text(encoding="utf-8") == "mine"
     assert path.parent.is_dir()  # not empty, so the folder stays
 
@@ -186,18 +219,18 @@ def test_a_directory_in_place_of_the_file_is_refused(home: Path) -> None:
     removed = remove_skill("codex", home=home)
     assert not removed.ok and removed.skill_action == "refused"
     assert path.is_dir()
+    assert not _expected_skill(home, "codex", SKILL_SETUP_NAME).exists()
 
 
 def test_connect_with_skill_and_one_command_disconnect(home: Path) -> None:
     runner = FakeRunner()
     result = connect("claude", runner=runner, home=home, skill=True)
     assert result.ok and result.skill_action == "installed"
-    path = _expected(home, "claude")
-    assert path.is_file()
+    assert all(path.is_file() for path in _expected_all(home, "claude"))
 
     gone = disconnect("claude", runner=runner, home=home)
     assert gone.ok and gone.skill_action == "removed"
-    assert not path.exists()
+    assert not any(path.exists() for path in _expected_all(home, "claude"))
     assert runner.calls[-1][0] == ["claude", "mcp", "remove", "--scope", "user", "saberops"]
 
 
@@ -212,12 +245,13 @@ def test_removal_still_works_when_the_cli_is_gone(
     gone = disconnect("claude", home=home)
     assert gone.ok and gone.skill_action == "removed"
     assert not path.exists()
+    assert not any(item.exists() for item in _expected_all(home, "claude"))
 
 
 def test_connect_without_skill_touches_no_skill_file(home: Path) -> None:
     result = connect("codex", runner=CodexRunner(home), home=home)
     assert result.ok and result.skill_action == ""
-    assert not _expected(home, "codex").exists()
+    assert not any(path.exists() for path in _expected_all(home, "codex"))
 
 
 def test_json_agent_connect_with_skill_then_disconnect(home: Path) -> None:
@@ -227,13 +261,12 @@ def test_json_agent_connect_with_skill_then_disconnect(home: Path) -> None:
 
     result = connect("opencode", home=home, skill=True)
     assert result.ok and result.skill_action == "installed"
-    path = _expected(home, "opencode")
-    assert path.is_file()
+    assert all(path.is_file() for path in _expected_all(home, "opencode"))
     assert "saberops" in json.loads(config.read_text(encoding="utf-8"))["mcp"]
 
     gone = disconnect("opencode", home=home)
     assert gone.ok and gone.skill_action == "removed"
-    assert not path.exists()
+    assert not any(path.exists() for path in _expected_all(home, "opencode"))
     assert "saberops" not in json.loads(config.read_text(encoding="utf-8"))["mcp"]
 
 
@@ -244,10 +277,10 @@ def test_cli_dry_run_prints_the_file_and_path(
 
     assert main(["connect", "opencode", "--skill", "--dry-run"]) == 0
     out = capsys.readouterr().out
-    path = _expected(home, "opencode")
-    assert f"Skill file: {path}" in out
+    for name in SKILL_NAMES:
+        assert f"Skill file: {_expected_skill(home, 'opencode', name)}" in out
     assert "saberops_on" in out and "submit_job" in out
-    assert not path.exists()
+    assert not any(path.exists() for path in _expected_all(home, "opencode"))
 
 
 def test_cli_install_and_remove_is_one_command(
@@ -256,22 +289,38 @@ def test_cli_install_and_remove_is_one_command(
     from saberops.cli import main
 
     assert main(["connect", "opencode", "--skill"]) == 0
-    path = _expected(home, "opencode")
-    assert path.is_file()
+    assert all(path.is_file() for path in _expected_all(home, "opencode"))
     capsys.readouterr()
     assert main(["connect", "opencode", "--remove"]) == 0
     out = capsys.readouterr().out
     assert "Removed the SaberOps skill" in out
-    assert not path.exists()
+    assert not any(path.exists() for path in _expected_all(home, "opencode"))
 
 
-def test_skill_carries_the_worker_choice_guidance() -> None:
+def test_main_skill_stays_short_and_points_at_the_guide() -> None:
     document = skill_document()
-    loop = " ".join(document.split("## Full guide", 1)[0].split())
+    assert document.count("\n") + 1 <= MAX_MAIN_SKILL_LINES
+    assert GUIDE not in document
+    for name in (SKILL_SETUP_NAME, SKILL_PLANNING_NAME, SKILL_MODES_NAME):
+        assert f"`{name}`" in document, name
+
+
+def test_each_skill_document_is_bounded() -> None:
+    for name in SKILL_NAMES:
+        document = skill_document(name)
+        assert document.startswith(f"---\nname: {name}\ndescription: ")
+        assert SKILL_MARKER in document
+        # Every skill is a sheet the host loads on demand, not the whole guide.
+        assert GUIDE not in document, name
+        assert len(document.splitlines()) <= MAX_MAIN_SKILL_LINES, name
+
+
+def test_planning_skill_carries_the_worker_choice_guidance() -> None:
+    document = " ".join(skill_document(SKILL_PLANNING_NAME).split())
     for phrase in (
-        "## Which worker for which job",
-        "read-only exploration and drafting",
-        "never accepted on its own",
+        "## Choosing the worker",
+        "Read-only exploration",
+        "never accepted as finished",
         "saberops-worker",
         "claude-worker",
         "codex-worker",
@@ -280,25 +329,25 @@ def test_skill_carries_the_worker_choice_guidance() -> None:
         "Claude cannot be an OpenCode subagent",
         "Connect other coding agents",
         "Antigravity is an orchestrator only",
-        # Codex only delegates when the owner or the skill asks for it (D13).
+        # Codex only delegates when the owner or the instructions ask (D13).
         "custom agents under `~/.codex/agents`",
         "spawn_agent",
         "agent_type",
         "do not quietly do it yourself",
     ):
-        assert phrase in loop, phrase
+        assert phrase in document, phrase
 
 
 def test_skill_never_shells_the_owner_commands() -> None:
     """D17/D16: the skill uses the MCP tools and leaves `orch resume` to the owner."""
-    loop = " ".join(skill_document().split("## Full guide", 1)[0].split())
+    document = skill_document()
     for phrase in (
-        "Never run `orch mcp on`, `orch mcp off`, `orch mcp release`",
-        "call `saberops_on`",
-        "tell the owner to run `orch resume`",
+        "never a shell `orch mcp on`",
+        "Call `saberops_on`",
+        "Tell the owner to run `orch resume`",
     ):
-        assert phrase in loop, phrase
-    assert "`resume_work`" not in loop
+        assert phrase in document, phrase
+    assert "`resume_work`" not in document
 
 
 def test_skill_matches_the_live_mcp_tool_list() -> None:
@@ -321,7 +370,7 @@ def test_skill_matches_the_live_mcp_tool_list() -> None:
     for field in ("run_id", "candidate_sha", "diff", "owner_action"):
         assert f"`{field}`" in document, field
     # No stale tool name is taught in the loop section.
-    loop = document.split("## Full guide", 1)[0]
+    loop = document.split("## Load the matching skill", 1)[0]
     mentioned = set(re.findall(r"`([a-z][a-z0-9_]+)`", loop))
     known = set(TOOL_NAMES) | switch_tools | {
         "repo",
@@ -333,6 +382,7 @@ def test_skill_matches_the_live_mcp_tool_list() -> None:
         "candidate_sha",
         "diff",
         "owner_action",
+        "difficulty",
         # Host-CLI delegation vocabulary, not SaberOps tools (D13).
         "spawn_agent",
         "agent_type",

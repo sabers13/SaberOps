@@ -32,6 +32,33 @@ from __future__ import annotations
 
 VALIDATION_POLICY_MARKER = "VALIDATION POLICY:"
 
+#: Engine-generated worker instructions appended to every build-role attempt
+#: (H12, ADR-0089).  Build role only: a scout keeps its own section and a
+#: reviewer or advisor keeps its fixed instructions.
+WORKER_INSTRUCTIONS_MARKER = "[HOW TO WORK]"
+
+#: The main skill and this section are the only guidance the planner governs;
+#: both are bounded by tests (H12).
+MAX_WORKER_INSTRUCTION_LINES = 16
+
+WORKER_INSTRUCTIONS = (
+    "[HOW TO WORK]\n"
+    "1. Make the smallest complete change: does it need to exist, is it already\n"
+    "   here, does the standard library do it, does an installed dependency do it,\n"
+    "   can it be one clear line; only then new code.\n"
+    "2. Never cut validation at a trust boundary, error handling that prevents\n"
+    "   data loss, security, or accessibility.\n"
+    "3. Edit surgically. Mention unrelated dead code in your report; never delete\n"
+    "   or reformat it.\n"
+    "4. A deliberate shortcut gets a comment: `shortcut: <limit>, <when to upgrade>`.\n"
+    "5. On a repair attempt, check each review finding against the code before\n"
+    "   changing anything. Put a disagreement in your report for the planner; do\n"
+    "   not start a rebuttal loop.\n"
+    "6. End your final report with three lines: what you skipped, what you did not\n"
+    "   check, and the risks."
+)
+
+
 VALIDATION_POLICY_TEXT = (
     "VALIDATION POLICY:\n"
     "OWNERSHIP: WORKER = focused validation only.\n"

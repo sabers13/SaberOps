@@ -460,7 +460,7 @@ when it is plain JSON, after a backup):
 orch connect                  # list agents on this computer and whether each is connected
 orch connect claude codex     # connect specific agents (or: orch connect all)
 orch connect claude --project # only for the current repository (.mcp.json)
-orch connect --remove codex   # undo (also removes the instruction skill)
+orch connect --remove codex   # undo (also removes the instruction skills)
 orch connect codex --dry-run  # show what would change
 orch connect codex --skill    # also install the "turn on saberops" instruction file
 orch connect --agents         # install proxy subagents for every supported CLI
@@ -469,14 +469,22 @@ orch disconnect --agents      # remove only the generated proxy subagents
 orch connect codex --profile work  # register the server in that isolated profile's store
 ```
 
-`--skill` installs one small `SKILL.md` per agent where the CLI supports local
-skills, so "turn on saberops" is discoverable and the planner knows the
-preflight, submit, wait and owner-accept loop. The MCP server stays the only
-engine connection. Paths: `~/.claude/skills/saberops/`, `~/.codex/skills/saberops/`,
-`~/.config/opencode/skills/saberops/` and `~/.gemini/config/skills/saberops/`.
-Cursor has no local skill format, so it reports **unsupported**. `--dry-run`
-prints the exact file and path; a file SaberOps did not write is never
-overwritten or removed.
+`--skill` installs four small `SKILL.md` files per agent where the CLI supports
+local skills, so "turn on saberops" is discoverable and the planner knows the
+preflight, submit, wait and owner-accept loop. The main `saberops` skill is the
+loop, the hard rules and when to load the other three; `saberops-setup` covers
+first-run setup, connecting CLIs and accounts, quota and billing consent, and a
+vendor CLI update that broke a worker; `saberops-planning` covers question
+rounds, difficulty, slices, wide changes, lanes and which worker to use; and
+`saberops-modes` covers ask-me, critical-only, away, self-answered questions and
+the strict pause. The short rules for one tool stay in that tool's MCP
+description, and the full guide stays on the server as `saberops://guide`; the
+skills only point at it. The MCP server stays the only engine connection.
+Paths (each skill gets its own folder): `~/.claude/skills/saberops*/`,
+`~/.codex/skills/saberops*/`, `~/.config/opencode/skills/saberops*/` and
+`~/.gemini/config/skills/saberops*/`. Cursor has no local skill format, so it
+reports **unsupported**. `--dry-run` prints every exact file and path; a file
+SaberOps did not write is never overwritten or removed.
 
 `--profile` selects the owner profile the registered server runs as and is
 honoured by `orch connect` itself (it is not only read from the ambient
@@ -623,6 +631,16 @@ permissions where the CLI has them. The planner guide tells the orchestrating
 CLI to launch native workers only from that definition, to call
 `native_controls` while waiting, and to stop the child itself when SaberOps
 posts a stop. Design: ADR-0030.
+
+Every build attempt also carries a bounded engine-generated `[HOW TO WORK]`
+section: the smallest complete change ladder, the "never cut" line for
+validation, data-loss handling, security and accessibility, surgical edits that
+mention unrelated dead code instead of deleting it, the optional
+`shortcut: <limit>, <when to upgrade>` comment, checking each repair finding
+against the code before changing anything, and a final report that ends with
+what was skipped, what was not checked, and the risks. Scouts keep their own
+section instead, and the reviewer receives the worker's bounded final report
+(ADR-0089).
 
 ### Which worker for which job
 
