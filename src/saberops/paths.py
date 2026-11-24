@@ -102,6 +102,11 @@ def saberops_config_dir() -> Path:
     return _profiled_app_dir(config_home(), CONFIG_APP_DIR)
 
 
+def saberops_cache_dir() -> Path:
+    """Return the canonical public cache directory for the active profile."""
+    return _profiled_app_dir(cache_home(), CACHE_APP_DIR)
+
+
 def owner_state_dir() -> Path:
     """Return the global owner-wide state directory (canonical public root)."""
     return saberops_state_dir()

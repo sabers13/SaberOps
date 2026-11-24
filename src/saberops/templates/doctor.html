@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% import "_ui.html" as ui %}
+{% set active_page = "doctor" %}
+{% block title %}Doctor{% endblock %}
+{# Doctor: "What can SaberOps repair by itself, and what needs me?" Every
+   finding is labelled ok, skip, fixable or human. Repair is explicit; the
+   recheck after a repair decides whether the finding is really gone. #}
+{% block content %}
+{% set fixable = doctor.counts.fixable | default(0) %}
+{% set human = doctor.counts.human | default(0) %}
+{% set faults = fixable + human %}
+<header class="page-head">
+  <div>
+    <h1>Doctor</h1>
+    <p class="lede">
+      {% if doctor.error %}The check could not run.
+      {% elif faults == 0 %}<strong>Everything this computer owns is healthy.</strong> Doctor only touches SaberOps's own state.
+      {% else %}<strong>{{ faults }} {{ "finding needs" if faults == 1 else "findings need" }} attention.</strong> SaberOps repairs only what it owns; everything else names the exact step for you.{% endif %}
+    </p>
+  </div>
+  <span class="status num" data-tone="{{ 'ok' if faults == 0 else 'warn' }}">{{ doctor.counts.ok | default(0) }} ok · {{ faults }} to review</span>
+</header>
+
+{% if doctor.error %}
+<div class="banner" data-tone="bad" role="alert">Doctor could not run: {{ doctor.error }}</div>
+{% endif %}
+
+<section class="section" aria-labelledby="doctor-findings">
+  <div class="section-head"><h2 id="doctor-findings">Findings</h2><p>The same report the <code>doctor</code> MCP tool returns.</p></div>
+  {% if doctor.findings %}
+  <ul class="rows">
+  {% for finding in doctor.findings %}
+    <li data-check-id="{{ finding.check_id }}" data-state="{{ finding.state }}">
+      <div class="row-main">
+        <span class="row-title">{{ finding.check_id | replace("_", " ") | capitalize }}{% if finding.message %} — {{ finding.message }}{% endif %}</span>
+        {% if finding.state == "human" and finding.steps %}<span class="row-sub">Steps: {{ finding.steps }}</span>{% endif %}
+        {% if finding.state == "fixable" and finding.action %}<span class="row-sub">Repair: {{ finding.action }}</span>{% endif %}
+      </div>
+      <span class="status" data-tone="{{ 'ok' if finding.state == 'ok' else ('warn' if finding.state in ('fixable', 'human') else 'idle') }}">{{ finding.state }}</span>
+    </li>
+  {% endfor %}
+  </ul>
+  {% else %}
+  {% call ui.empty("Nothing to report") %}<p>Doctor ran no checks.</p>{% endcall %}
+  {% endif %}
+</section>
+
+{% if fixable %}
+<section class="section" aria-labelledby="doctor-repair">
+  <div class="section-head"><h2 id="doctor-repair">Repair what SaberOps owns</h2><p>{{ fixable }} fixable {{ "finding" if fixable == 1 else "findings" }}. The check runs again afterwards; the recheck decides.</p></div>
+  <form method="post" action="/doctor/fix" class="form">
+    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+    <p class="muted">Vendor logins, API keys, owner settings, your repositories and system packages are never repaired automatically.</p>
+    <label class="small"><input type="checkbox" name="delete_legacy" value="yes"> Also delete the legacy state directories previewed above</label>
+    <div><button type="submit" class="primary">Repair safe findings</button></div>
+  </form>
+</section>
+{% endif %}
+
+{% if doctor.actions %}
+<section class="section" aria-labelledby="doctor-actions">
+  <div class="section-head"><h2 id="doctor-actions">Repair log</h2><p>One line per attempted repair; nothing is reported fixed until the recheck agrees.</p></div>
+  <div class="stack">
+  {% for action in doctor.actions %}
+    <details class="tech"><summary>{{ action.check_id }} — {{ "applied" if action.applied else "not applied" }}</summary>
+      <dl class="kv"><dt>Detail</dt><dd>{{ action.detail }}</dd><dt>Before</dt><dd>{{ action.before }}</dd><dt>After recheck</dt><dd>{{ action.after or "not reported" }}</dd></dl>
+    </details>
+  {% endfor %}
+  </div>
+</section>
+{% endif %}
+{% endblock %}

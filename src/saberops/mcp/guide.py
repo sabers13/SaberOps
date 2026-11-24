@@ -449,6 +449,11 @@ accepted on its own.
 - To suggest a setting, use `propose_config_change` with a short rationale. It
   changes nothing until the owner approves it. `list_proposals` reads the
   decision ledger: what the owner approved or rejected, and why.
+- `doctor` reads the self-healing report (each finding is ok, skip, fixable or
+  human). `doctor_fix` repairs only fixable SaberOps-owned findings and then
+  rechecks; ask-me asks the owner first and away/critical-only apply safe
+  repairs. Never use it for vendor logins, API keys, owner settings or the
+  user's repositories.
 
 ## If the tools disappear
 The user turned SaberOps off, or the owner switched it off for every agent.

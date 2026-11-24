@@ -948,6 +948,27 @@ def _diagnostics_rows() -> list[dict[str, Any]]:
     return rows
 
 
+def _doctor_view(db: Database, repo: Path) -> dict[str, Any]:
+    """The same findings the CLI and the ``doctor`` MCP tool report."""
+    from saberops.doctor import run_doctor
+
+    try:
+        report = run_doctor(repo, db.db_path, fix=False)
+    except Exception as exc:
+        return {
+            "error": f"{exc.__class__.__name__}: {exc}",
+            "counts": {"ok": 0, "skip": 0, "fixable": 0, "human": 0},
+            "findings": [],
+            "actions": [],
+        }
+    return {
+        "error": None,
+        "counts": report.counts(),
+        "findings": [finding.as_dict() for finding in report.findings],
+        "actions": [action.as_dict() for action in report.actions],
+    }
+
+
 def _vendor_login_rows() -> list[dict[str, Any]]:
     """Official vendor CLI logins: installed/readiness evidence, never secrets."""
     readiness: Any
@@ -1490,6 +1511,69 @@ def create_app(
         """Legacy onboarding URL: Setup now owns first-run, keeping the query."""
         query = request.url.query
         return RedirectResponse(url="/setup" + (f"?{query}" if query else ""), status_code=303)
+
+    def _doctor_repo() -> Path:
+        return Path(repo_path).resolve() if repo_path is not None else Path.cwd()
+
+    @app.get("/doctor", response_class=HTMLResponse, name="doctor_page")
+    def doctor_page(request: Request) -> HTMLResponse:
+        """Read-only doctor report; the same findings as the CLI and MCP tool."""
+        notice = None
+        if request.query_params.get("fixed") == "1":
+            notice = "Repairs were attempted; the recheck below decides what remains."
+        return templates.TemplateResponse(
+            request,
+            "doctor.html",
+            {
+                "doctor": _doctor_view(db, _doctor_repo()),
+                "notice": notice,
+                "error": None,
+                "csrf_token": _CSRF_TOKEN,
+            },
+        )
+
+    @app.post("/doctor/fix", name="doctor_fix")
+    def doctor_fix_route(
+        request: Request,
+        csrf: Annotated[str, Form()] = "",
+        delete_legacy: Annotated[str, Form()] = "",
+    ) -> Response:
+        """Owner-approved repair from the local page; the recheck decides."""
+        if not _csrf_valid(csrf):
+            return templates.TemplateResponse(
+                request,
+                "doctor.html",
+                {
+                    "doctor": _doctor_view(db, _doctor_repo()),
+                    "notice": None,
+                    "error": "Refused: missing or invalid confirmation token.",
+                    "csrf_token": _CSRF_TOKEN,
+                },
+                status_code=403,
+            )
+        from saberops.doctor import run_doctor
+
+        report = run_doctor(
+            _doctor_repo(),
+            db.db_path,
+            fix=True,
+            allow_legacy_delete=bool(delete_legacy),
+        )
+        return templates.TemplateResponse(
+            request,
+            "doctor.html",
+            {
+                "doctor": {
+                    "error": None,
+                    "counts": report.counts(),
+                    "findings": [finding.as_dict() for finding in report.findings],
+                    "actions": [action.as_dict() for action in report.actions],
+                },
+                "notice": "Repairs were attempted; the recheck below decides what remains.",
+                "error": None,
+                "csrf_token": _CSRF_TOKEN,
+            },
+        )
 
     def _owner_page_route(page: str) -> Callable[[Request], HTMLResponse]:
         def render(request: Request) -> HTMLResponse:

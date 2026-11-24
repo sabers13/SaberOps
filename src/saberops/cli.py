@@ -14,7 +14,6 @@ import sqlite3
 import sys
 import time
 import tomllib
-from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -22,6 +21,7 @@ from typing import Any
 from saberops.config import RunConfig, reconstruct_run_config
 from saberops.db import Database, get_default_db_path
 from saberops.dispatch import READINESS_AUTHORITY_UNAVAILABLE
+from saberops.doctor import CHECK_STATUSES, DoctorFinding, detect_platform
 from saberops.gate_runner import GateScratchPolicyError
 from saberops.gate_status import gate_summary_label
 from saberops.git import GitManager
@@ -141,12 +141,7 @@ _DEV_TOOLS: tuple[str, ...] = ("ruff", "mypy", "pytest")
 _SPECIFIER_PATTERN = re.compile(r"^(>=|<=|==|!=|>|<|~=)\s*v?(\d+)(?:\.(\d+))?(?:\.(\d+))?$")
 
 
-@dataclass(frozen=True)
-class DoctorFinding:
-    """A single read-only doctor check outcome."""
 
-    severity: str
-    message: str
 
 
 def _resolve_cli_run_config(args: argparse.Namespace, repo: Path | str) -> RunConfig:
@@ -449,6 +444,8 @@ def _check_database(db_path: Path) -> tuple[DoctorFinding, list[QuotaState]]:
                 "WARN",
                 f"database not initialized yet (expected at {resolved}); "
                 "it will be created on first orchestrator write command",
+                check_id="database",
+                status="ok",
             ),
             [],
         )
@@ -457,11 +454,38 @@ def _check_database(db_path: Path) -> tuple[DoctorFinding, list[QuotaState]]:
         try:
             row = conn.execute("SELECT COUNT(*) FROM runs").fetchone()
             count = int(row[0]) if row is not None else 0
+            integrity = str(conn.execute("PRAGMA quick_check").fetchone()[0])
+            indexes = {
+                str(index_row[0])
+                for index_row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='index'"
+                )
+            }
         finally:
             conn.close()
     except sqlite3.Error as exc:
         return (
-            DoctorFinding("FAIL", f"database unreadable/corrupt at {resolved}: {exc}"),
+            DoctorFinding(
+                "FAIL",
+                f"database unreadable/corrupt at {resolved}: {exc}",
+                check_id="database",
+                status="human",
+                steps=(
+                    "Back up the file, then restore the newest backup or start a "
+                    "fresh store; SaberOps never guesses at an unreadable database."
+                ),
+            ),
+            [],
+        )
+    if integrity.lower() != "ok":
+        return (
+            DoctorFinding(
+                "FAIL",
+                f"database integrity check reports '{integrity}' at {resolved}",
+                check_id="database",
+                status="human",
+                steps="Back up the file, then restore the newest backup.",
+            ),
             [],
         )
     try:
@@ -475,10 +499,17 @@ def _check_database(db_path: Path) -> tuple[DoctorFinding, list[QuotaState]]:
             version_row_conn.close()
     except sqlite3.Error as exc:
         return (
-            DoctorFinding("FAIL", f"database schema unreadable at {resolved}: {exc}"),
+            DoctorFinding(
+                "FAIL",
+                f"database schema unreadable at {resolved}: {exc}",
+                check_id="database",
+                status="human",
+                steps="Back up the file, then restore the newest backup.",
+            ),
             [],
         )
     from saberops.db import DB_SCHEMA_VERSION
+    from saberops.doctor import REQUIRED_INDEXES
 
     if schema_version != DB_SCHEMA_VERSION:
         return (
@@ -486,6 +517,13 @@ def _check_database(db_path: Path) -> tuple[DoctorFinding, list[QuotaState]]:
                 "FAIL",
                 f"database schema unsupported at {resolved}: "
                 f"user_version={schema_version}, expected {DB_SCHEMA_VERSION}",
+                check_id="database",
+                status="human",
+                steps=(
+                    "Back up the file first. A legacy or future schema is never "
+                    "migrated automatically: restore a compatible backup or start a "
+                    "fresh store."
+                ),
             ),
             [],
         )
@@ -494,14 +532,34 @@ def _check_database(db_path: Path) -> tuple[DoctorFinding, list[QuotaState]]:
         quota_rows = _quota_rows_readonly(resolved)
     except sqlite3.Error as exc:
         return (
-            DoctorFinding("FAIL", f"database quota table unreadable at {resolved}: {exc}"),
+            DoctorFinding(
+                "FAIL",
+                f"database quota table unreadable at {resolved}: {exc}",
+                check_id="database",
+                status="human",
+                steps="Back up the file, then restore the newest backup.",
+            ),
             [],
+        )
+    missing = [name for name in REQUIRED_INDEXES if name not in indexes]
+    if missing:
+        return (
+            DoctorFinding(
+                "WARN",
+                f"database at {resolved} is missing indexes: {', '.join(missing)}",
+                check_id="database",
+                status="fixable",
+                action="run additive schema migrations and rebuild indexes",
+            ),
+            quota_rows,
         )
     return (
         DoctorFinding(
             "OK",
             f"database readable (read-only) at {resolved} "
             f"({count} runs, schema v{schema_version})",
+            check_id="database",
+            status="ok",
         ),
         quota_rows,
     )
@@ -1477,7 +1535,7 @@ def build_parser() -> argparse.ArgumentParser:
     # orch doctor
     doctor_parser = subparsers.add_parser(
         "doctor",
-        help="Strictly read-only preflight diagnostics for SaberOps readiness.",
+        help="Check SaberOps readiness; --fix repairs only findings labelled fixable.",
     )
     doctor_parser.add_argument(
         "--repo",
@@ -1493,6 +1551,25 @@ def build_parser() -> argparse.ArgumentParser:
             "Path to SQLite database (default: "
             "$XDG_STATE_HOME/saberops/orchestrator.db or "
             "~/.local/state/saberops/orchestrator.db)."
+        ),
+    )
+    doctor_parser.add_argument(
+        "--fix",
+        action="store_true",
+        help=(
+            "Repair only findings labelled fixable, then run every check again; "
+            "the recheck decides. Without this flag doctor is strictly read-only."
+        ),
+    )
+    doctor_parser.add_argument(
+        "--json", action="store_true", help="Print the report as JSON."
+    )
+    doctor_parser.add_argument(
+        "--delete-legacy",
+        action="store_true",
+        help=(
+            "With --fix, also delete legacy SaberOps state directories after "
+            "the check has previewed their paths and size."
         ),
     )
 
@@ -8274,41 +8351,171 @@ def handle_quota_enable(args: argparse.Namespace) -> int:
     return 0
 
 
+def _doctor_finding(
+    finding: DoctorFinding,
+    check_id: str,
+    *,
+    steps: str = "",
+) -> DoctorFinding:
+    """Label one legacy finding with its check id and the owner's next step."""
+    return DoctorFinding(
+        finding.severity,
+        finding.message,
+        check_id=finding.check_id or check_id,
+        status=finding.status,
+        steps=(
+            finding.steps
+            or (steps if finding.state in ("human", "fixable") else "")
+        ),
+        action=finding.action,
+    )
+
+
+def _pinned_reinstall_step() -> str:
+    """The exact command that reinstalls this same pinned SaberOps version."""
+    try:
+        from importlib.metadata import version
+
+        pinned = f"saberops=={version('saberops')}"
+    except Exception:  # noqa: BLE001 - a source checkout may carry no metadata
+        pinned = "saberops"
+    return f"{sys.executable} -m pip install --upgrade '{pinned}'"
+
+
 def collect_doctor_findings(repo: Path, db_path: Path) -> list[DoctorFinding]:
-    """Run every read-only doctor check (shared by the CLI and the web page)."""
+    """Run the original read-only checks (shared by the CLI, web page and MCP).
+
+    The doctor appends its own repair-labelled checks in
+    :func:`saberops.doctor.collect_all`; this function stays the single place
+    the Python, import, tool, database, provider and target-repository checks
+    live so every surface reports the same facts.
+    """
     project_root = _orch_project_root()
+    host = detect_platform()
+    install_hint = (
+        "brew install git" if host == "macos" else "sudo apt install git (or your OS package manager)"
+    )
     findings: list[DoctorFinding] = []
 
-    findings.append(_check_python_requires(project_root))
-    findings.append(_check_core_imports())
-    findings.append(_check_dev_imports(project_root))
-    findings.append(_check_venv_tools(project_root))
-    findings.append(_check_git_binary())
+    findings.append(
+        _doctor_finding(
+            _check_python_requires(project_root),
+            "python_requires",
+            steps="Install Python 3.12 or newer, recreate the environment, then run `orch doctor`.",
+        )
+    )
+    findings.append(
+        _doctor_finding(
+            _check_core_imports(),
+            "core_imports",
+            steps=f"Reinstall the same pinned version: {_pinned_reinstall_step()}",
+        )
+    )
+    findings.append(
+        _doctor_finding(
+            _check_dev_imports(project_root),
+            "dev_imports",
+            steps="Development extras are missing; in a source checkout run `uv pip install -e '.[dev]'`.",
+        )
+    )
+    findings.append(
+        _doctor_finding(
+            _check_venv_tools(project_root),
+            "venv_tools",
+            steps="Recreate the checkout environment: `uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -e '.[dev]'`.",
+        )
+    )
+    findings.append(
+        _doctor_finding(
+            _check_git_binary(),
+            "git",
+            steps=f"Install git ({install_hint}), then reopen the terminal.",
+        )
+    )
     db_finding, quota_rows = _check_database(db_path)
-    findings.append(db_finding)
-    findings.extend(_check_providers(quota_rows))
-    findings.append(_check_target_repo(repo))
+    # The label-bearing database check lives in saberops.doctor; this call is
+    # kept only for the quota rows the provider check needs.
+    _ = db_finding
+    findings.extend(
+        _doctor_finding(
+            finding,
+            "providers",
+            steps="Sign in with each provider's own command in your terminal; SaberOps never asks for a password or key.",
+        )
+        for finding in _check_providers(quota_rows)
+    )
+    findings.append(
+        _doctor_finding(
+            _check_target_repo(repo),
+            "target_repo",
+            steps="Commit, stash or move the target repository's uncommitted changes before a run.",
+        )
+    )
     legacy_manager = _check_legacy_manager_state()
     if legacy_manager is not None:
-        findings.append(legacy_manager)
+        findings.append(
+            _doctor_finding(
+                legacy_manager,
+                "legacy_manager_state",
+                steps=(
+                    "Remove the legacy manager-session document yourself after "
+                    "checking it; SaberOps preserves it for repair."
+                ),
+            )
+        )
     return findings
 
 
 def handle_doctor(args: argparse.Namespace) -> int:
-    """Handle `orch doctor` command. Strictly read-only: never mutates state."""
+    """Handle `orch doctor`.
+
+    No flag is strictly read-only.  ``--fix`` repairs only findings labelled
+    fixable and prints the recheck, which alone decides the outcome.
+    """
+    from saberops.doctor import run_doctor
+
     db_arg = getattr(args, "db", None)
     db_path = Path(db_arg) if db_arg else get_default_db_path()
-    findings = collect_doctor_findings(Path(getattr(args, "repo", ".")), db_path)
+    fix = bool(getattr(args, "fix", False))
+    report = run_doctor(
+        Path(getattr(args, "repo", ".")),
+        db_path,
+        fix=fix,
+        allow_legacy_delete=bool(getattr(args, "delete_legacy", False)),
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(report.as_dict(), indent=2, sort_keys=True))
+    else:
+        for action in report.actions:
+            print(
+                f"[repair] {action.check_id}: {action.detail} "
+                f"(before={action.before}, after={action.after or 'n/a'})"
+            )
+        for finding in report.findings:
+            label = f"{finding.check_id}: " if finding.check_id else ""
+            print(f"[{finding.state}] {label}{finding.message}")
+            if finding.state == "human" and finding.steps:
+                print(f"  steps: {finding.steps}")
+            elif finding.state == "fixable" and finding.action:
+                print(f"  fix: {finding.action} (run `orch doctor --fix`)")
+        counts = report.counts()
+        print(
+            "Doctor summary: "
+            + ", ".join(f"{counts[state]} {state}" for state in CHECK_STATUSES)
+            + (" - READY" if _doctor_ready(report) else " - NOT READY")
+        )
 
-    ok_count = sum(1 for f in findings if f.severity == "OK")
-    warn_count = sum(1 for f in findings if f.severity == "WARN")
-    fail_count = sum(1 for f in findings if f.severity == "FAIL")
-    verdict = "READY" if fail_count == 0 else "NOT READY"
-
-    for finding in findings:
-        print(f"[{finding.severity}] {finding.message}")
-    print(f"Doctor summary: {ok_count} OK, {warn_count} WARN, {fail_count} FAIL - {verdict}")
+    fail_count = sum(1 for finding in report.findings if finding.severity == "FAIL")
+    if fix:
+        return 0 if fail_count == 0 and not report.remaining_fixable else 1
     return 0 if fail_count == 0 else 1
+
+
+def _doctor_ready(report: Any) -> bool:
+    return not report.remaining_fixable and not any(
+        finding.severity == "FAIL" for finding in report.findings
+    )
+
 
 
 def main(argv: list[str] | None = None) -> int:

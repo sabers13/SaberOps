@@ -292,6 +292,20 @@ per-window probe reading does not by itself refuse a route: a still-valid owner
 reading for the same pool (24-hour freshness) is used until fresh evidence
 arrives, and the refusal names stale evidence when no valid reading remains.
 
+## Self-repair
+
+`orch doctor` is strictly read-only and labels every finding `ok`, `skip`,
+`fixable` or `human`. `orch doctor --fix` repairs only the `fixable` findings
+SaberOps owns (its XDG directories, additive database migrations and indexes, a
+dead planning lease, dead-owner runs through the supervisor, a stopped
+scheduler while jobs are queued), then runs every check again; the recheck
+alone decides. Legacy state is previewed and deleted only with
+`--fix --delete-legacy`. Vendor logins, API keys, owner settings, your
+repositories and system packages are never repaired automatically; their
+findings print the exact step. The same report is available read-only as the
+`doctor` MCP tool and on the local `/doctor` page; `doctor_fix` follows the
+owner mode (`ask-me` asks, `critical-only` and `away` apply safe repairs).
+
 Native limit interfaces: [Codex app server](https://developers.openai.com/codex/app-server)
 and [Copilot usage and billing metrics](https://docs.github.com/en/copilot/how-tos/copilot-sdk/features/usage-and-billing).
 On POSIX systems, Claude Code and Antigravity account limits are read through

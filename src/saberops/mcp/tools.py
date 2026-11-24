@@ -6,7 +6,7 @@ The following tools are exposed::
     resume_job redirect_job get_job catch_up plan_status tail_job wait_job list_jobs
     cancel_job note_job discard_note capacity read_evidence list_questions
     answer_question propose_config_change list_proposals get_mode propose_mode_change
-    get_pause
+    get_pause doctor doctor_fix
 
 With ``ORCH_NATIVE_WORKERS`` enabled, four more tools exist for the hybrid
 native-worker path (ADR-0030): ``native_claim``, ``native_heartbeat``,
@@ -122,6 +122,7 @@ MUTATING_TOOLS: frozenset[str] = frozenset(
         "answer_question",
         "propose_config_change",
         "propose_mode_change",
+        "doctor_fix",
     }
 )
 
@@ -155,6 +156,7 @@ READ_TOOLS: frozenset[str] = frozenset(
         "list_proposals",
         "get_mode",
         "get_pause",
+        "doctor",
     }
 )
 
@@ -185,6 +187,8 @@ TOOL_NAMES: tuple[str, ...] = (
     "get_mode",
     "propose_mode_change",
     "get_pause",
+    "doctor",
+    "doctor_fix",
 )
 
 _JOB_STATES = ["QUEUED", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"]
@@ -1917,6 +1921,149 @@ def _get_pause(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str
     return {"v": SNAPSHOT_SCHEMA_VERSION, **gate_view(db=db)}
 
 
+def _doctor_paths(context: ServerContext) -> tuple[Path, Path]:
+    from saberops.db import get_default_db_path
+
+    db_path = Path(context.db_path) if context.db_path is not None else get_default_db_path()
+    repo = context.repo if context.repo is not None else Path.cwd()
+    return repo, db_path
+
+
+def _doctor(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    """Read-only self-healing doctor report (the CLI and web page use the same)."""
+    from saberops.doctor import run_doctor
+
+    repo, db_path = _doctor_paths(context)
+    report = run_doctor(repo, db_path, fix=False)
+    return {
+        "v": SNAPSHOT_SCHEMA_VERSION,
+        "repo": str(repo),
+        "database": str(db_path),
+        **report.as_dict(),
+    }
+
+
+def _doctor_fix(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    """Repair only fixable findings, then let the recheck decide.
+
+    ``ask-me`` raises one owner question and applies nothing.  ``critical-only``
+    and ``away`` apply the safe, SaberOps-owned repairs.  Legacy state is only
+    deleted when the caller asks for it explicitly after the check previews it.
+    """
+    from saberops.doctor import run_doctor
+    from saberops.owner_mode import OwnerMode, OwnerModeError, load_effective_owner_mode
+
+    repo, db_path = _doctor_paths(context)
+    only_raw = arguments.get("checks")
+    only: list[str] | None = None
+    if only_raw is not None:
+        if not isinstance(only_raw, list) or not all(
+            isinstance(item, str) and item for item in only_raw
+        ):
+            raise InvalidParamsError("checks must be a list of check ids")
+        only = [str(item) for item in only_raw]
+    delete_legacy = bool(arguments.get("delete_legacy", False))
+
+    try:
+        mode = load_effective_owner_mode()
+    except (OwnerModeError, ValueError) as exc:
+        raise ToolError(f"owner mode unavailable; refusing repair: {exc}") from exc
+
+    preview = run_doctor(repo, db_path, fix=False)
+    fixable = [
+        finding
+        for finding in preview.findings
+        if finding.fixable and (only is None or finding.check_id in only)
+    ]
+    if not fixable:
+        return {
+            "v": SNAPSHOT_SCHEMA_VERSION,
+            "applied": False,
+            "reason": "no fixable finding",
+            **preview.as_dict(),
+        }
+
+    if mode is OwnerMode.ASK_ME:
+        from saberops.questions import (
+            AskRole,
+            DecisionClass,
+            Escalation,
+            QuestionError,
+            QuestionRequest,
+            question_view,
+        )
+
+        ids = sorted({finding.check_id for finding in fixable})
+        request = QuestionRequest(
+            key="doctor-fix:" + "+".join(ids),
+            subject=f"Apply {len(ids)} safe SaberOps self-repair(s)?",
+            kind="doctor_fix",
+            decision_class=DecisionClass.OTHER,
+            raised_by_role=AskRole.PLAN,
+            raised_by="mcp:doctor_fix",
+            escalation=Escalation(
+                requirement=(
+                    "ask-me keeps repairs owner-approved; doctor_fix never "
+                    "applies a repair without the owner."
+                ),
+                proposed_expansion="Apply only these SaberOps-owned repairs: "
+                + ", ".join(ids),
+                smallest_compliant=(
+                    "Leave the findings unchanged; run `orch doctor --fix` "
+                    "yourself when ready."
+                ),
+                consequences=(
+                    "Nothing changes from this proposal; every finding stays "
+                    "as reported."
+                ),
+                recommendation=(
+                    "Apply the listed repairs, then recheck; a repair that does "
+                    "not clear its finding stays reported."
+                ),
+            ),
+            options=("apply", "skip"),
+            default_option="skip",
+        )
+        try:
+            question = context.question_queue().ask(request)
+        except QuestionError as exc:
+            raise ToolError(f"doctor repair question was not recorded: {exc}") from exc
+        context.ledger.append(
+            "doctor_fix_proposed",
+            {"checks": ids, "question_id": question.question_id, "applied": False},
+        )
+        return {
+            "v": SNAPSHOT_SCHEMA_VERSION,
+            "applied": False,
+            "mode": mode.value,
+            "question": question_view(question),
+            "note": "ask-me: the owner must approve before any repair runs",
+            **preview.as_dict(),
+        }
+
+    report = run_doctor(
+        repo,
+        db_path,
+        fix=True,
+        only=only,
+        allow_legacy_delete=delete_legacy,
+    )
+    context.ledger.append(
+        "doctor_fix_applied",
+        {
+            "mode": mode.value,
+            "checks": [action.check_id for action in report.actions],
+            "remaining_fixable": [finding.check_id for finding in report.remaining_fixable],
+        },
+    )
+    return {
+        "v": SNAPSHOT_SCHEMA_VERSION,
+        "applied": True,
+        "mode": mode.value,
+        **report.as_dict(),
+    }
+
+
 def _ask_advisor(context: ServerContext, arguments: Mapping[str, Any]) -> dict[str, Any]:
     """Ask the project's configured advisor one bounded question (ADR-0034).
 
@@ -2646,6 +2793,30 @@ def build_default_registry(context: ServerContext) -> ToolRegistry:
         _schema({}),
         _get_pause,
         mutating=False,
+    )
+    register(
+        "doctor",
+        "Read-only self-healing doctor report: each finding is ok, skip, fixable "
+        "or human, with exact steps. The CLI and web page report the same findings.",
+        _schema({}),
+        _doctor,
+        mutating=False,
+    )
+    register(
+        "doctor_fix",
+        "Repair only findings labelled fixable, then recheck; the recheck decides. "
+        "ask-me raises an owner question; away and critical-only apply safe repairs.",
+        _schema(
+            {
+                "checks": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1},
+                },
+                "delete_legacy": {"type": "boolean"},
+            }
+        ),
+        _doctor_fix,
+        mutating=True,
     )
     from saberops.advisor import advisor_route_or_none
 
